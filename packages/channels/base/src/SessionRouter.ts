@@ -10,7 +10,11 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, join } from 'node:path';
 import process from 'node:process';
-import type { SessionScope, SessionTarget } from './types.js';
+import type {
+  SessionRotationConfig,
+  SessionScope,
+  SessionTarget,
+} from './types.js';
 import type {
   ChannelAgentBridge,
   ChannelAgentBridgeSessionOptions,
@@ -22,6 +26,13 @@ interface PersistedEntry {
   sessionId: string;
   target: SessionTarget;
   cwd: string;
+  turns?: number;
+  startedAt?: number;
+  // Present only for managed worktree routes: the generic restore cannot
+  // resolve a worktree cwd to its workspace, so cold-start restore must
+  // re-attach these through the managed load path with the workspace root.
+  isolation?: 'worktree';
+  workspaceCwd?: string;
 }
 
 interface SessionReservation {
@@ -41,10 +52,73 @@ interface SessionOperation {
 type SessionLoadWindow = Set<string>;
 interface ResolveOptions {
   routingThreadId?: string;
+  routeKey?: string;
+  holdForTurn?: boolean;
 }
 
 export type SessionRecoveryMode = 'eager' | 'lazy';
 export type ManagedSessionIsolation = 'shared' | 'worktree';
+
+/**
+ * Read the daemon's typed error code off a `DaemonHttpError` (matched by
+ * shape: channels/base keeps no SDK dependency), walking `cause` chains so
+ * callers that wrap errors (the named-session manager) stay transparent.
+ */
+export function readDaemonHttpErrorCode(error: unknown): string | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5; depth++) {
+    if (
+      (typeof current !== 'object' && typeof current !== 'function') ||
+      current === null
+    ) {
+      return undefined;
+    }
+    const record = current as Record<string, unknown>;
+    if (record['name'] === 'DaemonHttpError' && record['status'] === 409) {
+      const body = record['body'];
+      if (typeof body === 'object' && body !== null && !Array.isArray(body)) {
+        const code = (body as Record<string, unknown>)['code'];
+        if (typeof code === 'string' && code.length > 0) return code;
+      }
+    }
+    current = record['cause'];
+  }
+  return undefined;
+}
+
+/**
+ * The replacement session id from a `409 worktree_session_superseded`
+ * daemon response, when the error carries one.
+ */
+export function readSupersededReplacementId(
+  error: unknown,
+): string | undefined {
+  let current: unknown = error;
+  for (let depth = 0; depth < 5; depth++) {
+    if (
+      (typeof current !== 'object' && typeof current !== 'function') ||
+      current === null
+    ) {
+      return undefined;
+    }
+    const record = current as Record<string, unknown>;
+    if (record['name'] === 'DaemonHttpError' && record['status'] === 409) {
+      const body = record['body'];
+      if (typeof body === 'object' && body !== null && !Array.isArray(body)) {
+        const typedBody = body as Record<string, unknown>;
+        if (typedBody['code'] !== 'worktree_session_superseded') {
+          return undefined;
+        }
+        const replacement = typedBody['replacementSessionId'];
+        return typeof replacement === 'string' && replacement.length > 0
+          ? replacement
+          : undefined;
+      }
+    }
+    current = record['cause'];
+  }
+  return undefined;
+}
 
 export interface SessionRouterOptions {
   recoveryMode?: SessionRecoveryMode;
@@ -54,9 +128,23 @@ export class SessionRouter {
   private toSession: Map<string, string> = new Map(); // routing key → session ID
   private toTarget: Map<string, SessionTarget> = new Map(); // session ID → target
   private toCwd: Map<string, string> = new Map(); // session ID → cwd
+  private toTurns = new Map<string, number>();
+  private toStartedAt = new Map<string, number>();
+  private routingLeases = new Map<string, number>();
+  private channelRotations = new Map<string, SessionRotationConfig>();
+  private rotationActivity = new Map<string, (sessionId: string) => boolean>();
+  private rotationListeners = new Map<
+    string,
+    (sessionId: string, target: SessionTarget) => void
+  >();
+  private toManagedMeta: Map<
+    string,
+    { isolation: 'worktree'; workspaceCwd: string }
+  > = new Map();
   private creatingSessions: Map<string, SessionOperation> = new Map();
   private sessionLoadWindows: Set<SessionLoadWindow> = new Set();
   private readonly liveSessionIds = new Set<string>();
+  private readonly staleBridgeBindings = new Set<string>();
   private readonly routeTokens = new Map<string, object>();
   private lifecycleGeneration = 0;
 
@@ -67,6 +155,8 @@ export class SessionRouter {
   private channelApprovalModes: Map<string, string> = new Map();
   private readonly channelsWithoutLoops = new Set<string>();
   private persistPath: string | undefined;
+  private restoreDepth = 0;
+  private persistPending = false;
   private readonly recoveryMode: SessionRecoveryMode;
 
   constructor(
@@ -87,11 +177,118 @@ export class SessionRouter {
   setBridge(bridge: ChannelAgentBridge): void {
     this.bridge = bridge;
     this.liveSessionIds.clear();
+    this.routingLeases.clear();
+    this.staleBridgeBindings.clear();
   }
 
   /** Set scope override for a specific channel. */
   setChannelScope(channelName: string, scope: SessionScope): void {
     this.channelScopes.set(channelName, scope);
+  }
+
+  setChannelRotation(
+    channelName: string,
+    rotation: SessionRotationConfig | undefined,
+  ): void {
+    const maxTurns =
+      Number.isSafeInteger(rotation?.maxTurns) && (rotation?.maxTurns ?? 0) > 0
+        ? rotation?.maxTurns
+        : undefined;
+    const maxAgeHours =
+      typeof rotation?.maxAgeHours === 'number' &&
+      Number.isFinite(rotation.maxAgeHours) &&
+      rotation.maxAgeHours > 0
+        ? rotation.maxAgeHours
+        : undefined;
+    if (maxTurns === undefined && maxAgeHours === undefined) {
+      this.channelRotations.delete(channelName);
+      this.rotationActivity.delete(channelName);
+      this.rotationListeners.delete(channelName);
+    } else {
+      this.channelRotations.set(channelName, { maxTurns, maxAgeHours });
+    }
+  }
+
+  setRotationActivityChecker(
+    channelName: string,
+    checker: (sessionId: string) => boolean,
+  ): void {
+    this.rotationActivity.set(channelName, checker);
+  }
+
+  setRotationListener(
+    channelName: string,
+    listener: (sessionId: string, target: SessionTarget) => void,
+  ): void {
+    this.rotationListeners.set(channelName, listener);
+  }
+
+  releaseRoutingLease(sessionId: string): void {
+    const count = this.routingLeases.get(sessionId);
+    if (count === undefined) return;
+    if (count <= 1) this.routingLeases.delete(sessionId);
+    else this.routingLeases.set(sessionId, count - 1);
+  }
+
+  private shouldRotate(channelName: string, sessionId: string): boolean {
+    const rotation = this.channelRotations.get(channelName);
+    if (!rotation) return false;
+    const startedAt = this.toStartedAt.get(sessionId);
+    return (
+      (rotation.maxTurns !== undefined &&
+        (this.toTurns.get(sessionId) ?? 0) >= rotation.maxTurns) ||
+      (rotation.maxAgeHours !== undefined &&
+        startedAt !== undefined &&
+        Date.now() - startedAt >= rotation.maxAgeHours * 60 * 60 * 1000)
+    );
+  }
+
+  private recordRoutedUse(
+    channelName: string,
+    sessionId: string,
+    holdForTurn: boolean | undefined,
+  ): void {
+    const rotation = this.channelRotations.get(channelName);
+    if (!rotation) return;
+    if (holdForTurn) {
+      this.routingLeases.set(
+        sessionId,
+        (this.routingLeases.get(sessionId) ?? 0) + 1,
+      );
+    }
+    let changed = false;
+    if (
+      rotation.maxAgeHours !== undefined &&
+      !this.toStartedAt.has(sessionId)
+    ) {
+      this.toStartedAt.set(sessionId, Date.now());
+      changed = true;
+    }
+    if (rotation.maxTurns !== undefined) {
+      this.toTurns.set(sessionId, (this.toTurns.get(sessionId) ?? 0) + 1);
+      changed = true;
+    }
+    if (changed) {
+      if (this.restoreDepth > 0) this.persistPending = true;
+      else this.persist();
+    }
+  }
+
+  private rotateRoute(
+    key: string,
+    sessionId: string,
+    channelName: string,
+    target: SessionTarget,
+  ): void {
+    try {
+      this.rotationListeners.get(channelName)?.(sessionId, target);
+    } catch (error) {
+      process.stderr.write(
+        `[SessionRouter] Rotation cleanup failed for ${sanitizeLogText(sessionId, 128)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 512)}\n`,
+      );
+    }
+    this.deleteByKey(key);
+    this.persist();
   }
 
   setChannelApprovalMode(
@@ -118,7 +315,14 @@ export class SessionRouter {
     senderId: string,
     chatId: string,
     threadId?: string,
+    routeKey?: string,
   ): string {
+    if (routeKey !== undefined) {
+      return JSON.stringify([
+        this.routingKey(channelName, senderId, chatId, threadId),
+        routeKey,
+      ]);
+    }
     const scope = this.channelScopes.get(channelName) || this.defaultScope;
     switch (scope) {
       case 'thread':
@@ -161,6 +365,7 @@ export class SessionRouter {
       senderId,
       chatId,
       options?.routingThreadId ?? threadId,
+      options?.routeKey,
     );
     const input = {
       channelName,
@@ -169,12 +374,32 @@ export class SessionRouter {
       threadId,
       cwd: cwd || this.defaultCwd,
       isGroup,
+      ...(options?.routeKey !== undefined
+        ? { messageRoute: options.routeKey }
+        : {}),
     };
     let failedWaits = 0;
     for (;;) {
-      const existing = this.toSession.get(key);
+      let existing = this.toSession.get(key);
+      let retiring:
+        | { sessionId: string; bridge: ChannelAgentBridge }
+        | undefined;
+      if (
+        existing &&
+        this.restoreDepth === 0 &&
+        !this.creatingSessions.has(key) &&
+        !this.toManagedMeta.has(existing) &&
+        (this.routingLeases.get(existing) ?? 0) === 0 &&
+        !this.rotationActivity.get(channelName)?.(existing) &&
+        this.shouldRotate(channelName, existing)
+      ) {
+        retiring = { sessionId: existing, bridge: this.bridge };
+        this.rotateRoute(key, existing, channelName, input);
+        existing = undefined;
+      }
       if (existing && this.isLive(existing)) {
         this.promoteTargetToGroup(existing, isGroup);
+        this.recordRoutedUse(channelName, existing, options?.holdForTurn);
         return existing;
       }
 
@@ -189,6 +414,7 @@ export class SessionRouter {
             throw error;
           }
           this.promoteTargetToGroup(sessionId, isGroup);
+          this.recordRoutedUse(channelName, sessionId, options?.holdForTurn);
           return sessionId;
         } catch (error) {
           if (creating.invalidationError) {
@@ -212,11 +438,27 @@ export class SessionRouter {
           chatId: input.chatId,
           threadId: input.threadId,
           isGroup: input.isGroup,
+          ...(input.messageRoute !== undefined
+            ? { messageRoute: input.messageRoute }
+            : {}),
         },
         (currentOperation) =>
-          existing
-            ? this.loadOrReplaceSession(key, existing, input, currentOperation)
-            : this.createAndStoreSession(key, input, currentOperation),
+          retiring
+            ? Promise.resolve(
+                retiring.bridge.discardSession?.(retiring.sessionId),
+              )
+                .catch(() => undefined)
+                .then(() =>
+                  this.createAndStoreSession(key, input, currentOperation),
+                )
+            : existing
+              ? this.loadOrReplaceSession(
+                  key,
+                  existing,
+                  input,
+                  currentOperation,
+                )
+              : this.createAndStoreSession(key, input, currentOperation),
       );
       this.creatingSessions.set(key, operation);
       try {
@@ -228,6 +470,7 @@ export class SessionRouter {
           throw error;
         }
         this.promoteTargetToGroup(sessionId, isGroup);
+        this.recordRoutedUse(channelName, sessionId, options?.holdForTurn);
         return sessionId;
       } finally {
         if (this.creatingSessions.get(key) === operation) {
@@ -251,6 +494,7 @@ export class SessionRouter {
       threadId?: string;
       cwd: string;
       isGroup?: boolean;
+      messageRoute?: string;
     },
     operation: SessionOperation,
   ): Promise<string> {
@@ -276,6 +520,9 @@ export class SessionRouter {
         chatId: input.chatId,
         threadId: input.threadId,
         isGroup: input.isGroup,
+        ...(input.messageRoute !== undefined
+          ? { messageRoute: input.messageRoute }
+          : {}),
       });
       this.toCwd.set(sessionId, input.cwd);
       this.liveSessionIds.add(sessionId);
@@ -296,6 +543,7 @@ export class SessionRouter {
       threadId?: string;
       cwd: string;
       isGroup?: boolean;
+      messageRoute?: string;
     },
     operation: SessionOperation,
   ): Promise<string> {
@@ -328,10 +576,15 @@ export class SessionRouter {
         }
         if (loadedSessionId !== savedSessionId) {
           const target = this.toTarget.get(savedSessionId);
+          const turns = this.toTurns.get(savedSessionId);
+          const startedAt = this.toStartedAt.get(savedSessionId);
           this.deleteByKey(key);
           this.toSession.set(key, loadedSessionId);
           if (target) this.toTarget.set(loadedSessionId, target);
           this.toCwd.set(loadedSessionId, savedCwd);
+          if (turns !== undefined) this.toTurns.set(loadedSessionId, turns);
+          if (startedAt !== undefined)
+            this.toStartedAt.set(loadedSessionId, startedAt);
           this.persist();
         }
         this.liveSessionIds.add(loadedSessionId);
@@ -360,6 +613,9 @@ export class SessionRouter {
             chatId: input.chatId,
             threadId: input.threadId,
             isGroup: input.isGroup,
+            ...(input.messageRoute !== undefined
+              ? { messageRoute: input.messageRoute }
+              : {}),
           });
           this.toCwd.set(replacement, input.cwd);
           this.liveSessionIds.add(replacement);
@@ -394,9 +650,10 @@ export class SessionRouter {
     senderId: string,
     chatId: string,
     threadId?: string,
+    routeKey?: string,
   ): string | undefined {
     return this.toSession.get(
-      this.routingKey(channelName, senderId, chatId, threadId),
+      this.routingKey(channelName, senderId, chatId, threadId, routeKey),
     );
   }
 
@@ -405,6 +662,7 @@ export class SessionRouter {
     senderId: string,
     chatId?: string,
     threadId?: string,
+    routeKey?: string,
   ): boolean {
     const scope = this.channelScopes.get(channelName) || this.defaultScope;
     // If chatId is provided, do an exact scoped lookup; otherwise scan for any
@@ -413,7 +671,7 @@ export class SessionRouter {
     // check.
     if (chatId) {
       return this.toSession.has(
-        this.routingKey(channelName, senderId, chatId, threadId),
+        this.routingKey(channelName, senderId, chatId, threadId, routeKey),
       );
     }
     if (scope === 'single') {
@@ -501,7 +759,12 @@ export class SessionRouter {
     workspaceCwd: string,
     expectedCwd: string = workspaceCwd,
     isolation: ManagedSessionIsolation = 'shared',
-  ): Promise<{ loaded: boolean }> {
+    allowSupersededRedirect = true,
+  ): Promise<{
+    loaded: boolean;
+    sessionId: string;
+    redirectedFrom?: string;
+  }> {
     if (this.liveSessionIds.has(sessionId)) {
       const actualCwd = this.validateManagedSessionIdentity(
         this.bridge,
@@ -512,7 +775,7 @@ export class SessionRouter {
       );
       this.toTarget.set(sessionId, target);
       this.toCwd.set(sessionId, actualCwd);
-      return { loaded: false };
+      return { loaded: false, sessionId };
     }
 
     const loadWindow = this.beginSessionLoad();
@@ -521,6 +784,13 @@ export class SessionRouter {
     const bindingToken = {};
     let loadedSessionId: string | undefined;
     try {
+      if (this.staleBridgeBindings.delete(sessionId)) {
+        // A failed worktree reset left the bridge holding a client for this id.
+        // Attaching over that binding reports the session as replaced, which
+        // aborts this very load, so release it first. Tokenless: the surviving
+        // binding carries the previous load's token.
+        await bridge.discardSession?.(sessionId).catch(() => undefined);
+      }
       loadedSessionId = await bridge.loadSession(
         sessionId,
         workspaceCwd,
@@ -558,13 +828,155 @@ export class SessionRouter {
       this.toTarget.set(sessionId, target);
       this.toCwd.set(sessionId, actualCwd);
       this.liveSessionIds.add(sessionId);
-      return { loaded: true };
+      return { loaded: true, sessionId };
     } catch (error) {
       if (loadedSessionId) {
         await bridge
           .discardSession?.(loadedSessionId, bindingToken)
           .catch(() => undefined);
+        throw error;
       }
+      // Superseded redirect: a worktree reset moved this session's checkout
+      // ownership to a replacement. Redirect the load once, then heal the
+      // route mappings so the stale id is never consulted again. A redirect
+      // chain (or a self-redirect) fails closed.
+      const replacementId = readSupersededReplacementId(error);
+      if (
+        allowSupersededRedirect &&
+        replacementId !== undefined &&
+        replacementId !== sessionId
+      ) {
+        const redirected = await this.loadManagedSession(
+          replacementId,
+          target,
+          workspaceCwd,
+          expectedCwd,
+          isolation,
+          false,
+        );
+        this.healSupersededRoute(sessionId, redirected.sessionId);
+        return {
+          loaded: redirected.loaded,
+          sessionId: redirected.sessionId,
+          redirectedFrom: sessionId,
+        };
+      }
+      throw error;
+    } finally {
+      this.endSessionLoad(loadWindow);
+    }
+  }
+
+  /**
+   * Remap every route that still points at a superseded session to its
+   * replacement, and drop the superseded id's bookkeeping. The manager's
+   * own task registry heals separately (it owns the task-name mapping).
+   */
+  private healSupersededRoute(
+    oldSessionId: string,
+    newSessionId: string,
+  ): void {
+    let changed = false;
+    for (const [key, mappedSessionId] of this.toSession) {
+      if (mappedSessionId !== oldSessionId) continue;
+      this.invalidateRouteOperation(key);
+      this.toSession.set(key, newSessionId);
+      changed = true;
+    }
+    changed = this.toTarget.delete(oldSessionId) || changed;
+    changed = this.toCwd.delete(oldSessionId) || changed;
+    const managedMeta = this.toManagedMeta.get(oldSessionId);
+    if (managedMeta !== undefined) {
+      // The replacement owns the same worktree, so the route's restore
+      // metadata follows it.
+      this.toManagedMeta.set(newSessionId, managedMeta);
+      this.toManagedMeta.delete(oldSessionId);
+      changed = true;
+    }
+    this.liveSessionIds.delete(oldSessionId);
+    this.staleBridgeBindings.delete(oldSessionId);
+    if (changed) this.persist();
+  }
+
+  /**
+   * Worktree reset: transfer the task session's checkout ownership to a
+   * fresh replacement session on the daemon, validate the replacement's
+   * attestation, and route it. The task registry itself is swapped by the
+   * named-session manager (it owns the task-name mapping); this call only
+   * wires the router's session bookkeeping.
+   *
+   * A failure past the daemon's marker flip rolls nothing back: the
+   * registry keeps pointing at the old id, and the next selection's load
+   * heals it through the superseded redirect — the failed reset drops the
+   * old id from the live set so that load consults the daemon again.
+   */
+  async replaceManagedWorktreeSession(
+    sessionId: string,
+    target: SessionTarget,
+    workspaceCwd: string,
+    expectedCwd: string,
+    beforeForget?: () => void,
+  ): Promise<string> {
+    const bridge = this.bridge;
+    if (!bridge.resetWorktreeSession) {
+      throw new Error('Worktree reset is not supported by this bridge');
+    }
+    const loadWindow = this.beginSessionLoad();
+    const lifecycleGeneration = this.lifecycleGeneration;
+    const bindingToken = {};
+    let replacementId: string | undefined;
+    try {
+      replacementId = await bridge.resetWorktreeSession(
+        sessionId,
+        workspaceCwd,
+        this.sessionOptions(target.channelName),
+        bindingToken,
+      );
+      if (
+        lifecycleGeneration !== this.lifecycleGeneration ||
+        bridge !== this.bridge
+      ) {
+        this.scheduleManagedDiscard(bridge, replacementId, bindingToken);
+        throw new Error('Managed session reset was invalidated');
+      }
+      if (typeof replacementId !== 'string' || replacementId.length === 0) {
+        throw new Error('Invalid session ID from bridge');
+      }
+      if (loadWindow.delete(replacementId)) {
+        await bridge.discardSession?.(replacementId, bindingToken);
+        throw new Error(
+          `Managed session ${replacementId} died before reset completed`,
+        );
+      }
+      const actualCwd = this.validateManagedSessionIdentity(
+        bridge,
+        replacementId,
+        workspaceCwd,
+        expectedCwd,
+        'worktree',
+      );
+      this.toTarget.set(replacementId, target);
+      this.toCwd.set(replacementId, actualCwd);
+      this.liveSessionIds.add(replacementId);
+      beforeForget?.();
+      this.forgetManagedSession(sessionId);
+      return replacementId;
+    } catch (error) {
+      if (replacementId !== undefined) {
+        await bridge
+          .discardSession?.(replacementId, bindingToken)
+          .catch(() => undefined);
+      }
+      // A failure past the daemon's marker flip leaves this session superseded
+      // server-side with no eviction event to tell us. While the id stays live
+      // the next load short-circuits and never consults the daemon, so the
+      // superseded redirect can never heal it. Drop only the live flag: the
+      // route mappings stay, so a pre-flip failure re-loads this id. The bridge
+      // keeps holding its client either way, so record the id — the re-load has
+      // to release that binding before attaching, and attaching over it would
+      // report the session as replaced and abort the load that recovers it.
+      this.staleBridgeBindings.add(sessionId);
+      this.liveSessionIds.delete(sessionId);
       throw error;
     } finally {
       this.endSessionLoad(loadWindow);
@@ -610,14 +1022,34 @@ export class SessionRouter {
     sessionId: string,
     target: SessionTarget,
     cwd: string,
+    managed?: { isolation: ManagedSessionIsolation; workspaceCwd: string },
   ): void {
+    if (managed?.isolation === 'worktree' && !managed.workspaceCwd) {
+      throw new Error('A worktree managed session requires its workspace cwd.');
+    }
+    const previousMeta = this.toManagedMeta.get(sessionId);
+    if (managed?.isolation === 'worktree') {
+      this.toManagedMeta.set(sessionId, {
+        isolation: 'worktree',
+        workspaceCwd: managed.workspaceCwd,
+      });
+    } else {
+      this.toManagedMeta.delete(sessionId);
+    }
+    const metaChanged =
+      managed?.isolation === 'worktree'
+        ? previousMeta?.workspaceCwd !== managed.workspaceCwd
+        : previousMeta !== undefined;
     const key = this.routingKey(
       target.channelName,
       target.senderId,
       target.chatId,
       target.threadId,
     );
-    if (this.toSession.get(key) === sessionId) return;
+    if (this.toSession.get(key) === sessionId) {
+      if (metaChanged) this.persist();
+      return;
+    }
     this.invalidateRouteOperation(key);
     this.toSession.set(key, sessionId);
     this.toTarget.set(sessionId, target);
@@ -635,18 +1067,30 @@ export class SessionRouter {
     }
     changed = this.toTarget.delete(sessionId) || changed;
     changed = this.toCwd.delete(sessionId) || changed;
+    changed = this.toManagedMeta.delete(sessionId) || changed;
     changed = this.liveSessionIds.delete(sessionId) || changed;
+    this.toTurns.delete(sessionId);
+    this.toStartedAt.delete(sessionId);
+    this.routingLeases.delete(sessionId);
+    this.staleBridgeBindings.delete(sessionId);
     if (changed) this.persist();
   }
 
-  async detachManagedSession(sessionId: string): Promise<void> {
+  async detachManagedSession(
+    sessionId: string,
+    beforeForget?: () => void,
+  ): Promise<void> {
     try {
-      if (this.liveSessionIds.has(sessionId)) {
-        if (!this.bridge.discardSession) {
-          throw new Error('Managed session detach is not supported');
-        }
+      if (this.bridge.discardSession) {
+        // Release regardless of the live flag: a failed worktree reset drops it
+        // so the superseded redirect can heal the id, while the bridge keeps
+        // holding the client and its event pump. Discarding an id the bridge
+        // has no binding for is a no-op.
         await this.bridge.discardSession(sessionId);
+      } else if (this.liveSessionIds.has(sessionId)) {
+        throw new Error('Managed session detach is not supported');
       }
+      beforeForget?.();
     } finally {
       this.forgetManagedSession(sessionId);
     }
@@ -660,11 +1104,18 @@ export class SessionRouter {
     senderId: string,
     chatId?: string,
     threadId?: string,
+    routeKey?: string,
   ): string[] {
     const removedIds: string[] = [];
     const scope = this.channelScopes.get(channelName) || this.defaultScope;
     if (chatId) {
-      const key = this.routingKey(channelName, senderId, chatId, threadId);
+      const key = this.routingKey(
+        channelName,
+        senderId,
+        chatId,
+        threadId,
+        routeKey,
+      );
       this.invalidateRouteOperation(key);
       const sessionId = this.deleteByKey(key);
       if (sessionId) removedIds.push(sessionId);
@@ -712,6 +1163,12 @@ export class SessionRouter {
     if (this.toCwd.delete(sessionId)) {
       removed = true;
     }
+    if (this.toManagedMeta.delete(sessionId)) {
+      removed = true;
+    }
+    this.toTurns.delete(sessionId);
+    this.toStartedAt.delete(sessionId);
+    this.routingLeases.delete(sessionId);
     this.liveSessionIds.delete(sessionId);
     if (!removed && this.sessionLoadWindows.size > 0) {
       for (const loadWindow of this.sessionLoadWindows) {
@@ -742,7 +1199,11 @@ export class SessionRouter {
     this.toSession.delete(key);
     this.toTarget.delete(sessionId);
     this.toCwd.delete(sessionId);
+    this.toManagedMeta.delete(sessionId);
     this.liveSessionIds.delete(sessionId);
+    this.toTurns.delete(sessionId);
+    this.toStartedAt.delete(sessionId);
+    this.routingLeases.delete(sessionId);
     return sessionId;
   }
 
@@ -785,6 +1246,13 @@ export class SessionRouter {
       this.toSession.set(key, entry.sessionId);
       this.toTarget.set(entry.sessionId, entry.target);
       this.toCwd.set(entry.sessionId, entry.cwd);
+      this.restoreRotationState(entry.sessionId, entry);
+      if (entry.isolation === 'worktree' && entry.workspaceCwd !== undefined) {
+        this.toManagedMeta.set(entry.sessionId, {
+          isolation: 'worktree',
+          workspaceCwd: entry.workspaceCwd,
+        });
+      }
       restored++;
     }
     if (persisted.dropped > 0) this.persist();
@@ -797,6 +1265,22 @@ export class SessionRouter {
    * Failed loads are dropped (new session on next message).
    */
   async restoreSessions(): Promise<{
+    restored: number;
+    failed: number;
+  }> {
+    this.restoreDepth++;
+    try {
+      return await this.restoreSessionsInner();
+    } finally {
+      this.restoreDepth--;
+      if (this.restoreDepth === 0 && this.persistPending) {
+        this.persistPending = false;
+        this.persist();
+      }
+    }
+  }
+
+  private async restoreSessionsInner(): Promise<{
     restored: number;
     failed: number;
   }> {
@@ -842,6 +1326,59 @@ export class SessionRouter {
         try {
           this.assertOperationCurrent(operation);
           const options = this.sessionOptions(entry.target.channelName);
+          if (
+            entry.isolation === 'worktree' &&
+            entry.workspaceCwd !== undefined
+          ) {
+            // The generic restore cannot resolve a persisted worktree cwd
+            // (the daemon exact-matches registered workspace roots), so
+            // re-attach through the managed path: load by workspace root and
+            // re-validate the daemon's worktree attestation. A superseded
+            // id redirects to its replacement inside the managed load.
+            // Death-during-restore is deliberately not re-checked here the
+            // way the generic branch does: the managed load's internal
+            // window already covers the load itself, and nothing below
+            // yields between its return and the route set, so a death
+            // notification cannot interleave (run-to-completion). The next
+            // death event lands after routing and is handled normally.
+            const managed = await this.loadManagedSession(
+              entry.sessionId,
+              entry.target,
+              entry.workspaceCwd,
+              entry.cwd,
+              'worktree',
+            );
+            try {
+              this.assertOperationCurrent(operation);
+            } catch (error) {
+              // loadManagedSession binds with its own token, so an
+              // operation-keyed discard can never match here; release
+              // tokenless and roll back the maps the load committed.
+              // No persist — the loop's guarded final write owns the file.
+              if (![...this.toSession.values()].includes(managed.sessionId)) {
+                void this.bridge
+                  .discardSession?.(managed.sessionId)
+                  .catch(() => undefined);
+                this.toTarget.delete(managed.sessionId);
+                this.toCwd.delete(managed.sessionId);
+                this.toManagedMeta.delete(managed.sessionId);
+                this.liveSessionIds.delete(managed.sessionId);
+              }
+              throw error;
+            }
+            this.toSession.set(key, managed.sessionId);
+            this.restoreRotationState(managed.sessionId, entry);
+            this.toManagedMeta.set(managed.sessionId, {
+              isolation: 'worktree',
+              workspaceCwd: entry.workspaceCwd,
+            });
+            reservation.resolve(managed.sessionId);
+            if (managed.sessionId !== entry.sessionId) {
+              changed = true;
+            }
+            restored++;
+            continue;
+          }
           const sessionId = await this.bridge.loadSession(
             entry.sessionId,
             entry.cwd,
@@ -864,6 +1401,7 @@ export class SessionRouter {
           this.toTarget.set(sessionId, entry.target);
           this.toCwd.set(sessionId, entry.cwd);
           this.liveSessionIds.add(sessionId);
+          this.restoreRotationState(sessionId, entry);
           reservation.resolve(sessionId);
           if (sessionId !== entry.sessionId) {
             changed = true;
@@ -901,15 +1439,21 @@ export class SessionRouter {
 
   dispose(): void {
     this.lifecycleGeneration++;
+    this.persistPending = false;
     for (const operation of this.creatingSessions.values()) {
       this.invalidateOperation(operation);
     }
     this.toSession.clear();
     this.toTarget.clear();
     this.toCwd.clear();
+    this.toTurns.clear();
+    this.toStartedAt.clear();
+    this.routingLeases.clear();
+    this.toManagedMeta.clear();
     this.creatingSessions.clear();
     this.sessionLoadWindows.clear();
     this.liveSessionIds.clear();
+    this.staleBridgeBindings.clear();
     this.routeTokens.clear();
   }
 
@@ -982,18 +1526,33 @@ export class SessionRouter {
     const target = entry['target'];
     if (typeof target !== 'object' || target === null) return false;
     const typedTarget = target as Record<string, unknown>;
-    return (
+    const wellFormed =
       typeof entry['sessionId'] === 'string' &&
       entry['sessionId'].length > 0 &&
       typeof entry['cwd'] === 'string' &&
       entry['cwd'].length > 0 &&
+      (entry['turns'] === undefined ||
+        (Number.isSafeInteger(entry['turns']) &&
+          Number(entry['turns']) >= 0)) &&
+      (entry['startedAt'] === undefined ||
+        (typeof entry['startedAt'] === 'number' &&
+          Number.isFinite(entry['startedAt']) &&
+          entry['startedAt'] >= 0)) &&
       typeof typedTarget['channelName'] === 'string' &&
       typeof typedTarget['senderId'] === 'string' &&
       typeof typedTarget['chatId'] === 'string' &&
+      (typedTarget['messageRoute'] === undefined ||
+        typeof typedTarget['messageRoute'] === 'string') &&
       (typedTarget['threadId'] === undefined ||
         typeof typedTarget['threadId'] === 'string') &&
       (typedTarget['isGroup'] === undefined ||
-        typeof typedTarget['isGroup'] === 'boolean')
+        typeof typedTarget['isGroup'] === 'boolean');
+    if (!wellFormed) return false;
+    if (entry['isolation'] === undefined) return true;
+    return (
+      entry['isolation'] === 'worktree' &&
+      typeof entry['workspaceCwd'] === 'string' &&
+      entry['workspaceCwd'].length > 0
     );
   }
 
@@ -1008,6 +1567,13 @@ export class SessionRouter {
         sessionId,
         target,
         cwd: this.toCwd.get(sessionId) ?? this.defaultCwd,
+        ...(this.toTurns.has(sessionId)
+          ? { turns: this.toTurns.get(sessionId) }
+          : {}),
+        ...(this.toStartedAt.has(sessionId)
+          ? { startedAt: this.toStartedAt.get(sessionId) }
+          : {}),
+        ...(this.toManagedMeta.get(sessionId) ?? {}),
       };
     }
 
@@ -1044,6 +1610,12 @@ export class SessionRouter {
         // best-effort temp cleanup
       }
     }
+  }
+
+  private restoreRotationState(sessionId: string, entry: PersistedEntry): void {
+    if (entry.turns !== undefined) this.toTurns.set(sessionId, entry.turns);
+    if (entry.startedAt !== undefined)
+      this.toStartedAt.set(sessionId, entry.startedAt);
   }
 
   private async createLiveSession(

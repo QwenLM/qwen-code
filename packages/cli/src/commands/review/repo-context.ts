@@ -19,13 +19,15 @@ import {
   statSync,
   utimesSync,
   writeSync,
-  type Stats,
+  type BigIntStats,
 } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { DOCS_NAV_PROFILE } from './lib/docs-nav-profile.js';
 import { git, gitOpt, gitRaw } from './lib/git.js';
 import { manifestRepositoryContextProvider } from './lib/manifest-repository-context.js';
 import { isSameFile } from './lib/same-file.js';
+import { untrustedGitfile } from './lib/worktree.js';
 import {
   isSafeRepositoryRelativePath,
   MAX_IDENTITY_BYTES,
@@ -34,6 +36,11 @@ import {
   validateRepositoryContext,
 } from './lib/repository-context.js';
 import { stringifyPlanReport } from './lib/report.js';
+import {
+  contextRoleRunsInThisReview,
+  reviewMode,
+  type RosterPlan,
+} from './lib/roster.js';
 
 interface RepoContextArgs {
   plan: string;
@@ -51,6 +58,7 @@ interface MutablePlan {
   mergeBaseSha?: unknown;
   baseFetchFailed?: unknown;
   repositoryContext?: unknown;
+  reviewProfile?: unknown;
   [key: string]: unknown;
 }
 
@@ -390,6 +398,23 @@ export function runRepoContext(
     }
     throw err;
   }
+  // Every read below — `rev-parse --git-common-dir`, `cat-file -e`, `ls-tree`,
+  // `show <base>:<path>` — resolves the repository through this worktree's own
+  // `.git`, which sits inside the directory the review sandbox hands the
+  // reviewed code read-write. The identity files this command extracts are the
+  // ones the trust boundary exists to take from the MERGE BASE rather than
+  // from the PR head; read through a rewritten pointer they come from a
+  // repository the PR author planted, and the whole boundary is decorative.
+  // Same gate, same reason, as the writes in `scratch-tree` and `fetch-pr`.
+  const untrusted = untrustedGitfile(worktree);
+  if (untrusted !== null) {
+    throw new Error(
+      `repo-context: refusing to read the repository context — ${untrusted}. ` +
+        `The merge-base identity files would come from whichever repository ` +
+        `that pointer names. Sweep the tree (\`qwen review cleanup\`) and ` +
+        `re-fetch before re-running.`,
+    );
+  }
 
   // The plan's identity, captured BEFORE the provider work. The providers
   // take real time, the plan path is shared per PR, and a concurrent capture
@@ -397,8 +422,12 @@ export function runRepoContext(
   // derived from the OLD plan and restore the NEW run's epoch over them,
   // leaving the other run's ledger and transcripts to pass an exact mtime
   // fence against a plan they never described. Compared just before the
-  // write; a moved identity aborts rather than corrupts.
-  const planStatBefore = statSync(planPath);
+  // write; a moved identity aborts rather than corrupts. Statted with
+  // `{ bigint: true }`: a number-backed `Stats.ino` rounds a 64-bit file id
+  // (NTFS) at the JS boundary, so two DISTINCT plans whose ids land in one
+  // double-rounding bucket would compare as one file and the guard below
+  // would fail open (#12574).
+  const planStatBefore = statSync(planPath, { bigint: true });
   const plan = readPlan(planPath);
   if (plan.worktreePath !== undefined) {
     if (
@@ -429,6 +458,22 @@ export function runRepoContext(
         );
   if (context === null) delete plan.repositoryContext;
   else plan.repositoryContext = context;
+  if (
+    plan.reviewProfile === DOCS_NAV_PROFILE &&
+    context &&
+    context.requiredAgents.some((role) =>
+      contextRoleRunsInThisReview(
+        role,
+        plan as RosterPlan,
+        reviewMode(plan as RosterPlan),
+      ),
+    )
+  ) {
+    delete plan.reviewProfile;
+    writeStderrLine(
+      'Repository-required reviewers keep this navigation change on the full review path.',
+    );
+  }
 
   mkdirSync(dirname(outPath), { recursive: true });
   atomicWriteFileSync(outPath, `${JSON.stringify(context, null, 2)}\n`);
@@ -439,14 +484,21 @@ export function runRepoContext(
   // enriches the same run's plan — it is not a re-capture — so the mtime is
   // restored after it; letting it advance re-keyed the epoch mid-run and
   // silently orphaned everything recorded before this command ran.
-  const planStat = statSync(planPath);
+  const planStat = statSync(planPath, { bigint: true });
   // Compare-and-refuse: if the plan is no longer the file this run read —
   // mtime moved or inode swapped since the capture above — another run owns
   // the path now, and writing stale derived contents under ITS epoch is the
-  // one outcome worse than doing nothing.
+  // one outcome worse than doing nothing. The inode disjunct compares exact
+  // bigints; a volume reporting no id at all (`ino === 0n`: FAT/exFAT/SMB)
+  // leaves the fence to the mtime disjunct, as before.
   if (
-    Math.abs(planStat.mtimeMs - planStatBefore.mtimeMs) > 1 ||
-    planStat.ino !== planStatBefore.ino
+    // `mtimeNs` rather than `mtimeMs`: the bigint millisecond field
+    // truncates toward zero while the number field rounds, and the sub-
+    // millisecond remainder is what the epoch-restore fidelity pins below.
+    Math.abs(Number(planStat.mtimeNs - planStatBefore.mtimeNs)) > 1e6 ||
+    (planStatBefore.ino !== 0n &&
+      planStat.ino !== 0n &&
+      planStat.ino !== planStatBefore.ino)
   ) {
     throw new Error(
       `repo-context: the plan at ${planPath} changed while repository ` +
@@ -478,7 +530,9 @@ export function runRepoContext(
     // warning fires precisely when the drift exceeds what that rail
     // tolerates; the strict `since` readers bind tighter still, but a drift
     // under 1ms cannot cross a whole-mtime boundary they compare against.
-    if (Math.abs(statSync(planPath).mtimeMs - planStat.mtimeMs) > 1) {
+    if (
+      Math.abs(statSync(planPath).mtimeMs - Number(planStat.mtimeNs) / 1e6) > 1
+    ) {
       writeStderrLine(
         `WARNING: could not restore the plan's timestamp at ${planPath}; ` +
           `the run epoch has moved, and evidence recorded before this ` +
@@ -516,7 +570,7 @@ export function runRepoContext(
 export function commitPlanPreservingEpoch(
   planPath: string,
   serialized: string,
-  anchor: Stats,
+  anchor: BigIntStats,
 ): void {
   const tmp = `${planPath}.${process.pid}.enrich-tmp`;
   rmSync(tmp, { force: true });
@@ -528,9 +582,18 @@ export function commitPlanPreservingEpoch(
     closeSync(fd);
   }
   try {
-    utimesSync(tmp, anchor.atimeMs / 1000, anchor.mtimeMs / 1000);
-    const now = statSync(planPath);
-    if (Math.abs(now.mtimeMs - anchor.mtimeMs) > 1 || now.ino !== anchor.ino) {
+    // Nanoseconds end to end: the bigint millisecond fields truncate toward
+    // zero, and restoring from them would move the epoch by up to a
+    // millisecond — the drift the sub-millisecond epoch test pins.
+    utimesSync(tmp, Number(anchor.atimeNs) / 1e9, Number(anchor.mtimeNs) / 1e9);
+    // `{ bigint: true }` again: the anchor's id is exact, and comparing it
+    // against a rounded double would fail open for two captures whose file
+    // ids land in one double-rounding bucket above 2^53 (#12574).
+    const now = statSync(planPath, { bigint: true });
+    if (
+      Math.abs(Number(now.mtimeNs - anchor.mtimeNs)) > 1e6 ||
+      (anchor.ino !== 0n && now.ino !== 0n && now.ino !== anchor.ino)
+    ) {
       throw new Error(
         `repo-context: the plan at ${planPath} changed while repository ` +
           'context was being committed (another run captured it); aborting ' +

@@ -174,6 +174,23 @@ export class CdpBrowserEmulator {
           // Handled explicitly (not via `default:`) so the empty ack is not
           // logged as an unsupported-method coverage gap.
           return this.cb.reply({ id, result: {} });
+        // Target mutations the tunnel cannot perform: behind it is ONE tab the
+        // user already has open, so there is nothing to create, close, or
+        // isolate. These must not fall through to the empty ack below — a CDP
+        // client reads `targetId` out of the createTarget result and then waits
+        // for a target that never appears, so a fake success turns "open a new
+        // page" into a protocol timeout instead of an immediate refusal.
+        case 'Target.createTarget':
+        case 'Target.closeTarget':
+        case 'Target.createBrowserContext':
+        case 'Target.disposeBrowserContext':
+          return this.cb.reply({
+            id,
+            error: {
+              code: SERVER_ERROR,
+              message: `${method} is not supported by the CDP tunnel: it drives a single existing tab`,
+            },
+          });
         case 'Target.attachToTarget': {
           const targetId = params?.['targetId'];
           if (targetId !== PAGE_TARGET_ID) {

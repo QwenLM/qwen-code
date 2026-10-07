@@ -12,7 +12,11 @@ import {
   extractSessionListItems,
   QwenAgentManager,
 } from './qwenAgentManager.js';
-import type { ModelInfo } from '@agentclientprotocol/sdk';
+import type {
+  ModelInfo,
+  RequestPermissionRequest,
+} from '@agentclientprotocol/sdk';
+import type { AskUserQuestionRequest } from '../types/acpTypes.js';
 
 vi.mock('vscode', () => ({
   window: {
@@ -59,6 +63,55 @@ describe('extractSessionListItems', () => {
     expect(extractSessionListItems({ sessions: 'not-array' })).toEqual([]);
     expect(extractSessionListItems({ items: 123 })).toEqual([]);
     expect(extractSessionListItems({})).toEqual([]);
+  });
+});
+
+describe('QwenAgentManager input fallbacks', () => {
+  it('cancels when no input callbacks are registered', async () => {
+    const manager = new QwenAgentManager();
+    const connection = (
+      manager as unknown as {
+        connection: {
+          onPermissionRequest: (
+            request: RequestPermissionRequest,
+          ) => Promise<{ optionId: string }>;
+          onAskUserQuestion: (
+            request: AskUserQuestionRequest,
+          ) => Promise<{ optionId: string }>;
+        };
+      }
+    ).connection;
+
+    await expect(
+      connection.onPermissionRequest({
+        sessionId: 'session-1',
+        options: [
+          {
+            optionId: 'proceed_once',
+            name: 'Allow once',
+            kind: 'allow_once',
+          },
+          {
+            optionId: 'reject_once',
+            name: 'Reject',
+            kind: 'reject_once',
+          },
+        ],
+        toolCall: {
+          toolCallId: 'tool-call-1',
+          title: 'Run command',
+          kind: 'execute',
+          status: 'pending',
+        },
+      }),
+    ).resolves.toEqual({ optionId: 'cancel' });
+
+    await expect(
+      connection.onAskUserQuestion({
+        sessionId: 'session-1',
+        questions: [],
+      }),
+    ).resolves.toEqual({ optionId: 'cancel' });
   });
 });
 
@@ -223,6 +276,55 @@ describe('QwenAgentManager.getSessionMessages', () => {
         },
       ]);
       expect(messages[0]?.content).not.toContain('hook-only context');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('renders the outer tool result once and skips internal Code Mode results', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'qwen-agent-manager-'));
+    const filePath = join(tempDir, 'session.jsonl');
+    const timestamp = '2026-03-22T16:48:35.000Z';
+    const rows = [
+      {
+        type: 'tool_result',
+        subtype: 'code_mode_tool_result',
+        toolCallResult: { callId: 'exec-1:code:1', status: 'success' },
+      },
+      {
+        type: 'tool_result',
+        subtype: 'code_mode_tool_result',
+        toolCallResult: { callId: 'exec-1:code:2', status: 'success' },
+      },
+      {
+        type: 'tool_result',
+        toolCallResult: { callId: 'exec-1', status: 'success' },
+      },
+    ].map((row) => ({ sessionId: 'session-1', timestamp, ...row }));
+    writeFileSync(
+      filePath,
+      `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`,
+    );
+
+    try {
+      const manager = new QwenAgentManager();
+      vi.spyOn(manager, 'getSessionList').mockResolvedValue([
+        {
+          id: 'session-1',
+          sessionId: 'session-1',
+          filePath,
+        },
+      ]);
+
+      const messages = await manager.getSessionMessages('session-1');
+
+      expect(messages).toEqual([
+        {
+          role: 'assistant',
+          content: 'Tool Result (exec-1): success',
+          timestamp: new Date(timestamp).getTime(),
+        },
+      ]);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

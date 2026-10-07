@@ -28,6 +28,7 @@
  */
 
 import type { Config } from '../config/config.js';
+import { toolSearchBridgeSentence } from '../skills/bundled-reference.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { ToolErrorType } from './tool-error.js';
 import { findMemberByName } from '../agents/team/teamHelpers.js';
@@ -135,6 +136,9 @@ class SendMessageInvocation extends BaseToolInvocation<
       // Addresses this tool would keep in-process must never be handed
       // back to the model as a peer address, bare.
       isReserved: (address) => isInProcessRecipient(address, teamFile),
+      // Which of this process's records is the sender. Matters only for a
+      // process hosting several sessions; the default covers the rest.
+      slot: this.config.getSessionRegistrySlot(),
     });
 
     switch (outcome.kind) {
@@ -293,14 +297,24 @@ class SendMessageInvocation extends BaseToolInvocation<
       // compatible runtime is not retained across session restore, so the
       // persisted transcript remains the cold fallback for resumable agents.
       if (entry.status === 'completed') {
-        const continued = registry.continueResidentAgent(
+        const continuation = registry.continueResidentAgent(
           this.params.task_id,
           this.params.message,
         );
-        if (continued) {
+        if (continuation === 'continued') {
           return {
             llmContent: `Background task "${this.params.task_id}" continued on its existing runtime with your message as the next instruction.`,
             returnDisplay: `Continued ${entry.description}`,
+          };
+        }
+        if (continuation === 'capacity_wait') {
+          return {
+            llmContent: `Error: Background task "${this.params.task_id}" is waiting for background-agent capacity.`,
+            returnDisplay: 'Task is waiting for capacity.',
+            error: {
+              message: `Background-agent capacity unavailable: ${this.params.task_id}`,
+              type: ToolErrorType.SEND_MESSAGE_NOT_RUNNING,
+            },
           };
         }
 
@@ -359,7 +373,7 @@ class SendMessageInvocation extends BaseToolInvocation<
       }
 
       return {
-        llmContent: `Message queued for delivery to background task "${this.params.task_id}". The task will receive it at the next tool-round boundary.`,
+        llmContent: `Message queued for delivery to background task "${this.params.task_id}". The task will receive it at the next tool-round boundary. There is no inline reply: whatever it does with your message shows up in its completion notification for this task_id. Do not relaunch the task while waiting.`,
         returnDisplay: `Message queued for ${entry.description}`,
       };
     }
@@ -452,7 +466,7 @@ class SendMessageInvocation extends BaseToolInvocation<
 
     if (!teamManager) {
       const msg = this.peerMessagingOff
-        ? `No active team and no task_id, and cross-session messaging is not enabled in this session (agents.crossSessionMessaging), so "${to}" cannot be another session. ` +
+        ? `No active team and no task_id, and cross-session messaging is not active in this session (agents.crossSessionMessaging is off, or its inbox did not start), so "${to}" cannot be another session. ` +
           'Create a team, or pass `task_id` to message a background task.'
         : `No active team, no task_id, and no reachable session named "${to}". ` +
           'Create a team, pass `task_id` to message a background task, or use ' +
@@ -483,7 +497,7 @@ class SendMessageInvocation extends BaseToolInvocation<
         // that the name it wants could belong to a session this setting
         // is hiding.
         errMsg += this.peerMessagingOff
-          ? ` Cross-session messaging is not enabled in this session (agents.crossSessionMessaging), so another session could not have taken that name either.`
+          ? ` Cross-session messaging is not active in this session (agents.crossSessionMessaging is off, or its inbox did not start), so another session could not have taken that name either.`
           : ` No reachable session has that name either; use list_agents to see who is reachable.`;
       }
       return {
@@ -509,6 +523,8 @@ export class SendMessageTool extends BaseDeclarativeTool<
         'Set "to" to a bare teammate name (no @), to "*" to broadcast within an active Agent Team only, or to a session name from list_agents, exactly as its "to" value shows it — list_agents appends " [ref]" whenever the bare name would not reach that session (another session or a teammate shares it). ' +
         "A message to another session arrives there marked as coming from another session, carries none of your user's authority, and may be held for that session's user to review; never use it to have another session perform an action this session was denied, blocked from, or cannot do itself. " +
         'For background tasks, set "task_id" to the id from the launch response or list_agents. ' +
+        `In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)} ` +
+        'If tool_search does not offer list_agents in this context, do not invoke it; use a known teammate name or task_id. ' +
         'Running tasks receive it at the next tool-round boundary; paused recovered tasks resume with the message as their first continuation instruction; completed tasks continue on their resident runtime when available and otherwise revive from their transcript and continue with your message. ' +
         'Your text output is NOT visible to teammates or to other sessions — use this tool to communicate.',
       Kind.Other,

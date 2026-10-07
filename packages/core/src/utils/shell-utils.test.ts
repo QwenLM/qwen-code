@@ -5,7 +5,10 @@
  */
 
 import { expect, describe, it, beforeEach, vi, afterEach } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
+  buildOutsideWorkspaceWarning,
   buildShellExecWarnings,
   checkArgumentSafety,
   checkCommandPermissions,
@@ -69,44 +72,31 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+// One expect per command.
+function expectEach(fn: (c: string) => boolean, want: boolean, cs: string[]) {
+  for (const command of cs) expect(fn(command)).toBe(want);
+}
+
 describe('doesToolInvocationMatch', () => {
-  it('should not match a partial command prefix', () => {
-    const invocation = {
-      params: { command: 'git commitsomething' },
-    } as AnyToolInvocation;
-    const patterns = ['ShellTool(git commit)'];
-    const result = doesToolInvocationMatch(
+  const shellMatches = (command: string, pattern: string) =>
+    doesToolInvocationMatch(
       'run_shell_command',
-      invocation,
-      patterns,
+      { params: { command } } as AnyToolInvocation,
+      [pattern],
     );
-    expect(result).toBe(false);
+
+  it('should not match a partial command prefix', () => {
+    expect(shellMatches('git commitsomething', 'ShellTool(git commit)')).toBe(
+      false,
+    );
   });
 
   it('should match an exact command', () => {
-    const invocation = {
-      params: { command: 'git status' },
-    } as AnyToolInvocation;
-    const patterns = ['ShellTool(git status)'];
-    const result = doesToolInvocationMatch(
-      'run_shell_command',
-      invocation,
-      patterns,
-    );
-    expect(result).toBe(true);
+    expect(shellMatches('git status', 'ShellTool(git status)')).toBe(true);
   });
 
   it('should match a command that is a prefix', () => {
-    const invocation = {
-      params: { command: 'git status -v' },
-    } as AnyToolInvocation;
-    const patterns = ['ShellTool(git status)'];
-    const result = doesToolInvocationMatch(
-      'run_shell_command',
-      invocation,
-      patterns,
-    );
-    expect(result).toBe(true);
+    expect(shellMatches('git status -v', 'ShellTool(git status)')).toBe(true);
   });
 
   describe('for non-shell tools', () => {
@@ -114,35 +104,19 @@ describe('doesToolInvocationMatch', () => {
     const invocation = {
       params: { file: 'test.txt' },
     } as AnyToolInvocation;
+    const matches = (patterns: string[]) =>
+      doesToolInvocationMatch(readFileTool, invocation, patterns);
 
     it('should match by tool name', () => {
-      const patterns = ['read_file'];
-      const result = doesToolInvocationMatch(
-        readFileTool,
-        invocation,
-        patterns,
-      );
-      expect(result).toBe(true);
+      expect(matches(['read_file'])).toBe(true);
     });
 
     it('should match by tool class name', () => {
-      const patterns = ['ReadFileTool'];
-      const result = doesToolInvocationMatch(
-        readFileTool,
-        invocation,
-        patterns,
-      );
-      expect(result).toBe(true);
+      expect(matches(['ReadFileTool'])).toBe(true);
     });
 
     it('should not match if neither name is in the patterns', () => {
-      const patterns = ['some_other_tool', 'AnotherToolClass'];
-      const result = doesToolInvocationMatch(
-        readFileTool,
-        invocation,
-        patterns,
-      );
-      expect(result).toBe(false);
+      expect(matches(['some_other_tool', 'AnotherToolClass'])).toBe(false);
     });
 
     it('should match by tool name when passed as a string', () => {
@@ -154,56 +128,58 @@ describe('doesToolInvocationMatch', () => {
 });
 
 describe('isCommandAllowed', () => {
+  const RM_BLOCKED = `Command 'rm -rf /' is blocked by configuration`;
+  const expectAllowed = async (command: string) => {
+    expect((await isCommandAllowed(command, config)).allowed).toBe(true);
+  };
+  const expectBlocked = async (command: string, reason: string) => {
+    const result = await isCommandAllowed(command, config);
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe(reason);
+  };
+  const expectSubstitutionBlocked = async (command: string) => {
+    const result = await isCommandAllowed(command, config);
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain('Command substitution');
+  };
+
   it('should allow a command if no restrictions are provided', async () => {
-    const result = await isCommandAllowed('ls -l', config);
-    expect(result.allowed).toBe(true);
+    await expectAllowed('ls -l');
   });
 
   it('should allow a command if it is in the global allowlist', async () => {
     config.getCoreTools = () => ['ShellTool(ls)'];
-    const result = await isCommandAllowed('ls -l', config);
-    expect(result.allowed).toBe(true);
+    await expectAllowed('ls -l');
   });
 
   it('should block a command if it is not in a strict global allowlist', async () => {
     config.getCoreTools = () => ['ShellTool(ls -l)'];
-    const result = await isCommandAllowed('rm -rf /', config);
-    expect(result.allowed).toBe(false);
-    expect(result.reason).toBe(
+    await expectBlocked(
+      'rm -rf /',
       `Command(s) not in the allowed commands list. Disallowed commands: "rm -rf /"`,
     );
   });
 
   it('should block a command if it is in the blocked list', async () => {
     config.getPermissionsDeny = () => ['ShellTool(rm -rf /)'];
-    const result = await isCommandAllowed('rm -rf /', config);
-    expect(result.allowed).toBe(false);
-    expect(result.reason).toBe(
-      `Command 'rm -rf /' is blocked by configuration`,
-    );
+    await expectBlocked('rm -rf /', RM_BLOCKED);
   });
 
   it('should prioritize the blocklist over the allowlist', async () => {
     config.getCoreTools = () => ['ShellTool(rm -rf /)'];
     config.getPermissionsDeny = () => ['ShellTool(rm -rf /)'];
-    const result = await isCommandAllowed('rm -rf /', config);
-    expect(result.allowed).toBe(false);
-    expect(result.reason).toBe(
-      `Command 'rm -rf /' is blocked by configuration`,
-    );
+    await expectBlocked('rm -rf /', RM_BLOCKED);
   });
 
   it('should allow any command when a wildcard is in coreTools', async () => {
     config.getCoreTools = () => ['ShellTool'];
-    const result = await isCommandAllowed('any random command', config);
-    expect(result.allowed).toBe(true);
+    await expectAllowed('any random command');
   });
 
   it('should block any command when a wildcard is in excludeTools', async () => {
     config.getPermissionsDeny = () => ['run_shell_command'];
-    const result = await isCommandAllowed('any random command', config);
-    expect(result.allowed).toBe(false);
-    expect(result.reason).toBe(
+    await expectBlocked(
+      'any random command',
       'Shell tool is globally disabled in configuration',
     );
   });
@@ -211,11 +187,7 @@ describe('isCommandAllowed', () => {
   it('should block a command on the blocklist even with a wildcard allow', async () => {
     config.getCoreTools = () => ['ShellTool'];
     config.getPermissionsDeny = () => ['ShellTool(rm -rf /)'];
-    const result = await isCommandAllowed('rm -rf /', config);
-    expect(result.allowed).toBe(false);
-    expect(result.reason).toBe(
-      `Command 'rm -rf /' is blocked by configuration`,
-    );
+    await expectBlocked('rm -rf /', RM_BLOCKED);
   });
 
   it('should allow a chained command if all parts are on the global allowlist', async () => {
@@ -223,24 +195,17 @@ describe('isCommandAllowed', () => {
       'run_shell_command(echo)',
       'run_shell_command(ls)',
     ];
-    const result = await isCommandAllowed('echo "hello" && ls -l', config);
-    expect(result.allowed).toBe(true);
+    await expectAllowed('echo "hello" && ls -l');
   });
 
   it('should block a chained command if any part is blocked', async () => {
     config.getPermissionsDeny = () => ['run_shell_command(rm)'];
-    const result = await isCommandAllowed('echo "hello" && rm -rf /', config);
-    expect(result.allowed).toBe(false);
-    expect(result.reason).toBe(
-      `Command 'rm -rf /' is blocked by configuration`,
-    );
+    await expectBlocked('echo "hello" && rm -rf /', RM_BLOCKED);
   });
 
   describe('command substitution', () => {
     it('should block command substitution using `$(...)`', async () => {
-      const result = await isCommandAllowed('echo $(rm -rf /)', config);
-      expect(result.allowed).toBe(false);
-      expect(result.reason).toContain('Command substitution');
+      await expectSubstitutionBlocked('echo $(rm -rf /)');
     });
 
     it('should block the two substitution forms from issue #8582', async () => {
@@ -248,9 +213,7 @@ describe('isCommandAllowed', () => {
         'echo "$\\\n(touch /tmp/pwned)"',
         'echo "${one="$"}${two="$one(touch /tmp/pwned)"}${two@P}"',
       ]) {
-        const result = await isCommandAllowed(command, config);
-        expect(result.allowed).toBe(false);
-        expect(result.reason).toContain('Command substitution');
+        await expectSubstitutionBlocked(command);
       }
     });
 
@@ -262,152 +225,93 @@ describe('isCommandAllowed', () => {
         "echo '$\\\n(touch /tmp/pwned)'",
         "echo '${two@P}'",
       ]) {
-        expect((await isCommandAllowed(command, config)).allowed).toBe(true);
+        await expectAllowed(command);
       }
     });
 
     it('should block command substitution using `<(...)`', async () => {
-      const result = await isCommandAllowed('diff <(ls) <(ls -a)', config);
-      expect(result.allowed).toBe(false);
-      expect(result.reason).toContain('Command substitution');
+      await expectSubstitutionBlocked('diff <(ls) <(ls -a)');
     });
 
     it('should block command substitution using `>(...)`', async () => {
-      const result = await isCommandAllowed(
-        'echo "Log message" > >(tee log.txt)',
-        config,
-      );
-      expect(result.allowed).toBe(false);
-      expect(result.reason).toContain('Command substitution');
+      await expectSubstitutionBlocked('echo "Log message" > >(tee log.txt)');
     });
 
     it('should block command substitution using backticks', async () => {
-      const result = await isCommandAllowed('echo `rm -rf /`', config);
-      expect(result.allowed).toBe(false);
-      expect(result.reason).toContain('Command substitution');
+      await expectSubstitutionBlocked('echo `rm -rf /`');
     });
 
     it('should allow substitution-like patterns inside single quotes', async () => {
       config.getCoreTools = () => ['ShellTool(echo)'];
-      const result = await isCommandAllowed("echo '$(pwd)'", config);
-      expect(result.allowed).toBe(true);
+      await expectAllowed("echo '$(pwd)'");
     });
 
     describe('heredocs', () => {
-      it('should allow substitution-like content in a quoted heredoc delimiter', async () => {
-        const cmd = [
-          "cat <<'EOF' > user_session.md",
-          '```',
-          '$(rm -rf /)',
-          '`not executed`',
-          '```',
-          'EOF',
-        ].join('\n');
+      // An unquoted `cat <<EOF > user_session.md` heredoc with `body` lines.
+      const heredoc = (...body: string[]) =>
+        ['cat <<EOF > user_session.md', ...body, 'EOF'].join('\n');
 
-        const result = await isCommandAllowed(cmd, config);
-        expect(result.allowed).toBe(true);
+      it('should allow substitution-like content in a quoted heredoc delimiter', async () => {
+        await expectAllowed(
+          [
+            "cat <<'EOF' > user_session.md",
+            '```',
+            '$(rm -rf /)',
+            '`not executed`',
+            '```',
+            'EOF',
+          ].join('\n'),
+        );
       });
 
       it('should block command substitution in an unquoted heredoc body', async () => {
-        const cmd = [
-          'cat <<EOF > user_session.md',
-          "'$(rm -rf /)'",
-          'EOF',
-        ].join('\n');
-
-        const result = await isCommandAllowed(cmd, config);
-        expect(result.allowed).toBe(false);
-        expect(result.reason).toContain('Command substitution');
+        await expectSubstitutionBlocked(heredoc("'$(rm -rf /)'"));
       });
 
       it('should block backtick command substitution in an unquoted heredoc body', async () => {
-        const cmd = ['cat <<EOF > user_session.md', '`rm -rf /`', 'EOF'].join(
-          '\n',
-        );
-
-        const result = await isCommandAllowed(cmd, config);
-        expect(result.allowed).toBe(false);
-        expect(result.reason).toContain('Command substitution');
+        await expectSubstitutionBlocked(heredoc('`rm -rf /`'));
       });
 
       it('should allow escaped command substitution in an unquoted heredoc body', async () => {
-        const cmd = [
-          'cat <<EOF > user_session.md',
-          '\\$(rm -rf /)',
-          'EOF',
-        ].join('\n');
-
-        const result = await isCommandAllowed(cmd, config);
-        expect(result.allowed).toBe(true);
+        await expectAllowed(heredoc('\\$(rm -rf /)'));
       });
 
       it('should support tab-stripping heredocs (<<-)', async () => {
-        const cmd = [
-          "cat <<-'EOF' > user_session.md",
-          '\t$(rm -rf /)',
-          '\tEOF',
-        ].join('\n');
-
-        const result = await isCommandAllowed(cmd, config);
-        expect(result.allowed).toBe(true);
+        await expectAllowed(
+          ["cat <<-'EOF' > user_session.md", '\t$(rm -rf /)', '\tEOF'].join(
+            '\n',
+          ),
+        );
       });
 
       it('should block command substitution split by line continuation in an unquoted heredoc body', async () => {
-        const cmd = [
-          'cat <<EOF > user_session.md',
-          '$\\',
-          '(rm -rf /)',
-          'EOF',
-        ].join('\n');
-
-        const result = await isCommandAllowed(cmd, config);
-        expect(result.allowed).toBe(false);
-        expect(result.reason).toContain('Command substitution');
+        await expectSubstitutionBlocked(heredoc('$\\', '(rm -rf /)'));
       });
 
       it('should allow escaped command substitution split by line continuation in an unquoted heredoc body', async () => {
-        const cmd = [
-          'cat <<EOF > user_session.md',
-          '\\$\\',
-          '(rm -rf /)',
-          'EOF',
-        ].join('\n');
-
-        const result = await isCommandAllowed(cmd, config);
-        expect(result.allowed).toBe(true);
+        await expectAllowed(heredoc('\\$\\', '(rm -rf /)'));
       });
     });
 
     describe('comments', () => {
       it('should ignore heredoc operators inside comments', async () => {
-        const cmd = ["# Fake heredoc <<'EOF'", '$(rm -rf /)', 'EOF'].join('\n');
-
-        const result = await isCommandAllowed(cmd, config);
-        expect(result.allowed).toBe(false);
-        expect(result.reason).toContain('Command substitution');
+        await expectSubstitutionBlocked(
+          ["# Fake heredoc <<'EOF'", '$(rm -rf /)', 'EOF'].join('\n'),
+        );
       });
 
       it('should allow command substitution patterns inside full-line comments', async () => {
-        const cmd = ['# Note: $(rm -rf /) is dangerous', 'echo hello'].join(
-          '\n',
+        await expectAllowed(
+          ['# Note: $(rm -rf /) is dangerous', 'echo hello'].join('\n'),
         );
-
-        const result = await isCommandAllowed(cmd, config);
-        expect(result.allowed).toBe(true);
       });
 
       it('should allow command substitution patterns inside inline comments', async () => {
-        const result = await isCommandAllowed(
-          'echo hello # $(rm -rf /)',
-          config,
-        );
-        expect(result.allowed).toBe(true);
+        await expectAllowed('echo hello # $(rm -rf /)');
       });
 
       it('should not treat # inside a word as a comment starter', async () => {
-        const result = await isCommandAllowed('echo foo#$(rm -rf /)', config);
-        expect(result.allowed).toBe(false);
-        expect(result.reason).toContain('Command substitution');
+        await expectSubstitutionBlocked('echo foo#$(rm -rf /)');
       });
     });
   });
@@ -461,21 +365,15 @@ describe('checkCommandPermissions', () => {
   });
 
   describe('in "Default Deny" mode (with sessionAllowlist)', () => {
+    const checkWith = (command: string, sessionAllowlist: string[]) =>
+      checkCommandPermissions(command, config, new Set(sessionAllowlist));
+
     it('should allow a command on the sessionAllowlist', async () => {
-      const result = await checkCommandPermissions(
-        'ls -l',
-        config,
-        new Set(['ls -l']),
-      );
-      expect(result.allAllowed).toBe(true);
+      expect((await checkWith('ls -l', ['ls -l'])).allAllowed).toBe(true);
     });
 
     it('should block a command not on the sessionAllowlist or global allowlist', async () => {
-      const result = await checkCommandPermissions(
-        'rm -rf /',
-        config,
-        new Set(['ls -l']),
-      );
+      const result = await checkWith('rm -rf /', ['ls -l']);
       expect(result.allAllowed).toBe(false);
       expect(result.blockReason).toContain(
         'not on the global or session allowlist',
@@ -485,42 +383,27 @@ describe('checkCommandPermissions', () => {
 
     it('should allow a command on the global allowlist even if not on the session allowlist', async () => {
       config.getCoreTools = () => ['ShellTool(git status)'];
-      const result = await checkCommandPermissions(
-        'git status',
-        config,
-        new Set(['ls -l']),
-      );
-      expect(result.allAllowed).toBe(true);
+      expect((await checkWith('git status', ['ls -l'])).allAllowed).toBe(true);
     });
 
     it('should allow a chained command if parts are on different allowlists', async () => {
       config.getCoreTools = () => ['ShellTool(git status)'];
-      const result = await checkCommandPermissions(
-        'git status && git commit',
-        config,
-        new Set(['git commit']),
-      );
+      const result = await checkWith('git status && git commit', [
+        'git commit',
+      ]);
       expect(result.allAllowed).toBe(true);
     });
 
     it('should block a command on the sessionAllowlist if it is also globally blocked', async () => {
       config.getPermissionsDeny = () => ['run_shell_command(rm)'];
-      const result = await checkCommandPermissions(
-        'rm -rf /',
-        config,
-        new Set(['rm -rf /']),
-      );
+      const result = await checkWith('rm -rf /', ['rm -rf /']);
       expect(result.allAllowed).toBe(false);
       expect(result.blockReason).toContain('is blocked by configuration');
     });
 
     it('should block a chained command if one part is not on any allowlist', async () => {
       config.getCoreTools = () => ['run_shell_command(echo)'];
-      const result = await checkCommandPermissions(
-        'echo "hello" && rm -rf /',
-        config,
-        new Set(['echo']),
-      );
+      const result = await checkWith('echo "hello" && rm -rf /', ['echo']);
       expect(result.allAllowed).toBe(false);
       expect(result.disallowedCommands).toEqual(['rm -rf /']);
     });
@@ -640,13 +523,11 @@ describe('getCommandRoots', () => {
   });
 
   it('should not split on newlines inside quotes', async () => {
-    const result = getCommandRoots('echo "line1\nline2"');
-    expect(result).toEqual(['echo']);
+    expect(getCommandRoots('echo "line1\nline2"')).toEqual(['echo']);
   });
 
   it('should treat escaped newline as line continuation (not a separator)', async () => {
-    const result = getCommandRoots('grep pattern\\\nfile');
-    expect(result).toEqual(['grep']);
+    expect(getCommandRoots('grep pattern\\\nfile')).toEqual(['grep']);
   });
 
   it('should treat escaped newlines in chained commands as line continuations', async () => {
@@ -657,13 +538,11 @@ describe('getCommandRoots', () => {
   });
 
   it('should not treat escaped CRLF as a line continuation', async () => {
-    const result = getCommandRoots('echo SAFE \\\r\nrm -rf /');
-    expect(result).toEqual(['echo', 'rm']);
+    expect(getCommandRoots('echo SAFE \\\r\nrm -rf /')).toEqual(['echo', 'rm']);
   });
 
   it('should filter out empty segments from consecutive newlines', async () => {
-    const result = getCommandRoots('ls\n\ngrep foo');
-    expect(result).toEqual(['ls', 'grep']);
+    expect(getCommandRoots('ls\n\ngrep foo')).toEqual(['ls', 'grep']);
   });
 
   it('should not treat file descriptor redirection as a command separator', async () => {
@@ -672,8 +551,7 @@ describe('getCommandRoots', () => {
   });
 
   it('should not treat >| redirection as a pipeline separator', async () => {
-    const result = getCommandRoots('echo hello >| out.txt');
-    expect(result).toEqual(['echo']);
+    expect(getCommandRoots('echo hello >| out.txt')).toEqual(['echo']);
   });
 
   it('should skip leading env var assignments', async () => {
@@ -744,6 +622,32 @@ describe('stripShellWrapper', () => {
     expect(stripShellWrapper('ls -l')).toEqual('ls -l');
   });
 
+  // Bash treats these as ordinary word characters, so at the edge of a command
+  // they are part of the last word — for `echo x >\u00a0` the redirection
+  // target — and trimming them off discards it (#11865).
+  it('should keep edge characters bash does not treat as whitespace', async () => {
+    expect(stripShellWrapper('echo x >\u00a0')).toEqual('echo x >\u00a0');
+    expect(stripShellWrapper('echo x >\v')).toEqual('echo x >\v');
+    expect(stripShellWrapper('echo x >\f')).toEqual('echo x >\f');
+  });
+
+  it('should still trim plain whitespace and CRLF at the edges', async () => {
+    expect(stripShellWrapper('  echo x  ')).toEqual('echo x');
+    expect(stripShellWrapper('echo x\r\n')).toEqual('echo x');
+  });
+
+  // The `$`-anchored `g` regex this replaced retried its end-anchored
+  // alternative at every index: quadratic inside an *interior* whitespace run
+  // (~3.2 s at 64 k chars, synchronously, on model-controlled input, in the
+  // permission gate). The two-pointer trim is linear; 500 ms is orders of
+  // magnitude above its cost and far below the regex's.
+  it('should trim a long interior whitespace run in linear time', async () => {
+    const command = `echo x${' '.repeat(64_000)}&& rm -rf /tmp/x`;
+    const started = Date.now();
+    expect(stripShellWrapper(command)).toEqual(command);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
   it('should strip absolute-path wrapper /bin/bash -c', async () => {
     expect(stripShellWrapper("/bin/bash -c 'sleep 5'")).toEqual('sleep 5');
     expect(stripShellWrapper('/usr/bin/zsh -c "ls -l"')).toEqual('ls -l');
@@ -801,250 +705,211 @@ describe('stripTrailingBackgroundAmp', () => {
 
 describe('detectSelfKillCommand', () => {
   it('detects broad Windows taskkill patterns that target qwen-code hosts', () => {
-    expect(detectSelfKillCommand('taskkill /F /IM node.exe 2>nul')).toBe(true);
-    expect(
-      detectSelfKillCommand('taskkill /FI "IMAGENAME eq qwen-code.exe" /F'),
-    ).toBe(true);
+    expectEach(detectSelfKillCommand, true, [
+      'taskkill /F /IM node.exe 2>nul',
+      'taskkill /FI "IMAGENAME eq qwen-code.exe" /F',
+    ]);
   });
 
   it('detects broad Unix killall and pkill patterns', () => {
-    expect(detectSelfKillCommand('killall -9 node')).toBe(true);
-    expect(detectSelfKillCommand('pkill node')).toBe(true);
-    expect(detectSelfKillCommand('pkill -f qwen-code')).toBe(true);
-    expect(detectSelfKillCommand('pkill -f /usr/bin/node')).toBe(true);
-    expect(detectSelfKillCommand('pkill -9f node')).toBe(true);
-    expect(detectSelfKillCommand("bash -lc 'pkill -f qwen'")).toBe(true);
+    expectEach(detectSelfKillCommand, true, [
+      'killall -9 node',
+      'pkill node',
+      'pkill -f qwen-code',
+      'pkill -f /usr/bin/node',
+      'pkill -9f node',
+      "bash -lc 'pkill -f qwen'",
+    ]);
   });
 
   it('detects self-kill commands in chains and execution prefixes', () => {
-    expect(detectSelfKillCommand('echo setup && killall node')).toBe(true);
-    expect(detectSelfKillCommand('false || taskkill /F /IM node.exe')).toBe(
-      true,
-    );
-    expect(detectSelfKillCommand('sudo killall node')).toBe(true);
-    expect(detectSelfKillCommand('env FOO=bar pkill -f qwen-code')).toBe(true);
-    expect(detectSelfKillCommand('command -p killall node')).toBe(true);
+    expectEach(detectSelfKillCommand, true, [
+      'echo setup && killall node',
+      'false || taskkill /F /IM node.exe',
+      'sudo killall node',
+      'env FOO=bar pkill -f qwen-code',
+      'command -p killall node',
+    ]);
   });
 
   it('detects kill commands using pgrep selectors for qwen-code hosts', () => {
-    expect(detectSelfKillCommand('kill -9 $(pgrep node)')).toBe(true);
-    expect(detectSelfKillCommand('kill $(pgrep -f node)')).toBe(true);
-    expect(detectSelfKillCommand('kill -9 $(pgrep node | head -1)')).toBe(true);
-    expect(detectSelfKillCommand('kill -9 `pgrep node | head -1`')).toBe(true);
-    expect(detectSelfKillCommand('pgrep node | xargs kill')).toBe(true);
-    expect(detectSelfKillCommand('pgrep node | xargs sudo kill')).toBe(true);
-    expect(detectSelfKillCommand('pgrep node | xargs -I {} kill -9 {}')).toBe(
-      true,
-    );
+    expectEach(detectSelfKillCommand, true, [
+      'kill -9 $(pgrep node)',
+      'kill $(pgrep -f node)',
+      'kill -9 $(pgrep node | head -1)',
+      'kill -9 `pgrep node | head -1`',
+      'pgrep node | xargs kill',
+      'pgrep node | xargs sudo kill',
+      'pgrep node | xargs -I {} kill -9 {}',
+    ]);
   });
 
   it('detects taskkill inline and dash-prefixed image options', () => {
-    expect(detectSelfKillCommand('taskkill /IM:node.exe /F')).toBe(true);
-    expect(
-      detectSelfKillCommand('taskkill /FI:"IMAGENAME eq qwen-code.exe" /F'),
-    ).toBe(true);
-    expect(detectSelfKillCommand('taskkill -IM node.exe -F')).toBe(true);
+    expectEach(detectSelfKillCommand, true, [
+      'taskkill /IM:node.exe /F',
+      'taskkill /FI:"IMAGENAME eq qwen-code.exe" /F',
+      'taskkill -IM node.exe -F',
+    ]);
   });
 
   it('detects glob patterns emitted by shell parsing', () => {
-    expect(detectSelfKillCommand('killall node*')).toBe(true);
-    expect(detectSelfKillCommand('pkill -f node*')).toBe(true);
-    expect(detectSelfKillCommand('taskkill /IM node*')).toBe(true);
+    expectEach(detectSelfKillCommand, true, [
+      'killall node*',
+      'pkill -f node*',
+      'taskkill /IM node*',
+    ]);
   });
 
   it('detects taskkill through Windows shell wrappers', () => {
-    expect(
-      detectSelfKillCommand('powershell -Command "taskkill /F /IM node.exe"'),
-    ).toBe(true);
-    expect(
-      detectSelfKillCommand(
-        'pwsh -NoProfile -Command "taskkill /F /IM node.exe"',
-      ),
-    ).toBe(true);
-    expect(
-      detectSelfKillCommand('powershell -Command taskkill /F /IM node.exe'),
-    ).toBe(true);
-    expect(
-      detectSelfKillCommand(
-        'powershell -ExecutionPolicy Bypass -Command "taskkill /F /IM node.exe"',
-      ),
-    ).toBe(true);
-    expect(detectSelfKillCommand('cmd.exe /c taskkill /F /IM node.exe')).toBe(
-      true,
-    );
+    expectEach(detectSelfKillCommand, true, [
+      'powershell -Command "taskkill /F /IM node.exe"',
+      'pwsh -NoProfile -Command "taskkill /F /IM node.exe"',
+      'powershell -Command taskkill /F /IM node.exe',
+      'powershell -ExecutionPolicy Bypass -Command "taskkill /F /IM node.exe"',
+      'cmd.exe /c taskkill /F /IM node.exe',
+    ]);
   });
 
   it('allows targeted process kills and unrelated process patterns', () => {
-    expect(detectSelfKillCommand('taskkill /PID 1234 /F')).toBe(false);
-    expect(detectSelfKillCommand('kill 1234')).toBe(false);
-    expect(detectSelfKillCommand('pkill -f vite')).toBe(false);
-    expect(detectSelfKillCommand('pkill -f "node server.js"')).toBe(false);
-    expect(detectSelfKillCommand('pkill -9f "node server.js"')).toBe(false);
-    expect(detectSelfKillCommand('kill -9 $(pgrep vite)')).toBe(false);
-    expect(detectSelfKillCommand('kill -9 $(pgrep -f "node server.js")')).toBe(
-      false,
-    );
-    expect(detectSelfKillCommand('pkill -F qwen-code.pid vite')).toBe(false);
-    expect(detectSelfKillCommand('taskkill /IM notepad.exe')).toBe(false);
+    expectEach(detectSelfKillCommand, false, [
+      'taskkill /PID 1234 /F',
+      'kill 1234',
+      'pkill -f vite',
+      'pkill -f "node server.js"',
+      'pkill -9f "node server.js"',
+      'kill -9 $(pgrep vite)',
+      'kill -9 $(pgrep -f "node server.js")',
+      'pkill -F qwen-code.pid vite',
+      'taskkill /IM notepad.exe',
+    ]);
   });
 });
 
 describe('hasNonFinalTopLevelBackgroundOperator', () => {
   it('detects top-level background operators followed by more syntax', () => {
-    expect(
-      hasNonFinalTopLevelBackgroundOperator('tail -f app.log & echo ok'),
-    ).toBe(true);
-    expect(
-      hasNonFinalTopLevelBackgroundOperator('tail -f app.log & # watch'),
-    ).toBe(true);
+    expectEach(hasNonFinalTopLevelBackgroundOperator, true, [
+      'tail -f app.log & echo ok',
+      'tail -f app.log & # watch',
+    ]);
   });
 
   it('ignores final, logical, escaped, quoted, and redirection ampersands', () => {
-    expect(hasNonFinalTopLevelBackgroundOperator('tail -f app.log &')).toBe(
-      false,
-    );
-    expect(hasNonFinalTopLevelBackgroundOperator('echo hi && echo ok')).toBe(
-      false,
-    );
-    expect(hasNonFinalTopLevelBackgroundOperator('echo foo \\& echo ok')).toBe(
-      false,
-    );
-    expect(hasNonFinalTopLevelBackgroundOperator(`printf '&' && echo ok`)).toBe(
-      false,
-    );
-    expect(hasNonFinalTopLevelBackgroundOperator('echo hi &> out')).toBe(false);
-    expect(hasNonFinalTopLevelBackgroundOperator('echo hi 2>&1')).toBe(false);
+    expectEach(hasNonFinalTopLevelBackgroundOperator, false, [
+      'tail -f app.log &',
+      'echo hi && echo ok',
+      'echo foo \\& echo ok',
+      `printf '&' && echo ok`,
+      'echo hi &> out',
+      'echo hi 2>&1',
+    ]);
   });
 });
 
 describe('hasUnsafeMonitorBackgroundOperator', () => {
   it('detects unsafe backgrounding inside shell wrapper scripts and suffixes', () => {
-    expect(
-      hasUnsafeMonitorBackgroundOperator(
-        "bash -c 'tail -f app.log & echo ready'",
-      ),
-    ).toBe(true);
-    expect(
-      hasUnsafeMonitorBackgroundOperator(
-        "bash -c 'tail -f app.log' & echo ready",
-      ),
-    ).toBe(true);
+    expectEach(hasUnsafeMonitorBackgroundOperator, true, [
+      "bash -c 'tail -f app.log & echo ready'",
+      "bash -c 'tail -f app.log' & echo ready",
+    ]);
   });
 
   it('allows final trailing ampersands that normalization strips', () => {
-    expect(hasUnsafeMonitorBackgroundOperator('tail -f app.log &')).toBe(false);
-    expect(
-      hasUnsafeMonitorBackgroundOperator("bash -c 'tail -f app.log &'"),
-    ).toBe(false);
+    expectEach(hasUnsafeMonitorBackgroundOperator, false, [
+      'tail -f app.log &',
+      "bash -c 'tail -f app.log &'",
+    ]);
   });
 });
 
 describe('normalizeMonitorCommand', () => {
-  it('unwraps quoted env-prefixed shell wrappers for analysis', () => {
-    expect(
-      normalizeMonitorCommand(
-        `FOO="bar baz" /bin/bash -c 'echo $(cat secret.txt)'`,
-      ),
-    ).toEqual({
-      analysisCommand: 'echo $(cat secret.txt)',
-      safetyCommand: `FOO="bar baz" echo $(cat secret.txt)`,
-      spawnCommand: `FOO="bar baz" /bin/bash -c 'echo $(cat secret.txt)'`,
-      strippedTrailingAmp: false,
+  // spawnCommand defaults to the input, as when no trailing `&` is stripped.
+  const expectNormalized = (
+    command: string,
+    analysisCommand: string,
+    safetyCommand: string,
+    spawnCommand = command,
+    strippedTrailingAmp = false,
+  ) =>
+    expect(normalizeMonitorCommand(command)).toEqual({
+      analysisCommand,
+      safetyCommand,
+      spawnCommand,
+      strippedTrailingAmp,
     });
+
+  it('unwraps quoted env-prefixed shell wrappers for analysis', () => {
+    expectNormalized(
+      `FOO="bar baz" /bin/bash -c 'echo $(cat secret.txt)'`,
+      'echo $(cat secret.txt)',
+      `FOO="bar baz" echo $(cat secret.txt)`,
+    );
   });
 
   it('preserves wrapper flags while stripping trailing ampersands', () => {
-    expect(
-      normalizeMonitorCommand(
-        `/bin/bash --noprofile -c 'tail -f /tmp/app.log &'`,
-      ),
-    ).toEqual({
-      analysisCommand: 'tail -f /tmp/app.log',
-      safetyCommand: 'tail -f /tmp/app.log',
-      spawnCommand: `/bin/bash --noprofile -c 'tail -f /tmp/app.log'`,
-      strippedTrailingAmp: true,
-    });
+    expectNormalized(
+      `/bin/bash --noprofile -c 'tail -f /tmp/app.log &'`,
+      'tail -f /tmp/app.log',
+      'tail -f /tmp/app.log',
+      `/bin/bash --noprofile -c 'tail -f /tmp/app.log'`,
+      true,
+    );
   });
 
   it('unwraps shell wrappers with option operands for safety analysis', () => {
-    expect(
-      normalizeMonitorCommand(
-        `/bin/bash -o pipefail -c 'echo $(cat secret.txt)'`,
-      ),
-    ).toEqual({
-      analysisCommand: 'echo $(cat secret.txt)',
-      safetyCommand: 'echo $(cat secret.txt)',
-      spawnCommand: `/bin/bash -o pipefail -c 'echo $(cat secret.txt)'`,
-      strippedTrailingAmp: false,
-    });
+    expectNormalized(
+      `/bin/bash -o pipefail -c 'echo $(cat secret.txt)'`,
+      'echo $(cat secret.txt)',
+      'echo $(cat secret.txt)',
+    );
   });
 
   it('analyzes only the script word after -c while preserving later argv', () => {
-    expect(
-      normalizeMonitorCommand(`/bin/bash -c 'echo $(cat secret.txt)' ignored`),
-    ).toEqual({
-      analysisCommand: 'echo $(cat secret.txt)',
-      safetyCommand: 'echo $(cat secret.txt) ignored',
-      spawnCommand: `/bin/bash -c 'echo $(cat secret.txt)' ignored`,
-      strippedTrailingAmp: false,
-    });
+    expectNormalized(
+      `/bin/bash -c 'echo $(cat secret.txt)' ignored`,
+      'echo $(cat secret.txt)',
+      'echo $(cat secret.txt) ignored',
+    );
   });
 
   it('strips trailing ampersands from the -c script without dropping later argv', () => {
-    expect(
-      normalizeMonitorCommand(`/bin/bash -c 'tail -f /tmp/app.log &' ignored`),
-    ).toEqual({
-      analysisCommand: 'tail -f /tmp/app.log',
-      safetyCommand: 'tail -f /tmp/app.log ignored',
-      spawnCommand: `/bin/bash -c 'tail -f /tmp/app.log' ignored`,
-      strippedTrailingAmp: true,
-    });
+    expectNormalized(
+      `/bin/bash -c 'tail -f /tmp/app.log &' ignored`,
+      'tail -f /tmp/app.log',
+      'tail -f /tmp/app.log ignored',
+      `/bin/bash -c 'tail -f /tmp/app.log' ignored`,
+      true,
+    );
   });
 
   it('keeps substitutions in wrapper argv suffix in the safety command', () => {
-    expect(
-      normalizeMonitorCommand(`/bin/bash -c 'echo ok' $(cat secret.txt)`),
-    ).toEqual({
-      analysisCommand: 'echo ok',
-      safetyCommand: 'echo ok $(cat secret.txt)',
-      spawnCommand: `/bin/bash -c 'echo ok' $(cat secret.txt)`,
-      strippedTrailingAmp: false,
-    });
+    expectNormalized(
+      `/bin/bash -c 'echo ok' $(cat secret.txt)`,
+      'echo ok',
+      'echo ok $(cat secret.txt)',
+    );
   });
 
   it('handles escaped whitespace in env-prefixed wrappers', () => {
-    expect(
-      normalizeMonitorCommand(
-        String.raw`FOO=bar\ baz /bin/bash --noprofile -c 'tail -f /tmp/app.log &'`,
-      ),
-    ).toEqual({
-      analysisCommand: 'tail -f /tmp/app.log',
-      safetyCommand: String.raw`FOO=bar\ baz tail -f /tmp/app.log`,
-      spawnCommand: String.raw`FOO=bar\ baz /bin/bash --noprofile -c 'tail -f /tmp/app.log'`,
-      strippedTrailingAmp: true,
-    });
+    expectNormalized(
+      String.raw`FOO=bar\ baz /bin/bash --noprofile -c 'tail -f /tmp/app.log &'`,
+      'tail -f /tmp/app.log',
+      String.raw`FOO=bar\ baz tail -f /tmp/app.log`,
+      String.raw`FOO=bar\ baz /bin/bash --noprofile -c 'tail -f /tmp/app.log'`,
+      true,
+    );
   });
 
   it('falls back to the original command when no wrapper is detected', () => {
-    expect(
-      normalizeMonitorCommand(`FOO="bar baz" tail -f /tmp/app.log`),
-    ).toEqual({
-      analysisCommand: `FOO="bar baz" tail -f /tmp/app.log`,
-      safetyCommand: `FOO="bar baz" tail -f /tmp/app.log`,
-      spawnCommand: `FOO="bar baz" tail -f /tmp/app.log`,
-      strippedTrailingAmp: false,
-    });
+    const command = `FOO="bar baz" tail -f /tmp/app.log`;
+    expectNormalized(command, command, command);
   });
 
   it('keeps env-prefix substitutions in the safety command', () => {
-    expect(
-      normalizeMonitorCommand(`FOO=$(cat secret.txt) /bin/bash -c 'echo ok'`),
-    ).toEqual({
-      analysisCommand: 'echo ok',
-      safetyCommand: 'FOO=$(cat secret.txt) echo ok',
-      spawnCommand: `FOO=$(cat secret.txt) /bin/bash -c 'echo ok'`,
-      strippedTrailingAmp: false,
-    });
+    expectNormalized(
+      `FOO=$(cat secret.txt) /bin/bash -c 'echo ok'`,
+      'echo ok',
+      'FOO=$(cat secret.txt) echo ok',
+    );
   });
 });
 
@@ -1067,8 +932,7 @@ describe('escapeShellArg', () => {
   describe('Windows', () => {
     describe('when shell is cmd.exe', () => {
       it('should wrap simple arguments in double quotes', async () => {
-        const result = escapeShellArg('search term', 'cmd');
-        expect(result).toBe('"search term"');
+        expect(escapeShellArg('search term', 'cmd')).toBe('"search term"');
       });
 
       it('should escape internal double quotes by doubling them', async () => {
@@ -1077,15 +941,15 @@ describe('escapeShellArg', () => {
       });
 
       it('should handle empty strings', async () => {
-        const result = escapeShellArg('', 'cmd');
-        expect(result).toBe('');
+        expect(escapeShellArg('', 'cmd')).toBe('');
       });
     });
 
     describe('when shell is PowerShell', () => {
       it('should wrap simple arguments in single quotes', async () => {
-        const result = escapeShellArg('search term', 'powershell');
-        expect(result).toBe("'search term'");
+        expect(escapeShellArg('search term', 'powershell')).toBe(
+          "'search term'",
+        );
       });
 
       it('should escape internal single quotes by doubling them', async () => {
@@ -1099,8 +963,7 @@ describe('escapeShellArg', () => {
       });
 
       it('should handle empty strings', async () => {
-        const result = escapeShellArg('', 'powershell');
-        expect(result).toBe('');
+        expect(escapeShellArg('', 'powershell')).toBe('');
       });
     });
   });
@@ -1108,6 +971,16 @@ describe('escapeShellArg', () => {
 
 describe('getShellConfiguration', () => {
   const originalEnv = { ...process.env };
+  const expectShell = (
+    executable: string,
+    argsPrefix: string[],
+    shell: string,
+  ) => {
+    const config = getShellConfiguration();
+    expect(config.executable).toBe(executable);
+    expect(config.argsPrefix).toEqual(argsPrefix);
+    expect(config.shell).toBe(shell);
+  };
 
   afterEach(() => {
     process.env = originalEnv;
@@ -1115,22 +988,25 @@ describe('getShellConfiguration', () => {
 
   it('should return bash configuration on Linux', async () => {
     mockPlatform.mockReturnValue('linux');
-    const config = getShellConfiguration();
-    expect(config.executable).toBe('bash');
-    expect(config.argsPrefix).toEqual(['-c']);
-    expect(config.shell).toBe('bash');
+    expectShell('bash', ['-c'], 'bash');
   });
 
   it('should return bash configuration on macOS (darwin)', async () => {
     mockPlatform.mockReturnValue('darwin');
-    const config = getShellConfiguration();
-    expect(config.executable).toBe('bash');
-    expect(config.argsPrefix).toEqual(['-c']);
-    expect(config.shell).toBe('bash');
+    expectShell('bash', ['-c'], 'bash');
   });
 
   describe('on Windows', () => {
     const originalEnv = { ...process.env };
+    const CMD_ARGS = ['/d', '/s', '/c'];
+    const PS_ARGS = ['-NoProfile', '-Command'];
+    // Sets ComSpec (deletes it when omitted) and clears the Git Bash hints.
+    const setComSpec = (comSpec?: string) => {
+      if (comSpec === undefined) delete process.env['ComSpec'];
+      else process.env['ComSpec'] = comSpec;
+      delete process.env['MSYSTEM'];
+      delete process.env['TERM'];
+    };
 
     beforeEach(() => {
       mockPlatform.mockReturnValue('win32');
@@ -1141,62 +1017,36 @@ describe('getShellConfiguration', () => {
     });
 
     it('should return cmd.exe configuration by default', async () => {
-      delete process.env['ComSpec'];
-      delete process.env['MSYSTEM'];
-      delete process.env['TERM'];
-      const config = getShellConfiguration();
-      expect(config.executable).toBe('cmd.exe');
-      expect(config.argsPrefix).toEqual(['/d', '/s', '/c']);
-      expect(config.shell).toBe('cmd');
+      setComSpec();
+      expectShell('cmd.exe', CMD_ARGS, 'cmd');
     });
 
     it('should respect ComSpec for cmd.exe', async () => {
       const cmdPath = 'C:\\WINDOWS\\system32\\cmd.exe';
-      process.env['ComSpec'] = cmdPath;
-      delete process.env['MSYSTEM'];
-      delete process.env['TERM'];
-      const config = getShellConfiguration();
-      expect(config.executable).toBe(cmdPath);
-      expect(config.argsPrefix).toEqual(['/d', '/s', '/c']);
-      expect(config.shell).toBe('cmd');
+      setComSpec(cmdPath);
+      expectShell(cmdPath, CMD_ARGS, 'cmd');
     });
 
     it('should return PowerShell configuration if ComSpec points to powershell.exe', async () => {
       const psPath =
         'C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
-      process.env['ComSpec'] = psPath;
-      delete process.env['MSYSTEM'];
-      delete process.env['TERM'];
-      const config = getShellConfiguration();
-      expect(config.executable).toBe(psPath);
-      expect(config.argsPrefix).toEqual(['-NoProfile', '-Command']);
-      expect(config.shell).toBe('powershell');
+      setComSpec(psPath);
+      expectShell(psPath, PS_ARGS, 'powershell');
     });
 
     it('should return PowerShell configuration if ComSpec points to pwsh.exe', async () => {
       const pwshPath = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe';
-      process.env['ComSpec'] = pwshPath;
-      delete process.env['MSYSTEM'];
-      delete process.env['TERM'];
-      const config = getShellConfiguration();
-      expect(config.executable).toBe(pwshPath);
-      expect(config.argsPrefix).toEqual(['-NoProfile', '-Command']);
-      expect(config.shell).toBe('powershell');
+      setComSpec(pwshPath);
+      expectShell(pwshPath, PS_ARGS, 'powershell');
     });
 
     it('should be case-insensitive when checking ComSpec', async () => {
-      process.env['ComSpec'] = 'C:\\Path\\To\\POWERSHELL.EXE';
-      delete process.env['MSYSTEM'];
-      delete process.env['TERM'];
-      const config = getShellConfiguration();
-      expect(config.executable).toBe('C:\\Path\\To\\POWERSHELL.EXE');
-      expect(config.argsPrefix).toEqual(['-NoProfile', '-Command']);
-      expect(config.shell).toBe('powershell');
+      setComSpec('C:\\Path\\To\\POWERSHELL.EXE');
+      expectShell('C:\\Path\\To\\POWERSHELL.EXE', PS_ARGS, 'powershell');
     });
 
     describe('Git Bash / MSYS2 / MinTTY detection', () => {
-      it('should return bash configuration when MSYSTEM starts with MINGW', () => {
-        process.env['MSYSTEM'] = 'MINGW64';
+      const expectGitBash = () => {
         const config = getShellConfiguration();
         // executable should be bash.exe path (either 'bash' or full path like 'C:\...\bash.exe')
         expect(
@@ -1205,74 +1055,46 @@ describe('getShellConfiguration', () => {
         ).toBe(true);
         expect(config.argsPrefix).toEqual(['-c']);
         expect(config.shell).toBe('bash');
+      };
+
+      it('should return bash configuration when MSYSTEM starts with MINGW', () => {
+        process.env['MSYSTEM'] = 'MINGW64';
+        expectGitBash();
       });
 
       it('should return bash configuration when MSYSTEM starts with MSYS', () => {
         process.env['MSYSTEM'] = 'MSYS';
-        const config = getShellConfiguration();
-        expect(
-          config.executable.endsWith('bash.exe') ||
-            config.executable === 'bash',
-        ).toBe(true);
-        expect(config.argsPrefix).toEqual(['-c']);
-        expect(config.shell).toBe('bash');
+        expectGitBash();
       });
 
       it('should return bash configuration when TERM includes msys', () => {
         delete process.env['MSYSTEM'];
         process.env['TERM'] = 'xterm-256color-msys';
-        const config = getShellConfiguration();
-        expect(
-          config.executable.endsWith('bash.exe') ||
-            config.executable === 'bash',
-        ).toBe(true);
-        expect(config.argsPrefix).toEqual(['-c']);
-        expect(config.shell).toBe('bash');
+        expectGitBash();
       });
 
       it('should return bash configuration when TERM includes cygwin', () => {
         delete process.env['MSYSTEM'];
         process.env['TERM'] = 'xterm-256color-cygwin';
-        const config = getShellConfiguration();
-        expect(
-          config.executable.endsWith('bash.exe') ||
-            config.executable === 'bash',
-        ).toBe(true);
-        expect(config.argsPrefix).toEqual(['-c']);
-        expect(config.shell).toBe('bash');
+        expectGitBash();
       });
 
       it('should prioritize MSYSTEM over TERM for Git Bash detection', () => {
         process.env['MSYSTEM'] = 'MINGW64';
         process.env['TERM'] = 'xterm';
-        const config = getShellConfiguration();
-        expect(
-          config.executable.endsWith('bash.exe') ||
-            config.executable === 'bash',
-        ).toBe(true);
-        expect(config.argsPrefix).toEqual(['-c']);
-        expect(config.shell).toBe('bash');
+        expectGitBash();
       });
 
       it('should return cmd.exe when MSYSTEM and TERM do not indicate Git Bash', () => {
         process.env['MSYSTEM'] = 'UNKNOWN';
         process.env['TERM'] = 'xterm';
         delete process.env['ComSpec'];
-        const config = getShellConfiguration();
-        expect(config.executable).toBe('cmd.exe');
-        expect(config.argsPrefix).toEqual(['/d', '/s', '/c']);
-        expect(config.shell).toBe('cmd');
+        expectShell('cmd.exe', CMD_ARGS, 'cmd');
       });
 
       it('should return bash when MSYSTEM is MINGW32', () => {
         process.env['MSYSTEM'] = 'MINGW32';
-        const config = getShellConfiguration();
-        expect(
-          config.executable.endsWith('bash.exe') ||
-            config.executable === 'bash',
-        ).toBe(true);
-        expect(config.argsPrefix).toEqual(['-c']);
-        expect(config.shell).toBe('bash');
+        expectGitBash();
       });
     });
   });
@@ -1280,8 +1102,7 @@ describe('getShellConfiguration', () => {
 
 describe('isCommandNeedPermission', () => {
   it('returns false for read-only commands', async () => {
-    const result = isCommandNeedsPermission('ls');
-    expect(result.requiresPermission).toBe(false);
+    expect(isCommandNeedsPermission('ls').requiresPermission).toBe(false);
   });
 
   it('returns true for mutating commands with reason', async () => {
@@ -1292,86 +1113,52 @@ describe('isCommandNeedPermission', () => {
 });
 
 describe('checkArgumentSafety', () => {
+  const expectDangerous = (arg: string, pattern: string) => {
+    const result = checkArgumentSafety(arg);
+    expect(result.isSafe).toBe(false);
+    expect(result.dangerousPatterns).toContain(pattern);
+  };
+
   describe('command substitution patterns', () => {
-    it('should detect $() command substitution', async () => {
-      const result = checkArgumentSafety('$(whoami)');
-      expect(result.isSafe).toBe(false);
-      expect(result.dangerousPatterns).toContain('$() command substitution');
-    });
-
-    it('should detect backtick command substitution', async () => {
-      const result = checkArgumentSafety('`whoami`');
-      expect(result.isSafe).toBe(false);
-      expect(result.dangerousPatterns).toContain(
+    it.each([
+      ['$() command substitution', '$(whoami)', '$() command substitution'],
+      [
         'backtick command substitution',
-      );
-    });
-
-    it('should detect <() process substitution', async () => {
-      const result = checkArgumentSafety('<(cat file)');
-      expect(result.isSafe).toBe(false);
-      expect(result.dangerousPatterns).toContain('<() process substitution');
-    });
-
-    it('should detect >() process substitution', async () => {
-      const result = checkArgumentSafety('>(tee file)');
-      expect(result.isSafe).toBe(false);
-      expect(result.dangerousPatterns).toContain('>() process substitution');
-    });
+        '`whoami`',
+        'backtick command substitution',
+      ],
+      ['<() process substitution', '<(cat file)', '<() process substitution'],
+      ['>() process substitution', '>(tee file)', '>() process substitution'],
+    ])('should detect %s', (_title, arg, pattern) =>
+      expectDangerous(arg, pattern),
+    );
   });
 
   describe('command separators', () => {
-    it('should detect semicolon separator', async () => {
-      const result = checkArgumentSafety('arg1; rm -rf /');
-      expect(result.isSafe).toBe(false);
-      expect(result.dangerousPatterns).toContain('; command separator');
-    });
-
-    it('should detect pipe', async () => {
-      const result = checkArgumentSafety('arg1 | cat file');
-      expect(result.isSafe).toBe(false);
-      expect(result.dangerousPatterns).toContain('| pipe');
-    });
-
-    it('should detect && operator', async () => {
-      const result = checkArgumentSafety('arg1 && ls');
-      expect(result.isSafe).toBe(false);
-      expect(result.dangerousPatterns).toContain('&& AND operator');
-    });
-
-    it('should detect || operator', async () => {
-      const result = checkArgumentSafety('arg1 || ls');
-      expect(result.isSafe).toBe(false);
-      expect(result.dangerousPatterns).toContain('|| OR operator');
-    });
+    it.each([
+      ['semicolon separator', 'arg1; rm -rf /', '; command separator'],
+      ['pipe', 'arg1 | cat file', '| pipe'],
+      ['&& operator', 'arg1 && ls', '&& AND operator'],
+      ['|| operator', 'arg1 || ls', '|| OR operator'],
+    ])('should detect %s', (_title, arg, pattern) =>
+      expectDangerous(arg, pattern),
+    );
   });
 
   describe('background execution', () => {
     it('should detect background operator', async () => {
-      const result = checkArgumentSafety('arg1 & ls');
-      expect(result.isSafe).toBe(false);
-      expect(result.dangerousPatterns).toContain('& background operator');
+      expectDangerous('arg1 & ls', '& background operator');
     });
   });
 
   describe('input/output redirection', () => {
-    it('should detect output redirection', async () => {
-      const result = checkArgumentSafety('arg1 > file');
-      expect(result.isSafe).toBe(false);
-      expect(result.dangerousPatterns).toContain('> output redirection');
-    });
-
-    it('should detect input redirection', async () => {
-      const result = checkArgumentSafety('arg1 < file');
-      expect(result.isSafe).toBe(false);
-      expect(result.dangerousPatterns).toContain('< input redirection');
-    });
-
-    it('should detect append redirection', async () => {
-      const result = checkArgumentSafety('arg1 >> file');
-      expect(result.isSafe).toBe(false);
-      expect(result.dangerousPatterns).toContain('> output redirection');
-    });
+    it.each([
+      ['output redirection', 'arg1 > file', '> output redirection'],
+      ['input redirection', 'arg1 < file', '< input redirection'],
+      ['append redirection', 'arg1 >> file', '> output redirection'],
+    ])('should detect %s', (_title, arg, pattern) =>
+      expectDangerous(arg, pattern),
+    );
   });
 
   describe('safe inputs', () => {
@@ -1381,34 +1168,15 @@ describe('checkArgumentSafety', () => {
       expect(result.dangerousPatterns).toHaveLength(0);
     });
 
-    it('should accept arguments with numbers', async () => {
-      const result = checkArgumentSafety('file123.txt');
-      expect(result.isSafe).toBe(true);
-    });
-
-    it('should accept arguments with hyphens', async () => {
-      const result = checkArgumentSafety('--flag=value');
-      expect(result.isSafe).toBe(true);
-    });
-
-    it('should accept arguments with underscores', async () => {
-      const result = checkArgumentSafety('my_file_name');
-      expect(result.isSafe).toBe(true);
-    });
-
-    it('should accept arguments with dots', async () => {
-      const result = checkArgumentSafety('path/to/file.txt');
-      expect(result.isSafe).toBe(true);
-    });
-
-    it('should accept empty string', async () => {
-      const result = checkArgumentSafety('');
-      expect(result.isSafe).toBe(true);
-    });
-
-    it('should accept arguments with spaces (quoted)', async () => {
-      const result = checkArgumentSafety('hello world');
-      expect(result.isSafe).toBe(true);
+    it.each([
+      ['arguments with numbers', 'file123.txt'],
+      ['arguments with hyphens', '--flag=value'],
+      ['arguments with underscores', 'my_file_name'],
+      ['arguments with dots', 'path/to/file.txt'],
+      ['empty string', ''],
+      ['arguments with spaces (quoted)', 'hello world'],
+    ])('should accept %s', (_title, arg) => {
+      expect(checkArgumentSafety(arg).isSafe).toBe(true);
     });
   });
 
@@ -1430,18 +1198,48 @@ describe('checkArgumentSafety', () => {
 // `bash -c`) — was untested. Without coverage, removing the
 // `|| detectCommandSubstitution(rawCommand)` clause would not regress
 // any test in this file.
+describe('buildOutsideWorkspaceWarning', () => {
+  it('names the directory as given when nothing resolves differently', () => {
+    expect(buildOutsideWorkspaceWarning('/elsewhere/project')).toBe(
+      'Runs outside the workspace in /elsewhere/project',
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'names where a symlinked directory really points',
+    async () => {
+      const { tmpdir } =
+        await vi.importActual<typeof import('node:os')>('node:os');
+      const root = fs.realpathSync(
+        fs.mkdtempSync(path.join(tmpdir(), 'outside-warning-')),
+      );
+      try {
+        const target = path.join(root, 'elsewhere');
+        const link = path.join(root, 'workspace', 'link-out');
+        fs.mkdirSync(target);
+        fs.mkdirSync(path.dirname(link));
+        fs.symlinkSync(target, link);
+
+        expect(buildOutsideWorkspaceWarning(link)).toBe(
+          `Runs outside the workspace in ${target} (via ${link})`,
+        );
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
 describe('buildShellExecWarnings', () => {
+  // The same command as both the stripped and the raw form.
+  const warnFor = (command: string) => buildShellExecWarnings(command, command);
+
   it('returns undefined when neither stripped nor raw command has substitution', () => {
-    expect(
-      buildShellExecWarnings('npm install', 'npm install'),
-    ).toBeUndefined();
+    expect(warnFor('npm install')).toBeUndefined();
   });
 
   it('returns the substitution warning when the stripped command has $()', () => {
-    const result = buildShellExecWarnings(
-      'echo $(cat secret)',
-      'echo $(cat secret)',
-    );
+    const result = warnFor('echo $(cat secret)');
     expect(result).toEqual([COMMAND_SUBSTITUTION_WARNING]);
   });
 
@@ -1460,18 +1258,13 @@ describe('buildShellExecWarnings', () => {
   });
 
   it('returns the warning for backtick substitution in either input', () => {
-    expect(buildShellExecWarnings('echo `whoami`', 'echo `whoami`')).toEqual([
-      COMMAND_SUBSTITUTION_WARNING,
-    ]);
+    expect(warnFor('echo `whoami`')).toEqual([COMMAND_SUBSTITUTION_WARNING]);
   });
 
   it('returns the warning for process substitution <(...)', () => {
-    expect(
-      buildShellExecWarnings(
-        'diff <(ls /a) <(ls /b)',
-        'diff <(ls /a) <(ls /b)',
-      ),
-    ).toEqual([COMMAND_SUBSTITUTION_WARNING]);
+    expect(warnFor('diff <(ls /a) <(ls /b)')).toEqual([
+      COMMAND_SUBSTITUTION_WARNING,
+    ]);
   });
 });
 

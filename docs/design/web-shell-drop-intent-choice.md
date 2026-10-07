@@ -32,8 +32,10 @@ dialog closes if the composer target changes or upload becomes unavailable.
 
 When workspace upload is unavailable, drops keep the existing attachment
 behavior instead of showing an upload action that cannot succeed. Host-level
-`fileUploadEnabled={false}` retains its existing contract and disables all
-file drag-in. Clipboard paste and the `@` panel upload item are unchanged.
+`fileUploadEnabled={false}` disables only the upload lane; drops fall back to
+attachments when `attachmentsEnabled` permits them. Clipboard paste is unchanged,
+and the `@` panel upload item remains hidden when uploads are disabled. See
+[Default file drop action](web-shell-file-drop-action.md).
 
 File attachment chips are interactive before and after optimistic submission.
 Opening one shows the referenced file in the right-side preview panel.

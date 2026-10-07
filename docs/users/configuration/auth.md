@@ -2,7 +2,7 @@
 
 Qwen Code's first-run `/auth` menu has three top-level options. Pick the one that matches how you want to run the CLI:
 
-- **Alibaba ModelStudio**: official recommended setup. Opens a sub-menu with **Coding Plan** (for individual developers · weekly quota included), **Token Plan** (for teams and companies · usage-based billing with a dedicated endpoint), or **Standard API Key** (connect with an existing ModelStudio API key).
+- **Alibaba ModelStudio**: official recommended setup. Opens a sub-menu with **Coding Plan** (for individual developers · weekly quota included), **Token Plan** (for teams and companies · usage-based billing with a dedicated endpoint), or **Standard API Key** (connect with an existing ModelStudio API key). Token Plan and Standard API Key also enable the built-in [`web_search` tool](../../developers/tools/web-search.md) with no extra setup.
 - **Third-party Providers**: choose a built-in provider and connect with an API key (DeepSeek, Grok, MiniMax, Z.AI, Kimi, Idealab, ModelScope, OpenRouter, Requesty).
 - **Custom Provider**: manually connect a local server, proxy, or unsupported provider — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
 
@@ -283,6 +283,7 @@ Edit `~/.qwen/settings.json` (create it if it doesn't exist). You can mix multip
 | Field              | Required | Description                                                                                                                                        |
 | ------------------ | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `id`               | Yes      | Model ID sent to the API (e.g. `gpt-4o`, `claude-sonnet-4-20250514`)                                                                               |
+| `wireApi`          | No       | OpenAI-compatible request format: `chat-completions` or `responses`. Omit to inherit the provider protocol.                                        |
 | `name`             | No       | Display name in the `/model` picker (defaults to `id`)                                                                                             |
 | `envKey`           | No       | Environment variable name for the API key (e.g. `OPENAI_API_KEY`); optional/recommended — defaults to the auth type's default env key when omitted |
 | `baseUrl`          | No       | API endpoint override (useful for proxies or custom endpoints)                                                                                     |

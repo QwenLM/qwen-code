@@ -14,8 +14,25 @@ import type { GoalRuntime } from '@qwen-code/qwen-code-core/goals/goal-runtime.j
 import { useConfig } from '../contexts/ConfigContext.js';
 import { theme } from '../semantic-colors.js';
 import { ICON } from '../constants.js';
+import { formatTokenCount } from '../statusLinePresets.js';
 
 const ELAPSED_REFRESH_MS = 1000;
+
+/**
+ * The Goal's spend against the window it is allowed, or nothing.
+ *
+ * A Goal that has not billed a turn yet shows no figures rather than a
+ * reassuring `0/30.0m`: the pill sits in a footer with little room, and a
+ * zero says nothing the status has not already said. A Goal with no budget
+ * shows what it has spent, since that is the whole of what is known.
+ */
+function formatSpend(goal: NonNullable<GoalSnapshotV2['goal']>): string {
+  if (goal.tokensUsed <= 0) return '';
+  const used = formatTokenCount(goal.tokensUsed);
+  return goal.tokenBudget === undefined
+    ? used
+    : `${used}/${formatTokenCount(goal.tokenBudget)}`;
+}
 
 function formatElapsed(ms: number): string {
   if (ms < 1000) return '';
@@ -81,13 +98,14 @@ function presentation(snapshot: GoalSnapshotV2): {
   if (!goal || goal.status === 'complete') return null;
 
   if (goal.status === 'active') {
-    return snapshot.activity === 'verifying'
-      ? {
-          icon: ICON.CIRCLE_EMPTY,
-          label: 'checking',
-          color: theme.text.secondary,
-        }
-      : { icon: ICON.BULLSEYE, label: 'active', color: theme.text.accent };
+    if (snapshot.activity === 'verifying') {
+      return {
+        icon: ICON.CIRCLE_EMPTY,
+        label: 'checking',
+        color: theme.text.secondary,
+      };
+    }
+    return { icon: ICON.BULLSEYE, label: 'active', color: theme.text.accent };
   }
   switch (goal.status) {
     case 'paused':
@@ -130,7 +148,9 @@ export const GoalPill: React.FC<GoalPillProps> = ({ snapshot }) => {
   if (!visible) return null;
 
   const elapsed = formatElapsed(elapsedActiveTime(goal, Date.now()));
-  const suffix = elapsed ? ` (${elapsed})` : '';
+  const spend = formatSpend(goal);
+  const detail = [elapsed, spend].filter(Boolean).join(' · ');
+  const suffix = detail ? ` (${detail})` : '';
   return (
     <Text color={visible.color}>
       {visible.icon} /goal {visible.label}

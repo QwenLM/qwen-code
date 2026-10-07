@@ -137,6 +137,7 @@ export async function handleResumeSession(
   try {
     const cwd = config.getTargetDir();
     const sessionService = new SessionService(cwd);
+    sessionService.assertLegacySessionExecution(sessionId);
     const sessionData = await sessionService.loadSession(sessionId);
     if (!sessionData) {
       // Nothing was replayed — close this attempt's unarmed transaction.
@@ -206,6 +207,17 @@ export async function handleResumeSession(
         resetBackgroundStateForSessionSwitch(config);
         config.startNewSession(oldSessionId, undefined);
         await config.loadPausedBackgroundAgents(oldSessionId).catch(() => {});
+        // Re-hydrate the client against the restored session, mirroring the
+        // other three rollback routes (useResumeCommand, useBranchCommand,
+        // the TUI session-switch): startNewSession cleared the reviewed-schema
+        // evidence, and without a fresh startChat the chat keeps serving the
+        // abandoned session's replayed history, so the next hidden deferred
+        // call is refused as un-reviewed even though its tool_search block is
+        // still in context. Must run BEFORE abortTelemetrySwap below — the
+        // re-initialize replays the old session's history on top of the
+        // abandoned session's replay, and restore overwrites rather than
+        // subtracts, so the final state is exactly pre-swap (#9833).
+        await config.getGeminiClient()?.initialize?.();
       } catch (rollbackErr) {
         config
           .getDebugLogger()

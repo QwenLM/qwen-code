@@ -272,6 +272,8 @@ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
     "press_key",
     "hotkey",
     "set_value",
+    "paste",
+    "select_text",
     "perform_secondary_action",
     "bring_to_front",
     "set_window_frame",
@@ -859,6 +861,8 @@ pub fn advertised_risk_for(tool: &str) -> RiskAssessment {
         | "press_key"
         | "hotkey"
         | "set_value"
+        | "paste"
+        | "select_text"
         | "perform_secondary_action"
         | "invoke_menu"
         | "launch_app"
@@ -1151,6 +1155,8 @@ fn enforce_hard_invariants(
             | "press_key"
             | "hotkey"
             | "set_value"
+            | "paste"
+            | "select_text"
             | "perform_secondary_action"
             | "kill_app"
             | "bring_to_front"
@@ -1491,6 +1497,19 @@ mod tests {
         assert_eq!(risk.class, RiskClass::R1);
         assert_eq!(risk.enforcement, RiskEnforcement::MetadataOnly);
         assert!(!risk.operation_sensitive);
+    }
+
+    #[test]
+    fn native_text_operations_use_the_existing_desktop_input_adapter() {
+        for tool in ["paste", "select_text"] {
+            let risk = classify_tool_call(tool, &serde_json::json!({"pid":42,"window_id":7}));
+            assert_eq!(risk.class, RiskClass::R1);
+            assert_eq!(risk.enforcement, RiskEnforcement::Active);
+            assert!(
+                enforce_hard_invariants(tool, &serde_json::json!({"pid":std::process::id()}))
+                    .is_err()
+            );
+        }
     }
 
     #[test]

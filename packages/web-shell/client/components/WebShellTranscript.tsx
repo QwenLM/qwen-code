@@ -1,3 +1,4 @@
+import { getSourceEntries } from './sources/sourceEntries';
 import '../styles/globals.css';
 import 'katex/dist/katex.min.css';
 import {
@@ -8,11 +9,16 @@ import {
   type CSSProperties,
   type ReactElement,
 } from 'react';
-import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonTranscriptBlock,
+  SessionSource,
+  DaemonSessionAttachmentReference,
+} from '@qwen-code/sdk/daemon';
 import { CompactModeContext, TodoContextsProvider } from '../WebShellContexts';
 import {
   WebShellCustomizationProvider,
   type AssistantTurnFooterRenderer,
+  type WebShellArtifactCustomization,
   type ComposerTagRenderer,
   type MarkdownTableMode,
   type ToolHeaderExtraRenderer,
@@ -20,6 +26,9 @@ import {
   type UserMessageContentRenderer,
   type WebShellComposerTagIconMap,
   type WebShellMarkdownCustomization,
+  type WebShellSource,
+  type WebShellSourceReference,
+  type WebShellSourceIconResolver,
 } from '../customization';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageList } from './MessageList';
@@ -63,8 +72,15 @@ export interface WebShellTranscriptProps {
   markdownTableMode?: MarkdownTableMode;
   virtualScrollThreshold?: number;
   markdown?: WebShellMarkdownCustomization;
+  sourceSessionId?: string;
+  sources?: readonly SessionSource[];
+  sourceAttachments?: readonly DaemonSessionAttachmentReference[];
+  sourceReferences?: readonly WebShellSourceReference[];
+  getAssistantSourcesIcon?: WebShellSourceIconResolver;
+  onSourceOpen?: (source: WebShellSource) => void;
   composerTagIcons?: WebShellComposerTagIconMap;
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
+  artifact?: WebShellArtifactCustomization;
   parseUserMessageContent?: UserMessageContentParser;
   renderUserMessageContent?: UserMessageContentRenderer;
   renderComposerTag?: ComposerTagRenderer;
@@ -116,7 +132,14 @@ function WebShellTranscriptContent({
   markdownTableMode = 'basic',
   virtualScrollThreshold,
   markdown,
+  sourceSessionId,
+  sources,
+  sourceAttachments,
+  sourceReferences,
+  getAssistantSourcesIcon,
+  onSourceOpen,
   composerTagIcons,
+  artifact,
   renderToolHeaderExtra,
   parseUserMessageContent,
   renderUserMessageContent,
@@ -135,10 +158,15 @@ function WebShellTranscriptContent({
     () => transcriptBlocksToLocalizedMessages(blocks, t, documentMode),
     [blocks, documentMode, t],
   );
+  const sourceEntries = useMemo(
+    () => getSourceEntries(sources ?? [], sourceAttachments ?? []),
+    [sources, sourceAttachments],
+  );
   const todoDetails = useMemo(() => computeTodoDetails(messages), [messages]);
   const todoTimeline = useMemo(() => computeTodoTimeline(messages), [messages]);
   const customization = useMemo(
     () => ({
+      artifact,
       composerTagIcons,
       renderToolHeaderExtra,
       parseUserMessageContent,
@@ -150,12 +178,17 @@ function WebShellTranscriptContent({
       collapseCompletedTurns: effectiveCollapseCompletedTurns,
       markdownTableMode: effectiveMarkdownTableMode,
       markdown,
+      sourceReferences,
+      getAssistantSourcesIcon,
     }),
     [
+      artifact,
       effectiveCollapseCompletedTurns,
       compactThinking,
       composerTagIcons,
       markdown,
+      sourceReferences,
+      getAssistantSourcesIcon,
       effectiveMarkdownTableMode,
       parseUserMessageContent,
       renderAssistantTurnFooter,
@@ -274,6 +307,11 @@ function WebShellTranscriptContent({
                         >
                           <MessageList
                             messages={messages}
+                            sourceSessionId={sourceSessionId}
+                            sourceEntries={
+                              documentMode ? undefined : sourceEntries
+                            }
+                            onSourceOpen={onSourceOpen}
                             pendingApproval={null}
                             isResponding={false}
                             workspaceCwd={workspaceCwd}

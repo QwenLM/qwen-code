@@ -273,7 +273,7 @@ def build_cli_arguments(options: QueryOptions) -> list[str]:
         args.extend(["--proxy", options.proxy])
 
     if options.sandbox:
-        args.append("--sandbox")
+        args.append("--sandbox=true")
 
     if options.safe_mode:
         args.append("--safe-mode")

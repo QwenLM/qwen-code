@@ -29,6 +29,7 @@ import type {
 } from './agent-events.js';
 import { AgentEventType } from './agent-events.js';
 import type { AgentStatsSummary } from './agent-statistics.js';
+import type { SubagentExecutor } from './subagent-executor.js';
 import type {
   PromptConfig,
   ModelConfig,
@@ -135,7 +136,7 @@ export function templateString(
  * Each execute() call runs one task through AgentCore's reasoning loop. Calls
  * must be sequential; later calls reuse the same chat and prepared tools.
  */
-export class AgentHeadless {
+export class AgentHeadless implements SubagentExecutor {
   private readonly core: AgentCore;
   private finalText: string = '';
   private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;
@@ -184,6 +185,14 @@ export class AgentHeadless {
     taskName?: string,
     subagentId?: string,
   ): Promise<AgentHeadless> {
+    if (
+      runtimeContext.getAgentExecutionBackend?.() === 'container' &&
+      !runtimeContext.getExecutionEnvironment?.()
+    ) {
+      throw new Error(
+        'Container execution is required, but this agent has no execution environment. Start a supported regular subagent.',
+      );
+    }
     const core = new AgentCore(
       name,
       runtimeContext,
@@ -216,7 +225,10 @@ export class AgentHeadless {
   async execute(
     context: ContextState,
     externalSignal?: AbortSignal,
-    options: { resetStats?: boolean } = {},
+    options: {
+      resetStats?: boolean;
+      enforceTimeLimitDuringRetryWait?: boolean;
+    } = {},
   ): Promise<void> {
     if (this.executing) {
       throw new Error(
@@ -237,7 +249,14 @@ export class AgentHeadless {
     }
 
     try {
-      await this.executeTurn(context, externalSignal, !resetStats);
+      await this.core.runInHookFrame(() =>
+        this.executeTurn(
+          context,
+          externalSignal,
+          !resetStats,
+          options.enforceTimeLimitDuringRetryWait,
+        ),
+      );
     } finally {
       this.executing = false;
     }
@@ -258,16 +277,15 @@ export class AgentHeadless {
     context: ContextState,
     externalSignal?: AbortSignal,
     preserveStats = false,
+    enforceTimeLimitDuringRetryWait?: boolean,
   ): Promise<void> {
     const initialMessagesOverride = context.get('initial_messages_override') as
       | Content[]
       | undefined;
     const isContinuation = this.hasStartedReasoning;
-    const externalInputsOverride = isContinuation
-      ? (context.get('external_inputs_override') as
-          | AgentExternalInput[]
-          | undefined)
-      : undefined;
+    const externalInputsOverride = context.get('external_inputs_override') as
+      | AgentExternalInput[]
+      | undefined;
     // Record the initial user turn in the observable message log before
     // anything that can throw — createChat / prepareTools failures still
     // get a transcript showing the task that was asked, which is what
@@ -276,8 +294,8 @@ export class AgentHeadless {
     const initialTaskText = String(
       (context.get('task_prompt') as string) ?? 'Get Started!',
     );
-    if (isContinuation) {
-      const transcriptInputs = externalInputsOverride ?? [initialTaskText];
+    if (externalInputsOverride) {
+      const transcriptInputs = externalInputsOverride;
       for (const input of transcriptInputs) {
         this.core.eventEmitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
           subagentId: this.core.subagentId,
@@ -286,6 +304,13 @@ export class AgentHeadless {
           timestamp: Date.now(),
         });
       }
+    } else if (isContinuation) {
+      this.core.eventEmitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
+        subagentId: this.core.subagentId,
+        kind: 'message',
+        text: initialTaskText,
+        timestamp: Date.now(),
+      });
     } else if (
       !initialMessagesOverride ||
       initialMessagesOverride.length === 0
@@ -386,6 +411,7 @@ export class AgentHeadless {
             getExternalMessages: this.externalMessageProvider,
             waitForExternalMessages: this.externalMessageWaiter,
             shouldWaitForExternalMessages: this.externalMessageWaitPredicate,
+            enforceTimeLimitDuringRetryWait,
           },
         );
 

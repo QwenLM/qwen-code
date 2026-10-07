@@ -56,6 +56,9 @@ test("an explicit native directory is authoritative", () => {
     )
     writeFileSync(join(directory, target.library), "library")
     writeFileSync(join(directory, target.runtime), "runtime")
+    for (const companion of target.companions ?? []) {
+      writeFileSync(join(directory, companion), "companion")
+    }
     assert.equal(
       resolveNativeDirectory(
         { QWEN_CUA_SDK_NATIVE_DIR: directory },

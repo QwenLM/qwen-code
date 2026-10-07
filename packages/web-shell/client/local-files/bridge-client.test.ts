@@ -523,6 +523,7 @@ describe('LocalFilesBridge RPC routing', () => {
         filesScanned: 0,
         bytesScanned: 0,
         filesSkipped: 0,
+        dirsScanned: 0,
         truncated: false,
         truncatedBy: null,
       }),
@@ -1043,6 +1044,45 @@ describe('LocalFilesBridge cross-tab ownership', () => {
     // Retried a few times: a same-tab replacement's release can still be
     // settling when the first attempt lands.
     expect(locks.requests).toBe(3);
+  });
+
+  it('reports start_failed with the rejection message when the lock request rejects', async () => {
+    const locks: LockManagerLike = {
+      request: async () => {
+        throw new DOMException('blocked by policy', 'SecurityError');
+      },
+    };
+    const h = harness({ locks });
+    await flush();
+    // The reason must survive to the UI: a sandboxed iframe user otherwise
+    // sees a bare "Failed" with no hint that the frame policy blocked it.
+    expect(h.states.at(-1)).toEqual({
+      phase: 'failed',
+      code: 'start_failed',
+      message: 'blocked by policy',
+    });
+    await h.running;
+  });
+
+  it('keeps stopped as the final state when stop lands before the rejection', async () => {
+    let rejectRequest: ((reason: unknown) => void) | undefined;
+    const locks: LockManagerLike = {
+      request: async () => {
+        await new Promise<void>((_resolve, reject) => {
+          rejectRequest = reject;
+        });
+      },
+    };
+    const h = harness({ locks });
+    await flush();
+    h.bridge.stop();
+    await flush();
+    rejectRequest!(new DOMException('blocked by policy', 'SecurityError'));
+    await flush();
+    await h.running;
+    // A disconnect must not be overwritten by a rejection that was still
+    // in flight when the user left.
+    expect(h.states.at(-1)).toEqual({ phase: 'stopped' });
   });
 
   it('retries a declined lock before concluding another tab owns it', async () => {

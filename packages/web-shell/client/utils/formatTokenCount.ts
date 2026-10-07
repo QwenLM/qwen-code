@@ -6,19 +6,13 @@ export function formatTokenCount(count: number): string {
 
 /**
  * Context-usage token count — k/M with one decimal (e.g. `53.6k`, `1.0M`),
- * shared by the composer ring tooltip and the /context panel so both
- * surfaces describe the same session identically.
+ * used by context cards and usage summaries. The composer tooltip shows
+ * exact locale-grouped counts instead.
  */
 export function formatContextTokens(count: number): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
   if (count >= 1000) return `${(count / 1000).toFixed(1)}k`;
   return `${count}`;
-}
-
-/** `53.6k / 1.0M tokens (5.4%)` — the context ring's hover detail. */
-export function formatContextUsageDetail(used: number, size: number): string {
-  const pct = size > 0 ? ((used / size) * 100).toFixed(1) : '0.0';
-  return `${formatContextTokens(used)} / ${formatContextTokens(size)} tokens (${pct}%)`;
 }
 
 /**

@@ -6,6 +6,11 @@
 
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  applyDynamicHeaderValues,
+  hasDynamicPlaceholder,
+  warnIfDynamicHeadersDisabled,
+} from './outbound-dynamic-headers.js';
 
 const debugLogger = createDebugLogger('OUTBOUND_CORRELATION');
 
@@ -58,18 +63,31 @@ export function buildSessionIdHeaders(
 export function wrapFetchWithSessionId<TFetch>(
   baseFetch: TFetch,
   config: Config,
+  customHeaders?: Record<string, string>,
 ): TFetch {
   const fetchLike = baseFetch as FetchLike;
+  // Decided once, at client construction: whether this provider has any
+  // `customHeaders` value carrying a runtime placeholder. When it does
+  // not — every provider configured today — the wrapper keeps its
+  // existing early return and costs exactly what it did before.
+  const expandsHeaders = Object.values(customHeaders ?? {}).some(
+    (value) => typeof value === 'string' && hasDynamicPlaceholder(value),
+  );
+  if (expandsHeaders) warnIfDynamicHeadersDisabled(customHeaders, config);
   const wrapped: FetchLike = async (input, init) => {
     const sessionHeaders = buildSessionIdHeaders(config, input);
     const sessionId = sessionHeaders[SESSION_ID_HEADER];
-    if (!sessionId) return fetchLike(input, init);
+    if (!sessionId && !expandsHeaders) return fetchLike(input, init);
 
     const headers = new Headers(
       input instanceof Request ? input.headers : undefined,
     );
     new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
-    headers.set(SESSION_ID_HEADER, sessionId);
+    // Expand before the built-in header is written, so first-party
+    // correlation still wins over anything the user configured — the
+    // precedence documented for this wrapper (correlation > customHeaders).
+    if (expandsHeaders) applyDynamicHeaderValues(headers, config);
+    if (sessionId) headers.set(SESSION_ID_HEADER, sessionId);
     return fetchLike(input, { ...init, headers });
   };
 
@@ -79,8 +97,9 @@ export function wrapFetchWithSessionId<TFetch>(
 export function buildSessionAwareFetch(
   runtimeFetch: unknown,
   config: Config,
+  customHeaders?: Record<string, string>,
 ): typeof globalThis.fetch {
   const baseFetch =
     (runtimeFetch as typeof globalThis.fetch | undefined) ?? globalThis.fetch;
-  return wrapFetchWithSessionId(baseFetch, config);
+  return wrapFetchWithSessionId(baseFetch, config, customHeaders);
 }

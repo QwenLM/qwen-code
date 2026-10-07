@@ -1,5 +1,5 @@
 name: 'Configure Windows self-hosted runner'
-description: 'Tunes a self-hosted Windows runner for the test gates: exports the Linux gates'' C.UTF-8 locale env (inert on Windows, where Node collates through ICU), redirects TEMP/TMP to RUNNER_TEMP, and puts Git Bash on PATH for bash-shell steps. Runs after actions/checkout because repository-local actions resolve from the workspace; callers turn off autocrlf before the checkout itself. Shared by the Windows merge-queue gate and the runner smoke workflow so both always run an identical configuration.'
+description: "Tunes a self-hosted Windows runner for the test gates: exports the Linux gates' C.UTF-8 locale env (inert on Windows, where Node collates through ICU), redirects TEMP/TMP to RUNNER_TEMP, and puts Git Bash on PATH for bash-shell steps. Runs after actions/checkout because repository-local actions resolve from the workspace; callers turn off autocrlf before the checkout itself. Shared by the Windows merge-queue gate and the runner smoke workflow so both always run an identical configuration."
 
 runs:
   using: 'composite'

@@ -1,12 +1,13 @@
 # Daemon Session Maintenance Writer Lease
 
-> **Proposed Conversations-runtime update (2026-09-02):**
+> **Conversations-runtime update (2026-09-06):**
 > [Relaxed Standalone Daemon Ownership](./2026-09-02-relaxed-standalone-daemon-ownership.md)
-> for [Issue #10810](https://github.com/QwenLM/qwen-code/issues/10810) would
-> supersede this document's always-`reclaimPolicy: 'never'` rule for standalone
-> lifecycle and maintenance acquisitions on the Conversations runtime. Those
-> acquisitions would use the hardened `local` policy; daemon maintenance for
-> ordinary workspaces and other managed runtimes keeps `never`.
+> is implemented by [#10924](https://github.com/QwenLM/qwen-code/pull/10924)'s
+> mandatory writer fences and [#11207](https://github.com/QwenLM/qwen-code/pull/11207)'s
+> global-owner cutover. This supersedes the always-`reclaimPolicy: 'never'` rule
+> for standalone lifecycle and maintenance acquisitions on Conversations,
+> which now use hardened `local` recovery. Daemon maintenance for ordinary
+> workspaces and other managed runtimes keeps `never`.
 
 ## Problem
 

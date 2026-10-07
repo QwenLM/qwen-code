@@ -134,7 +134,9 @@ test('hides the standalone entry point without the capability @smoke', async ({
   const daemon = await installScenario(page, scenario, testInfo);
 
   await page.goto('/');
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   // A single workspace with no creation capabilities and no standalone
   // support hides the composer picker entirely.
   await expect(page.locator('button[aria-label="Workspace"]')).toHaveCount(0);
@@ -210,7 +212,9 @@ test('standalone Recents keeps lifecycle actions on exact standalone routes @smo
   await page.goto(
     `/session/${encodeURIComponent(currentSessionId)}?context=standalone`,
   );
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   const connection = await daemon.sse.waitForConnection(currentSessionId);
   await daemon.sendEvent(
     replayCompleteEvent({ sessionId: connection.sessionId, replayedCount: 0 }),
@@ -293,7 +297,9 @@ async function clickNewTask(page: Page): Promise<void> {
 
 async function gotoNewTask(page: Page): Promise<void> {
   await page.goto('/');
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   await clickNewTask(page);
 }
 
@@ -301,7 +307,7 @@ async function selectNoWorkspaceTarget(page: Page): Promise<void> {
   await page.locator('button[aria-label="Workspace"]').click();
   await page
     .getByRole('menuitemradio', {
-      name: 'No workspace (standalone)',
+      name: 'No workspace',
       exact: true,
     })
     .click();
@@ -309,7 +315,9 @@ async function selectNoWorkspaceTarget(page: Page): Promise<void> {
 
 async function gotoNewStandaloneChat(page: Page): Promise<void> {
   await page.goto('/');
-  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(
+    page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
+  ).toBeVisible();
   await selectNoWorkspaceTarget(page);
 }
 
@@ -325,9 +333,10 @@ async function openSessionAction(
   actionName: string,
 ): Promise<void> {
   const row = page
-    .getByRole('button', { name: sessionName, exact: true })
+    .locator('[data-web-shell-session-title]', { hasText: sessionName })
     .locator('..');
-  await row.getByRole('button', { name: 'Conversation actions' }).click();
+  await row.hover();
+  await row.getByRole('button', { name: 'More actions' }).click();
   await page.getByRole('menuitem', { name: actionName, exact: true }).click();
 }
 

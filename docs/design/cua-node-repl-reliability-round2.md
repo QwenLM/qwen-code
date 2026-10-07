@@ -23,19 +23,20 @@ iteration must check its diff against this list before continuing.
 - B1: Node REPL MCP instructions contain only the minimal persistent-kernel
   contract: cross-cell scope, `globalThis` versus lexical bindings, dynamic
   import, selective output, and cell/reset lifecycle.
-- B2: the Computer Use skill retains the Codex Computer Use principles while
-  using the actual CUA SDK types and action-result fields.
-- B3: state-changing operations use an action-result plus fresh, stable
-  verification workflow. Completion requires current evidence.
+- B2: the Computer Use skill directly migrates Codex's `API surface` and
+  `Workflow` sections onto the typed CUA SDK. Section structure, prose order,
+  action-batch example structure, and decision semantics stay aligned; only
+  SDK-required mappings change.
+- B3: after one or more UI actions, call `observeWindow(...)` before deciding
+  what to do next. There is no per-action observation rule.
 - B4: the full Computer Use skill is not embedded in Node REPL MCP
   instructions. The two texts have one source and one owner each.
 - B5: both texts are minimum viable guidance. They contain no benchmark rules,
   scores, evaluators, historical case names, failure counts, application
   special cases, or duplicated examples. The final outbound model request is
   the delivery boundary.
-- B6: the default observation example maintains a per-surface revision cursor.
-  `forceFull` is a one-shot resync path and is never a persistent helper
-  default.
+- B6: the SDK maintains one revision cursor per exact surface. `disableDiff` is
+  a one-shot complete-tree request and is never a persistent helper default.
 
 ## Non-goals
 
@@ -46,7 +47,8 @@ iteration must check its diff against this list before continuing.
 - Input across the UAC secure desktop or login desktop.
 - Changes to JavaScript lexical semantics, automatic block wrapping, binding
   deletion, or code rewriting to hide redeclarations.
-- A new CUA wrapper/DSL, implicit revision API, or benchmark-specific policy.
+- A new native revision protocol, model-managed revision helper, or
+  benchmark-specific policy.
 
 ## Implementation order
 
@@ -59,8 +61,10 @@ iteration must check its diff against this list before continuing.
    metadata, partial accessibility coverage, and degraded diagnostics.
 4. Activate and route the existing packaged UIAccess worker for A4. Keep the
    public SDK and MCP endpoint unchanged.
-5. Rewrite the Node REPL instruction and Computer Use skill for B1-B6. Record a
-   semantic coverage map from the canonical Codex principles to the new skill.
+5. Rewrite the Node REPL instruction and Computer Use skill for B1-B6. Record
+   the mechanical API mapping from the canonical Codex workflow to the typed
+   SDK, while keeping native revision details and state-verification helpers
+   out of model guidance.
 6. Run focused tests, build/typecheck, protocol E2E, Windows interactive tests,
    AP-container-equivalent bootstrap, and representative prior-failure jobs.
 
@@ -77,8 +81,11 @@ After each fix:
 
 ## Verification record
 
-The following evidence is complete for the current implementation. It does not
-replace the release or benchmark gates below.
+The following evidence was recorded for the preceding Round 2 implementation.
+This Linux/Qwen Code SDK and Skill update does not rerun or supersede its
+Windows and model-request results. These historical results do not replace the
+release or benchmark gates below and must not be read as verification of the
+revised Skill.
 
 - Node REPL: 152 local tests pass. A clean-packed MCP session on Windows
   cancelled an active CUA cell without changing the kernel PID or the
@@ -115,31 +122,29 @@ replace the release or benchmark gates below.
   verify that progressively discovered MCP instructions are queued for the
   next user turn instead of being lost after the startup prelude is built.
 
-## Computer Use guidance coverage
+## Computer Use API migration
 
-The Computer Use skill keeps the original operating principles but maps them
-to the public CUA SDK instead of copying interfaces from another runtime.
+The Computer Use skill keeps Codex's section structure and workflow. Only the
+runtime-specific surface changes:
 
-| Principle                                 | Round 2 owner and expression                                                                                                    |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| Prefer a connector or API                 | Computer Use skill, before any UI action                                                                                        |
-| Keep one persistent session               | Node REPL MCP owns kernel lifecycle; the skill creates one `ComputerUse` client                                                 |
-| Select the real app and surface           | `listApps`, then `listWindows`; no guessed PID, window, token, or coordinate                                                    |
-| Observe before acting                     | `observeWindow` on the exact current surface                                                                                    |
-| Prefer semantic targets                   | Current element tokens before screenshot coordinates                                                                            |
-| Consume incremental state                 | Per-surface `baseRevisionId`; one-shot `forceFull` only for an explicit lineage failure                                         |
-| Inspect only useful visuals               | Request screenshots when accessibility is incomplete or visual evidence is necessary                                            |
-| Use only advertised secondary actions     | `performSecondaryAction` only from the current element action list                                                              |
-| Re-observe after an unexpected transition | Refresh surfaces and state instead of repeating an action blindly                                                               |
-| Do not assume text replacement            | Inspect current state and select existing text when replacement is required                                                     |
-| Verify every mutation                     | Read the typed action result, then require fresh stable state with `actAndVerify`, `verifyState`, or a fresh visual observation |
-| Stop when the requested state is proven   | No extra cleanup actions after the stable postcondition                                                                         |
+| Codex `@oai/sky`                  | Qwen CUA SDK mapping                                       |
+| --------------------------------- | ---------------------------------------------------------- |
+| bundled `sky` singleton           | `ComputerUse.create()` and `close()`                       |
+| app name target                   | exact PID and window ID from `listApps` + `listWindows`    |
+| `get_app_state`                   | `observeWindow`                                            |
+| `element_index`                   | `elementToken`                                             |
+| `disableDiff: true`               | `disableDiff: true`                                        |
+| screenshot `file://` URL          | `{ mimeType, dataBase64 }` images                          |
+| snake-case actions                | typed camel-case SDK actions                               |
+| `press_key` combination syntax    | `pressKey` modifiers or `hotkey` keys                      |
+| `paste` and `select_text`         | no public high-level SDK equivalent; omitted, not emulated |
+| one or more actions, then observe | unchanged                                                  |
 
 The Node REPL MCP instruction exclusively owns JavaScript cell scope,
 redeclaration, cancellation, output, and reset behavior. The Computer Use
-skill exclusively owns UI observation, action, result interpretation, and
-verification. Neither text contains benchmark policy, evaluator criteria,
-historical failures, or application-specific examples.
+skill exclusively owns the migrated UI discovery, observation, action, and
+screenshot guidance. Neither text contains benchmark policy, evaluator
+criteria, historical failures, or application-specific examples.
 
 ## Release gate
 

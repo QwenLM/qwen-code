@@ -22,8 +22,10 @@ import { t } from '../../i18n/index.js';
 import { MCPServerStatus } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
 import { ICON } from '../constants.js';
 import { toOriginalKey } from './key-map.js';
+import { useBatchSafeCursor } from './batch-cursor.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import { DialogFrame, FooterHint } from './dialogs-shared.js';
+import { findNextEnabledIndex } from './dialogs-core.js';
 
 export const MCP_MANAGEMENT_STEPS = {
   SERVER_LIST: 'server-list',
@@ -296,7 +298,10 @@ export function mcpStepFooter(
   }
 }
 
-/** Clamp-style navigation — MCP lists do NOT wrap (unlike the radio lists). */
+/**
+ * Clamp-style navigation — ink's server/tool/resource steps clamp here; the
+ * server-detail action list is a radio list and wraps instead.
+ */
 export function clampNavIndex(
   current: number,
   count: number,
@@ -340,10 +345,26 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
   const [selectedTool, setSelectedTool] = useState<McpToolInfo | null>(null);
   const [selectedResource, setSelectedResource] =
     useState<McpResourceInfo | null>(null);
-  const [serverCursor, setServerCursor] = useState(0);
-  const [actionCursor, setActionCursor] = useState(0);
-  const [toolCursor, setToolCursor] = useState(0);
-  const [resourceCursor, setResourceCursor] = useState(0);
+  const {
+    cursor: serverCursor,
+    cursorRef: serverCursorRef,
+    setCursor: setServerCursor,
+  } = useBatchSafeCursor();
+  const {
+    cursor: actionCursor,
+    cursorRef: actionCursorRef,
+    setCursor: setActionCursor,
+  } = useBatchSafeCursor();
+  const {
+    cursor: toolCursor,
+    cursorRef: toolCursorRef,
+    setCursor: setToolCursor,
+  } = useBatchSafeCursor();
+  const {
+    cursor: resourceCursor,
+    cursorRef: resourceCursorRef,
+    setCursor: setResourceCursor,
+  } = useBatchSafeCursor();
 
   const currentStep = (navigationStack[navigationStack.length - 1] ??
     MCP_MANAGEMENT_STEPS.SERVER_LIST) as McpManagementStep;
@@ -381,15 +402,15 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
         return;
       }
       if (keyMatchers[Command.SELECTION_UP](original)) {
-        setServerCursor((prev) =>
-          clampNavIndex(prev, flatServers.length, 'up'),
+        setServerCursor(
+          clampNavIndex(serverCursorRef.current, flatServers.length, 'up'),
         );
       } else if (keyMatchers[Command.SELECTION_DOWN](original)) {
-        setServerCursor((prev) =>
-          clampNavIndex(prev, flatServers.length, 'down'),
+        setServerCursor(
+          clampNavIndex(serverCursorRef.current, flatServers.length, 'down'),
         );
       } else if (name === 'return') {
-        const server = flatServers[serverCursor];
+        const server = flatServers[serverCursorRef.current];
         if (server) {
           setSelectedServerName(server.name);
           setActionCursor(0);
@@ -406,15 +427,15 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
 
     if (currentStep === MCP_MANAGEMENT_STEPS.SERVER_DETAIL) {
       if (keyMatchers[Command.SELECTION_UP](original)) {
-        setActionCursor((prev) =>
-          clampNavIndex(prev, detailActions.length, 'up'),
+        setActionCursor(
+          findNextEnabledIndex(detailActions, actionCursorRef.current, 'up'),
         );
       } else if (keyMatchers[Command.SELECTION_DOWN](original)) {
-        setActionCursor((prev) =>
-          clampNavIndex(prev, detailActions.length, 'down'),
+        setActionCursor(
+          findNextEnabledIndex(detailActions, actionCursorRef.current, 'down'),
         );
       } else if (name === 'return') {
-        const action = detailActions[actionCursor];
+        const action = detailActions[actionCursorRef.current];
         if (!action || !selectedServer) return;
         switch (action.action) {
           case 'view-tools':
@@ -434,13 +455,15 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
 
     if (currentStep === MCP_MANAGEMENT_STEPS.TOOL_LIST) {
       if (keyMatchers[Command.SELECTION_UP](original)) {
-        setToolCursor((prev) => clampNavIndex(prev, serverTools.length, 'up'));
+        setToolCursor(
+          clampNavIndex(toolCursorRef.current, serverTools.length, 'up'),
+        );
       } else if (keyMatchers[Command.SELECTION_DOWN](original)) {
-        setToolCursor((prev) =>
-          clampNavIndex(prev, serverTools.length, 'down'),
+        setToolCursor(
+          clampNavIndex(toolCursorRef.current, serverTools.length, 'down'),
         );
       } else if (name === 'return') {
-        const tool = serverTools[toolCursor];
+        const tool = serverTools[toolCursorRef.current];
         if (tool) {
           setSelectedTool(tool);
           navigateToStep(MCP_MANAGEMENT_STEPS.TOOL_DETAIL);
@@ -451,15 +474,23 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
 
     if (currentStep === MCP_MANAGEMENT_STEPS.RESOURCE_LIST) {
       if (keyMatchers[Command.SELECTION_UP](original)) {
-        setResourceCursor((prev) =>
-          clampNavIndex(prev, serverResources.length, 'up'),
+        setResourceCursor(
+          clampNavIndex(
+            resourceCursorRef.current,
+            serverResources.length,
+            'up',
+          ),
         );
       } else if (keyMatchers[Command.SELECTION_DOWN](original)) {
-        setResourceCursor((prev) =>
-          clampNavIndex(prev, serverResources.length, 'down'),
+        setResourceCursor(
+          clampNavIndex(
+            resourceCursorRef.current,
+            serverResources.length,
+            'down',
+          ),
         );
       } else if (name === 'return') {
-        const resource = serverResources[resourceCursor];
+        const resource = serverResources[resourceCursorRef.current];
         if (resource) {
           setSelectedResource(resource);
           navigateToStep(MCP_MANAGEMENT_STEPS.RESOURCE_DETAIL);
@@ -591,12 +622,14 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
               flexDirection="column"
               marginBottom={groupIndex === groupedServers.length - 1 ? 0 : 1}
             >
-              <text fg={C.text} attributes={1}>
-                {`  ${group.displayName}`}
+              <box flexDirection="row">
+                <text fg={C.text} attributes={1}>
+                  {`  ${group.displayName}`}
+                </text>
                 {group.servers[0]?.configPath ? (
-                  <text fg={C.dim}> ({group.servers[0].configPath})</text>
+                  <text fg={C.dim}>{` (${group.servers[0].configPath})`}</text>
                 ) : null}
-              </text>
+              </box>
               {group.servers.map((server, itemIndex) => {
                 const globalIndex = startIndex + itemIndex;
                 const isSelected = globalIndex === serverCursor;

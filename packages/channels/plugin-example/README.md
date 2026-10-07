@@ -33,7 +33,7 @@ Add a channel entry to `~/.qwen/settings.json`:
     "my-plugin-test": {
       "type": "plugin-example",
       "serverWsUrl": "ws://localhost:9201",
-      "senderPolicy": "open",
+      "privatePolicy": "open",
       "sessionScope": "user",
       "cwd": "/path/to/your/project"
     }
@@ -112,7 +112,6 @@ Existing TypeScript plugins that explicitly type the adapter constructor or fact
 
 ### Features you get for free
 
-- **Block streaming** — enable `blockStreaming: "on"` in config and the agent's response is automatically split into multiple messages at paragraph boundaries
 - **Attachments** — populate `envelope.attachments` with images/files and `handleInbound()` routes them to the agent (images as vision input, files as paths in the prompt)
 - **Streaming hooks** — override `onResponseChunk()` for progressive display (e.g., editing a message in-place)
 - Access control (allowlist, pairing, open), session routing, slash commands, crash recovery
