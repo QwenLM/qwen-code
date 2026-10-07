@@ -108,42 +108,60 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         RuntimeProvisioner baseProvisioner = provisioner(broker, http);
         RuntimeProvisioner provisioner = workspaces == null ? baseProvisioner
                 : new WorkspaceRuntimeProvisioner(baseProvisioner, workspaces, workspaceExecutionStore);
-        HarnessSessionResolver resolver = sessionId -> {
-            SessionRecord session = store.findSessionById(sessionId)
-                    .orElse(null);
-            if (session == null) {
-                CompletableFuture<RuntimeScope> failed =
-                        new CompletableFuture<>();
-                failed.completeExceptionally(new IllegalArgumentException(
-                        "Session is not owned by this service"));
-                return failed;
+        HarnessSessionResolver resolver = new HarnessSessionResolver() {
+            @Override
+            public CompletionStage<RuntimeScope> resolve(
+                    String sessionId) {
+                return resolveSession(sessionId, false);
             }
-            if (session.workspace() != null) {
-                if (workspaces != null) {
-                    return CompletableFuture.completedFuture(workspaces.resolve(sessionId).scope());
+
+            @Override
+            public CompletionStage<RuntimeScope> resolveForTeardown(
+                    String sessionId) {
+                return resolveSession(sessionId, true);
+            }
+
+            private CompletionStage<RuntimeScope> resolveSession(
+                    String sessionId, boolean teardown) {
+                SessionRecord session = store.findSessionById(sessionId)
+                        .orElse(null);
+                if (session == null) {
+                    CompletableFuture<RuntimeScope> failed =
+                            new CompletableFuture<>();
+                    failed.completeExceptionally(new IllegalArgumentException(
+                            "Session is not owned by this service"));
+                    return failed;
                 }
-                return CompletableFuture.failedFuture(
-                        new RuntimeBrokerException(409,
-                                "workspace_unavailable",
-                                "Hosted Workspace execution is not available.",
-                                false));
+                if (session.workspace() != null) {
+                    if (workspaces != null) {
+                        return CompletableFuture.completedFuture(workspaces.resolve(sessionId).scope());
+                    }
+                    return CompletableFuture.failedFuture(
+                            new RuntimeBrokerException(409,
+                                    "workspace_unavailable",
+                                    "Hosted Workspace execution is not available.",
+                                    false));
+                }
+                // The durable row is the fence for archived/deleted
+                // Sessions: unlike the in-process retired set it survives
+                // restarts and never accumulates in memory. Bootstrap only:
+                // teardown (release, reconciliation) must still converge
+                // after the Session closed.
+                if (!teardown
+                        && ("ARCHIVED".equals(session.status())
+                                || "DELETED".equals(session.status()))) {
+                    return CompletableFuture.failedFuture(
+                            new RuntimeBrokerException(409,
+                                    "runtime_broker_session_closed",
+                                    "Harness Session is closed.", false));
+                }
+                return CompletableFuture.completedFuture(new RuntimeScope(
+                        session.tenantId(), workspaceId,
+                        broker.getWorkspaceGeneration(),
+                        workspaceCwd,
+                        properties.getHarness().getCapabilityDigest(),
+                        broker.getIsolationClass()));
             }
-            // The durable row is the fence for archived/deleted Sessions:
-            // unlike the in-process retired set it survives restarts and
-            // never accumulates in memory.
-            if ("ARCHIVED".equals(session.status())
-                    || "DELETED".equals(session.status())) {
-                return CompletableFuture.failedFuture(
-                        new RuntimeBrokerException(409,
-                                "runtime_broker_session_closed",
-                                "Harness Session is closed.", false));
-            }
-            return CompletableFuture.completedFuture(new RuntimeScope(
-                    session.tenantId(), workspaceId,
-                    broker.getWorkspaceGeneration(),
-                    workspaceCwd,
-                    properties.getHarness().getCapabilityDigest(),
-                    broker.getIsolationClass()));
         };
         ObjectMapper mapper = new ObjectMapper();
         RuntimePublicationVerifier verifier = publications == null || publicationData == null

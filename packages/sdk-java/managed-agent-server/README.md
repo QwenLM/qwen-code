@@ -206,8 +206,9 @@ curl -sS -X DELETE \
 Close and delete reject an active Turn and seal input as soon as they are
 admitted. A background worker then closes the Hosted Harness Session, waits
 until no Harness holds its journal writer under an unexpired lease (the
-holding Harness seals it when closing), drains the Runtime binding (currently
-only an in-process retirement flag) and completes the operation; a failed
+holding Harness seals it when closing), drains the Runtime binding (fenced by
+the persisted Session status, so restart-blind and bounded in memory) and
+completes the operation; a failed
 attempt is retried with the dispatch backoff until it succeeds, so a `202`
 never means that tools stopped. After the Hosted Harness restarts, its calls fail with a
 generation error until Java restarts too, as Turns do, and the operation waits. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session

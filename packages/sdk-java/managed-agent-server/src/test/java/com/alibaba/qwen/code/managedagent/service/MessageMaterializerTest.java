@@ -2,7 +2,6 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -30,13 +29,17 @@ class MessageMaterializerTest {
         // A hard-poisoned target used to head every pass at 10 Hz and starve
         // every healthy session behind it; now it retries on streaks
         // 1, 2, 4, 8, ... and rotates to the back of the queue otherwise.
+        // Nine passes attempt on 1, 2, 4 and 8 plus the first look, wrote
+        // exactly one rotation each (the pre-attempt defer outside the due
+        // gate used to double the catch's write into 13), and warn only on
+        // the five attempts, never at 10 Hz.
         for (int pass = 0; pass < 9; pass++) {
             materializer.materialize();
         }
 
         verify(store, times(5)).materializeNextBatch("tenant", "poison",
                 200);
-        verify(store, atLeast(8)).deferMaterializationTarget("tenant",
+        verify(store, times(9)).deferMaterializationTarget("tenant",
                 "poison");
     }
 
@@ -55,11 +58,11 @@ class MessageMaterializerTest {
         materializer.materialize();
         materializer.materialize();
 
-        // fail, retry-and-succeed, then a normal pass: full attempts, and
-        // the deferred rotation left the row alone once healthy.
+        // fail, retry-and-succeed, then a normal pass: three attempts and a
+        // single rotation (only the failure pass defers now).
         verify(store, times(3)).materializeNextBatch("tenant", "poison",
                 200);
-        verify(store, times(2)).deferMaterializationTarget("tenant",
+        verify(store, times(1)).deferMaterializationTarget("tenant",
                 "poison");
     }
 }

@@ -873,6 +873,36 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void teardownReleaseStillResolvesTheScopeWhenBootstrapIsFenced() {
+        try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
+            // A lifecycle-closed Harness Session fences bootstrap routes,
+            // but the durable release and the unknown-outcome reconciliation
+            // share persistedSession and must still resolve the placement,
+            // or they die on the fence with a non-retryable 409 forever.
+            RuntimeBrokerException closed = new RuntimeBrokerException(409,
+                    "runtime_broker_session_closed",
+                    "Harness Session is closed.", false);
+            fixture.resolver.result = CompletableFuture.failedFuture(closed);
+            fixture.resolver.teardownResult =
+                    CompletableFuture.completedFuture(WORKSPACE_SCOPE);
+            RuntimeSessionRecord created = fixture.sessionRepository
+                    .findOrCreate(new RuntimeSessionRecord(
+                            new RuntimeSession("harness", "runtime",
+                                    "bootstrap", WORKSPACE_SCOPE),
+                            "binding-1", 1,
+                            RuntimeSessionRecord.State.ACQUIRING, 0,
+                            Instant.now()));
+            fixture.sessionRepository.compareAndSet(created,
+                    created.withState(RuntimeSessionRecord.State.RELEASED,
+                            Instant.now()));
+
+            assertTrue(join(fixture.service.release("harness", "runtime")));
+            assertEquals("runtime_broker_session_closed",
+                    failure(fixture.service.warm("harness")).getCode());
+        }
+    }
+
+    @Test
     void releaseWaitsForActiveExecutionAndThenRemovesSession() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             CompletableFuture<Map<String, Object>> result =
@@ -4539,6 +4569,7 @@ class RuntimeBrokerServiceTest {
             implements HarnessSessionResolver {
         final AtomicReference<String> lastHarness = new AtomicReference<>();
         volatile CompletionStage<RuntimeScope> result;
+        volatile CompletionStage<RuntimeScope> teardownResult;
 
         FakeResolver(RuntimeScope scope) {
             result = CompletableFuture.completedFuture(scope);
@@ -4549,6 +4580,13 @@ class RuntimeBrokerServiceTest {
                 String harnessSessionId) {
             lastHarness.set(harnessSessionId);
             return result;
+        }
+
+        @Override
+        public CompletionStage<RuntimeScope> resolveForTeardown(
+                String harnessSessionId) {
+            CompletionStage<RuntimeScope> teardown = teardownResult;
+            return teardown == null ? resolve(harnessSessionId) : teardown;
         }
     }
 

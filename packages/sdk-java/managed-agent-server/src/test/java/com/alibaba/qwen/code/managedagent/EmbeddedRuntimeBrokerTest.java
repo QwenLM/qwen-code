@@ -14,10 +14,14 @@ import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.InMemoryToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
@@ -219,6 +223,68 @@ class EmbeddedRuntimeBrokerTest {
                             ((RuntimeBrokerException) error.getCause())
                                     .getCode())
                             .isEqualTo("runtime_broker_session_closed"));
+        }
+    }
+
+    @Test
+    void releaseConvergesBehindTheDurableFenceOfAClosedSession()
+            throws Exception {
+        // The durable row gates warm(), but teardown must not die on it: a
+        // release after archive/delete only needs the persisted placement.
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        when(store.findSessionById(SESSION_ID)).thenReturn(
+                Optional.of(new SessionRecord("tenant-a", SESSION_ID,
+                        "qwen-code", null, "ARCHIVED", null, null, 0, 0, 1,
+                        1, null, 0)));
+        ManagedAgentProperties properties = properties();
+        RuntimeScope scope = new RuntimeScope("tenant-a", "workspace",
+                "generation", Path.of(".").toRealPath().toString(),
+                properties.getHarness().getCapabilityDigest(), "workspace");
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        RuntimeSessionRecord created = sessions.findOrCreate(
+                new RuntimeSessionRecord(new RuntimeSession(SESSION_ID,
+                        "runtime-1", "bootstrap", scope), "binding-1", 1,
+                        RuntimeSessionRecord.State.ACQUIRING, 0,
+                        Instant.now()));
+        sessions.compareAndSet(created, created.withState(
+                RuntimeSessionRecord.State.RELEASED, Instant.now()));
+
+        try (EmbeddedRuntimeBroker broker = new EmbeddedRuntimeBroker(store,
+                properties, new InMemoryRuntimeBindingRepository(), sessions,
+                new InMemoryToolExecutionRepository())) {
+            assertThatThrownBy(() -> broker.warm(SESSION_ID)
+                    .toCompletableFuture().join())
+                    .hasCauseInstanceOf(RuntimeBrokerException.class)
+                    .satisfies(error -> assertThat(
+                            ((RuntimeBrokerException) error.getCause())
+                                    .getCode())
+                            .isEqualTo("runtime_broker_session_closed"));
+
+            URI endpoint = broker.getBaseUri().resolve(
+                    "/internal/runtime-broker/v1/tool-sessions/runtime-1:release");
+            HttpURLConnection connection = (HttpURLConnection) endpoint
+                    .toURL().openConnection();
+            try {
+                connection.setRequestMethod("POST");
+                connection.setRequestProperty("Authorization",
+                        "Bearer broker-token");
+                connection.setRequestProperty("Content-Type",
+                        "application/json");
+                connection.setDoOutput(true);
+                connection.getOutputStream().write(
+                        ("{\"protocolVersion\":1,\"requestId\":\"release-1\","
+                                + "\"harnessSessionId\":\"" + SESSION_ID
+                                + "\"}").getBytes(
+                                java.nio.charset.StandardCharsets.UTF_8));
+                assertThat(connection.getResponseCode()).isEqualTo(200);
+                assertThat(new String(connection.getInputStream()
+                        .readAllBytes(),
+                        java.nio.charset.StandardCharsets.UTF_8))
+                        .contains("\"released\":true");
+            } finally {
+                connection.disconnect();
+            }
         }
     }
 
