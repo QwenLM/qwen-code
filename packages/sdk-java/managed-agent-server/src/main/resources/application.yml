@@ -85,6 +85,8 @@ qwen:
       read-grant-recheck-interval: '5s'
       batch-interval: '75ms'
       materialize-interval: '100ms'
+      replay-floor-enabled: '${QWEN_MANAGED_AGENT_REPLAY_FLOOR_ENABLED:false}'
+      replay-floor-interval: '${QWEN_MANAGED_AGENT_REPLAY_FLOOR_INTERVAL:60s}'
       batch-max-events: 64
       batch-max-bytes: 65536
     runtime-broker:

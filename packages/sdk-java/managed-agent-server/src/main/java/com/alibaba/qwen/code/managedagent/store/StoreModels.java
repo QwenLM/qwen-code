@@ -165,6 +165,10 @@ public final class StoreModels {
             long coveredSequence) {
     }
 
+    /** A Session whose Snapshot covers more than its replay floor. */
+    public record ReplayFloorTarget(String tenantId, String sessionId) {
+    }
+
     public record DispatchTarget(String tenantId, String sessionId,
             String turnId) {
     }
