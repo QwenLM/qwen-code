@@ -2426,10 +2426,12 @@ export class LocalManagedSessionAuthority {
       operation: 'renewActivation',
       subject: this.currentActivationSubject,
       renewalSeq,
-      // The check above ran before this renewal waited its turn, so a release
-      // or another renewal can have landed meanwhile; a same-epoch 'active'
-      // event here would revive the activation the release just ended.
+      // The checks above ran before this renewal waited its turn, so a
+      // release, a recovery block, or another renewal can have landed
+      // meanwhile; a same-epoch 'active' event here would revive the
+      // activation the release just ended or write behind the block.
       hold: (live) =>
+        !this.recoveryBlocked &&
         live !== undefined &&
         live.phase === 'active' &&
         live.activationId === current.activationId &&
@@ -2477,6 +2479,9 @@ export class LocalManagedSessionAuthority {
       boundaryRef,
       operation: 'releaseActivation',
       subject: this.currentActivationSubject,
+      // The pre-queue check ran before the boundary publish awaited, so a
+      // recovery block can have landed meanwhile.
+      hold: () => !this.recoveryBlocked,
     });
   }
 
@@ -2596,10 +2601,15 @@ export class LocalManagedSessionAuthority {
     });
     let resultValue: unknown;
     try {
-      resultValue = JSON.parse(resultBody.toString('utf8'));
-    } catch {
+      // Decode the way the cold reader does: duplicate wire keys and deep
+      // nesting that JSON.parse would wave through must refuse here too.
+      resultValue = parseManagedSessionRecordJson(
+        resultBody.toString('utf8'),
+        resultBody.byteLength,
+      );
+    } catch (error) {
       throw new ManagedSessionRecordError(
-        `turn result resource ${ref.resourceId} contains an invalid reader-facing record: the body is not JSON.`,
+        `turn result resource ${ref.resourceId} contains an invalid reader-facing record: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
     const validated = validateTranscriptRecord(resultValue);

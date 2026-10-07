@@ -308,7 +308,42 @@ describe('EmbeddedHarnessScheduler', () => {
     await waitUntil(() => consulted() > 0);
     const before = consulted();
     await vi.advanceTimersByTimeAsync(60_000);
+    expect(consulted() - before).toBeGreaterThan(0);
     expect(consulted() - before).toBeLessThanOrEqual(120);
+
+    // The cadence backs off within one blocked episode (1s, doubling to a
+    // 30s cap): ten minutes cost tens of consults, not hundreds.
+    await vi.advanceTimersByTimeAsync(9 * 60_000);
+    expect(consulted() - before).toBeLessThanOrEqual(30);
+  });
+
+  it('polls for headroom while queued-only work waits behind the memory gate', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const store = await FileManagedActivationStore.open(filePath);
+    const hasMemoryHeadroom = vi.fn(() => false);
+    const handled: string[] = [];
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 30_000,
+      hasMemoryHeadroom,
+      handler: async (item) => {
+        handled.push(item.activationId);
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(activation('a1'));
+    await scheduler.start();
+    expect(scheduler.isMemoryBlocked).toBe(true);
+
+    // No lease is pending to wake for and notifyCapacityChanged is never
+    // called: the blocked pump must notice the headroom return on its own.
+    hasMemoryHeadroom.mockReturnValue(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await waitUntil(() => handled.includes('a1'));
   });
 
   it('renews the lease while a handler remains active', async () => {

@@ -34,6 +34,7 @@ import {
   MANAGED_SESSION_FORMAT_VERSION,
   type ManagedSessionDurableRef,
 } from './managed-session-records.js';
+import type { ManagedSessionJournalHandle } from './managed-session-storage.js';
 
 const DIGEST = 'b'.repeat(64);
 const temporaryDirectories = new Set<string>();
@@ -976,6 +977,144 @@ describe('managed session authority activation fences', () => {
         expect(authority.currentActivation).toMatchObject({
           activationId: 'act-b',
           epoch: 2,
+          phase: 'active',
+        });
+      } finally {
+        await lease.release();
+      }
+    });
+
+    it('drops a renewal that queued behind a recovery block', async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire({
+        runtimeBaseDir: fixture.runtimeBaseDir,
+        sessionId: fixture.sessionId,
+        transcriptPath: fixture.transcriptPath,
+      });
+      try {
+        const journal: ManagedSessionJournalHandle =
+          LocalJsonlManagedSessionJournalStore.fromLease(
+            lease,
+            sessionKeyFor(fixture),
+          );
+        // Hold the block's durable write inside the serial queue, so the
+        // renewal below passes the pre-queue recoveryBlocked check and queues
+        // behind the block it must not outlive.
+        let blockWriteStarted!: () => void;
+        const blockInFlight = new Promise<void>((resolve) => {
+          blockWriteStarted = resolve;
+        });
+        let blockMayFinish!: () => void;
+        const blockGate = new Promise<void>((resolve) => {
+          blockMayFinish = resolve;
+        });
+        journal.blockRecovery = async () => {
+          blockWriteStarted();
+          await blockGate;
+        };
+        const authority = await LocalManagedSessionAuthority.open({
+          journal,
+          sessionKey: sessionKeyFor(fixture),
+          cwd: '/workspace',
+          version: 'test',
+          now: () => 1_000_000,
+          resources: LocalManagedSessionResourceStore.create({
+            runtimeBaseDir: fixture.runtimeBaseDir,
+            sessionKey: sessionKeyFor(fixture),
+          }),
+          create: {
+            definitionRef: ref('managed-definition'),
+            rootSnapshotRef: ref('managed-root'),
+            createdBy: 'daemon',
+          },
+        });
+        await authority.installActivation({
+          activationId: 'act-block-race',
+          workerId: 'worker-1',
+          leaseDurationMs: 60_000,
+        });
+        const before = authority.committedSequence;
+
+        const blocked = authority.blockRecovery({
+          status: 'BLOCKED_WORKSPACE',
+          detailCode: 'test-block',
+        });
+        await blockInFlight;
+        const renewed = authority.renewActivation({ leaseDurationMs: 60_000 });
+        blockMayFinish();
+        await blocked;
+        await expect(renewed).resolves.toBeUndefined();
+        expect(authority.committedSequence).toBe(before);
+        expect(authority.currentActivation).toMatchObject({
+          activationId: 'act-block-race',
+          phase: 'active',
+          renewalSeq: 0,
+        });
+      } finally {
+        await lease.release();
+      }
+    });
+
+    it('drops a release that queued behind a recovery block', async () => {
+      const fixture = await createFixture();
+      const lease = await SessionWriterLease.acquire({
+        runtimeBaseDir: fixture.runtimeBaseDir,
+        sessionId: fixture.sessionId,
+        transcriptPath: fixture.transcriptPath,
+      });
+      try {
+        const journal: ManagedSessionJournalHandle =
+          LocalJsonlManagedSessionJournalStore.fromLease(
+            lease,
+            sessionKeyFor(fixture),
+          );
+        let blockWriteStarted!: () => void;
+        const blockInFlight = new Promise<void>((resolve) => {
+          blockWriteStarted = resolve;
+        });
+        let blockMayFinish!: () => void;
+        const blockGate = new Promise<void>((resolve) => {
+          blockMayFinish = resolve;
+        });
+        journal.blockRecovery = async () => {
+          blockWriteStarted();
+          await blockGate;
+        };
+        const authority = await LocalManagedSessionAuthority.open({
+          journal,
+          sessionKey: sessionKeyFor(fixture),
+          cwd: '/workspace',
+          version: 'test',
+          now: () => 1_000_000,
+          resources: LocalManagedSessionResourceStore.create({
+            runtimeBaseDir: fixture.runtimeBaseDir,
+            sessionKey: sessionKeyFor(fixture),
+          }),
+          create: {
+            definitionRef: ref('managed-definition'),
+            rootSnapshotRef: ref('managed-root'),
+            createdBy: 'daemon',
+          },
+        });
+        await authority.installActivation({
+          activationId: 'act-block-race',
+          workerId: 'worker-1',
+          leaseDurationMs: 60_000,
+        });
+        const before = authority.committedSequence;
+
+        const blocked = authority.blockRecovery({
+          status: 'BLOCKED_WORKSPACE',
+          detailCode: 'test-block',
+        });
+        await blockInFlight;
+        const released = authority.releaseActivation();
+        blockMayFinish();
+        await blocked;
+        await expect(released).resolves.toBeUndefined();
+        expect(authority.committedSequence).toBe(before);
+        expect(authority.currentActivation).toMatchObject({
+          activationId: 'act-block-race',
           phase: 'active',
         });
       } finally {
@@ -2761,7 +2900,32 @@ describe('managed session checkpoints', () => {
     {
       label: 'non-JSON bytes',
       body: () => Buffer.from('this is not json', 'utf8'),
-      detail: () => 'the body is not JSON',
+      detail: () => 'record is not valid JSON.',
+    },
+    {
+      label: 'a body nested deeper than the reader accepts',
+      body: () => {
+        let text = turnResultBody().toString('utf8');
+        for (let depth = 0; depth < 65; depth++) {
+          text = `{"nested":${text}}`;
+        }
+        return Buffer.from(text, 'utf8');
+      },
+      detail: () => 'record exceeds the maximum JSON depth of 64.',
+    },
+    {
+      label: 'a body with a duplicate wire key',
+      body: () =>
+        Buffer.from(
+          turnResultBody()
+            .toString('utf8')
+            .replace(
+              '"uuid":"rec-turn-1"',
+              '"uuid":"rec-turn-1","uuid":"rec-turn-1"',
+            ),
+          'utf8',
+        ),
+      detail: () => 'record has the duplicate JSON key "uuid".',
     },
   ])(
     'rejects a turn-complete whose result body is $label',

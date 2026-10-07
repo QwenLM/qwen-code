@@ -79,6 +79,15 @@ function toError(error: unknown): Error {
 }
 
 /**
+ * First headroom poll of a memory-blocked episode; it doubles per blocked
+ * tick up to {@link MEMORY_BLOCKED_POLL_MAX_MS} and resets when a pump clears
+ * the blocked flag, so a minutes-long memory-pressure episode does not poll
+ * the store at a fixed 1 Hz.
+ */
+const MEMORY_BLOCKED_POLL_MS = 1_000;
+const MEMORY_BLOCKED_POLL_MAX_MS = 30_000;
+
+/**
  * Bounded asynchronous Harness scheduler for one long-lived service process.
  * It intentionally creates neither child processes nor Worker threads.
  */
@@ -92,6 +101,7 @@ export class EmbeddedHarnessScheduler {
   private started = false;
   private disposed = false;
   private memoryBlocked = false;
+  private memoryBlockedPollMs = MEMORY_BLOCKED_POLL_MS;
   private fatalError: Error | undefined;
 
   constructor(options: EmbeddedHarnessSchedulerOptions) {
@@ -183,6 +193,13 @@ export class EmbeddedHarnessScheduler {
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = undefined;
 
+    // A memory-blocked pump cannot claim until headroom returns, so a blocked
+    // tick re-consults the probe before paying for the store scans.
+    if (this.memoryBlocked && !this.options.hasMemoryHeadroom()) {
+      this.armBlockedWake();
+      return;
+    }
+
     while (this.active.size < this.options.maxActiveSlots) {
       const candidates = this.store
         .listRunnable()
@@ -190,7 +207,7 @@ export class EmbeddedHarnessScheduler {
           (candidate) => !this.active.has(activationKey(candidate.descriptor)),
         );
       if (candidates.length === 0) {
-        this.memoryBlocked = false;
+        this.clearMemoryBlocked();
         this.scheduleRecoveryWake();
         return;
       }
@@ -198,11 +215,12 @@ export class EmbeddedHarnessScheduler {
         this.memoryBlocked = true;
         // Entries of the pump cleared the armed recovery wake above, and no
         // execute() completion is coming to re-arm it (zero or idle active
-        // runs) — reclaimable leases would otherwise wait forever.
-        this.scheduleRecoveryWake();
+        // runs) — queued work and reclaimable leases would otherwise wait
+        // forever.
+        this.armBlockedWake();
         return;
       }
-      this.memoryBlocked = false;
+      this.clearMemoryBlocked();
       const candidate = this.selectTenantFair(candidates)!;
       const lease = await this.store.claim(
         candidate.descriptor,
@@ -326,7 +344,38 @@ export class EmbeddedHarnessScheduler {
     }
   }
 
-  private scheduleRecoveryWake(): void {
+  private clearMemoryBlocked(): void {
+    this.memoryBlocked = false;
+    this.memoryBlockedPollMs = MEMORY_BLOCKED_POLL_MS;
+  }
+
+  /** Arms the wake a memory-blocked pump still needs and steps the backoff. */
+  private armBlockedWake(): void {
+    const wake = this.scheduleRecoveryWake(this.memoryBlockedPollMs);
+    this.memoryBlockedPollMs =
+      wake === 'lease'
+        ? MEMORY_BLOCKED_POLL_MS
+        : Math.min(this.memoryBlockedPollMs * 2, MEMORY_BLOCKED_POLL_MAX_MS);
+  }
+
+  private armRecoveryTimer(delay: number): void {
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = undefined;
+      void this.requestPump().catch(() => undefined);
+    }, delay);
+    this.recoveryTimer.unref();
+  }
+
+  /**
+   * Arms the recovery wake for the next reclaimable lease expiry. A blocked
+   * pump passes its headroom poll cadence: it wins when no lease expires
+   * sooner, because reclaiming waits on headroom either way. Returns what
+   * was armed — 'lease' restarts the blocked backoff, since a lease
+   * transition is a fresh chance to claim.
+   */
+  private scheduleRecoveryWake(
+    blockedPollMs?: number,
+  ): 'lease' | 'poll' | 'none' {
     const activeKeys = new Set(this.active.keys());
     const seenSessions = new Set<string>();
     let expiry: number | undefined;
@@ -345,16 +394,27 @@ export class EmbeddedHarnessScheduler {
           ? activation.lease!.expiresAt
           : Math.min(expiry, activation.lease!.expiresAt);
     }
-    if (expiry === undefined) return;
+    if (expiry === undefined) {
+      // No reclaimable lease; a blocked pump with queued work still polls
+      // for headroom, since nothing else re-runs it.
+      if (blockedPollMs === undefined) return 'none';
+      this.armRecoveryTimer(blockedPollMs);
+      return 'poll';
+    }
     const remaining = expiry - this.store.getCurrentTime();
+    if (
+      blockedPollMs !== undefined &&
+      (remaining <= 0 || remaining > blockedPollMs)
+    ) {
+      this.armRecoveryTimer(blockedPollMs);
+      return 'poll';
+    }
     // An already-expired lease is reclaimable now, but a zero delay would
     // spin the pump while the worker stays memory-blocked — poll instead.
-    const delay = Math.min(remaining <= 0 ? 1_000 : remaining, 2_147_483_647);
-    this.recoveryTimer = setTimeout(() => {
-      this.recoveryTimer = undefined;
-      void this.requestPump().catch(() => undefined);
-    }, delay);
-    this.recoveryTimer.unref();
+    this.armRecoveryTimer(
+      Math.min(remaining <= 0 ? 1_000 : remaining, 2_147_483_647),
+    );
+    return 'lease';
   }
 
   private halt(error: Error): void {

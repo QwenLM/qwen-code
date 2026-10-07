@@ -18,6 +18,7 @@ import { isManagedSessionTranscriptSync } from '../utils/sessionStorageUtils.js'
 import {
   readManagedSessionTitleInfoSync,
   readManagedSessionSourceSync,
+  readSessionTitleInfoFromFileSync,
 } from '../utils/sessionStorageUtils.js';
 import { LocalManagedSessionAuthority } from './managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
@@ -715,6 +716,41 @@ describe('managed session metadata', () => {
         harness.runtimeBaseDir,
       ),
     ).toBeUndefined();
+  });
+
+  it('defers to the legacy reader when marker text is glued onto a legacy line', async () => {
+    const harness = await createHarness();
+    // A torn append can glue unparseable marker-looking text onto a valid
+    // legacy line; quoted marker text is not a Managed header record.
+    const customTitle = JSON.stringify({
+      uuid: 'legacy-1',
+      parentUuid: null,
+      sessionId,
+      timestamp: new Date().toISOString(),
+      type: 'system',
+      subtype: 'custom_title',
+      customTitle: 'Legacy title',
+      titleSource: 'manual',
+    });
+    await fs.writeFile(
+      harness.transcriptPath,
+      `${customTitle} and the raw bytes "subtype":"managed_session_header_v1" landed here\n`,
+      'utf8',
+    );
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toBeUndefined();
+    // The callers compose managed ?? legacy, so the custom title survives.
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ) ?? readSessionTitleInfoFromFileSync(harness.transcriptPath),
+    ).toEqual({ title: 'Legacy title', source: 'manual' });
   });
 
   it('refuses a registered domain that is not enabled', async () => {

@@ -193,6 +193,22 @@ describe('Legacy refusal of Managed-owned transcripts', () => {
     ).resolves.toBe(true);
   });
 
+  it('detects a Managed header whose subtype is written with JSON escapes', async () => {
+    const header = line({
+      type: 'system',
+      subtype: 'managed_session_header_v1',
+      managedSession: { engine: 'managed' },
+    }).replace(
+      '"managed_session_header_v1"',
+      '"managed\\u005fsession\\u005fheader\\u005fv1"',
+    );
+    const transcriptPath = await writeTranscript(
+      `${owner('managed')}\n${header}\n`,
+    );
+
+    expect(isManagedSessionTranscriptSync(transcriptPath)).toBe(true);
+  });
+
   it('keeps a Managed create that stopped before its header completable', async () => {
     // What a Managed create leaves when it stops between its owner record and
     // its header.
