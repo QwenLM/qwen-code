@@ -76,12 +76,6 @@ public interface AgentStateStore {
         return null;
     }
 
-    /** The child Sessions a parent Session owns, newest first. */
-    default List<StoreModels.SessionRecord> listSessionChildren(
-            String tenantId, String parentSessionId) {
-        return List.of();
-    }
-
     Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest, String agentId,
             String requestedRevision, String title,

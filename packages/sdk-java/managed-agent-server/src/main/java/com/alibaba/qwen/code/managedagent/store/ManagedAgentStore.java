@@ -367,6 +367,27 @@ public class ManagedAgentStore implements AgentStateStore {
                 ManagedWorkspaceRegistry.actorKey(tenantId,
                         childActorOf(parentSessionId)),
                 idempotencyKey, requestDigest, sessionId, turnId, now);
+        // The child actor inherits the parent's creator grant on the
+        // Workspace, so the close cascade's child-lifecycle admission
+        // passes the workspace creator checks on the child's own row.
+        byte[] creator = jdbc.query("SELECT actor_id FROM"
+                        + " managed_workspace_create_command"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                (result, row) -> result.getBytes(1), tenantId,
+                parentSessionId).stream().findFirst().orElse(null);
+        if (creator != null) {
+            jdbc.update("INSERT IGNORE INTO managed_workspace_access"
+                            + " (tenant_id, workspace_id, actor_id,"
+                            + " can_read, can_create) SELECT ?,"
+                            + " workspace_id, ?, can_read, can_create"
+                            + " FROM managed_workspace_access WHERE"
+                            + " tenant_id = ? AND workspace_id = ?"
+                            + " AND actor_id = ?",
+                    tenantId,
+                    ManagedWorkspaceRegistry.actorKey(tenantId,
+                            childActorOf(parentSessionId)),
+                    tenantId, parent.workspace().getWorkspaceId(), creator);
+        }
         appendEvent(tenantId, sessionId, null, "session.created",
                 Map.of("sessionId", sessionId), false, null, now);
         if (turnId != null) {
@@ -400,7 +421,10 @@ public class ManagedAgentStore implements AgentStateStore {
     @Override
     public StoreModels.SessionLineage findChildLineage(String tenantId,
             String sessionId) {
-        return jdbc.query("SELECT parent_session_id, root_session_id,"
+        // The mapper yields null for a root row, and Stream.findFirst()
+        // throws on a null element — fetch and read the one row directly.
+        List<StoreModels.SessionLineage> rows = jdbc.query(
+                "SELECT parent_session_id, root_session_id,"
                         + " parent_child_run_id, child_depth"
                         + " FROM managed_agent_session"
                         + " WHERE tenant_id = ? AND session_id = ?",
@@ -413,16 +437,8 @@ public class ManagedAgentStore implements AgentStateStore {
                             result.getString("root_session_id"),
                             result.getString("parent_child_run_id"),
                             result.getInt("child_depth"));
-                }, tenantId, sessionId).stream().findFirst().orElse(null);
-    }
-
-    @Override
-    public List<SessionRecord> listSessionChildren(String tenantId,
-            String parentSessionId) {
-        return jdbc.query("SELECT * FROM managed_agent_session"
-                        + " WHERE tenant_id = ? AND parent_session_id = ?"
-                        + " ORDER BY created_at DESC, session_id DESC",
-                sessionMapper, tenantId, parentSessionId);
+                }, tenantId, sessionId);
+        return rows.isEmpty() ? null : rows.get(0);
     }
 
     private Admission replayWorkspaceCommand(String tenantId, String actorId,

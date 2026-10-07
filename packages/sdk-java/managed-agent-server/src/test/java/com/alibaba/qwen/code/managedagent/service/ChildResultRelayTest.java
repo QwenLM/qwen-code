@@ -16,8 +16,8 @@ import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.RelayRow;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.TurnLine;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
-import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.util.List;
@@ -117,6 +117,8 @@ class ChildResultRelayTest {
         when(store.claim(anyString(), anyString(), anyString(), anyString(),
                 anyString(), anyLong(), anyLong()))
                 .thenAnswer(ignored -> row.get());
+        when(store.find(anyString(), anyString(), anyString()))
+                .thenAnswer(ignored -> row.get());
         Mockito.doAnswer(args -> {
                     RelayRow before = row.get();
                     row.set(new RelayRow(before.tenantId(),
@@ -170,11 +172,11 @@ class ChildResultRelayTest {
         when(sessions.createChildSession(TENANT, PARENT, RUN,
                 "audit the diff", "review")).thenReturn(
                 new CommandAdmission(CHILD, null, "accepted", false));
-        RuntimeSessionRecord runtime = mock(RuntimeSessionRecord.class);
-        when(runtime.getBindingId()).thenReturn("binding-1");
-        when(runtime.getRuntimeGeneration()).thenReturn(7L);
-        when(broker.findLatestRuntimeSessionByHarnessSession(CHILD))
-                .thenReturn(runtime);
+        RuntimeBindingRecord binding = mock(RuntimeBindingRecord.class);
+        when(binding.getBindingId()).thenReturn("binding-1");
+        when(binding.getGeneration()).thenReturn(7L);
+        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+                .thenReturn(binding);
 
         relay.scan();
         assertThat(row.get().state()).isEqualTo("binding");
@@ -200,6 +202,10 @@ class ChildResultRelayTest {
         assertThat(accept.get("notification")).isEqualTo(
                 Map.of("description", "audit the diff"));
 
+        // The acceptance is committed: the next scan must still issue the
+        // relay's own mark_accepted — the early-out covers only arms past
+        // delivering, never the delivering arm itself.
+        when(store.hasAcceptance(TENANT, PARENT, RUN)).thenReturn(true);
         relay.scan();
         assertThat(row.get().state()).isEqualTo("done");
         assertThat(harness.operations.stream()
@@ -248,7 +254,7 @@ class ChildResultRelayTest {
     void persistentProbeFailuresBecomeUnknownNeverRerun() {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "binding", "owner", now + 30_000, 63, 0, null, now, now));
-        when(broker.findLatestRuntimeSessionByHarnessSession(CHILD))
+        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
                 .thenReturn(null);
         relay.scan();
         assertThat(row.get().state()).isEqualTo("unknown");

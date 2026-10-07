@@ -60,6 +60,8 @@ class ChildResultRelayStoreTest {
     @Test
     void stampsAndReadsChildLineageWithIdempotentCreation() {
         String parent = boundParent();
+        // A root Session answers no lineage without an exception.
+        assertThat(state.findChildLineage(TENANT, parent)).isNull();
         StoreModels.SessionLineage lineage = new StoreModels.SessionLineage(
                 parent, parent, "run-1", 1);
         // This context runs without Hosted Workspace files, so the
@@ -73,9 +75,11 @@ class ChildResultRelayStoreTest {
         assertThat(first.replayed()).isFalse();
         assertThat(state.findChildLineage(TENANT, first.sessionId()))
                 .isEqualTo(lineage);
-        assertThat(state.listSessionChildren(TENANT, parent))
-                .extracting(StoreModels.SessionRecord::sessionId)
-                .containsExactly(first.sessionId());
+        assertThat(jdbc.query("SELECT session_id FROM managed_agent_session"
+                        + " WHERE tenant_id = ? AND parent_session_id = ?"
+                        + " ORDER BY created_at, session_id",
+                (result, row) -> result.getString("session_id"), TENANT,
+                parent)).containsExactly(first.sessionId());
         StoreModels.SessionRecord child = state.requireSession(TENANT,
                 first.sessionId());
         StoreModels.SessionRecord parentRow = state.requireSession(TENANT,
@@ -89,7 +93,10 @@ class ChildResultRelayStoreTest {
                 lineage);
         assertThat(replayed.replayed()).isTrue();
         assertThat(replayed.sessionId()).isEqualTo(first.sessionId());
-        assertThat(state.listSessionChildren(TENANT, parent)).hasSize(1);
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM managed_agent_session"
+                        + " WHERE tenant_id = ? AND parent_session_id = ?",
+                Integer.class, TENANT, parent)).isEqualTo(1);
         assertThatThrownBy(() -> state.insertChildSessionCommand(TENANT,
                 parent, creationKey, "other-digest", "audit", input, null,
                 lineage))
@@ -98,7 +105,10 @@ class ChildResultRelayStoreTest {
                         ((ApiException) error).getCode())
                         .isEqualTo("idempotency_conflict"));
         assertThat(creationKey).matches("^[0-9a-f]{64}$");
-        assertThat(state.listSessionChildren(TENANT, parent)).hasSize(1);
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM managed_agent_session"
+                        + " WHERE tenant_id = ? AND parent_session_id = ?",
+                Integer.class, TENANT, parent)).isEqualTo(1);
     }
 
     private static String key(String parent, String childRunId) {
@@ -153,6 +163,17 @@ class ChildResultRelayStoreTest {
         assertThat(relayStore.findLiveScopes(TENANT, session))
                 .extracting(ChildResultRelayStore.LiveScope::childRunId)
                 .containsExactly("run-live");
+        // A live ledger claim leaves the run discoverable; a terminal
+        // classification retires it even though the extension record
+        // still sits delivery-pending.
+        RelayRow claimed = relayStore.claim(TENANT, session, "run-live",
+                "key-live", "owner", 30_000, 100);
+        assertThat(claimed).isNotNull();
+        assertThat(relayStore.findPendingChildren(10))
+                .extracting(PendingChild::childRunId)
+                .containsExactly("run-live");
+        relayStore.classify(claimed, "owner", "done", null, 200);
+        assertThat(relayStore.findPendingChildren(10)).isEmpty();
     }
 
     private void insertRecordRow(String scopeKey, String sessionId,

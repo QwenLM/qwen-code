@@ -188,34 +188,6 @@ public final class JdbcRuntimeSessionRepository
     }
 
     @Override
-    public RuntimeSessionRecord findLatestByHarnessSession(
-            String harnessSessionId) {
-        String id = BrokerValues.requireId(harnessSessionId,
-                "harnessSessionId");
-        return JdbcRepositorySupport.read(dataSource, connection -> {
-            String sql = "SELECT " + SESSION_COLUMNS
-                    + " FROM qwen_runtime_session WHERE harness_session_id = ?"
-                    + " ORDER BY runtime_generation DESC, runtime_session_id"
-                    + " DESC LIMIT 1";
-            try (PreparedStatement statement = connection.prepareStatement(
-                    sql)) {
-                statement.setString(1, id);
-                try (ResultSet result = statement.executeQuery()) {
-                    if (!result.next()) {
-                        return null;
-                    }
-                    RuntimeSessionRecord record = mapSession(result);
-                    if (!id.equals(record.getSession().getHarnessSessionId())) {
-                        throw new IllegalStateException(
-                                "Runtime Session identifier collision");
-                    }
-                    return record;
-                }
-            }
-        });
-    }
-
-    @Override
     public List<RuntimeSessionRecord> findByBinding(String bindingId, long generation,
             String afterSessionId, int limit) {
         if (limit < 1 || limit > 100) {

@@ -19,10 +19,12 @@ import type {
   ManagedSessionCommand,
   ManagedSessionInputRequest,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
-import type {
-  ManagedSessionDurableRef,
-  ManagedSessionDomain,
-  ManagedSessionKey,
+import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
+import {
+  ManagedSessionRecordError,
+  type ManagedSessionDurableRef,
+  type ManagedSessionDomain,
+  type ManagedSessionKey,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   MANAGED_CHILD_LIMITS,
@@ -216,7 +218,7 @@ export class HostedChildAgentSession {
           bytes,
         );
       if (!sameEvidence) {
-        throw new Error(
+        throw new ManagedSessionConflictError(
           `Child run ${params.childRunId} was launched with different evidence.`,
         );
       }
@@ -264,7 +266,7 @@ export class HostedChildAgentSession {
         ) {
           return previous;
         }
-        throw new Error(
+        throw new ManagedSessionConflictError(
           `Child run ${childRunId} was already dispatched differently.`,
         );
       }
@@ -277,7 +279,7 @@ export class HostedChildAgentSession {
     return this.revise(childRunId, (previous) => {
       if (previous.childSessionId !== null) {
         if (previous.childSessionId === childSessionId) return previous;
-        throw new Error(
+        throw new ManagedSessionConflictError(
           `Child run ${childRunId} is already attached to another Session.`,
         );
       }
@@ -295,7 +297,7 @@ export class HostedChildAgentSession {
     params: { readonly result: Buffer; readonly receipt: Buffer },
   ): Promise<ManagedSessionDurableRef> {
     if (params.result.byteLength > MANAGED_CHILD_LIMITS.maxResultBytes) {
-      throw new Error(
+      throw new ManagedSessionRecordError(
         `Child result exceeds ${MANAGED_CHILD_LIMITS.maxResultBytes} bytes (byte_limit).`,
       );
     }
@@ -390,7 +392,7 @@ export class HostedChildAgentSession {
       const delivery = previous.run.delivery?.state;
       if (delivery === 'accepted' || delivery === 'consumed') return previous;
       if (delivery !== 'accepting') {
-        throw new Error(
+        throw new ManagedSessionConflictError(
           `Child run ${childRunId} cannot be accepted from ${delivery}.`,
         );
       }
@@ -429,7 +431,7 @@ export class HostedChildAgentSession {
       if (delivery === 'accepting') {
         return childDeliveryBody(previous, 'accepted');
       }
-      throw new Error(
+      throw new ManagedSessionConflictError(
         `Child run ${childRunId} cannot be consumed from ${delivery}.`,
       );
     });

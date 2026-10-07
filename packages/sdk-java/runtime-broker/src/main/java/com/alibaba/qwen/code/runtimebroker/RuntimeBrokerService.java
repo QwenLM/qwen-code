@@ -100,13 +100,26 @@ public final class RuntimeBrokerService implements AutoCloseable {
             unknownLookupCooldowns = new ConcurrentHashMap<>();
 
     /**
-     * H4b: the newest logical Runtime Session of a Harness Session — how
-     * the child result relay reads the child Session's Runtime binding
-     * (identity and generation) once provisioning answers.
+     * H4b: the newest physical Runtime binding of a Harness Session —
+     * how the child result relay confirms the child Session's Runtime
+     * identity and generation. {@code warm()} creates the binding when
+     * the Hosted tool turn is constructed, so it exists even for a child
+     * that finishes without ever acquiring a tool Session.
      */
-    public RuntimeSessionRecord findLatestRuntimeSessionByHarnessSession(
-            String harnessSessionId) {
-        return sessionRepository.findLatestByHarnessSession(harnessSessionId);
+    public RuntimeBindingRecord findLatestBindingByHarnessSession(
+            String tenantId, String harnessSessionId) {
+        List<RuntimeBindingRecord> page = bindingRepository
+                .findByHarnessSession(tenantId, harnessSessionId, null, 100);
+        RuntimeBindingRecord latest = null;
+        while (!page.isEmpty()) {
+            latest = page.get(page.size() - 1);
+            if (page.size() < 100) {
+                break;
+            }
+            page = bindingRepository.findByHarnessSession(tenantId,
+                    harnessSessionId, latest.getBindingId(), 100);
+        }
+        return latest;
     }
 
     public RuntimeBrokerService(HarnessSessionResolver sessionResolver,

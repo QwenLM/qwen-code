@@ -18,7 +18,7 @@ import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.RelayRow;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
-import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 
 /**
  * H4b: the first cross-Session dispatcher — the child result relay. It
@@ -99,7 +99,14 @@ public class ChildResultRelay {
         boolean accepted = relayStore.hasAcceptance(pending.tenantId(),
                 pending.parentSessionId(), pending.childRunId());
         if (accepted) {
-            return;
+            // An answered acceptance short-circuits only: everything except
+            // `delivering`, whose mark_accepted is the relay's own owed step
+            // (checking it before the switch masked that arm entirely).
+            RelayRow existing = relayStore.find(pending.tenantId(),
+                    pending.parentSessionId(), pending.childRunId());
+            if (existing == null || !"delivering".equals(existing.state())) {
+                return;
+            }
         }
         RelayRow row = relayStore.claim(pending.tenantId(),
                 pending.parentSessionId(), pending.childRunId(),
@@ -155,19 +162,22 @@ public class ChildResultRelay {
                     "creation answer lost", now + LEASE_MS, now);
             return;
         }
-        RuntimeSessionRecord runtime = broker
-                .findLatestRuntimeSessionByHarnessSession(
+        // The physical Runtime binding exists from the construction of the
+        // child's Hosted tool turn — a child that answers end-to-end in
+        // plain text holds one without ever acquiring a tool Session.
+        RuntimeBindingRecord binding = broker
+                .findLatestBindingByHarnessSession(row.tenantId(),
                         row.childSessionId());
-        if (runtime == null) {
+        if (binding == null) {
             throw new RelayRetry("child runtime binding is not visible yet");
         }
-        String generation = Long.toString(runtime.getRuntimeGeneration());
+        String generation = Long.toString(binding.getGeneration());
         Map<String, Object> operation = new LinkedHashMap<>();
         operation.put("operationId", UUID.randomUUID().toString());
         operation.put("kind", "dispatch_started");
         operation.put("childRunId", row.childRunId());
         operation.put("dispatchId", row.creationKey());
-        operation.put("runtimeBindingId", runtime.getBindingId());
+        operation.put("runtimeBindingId", binding.getBindingId());
         operation.put("generation", generation);
         harness.runChildOperation(row.tenantId(), row.parentSessionId(),
                 operation);

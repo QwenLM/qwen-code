@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore.CwdChangeOutcome;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
@@ -60,6 +61,7 @@ public class SessionLifecycleCoordinator {
     private final RuntimeWarmer runtimeWarmer;
     private final ChildResultRelayStore childScopes;
     private final ObjectMapper objectMapper;
+    private final RequestDigests digests;
     private final ExecutorService executor;
     private final Clock clock;
     private final Duration leaseDuration;
@@ -79,11 +81,14 @@ public class SessionLifecycleCoordinator {
     }
 
     private final Set<String> active = ConcurrentHashMap.newKeySet();
+    static final Set<String> SETTLED_SESSION_STATES =
+            Set.of("CLOSED", "ARCHIVED", "DELETED");
 
     public SessionLifecycleCoordinator(AgentStateStore store,
             ManagedSessionStore sessionStore, HarnessConnector harness,
             RuntimeWarmer runtimeWarmer, ChildResultRelayStore childScopes,
-            ObjectMapper objectMapper, ExecutorService executor,
+            ObjectMapper objectMapper, RequestDigests digests,
+            ExecutorService executor,
             Clock clock, ManagedAgentProperties properties) {
         this.store = store;
         this.sessionStore = sessionStore;
@@ -91,6 +96,7 @@ public class SessionLifecycleCoordinator {
         this.runtimeWarmer = runtimeWarmer;
         this.childScopes = childScopes;
         this.objectMapper = objectMapper;
+        this.digests = digests;
         this.executor = executor;
         this.clock = clock;
         this.leaseDuration = properties.getDispatch().getLeaseDuration();
@@ -315,16 +321,22 @@ public class SessionLifecycleCoordinator {
      * H4b close cascade (reference design §12): after the admission
      * barriers seal new work and before the Harness closes, every
      * non-terminal child run of the closing Session takes its durable stop
-     * request, its child Session closes through the ordinary idempotent
-     * close, and its terminal revision commits — recursively, since each
-     * child's own close runs this same step for its children. Nothing here
-     * rewrites an unproven end as cancelled: a child that fails to close
-     * throws, and the whole close operation re-arms through the dispatch
-     * retry instead of settling on suspicion.
+     * request, its child Session closes through its own Session lifecycle —
+     * recursively, since each child's own close runs this same step for
+     * its children — and its terminal revision commits. A run whose body
+     * never learned the child Session id consults the relay ledger, so a
+     * child created but not yet attached is still found. The physical
+     * effect never waits on the parent's journal: a reachable child 
+     * closes even while its stop-request and terminal revisions falter.
+     * Nothing here rewrites an unproven end as cancelled: a child the
+     * Harness cannot reach has no settled evidence to record, so the whole
+     * close operation re-arms through the dispatch retry with its debt
+     * owed, instead of settling on suspicion.
      */
     private void cascadeChildScopes(OperationRecord operation) {
         String tenantId = operation.tenantId();
         String sessionId = operation.sessionId();
+        boolean journalDebt = false;
         for (ChildResultRelayStore.LiveScope scope : childScopes
                 .findLiveScopes(tenantId, sessionId)) {
             String childSessionId = null;
@@ -342,24 +354,105 @@ public class SessionLifecycleCoordinator {
                 throw new IllegalStateException(
                         "Child scope evidence is unreadable", error);
             }
+            if (childSessionId == null) {
+                // The child may exist while its attach revision has not
+                // committed (the create→attach window): the relay ledger
+                // names the child Session, so an unstarted verdict rests
+                // on evidence, never on the body's gap.
+                ChildResultRelayStore.RelayRow ledger = childScopes.find(
+                        tenantId, sessionId, scope.childRunId());
+                if (ledger != null && ledger.childSessionId() != null) {
+                    childSessionId = ledger.childSessionId();
+                }
+            }
             Map<String, Object> cancel = new LinkedHashMap<>();
             cancel.put("operationId", UUID.randomUUID().toString());
             cancel.put("kind", "cancel");
             cancel.put("childRunId", scope.childRunId());
-            harness.runChildOperation(tenantId, sessionId, cancel);
-            if (childSessionId != null && harness.isAvailable()) {
-                harness.closeSession(tenantId, childSessionId);
+            try {
+                harness.runChildOperation(tenantId, sessionId, cancel);
+            } catch (RuntimeException error) {
+                journalDebt = true;
+                LOG.warn("Managed Session close cascade's stop request"
+                                + " faltered tenant={} session={}"
+                                + " childRun={} — the child still closes,"
+                                + " debt owed; failure={}", tenantId,
+                        sessionId, scope.childRunId(), error.getMessage());
+            }
+            if (childSessionId != null) {
+                String status = childScopes.sessionStatus(tenantId,
+                        childSessionId);
+                if (status == null
+                        || !SETTLED_SESSION_STATES.contains(status)) {
+                    // The child closes through its own Session lifecycle:
+                    // an admission is idempotent under the run's key, and
+                    // an active Turn or a missing Runtime lane refuses —
+                    // every outcome here is owed work, never a settled
+                    // one, so the close re-arms instead of committing a
+                    // close_scope proof for a close that never ran.
+                    try {
+                        OperationAdmission admitted =
+                                admitChildClose(operation, childSessionId,
+                                        scope.childRunId());
+                        if (!"COMPLETED".equals(
+                                admitted.operation().state())) {
+                            dispatch(tenantId, childSessionId,
+                                    admitted.operation().operationId());
+                        }
+                    } catch (RuntimeException error) {
+                        LOG.warn("Managed Session close cascade's child"
+                                        + " close admission faltered"
+                                        + " tenant={} session={}"
+                                        + " childRun={} child={} — debt"
+                                        + " owed; failure={}", tenantId,
+                                sessionId, scope.childRunId(),
+                                childSessionId, error.getMessage());
+                    }
+                    LOG.info("Managed Session close cascade owes the child"
+                                    + " Session's lifecycle close tenant={}"
+                                    + " session={} childRun={} child={}",
+                            tenantId, sessionId, scope.childRunId(),
+                            childSessionId);
+                    journalDebt = true;
+                    continue;
+                }
             }
             Map<String, Object> closeScope = new LinkedHashMap<>();
             closeScope.put("operationId", UUID.randomUUID().toString());
             closeScope.put("kind", "close_scope");
             closeScope.put("childRunId", scope.childRunId());
             closeScope.put("started", childSessionId != null);
-            harness.runChildOperation(tenantId, sessionId, closeScope);
+            try {
+                harness.runChildOperation(tenantId, sessionId, closeScope);
+            } catch (RuntimeException error) {
+                journalDebt = true;
+                LOG.warn("Managed Session close cascade's terminal"
+                                + " revision faltered tenant={} session={}"
+                                + " childRun={} — debt owed; failure={}",
+                        tenantId, sessionId, scope.childRunId(),
+                        error.getMessage());
+            }
             LOG.info("Managed Session close cascade settled a child scope"
                             + " tenant={} session={} childRun={} child={}",
                     tenantId, sessionId, scope.childRunId(),
                     childSessionId == null ? "unstarted" : childSessionId);
         }
+        if (journalDebt) {
+            throw new IllegalStateException(
+                    "Child cascade journal debt: the stop or terminal"
+                            + " revisions are owed");
+        }
+    }
+
+    private OperationAdmission admitChildClose(OperationRecord parent,
+            String childSessionId, String childRunId) {
+        String actor = "child:" + parent.sessionId();
+        return store.beginWorkspaceLifecycle(parent.tenantId(),
+                childSessionId, OperationKind.CLOSE, actor,
+                digests.digest(Map.of("actorId", actor)),
+                "child-close-" + childRunId,
+                digests.digest(Map.of("sessionId", childSessionId,
+                        "operation", "CLOSE_SESSION")),
+                runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose());
     }
 }

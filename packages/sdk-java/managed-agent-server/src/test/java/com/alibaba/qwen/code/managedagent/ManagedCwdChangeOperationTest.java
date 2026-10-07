@@ -1390,7 +1390,9 @@ class ManagedCwdChangeOperationTest {
         SessionLifecycleCoordinator coordinator(RuntimeWarmer warmer) {
             return new SessionLifecycleCoordinator(store, null, null,
                     warmer, new ChildResultRelayStore(jdbc),
-                    new ObjectMapper(), new AbstractExecutorService() {
+                    new ObjectMapper(),
+                    new com.alibaba.qwen.code.managedagent.service.RequestDigests(),
+                    new AbstractExecutorService() {
                         @Override
                         public void shutdown() {
                         }

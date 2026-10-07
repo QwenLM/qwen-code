@@ -35,14 +35,24 @@ public class ChildResultRelayStore {
     }
 
     // delivery_state is null on the shell kind, so a child_run row with a
-    // pending delivery is always a child_agent row.
+    // pending delivery is always a child_agent row; the ledger join
+    // drops every row whose classification is terminal (delivered,
+    // orphaned or given up), because the bounded discovery set is for
+    // work still owed — accumulated terminal rows would otherwise starve
+    // the fleet-wide scan behind an ORDER BY created_at LIMIT.
     private static final String PENDING_SQL =
-            "SELECT tenant_id, session_id, record_id, revision,"
-                    + " delivery_state, record_resource_id"
-                    + " FROM qwen_managed_session_extension_record"
-                    + " WHERE domain = 'child_run' AND delivery_state IN"
+            "SELECT r.tenant_id, r.session_id, r.record_id, r.revision,"
+                    + " r.delivery_state, r.record_resource_id"
+                    + " FROM qwen_managed_session_extension_record r"
+                    + " LEFT JOIN qwen_managed_child_result_relay l"
+                    + " ON l.parent_session_id = r.session_id"
+                    + " AND l.child_run_id = r.record_id"
+                    + " WHERE r.domain = 'child_run' AND r.delivery_state IN"
                     + " ('planned', 'accepting', 'unknown')"
-                    + " ORDER BY created_at, session_id, record_id LIMIT ?";
+                    + " AND (l.state IS NULL OR l.state NOT IN ('done',"
+                    + " 'orphaned', 'unknown'))"
+                    + " ORDER BY r.created_at, r.session_id, r.record_id"
+                    + " LIMIT ?";
 
     private final JdbcTemplate jdbc;
 

@@ -25,6 +25,7 @@ import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-ru
 import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import {
   ManagedSessionAlreadyExistsError,
+  ManagedSessionConflictError,
   ManagedSessionNotFoundError,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
@@ -57,6 +58,7 @@ import type {
 import {
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
+  ManagedSessionRecordError,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
@@ -80,6 +82,7 @@ import {
 import {
   createMonitorWakeRunTurn,
   monitorWakeNeedsRecovery,
+  withChildAgentConsumption,
 } from './hosted-monitor-wake-turn.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
@@ -1473,17 +1476,18 @@ async function executeHostedTurn(
         await toolTurn?.finish();
         // H4b: the tool-arm results this turn answered are consumed
         // facts only once the turn settles — they commit ahead of the
-        // turn record, and a crashed turn leaves them accepted alone,
-        // never widened.
+        // turn record, and each leaves the owed set as it commits, so a
+        // commit that dies mid-flush keeps the remainder owed, never
+        // widened and never silently dropped.
         if (
           state === 'completed' &&
           session.childAgents &&
           session.childConsumption.size > 0
         ) {
-          const consumed = [...session.childConsumption];
-          session.childConsumption.clear();
+          const consumed = [...session.childConsumption].sort();
           for (const childRunId of consumed) {
             await session.childAgents.markConsumed(childRunId);
+            session.childConsumption.delete(childRunId);
           }
         }
         turnResult = record(session, sessionId, 'system', null, {
@@ -2050,23 +2054,10 @@ export function registerHostedHarnessSessionRoutes(
               needsRecovery: monitorWakeNeedsRecovery,
               writeStderr: writeStderrLineSafe,
             });
-            // H4b: the wake turn consumed the child's result input; the
-            // consumption commits follow its settle, the acceptance's
-            // step before the run's, never before the turn is real.
-            return async (turn) => {
-              const outcome = await runWakeTurn(turn);
-              if (
-                outcome === 'settled' &&
-                turn.source === 'child_agent' &&
-                turn.turnId.endsWith(':accept:notify') &&
-                session.childAgents
-              ) {
-                await session.childAgents.markConsumed(
-                  turn.turnId.slice(0, -':accept:notify'.length),
-                );
-              }
-              return outcome;
-            };
+            // H4b: the consumption commits follow the turn's real settle,
+            // the acceptance's step before the run's, never before the
+            // turn is real.
+            return withChildAgentConsumption(runWakeTurn, session);
           })(),
           failed: (cause) => {
             session.blocked = true;
@@ -3285,12 +3276,11 @@ export function registerHostedHarnessSessionRoutes(
       }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
-      if (
-        message.includes('conflict') ||
-        message.includes('cannot follow') ||
-        message.includes('already')
-      ) {
+      if (cause instanceof ManagedSessionConflictError) {
         return error(res, 409, 'child_operation_conflict', message);
+      }
+      if (cause instanceof ManagedSessionRecordError) {
+        return error(res, 409, 'child_operation_record', message);
       }
       writeStderrLineSafe(
         `qwen serve: Hosted child operation ${kind} of session ${req.params['id']} failed: ${message}`,

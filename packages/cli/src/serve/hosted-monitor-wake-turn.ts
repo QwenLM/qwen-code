@@ -9,6 +9,7 @@ import type { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed
 import { randomUUID } from 'node:crypto';
 import type { HostedMonitorWakeTurn } from './hosted-monitor-wake.js';
 import { wakeHasPriorAttempt } from './hosted-monitor-wake.js';
+import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
@@ -132,5 +133,38 @@ export function createMonitorWakeRunTurn(params: {
       session.active = undefined;
     }
     return 'settled';
+  };
+}
+
+/**
+ * H4b: the wake turn marks the delivered child result consumed only when
+ * the turn itself durably settled. {@link createMonitorWakeRunTurn}'s
+ * `'settled'` also answers the two blocked branches (a prior unfinished
+ * attempt, a recovery-required error), where the Turn and its input
+ * deliberately stay unsettled — those branches set `blocked`, which a
+ * genuine settle never does, so the block flag is the witness that the
+ * consumption must not commit.
+ */
+export function withChildAgentConsumption(
+  runWakeTurn: (turn: HostedMonitorWakeTurn) => Promise<'settled' | 'busy'>,
+  session: {
+    blocked: boolean;
+    childAgents?: HostedChildAgentSession;
+  },
+): (turn: HostedMonitorWakeTurn) => Promise<'settled' | 'busy'> {
+  return async (turn) => {
+    const outcome = await runWakeTurn(turn);
+    if (
+      outcome === 'settled' &&
+      !session.blocked &&
+      turn.source === 'child_agent' &&
+      turn.turnId.endsWith(':accept:notify') &&
+      session.childAgents
+    ) {
+      await session.childAgents.markConsumed(
+        turn.turnId.slice(0, -':accept:notify'.length),
+      );
+    }
+    return outcome;
   };
 }

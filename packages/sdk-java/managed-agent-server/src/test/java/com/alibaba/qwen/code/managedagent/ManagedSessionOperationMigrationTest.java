@@ -69,8 +69,8 @@ class ManagedSessionOperationMigrationTest {
                     new SessionLifecycleCoordinator(store,
                             new ManagedSessionStore(jdbc), harness,
                             new DrainedRuntime(), new ChildResultRelayStore(jdbc),
-                            new ObjectMapper(), executor, Clock.systemUTC(),
-                            properties);
+                            new ObjectMapper(), digests, executor,
+                            Clock.systemUTC(), properties);
             SessionLifecycleService lifecycle = new SessionLifecycleService(
                     store, new ManagedAgentService(store, digests, null,
                             harness, registry), digests, coordinator);
