@@ -131,9 +131,10 @@ interface ScoredTool {
 }
 
 export function isDeferredToolBridgeAvailable(registry: ToolRegistry): boolean {
-  return Boolean(
-    registry.getTool(ToolNames.TOOL_SEARCH) &&
-      registry.getTool(ToolNames.TOOL_CALL),
+  const toolNames = registry.getAllToolNames();
+  return (
+    toolNames.includes(ToolNames.TOOL_SEARCH) &&
+    toolNames.includes(ToolNames.TOOL_CALL)
   );
 }
 

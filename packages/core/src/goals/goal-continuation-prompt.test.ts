@@ -10,15 +10,28 @@ import {
   renderGoalContinuationPrompt,
   type GoalContinuationPromptInput,
 } from './goal-continuation-prompt.js';
+import type { ToolRegistry } from '../tools/tool-registry.js';
+import { ToolNames } from '../tools/tool-names.js';
+
+const registryWith = (...names: string[]) =>
+  ({ getAllToolNames: () => names }) as ToolRegistry;
+const discoveryRegistry = registryWith(
+  ToolNames.TOOL_SEARCH,
+  ToolNames.TOOL_CALL,
+  ToolNames.EXEC,
+);
 
 /** Renders for goal-7 at revision 3 with `fields` added or overridden. */
 const render = (fields: Partial<GoalContinuationPromptInput> = {}) =>
-  renderGoalContinuationPrompt({
-    goalId: 'goal-7',
-    revision: 3,
-    objective: 'Ship the release notes.',
-    ...fields,
-  });
+  renderGoalContinuationPrompt(
+    {
+      goalId: 'goal-7',
+      revision: 3,
+      objective: 'Ship the release notes.',
+      ...fields,
+    },
+    discoveryRegistry,
+  );
 
 // These expectations pin the complete rendered prompt. Every host renders from
 // here, so any edit to any line must show up as a diff in this file rather
@@ -44,6 +57,24 @@ Judge your previous Goal turn before acting: it made progress only if it changed
 Before proposing that the Goal is complete, treat completion as unproven: for every explicit requirement in the objective, identify the tool result that proves it and, unless it is among the most recent records, produce it again now, matching the scope of the check to the scope of the requirement. Missing, indirect, or self-reported evidence means not done: keep working, and do not redefine success around the work that already exists.`;
 
 describe('renderGoalContinuationPrompt', () => {
+  it('omits discovery instructions for unavailable routes', () => {
+    const input = {
+      goalId: 'goal-7',
+      revision: 3,
+      objective: 'Ship the release notes.',
+    };
+    expect(renderGoalContinuationPrompt(input)).not.toContain('tool_search');
+    expect(
+      renderGoalContinuationPrompt(input, registryWith(ToolNames.TOOL_CALL)),
+    ).not.toContain('tool_search');
+    const codeOnly = renderGoalContinuationPrompt(
+      input,
+      registryWith(ToolNames.TOOL_SEARCH, ToolNames.EXEC),
+    );
+    expect(codeOnly).toContain('In Code Mode, discover missing Goal tools');
+    expect(codeOnly).not.toContain('In Direct mode:');
+  });
+
   it('renders the whole prompt without verifier feedback', () => {
     expect(render()).toBe(`${PROMPT_HEAD}\n${PROMPT_WORK}`);
   });
@@ -279,6 +310,18 @@ ${PROMPT_WORK}`,
 });
 
 describe('buildGoalContinuationParts', () => {
+  it('carries the registered discovery capability through the host renderer', () => {
+    const [part] = buildGoalContinuationParts(
+      {
+        permit: { goalId: 'goal-7', revision: 3, turnId: 'turn-1' },
+        continuationContext: 'Ship the release notes.',
+      },
+      registryWith(ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL),
+    );
+    expect(part.text).toContain('In Direct mode:');
+    expect(part.text).not.toContain('In Code Mode, discover');
+  });
+
   it('wraps the prompt for the turn permit in a single text part', () => {
     expect(
       buildGoalContinuationParts({

@@ -156,6 +156,7 @@ import {
   type BundledReferenceSurface,
   toolSearchBridgeSentence,
 } from '../../skills/bundled-reference.js';
+import { isDeferredToolBridgeAvailable } from '../tool-search.js';
 
 const EXTERNAL_USAGE_NOTICE =
   '\n\n[External executor token usage and cost are unavailable.]';
@@ -970,6 +971,13 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     const delegationSection = buildAgentDelegationSection(
       this.delegationSurface,
     );
+    const registry = this.config.getToolRegistry?.();
+    const rosterDiscovery =
+      registry &&
+      isDeferredToolBridgeAvailable(registry) &&
+      registry.getAllToolNames().includes(ToolNames.LIST_AGENTS)
+        ? `In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)}\n\n`
+        : '';
     const baseDescription = `${AGENT_DESCRIPTION_FIRST_LINE}
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
@@ -1004,9 +1012,7 @@ ${todoGuidance}- Delegate only concrete, bounded tasks that can run independentl
 
 ## Working with background agents
 
-In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)}
-
-**Don't peek.** Do not read or tail a background agent's output file while it runs. You get a completion notification; trust it. Reading the transcript mid-flight pulls the agent's tool noise into your context, which defeats the point of delegating.
+${rosterDiscovery}**Don't peek.** Do not read or tail a background agent's output file while it runs. You get a completion notification; trust it. Reading the transcript mid-flight pulls the agent's tool noise into your context, which defeats the point of delegating.
 
 **Don't race.** After launching a background agent, you know nothing about what it found. Never fabricate or predict its results in any format — not as prose, summary, or structured output. The notification arrives as a user-role message in a later turn; it is never something you write yourself. If the user asks a follow-up before the notification lands, tell them the agent is still running — give status, not a guess.
 

@@ -16,6 +16,7 @@ import type { ApprovalMode, Config } from '../config/config.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 import type { BroadcastResult } from '../agents/team/TeamManager.js';
 import type { ToolResult } from './tools.js';
+import { ToolNames } from './tool-names.js';
 
 const sendToPeer = vi.fn();
 vi.mock('../ipc/peer-send.js', () => ({
@@ -42,6 +43,7 @@ function makeTeamConfig(opts?: {
   registry?: BackgroundTaskRegistry;
   teamManager?: TeamManagerStub | null;
   approvalMode?: ApprovalMode;
+  toolNames?: readonly string[];
 }) {
   const teamManager = opts?.teamManager
     ? {
@@ -55,6 +57,9 @@ function makeTeamConfig(opts?: {
       opts?.registry ?? new BackgroundTaskRegistry(),
     getApprovalMode: () => opts?.approvalMode ?? DEFAULT_MODE,
     getSessionRegistrySlot: () => SHARED_RECORD_SLOT,
+    getToolRegistry: () => ({
+      getAllToolNames: () => opts?.toolNames ?? [],
+    }),
   } as unknown as Config;
 }
 
@@ -123,11 +128,28 @@ describe('SendMessageTool — team mode', () => {
   it('has the correct name', () => {
     expect(noTeamTool().name).toBe('send_message');
     expect(noTeamTool().description).toContain(
+      'Running tasks receive your message at the next tool-round boundary',
+    );
+    expect(noTeamTool().description).not.toContain('tool_search');
+  });
+
+  it('advertises roster discovery only for a registered bridge in leader scope', () => {
+    const toolNames = [
+      ToolNames.LIST_AGENTS,
+      ToolNames.TOOL_SEARCH,
+      ToolNames.TOOL_CALL,
+    ];
+    const tool = new SendMessageTool(makeTeamConfig({ toolNames }));
+    expect(tool.schema.description).toContain(
       'In Direct mode: If the list_agents tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
     );
-    expect(noTeamTool().description).toContain(
-      'If tool_search does not offer list_agents in this context, do not invoke it; use a known teammate name or task_id.',
-    );
+    expect(
+      new SendMessageTool(makeTeamConfig({ toolNames: toolNames.slice(0, 2) }))
+        .schema.description,
+    ).not.toContain('tool_search');
+    const teammateSchema = asTeammate('alice', () => tool.schema);
+    expect(teammateSchema.description).not.toContain('list_agents');
+    expect(teammateSchema.description).toContain('known teammate name');
   });
 
   it('describes text invisibility as peer-only for teammates', () => {

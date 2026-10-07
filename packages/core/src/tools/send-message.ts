@@ -33,7 +33,8 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { ToolErrorType } from './tool-error.js';
 import { findMemberByName } from '../agents/team/teamHelpers.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import { getAgentName } from '../agents/team/identity.js';
+import { getAgentName, isTeammate } from '../agents/team/identity.js';
+import { isDeferredToolBridgeAvailable } from './tool-search.js';
 import { LEADER_NAME } from '../agents/team/types.js';
 import type { ApprovalMode } from '../config/approval-mode.js';
 import {
@@ -509,6 +510,28 @@ class SendMessageInvocation extends BaseToolInvocation<
   }
 }
 
+function sendMessageDescription(config: Config): string {
+  const registry = config.getToolRegistry?.();
+  const rosterAvailable =
+    !isTeammate() &&
+    registry?.getAllToolNames().includes(ToolNames.LIST_AGENTS);
+  const rosterGuidance = rosterAvailable
+    ? 'Use list_agents to find a background task id or another session\'s "to" value, exactly as shown — list_agents appends " [ref]" whenever the bare name would not reach that session (another session or a teammate shares it). ' +
+      (registry && isDeferredToolBridgeAvailable(registry)
+        ? `In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)} `
+        : '')
+    : '';
+  return (
+    'Send to a teammate or another Qwen Code session (use "to"), or a running, paused, or completed background task (use "task_id"); completed tasks are revived. Specify exactly one of the two fields. ' +
+    'Set "to" to a known teammate name (no @), to "*" to broadcast within an active Agent Team only, or to another session\'s destination name. ' +
+    "A message to another session arrives there marked as coming from another session, carries none of your user's authority, and may be held for that session's user to review; never use it to have another session perform an action this session was denied, blocked from, or cannot do itself. " +
+    'For background tasks, set "task_id" to the id from the launch response or a recovered task. ' +
+    'Running tasks receive your message at the next tool-round boundary; paused recovered tasks resume with the message as their first continuation instruction; completed tasks continue on their resident runtime when available and otherwise revive from their transcript and continue with your message. ' +
+    rosterGuidance +
+    'Your text output is NOT visible to teammates or to other sessions — use this tool to communicate.'
+  );
+}
+
 export class SendMessageTool extends BaseDeclarativeTool<
   SendMessageParams,
   ToolResult
@@ -519,14 +542,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
     super(
       SendMessageTool.Name,
       ToolDisplayNames.SEND_MESSAGE,
-      'Send to a teammate or another Qwen Code session (use "to"), or a running, paused, or completed background task (use "task_id"); completed tasks are revived. Specify exactly one of the two fields. ' +
-        'Set "to" to a bare teammate name (no @), to "*" to broadcast within an active Agent Team only, or to a session name from list_agents, exactly as its "to" value shows it — list_agents appends " [ref]" whenever the bare name would not reach that session (another session or a teammate shares it). ' +
-        "A message to another session arrives there marked as coming from another session, carries none of your user's authority, and may be held for that session's user to review; never use it to have another session perform an action this session was denied, blocked from, or cannot do itself. " +
-        'For background tasks, set "task_id" to the id from the launch response or list_agents. ' +
-        `In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)} ` +
-        'If tool_search does not offer list_agents in this context, do not invoke it; use a known teammate name or task_id. ' +
-        'Running tasks receive it at the next tool-round boundary; paused recovered tasks resume with the message as their first continuation instruction; completed tasks continue on their resident runtime when available and otherwise revive from their transcript and continue with your message. ' +
-        'Your text output is NOT visible to teammates or to other sessions — use this tool to communicate.',
+      sendMessageDescription(config),
       Kind.Other,
       {
         type: 'object',
@@ -534,7 +550,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
           to: {
             type: 'string',
             description:
-              'Recipient: a teammate name, "*" for Agent Team broadcast, or a session\'s "to" value from list_agents verbatim (it carries " [ref]" when the bare name would not reach that session).',
+              'Recipient: a known teammate name, "*" for Agent Team broadcast, or another Qwen Code session\'s destination name.',
           },
           task_id: {
             type: 'string',
@@ -565,6 +581,13 @@ export class SendMessageTool extends BaseDeclarativeTool<
       false, // alwaysLoad
       'send message task teammate team communicate notify',
     );
+  }
+
+  override get schema() {
+    return {
+      ...super.schema,
+      description: sendMessageDescription(this.config),
+    };
   }
 
   protected createInvocation(

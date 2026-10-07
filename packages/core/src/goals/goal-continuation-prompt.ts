@@ -8,6 +8,9 @@ import type { Part } from '@google/genai';
 import type { GoalRecord, GoalTurnPermit } from './goal-protocol.js';
 import { escapeJsonTagCharacters } from '../utils/formatters.js';
 import { toolSearchBridgeSentence } from '../skills/bundled-reference.js';
+import { isDeferredToolBridgeAvailable } from '../tools/tool-search.js';
+import type { ToolRegistry } from '../tools/tool-registry.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 export type GoalContinuationUsage = Pick<
   GoalRecord,
@@ -70,8 +73,6 @@ const DATA_CLOSE_TAG = '</goal_runtime_data>';
 const SHARED_LINES = [
   'Continue working on the active Goal.',
   'Use get_goal for the authoritative objective, the budget figures, and any verifier feedback.',
-  `In Direct mode: ${toolSearchBridgeSentence('get_goal or update_goal')}`,
-  'In Code Mode, discover missing Goal tools with tool_search and invoke them through exec using the returned JavaScript name.',
   "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
   'If completion depends on content delivered in this turn, deliver only that content in this turn, before update_goal.',
 ];
@@ -204,9 +205,27 @@ function serializeGoalData(input: GoalContinuationPromptInput): string {
 /** Renders the full continuation prompt text for one Goal turn. */
 export function renderGoalContinuationPrompt(
   input: GoalContinuationPromptInput,
+  registry?: ToolRegistry,
 ): string {
+  const toolNames = registry?.getAllToolNames() ?? [];
+  const discoveryLines: string[] = [];
+  if (registry && isDeferredToolBridgeAvailable(registry)) {
+    discoveryLines.push(
+      `In Direct mode: ${toolSearchBridgeSentence('get_goal or update_goal')}`,
+    );
+  }
+  if (
+    toolNames.includes(ToolNames.TOOL_SEARCH) &&
+    toolNames.includes(ToolNames.EXEC)
+  ) {
+    discoveryLines.push(
+      'In Code Mode, discover missing Goal tools with tool_search and invoke them through exec using the returned JavaScript name.',
+    );
+  }
   const lines = [
-    ...SHARED_LINES,
+    ...SHARED_LINES.slice(0, 2),
+    ...discoveryLines,
+    ...SHARED_LINES.slice(2),
     ...SYNTHETIC_TURN_GUARD_LINES,
     DATA_BLOCK_FRAMING_LINE,
     DATA_OPEN_TAG,
@@ -250,19 +269,24 @@ export function renderGoalContinuationPrompt(
 /** Renders a runtime-scheduled Goal continuation turn. */
 export function renderGoalContinuationTurn(
   turn: { permit: GoalTurnPermit } & GoalContinuationTurn,
+  registry?: ToolRegistry,
 ): string {
   const { permit, continuationContext, ...hints } = turn;
-  return renderGoalContinuationPrompt({
-    goalId: permit.goalId,
-    revision: permit.revision,
-    objective: continuationContext,
-    ...hints,
-  });
+  return renderGoalContinuationPrompt(
+    {
+      goalId: permit.goalId,
+      revision: permit.revision,
+      objective: continuationContext,
+      ...hints,
+    },
+    registry,
+  );
 }
 
 /** Builds the sendable parts for a runtime-scheduled Goal continuation turn. */
 export function buildGoalContinuationParts(
   turn: { permit: GoalTurnPermit } & GoalContinuationTurn,
+  registry?: ToolRegistry,
 ): Part[] {
-  return [{ text: renderGoalContinuationTurn(turn) }];
+  return [{ text: renderGoalContinuationTurn(turn, registry) }];
 }

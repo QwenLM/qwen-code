@@ -1303,7 +1303,10 @@ export async function runNonInteractive(
                 );
               }
               markGoalTurnDelivered(activeGoalTurn);
-              initialPartList = buildGoalContinuationParts(activeGoalTurn);
+              initialPartList = buildGoalContinuationParts(
+                activeGoalTurn,
+                config.getToolRegistry?.(),
+              );
               slashHandled = true;
               break;
             }
@@ -2721,7 +2724,10 @@ export async function runNonInteractive(
               currentMessages = [
                 {
                   role: 'user',
-                  parts: buildGoalContinuationParts(nextGoalTurn),
+                  parts: buildGoalContinuationParts(
+                    nextGoalTurn,
+                    config.getToolRegistry?.(),
+                  ),
                 },
               ];
               hasUnsentToolResponse = false;
@@ -2752,7 +2758,10 @@ export async function runNonInteractive(
               currentMessages = [
                 {
                   role: 'user',
-                  parts: buildGoalContinuationParts(nextGoalTurn),
+                  parts: buildGoalContinuationParts(
+                    nextGoalTurn,
+                    config.getToolRegistry?.(),
+                  ),
                 },
               ];
               hasUnsentToolResponse = false;
