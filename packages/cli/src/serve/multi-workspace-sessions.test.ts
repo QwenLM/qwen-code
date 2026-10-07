@@ -7583,6 +7583,15 @@ describe('batch workspace session live-state route', () => {
       Array.from({ length: 20 }, () => 'primary-id'),
     ).expect(200);
     expect(res.body.workspaces).toHaveLength(20);
+    // The route answers a valid batch with 200 and per-member error objects,
+    // so the count alone cannot tell twenty snapshots from twenty failures.
+    for (const member of res.body.workspaces) {
+      expect(member).toMatchObject({
+        workspaceId: 'primary-id',
+        v: 1,
+        sessions: expect.any(Array),
+      });
+    }
 
     const longest = await batch(app, ['/' + 'a'.repeat(4095)]).expect(200);
     expect(longest.body.workspaces).toEqual([

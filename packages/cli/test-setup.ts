@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { afterAll } from 'vitest';
 
 // Unset NO_COLOR environment variable to ensure consistent theme behavior between local and CI test runs
 if (process.env['NO_COLOR'] !== undefined) {
@@ -60,11 +61,16 @@ delete process.env['QWEN_SERVE_MAX_WORKSPACES'];
 // closed by design (one polluted file failed 408 tests across 15 files in a
 // measured gate run). Pin a private empty home per test-file process when the
 // environment did not select one; tests that exercise QWEN_HOME set, stub, or
-// delete it themselves.
-if (process.env['QWEN_HOME'] === undefined) {
+// delete it themselves. The truthiness test matches every production reader
+// (Storage.getGlobalQwenDir does `if (envDir)`), so an ambient empty string is
+// pinned over rather than falling through to $HOME/.qwen.
+if (!process.env['QWEN_HOME']) {
   const qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-cli-test-'));
   process.env['QWEN_HOME'] = qwenHome;
-  process.once('exit', () => {
+  // Vitest workers are terminated, not exited, so a `process.on('exit')`
+  // cleanup never runs and leaks one directory per test file; afterAll does
+  // run at the end of each file, which is exactly the pin's lifetime.
+  afterAll(() => {
     fs.rmSync(qwenHome, { recursive: true, force: true });
   });
 }
