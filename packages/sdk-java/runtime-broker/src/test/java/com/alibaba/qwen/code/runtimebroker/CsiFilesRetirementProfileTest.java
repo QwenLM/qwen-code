@@ -13,6 +13,12 @@ class CsiFilesRetirementProfileTest {
             "storage", ".", CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1);
 
     @Test
+    void pinsTheReservedWorkerCapabilityDigest() {
+        assertEquals("sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+                CsiFilesRetirementProfile.CAPABILITY_DIGEST);
+    }
+
+    @Test
     void pinsExactSessionAndUsesTheExistingManagedRequestEncoding() {
         String id = UUID.randomUUID().toString();
         var request = CsiFilesRetirementProfile.request(workspace, "/workspace", id);

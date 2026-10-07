@@ -3,18 +3,19 @@
 [English](2026-10-07-k2-native-file-execution.md) | [简体中文](2026-10-07-k2-native-file-execution.zh-CN.md)
 
 状态：完整文件组合设计；初始 checkpoint 门禁已在本地实现，并在自有 MySQL 上独立验证，
-2026-10-07。调查基线为
+2026-10-07。实现基线为
 [Draft PR #13526](https://github.com/QwenLM/qwen-code/pull/13526) 中的
-`a6cc145edf2f586604c889b186dc10a20e534761`。该提交已实现原执行的 SQL
+`b0738214c5d09f00ac74b14f3d517f8a6e3fd4b4`。该提交已实现原执行的 SQL
 continuation；以下正常文件链尚未实现。本文补充
 [K2 补全设计](2026-10-06-kubernetes-k2-retirement-handoff.zh-CN.md)，不声明完整
 A2、聚合退役或新增云上验收完成。
 
 ## 1. 问题与范围
 
-调查基线中，私有 `csi-files-retirement/1` 的 CREATE 与首次 activation 固定点已存在，但
-通用 worker 构造 Shell/MCP/Hook/monitor/provider 组件，SQL reader 仅接受
-genesis/install/renew。删除 control 拒绝或允许任意 checkpoint，不能安全连接这些权威。
+实现基线中，私有 `csi-files-retirement/1` 的 CREATE 与首次 activation 固定点已存在，但
+通用 worker 构造 Shell/MCP/Hook/monitor/provider 组件。SQL reader 接受
+genesis/install/renew 与一次准确的空初始 checkpoint，尚未准入连通的文件执行链。
+删除 control 拒绝或允许任意 checkpoint，不能安全连接这些权威。
 
 真实 Hosted v2 链为 Write/Edit 的 file-history 准备 → Broker PREPARED → 原生
 `tool.intent` → `await_runtime` checkpoint → 授权/worker 执行 → 内联
@@ -30,6 +31,14 @@ stop/unpublish、K2-C release/多轮交接、K2-D 部署资格验证仍是后续
 
 ## 2. 封闭 worker 身份与构造
 
+本批仅增加下述 legacy 入口拒绝。独立基线观测到保留 digest 到达旧通用
+factory，local-process 也在启动失败前创建子进程。Guard 在副作用前拒绝
+stdin/container reader、直接旧 worker/factory 构造，以及本地 request 创建、
+registration、provisioning、adoption、confirmation、release。Local operator
+registration/stop evidence 也拒绝该私有 request。普通 profile digest 保留既有
+路径。可复用 managed-context 数据 parser 与 CSI-v1 数据 schema 不变，它们
+不授予执行权。下述 boot4/CSI2 构造、新 route 和连通文件链仍是设计。
+
 预留外层 boot version `4`、`managed-csi/2` 与 CSI v2 attestation/drain route。
 包裹不变的封闭 managed-context boot v2 与已注册 storage tuple，增加只含
 `profile`、`sessionId`、`capabilityDigest` 的封闭 profile identity。要求准确的
@@ -44,6 +53,38 @@ managed-context/1、CSI v1 record 保持封闭且不变。
 固定 Runtime Session，execution turn/prompt ID 仍独立；legacy Hosted 保持
 prompt-scoped Runtime Session ID。不能为误用 legacy composer 放宽 SQL 身份
 条件或增加第二个固定点。
+
+外层 key 为 `identity`，准确三个字段来自不可变原 provision request。新 wire
+契约与 legacy schema 分开；仅凭 protocol number 不能选择或授权此 profile。
+
+| 契约                           | 准确外层字段与固定值                                                                                                                                                                  |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Container boot                 | `type: "boot"`、`version: 4`、`managedCsi: "managed-csi/2"`、`identity`、不变的 boot-v2 `context`、不变的 12 字段 `storage`                                                           |
+| 信息性 ready                   | `type: "ready"`、`version: 4`、`managedCsi: "managed-csi/2"`、`identity`、不变的 ready-v2 `context`                                                                                   |
+| Context attest/install/receipt | `protocolVersion: 2`、`managedCsi: "managed-csi/2"`、`identity`、`context` 内不变的封闭 managed-context-v3 request/response                                                           |
+| Physical attestation request   | `protocolVersion: 2`、`managedCsi: "managed-csi/2"`、`identity`、`provisionRequestId`、`physicalKey`、`registrationRevision`、`reservationId`、`reservationRevision`                  |
+| Physical attestation response  | `protocolVersion: 2`、`managedCsi: "managed-csi/2"`、`identity`、`context`、`storage`、`pod`、`mount`                                                                                 |
+| Drain request                  | `protocolVersion: 2`、`managedCsi: "managed-csi/2"`、`identity`、`operation`、`retirementId`、`context`、`storage`、`pod`                                                             |
+| Drain response                 | `protocolVersion: 2`、`managedCsi: "managed-csi/2"`、`identity`、`retirementId`、`context`、`storage`、`pod`、`state`、`workState`、`pendingStarts`、`pendingInvocations`、`blockers` |
+
+使用 `/internal/managed-runtime/csi/v2/context-attest`、`/context`、`/attest`
+与 `/drain`；后三者位于同一 CSI-v2 prefix。Kubernetes 资格验证对照真实 Pod 与
+两种 HTTP attestation。Ready stdout 只提供信息，不能成为第二权威。Drain
+保留 seal/status、`state: "DRAINING"` 与 `workState: "BLOCKED" | "PENDING" |
+"QUIESCENT"`；counter 为原生非负 safe integer，blockers 为唯一排序字符串。
+这是 worker 观测，不是聚合 DRAINED 或物理终止证据。
+
+Attestation/drain route 为 selected-runtime scope；context installation 与
+私有 history route 是该准确 runtime 内的 live-session-owner scope。认证原
+lease/incarnation/epoch 后，再验证固定 owner 与已安装 context。缺失/draining/
+removed 或身份不匹配按声明的拒绝/观测规则处理，不能 fallback 到 primary runtime。
+不存在 process-global 的私有通用 control route。
+
+Legacy boot 1/2/3 与 local-process provisioning 在构造通用完整 profile worker
+之前拒绝保留的私有 manifest digest。新 profile 仅支持 container，不扩展旧 stdin
+boot reader，也不启用 CSI-v1 publication ACK。其他有效 legacy profile 保持既有
+行为。私有内层 context 固定 `cwd` 为 `.` 并要求已注册私有 configuration digest；
+调用方选择的 context 不能扩大能力。
 
 仅构造三个文件工具，同时限制 executor lookup 与工具声明；每次调用要求原
 activation 和 context。安装必须匹配 boot 的 Session/profile 配置。在构造 runtime、
@@ -71,6 +112,41 @@ caller 保持默认值。使用已注册卷内绑定原 Session 的保留目录�
 Write/Edit 必须要求已绑定并 prepared 的 history；不能使用 legacy executor
 在没有 history 对象时仍执行 mutation 的 fallback。
 
+选择固定保留 prefix `.qwen-csi-file-history` 与规范 owner UUID leaf。私有 backend
+使用具体 Linux directory-fd 实现，不接受调用方路径或环境选项。以
+`O_DIRECTORY | O_NOFOLLOW` 打开并持有原 mount、保留 prefix、Session directory，
+对照原 mount receipt 的 volume device/inode。每次只向 `/proc/self/fd/<dirfd>`
+追加一个已验证 component。I/O 前后验证目录名称仍对应原身份并核实原 mount；
+观测到不匹配后，本 lifetime 的 backend 永久 blocked，不替换/adopt，也不允许
+非 Linux fallback。首次空 bind 可以在当前原 admission 下创建 Session directory，
+该 metadata I/O 必须计入 drain；拒绝已有非空/未知目录。
+
+从已打开普通文件 descriptor 复制 raw preimage bytes，以
+`O_CREAT | O_EXCL | O_NOFOLLOW` 创建唯一 leaf。同一 descriptor 完成
+stat/read/write/hash/chmod，处理短写，在发布 metadata 前 sync 文件和目录。
+不能覆盖 retained leaf，不能 unlink 失败尝试。全部 backup 读取验证原 content
+pin，不能只检查当前存在或重新计算 hash。Snapshot 与 orphan bytes 保留至具备
+资格的原 finalize，失败尝试仍是 blocker。Legacy `copyFile` 非原子且出错时可能
+删除目的，不能提供此私有契约。这些选择依据文档中的
+[Linux directory-fd 行为](https://man7.org/linux/man-pages/man2/open.2.html) 与
+[Node 22 FileHandle 操作](https://nodejs.org/docs/latest-v22.x/api/fs.html#class-filehandle)，
+仍需真实 Linux 测试。
+
+从私有 factory → executor → `ManagedRuntimeFileHistory` →
+`ManagedToolFileHistory` → `FileHistoryService` 传递同一个具体 backend，含
+previous-history rollback 构造。Legacy caller 不传，保持原默认值。私有 create、
+fingerprint、validation、diff、snapshot、inventory 读取均使用此 backend；
+rewind/restore 与 orphan cleanup 在破坏性 I/O 前拒绝。Wrapper 仅借用，原 factory
+拥有可 join 的 tail 与 descriptor lifetime。
+
+普通工具也需要 descriptor-bound access。注入的既有 `FileSystemService` 覆盖
+文本 I/O，但 `read_file` 格式分类/media 读取、Write/Edit 直接 mkdir、atomic-write
+fallback 仍使用 pathname。启用私有 worker 前，必须盘点并闭合这些真实 I/O
+接点。一次 realpath 检查或安全 backup class 不能保护稍后的工具读写。在实际
+open/use 边界拒绝保留 prefix alias 与 backup-inode hardlink。保留格式/编码
+语义，未验证的 helper lifecycle 仍明确作为 blocker。此设计保护声明的文件系统
+边界，不防御已经控制 worker memory、fd table、mount namespace 的 hostile actor。
+
 Hosted 当前先调用 prepare，再提交 `pendingTurn`/`pendingMessageId`；这些字段
 不是 preparation 准入。此 profile 必须在 worker I/O 前，向既有原生 file-history
 domain 提交版本化的准确 preparation intent，绑定原 turn/message、invocation/input
@@ -78,11 +154,83 @@ ref 与排序路径。原 parent guard 仅在 READY 准入。Broker 在原 conne
 已提交字节，不信调用方标志或缓存 context。保持单一 journal 权威，不持 parent
 SQL 锁跨 worker I/O。
 
+私有 file-history body 使用 `schemaVersion: 2`；durable resource ref、
+`domain.committed` event、native marker 仍为 version 1。Root 准确字段为
+`operationId`、`revision`、`previousRecordRef`、`schemaVersion`、`profile`、
+`runtimeSessionId`、`state`、`backupDirectory`、`retainedBackups`、`preparation`、
+`record`。前三个由 authority 提供。`state` 保留封闭 owner/snapshots/files
+形态；`record` 保留普通 file-history reader projection，必须与
+`state.snapshots` 一致。Legacy body schema 1 保持独立分支，不能充当私有
+preparation 证据。
+
+`backupDirectory` 准确为 `volumeDevice`、`volumeInode`、`directoryDevice`、
+`directoryInode`，使用原打开 descriptor 的规范无符号十进制字符串。
+按 name 排序的 `retainedBackups` 每项准确为 `name`、`device`、`inode`、
+`byteLength`、`digest`、`mode`：已验证单叶名、规范 device/inode 字符串、safe
+integer 字节数/mode、bare lowercase SHA-256 bytes digest。每个非 NULL retained
+snapshot backup 恰有一个原 pin，跨 revision 不能更改或删除 pin。Native pin
+描述成功认证的 preimage；sealed worker inventory 另行观测全部实际 leaf，含
+未知/不完整 orphan 尝试，不能用认可当前字节代替先前 pin。
+
+| History stage | 准确 preparation 与 transition                                                                                                    |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 初始 idle     | `preparation: null`，空 state/pins、revision 1、NULL predecessor；原空 bind 观测                                                  |
+| Intent        | `stage: "intent"`、`turnId`、`promptId`、`batchId`、`invocations`、`paths`；保留 previous idle state/directory/pins               |
+| Prepared      | 相同不可变字段，`stage: "prepared"`，增加 `intentRef`；直接 predecessor 等于该原 intent ref，仅增加已认证 backup 与匹配观测 state |
+| 完成 idle     | `preparation: null`；直接 predecessor 为对应 prepared record，保留 retained evidence，证明整个原 batch 的 results/history         |
+
+每个 invocation 准确为 `executionCallId`、`callId`、`functionCallId`、`toolName`、
+`partIndex`、`ordinal`、`requestDigest`、`inputRef`、`toolDefinitionRef`。纳入 batch
+全部已准入 read/write/edit，身份唯一并按原 ordinal 递增，对照已提交 assistant
+message 验证 part/function 身份。Input/definition ref 为不变的封闭 durable ref。
+`requestDigest` 是准确 payload JSON UTF-8 bytes 的 hash，带 `sha256:` prefix；
+inputRef.digest 是外层 input resource 的 hash，两者不同。Paths 从这些准确原
+input bytes 派生为排序去重的 Write/Edit path union，使用 JS 默认 sort/Java
+natural String order，不能用 locale order。Preimage I/O 前，将整体 resource 限制
+在既有 64 KiB inline 上限，snapshot 限制为 100。
+
+一次分配 call，发布 input/definition，并在提交 intent **前**为已接受调用预留
+SQL PREPARED row，随后调用 prepare。Reservation 不是 dispatch authorization，
+此顺序避免增加后续 execution-identity 解析阶段。文件 reservation 保留封闭
+Tool-v2 deferred reference，不能发送 `runtimeProtocol: 3`/`inputDigest`；当前
+service 将该分支限制为 Shell/Monitor。Read-only batch 不需要 backup intent。
+后续 mutation 的 tool intent 与 dispatch checkpoint 必须引用已提交 prepared record。
+
+稳定 command 使用 `csi-file-history:bind:<owner>`、`:intent:<batchId>`、
+`:prepared:<batchId>`、`:settled:<batchId>`，每个提交一个既有 file_history-domain
+event。从准确 semantic field 派生 contentDigest，排除 authority wrapper 与生成的
+reader projection，返回真实 domain receipt/ref。恢复后的 retry 复用持久化 call/ref，
+比较原 semantic bytes，不能制造新 batch 绕过不确定性。HTTP resource commit 与
+read-only snapshot closure 都显式增加 schema-2 nested-ref collector，收集
+invocation input/definition ref 与 intentRef；不能每次 transaction 递归整个
+previousRecordRef 链。
+
 提供独立于 provider lifecycle 的窄认证 history 分支：READY 允许首次空 bind、
 已准入 prepare、snapshot，不允许 rewind/restore。Worker seal 后只允许对已绑定
 原 history 做 idle snapshot。拒绝迟到 prepare，并保留其持久化未完成 intent 为
 blocker。追踪已运行 preparation 至完成及最终 inventory，不能推断失败/拒绝 RPC
 没有改变文件。
+
+独立封闭 `csi-file-history` operation 使用 version 1。Bind/snapshot 只有
+`kind`、`version`、`action`，prepare 增加 `preparationRef`。Broker 在原 connection
+查找当前已提交 intent 与全部 SQL PREPARED row，对照 assistant/input/path/resource
+membership 后派生 worker request。调用方不能提供权威 paths 或 prepared flag。
+Transport 使用独立认证 CSI-v2 history route，匹配 boot identity 与已安装原 context，
+不构造 ProviderWorker。Legacy raw-file-history request 保持不变。
+
+Worker 去重是原 lifetime 内按准确 intent resource ID/digest 保存的观测，在第一次
+await 前登记 retained promise。准确 retry join 原 operation 或返回 retained result；
+内容变化冲突，失败不能重新 copy。此工作计入 seal 与 inventory。SQL 和 worker
+admission 是两个独立 barrier：seal 先于首次 worker start 则拒绝；seal 先于 native
+prepared commit 则持久化 intent 保持未解决。最小分支不授予新 prepare，也不授予
+post-seal prepared 权威。Worker seal 后只允许已运行 preparation 的只读观测。
+Cancel、timeout、SQL not_started、worker 身份丢失均不能清除未解决 intent。
+
+Hosted load/resume/idle/cancel/history、workspace read-only recovery、原
+file-checkpoint proof、native CSI inventory 都必须增加 schema-aware pending
+reader。既有 cancelled-turn cleanup 写 schema 1 并置 pendingTurn NULL，对 schema 2
+禁用。Parser 丢弃未知 pending 字段，或 terminal reader 只检查最新 record，都会
+丢失义务；必须 fold 并验证整个同 domain revision 链。
 
 ## 4. 原生 journal 与原 continuation
 

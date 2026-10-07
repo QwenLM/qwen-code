@@ -3,8 +3,8 @@
 [English](2026-10-07-k2-native-file-execution.md) | [简体中文](2026-10-07-k2-native-file-execution.zh-CN.md)
 
 Status: connected-composition design with the initial checkpoint gate locally
-implemented and independently verified on owned MySQL, 2026-10-07. Investigation baseline:
-`a6cc145edf2f586604c889b186dc10a20e534761` in
+implemented and independently verified on owned MySQL, 2026-10-07. Implementation baseline:
+`b0738214c5d09f00ac74b14f3d517f8a6e3fd4b4` in
 [Draft PR #13526](https://github.com/QwenLM/qwen-code/pull/13526). Original SQL
 execution continuation is implemented there; the normal file chain below is not.
 This extends the [K2 completion design](2026-10-06-kubernetes-k2-retirement-handoff.md)
@@ -12,9 +12,10 @@ and claims neither full A2 nor aggregate retirement nor new cloud acceptance.
 
 ## 1. Problem and scope
 
-At the investigation baseline, private `csi-files-retirement/1` CREATE and first
+At the implementation baseline, private `csi-files-retirement/1` CREATE and first
 activation pin exist, but the generic worker constructs Shell/MCP/Hook/monitor/
-provider components and the SQL reader accepts only genesis/install/renew.
+provider components. The SQL reader accepts genesis/install/renew and one exact
+empty initial checkpoint; it does not admit the connected file chain.
 Removing a control refusal or allowing
 arbitrary checkpoints would not connect those authorities safely.
 
@@ -33,6 +34,17 @@ repeated handoff and K2-D deployment qualification remain required later work.
 
 ## 2. Closed worker identity and construction
 
+The current slice adds only the legacy-entry refusal described below. Its
+independent baseline observed the reserved digest reaching the old generic
+factory and a local-process child before startup failure. The guard rejects
+stdin/container readers, direct old worker/factory construction, and local
+request creation, registration, provisioning, adoption, confirmation and
+release before their side effects. Local operator registration/stop evidence
+also refuses this private request. Ordinary profile digests retain their
+existing path. The reusable managed-context data parser and CSI-v1 data schema
+are unchanged; they do not grant execution. Boot4/CSI2 construction, new routes
+and the connected file chain below remain planned.
+
 Reserve outer boot version `4`, `managed-csi/2` and CSI v2 attestation/drain
 routes. Wrap unchanged closed managed-context boot v2 and the registered storage
 tuple; add a closed profile identity with `profile`, `sessionId` and
@@ -49,6 +61,43 @@ separate. Legacy Hosted keeps its prompt-scoped Runtime Session IDs. Do not
 broaden the SQL identity predicate or add a second pin to accommodate the legacy
 composer accidentally. Old boot v3, managed-context/1 and CSI v1 records remain
 closed and unchanged.
+
+The outer key is `identity`. Its exact three fields come from the immutable
+original provision request. The new wire contracts are separate from legacy
+schemas; a protocol number alone never selects or authorizes this profile.
+
+| Contract                       | Exact outer fields and fixed values                                                                                                                                                   |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Container boot                 | `type: "boot"`, `version: 4`, `managedCsi: "managed-csi/2"`, `identity`, unchanged boot-v2 `context`, unchanged 12-field `storage`                                                    |
+| Informational ready            | `type: "ready"`, `version: 4`, `managedCsi: "managed-csi/2"`, `identity`, unchanged ready-v2 `context`                                                                                |
+| Context attest/install/receipt | `protocolVersion: 2`, `managedCsi: "managed-csi/2"`, `identity`, unchanged closed managed-context-v3 request/response in `context`                                                    |
+| Physical attestation request   | `protocolVersion: 2`, `managedCsi: "managed-csi/2"`, `identity`, `provisionRequestId`, `physicalKey`, `registrationRevision`, `reservationId`, `reservationRevision`                  |
+| Physical attestation response  | `protocolVersion: 2`, `managedCsi: "managed-csi/2"`, `identity`, `context`, `storage`, `pod`, `mount`                                                                                 |
+| Drain request                  | `protocolVersion: 2`, `managedCsi: "managed-csi/2"`, `identity`, `operation`, `retirementId`, `context`, `storage`, `pod`                                                             |
+| Drain response                 | `protocolVersion: 2`, `managedCsi: "managed-csi/2"`, `identity`, `retirementId`, `context`, `storage`, `pod`, `state`, `workState`, `pendingStarts`, `pendingInvocations`, `blockers` |
+
+Use `/internal/managed-runtime/csi/v2/context-attest`, `/context`, `/attest`
+and `/drain`; the latter three are under the same CSI-v2 prefix. Kubernetes
+qualification compares the actual Pod and both HTTP attestations. Ready stdout
+is informational and must not become a second authority. Drain retains
+seal/status, `state: "DRAINING"` and `workState: "BLOCKED" | "PENDING" |
+"QUIESCENT"`; counts are native nonnegative safe integers and blockers are
+unique sorted strings. This is worker observation, not aggregate DRAINED or
+physical termination evidence.
+
+Attestation and drain routes are selected-runtime scoped. Context installation
+and the private history route are live-session-owner scoped within that exact
+runtime. They authenticate the original lease/incarnation/epoch, then verify
+the fixed owner and installed context; missing/draining/removed or mismatched
+identity follows the stated refusal/observation rule without primary-runtime
+fallback. No private route is a process-global generic control.
+
+Before constructing the generic full-profile worker, legacy boot 1/2/3 and
+local-process provisioning reject the reserved private manifest digest. The new
+profile is container-only. It does not extend the old stdin boot reader or
+enable CSI-v1 publication ACK. Other valid legacy profiles keep their existing
+behavior. The private inner context fixes `cwd` to `.` and the registered private
+configuration digest; caller-selected context cannot expand its capability.
 
 Construct only the three file tools. Restrict executor lookup as well as tool
 declarations; each invocation requires the original activation and context.
@@ -83,6 +132,50 @@ retained backup bytes as well as native history resources.
 Write/Edit must require bound, prepared history; the legacy executor fallback
 that executes a mutation without any history object is forbidden here.
 
+Choose the fixed reserved prefix `.qwen-csi-file-history` and canonical owner
+UUID leaf. The private backend is a concrete Linux directory-fd implementation,
+not a caller-selected pathname or environment option. Open and retain the
+original mount, reserved prefix and Session directory using
+`O_DIRECTORY | O_NOFOLLOW`; compare the volume device/inode with the original
+mount receipt. Append one validated component to `/proc/self/fd/<dirfd>` at a
+time. Check named-directory identities and the original mount before/after I/O;
+an observed mismatch makes the backend permanently blocked for this lifetime.
+No replacement/adoption or non-Linux fallback is allowed. First empty bind may
+create the Session directory under current original admission; track that
+metadata I/O through drain. Existing nonempty/unknown directories are refused.
+
+Copy raw preimage bytes from an opened ordinary-file descriptor into a unique
+leaf with `O_CREAT | O_EXCL | O_NOFOLLOW`. Use the same descriptors for
+stat/read/write/hash/chmod, handle short writes, then sync the file and directory
+before publishing metadata. Never overwrite a retained leaf or unlink a failed
+attempt. All backup reads verify the original content pin, not merely current
+existence or a newly computed hash. Keep snapshots and orphan bytes until
+qualified original finalize; a failed attempt remains a blocker. The legacy
+`copyFile` path cannot provide this private contract because its operation is
+not atomic and an error can remove the destination. These choices use the
+documented [Linux directory-fd behavior](https://man7.org/linux/man-pages/man2/open.2.html)
+and [Node 22 FileHandle operations](https://nodejs.org/docs/latest-v22.x/api/fs.html#class-filehandle);
+they still require actual Linux testing.
+
+Pass the same concrete backend from private factory → executor →
+`ManagedRuntimeFileHistory` → `ManagedToolFileHistory` → `FileHistoryService`,
+including the previous-history rollback constructor. Legacy callers omit it
+and keep their original default. Private create, fingerprint, validation, diff,
+snapshot and inventory reads use this backend; rewind/restore and orphan cleanup
+refuse before destructive I/O. Wrappers borrow it; the original factory owns
+its joinable tail and descriptor lifetime.
+
+The ordinary tools also need descriptor-bound access. The existing injected
+`FileSystemService` covers text I/O, but `read_file` format classification/media
+reads, Write/Edit direct mkdir and atomic-write fallbacks also use pathnames.
+Inventory and close these actual I/O sites before enabling the private worker.
+A single realpath check or secure backup class does not protect a later tool
+read/write. Deny reserved-prefix aliases and backup-inode hardlinks at actual
+open/use boundaries. Preserve format/encoding semantics; keep any unqualified
+helper lifecycle as an explicit blocker. This protects the declared filesystem
+boundary, not a hostile actor that already controls the worker's memory, fd
+table or mount namespace.
+
 Hosted currently calls prepare before committing `pendingTurn`/`pendingMessageId`;
 those fields are not preparation admission. For this profile, commit a versioned
 exact preparation intent to the existing native file-history domain before
@@ -91,12 +184,96 @@ The original parent guard admits it in READY. Broker verifies those committed
 bytes on the original connection, not a caller flag or cached context. Keep one
 journal authority; hold no parent SQL lock across worker I/O.
 
+Use a private file-history body `schemaVersion: 2`; durable resource refs,
+`domain.committed` events and native markers retain version 1. Root fields are
+exactly `operationId`, `revision`, `previousRecordRef`, `schemaVersion`,
+`profile`, `runtimeSessionId`, `state`, `backupDirectory`, `retainedBackups`,
+`preparation`, `record`. The authority supplies the first three. `state` retains
+the closed owner/snapshots/files shape. `record` retains the ordinary
+file-history reader projection and must mirror `state.snapshots`. Legacy body
+schema 1 remains a separate branch, never private preparation evidence.
+
+`backupDirectory` is exactly `volumeDevice`, `volumeInode`, `directoryDevice`,
+`directoryInode`, using canonical unsigned decimal strings from the original
+open descriptors. Each name-sorted `retainedBackups` member is exactly `name`,
+`device`, `inode`, `byteLength`, `digest`, `mode`: a validated single leaf,
+canonical device/inode strings, safe integral byte length/mode and bare
+lowercase SHA-256 bytes digest. Every non-null retained snapshot backup has
+exactly one original pin; no pin may change/disappear across revisions. Native
+pins describe successfully authenticated preimages. A sealed worker inventory
+separately observes all actual leaves, including unknown/incomplete orphan
+attempts; it cannot replace the earlier pins by approving current bytes.
+
+| History stage  | Exact preparation and transition                                                                                                                                                     |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Initial idle   | `preparation: null`, empty state/pins, revision 1 and null predecessor; original empty bind observation                                                                              |
+| Intent         | `stage: "intent"`, `turnId`, `promptId`, `batchId`, `invocations`, `paths`; preserve previous idle state/directory/pins                                                              |
+| Prepared       | Same immutable fields with `stage: "prepared"` and `intentRef`; immediate predecessor equals that original intent ref; append only authenticated backups and matching observed state |
+| Completed idle | `preparation: null`; immediate predecessor is the corresponding prepared record; preserve retained evidence and prove the entire original batch's results/history                    |
+
+Each invocation has exactly `executionCallId`, `callId`, `functionCallId`,
+`toolName`, `partIndex`, `ordinal`, `requestDigest`, `inputRef`,
+`toolDefinitionRef`. Include every admitted read/write/edit entry of the batch,
+with unique identities and ascending original ordinal; verify part/function
+identity against the committed assistant message. Input/definition refs are
+unchanged closed durable refs. `requestDigest` hashes exact payload JSON UTF-8
+bytes, with `sha256:` prefix; inputRef.digest hashes the enclosing input resource
+and is a different value. Paths are the sorted deduplicated Write/Edit path
+union derived from those exact original input bytes. Use JS default sort/Java
+natural String order, not locale order. Bound the whole resource to the existing
+64 KiB inline limit and snapshots to 100 before preimage I/O.
+
+Allocate calls once, publish inputs/definitions and reserve accepted SQL
+PREPARED rows **before** committing intent, then call prepare. Reservation is
+not dispatch authorization. This avoids a later unresolved execution-identity
+stage. File reservations retain the closed Tool-v2 deferred reference; do not
+send `runtimeProtocol: 3`/`inputDigest`, which the current service limits to
+Shell/Monitor. Read-only batches need no backup intent. Subsequent tool intent
+and dispatch checkpoints require the committed prepared record for mutations.
+
+Use stable commands `csi-file-history:bind:<owner>`, `:intent:<batchId>`,
+`:prepared:<batchId>` and `:settled:<batchId>`, each committing one existing
+file_history-domain event. Derive contentDigest from exact semantic fields,
+excluding the authority wrapper and generated reader projection. Return the
+actual domain receipt/ref. Recovered retries reuse durable calls/refs and compare
+original semantic bytes; they never generate a new batch to escape uncertainty.
+Add an explicit schema-2 nested-ref collector to both HTTP resource commit and
+read-only snapshot closure for invocation input/definition refs and intentRef.
+Do not recurse the whole previousRecordRef chain into every transaction.
+
 Expose a narrow authenticated history branch independently of provider
 lifecycle: initial empty bind, admitted prepare and snapshot in READY; no
 rewind/restore. After worker seal, permit only an idle snapshot of already-bound
 original history. Refuse a late prepare and retain its unresolved durable intent
 as a blocker. Track preparations already running through completion and final
 inventory; do not infer that a refused/failed RPC left files unchanged.
+
+Use a separate closed `csi-file-history` operation, version 1: bind and snapshot
+have only `kind`, `version`, `action`; prepare also has `preparationRef`. The
+Broker finds that current committed intent and all its SQL PREPARED rows on the
+original connection, compares assistant/input/path/resource membership and
+derives the worker request. The caller cannot provide authoritative paths or a
+prepared flag. Transport uses a separate authenticated CSI-v2 history route,
+matching boot identity and installed original context; it does not construct a
+ProviderWorker. Legacy raw-file-history requests remain unchanged.
+
+Worker deduplication is an original-lifetime observation keyed by exact intent
+resource ID/digest. Install its retained promise before the first await. Exact
+retry joins that operation or returns its retained result; changed content
+conflicts, and failure never starts another copy. Track it through seal and
+inventory. SQL and worker admission are separate barriers: seal winning before
+the initial worker start refuses it; seal winning before the native prepared
+commit leaves the durable intent unresolved. The minimal branch grants neither
+new prepare nor post-seal prepared authority. Only read-only observation of an
+already-running preparation is permitted after worker seal. Cancel, timeout,
+SQL not_started or lost worker identity cannot clear an unresolved intent.
+
+Update schema-aware pending readers in Hosted load/resume/idle/cancel/history,
+workspace read-only recovery, original file-checkpoint proof and native CSI
+inventory. The existing cancelled-turn cleanup that writes schema 1 with
+pendingTurn null is forbidden for schema 2. A parser dropping an unknown pending
+field or a terminal reader checking only the newest record would lose the
+obligation; fold and verify the whole same-domain revision chain.
 
 ## 4. Native journal and original continuation
 

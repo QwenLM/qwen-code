@@ -47,6 +47,7 @@ import {
   type ManagedCsiBoot,
 } from './managed-csi-envelope.js';
 import { ManagedCsiMount } from './managed-csi-mount.js';
+import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
 import {
   MANAGED_CSI_ATTEST_ROUTE,
   MANAGED_CSI_DRAIN_ROUTE,
@@ -136,12 +137,17 @@ function parseWorkerBoot(
     throw new Error(INVALID_BOOT_MESSAGE);
   }
   if (isExactBoot(parsed)) {
+    if (parsed.capabilityDigest === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST)
+      throw new Error(INVALID_BOOT_MESSAGE);
     return parsed;
   }
   try {
     // Boot v2 is UTF-8: bytes that are not are refused, never replaced.
     new TextDecoder('utf-8', { fatal: true }).decode(document);
-    return parseManagedContextBoot(parsed);
+    const boot = parseManagedContextBoot(parsed);
+    if (boot.capabilityDigest === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST)
+      throw new Error(INVALID_BOOT_MESSAGE);
+    return boot;
   } catch {
     throw new Error(INVALID_BOOT_MESSAGE);
   }
@@ -186,6 +192,7 @@ export async function startManagedRuntimeAttestationWorker(
   const csiBoot = resolved.version === 3 ? resolved : undefined;
   const boot = resolved.version === 3 ? resolved.context : resolved;
   if (
+    boot.capabilityDigest === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST ||
     (csiBoot !== undefined && !containerMode) ||
     (containerMode &&
       csiBoot === undefined &&
@@ -338,7 +345,12 @@ export async function readManagedRuntimeContainerBoot(
       'version' in parsed &&
       parsed.version === 3
     ) {
-      return parseManagedCsiBoot(parsed);
+      const boot = parseManagedCsiBoot(parsed);
+      if (
+        boot.context.capabilityDigest === CSI_FILES_RETIREMENT_CAPABILITY_DIGEST
+      )
+        throw new Error(INVALID_BOOT_MESSAGE);
+      return boot;
     }
     const boot = parseWorkerBoot(document);
     if (boot.version !== 1 || boot.isolationClass !== 'session') {
