@@ -2440,7 +2440,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as number | undefined,
         minimum: 0,
         description:
-          "Max runtime in minutes for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (2–5 minutes); 0 disables the time limit. Useful for slow local models that need longer than the defaults.",
+          "Max runtime in minutes for background memory agents (extraction, dream, remember, skill review, memory metadata migration). Unset uses each agent's built-in default (2–5 minutes); 0 disables the time limit. Useful for slow local models that need longer than the defaults. User/System/SystemDefaults scopes only; Workspace values are ignored with a warning.",
         showInDialog: false,
       },
       agentMaxTurns: {
@@ -2451,7 +2451,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as number | undefined,
         minimum: 0,
         description:
-          "Max turns for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (5–8); 0 disables the turn limit.",
+          "Max turns for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (5–8); 0 disables the turn limit. User/System/SystemDefaults scopes only; Workspace values are ignored with a warning.",
         showInDialog: false,
       },
       enableTeamMemory: {
@@ -2912,6 +2912,16 @@ const SETTINGS_SCHEMA = {
         description:
           'Expose ordinary tools through the isolated exec JavaScript tool. Load deferred descriptions and schemas on demand with tool_search; if search is unavailable, include all allowed signatures in exec. Direct control tools remain available. Ignored in safe and bare modes.',
         showInDialog: true,
+      },
+      freeform: {
+        type: 'boolean',
+        label: 'Freeform Tool Input (Experimental)',
+        category: 'Tools',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Use raw text input for the Code Mode exec tool on OpenAI Responses models. Effective only when tools.codeModeOnly is true and the selected model uses wireApi "responses". Enable only for endpoints that support Responses Custom Tools.',
+        showInDialog: false,
       },
       sandbox: {
         type: 'object',

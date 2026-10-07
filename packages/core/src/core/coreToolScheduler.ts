@@ -76,6 +76,7 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import {
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  describeBridgedArgumentError,
   resolveDeferredToolCall,
 } from '../tools/tool-call.js';
 import type {
@@ -503,6 +504,31 @@ const TRUNCATION_EDIT_REJECTION =
   'first write_file with a skeleton/partial content, ' +
   'then use edit to add the remaining sections incrementally. ' +
   'Do NOT retry with the same large content.';
+
+// The two pairs below are deliberately split by *cause*, not just by tool
+// kind. Blaming max_tokens for a response whose own usage disproves a
+// token-limit cut sends the model into identical retries that burn turns
+// (QwenLM/qwen-code#12970), so the malformed-generation case gets guidance
+// that matches what actually went wrong. The data-loss guard itself stays
+// armed for both: incomplete arguments mean incomplete file content either
+// way, regardless of what cut them off.
+/** Validation-failure note when the output limit was *not* the cause. */
+const INCOMPLETE_ARGS_PARAM_GUIDANCE =
+  "Note: This tool call's arguments arrived incomplete, but the response did " +
+  'not come close to the max_tokens limit, so this was malformed generation ' +
+  'rather than truncation. Retrying the same call unchanged will fail the same ' +
+  'way. Issue one tool call per turn and send schema-valid parameters — in ' +
+  "particular, do not nest one call's argument object inside another's.";
+
+/** Edit rejection when the output limit was *not* the cause. */
+const INCOMPLETE_ARGS_EDIT_REJECTION =
+  "This tool call's arguments arrived incomplete, so the file content would " +
+  'have been partial. The response did not come close to the max_tokens limit, ' +
+  'so this was malformed generation rather than truncation. The tool call has ' +
+  'been rejected to prevent writing incomplete content to the file. Re-issue ' +
+  'it as the only tool call this turn with the full content, or write a ' +
+  'skeleton first and add the rest with incremental edits. ' +
+  'Do NOT retry unchanged.';
 
 function setToolSpanFailure(
   span: Span,
@@ -1099,10 +1125,10 @@ function getModelFacingToolName(request: ToolCallRequestInfo): string {
   );
 }
 
-// NOTE: the `⚠` in this and TRUNCATION_RETRY_LOOP_DIRECTIVE below is part of an
-// LLM-facing prompt directive (injected into the model prompt, not rendered in
-// the TUI). The width-1 glyph rationale used elsewhere in this change does not
-// apply here — these are not terminal strings to "fix" for column width.
+// NOTE: the `⚠` in this and the other RETRY LOOP directives below is part of
+// an LLM-facing prompt directive (injected into the model prompt, not rendered
+// in the TUI). The width-1 glyph rationale used elsewhere in this change does
+// not apply here — these are not terminal strings to "fix" for column width.
 /** Directive injected when a tool call repeatedly fails validation. */
 const RETRY_LOOP_STOP_DIRECTIVE =
   '\n\n⚠ RETRY LOOP DETECTED: This tool call has failed validation multiple times with the same error. ' +
@@ -1116,6 +1142,12 @@ const TRUNCATION_RETRY_LOOP_DIRECTIVE =
   'STOP resending the same large content. Either split it into smaller write_file + incremental edit calls, ' +
   'or explain to the user that the content is too large to write safely in one call.';
 
+/** Directive injected when an incomplete-args file-modifying call repeats. */
+const INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE =
+  '\n\n⚠ RETRY LOOP DETECTED: The same incomplete file write has been rejected multiple times. ' +
+  'STOP resending the entire content in a single call. Write a skeleton first and fill in the rest with ' +
+  'incremental edit calls, or explain to the user why the content cannot be written safely.';
+
 const createErrorResponse = (
   request: ToolCallRequestInfo,
   error: Error,
@@ -1123,24 +1155,32 @@ const createErrorResponse = (
   executionStatus: ToolExecutionStatus,
   artifacts?: ToolArtifact[],
   resultDisplay?: ToolResultDisplay,
-): CoreToolCallResponseInfo => ({
-  callId: request.callId,
-  error,
-  responseParts: [
-    {
-      functionResponse: {
-        id: request.callId,
-        name: getModelFacingToolName(request),
-        response: { error: error.message },
+): CoreToolCallResponseInfo => {
+  const errorMessage =
+    getModelFacingToolName(request) === ToolNames.TOOL_CALL &&
+    executionStatus === 'not_started' &&
+    !error.message.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX)
+      ? `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${error.message}`
+      : error.message;
+  return {
+    callId: request.callId,
+    error,
+    responseParts: [
+      {
+        functionResponse: {
+          id: request.callId,
+          name: getModelFacingToolName(request),
+          response: { error: errorMessage },
+        },
       },
-    },
-  ],
-  resultDisplay: resultDisplay ?? error.message,
-  errorType,
-  executionStatus,
-  contentLength: error.message.length,
-  ...(artifacts && artifacts.length > 0 ? { artifacts } : {}),
-});
+    ],
+    resultDisplay: resultDisplay ?? error.message,
+    errorType,
+    executionStatus,
+    contentLength: errorMessage.length,
+    ...(artifacts && artifacts.length > 0 ? { artifacts } : {}),
+  };
+};
 
 const createCancelledResponse = (
   request: ToolCallRequestInfo,
@@ -1153,7 +1193,8 @@ const createCancelledResponse = (
   visionBridgeNotice?: string,
 ): CoreToolCallResponseInfo => {
   const cancellationPrefix =
-    getModelFacingToolName(request) === ToolNames.TOOL_CALL
+    getModelFacingToolName(request) === ToolNames.TOOL_CALL &&
+    executionStatus === 'not_started'
       ? DEFERRED_TOOL_CALL_CANCELLATION_PREFIX
       : '';
   const errorMessage = `${cancellationPrefix}[Operation Cancelled] Reason: ${reason}`;
@@ -1490,8 +1531,9 @@ interface BatchAbortState {
 
 /**
  * Returns true if a tool call can safely execute concurrently with other
- * safe tools (no side effects, no shared mutable state), decided from its
- * raw name/kind/args alone. Shared by the interactive scheduler's batch
+ * safe tools (no side effects, no shared mutable state). Code Mode Bash
+ * calls use a separate source-aware rule because the model explicitly
+ * batches independent calls. Shared by the interactive scheduler's batch
  * partitioning and the headless runner (`runNonInteractive`) so both
  * runtimes parallelize exactly the same set of tools.
  *
@@ -1503,12 +1545,21 @@ export function isToolCallConcurrencySafe(
   name: string,
   kind: Kind | undefined,
   args: unknown,
+  source?: ToolCallRequestInfo['source'],
 ): boolean {
   const canonicalName = canonicalToolName(name);
   // Skills register hooks and change session permissions.
   if (canonicalName === ToolNames.SKILL) return false;
   // Agent tools spawn independent sub-agents with no shared state.
   if (canonicalName === ToolNames.AGENT) return true;
+  // Code Mode lets the model batch independent shell calls explicitly.
+  if (
+    source === 'code_mode' &&
+    canonicalName === ToolNames.SHELL &&
+    kind === Kind.Execute
+  ) {
+    return true;
+  }
   // Shell commands: check if the command is read-only (e.g., git log, cat).
   // Uses the synchronous regex+shell-quote checker (not the async AST-based
   // one) because partitioning runs synchronously. It is deliberately more
@@ -1535,6 +1586,7 @@ function isConcurrencySafe(call: ScheduledToolCall): boolean {
     call.request.name,
     call.tool.kind,
     call.request.args,
+    call.request.source,
   );
 }
 
@@ -2136,7 +2188,6 @@ export class CoreToolScheduler {
 
           const preservedResultDisplay =
             this.compactResultDisplayForInteractiveHistory(resultDisplay);
-          const errorMessage = `[Operation Cancelled] Reason: ${auxiliaryData}`;
           const response: CoreToolCallResponseInfo = isToolCallResponseInfo(
             auxiliaryData,
           )
@@ -2150,23 +2201,12 @@ export class CoreToolScheduler {
                   auxiliaryData.resultDisplay ?? preservedResultDisplay,
               }
             : {
-                callId: currentCall.request.callId,
-                responseParts: [
-                  {
-                    functionResponse: {
-                      id: currentCall.request.callId,
-                      name: getModelFacingToolName(currentCall.request),
-                      response: {
-                        error: errorMessage,
-                      },
-                    },
-                  },
-                ],
+                ...createCancelledResponse(
+                  currentCall.request,
+                  String(auxiliaryData),
+                  executionStatus ?? 'not_started',
+                ),
                 resultDisplay: preservedResultDisplay,
-                error: undefined,
-                errorType: undefined,
-                executionStatus: executionStatus ?? 'not_started',
-                contentLength: errorMessage.length,
               };
           return {
             request: currentCall.request,
@@ -3125,13 +3165,21 @@ export class CoreToolScheduler {
           // Check if the tool is excluded due to permissions/environment restrictions
           // This check should happen before registry lookup to provide a clear permission error
           const pm = this.config.getPermissionManager?.();
+          const toolAliases = this.config
+            .getToolRegistry?.()
+            ?.getPermissionAliases?.(canonicalName);
+          const mcpIdentity = this.config
+            .getToolRegistry?.()
+            ?.getMcpToolIdentity?.(canonicalName);
           const permissionEnabled = pm
-            ? await pm.isToolEnabled(canonicalName)
+            ? await pm.isToolEnabled(canonicalName, toolAliases, mcpIdentity)
             : true;
           if (recordPrevalidationCancellation()) continue;
           if (pm && !permissionEnabled) {
             const matchingRule = pm.findMatchingDenyRule({
               toolName: canonicalName,
+              toolAliases,
+              mcpIdentity,
             });
             let permissionErrorMessage: string;
             if (matchingRule) {
@@ -3230,17 +3278,38 @@ export class CoreToolScheduler {
             continue;
           }
 
-          // Reject file-modifying calls when truncated to prevent
-          // writing incomplete content, even if params failed schema validation.
-          if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
+          // Reject file-modifying calls whose arguments arrived incomplete, to
+          // prevent writing partial content even when repair made the params
+          // schema-valid. Keyed on the fact rather than on the diagnosis: a
+          // correct "this was not a max_tokens cut" verdict must withdraw the
+          // misleading note without disarming this guard (#12970).
+          if (
+            (reqInfo.wasOutputTruncated || reqInfo.hadIncompleteArguments) &&
+            toolInstance.kind === Kind.Edit
+          ) {
+            const truncated = reqInfo.wasOutputTruncated === true;
+            const rejectionMessage = truncated
+              ? TRUNCATION_EDIT_REJECTION
+              : INCOMPLETE_ARGS_EDIT_REJECTION;
             const count = recordBatchRetryableToolError(
               reqInfo.name,
-              TRUNCATION_EDIT_REJECTION,
+              rejectionMessage,
             );
+            // The directive is appended after the rejectionMessage key was
+            // recorded: recordRetryableToolError prunes the tool's other keys,
+            // so folding the directive into the key would reset the count at
+            // the threshold. And the incomplete-args arm must not reuse
+            // RETRY_LOOP_STOP_DIRECTIVE: this guard rejects before
+            // buildInvocation, so validation never ran and "failed validation
+            // ... re-examine the tool schema" would misdiagnose the cause.
             const truncationError = new Error(
               count >= VALIDATION_RETRY_LOOP_THRESHOLD
-                ? `${TRUNCATION_EDIT_REJECTION}${TRUNCATION_RETRY_LOOP_DIRECTIVE}`
-                : TRUNCATION_EDIT_REJECTION,
+                ? `${rejectionMessage}${
+                    truncated
+                      ? TRUNCATION_RETRY_LOOP_DIRECTIVE
+                      : INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE
+                  }`
+                : rejectionMessage,
             );
             newToolCalls.push({
               status: 'error',
@@ -3249,7 +3318,9 @@ export class CoreToolScheduler {
               response: createErrorResponse(
                 reqInfo,
                 truncationError,
-                ToolErrorType.OUTPUT_TRUNCATED,
+                truncated
+                  ? ToolErrorType.OUTPUT_TRUNCATED
+                  : ToolErrorType.INVALID_TOOL_PARAMS,
                 'not_started',
               ),
               durationMs: 0,
@@ -3303,11 +3374,30 @@ export class CoreToolScheduler {
           );
           if (recordPrevalidationCancellation()) continue;
           if (invocationOrError instanceof Error) {
-            const displayError = reqInfo.wasOutputTruncated
-              ? new Error(
-                  `${invocationOrError.message} ${TRUNCATION_PARAM_GUIDANCE}`,
-                )
-              : invocationOrError;
+            // A target reached through tool_call reports its own validation
+            // error; name it so the model does not blame the envelope.
+            const targetMessage =
+              reqInfo.modelFacingName !== undefined
+                ? describeBridgedArgumentError(
+                    reqInfo.name,
+                    invocationOrError.message,
+                  )
+                : invocationOrError.message;
+            // Attach guidance that matches the actual cause. Both flags mean
+            // the arguments arrived incomplete; only the first means the
+            // output token limit did it, and claiming max_tokens when the
+            // response's own usage disproves a cut is what drove the futile
+            // identical retries in #12970.
+            const paramGuidance = reqInfo.wasOutputTruncated
+              ? TRUNCATION_PARAM_GUIDANCE
+              : reqInfo.hadIncompleteArguments
+                ? INCOMPLETE_ARGS_PARAM_GUIDANCE
+                : undefined;
+            const displayError = paramGuidance
+              ? new Error(`${targetMessage} ${paramGuidance}`)
+              : reqInfo.modelFacingName !== undefined
+                ? new Error(targetMessage)
+                : invocationOrError;
 
             // Track validation retry for loop detection. Counts accumulate per
             // (tool, error message) pair so a different validation mistake on
@@ -3319,9 +3409,7 @@ export class CoreToolScheduler {
 
             const finalError =
               count >= VALIDATION_RETRY_LOOP_THRESHOLD
-                ? new Error(
-                    `${invocationOrError.message}${RETRY_LOOP_STOP_DIRECTIVE}`,
-                  )
+                ? new Error(`${targetMessage}${RETRY_LOOP_STOP_DIRECTIVE}`)
                 : displayError;
 
             newToolCalls.push({
@@ -5060,8 +5148,8 @@ export class CoreToolScheduler {
 
       // Partition tool calls into consecutive batches by concurrency safety.
       // Consecutive safe tools are grouped into parallel batches; unsafe
-      // tools each form their own sequential batch. Execute (shell) is safe
-      // only when isShellCommandReadOnly() returns true; otherwise sequential.
+      // tools each form their own sequential batch. Code Mode Bash calls are
+      // safe because the model explicitly groups independent calls in code.
       const batches = partitionToolCalls(callsToExecute);
 
       for (const batch of batches) {
@@ -7482,9 +7570,16 @@ export class CoreToolScheduler {
   }
 
   private recordToolResults(completedCalls: CompletedToolCall[]): void {
-    if (!this.chatRecordingService) return;
-
     for (const call of completedCalls) {
+      const nested = call.request.source === 'code_mode';
+      // Aggregate owners record the outer exec only. Its script can discard
+      // or rewrite nested output, so Goal facts need their original records.
+      const recorder =
+        this.chatRecordingService ??
+        (nested && call.request.goalContext
+          ? this.config.getChatRecordingService()
+          : undefined);
+      if (!recorder) continue;
       const result = {
         callId: call.request.callId,
         status: call.status,
@@ -7498,13 +7593,17 @@ export class CoreToolScheduler {
         error: call.response.error,
         errorType: call.response.errorType,
       };
-      const goalProvenance = goalToolResultProvenance(call.request);
-      this.chatRecordingService.recordToolResult(
+      const goalProvenance = goalToolResultProvenance(
+        call.request,
+        call.response.responseParts,
+      );
+      const options = nested
+        ? { ...goalProvenance, subtype: 'code_mode_tool_result' as const }
+        : goalProvenance;
+      recorder.recordToolResult(
         call.response.responseParts,
         result,
-        // Passed only inside a Goal turn, so recording outside one keeps its
-        // two-argument shape.
-        ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+        ...(options ? ([options] as const) : ([] as const)),
       );
     }
   }

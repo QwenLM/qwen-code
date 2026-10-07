@@ -224,7 +224,7 @@ class WorkspaceShellTool extends ShellTool {
   }
 }
 
-class ManagedRuntimeProviderWorker {
+export class ManagedRuntimeProviderWorker {
   private readonly sessions = new Map<string, ProviderSession>();
   /** Released Sessions that still hold their runtime, oldest first. */
   private readonly released: ProviderSession[] = [];
@@ -241,6 +241,28 @@ class ManagedRuntimeProviderWorker {
       session !== undefined &&
       (session.pending > 0 || session.value?.runtime.hasActiveWork() === true)
     );
+  }
+
+  getDrainInspection(): { pendingInvocations: number; hasActivity: boolean } {
+    return {
+      pendingInvocations: [...this.sessions.values()].reduce(
+        (count, session) =>
+          count +
+          session.pending +
+          (session.value?.runtime.hasActiveWork() ? 1 : 0),
+        0,
+      ),
+      hasActivity: [...this.sessions.values()].some(
+        (session) => session.ready !== undefined || session.value !== undefined,
+      ),
+    };
+  }
+
+  private assertAdmissionOpen(): void {
+    if (!this.executor.isAdmissionOpen)
+      throw new ManagedToolUnavailableError(
+        'Managed Runtime admission is sealed.',
+      );
   }
 
   private lookup(identity: ManagedRuntimeProviderSession) {
@@ -299,6 +321,7 @@ class ManagedRuntimeProviderWorker {
       return entry.release;
     }
     if (operation.kind === 'acquire') {
+      this.assertAdmissionOpen();
       if (this.closing || session?.closed || session?.release)
         conflict('Managed Runtime Session is closed.');
       if (!session) {
@@ -334,13 +357,19 @@ class ManagedRuntimeProviderWorker {
     }
     if (!session?.ready)
       conflict('Managed Runtime Session has not been acquired.');
-    const observes = ['status', 'cancel', 'history'].includes(operation.kind);
+    const observes =
+      ['status', 'cancel', 'history'].includes(operation.kind) ||
+      (this.executor.isAdmissionSealed &&
+        !this.closing &&
+        operation.kind === 'manifest');
+    if (!observes) this.assertAdmissionOpen();
     if ((this.closing || session.closed || session.release) && !observes)
       conflict('Managed Runtime Session is closed.');
     session.pending++;
     try {
       const value = await session.ready;
       if (!observes) await this.assertContext(identity.runtimeSessionId, value);
+      if (!observes) this.assertAdmissionOpen();
       return await sessionIdContext.run(identity.runtimeSessionId, () =>
         this.dispatch(value, operation),
       );
@@ -383,6 +412,11 @@ class ManagedRuntimeProviderWorker {
 
   private async createRuntime(sessionId: string): Promise<ProviderRuntime> {
     const context = await this.contextFor(sessionId);
+    // Ordinary shutdown completes an acquire already in flight, then retires it.
+    if (this.executor.isAdmissionSealed)
+      throw new ManagedToolUnavailableError(
+        'Managed Runtime admission is sealed.',
+      );
     if (!context || context.isActive?.() === false) {
       throw new ManagedToolUnavailableError(
         'Managed context directory is unavailable.',
@@ -421,7 +455,11 @@ class ManagedRuntimeProviderWorker {
         {
           prepareTurn: (identity) =>
             history(value).checkpoint(identity.promptId),
-          execute: (action) => history(value).run(action),
+          execute: (action) =>
+            history(value).run(() => {
+              if (this.executor.isAdmissionSealed) this.assertAdmissionOpen();
+              return action();
+            }),
         },
         (tool, media) => {
           if (tool.name !== ReadFileTool.Name)
@@ -492,6 +530,7 @@ class ManagedRuntimeProviderWorker {
         return runtime.manifest();
       case 'begin-turn':
         await history(value).ready();
+        this.assertAdmissionOpen();
         await runtime.beginTurn(operation.identity);
         return null;
       case 'prepare': {

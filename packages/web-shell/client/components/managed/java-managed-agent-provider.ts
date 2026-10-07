@@ -195,7 +195,8 @@ export function createJavaManagedAgentProvider(
           requestId: managedRequestId(),
           idempotencyKey: command.idempotencyKey,
           agentId,
-          environmentId: options.environmentId,
+          // environmentId scopes the storageKey only: the standalone Java
+          // server 400s any non-blank value with unsupported_feature.
           title: titleFor(request.text),
           input: [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
@@ -238,6 +239,7 @@ export function createJavaManagedAgentProvider(
       for await (const event of client.streamEvents(
         { sessionId, afterSequence: request.lastEventId },
         request.signal,
+        request.onEstablished,
       )) {
         if (isJavaAgentResyncRequired(event)) {
           // Events after the cursor are gone: reload the transcript.
@@ -270,6 +272,10 @@ function toSessionSummary(
       turnStatus,
     );
   const sessionActive = session.status.toLowerCase() === 'active';
+  // A bound Session takes later Turns only from the caller the service
+  // allows; everything else about a bound Session stays read-only.
+  const workspaceTurns =
+    Boolean(session.workspace) && session.capabilities?.workspaceTurns === true;
   const errorCode =
     session.activeTurn?.errorCode ?? session.environment?.errorCode;
   return {
@@ -287,12 +293,14 @@ function toSessionSummary(
     runtimeState,
     capabilities: {
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
-      canSend: sessionActive && !active && !session.workspace,
+      canSend:
+        sessionActive && !active && (!session.workspace || workspaceTurns),
       canCancel:
         sessionActive &&
         active &&
         turnStatus !== 'cancelling' &&
-        !session.workspace,
+        (!session.workspace || workspaceTurns),
+      ...(workspaceTurns ? { workspaceTurns: true } : {}),
       ...(session.capabilities?.actions === true ? { actions: true } : {}),
     },
     ...(errorCode ? { failure: { code: errorCode, message: errorCode } } : {}),
@@ -312,6 +320,7 @@ function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {
       policyRevision: action.policyRevision,
       expiresAt: action.expiresAt,
       options: action.options.map(({ id, label }) => ({ id, label })),
+      ...(action.inputPreview ? { inputPreview: action.inputPreview } : {}),
     },
   ];
 }

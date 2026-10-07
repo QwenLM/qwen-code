@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import org.springframework.dao.support.DataAccessUtils;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -16,6 +17,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -64,20 +66,44 @@ public class ManagedActionStore {
             throw new ApiException(HttpStatus.FORBIDDEN,
                     "actor_scope_mismatch", "Authenticated actor scope is invalid.");
         }
-        if (key == null
-                || jdbc.queryForObject(
+        byte[] creator = DataAccessUtils.nullableSingleResult(jdbc.query(
+                "SELECT creator_actor_key FROM managed_agent_session WHERE"
+                        + " tenant_id = ? AND session_id = ?",
+                (result, row) -> result.getBytes(1), tenantId, sessionId));
+        if (creator != null) {
+            if (key != null && Arrays.equals(creator, key)) {
+                return;
+            }
+            throw forbidden();
+        }
+        int owners = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM managed_workspace_create_command WHERE"
+                        + " tenant_id = ? AND session_id = ?",
+                Integer.class, tenantId, sessionId);
+        if (owners == 0) {
+            // No recorded creator: an anonymous open-mode Session is
+            // tenant-owned, matching its read semantics.
+            return;
+        }
+        if (key != null
+                && jdbc.queryForObject(
                                 "SELECT COUNT(*) FROM managed_workspace_create_command WHERE"
                                         + " tenant_id = ? AND session_id = ? AND actor_id = ?",
                                 Integer.class,
                                 tenantId,
                                 sessionId,
                                 key)
-                        != 1) {
-            throw new ApiException(
-                    HttpStatus.FORBIDDEN,
-                    "action_forbidden",
-                    "Only the Session's creator may answer its Actions.");
+                        == 1) {
+            return;
         }
+        throw forbidden();
+    }
+
+    private static ApiException forbidden() {
+        return new ApiException(
+                HttpStatus.FORBIDDEN,
+                "action_forbidden",
+                "Only the Session's creator may answer its Actions.");
     }
 
     void apply(
@@ -158,8 +184,7 @@ public class ManagedActionStore {
             JsonNode ref = payload.path("optionsRef");
             StoredResource resource = resource(ref, "managed-action-options", resources);
             JsonNode options = read(new String(resource.bytes(), StandardCharsets.UTF_8));
-            closed(
-                    options,
+            List<String> optionFields = new ArrayList<>(List.of(
                     "v",
                     "requestId",
                     "turnId",
@@ -169,10 +194,15 @@ public class ManagedActionStore {
                     "inputRevision",
                     "createdAt",
                     "expiresAt",
-                    "options");
+                    "options"));
+            if (options.path("v").asLong() == 2) {
+                optionFields.add("inputRef");
+            }
+            closed(options, optionFields.toArray(String[]::new));
             require(
                     safeNumber(options.path("v"))
-                            && options.path("v").asLong() == 1
+                            && (options.path("v").asLong() == 1
+                                    || options.path("v").asLong() == 2)
                             && id.equals(options.path("requestId").asText())
                             && safeNumber(options.path("inputRevision"))
                             && options.path("inputRevision").asLong()
@@ -195,6 +225,9 @@ public class ManagedActionStore {
             for (JsonNode option : options.path("options")) {
                 closed(option, "id", "label");
                 require(text(option.path("label")));
+            }
+            if (options.path("v").asLong() == 2) {
+                resource(options.path("inputRef"), "managed-tool-input", resources);
             }
             Action previous = find(tenantId, sessionId, id).orElse(null);
             require(
@@ -354,6 +387,11 @@ public class ManagedActionStore {
                         "The idempotency key was reused with different content.");
             }
             return new OperationAdmission(existing, true);
+        }
+        String sessionStatus = jdbc.queryForObject("SELECT status FROM managed_agent_session"
+                + " WHERE tenant_id = ? AND session_id = ?", String.class, tenantId, sessionId);
+        if (!"ACTIVE".equals(sessionStatus)) {
+            throw new ApiException(HttpStatus.CONFLICT, "session_inactive", "The Session does not accept responses.");
         }
         Action action =
                 find(tenantId, sessionId, actionId)

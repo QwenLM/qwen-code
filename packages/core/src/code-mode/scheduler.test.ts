@@ -13,6 +13,7 @@ import {
   type WaitingToolCall,
 } from '../core/coreToolScheduler.js';
 import type { ToolCallRequestInfo } from '../core/turn.js';
+import type { ChatRecordingService } from '../services/chatRecordingService.js';
 import { makeFakeConfig } from '../test-utils/config.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ExecTool } from '../tools/exec.js';
@@ -23,6 +24,7 @@ import {
   ToolConfirmationOutcome,
   type AnyDeclarativeTool,
 } from '../tools/tools.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { UpdateGoalTool } from '../goals/goal-tools.js';
 import type { GoalRuntime } from '../goals/goal-runtime.js';
@@ -49,6 +51,7 @@ function setup(
   const config = makeFakeConfig({
     codeModeOnly: true,
     approvalMode: ApprovalMode.DEFAULT,
+    chatRecording: false,
     targetDir: '/tmp',
     cwd: '/tmp',
     ...opts.params,
@@ -386,7 +389,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
     await run(
       'exec-parent',
       'prompt-1',
-      'const result = await tools.read_probe({}); return result.output;',
+      'const result = await tools.read_probe({}); text(result.output);',
     );
 
     expect(nestedExecute).toHaveBeenCalledOnce();
@@ -397,6 +400,40 @@ describe('CodeModeOnly scheduler dispatch', () => {
     });
     expect(completed).toHaveBeenCalledOnce();
     expect(fnResponse()?.response?.['output']).toContain('nested output');
+  }, 10_000);
+
+  it('records no nested code_mode result when the call is outside a Goal turn', async () => {
+    const recordToolResult = vi.fn();
+    const { run, fnResponse } = setup(
+      [
+        new MockTool({
+          name: 'read_probe',
+          kind: Kind.Read,
+          params: { type: 'object', additionalProperties: false },
+          execute: async () => ({
+            llmContent: 'nested output',
+            returnDisplay: 'nested output',
+          }),
+        }),
+      ],
+      {
+        configure: (config) =>
+          vi.spyOn(config, 'getChatRecordingService').mockReturnValue({
+            recordToolResult,
+          } as unknown as ChatRecordingService),
+      },
+    );
+
+    await run(
+      'exec-nogoal',
+      'prompt-nogoal',
+      'const result = await tools.read_probe({}); text(result.output);',
+    );
+
+    // Positive control: without it the negative below also passes when the
+    // nested call never dispatches.
+    expect(fnResponse()?.response?.['output']).toContain('nested output');
+    expect(recordToolResult).not.toHaveBeenCalled();
   }, 10_000);
 
   it('runs Promise.all reads in one scheduler batch', async () => {
@@ -422,6 +459,63 @@ describe('CodeModeOnly scheduler dispatch', () => {
       'exec-parallel',
       'prompt-parallel',
       'await Promise.all([tools.parallel_read({ id: 1 }), tools.parallel_read({ id: 2 })])',
+    );
+    try {
+      await vi.waitFor(() => expect(started).toBe(2), { timeout: 30_000 });
+    } finally {
+      release();
+    }
+    await scheduled;
+  }, 40_000);
+
+  it('runs Code Mode Bash calls in one Promise.allSettled batch', async () => {
+    const config = makeFakeConfig({
+      codeModeOnly: true,
+      approvalMode: ApprovalMode.DEFAULT,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.registerTool(new ExecTool(config));
+
+    let started = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.SHELL,
+        kind: Kind.Execute,
+        params: { type: 'object' },
+        execute: async () => {
+          started++;
+          await gate;
+          return { llmContent: 'ok', returnDisplay: 'ok' };
+        },
+      }),
+    );
+    const scheduler = new CoreToolScheduler({
+      config,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => undefined,
+      onEditorClose: vi.fn(),
+    });
+
+    const scheduled = scheduler.schedule(
+      {
+        callId: 'exec-parallel-shell',
+        name: ToolNames.EXEC,
+        args: {
+          source:
+            "await Promise.allSettled([tools.run_shell_command({ command: 'first' }), tools.run_shell_command({ command: 'second' })]);",
+        },
+        isClientInitiated: false,
+        prompt_id: 'prompt-parallel-shell',
+      },
+      new AbortController().signal,
     );
     try {
       await vi.waitFor(() => expect(started).toBe(2), { timeout: 30_000 });

@@ -792,7 +792,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         yield* this.projectAssistantRecord(record, emit, meta);
         break;
       case 'tool_result':
-        yield* this.projectToolResult(record, emit, meta);
+        if (record.subtype !== 'code_mode_tool_result') {
+          yield* this.projectToolResult(record, emit, meta);
+        }
         break;
       case 'system':
         yield* this.projectSystemRecord(record, emit, meta);

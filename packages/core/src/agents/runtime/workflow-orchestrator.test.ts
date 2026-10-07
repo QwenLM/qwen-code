@@ -75,6 +75,7 @@ const {
     agentId?: string | null;
     taskName?: string;
     subagentId?: string;
+    executeOptions?: { enforceTimeLimitDuringRetryWait?: boolean };
   }>,
   nextFinalText: { value: undefined as string | undefined },
   // T10 (PR #4732 R1): simulates non-GOAL modes, on which the dispatch throws.
@@ -186,9 +187,11 @@ vi.mock('./agent-headless.js', () => ({
       execute: async (
         ctx: { get: (k: string) => unknown },
         signal?: AbortSignal,
+        executeOptions?: { enforceTimeLimitDuringRetryWait?: boolean },
       ) => {
         const { getCurrentAgentId } = await import('./agent-context.js');
         created.push({
+          executeOptions,
           name,
           prompt: ctx.get('task_prompt') as string,
           signal,
@@ -1858,6 +1861,9 @@ describe('createProductionDispatch', () => {
     expect(created[0]!.agentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
     expect(created[0]!.taskName).toBe('hello');
     expect(created[0]!.subagentId).toBe(created[0]!.agentId);
+    expect(created[0]!.executeOptions).toEqual({
+      enforceTimeLimitDuringRetryWait: true,
+    });
   });
 
   it('does not suppress env bootstrap with an empty initial history', async () => {
@@ -2947,6 +2953,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     };
     eventEmitterAttached: boolean;
     executeAgentId?: string | null;
+    executeOptions?: { enforceTimeLimitDuringRetryWait?: boolean };
   };
 
   /** The minimal surface read after createAgentHeadless returns. */
@@ -3101,11 +3108,13 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
               execute: async (
                 _ctx: unknown,
                 signal?: AbortSignal,
+                executeOptions?: { enforceTimeLimitDuringRetryWait?: boolean },
               ): Promise<void> => {
                 const { getCurrentAgentId } = await import(
                   './agent-context.js'
                 );
                 call.executeAgentId = getCurrentAgentId();
+                call.executeOptions = executeOptions;
                 if (outcome.runWithEmitter && options?.eventEmitter) {
                   await outcome.runWithEmitter(
                     options.eventEmitter as Emits,
@@ -3410,6 +3419,9 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
     expect(calls[0].options?.taskName).toBe('find foo');
     expect(calls[0].options?.subagentId).toBe(calls[0].executeAgentId);
+    expect(calls[0].executeOptions).toEqual({
+      enforceTimeLimitDuringRetryWait: true,
+    });
     // The workflow floor must be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
       expect.arrayContaining(FLOOR),

@@ -32,9 +32,8 @@ public class TenantContextFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        String path = request.getRequestURI();
-        return !path.startsWith("/v1/agents/")
-                && !path.startsWith("/api/agent/web-shell/v1/")
+        String path = PublicSurface.pathWithinApplication(request);
+        return !PublicSurface.covers(path)
                 && !path.startsWith(MANAGED_SESSION_STORE_PREFIX)
                 && !path.startsWith(TOOL_PUBLICATION_PREFIX);
     }
@@ -43,12 +42,11 @@ public class TenantContextFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request,
             HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
-        if (request.getRequestURI()
-                .startsWith(MANAGED_SESSION_STORE_PREFIX)
-                || request.getRequestURI().startsWith(TOOL_PUBLICATION_PREFIX)
-                || request.getRequestURI().startsWith("/v1/agents/workspaces")
-                || request.getRequestURI().startsWith(
-                        "/api/agent/web-shell/v1/workspaces/")) {
+        String path = PublicSurface.pathWithinApplication(request);
+        if (path.startsWith(MANAGED_SESSION_STORE_PREFIX)
+                || path.startsWith(TOOL_PUBLICATION_PREFIX)
+                || path.startsWith("/v1/agents/workspaces")
+                || path.startsWith("/api/agent/web-shell/v1/workspaces/")) {
             response.setHeader(HttpHeaders.CACHE_CONTROL, "no-store");
         }
         String tenantId = request.getHeader(HEADER);
