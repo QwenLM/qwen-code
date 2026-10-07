@@ -145,6 +145,7 @@ export type StandaloneSessionServiceErrorCode =
   | 'model_selection_failed'
   | 'standalone_creation_rolled_back'
   | 'standalone_creation_outcome_unknown'
+  | 'managed_engine_quarantined'
   | 'working_directory_missing'
   | 'working_directory_compromised'
   | 'deletion_recovery_compromised'
@@ -371,6 +372,23 @@ class TerminalQuarantineSignal extends Error {
   }
 }
 
+/**
+ * Whether a bridge refusal is the Managed engine's liftable quarantine
+ * refusal: pending proof, never a terminal verdict a runtime freeze should
+ * follow.
+ */
+function isManagedEngineQuarantineRefusal(error: unknown): boolean {
+  const data =
+    typeof error === 'object' && error !== null
+      ? (error as { data?: unknown }).data
+      : undefined;
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    (data as { errorKind?: unknown }).errorKind === 'managed_engine_quarantined'
+  );
+}
+
 function invalidRequest(): StandaloneSessionServiceError {
   return new StandaloneSessionServiceError(
     'invalid_request',
@@ -408,6 +426,8 @@ function serviceError(
       'Standalone session creation failed before durable source persistence and was rolled back.',
     standalone_creation_outcome_unknown:
       'Standalone session creation could not be safely completed or rolled back.',
+    managed_engine_quarantined:
+      'The Managed engine is quarantined while a Runtime worker stop stays unproven; retry once it proves.',
     working_directory_missing: 'The standalone working directory is missing.',
     working_directory_compromised:
       'The standalone working directory identity is compromised.',
@@ -2990,6 +3010,14 @@ export class StandaloneSessionService {
       attempt.diagnostic.cleanupOutcome = 'unknown';
       await this.closeOwnedSessionOrQuarantine(runtime, sessionId);
       attempt.diagnostic.cleanupOutcome = 'closed';
+      if (isManagedEngineQuarantineRefusal(error)) {
+        throw serviceError(
+          'managed_engine_quarantined',
+          sessionId,
+          true,
+          error,
+        );
+      }
       throw serviceError(
         'standalone_creation_outcome_unknown',
         sessionId,
@@ -3053,6 +3081,10 @@ export class StandaloneSessionService {
         if (retryError instanceof TerminalQuarantineSignal) {
           throw new TerminalQuarantineSignal(retryError.completion, error);
         }
+        // A quarantined-engine refusal lifts once its stop proves: keeping
+        // the activation retryable, not freezing the runtime that might
+        // lift seconds later.
+        if (isManagedEngineQuarantineRefusal(retryError)) throw retryError;
         this.beginTerminalQuarantine(runtime, error);
       }
     }
@@ -3088,6 +3120,7 @@ export class StandaloneSessionService {
         if (retryError instanceof TerminalQuarantineSignal) {
           throw new TerminalQuarantineSignal(retryError.completion, error);
         }
+        if (isManagedEngineQuarantineRefusal(retryError)) throw retryError;
         this.directoryStates.set(sessionId, { pinned });
         this.beginTerminalQuarantine(runtime, error);
       }

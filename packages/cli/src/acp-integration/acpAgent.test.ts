@@ -4859,7 +4859,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             mcpServers: [],
             _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
           }),
-        ).rejects.toMatchObject({ code: -32024 });
+        ).rejects.toMatchObject({
+          code: -32024,
+          data: { errorKind: 'managed_engine_quarantined' },
+        });
         expect(loadCliConfig).toHaveBeenCalledTimes(1);
 
         // Proving one stop lifts only its reason; the other still holds.
@@ -4932,6 +4935,121 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         expect((refused as Error).message).toContain('1 process group(s)');
         expect((refused as Error).message).not.toContain('/tmp/x');
         expect((refused as Error).message).not.toContain('4123');
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+
+    it('quarantines no read: the transcript replay gate carries no admission', async () => {
+      await setupSessionMocks('managed-host-quarantine-transcript');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        const readPage = vi.fn().mockResolvedValue({
+          sessionId: VALID_SESSION_ID,
+          records: [{ uuid: 'u1' }],
+          hasMore: false,
+          gaps: [],
+          startTime: 'start',
+          lastUpdated: 'end',
+        });
+        vi.mocked(SessionTranscriptReader).mockImplementation(
+          () =>
+            ({
+              readPage,
+            }) as unknown as InstanceType<typeof SessionTranscriptReader>,
+        );
+        hostPolicy!.onManagedEngineQuarantine!(
+          true,
+          new Error('the worker stop could not be proven'),
+        );
+        // The transcript read carries no admission, so the quarantined
+        // engine may not refuse it.
+        const result = await agent.extMethod(
+          SERVE_STATUS_EXT_METHODS.sessionTranscript,
+          { sessionId: VALID_SESSION_ID },
+        );
+        expect(result).toMatchObject({ hasMore: false });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+
+    it('names the count when more than one stop stays unproven', async () => {
+      await setupSessionMocks('managed-host-quarantine-count');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        hostPolicy!.onManagedEngineQuarantine!(
+          true,
+          Object.assign(new Error('a: stop unproven'), {
+            workFile: '/tmp/x/managed-runtime/a.json',
+            remaining: [4123],
+          }),
+        );
+        hostPolicy!.onManagedEngineQuarantine!(
+          true,
+          Object.assign(new Error('b: stop unproven'), {
+            workFile: '/tmp/x/managed-runtime/b.json',
+            remaining: [4124],
+          }),
+        );
+        await expect(
+          agent.newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          }),
+        ).rejects.toMatchObject({
+          code: -32024,
+          message: expect.stringContaining('1 more reason(s)'),
+          data: { errorKind: 'managed_engine_quarantined' },
+        });
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    });
+
+    it('reports a shapeless sweep failure as a failure of the sweep, not of a ledger', async () => {
+      await setupSessionMocks('managed-host-quarantine-shapeless');
+      const { agent, agentPromise } = await bootManagedHost();
+      try {
+        await agent.newSession({
+          cwd: '/tmp',
+          mcpServers: [],
+          _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+        });
+        const hostPolicy = vi.mocked(loadCliConfig).mock.calls[0]![9];
+        hostPolicy!.onManagedEngineQuarantine!(
+          true,
+          new Error('a directory of Runtime ledgers could not be listed'),
+        );
+        await expect(
+          agent.newSession({
+            cwd: '/tmp',
+            mcpServers: [],
+            _meta: { [SESSION_EXECUTION_ENGINE_META_KEY]: 'managed' },
+          }),
+        ).rejects.toMatchObject({
+          code: -32024,
+          message: expect.stringContaining(
+            'a sweep of its Runtime ledgers did not prove the stop',
+          ),
+          data: { errorKind: 'managed_engine_quarantined' },
+        });
       } finally {
         mockConnectionState.resolve();
         await agentPromise;

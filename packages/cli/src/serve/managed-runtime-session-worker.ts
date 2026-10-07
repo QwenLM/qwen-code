@@ -512,11 +512,9 @@ export class ManagedSessionRuntimeWorker {
       // same groups and re-reports a quarantine that is already counted.
       if (this.unprovenLedgerPaths.has(ledgerPath)) continue;
       try {
-        await sweepWorkerLedger(ledgerPath, { exitWitnessed: true });
+        await this.sweepLedgerOnce(ledgerPath);
       } catch (error) {
-        const reason = toRuntimeError(error);
-        failures.push(reason);
-        this.reportUnproven(ledgerPath, reason);
+        failures.push(toRuntimeError(error));
       }
     }
     if (failures.length > 0) {
@@ -539,8 +537,12 @@ export class ManagedSessionRuntimeWorker {
     this.options.quarantine?.report(reason);
     // The groups the last failure named: a sweep that finds the file gone
     // has proven nothing about them, so the lift waits for their own
-    // deaths; a retired ledger can never be proven.
+    // deaths; a retired ledger can never be proven. They accumulate, never
+    // replace: a later failure that names fewer groups — a transient read
+    // error names none — must not forget the ones earlier failures left
+    // outstanding.
     let lastNamed = unprovenGroupsOf(reason);
+    let sawRetired = sweepRetiredLedger(reason);
     startLedgerReaper(
       async (): Promise<LedgerReaperVerdict> => {
         let verdict: LedgerSweepVerdict;
@@ -551,7 +553,8 @@ export class ManagedSessionRuntimeWorker {
           // than SIGKILL whatever now answers on a recycled id.
           verdict = await sweepWorkerLedger(ledgerPath);
         } catch (error) {
-          lastNamed = unprovenGroupsOf(error);
+          sawRetired = sawRetired || sweepRetiredLedger(error);
+          lastNamed = [...new Set([...lastNamed, ...unprovenGroupsOf(error)])];
           throw error;
         }
         if (verdict === 'proven') return 'proven';
@@ -562,7 +565,7 @@ export class ManagedSessionRuntimeWorker {
           // Nothing was ever named — the file itself was unreadable, or set
           // aside — so an empty probe over a vanished file is no proof: the
           // stop stays unprovable and the quarantine stands.
-          return lastNamed.length === 0 ? 'terminal' : 'proven';
+          return sawRetired || lastNamed.length === 0 ? 'terminal' : 'proven';
         }
         lastNamed = alive;
         return 'unproven';
@@ -575,16 +578,40 @@ export class ManagedSessionRuntimeWorker {
   }
 
   /**
+   * Sweeps one ledger exactly once per task: the exit-hook sweep, the
+   * close() path and a launch-failure inline sweep all join the one already
+   * running, never a second one over it.
+   */
+  private readonly sweepsInFlight = new Map<string, Promise<void>>();
+
+  private async sweepLedgerOnce(ledgerPath: string): Promise<void> {
+    const inFlight = this.sweepsInFlight.get(ledgerPath);
+    if (inFlight !== undefined) return inFlight;
+    const promise = (async () => {
+      try {
+        await sweepWorkerLedger(ledgerPath, { exitWitnessed: true });
+      } catch (error) {
+        this.reportUnproven(ledgerPath, toRuntimeError(error));
+        throw error;
+      }
+    })();
+    this.sweepsInFlight.set(ledgerPath, promise);
+    try {
+      await promise;
+    } finally {
+      if (this.sweepsInFlight.get(ledgerPath) === promise) {
+        this.sweepsInFlight.delete(ledgerPath);
+      }
+    }
+  }
+
+  /**
    * Sweeps the ledger of a worker that exited between calls: whatever it
    * left running is no session's future work, so its groups die now.
    */
   private async sweepDeadWorkerLedger(worker: StartedWorker): Promise<void> {
     if (!worker.ledgerPath) return;
-    try {
-      await sweepWorkerLedger(worker.ledgerPath, { exitWitnessed: true });
-    } catch (error) {
-      this.reportUnproven(worker.ledgerPath, toRuntimeError(error));
-    }
+    await this.sweepLedgerOnce(worker.ledgerPath).catch(() => undefined);
   }
 
   private async awaitSettlement(
@@ -792,10 +819,7 @@ export class ManagedSessionRuntimeWorker {
         // The failed worker may have written its ledger already; with the
         // skip-set entry it would stay invisible to every future sweep.
         launchedLedgerPaths.delete(ledgerPath);
-        void sweepWorkerLedger(ledgerPath, { exitWitnessed: true }).catch(
-          (sweepError: unknown) =>
-            this.reportUnproven(ledgerPath, toRuntimeError(sweepError)),
-        );
+        void this.sweepLedgerOnce(ledgerPath).catch(() => undefined);
       }
       throw error;
     }
@@ -1027,6 +1051,13 @@ const launchedLedgerPaths = new Set<string>();
 const armedStaleSweeps = new Set<string>();
 
 /**
+ * Ledger dirs whose installation-time sweep is already running, so two
+ * environments created in the same window share its pass instead of paying
+ * a second full directory sweep on the child's single thread.
+ */
+const dirSweepsInFlight = new Map<string, Promise<LedgerSweepVerdict | void>>();
+
+/**
  * The startup-side sweep of a project's ledger directory, run at every
  * environment creation: it judges only ledgers this process never launched
  * (the skip set is live by reference, grown before every spawn), so a
@@ -1039,77 +1070,90 @@ function sweepStaleRuntimeLedgers(
   ledgerDir: string,
   quarantine: ManagedEngineQuarantineSink,
 ): void {
+  if (dirSweepsInFlight.has(ledgerDir)) return;
   const options = { skip: launchedLedgerPaths };
-  void sweepStaleLedgers(ledgerDir, options).catch((error: unknown) => {
-    if (armedStaleSweeps.has(ledgerDir)) return;
-    armedStaleSweeps.add(ledgerDir);
-    const reason = toRuntimeError(error);
-    quarantine.report(reason);
-    // The lift is pinned to what armed the quarantine. The files the
-    // rejection named must each be judged clean by a sweep themselves — a
-    // directory-level 'proven' an unrelated ledger earned lifts nothing,
-    // and a file gone without a judgement proves nothing either: the groups
-    // the failures named answer by liveness instead. A retired ledger can
-    // never be proven, so a retirement the rejection carries makes the end
-    // terminal — but only after everything else the directory held has been
-    // proven, since a provable group keeps its retries.
-    let lastNamed = unprovenGroupsOf(error);
-    let sawRetired = sweepRetiredLedger(error);
-    const armedFiles = new Set(workFilesOf(error));
-    startLedgerReaper(
-      async (): Promise<LedgerReaperVerdict> => {
-        // The files this pass itself judged clean.
-        const judged = new Set<string>();
-        try {
-          await sweepStaleLedgers(ledgerDir, options, (workFile) =>
-            judged.add(workFile),
+  const sweeping = sweepStaleLedgers(ledgerDir, options).catch(
+    (error: unknown) => {
+      if (armedStaleSweeps.has(ledgerDir)) return;
+      armedStaleSweeps.add(ledgerDir);
+      const reason = toRuntimeError(error);
+      quarantine.report(reason);
+      // The lift is pinned to what armed the quarantine. The files the
+      // rejection named must each be judged clean by a sweep themselves — a
+      // directory-level 'proven' an unrelated ledger earned lifts nothing,
+      // and a file gone without a judgement proves nothing either: the groups
+      // the failures named answer by liveness instead. A retired ledger can
+      // never be proven, so a retirement the rejection carries makes the end
+      // terminal — but only after everything else the directory held has been
+      // proven, since a provable group keeps its retries. A file any sweep
+      // ever judged keeps its proof and never re-enters the liveness ladder
+      // (its ids may now answer for another job).
+      let lastNamed = unprovenGroupsOf(error);
+      let sawRetired = sweepRetiredLedger(error);
+      const armedFiles = new Set(workFilesOf(error));
+      const provenFiles = new Set<string>();
+      startLedgerReaper(
+        async (): Promise<LedgerReaperVerdict> => {
+          // The files this pass itself judged clean.
+          const judged = new Set<string>();
+          try {
+            await sweepStaleLedgers(ledgerDir, options, (workFile) => {
+              judged.add(workFile);
+              provenFiles.add(workFile);
+            });
+          } catch (retryError) {
+            sawRetired = sawRetired || sweepRetiredLedger(retryError);
+            // Accumulate, never replace: a failure that names fewer groups —
+            // or none, a ledger nobody could read — must not forget the ones
+            // earlier failures left outstanding.
+            lastNamed = [
+              ...new Set([...lastNamed, ...unprovenGroupsOf(retryError)]),
+            ];
+            for (const workFile of workFilesOf(retryError)) {
+              armedFiles.add(workFile);
+            }
+            throw retryError;
+          }
+          let needsLiveness = false;
+          for (const workFile of armedFiles) {
+            if (provenFiles.has(workFile) || judged.has(workFile)) continue;
+            if (!existsSync(workFile)) {
+              needsLiveness = true;
+              continue;
+            }
+            // Present but unjudged on a resolving pass — it landed between
+            // the readdir and the judgement; the next tick judges it.
+            return 'unproven';
+          }
+          // A retirement never reaches this line: the retired ledger was
+          // renamed away, so its armed path always fails existsSync above
+          // and the end answers through the liveness check below.
+          if (!needsLiveness) return 'proven';
+          const alive = lastNamed.filter(
+            (pgid) => processGroupLiveness(pgid) !== 'gone',
           );
-        } catch (retryError) {
-          sawRetired = sawRetired || sweepRetiredLedger(retryError);
-          // Accumulate, never replace: a failure that names fewer groups —
-          // or none, a ledger nobody could read — must not forget the ones
-          // earlier failures left outstanding.
-          lastNamed = [
-            ...new Set([...lastNamed, ...unprovenGroupsOf(retryError)]),
-          ];
-          for (const workFile of workFilesOf(retryError)) {
-            armedFiles.add(workFile);
+          if (alive.length > 0) {
+            lastNamed = alive;
+            return 'unproven';
           }
-          throw retryError;
-        }
-        let needsLiveness = false;
-        for (const workFile of armedFiles) {
-          if (judged.has(workFile)) continue;
-          if (!existsSync(workFile)) {
-            needsLiveness = true;
-            continue;
-          }
-          // Present but unjudged on a resolving pass — it landed between
-          // the readdir and the judgement; the next tick judges it.
-          return 'unproven';
-        }
-        // A retirement never reaches this line: the retired ledger was
-        // renamed away, so its armed path always fails existsSync above
-        // and the end answers through the liveness check below.
-        if (!needsLiveness) return 'proven';
-        const alive = lastNamed.filter(
-          (pgid) => processGroupLiveness(pgid) !== 'gone',
-        );
-        if (alive.length > 0) {
-          lastNamed = alive;
-          return 'unproven';
-        }
-        // A file vanishing without ever being judged proves nothing —
-        // never readable and deleted from outside the sweep, there is no
-        // provable stop behind it. Its single-ledger sibling holds the
-        // same fact terminal.
-        return sawRetired || lastNamed.length === 0 ? 'terminal' : 'proven';
-      },
-      () => {
-        armedStaleSweeps.delete(ledgerDir);
-        quarantine.lift(reason);
-      },
-    );
+          // A file vanishing without ever being judged proves nothing —
+          // never readable and deleted from outside the sweep, there is no
+          // provable stop behind it. Its single-ledger sibling holds the
+          // same fact terminal.
+          return sawRetired || lastNamed.length === 0 ? 'terminal' : 'proven';
+        },
+        () => {
+          armedStaleSweeps.delete(ledgerDir);
+          quarantine.lift(reason);
+        },
+      );
+    },
+  );
+  dirSweepsInFlight.set(ledgerDir, sweeping);
+  void sweeping.finally(() => {
+    if (dirSweepsInFlight.get(ledgerDir) === sweeping) {
+      dirSweepsInFlight.delete(ledgerDir);
+    }
   });
 }
 

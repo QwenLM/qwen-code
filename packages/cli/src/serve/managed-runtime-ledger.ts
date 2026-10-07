@@ -164,7 +164,10 @@ export interface ProcessTableRow {
 /** Parses ps's elapsed column, `[[dd-]hh:]mm:ss` on Linux and macOS alike. */
 export function parsePsElapsed(value: string): number | undefined {
   const trimmed = value.trim();
-  if (!/^(\d+-)?\d{1,2}(:\d{2}){1,2}$/u.test(trimmed)) return undefined;
+  // procps's negative-elapsed wraparound prints astronomically large days,
+  // whose row would flip every one-sided age comparison; this spelling has
+  // four day digits at most, so anything wider is rejected outright.
+  if (!/^(\d{1,4}-)?\d{1,2}(:\d{2}){1,2}$/u.test(trimmed)) return undefined;
   const days = trimmed.includes('-') ? Number(trimmed.split('-', 2)[0]) : 0;
   const rest = trimmed.includes('-') ? trimmed.split('-', 2)[1]! : trimmed;
   const parts = rest.split(':').map(Number);
@@ -423,12 +426,19 @@ function parseLedgerDocument(
   return { version: LEDGER_FILE_VERSION, worker: worker!, groups };
 }
 
+let stagingSerial = 0;
+
 function writeLedgerDocument(
   workFile: string,
   worker: ManagedRuntimeLedgerWorkerRecord,
   groups: readonly ManagedRuntimeLedgerGroupRecord[],
 ): void {
-  const temporary = `${workFile}.tmp`;
+  // A unique staging name per write: the worker's own rewrite, the host
+  // sweep's closing rewrite, and a sibling child's startup sweep may all
+  // touch the same ledger, and one shared `.tmp` would let a loser's rename
+  // ENOENT escape into the caller or splice one writer's tail into another's
+  // document once it outgrows one write call.
+  const temporary = `${workFile}.tmp.${process.pid}-${stagingSerial++}`;
   writeFileSync(
     temporary,
     JSON.stringify({ version: LEDGER_FILE_VERSION, worker, groups }),
@@ -466,17 +476,33 @@ export class ManagedRuntimeLedger {
     return ledger;
   }
 
-  /** Records a Shell's group before its invocation can settle. */
+  /**
+   * Records a Shell's group before its invocation can settle. The durable
+   * write lands first: a failure escapes with both views holding nothing,
+   * never a memory-only group a host sweep would read a stale file past and
+   * certify stopped beside.
+   */
   addGroup(record: ManagedRuntimeLedgerGroupRecord): void {
-    this.groups.set(record.pgid, {
+    const stamped = {
       ...record,
       // The boot-domain stamp of the caller's own startedAt, so both clocks
       // tell one story even when the caller backdates the record.
       uptimeMs:
         record.uptimeMs ??
         Math.max(0, os.uptime() * 1000 - (Date.now() - record.startedAt)),
-    });
-    this.rewrite();
+    };
+    // Written as the view memory will hold after it: the new group's record
+    // replaces any record the id had, never stacks beside it.
+    const updated = [...this.groups.values()].filter(
+      (group) => group.pgid !== record.pgid,
+    );
+    updated.push(stamped);
+    writeLedgerDocument(
+      this.workFile,
+      this.worker,
+      updated.map((group) => ({ ...group })),
+    );
+    this.groups.set(record.pgid, stamped);
   }
 
   /** The groups whose exit is not yet proven. */
@@ -541,16 +567,20 @@ export class ManagedRuntimeLedger {
    * Waits for `pgid`'s group to exit; a proof drops it from the ledger. A
    * recycled id the live table names as a younger group proves the recorded
    * group gone too — that is the exit a bare liveness probe would hide
-   * behind the impostor's liveness for the whole evidence budget.
+   * behind the impostor's liveness for the whole evidence budget. The last
+   * parameter is an amortized table reader a caller fans out over several
+   * groups with; a direct caller gets its own consult per interval instead.
    */
   async waitForGroupExit(
     pgid: number,
     timeoutMs: number,
+    tableReader?: () => ReadonlyMap<number, ProcessTableRow> | undefined,
   ): Promise<ProcessLiveness> {
     const record = this.groups.get(pgid);
-    const deadline = Date.now() + timeoutMs;
+    const deadline = performance.now() + timeoutMs;
     let state = processGroupLiveness(pgid);
     let identityCheckedAt = 0;
+    const readTable = tableReader ?? queryTableQuietly;
     for (;;) {
       if (state === 'gone') break;
       if (
@@ -559,17 +589,13 @@ export class ManagedRuntimeLedger {
         Date.now() - identityCheckedAt >= LEDGER_WATCH_INTERVAL_MS
       ) {
         identityCheckedAt = Date.now();
-        const identity = judgeGroupIdentity(
-          record,
-          queryTableQuietly(),
-          Date.now(),
-        );
+        const identity = judgeGroupIdentity(record, readTable(), Date.now());
         if (identity === 'gone' || identity === 'recycled') {
           state = 'gone';
           break;
         }
       }
-      const remaining = deadline - Date.now();
+      const remaining = deadline - performance.now();
       if (remaining <= 0) break;
       await new Promise((resolve) =>
         setTimeout(resolve, Math.min(POLL_GROUP_EXIT_MS, remaining)),
@@ -620,12 +646,35 @@ export class ManagedRuntimeLedger {
     // Dead groups come out of the ledger before any signal goes out, so a
     // recycled id never gets to look like a survivor worth signalling.
     this.prune(true);
-    const deadline = Date.now() + budgetMs;
+    const deadline = performance.now() + budgetMs;
+    // One identity snapshot serves every waiter in this pass: a poll per
+    // second per group would otherwise multiply one blocking ps call by the
+    // outstanding count, before the budget's first await.
+    let sharedTableReference: {
+      table: ReadonlyMap<number, ProcessTableRow> | undefined;
+      readAt: number;
+    } = { table: undefined, readAt: Number.NEGATIVE_INFINITY };
+    const sharedTable = () => {
+      if (
+        Date.now() - sharedTableReference.readAt >=
+        LEDGER_WATCH_INTERVAL_MS
+      ) {
+        sharedTableReference = {
+          table: queryTableQuietly(),
+          readAt: Date.now(),
+        };
+      }
+      return sharedTableReference.table;
+    };
     const waiting: Array<Promise<ProcessLiveness>> = [];
     for (const pgid of this.groups.keys()) {
       signalProcessGroup(pgid, 'SIGKILL');
       waiting.push(
-        this.waitForGroupExit(pgid, Math.max(0, deadline - Date.now())),
+        this.waitForGroupExit(
+          pgid,
+          Math.max(0, deadline - performance.now()),
+          sharedTable,
+        ),
       );
     }
     await Promise.all(waiting);
@@ -809,15 +858,17 @@ export async function sweepWorkerLedger(
   const unproven: number[] = [];
 
   // One proof budget per process, spent at its own start: a slow exit must
-  // not eat the budget owed to everything behind it.
+  // not eat the budget owed to everything behind it. The deadline lives on
+  // the monotonic clock — a wall step in either direction must not stretch
+  // or collapse what a proof gets to wait.
   const prove = async (pgid: number): Promise<boolean> => {
     // Only ESRCH (or the caller's idea of 'gone') proves an exit; a transient
     // EPERM during teardown must not end the wait, and a permanent one ends
     // it unproven at the deadline.
-    const deadline = now() + proofTimeoutMs;
+    const deadline = performance.now() + proofTimeoutMs;
     for (;;) {
       if (liveness(pgid) === 'gone') return true;
-      const budget = deadline - now();
+      const budget = deadline - performance.now();
       if (budget <= 0) return false;
       await new Promise((resolve) =>
         setTimeout(resolve, Math.min(POLL_GROUP_EXIT_MS, budget)),
@@ -1117,12 +1168,14 @@ export async function sweepStaleLedgers(
     // for every genuine ledger sorted after it.
     if (!entry.isFile()) continue;
     const workFile = path.join(directory, entry.name);
-    if (entry.name.endsWith('.tmp')) {
+    const temporaryName = /\.tmp(?:\..+)?$/.test(entry.name);
+    if (temporaryName) {
       // Debris from a crash between write and rename outlives any plausible
       // write stall; a live writer's in-flight staging is milliseconds old
       // and must never be taken for it.
+      const ledgerBase = workFile.replace(/\.tmp(?:\..+)?$/, '');
       if (
-        !options.skip?.has(workFile.slice(0, -'.tmp'.length)) &&
+        !options.skip?.has(ledgerBase) &&
         isOlderThan(workFile, TMP_DEBRIS_AGE_MS)
       ) {
         // Debris that will not delete names no process: a failed unlink is

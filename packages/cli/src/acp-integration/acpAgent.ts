@@ -863,10 +863,13 @@ const SESSION_WRITER_MESSAGES = {
 function managedQuarantineSummary(reason: Error): string {
   const failures = reason instanceof AggregateError ? reason.errors : [reason];
   const named = failures.filter(isUnprovenSweepReport);
-  if (
-    named.length === 0 ||
-    named.some((failure) => failure.remaining.length === 0)
-  ) {
+  if (named.length === 0) {
+    // Nothing named a ledger or a group: a sweep-level condition (an
+    // unlistable directory, a transient carry), not a ledger the client
+    // could look at.
+    return 'a sweep of its Runtime ledgers did not prove the stop';
+  }
+  if (named.some((failure) => failure.remaining.length === 0)) {
     return 'a ledger it could not read held the unproven stop';
   }
   return named
@@ -4085,7 +4088,7 @@ class QwenAgent implements Agent {
     return this.privateParentState === 'trusted';
   }
 
-  private assertManagedSessionAdmission(): void {
+  private assertManagedSessionAdmission(engine?: SessionExecutionEngine): void {
     if (
       this.expectedPrivateParentCapability !== undefined &&
       !this.isTrustedManagedParent()
@@ -4098,15 +4101,21 @@ class QwenAgent implements Agent {
     if (this.managedShuttingDown) {
       throw new SessionWriterUnavailableError();
     }
-    const quarantine = this.managedEngineQuarantineReasons
-      .values()
-      .next().value;
-    if (quarantine !== undefined) {
-      throw new RequestError(
-        -32024,
-        `The Managed engine is quarantined: a Runtime worker's stop could not be proven (${managedQuarantineSummary(quarantine)}).`,
-        { errorKind: 'managed_engine_quarantined' },
-      );
+    if (engine === 'managed') {
+      const quarantine = this.managedEngineQuarantineReasons
+        .values()
+        .next().value;
+      if (quarantine !== undefined) {
+        const extra =
+          this.managedEngineQuarantineReasons.size > 1
+            ? `; ${this.managedEngineQuarantineReasons.size - 1} more reason(s) awaiting proof`
+            : '';
+        throw new RequestError(
+          -32024,
+          `The Managed engine is quarantined: a Runtime worker's stop could not be proven (${managedQuarantineSummary(quarantine)}${extra}).`,
+          { errorKind: 'managed_engine_quarantined' },
+        );
+      }
     }
   }
 
@@ -15244,7 +15253,7 @@ class QwenAgent implements Agent {
     const debugSessionId =
       effectiveSessionId ?? inheritedSessionId ?? 'transcript-replay';
     try {
-      this.assertManagedSessionAdmission();
+      this.assertManagedSessionAdmission(executionEngine);
       return await sessionIdContext.run(debugSessionId, () =>
         this.runWithPinnedRuntimeBaseDir(settings, cwd, async () => {
           await this.retryPendingConfigCleanup(
@@ -15490,7 +15499,7 @@ class QwenAgent implements Agent {
       this.initializingConfigs.add(config);
     }
     try {
-      this.assertManagedSessionAdmission();
+      this.assertManagedSessionAdmission(executionEngine);
       if (this.isTrustedManagedParent()) {
         // A child carrying the Conversations provenance marker writes through
         // the mandatory session writer lease and may reclaim a provably dead
@@ -15684,7 +15693,7 @@ class QwenAgent implements Agent {
         }
         await config.getLlmClient().refreshSystemInstruction();
       }
-      this.assertManagedSessionAdmission();
+      this.assertManagedSessionAdmission(executionEngine);
     } catch (error) {
       return this.cleanupAfterRequestFailure(error, () =>
         this.cleanupUnstoredConfig(config),
@@ -16156,7 +16165,7 @@ class QwenAgent implements Agent {
     } = {},
   ): Promise<Session> {
     options.signal?.throwIfAborted();
-    this.assertManagedSessionAdmission();
+    this.assertManagedSessionAdmission(this.hostExecutionEngine);
     const sessionId = normalizeSessionIdForLookup(config.getSessionId());
     const llmClient = config.getLlmClient();
     const needsInitialize = !llmClient.isInitialized();
@@ -16165,7 +16174,7 @@ class QwenAgent implements Agent {
       await llmClient.initialize(undefined, options.signal);
     }
     options.signal?.throwIfAborted();
-    this.assertManagedSessionAdmission();
+    this.assertManagedSessionAdmission(this.hostExecutionEngine);
 
     if (this.sessions.has(sessionId)) {
       throw new RequestError(
@@ -16177,7 +16186,7 @@ class QwenAgent implements Agent {
 
     await options.prepareBeforeSessionCreate?.();
     options.signal?.throwIfAborted();
-    this.assertManagedSessionAdmission();
+    this.assertManagedSessionAdmission(this.hostExecutionEngine);
     if (this.sessions.has(sessionId)) {
       throw new RequestError(
         ACP_ERROR_CODES.INVALID_PARAMS,
@@ -16230,7 +16239,7 @@ class QwenAgent implements Agent {
     if (options.deferWorkspaceActivation === true) {
       session.installManagedConversationActivation(
         async () => {
-          this.assertManagedSessionAdmission();
+          this.assertManagedSessionAdmission(this.hostExecutionEngine);
           const settingsReloaded =
             settings.reloadScopesFromDiskAtomically?.([
               SettingScope.User,
@@ -16248,9 +16257,9 @@ class QwenAgent implements Agent {
           } else {
             await this.ensureAuthenticated(config, settings);
           }
-          this.assertManagedSessionAdmission();
+          this.assertManagedSessionAdmission(this.hostExecutionEngine);
           await config.activateProvisionalWorkspace();
-          this.assertManagedSessionAdmission();
+          this.assertManagedSessionAdmission(this.hostExecutionEngine);
           this.bindSessionSourceService(config);
           await config.registerSessionSourceTool();
           await config.getLlmClient().setTools();
