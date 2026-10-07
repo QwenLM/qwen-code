@@ -43,6 +43,30 @@ import { HttpHookRunner } from '@qwen-code/qwen-code-core/hooks/httpHookRunner.j
 import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 
+// The absent-owner release refusal is reported on the module's debug
+// logger only, and that channel is silent unless a debug session is active:
+// capture it at the factory so the diagnostic cannot disappear unnoticed.
+const hostedHookDebug = vi.hoisted(() => vi.fn());
+
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/debugLogger.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/debugLogger.js')
+      >();
+    return {
+      ...actual,
+      createDebugLogger: (tag?: string) => {
+        const logger = actual.createDebugLogger(tag);
+        return tag === 'HOSTED_HOOK_SESSION'
+          ? { ...logger, debug: hostedHookDebug }
+          : logger;
+      },
+    };
+  },
+);
+
 let root: string;
 let session: ManagedSession;
 let hooks: HostedHookSession;
@@ -1228,16 +1252,25 @@ it('stops reconciling fences as soon as the firing turn aborts', async () => {
   const firstStatus = new Promise<void>((resolve) => {
     statusSeen = resolve;
   });
+  let statusPolls = 0;
   control.mockImplementation(async function (
     this: HostedWorkspaceBroker,
     operation,
   ) {
     if (operation.kind === 'hook-status' || operation.kind === 'hook-cancel') {
+      statusPolls += 1;
       statusSeen();
       return new Promise<ManagedHookOperationView>(() => {});
     }
     return originalControl.call(this, operation);
   });
+  const fencedId = session.authority
+    .extensionRecordsInDomain('hook_execution')
+    .find(
+      (entry) =>
+        entry.recordId.startsWith('hook-') &&
+        !entry.recordId.startsWith('hook-plan-'),
+    )!.recordId;
   const abort = new AbortController();
   const fired = hooks.fire(
     HookEventName.PreToolUse,
@@ -1255,8 +1288,22 @@ it('stops reconciling fences as soon as the firing turn aborts', async () => {
     settled,
     delay(2_000).then(() => 'pending' as const),
   ]);
+  // The turn rejects with its own abort reason — an abandoned reconcile
+  // would instead fall through to the fence's HostedHookRecoveryRequiredError
+  // — and the abort leaves the fenced record and its poll count untouched.
   expect(outcome).not.toBe('pending');
   expect(outcome).not.toBe('resolved');
+  expect(outcome).toBe(abort.signal.reason);
+  expect(
+    parseHookExecution(
+      session.authority.extensionRecord('hook_execution', fencedId)!.record,
+    ).run,
+  ).toMatchObject({
+    state: 'recovery_blocked',
+    execution: 'outcome_unknown',
+  });
+  await delay(200);
+  expect(statusPolls).toBe(1);
 });
 
 it('never tombstones a healthy in-flight async Hook reconciling an unrelated fence', async () => {
@@ -1334,6 +1381,22 @@ it('never tombstones a healthy in-flight async Hook reconciling an unrelated fen
   });
   expect(asyncChild.resultRef).toBeNull();
   expect(reloaded.hasPendingOperations).toBe(true);
+  // Settle the abandoned child before the test ends: its detached perform
+  // loop polls through the prototype broker spy the next test reinstalls,
+  // so a reply left running would leak hook-status calls into it. The loop's
+  // own settle writes through the pre-reopen Session whose writer is gone,
+  // so completion shows as the poll count freezing, not a clean drain.
+  replies.set(asyncChildId, {
+    operationId: asyncChildId,
+    state: 'settled',
+    result: { success: true, outcome: 'success', duration: 0 },
+  });
+  const statusPolls = () =>
+    requests.filter((request) => request.kind === 'hook-status').length;
+  await delay(250);
+  const stopped = statusPolls();
+  await delay(250);
+  expect(statusPolls()).toBe(stopped);
 });
 
 it('fences a hook-cancel that lands during module evaluation as outcome_unknown', async () => {
@@ -1672,6 +1735,9 @@ it.each([
         // An absent owner is routine and self-healing: booked released, and
         // reported only on the debug logger, never the default channel.
         expect(log).not.toHaveBeenCalled();
+        expect(hostedHookDebug).toHaveBeenCalledWith(
+          `qwen serve: earlier Hook owner release refused (owner absent, booked released): ${unacquired.broker.runtimeSessionId} ${status} ${code}`,
+        );
         await replacement.close();
       }
       // Cleared after close() so this observes the acquire-path retry rather

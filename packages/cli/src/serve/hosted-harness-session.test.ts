@@ -86,6 +86,7 @@ import { HostedMonitorLoop } from './hosted-monitor-loop.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { LocalShellStreamCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-stream-capture.js';
 import { monitorWakeNeedsRecovery } from './hosted-monitor-wake-turn.js';
+import { HostedMonitorWakeScheduler } from './hosted-monitor-wake.js';
 
 const wakeDeps = vi.hoisted(() => ({
   last: undefined as unknown,
@@ -342,7 +343,7 @@ const hookPin = {
   catalogRevision: 1,
   definitionDigest: 'b'.repeat(64),
 };
-async function hookApp() {
+async function hookApp(toolProfile = 'hosted-workspace-files/1') {
   const requests: ManagedHookControl[] = [];
   const catalog: ManagedHookCatalog = {
     ...hookPin,
@@ -399,7 +400,7 @@ async function hookApp() {
     sessionId: SESSION_ID,
     sessionScope: 'thread',
     managedSessionStore: store(),
-    toolProfile: 'hosted-workspace-files/1',
+    toolProfile,
     approvalMode: 'yolo',
     hookCatalog: hookPin,
   };
@@ -1912,6 +1913,134 @@ describe('Hosted Harness no-tool session', () => {
   );
 
   it.each([
+    {
+      code: 'managed_hook_module_evaluation_abandoned',
+      outcome: 'cancelled',
+    },
+    {
+      code: 'managed_hook_module_evaluation_timeout',
+      outcome: 'timeout',
+    },
+  ] as const)(
+    'settles a pre-tool turn an evaluation fence parked once the Runtime republishes ($code)',
+    async ({ code, outcome }) => {
+      const { server, authorize, catalog, requests } = await hookApp();
+      Object.assign(catalog, {
+        hooks: [{ ...catalog.hooks[0], eventName: HookEventName.PreToolUse }],
+      });
+      const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl');
+      const original = control.getMockImplementation()!;
+      const republished = new Map<string, ManagedHookOperationView>();
+      let fence = true;
+      control.mockImplementation(async function (
+        this: HostedWorkspaceBroker,
+        operation,
+      ) {
+        if (operation.kind === 'hook-execute' && fence) {
+          fence = false;
+          requests.push(operation);
+          return {
+            operationId: operation.operationId,
+            state: 'settled',
+            error: { code },
+          };
+        }
+        if (
+          (operation.kind === 'hook-status' ||
+            operation.kind === 'hook-cancel') &&
+          republished.has(operation.targetOperationId)
+        )
+          return republished.get(operation.targetOperationId)!;
+        return original.call(this, operation);
+      });
+      const call = {
+        name: 'write_file',
+        callId: 'call-0',
+        args: { file_path: 'notes.txt', content: 'hello' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      // The assistant message commits before the PreToolUse Hook fences, so
+      // the parked turn is the pre-tool arm's, never the pre-model one's.
+      state.model.mockImplementationOnce(
+        async ({ toolTurn, signal, modelScope }) => {
+          const complete = await modelScope!.beginMainAttempt('test-model');
+          await complete(true, []);
+          await toolTurn!.execute(
+            [call],
+            [
+              {
+                functionCall: {
+                  id: call.callId,
+                  name: call.name,
+                  args: call.args,
+                },
+              },
+            ],
+            'test-model',
+            signal,
+          );
+          throw new Error('The fenced Hook must stop this turn.');
+        },
+      );
+      const prompt = [{ type: 'text', text: 'write notes' }];
+      const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .send({ prompt, promptId: PROMPT_ID, payloadDigest })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: true,
+          });
+        },
+        { timeout: 10_000 },
+      );
+      // Once the evaluation definitively ends the Runtime republishes its
+      // receipt, and the next prompt reconciles the fence, settles the
+      // parked turn, and is admitted rather than refused for the Session's
+      // life — the pre-model arm's contract, applied to the pre-tool arm.
+      const child = requests.find((entry) => entry.kind === 'hook-execute')!;
+      republished.set(child.operationId, {
+        operationId: child.operationId,
+        state: 'settled',
+        result: { success: false, outcome, duration: 0 },
+      });
+      await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .send({ prompt, promptId: randomUUID(), payloadDigest })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body).toMatchObject({
+            hasActivePrompt: false,
+            recoveryBlocked: false,
+          });
+        },
+        { timeout: 10_000 },
+      );
+      const transcript = await authorize(
+        supertest(server).get(`/session/${SESSION_ID}/transcript`),
+      );
+      expect(transcript.body.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'turn_complete',
+            promptId: PROMPT_ID,
+            data: expect.objectContaining({ stopReason: 'cancelled' }),
+          }),
+        ]),
+      );
+    },
+  );
+
+  it.each([
     'single',
     'batch',
     'result-write-failure',
@@ -2867,6 +2996,145 @@ describe('Hosted Harness no-tool session', () => {
     );
     expect(retry.status).toBe(503);
     expect(retry.body.code).toBe('hosted_hook_recovery_required');
+  });
+
+  it('keeps the wake pump of a Session its refused DELETE kept alive', async () => {
+    domainEnablement.monitorRun = true;
+    const { server, authorize, release } = await hookApp(
+      'hosted-workspace-shell/1',
+    );
+    const wakeClose = vi.spyOn(HostedMonitorWakeScheduler.prototype, 'close');
+    release.mockImplementation(async () => {
+      throw new HostedWorkspaceBrokerRejection(
+        409,
+        'managed_runtime_owner_hold_pending',
+      );
+    });
+    vi.spyOn(stdio, 'writeStderrLineSafe').mockImplementation(() => {});
+    const failed = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(failed.status).toBe(503);
+    expect(failed.body.code).toBe('hosted_hook_recovery_required');
+    // The Session stays attached and fully served — and its wake pump with
+    // it: tearing the scheduler down before the Hook close was known
+    // terminal would leave the kept Session never delivering a wake turn.
+    expect(
+      (await authorize(supertest(server).get(`/session/${SESSION_ID}/status`)))
+        .status,
+    ).toBe(200);
+    expect(wakeClose).not.toHaveBeenCalled();
+    release.mockResolvedValue();
+    await authorize(supertest(server).delete(`/session/${SESSION_ID}`)).expect(
+      204,
+    );
+    expect(wakeClose).toHaveBeenCalledOnce();
+  });
+
+  it('bounds the prompt-gate reconcile so a stalled Runtime cannot hold the route', async () => {
+    const { server, authorize } = await hookApp();
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+    const original = control.getMockImplementation()!;
+    control.mockImplementation(async (operation) => {
+      if (operation.kind === 'hook-execute')
+        return {
+          operationId: operation.operationId,
+          state: 'outcome_unknown',
+        };
+      return original(operation);
+    });
+    const fenced = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+    ).send({
+      operationId: randomUUID(),
+      event: 'Notification',
+      input: { message: 'effect', notification_type: 'test' },
+    });
+    expect(fenced.status).toBe(503);
+    expect(
+      (await authorize(supertest(server).get(`/session/${SESSION_ID}/status`)))
+        .body.recoveryBlocked,
+    ).toBe(true);
+    // The poll that never answers: only the route's own budget can end it.
+    let statusSeen!: () => void;
+    const firstStatus = new Promise<void>((resolve) => {
+      statusSeen = resolve;
+    });
+    control.mockImplementation(async (operation) => {
+      if (
+        operation.kind === 'hook-status' ||
+        operation.kind === 'hook-cancel'
+      ) {
+        statusSeen();
+        return new Promise<ManagedHookOperationView>(() => {});
+      }
+      return original(operation);
+    });
+    const prompt = [{ type: 'text', text: 'hello' }];
+    // Only the reconcile budget's timer is faked — faking setImmediate too
+    // would stall the request itself before the poll begins.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      // A supertest request fires on the first then: attach it now or the
+      // poll below would wait on a request that was never sent.
+      const posted = authorize(
+        supertest(server).post(`/session/${SESSION_ID}/prompt`),
+      )
+        .send({
+          prompt,
+          promptId: randomUUID(),
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .then((response) => response);
+      await firstStatus;
+      await vi.advanceTimersByTimeAsync(30_000);
+      const response = await posted;
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe('hosted_turn_recovery_required');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('answers an invalid prompt on a fenced Session without reconciling first', async () => {
+    const { server, authorize, requests } = await hookApp();
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+    const original = control.getMockImplementation()!;
+    control.mockImplementation(async (operation) => {
+      if (operation.kind === 'hook-execute')
+        return {
+          operationId: operation.operationId,
+          state: 'outcome_unknown',
+        };
+      return original(operation);
+    });
+    const fenced = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+    ).send({
+      operationId: randomUUID(),
+      event: 'Notification',
+      input: { message: 'effect', notification_type: 'test' },
+    });
+    expect(fenced.status).toBe(503);
+    const statusPolls = () =>
+      requests.filter((request) => request.kind === 'hook-status').length;
+    const before = statusPolls();
+    const rejected = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    ).send({});
+    expect(rejected.status).toBe(400);
+    expect(rejected.body.code).toBe('invalid_hosted_prompt');
+    // A request the validation refuses never pays a Runtime poll or a
+    // durable settle write.
+    expect(statusPolls()).toBe(before);
+    const transcript = await authorize(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    );
+    expect(
+      transcript.body.events.filter(
+        (event: { type: string }) => event.type === 'turn_complete',
+      ),
+    ).toHaveLength(0);
   });
 
   it('pins dynamic Hook revisions and rejects unscoped operations', async () => {

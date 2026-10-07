@@ -82,7 +82,10 @@ import {
 } from './hosted-monitor-wake-turn.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
-import { parseHookExecution } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
+import {
+  parseHookExecution,
+  type HookExecution,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-record.js';
 import { runHostedHookOperation } from './hosted-hook-model.js';
 import type { ManagedHookCatalogPin } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 import { HookEventName } from '@qwen-code/qwen-code-core/hooks/types.js';
@@ -155,6 +158,14 @@ const debugLogger = createDebugLogger('HOSTED_HARNESS_SESSION');
 const HOSTED_TURN_DEADLINE = new Error(
   'The Hosted Harness Turn deadline expired.',
 );
+
+/**
+ * One prompt-gate Hook reconcile pass gets the grace a single broker poll
+ * gets: each status round-trip is itself bounded by the broker's fetch
+ * timeout, and a stalled Runtime must not multiply that bound by every
+ * pending record while the route waits.
+ */
+const HOSTED_HOOK_RECONCILE_BUDGET_MS = 30_000;
 
 /**
  * The terminal classification of a turn whose runner threw. A deadline
@@ -354,6 +365,34 @@ function unsettledPromptId(session: HostedSession): string | undefined {
   return unsettled.size === 1 ? [...unsettled][0] : undefined;
 }
 
+/**
+ * A Hook record the Runtime's own reconcile proved never ran its callback:
+ * either the record shows the dispatch never started, or the Runtime
+ * republished the receipt of a definitively-ended evaluation — the abandoned
+ * arm reconciles to a cancelled record, the over-budget arm to a settled
+ * record carrying a timeout outcome. A settled result of any other outcome
+ * is real work, not a fence.
+ */
+async function isSettledHookFence(
+  session: HostedSession,
+  execution: HookExecution,
+): Promise<boolean> {
+  if (
+    execution.run.state === 'cancelled' &&
+    execution.run.execution === 'not_started_proven'
+  )
+    return true;
+  if (execution.resultRef === null || execution.run.execution !== 'settled')
+    return false;
+  if (execution.run.state === 'cancelled') return true;
+  const result = object(
+    JSON.parse(
+      (await session.managed.resources.read(execution.resultRef)).toString(),
+    ),
+  );
+  return result?.['outcome'] === 'timeout';
+}
+
 async function recoverCancelledPreToolHook(
   session: HostedSession,
   promptId: string,
@@ -434,10 +473,16 @@ async function recoverCancelledPreToolHook(
     const execution = parseHookExecution(record);
     if (
       execution.eventName !== HookEventName.PreToolUse ||
-      execution.hookId === '__plan__' ||
-      !execution.cancelRequested ||
-      execution.run.state !== 'cancelled' ||
-      execution.run.execution !== 'not_started_proven'
+      execution.hookId === '__plan__'
+    )
+      continue;
+    if (
+      !(
+        execution.cancelRequested &&
+        execution.run.state === 'cancelled' &&
+        execution.run.execution === 'not_started_proven'
+      ) &&
+      !(await isSettledHookFence(session, execution))
     )
       continue;
     const input = object(
@@ -570,20 +615,10 @@ export async function settleCancelledHookTurn(
           execution.eventName === HookEventName.InstructionsLoaded &&
           execution.hookId !== '__plan__' &&
           execution.cancelRequested;
-        // A fence the Runtime reconciled by republishing the receipt proves
-        // what not_started_proven does: the module's callback never
-        // dispatched. The abandoned arm reconciles to a cancelled record; the
-        // over-budget arm to a settled record carrying a timeout outcome.
-        const reconciledFence =
-          execution.resultRef !== null && execution.run.execution === 'settled';
         if (
           (!occurrenceIds.has(execution.occurrenceId) &&
             !cancelledInstructions) ||
-          !(
-            (execution.run.state === 'cancelled' &&
-              execution.run.execution === 'not_started_proven') ||
-            reconciledFence
-          )
+          !(await isSettledHookFence(session, execution))
         )
           continue;
         const input = object(
@@ -594,18 +629,6 @@ export async function settleCancelledHookTurn(
           ),
         );
         if (input?.['prompt_id'] !== promptId) continue;
-        if (reconciledFence && execution.run.state !== 'cancelled') {
-          const result = object(
-            JSON.parse(
-              (
-                await session.managed.resources.read(execution.resultRef!)
-              ).toString(),
-            ),
-          );
-          // Only the evaluation-timeout republish lands here; a settled
-          // result of any other outcome is real work, not a fence.
-          if (result?.['outcome'] !== 'timeout') continue;
-        }
         cancelled = true;
         break;
       }
@@ -2369,7 +2392,7 @@ export function registerHostedHarnessSessionRoutes(
     void open(req, res, false);
   });
 
-  const admitPrompt = (req: Request, res: Response) => {
+  const admitPrompt = (req: Request, res: Response, reconciled = false) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
@@ -2433,6 +2456,53 @@ export function registerHostedHarnessSessionRoutes(
       return;
     }
     if (session.active) return error(res, 409, 'hosted_turn_active');
+    // A Hook recovery fence is not terminal: reconcile the pending records
+    // once — a non-cancelling poll, so no fenced occurrence re-dispatches —
+    // and settle the turn the fence parked before the admission gate reads
+    // either, or a Session whose cancel landed mid-evaluation stays blocked
+    // for life. A Session blocked with nothing pending keeps the existing
+    // contract: the prompt refuses and the Hook status poll settles. Only a
+    // request that passed body validation and missed the idempotent replay
+    // pays for the pass, and the pass is bounded and dies with the client,
+    // so a stalled Runtime cannot hold the route open. hooksBusy holds a
+    // concurrent prompt at the gate for the duration and is released
+    // straight into the settle, which re-takes it before its first await.
+    if (!reconciled && session.hooks?.hasPendingOperations) {
+      session.hooksBusy = true;
+      const reconcileAbort = new AbortController();
+      const budget = setTimeout(
+        () =>
+          reconcileAbort.abort(
+            new Error('The Hook reconciliation deadline expired.'),
+          ),
+        HOSTED_HOOK_RECONCILE_BUDGET_MS,
+      );
+      budget.unref();
+      const disconnected = () => {
+        if (!res.writableEnded)
+          reconcileAbort.abort(new Error('The prompting client disconnected.'));
+      };
+      res.once('close', disconnected);
+      void (async () => {
+        try {
+          try {
+            await session.hooks!.reconcileUnsettled(reconcileAbort.signal);
+          } finally {
+            session.hooksBusy = false;
+          }
+          await settleCancelledHookTurn(session);
+        } catch (cause) {
+          writeStderrLineSafe(
+            `qwen serve: Hosted Session ${req.params['id']} Hook reconciliation failed: ${String(cause)}`,
+          );
+        } finally {
+          clearTimeout(budget);
+          res.off('close', disconnected);
+        }
+        admitPrompt(req, res, true);
+      })();
+      return;
+    }
     if (
       session.blocked ||
       session.managed.authority.currentActivation?.phase !== 'active' ||
@@ -2561,42 +2631,6 @@ export function registerHostedHarnessSessionRoutes(
     })();
   };
   app.post('/session/:id/prompt', (req, res) => {
-    const session = identity(req, sessions);
-    // A Hook recovery fence is not terminal: reconcile the pending records
-    // once — a non-cancelling poll, so no fenced occurrence re-dispatches —
-    // and settle the turn the fence parked before the admission gate reads
-    // either, or a Session whose cancel landed mid-evaluation stays blocked
-    // for life. A Session blocked with nothing pending keeps the existing
-    // contract: the prompt refuses and the Hook status poll settles. hooksBusy
-    // holds a concurrent prompt at the prefix for the duration and is released
-    // straight into the settle, which re-takes it before its first await.
-    if (
-      session?.hooks &&
-      !session.mcpClosing &&
-      !session.active &&
-      !session.hooksBusy &&
-      !session.mcpBusy &&
-      !session.mcpRecovering &&
-      session.hooks.hasPendingOperations
-    ) {
-      session.hooksBusy = true;
-      void (async () => {
-        try {
-          try {
-            await session.hooks!.reconcileUnsettled();
-          } finally {
-            session.hooksBusy = false;
-          }
-          await settleCancelledHookTurn(session);
-        } catch (cause) {
-          writeStderrLineSafe(
-            `qwen serve: Hosted Session ${req.params['id']} Hook reconciliation failed: ${String(cause)}`,
-          );
-        }
-        admitPrompt(req, res);
-      })();
-      return;
-    }
     admitPrompt(req, res);
   });
 
@@ -3839,9 +3873,6 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 409, 'hosted_turn_active');
     session.mcpBusy = true;
     session.mcpClosing = true;
-    // No wake turn may start once the Session is draining; pending
-    // notifications still settle below before the log closes.
-    session.monitorWake?.close();
     try {
       if (req.method === 'DELETE' && session.hooks) {
         session.hooksBusy = true;
@@ -3864,6 +3895,11 @@ export function registerHostedHarnessSessionRoutes(
         }
       }
       await session.hooks?.close();
+      // Deferred until the close is known terminal: a Hook fence refusal
+      // above keeps the Session attached and retryable, and its wake pump
+      // with it. wakeBusy() holds mcpClosing for the whole drain, so no
+      // wake turn can start meanwhile; pending notifications settle below.
+      session.monitorWake?.close();
       // A lease a recovery load acquired must go back with the Session, or
       // the Workspace stays pinned after every later route is gone.
       await releaseLeaseNow(session);

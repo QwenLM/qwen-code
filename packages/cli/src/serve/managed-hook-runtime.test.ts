@@ -20,6 +20,7 @@ import type {
   ManagedHookExecute,
   ManagedHookOperationView,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
+import { MANAGED_HOOK_MAX_RUNNING } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 import {
   ManagedHookRuntime,
   parseManagedHookControl,
@@ -1075,7 +1076,7 @@ describe('ManagedHookRuntime', () => {
         },
       },
     ]);
-    const stuck = Array.from({ length: 16 }, (_, index) =>
+    const stuck = Array.from({ length: MANAGED_HOOK_MAX_RUNNING }, (_, index) =>
       request(`stuck-${index}`),
     );
     await Promise.all(
@@ -1087,7 +1088,7 @@ describe('ManagedHookRuntime', () => {
         error: { code: 'managed_hook_module_evaluation_timeout' },
       });
     }
-    // All 16 evaluations are abandoned but still live, so the holds are all
+    // All evaluations are abandoned but still live, so the holds are all
     // retained while the admission slots are free again.
     expect(instance.hasHolds('runtime-session')).toBe(true);
     const next = request('after-fences');
