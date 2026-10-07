@@ -229,6 +229,7 @@ function settleTurn(
 async function settleInJournal(
   authority: LocalManagedSessionAuthority,
   turnId: string,
+  outcome: 'completed' | 'error' | 'cancelled' = 'completed',
 ): Promise<void> {
   // The wake turn's journal settle, as `commitTurnComplete` records it:
   // the only thing that consumes a pending input.
@@ -250,8 +251,8 @@ async function settleInJournal(
         subject: { type: 'turn', turnId },
         payload: {
           turnId,
-          outcome: 'completed',
-          stopReason: 'end_turn',
+          outcome,
+          stopReason: outcome === 'completed' ? 'end_turn' : outcome,
           resultRef: null,
           usageRef: null,
           pendingOwnersRef: null,
@@ -451,13 +452,44 @@ describe('HostedChannelSession outbound', () => {
     await withSession(harness, async (channels, authority) => {
       const errored = (await channels.submitInput(inbound())).inputId;
       settleTurn(harness, errored, 'partial', 'error');
-      await settleInJournal(authority, errored);
+      await settleInJournal(authority, errored, 'error');
       expect(await channels.planReply(errored)).toBeUndefined();
       const empty = (
         await channels.submitInput(inbound({ platformEventId: '1700:50' }))
       ).inputId;
       settleTurn(harness, empty, '   ');
+      await settleInJournal(authority, empty);
       expect(await channels.planReply(empty)).toBeUndefined();
+      expect(await channels.reconcileReplies()).toEqual([]);
+    });
+  });
+
+  it('plans from the journal settle of the production wiring, and one unplannable turn breaks nothing behind it', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (channels, authority) => {
+      // A completed turn whose route then re-keys: its own reply can never
+      // plan (the pin refuses), but every turn behind it must still get one.
+      const stuck = (await channels.submitInput(inbound())).inputId;
+      settleTurn(harness, stuck, 'Late answer.');
+      await settleInJournal(authority, stuck);
+      const rolled = (
+        await channels.submitInput(
+          inbound({ accountGeneration: 2, platformEventId: '1800:1' }),
+        )
+      ).inputId;
+      settleTurn(harness, rolled, 'Fresh answer.');
+      await settleInJournal(authority, rolled);
+      // No turn_result record exists in the projection — none arrives
+      // through the production sink — so this settle gate is journal-only.
+      await expect(channels.planReply(stuck)).rejects.toThrow(
+        /committed route at the pinned revision/,
+      );
+      expect(await channels.reconcileReplies()).toEqual([rolled]);
+      expect(channels.delivery(`${rolled}:reply`)).toMatchObject({
+        run: { delivery: { state: 'planned' } },
+      });
+      expect(channels.delivery(`${stuck}:reply`)).toBeUndefined();
+      // A second open replays nothing and aborts nothing.
       expect(await channels.reconcileReplies()).toEqual([]);
     });
   });

@@ -368,18 +368,17 @@ export class HostedChannelSession {
     if (existing !== undefined) return existing;
     const envelope = await this.envelopeOf(turnId);
     if (envelope === undefined) return undefined;
-    const projected = await this.store.sink.project();
-    const result = projected.findLast(
-      (entry) =>
-        entry.type === 'system' &&
-        entry.subtype === 'turn_result' &&
-        (entry.systemPayload as { promptId?: unknown } | undefined)
-          ?.promptId === turnId,
-    );
-    const state = (result?.systemPayload as { state?: unknown } | undefined)
-      ?.state;
-    if (state !== 'completed') return undefined;
-    const text = projected
+    // The settle gate reads the journal, not the record projection: the
+    // production sink commits turn results as `turn.settled` events and
+    // never projects them, so only the journal knows the turn ended.
+    const settled = this.store.authority
+      .eventsInSequenceRange(1, this.store.authority.committedSequence)
+      .findLast(
+        (event) =>
+          event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+      );
+    if (settled?.payload['outcome'] !== 'completed') return undefined;
+    const text = (await this.store.sink.project())
       .filter(
         (entry) =>
           entry.type === 'assistant' && entry.daemonPromptId === turnId,
@@ -445,7 +444,12 @@ export class HostedChannelSession {
       const turnId = event.payload['turnId'];
       if (typeof turnId !== 'string') continue;
       if (this.delivery(channelDeliveryId(turnId)) !== undefined) continue;
-      if ((await this.planReply(turnId)) !== undefined) planned.push(turnId);
+      try {
+        if ((await this.planReply(turnId)) !== undefined) planned.push(turnId);
+      } catch {
+        // A turn that can never plan — its route re-keyed since the input,
+        // say — must not break the reconciliation of every turn behind it.
+      }
     }
     return planned;
   }
