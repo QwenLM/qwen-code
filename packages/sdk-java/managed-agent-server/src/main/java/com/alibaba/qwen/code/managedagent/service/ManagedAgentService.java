@@ -516,14 +516,20 @@ public class ManagedAgentService {
 
     // Events are read before the floor: a floor that is not above the cursor
     // after the read was not above it during the read either, so no event
-    // after the cursor had been pruned.
+    // after the cursor had been pruned. A stream reconciliation discards the
+    // Snapshot without lowering the floor, so the floor can exceed the
+    // coverage while the Items rebuild; nothing prunes events yet, so such
+    // a cursor is still served instead of looping 409/resync until the
+    // rebuild finishes. The pruning work must revisit this condition once
+    // rows below the floor can be gone.
     private List<EventRecord> replayableEvents(SessionRecord session,
             long afterSequence, int limit) {
         List<EventRecord> events = store.findEvents(session.tenantId(),
                 session.sessionId(), afterSequence, limit);
         ReplayWindow window = store.findReplayWindow(session.tenantId(),
                 session.sessionId());
-        if (afterSequence < window.floorSequence()) {
+        if (afterSequence < window.floorSequence()
+                && window.floorSequence() <= window.snapshotThroughSequence()) {
             throw new ReplayCursorExpired(window);
         }
         return events;

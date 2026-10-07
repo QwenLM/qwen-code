@@ -49,8 +49,8 @@ correct `cursor_expired` or resync.
 
 ## 3. Non-goals
 
-- Pruning events. Nothing raises the floor in production yet; that belongs to
-  the retention work.
+- Pruning events. A flag-gated scheduled pass now raises the floor (see 4.4),
+  but it deletes nothing; pruning still belongs to the retention work.
 - The WebShell Session's `replayFloorSequence` and `snapshotThroughSequence`,
   which stay `planned`.
 - `listItems`, which stays `partial` until Snapshot versions are paged.
@@ -169,14 +169,22 @@ follows tells clients to reload the Snapshot.
 - `ManagedAgentStore.advanceReplayFloor` raises the floor and never lowers it.
   It caps the floor at the Snapshot's covered sequence, so that a client that
   reloads the Snapshot can resume after `snapshot_through_sequence`. Tests call
-  it; the retention work will call it before it deletes events.
+  it, and the scheduled `ReplayFloorAdvancer` pass calls it with the cap, so an
+  enabled deployment raises each Session's floor as far as its Snapshot proves
+  safe; the retention work will call it before it deletes events. The pass is
+  gated by `qwen.managed-agent.events.replay-floor-enabled`
+  (`QWEN_MANAGED_AGENT_REPLAY_FLOOR_ENABLED`, default `false`) and runs every
+  `qwen.managed-agent.events.replay-floor-interval`
+  (`QWEN_MANAGED_AGENT_REPLAY_FLOOR_INTERVAL`, default 60s).
 - `PublicSession.replay_floor_sequence` returns the stored floor.
-- A stream reconciliation discards the Snapshot, so its covered sequence is `0`
-  until the Items are rebuilt. With a raised floor, a public client told to
-  resync during that time would find its cursor expired again, with `409` or
-  another resync frame, until the rebuild finishes.
-  Nothing raises the floor in production yet; the retention work must close
-  this window before it does.
+- A stream reconciliation discards the Snapshot, so its covered sequence is
+  `0` until the Items are rebuilt, and the floor never lowers, so it can exceed
+  the coverage during the rebuild. A read expires a cursor below the floor only
+  while the Snapshot backs it (`floor <= snapshot_through_sequence`); nothing
+  prunes events yet, so during the rebuild the cursor is still served from the
+  retained events instead of looping `409` or another resync frame. The
+  retention work must revisit this condition once it deletes rows below the
+  stored floor: a cursor it then serves could name events that are gone.
 - The WebShell transcript does not check the floor. Once events are pruned,
   its older pages must end at the floor; that also belongs to the retention
   work.
@@ -259,6 +267,12 @@ placeholder watermarks (`replayFloorSequence: 0`,
   idle stream does not read the store during a test and live events can reach
   it only through the hub.
 
+- `ReplayFloorRetractionTest` pauses the materializer, raises the floor to the
+  Snapshot and retracts the continuation output, then checks that a cursor
+  below the floor is still served while the Snapshot is gone, that the stored
+  floor never regresses, and that the cursor expires again once the rebuilt
+  Snapshot backs the floor.
+
 - `EventIdentityTest` pins the rule. Integration tests compare every event's
   identity with the materialized Snapshot after deltas appended in two batches
   with a reasoning Part that spans both, after single appends, and after
@@ -295,7 +309,8 @@ placeholder watermarks (`replayFloorSequence: 0`,
   have.
 - A client that ignores the resync frame sees the stream end, reconnects with
   the same cursor and gets the frame again. The web-shell client handles it.
-  Until the retention work raises the floor, no production stream sends it.
+  Only a deployment that opts in to the replay-floor pass sends it in
+  production.
 - The generated `@qwen-code/web-shell` types add `WebShellResyncRequired`, and
   the stream operation no longer lists `409`. The optional event fields were
   already in the WebShell event schema.
@@ -319,9 +334,10 @@ placeholder watermarks (`replayFloorSequence: 0`,
 
 ## 8. Follow-up
 
-- Retention: prune events, raise the floor before pruning, keep the floor at
-  or below the Snapshot while a stream reconciliation rebuilds the Items, and
-  end the WebShell transcript's older pages at the floor.
+- Retention: prune events below the floor the pass already raises, and end
+  the WebShell transcript's older pages at the floor. The Snapshot-discard
+  window above is closed at the read site only while nothing prunes; the
+  pruning half must re-decide the effective floor before it deletes rows.
 - The WebShell Session's floor and Snapshot watermarks.
 - `listItems` with paged Snapshot versions.
 - Lifecycle work: the three remaining gap lines.
