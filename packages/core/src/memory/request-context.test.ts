@@ -7,8 +7,15 @@
 import type { Content } from '@google/genai';
 import { describe, expect, it } from 'vitest';
 import { appendAutoMemoryContext } from './request-context.js';
+import { REATTACH_BOUNDARY_METADATA } from '../services/image-payload-references.js';
 
 const catalog = 'current memory catalog';
+// The catalog part is request-only, so it must carry the volatile-boundary
+// marker that keeps the providers' per-turn cache breakpoint off it.
+const catalogPart = (text: string) => ({
+  text,
+  partMetadata: { [REATTACH_BOUNDARY_METADATA]: true },
+});
 
 describe('appendAutoMemoryContext', () => {
   it('keeps input history unchanged across catalog revisions and repeated requests', () => {
@@ -24,11 +31,11 @@ describe('appendAutoMemoryContext', () => {
     expect(first.slice(0, -1)).toEqual(original.slice(0, -1));
     expect(first.at(-1)?.parts).toEqual([
       { text: 'current question' },
-      { text: catalog },
+      catalogPart(catalog),
     ]);
     expect(updated.at(-1)?.parts).toEqual([
       { text: 'current question' },
-      { text: 'updated catalog' },
+      catalogPart('updated catalog'),
     ]);
     expect(appendAutoMemoryContext(contents, catalog)).toEqual(first);
     expect(appendAutoMemoryContext(contents, '')).toBe(contents);
@@ -56,12 +63,12 @@ describe('appendAutoMemoryContext', () => {
     const result = appendAutoMemoryContext(contents, catalog);
     expect(result[0]).toBe(contents[0]);
     expect(result[1].parts?.[0]).toBe(contents[1].parts?.[0]);
-    expect(result[1].parts?.at(-1)).toEqual({ text: catalog });
+    expect(result[1].parts?.at(-1)).toEqual(catalogPart(catalog));
     expect(contents[1].parts).toHaveLength(1);
   });
 
   it('uses a trailing user entry for empty history and a model tail', () => {
-    const tail = { role: 'user', parts: [{ text: catalog }] };
+    const tail = { role: 'user', parts: [catalogPart(catalog)] };
     expect(appendAutoMemoryContext([], catalog)).toEqual([tail]);
     const contents: Content[] = [
       { role: 'model', parts: [{ text: 'answer' }] },

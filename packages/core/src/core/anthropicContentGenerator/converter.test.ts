@@ -27,6 +27,7 @@ import {
   type ConvertLlmRequestToAnthropicOptions as Opts,
 } from './converter.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { appendAutoMemoryContext } from '../../memory/request-context.js';
 import {
   content,
   fnCall,
@@ -1816,6 +1817,26 @@ describe('AnthropicContentConverter', () => {
       };
       expect(lastBlock.type).toBe('tool_result');
       expect(lastBlock.cache_control).toEqual(EPH);
+    });
+
+    it('keeps the per-turn breakpoint off the request-only memory catalog', () => {
+      // appendAutoMemoryContext appends the catalog as the last block of the
+      // last user message — exactly where this pass stamps its breakpoint.
+      // Stored history never reproduces that block, so anchoring on it writes
+      // an entry no later request can read back and history caching collapses
+      // to system+tools for the whole session. The marker it carries must move
+      // the breakpoint onto the persisted question instead.
+      const contents = appendAutoMemoryContext(
+        [{ role: 'user', parts: [{ text: 'q' }] }],
+        'current memory catalog',
+      );
+      const { messages } = convert(contents);
+      const lastUser = messages[messages.length - 1];
+      expect(lastUser.role).toBe('user');
+      const blocks = Array.isArray(lastUser.content) ? lastUser.content : [];
+      expect(blocks).toHaveLength(2);
+      expect(blocks[0]).toEqual(txt('q', EPH));
+      expect(blocks[1]).not.toHaveProperty('cache_control');
     });
 
     it('does not add cache_control to tools when disabled', async () => {
