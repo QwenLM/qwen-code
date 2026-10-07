@@ -101,11 +101,20 @@ describe('managed child operations (H4b)', () => {
     it('refuses an oversized description and envelope', () => {
       expect(() =>
         encodeChildLaunchEnvelope({
-          description: 'd'.repeat(513),
+          description: 'd'.repeat(MANAGED_CHILD_LIMITS.maxDescriptionBytes + 1),
           prompt: 'p',
           definition: DEFINITION,
         }),
       ).toThrow('byte_limit');
+      // The at-limit description encodes without a throw — a bound that
+      // only rejects would leave the lawful window untested.
+      expect(() =>
+        encodeChildLaunchEnvelope({
+          description: 'd'.repeat(MANAGED_CHILD_LIMITS.maxDescriptionBytes),
+          prompt: 'p',
+          definition: DEFINITION,
+        }),
+      ).not.toThrow();
       expect(() =>
         encodeChildLaunchEnvelope({
           description: 'd',

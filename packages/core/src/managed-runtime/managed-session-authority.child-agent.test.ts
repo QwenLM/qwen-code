@@ -982,7 +982,7 @@ describe('managed session authority child_agent records', () => {
     });
   });
 
-  it('admits child_agent and child_acceptance while refusing a shell body', async () => {
+  it('admits child_agent while refusing a shell body through the kind gate', async () => {
     const harness = await createHarness();
     const refs = await publishRefs(harness);
     const chain = life(refs);
@@ -1003,6 +1003,15 @@ describe('managed session authority child_agent records', () => {
       );
       expect(launch.revision).toBe(1);
       expect(await publishedBodies(harness, 'child_run')).toBe(1);
+      // And the kind its sibling gate admitted (`child_acceptance` is real
+      // on this chain, not a tolerated-unknown domain).
+      await settleChild(harness, authority, chain);
+      await authority.commitExtensionRecord(
+        command('accept-1:1'),
+        { domain: 'child_acceptance', record: acceptance(refs) },
+        TRUSTED,
+      );
+      expect(await publishedBodies(harness, 'child_acceptance')).toBe(1);
     });
   });
 

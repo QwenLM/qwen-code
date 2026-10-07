@@ -329,6 +329,15 @@ public class SessionLifecycleCoordinator {
         return harnessConfirmed;
     }
 
+    /** A child run body's dispatch facts, as the record proves them. */
+    private record ScopeEvidence(String childSessionId, String dispatchId,
+            String runtimeBindingId, String runtimeGeneration) {
+    }
+
+    private static String jsonText(JsonNode node) {
+        return node == null || node.isNull() ? null : node.asText();
+    }
+
     /**
      * H4b close cascade (reference design §12): after the admission
      * barriers seal new work and before the Harness closes, every
@@ -348,14 +357,6 @@ public class SessionLifecycleCoordinator {
      * close operation re-arms through the dispatch retry with its debt
      * owed, instead of settling on suspicion.
      */
-    /** A child run body's dispatch facts, as the record proves them. */
-    private record ScopeEvidence(String childSessionId, String dispatchId,
-            String runtimeBindingId, String runtimeGeneration) {
-    }
-
-    private static String jsonText(JsonNode node) {
-        return node == null || node.isNull() ? null : node.asText();
-    }
 
     private void cascadeChildScopes(OperationRecord operation) {
         String tenantId = operation.tenantId();

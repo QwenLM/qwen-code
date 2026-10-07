@@ -177,17 +177,26 @@ export function childResultNotificationText(params: {
   if (serialized(escaped) <= CHILD_NOTIFICATION_INLINE_LIMIT) {
     return head + escaped + tail;
   }
-  const fits = (chars: number): boolean =>
-    serialized(escapeXml(stripped.slice(0, chars) + TRUNCATION_MARKER)) <=
-    CHILD_NOTIFICATION_INLINE_LIMIT;
+  // The cut is a code-POINT slice: a UTF-16 code-unit cut could land
+  // between a surrogate pair and emit an unpaired surrogate to the
+  // model-facing notification — one split pair, never a character.
+  const codePoints = [...stripped];
+  const fits = (points: number): boolean =>
+    serialized(
+      escapeXml(codePoints.slice(0, points).join('') + TRUNCATION_MARKER),
+    ) <= CHILD_NOTIFICATION_INLINE_LIMIT;
   let low = 0;
-  let high = stripped.length;
+  let high = codePoints.length;
   while (low < high) {
     const middle = (low + high + 1) >> 1;
     if (fits(middle)) low = middle;
     else high = middle - 1;
   }
-  return head + escapeXml(stripped.slice(0, low) + TRUNCATION_MARKER) + tail;
+  return (
+    head +
+    escapeXml(codePoints.slice(0, low).join('') + TRUNCATION_MARKER) +
+    tail
+  );
 }
 
 export class HostedChildAgentSession {
@@ -349,35 +358,64 @@ export class HostedChildAgentSession {
     // A reply lost after the settling revision committed leaves the
     // already-published copies readable: the replay reuses them after
     // proving byte equality, instead of minting new resources and a
-    // terminal revision the successor rule must refuse.
-    const prior = this.mustRecord(childRunId);
-    if (prior.resultRef != null && prior.terminalReceiptRef != null) {
-      const committedResult = await this.store.resources.read(prior.resultRef);
-      const committedReceipt = await this.store.resources.read(
-        prior.terminalReceiptRef,
+    // terminal revision the successor rule must refuse. The read, guard,
+    // publications and the commit all queue into the one writes chain,
+    // so a racing settle can never scan a half-committed chain.
+    const write = this.writes.then(async () => {
+      const existing = this.store.authority.extensionRecord(
+        'child_run',
+        childRunId,
       );
-      if (
-        committedResult.equals(params.result) &&
-        committedReceipt.equals(params.receipt)
-      ) {
-        return prior.resultRef;
+      if (existing === undefined) {
+        throw new Error(`Child run ${childRunId} has no record to revise.`);
       }
-      throw new ManagedSessionConflictError(
-        `Child run ${childRunId} was already settled with a different result.`,
+      const previous = this.parseAgent(existing.record, childRunId);
+      if (previous.resultRef != null && previous.terminalReceiptRef != null) {
+        const committedResult = await this.store.resources.read(
+          previous.resultRef,
+        );
+        const committedReceipt = await this.store.resources.read(
+          previous.terminalReceiptRef,
+        );
+        if (
+          committedResult.equals(params.result) &&
+          committedReceipt.equals(params.receipt)
+        ) {
+          return previous.resultRef;
+        }
+        throw new ManagedSessionConflictError(
+          `Child run ${childRunId} was already settled with a different result.`,
+        );
+      }
+      const resultRef = await this.store.resources.publish(
+        'managed-child-result',
+        params.result,
       );
-    }
-    const resultRef = await this.store.resources.publish(
-      'managed-child-result',
-      params.result,
+      const terminalReceiptRef = await this.store.resources.publish(
+        'managed-runtime-receipt',
+        params.receipt,
+      );
+      const next = childSettleCompletedBody(previous, {
+        resultRef,
+        terminalReceiptRef,
+      });
+      await this.store.authority.commitExtensionRecord(
+        {
+          operation: 'commitChildRunRecord',
+          commandId: `${childRunId}:${existing.revision + 1}`,
+          sessionKey: this.key,
+          contentDigest: digest(next),
+        },
+        { domain: 'child_run', record: next },
+        TRUSTED,
+      );
+      return resultRef;
+    });
+    this.writes = write.then(
+      () => undefined,
+      () => undefined,
     );
-    const terminalReceiptRef = await this.store.resources.publish(
-      'managed-runtime-receipt',
-      params.receipt,
-    );
-    await this.revise(childRunId, (previous) =>
-      childSettleCompletedBody(previous, { resultRef, terminalReceiptRef }),
-    );
-    return resultRef;
+    return write;
   }
 
   /** A proven failure; a pre-creation failure lands on not_started_proven. */
@@ -424,27 +462,49 @@ export class HostedChildAgentSession {
     childRunId: string,
     params: { readonly notification?: { readonly description: string } } = {},
   ): Promise<ManagedSessionDurableRef> {
-    const child = this.mustRecord(childRunId);
-    const notification =
-      params.notification === undefined
-        ? undefined
-        : await this.buildResultNotification(
-            childRunId,
-            child,
-            params.notification,
-          );
-    await this.commitDomain(
-      'child_acceptance',
-      childRunId,
-      childAcceptanceBody(child, {
+    // One serialization for all of: the replay check, both notification
+    // resources, and the acceptance commit — a re-driven acceptance mints
+    // nothing twice.
+    return this.inWrites(async () => {
+      const child = this.mustRecord(childRunId);
+      const acceptance = childAcceptanceBody(child, {
         contentRef: child.resultRef!,
         terminalReceiptRef: child.terminalReceiptRef!,
-      }),
-      `${childRunId}:accept`,
-      'acceptChildResult',
-      notification,
-    );
-    return child.resultRef!;
+      });
+      const existing = this.store.authority.extensionRecord(
+        'child_acceptance',
+        childRunId,
+      );
+      if (
+        existing !== undefined &&
+        isDeepStrictEqual(existing.record, acceptance)
+      ) {
+        return child.resultRef!;
+      }
+      const notification =
+        params.notification === undefined
+          ? undefined
+          : await this.buildResultNotification(
+              childRunId,
+              child,
+              params.notification,
+            );
+      await this.store.authority.commitExtensionRecord(
+        {
+          operation: 'acceptChildResult',
+          commandId: `${childRunId}:accept`,
+          sessionKey: this.key,
+          contentDigest: digest(acceptance),
+        },
+        {
+          domain: 'child_acceptance',
+          record: acceptance,
+          ...(notification === undefined ? {} : { input: notification }),
+        },
+        TRUSTED,
+      );
+      return child.resultRef!;
+    });
   }
 
   /**
@@ -558,6 +618,17 @@ export class HostedChildAgentSession {
       throw new Error(`Child run ${childRunId} has no record to revise.`);
     }
     return record;
+  }
+
+  /** One queued chain: the replay check, the body and resource work, and
+   * the commit, so a re-driven verb mints nothing twice. */
+  private async inWrites<T>(body: () => Promise<T>): Promise<T> {
+    const run = this.writes.then(body);
+    this.writes = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   private revise(

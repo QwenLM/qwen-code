@@ -27,6 +27,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels;
@@ -46,8 +47,6 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -279,25 +278,13 @@ public class ManagedAgentService {
         return response(admission);
     }
 
-    /** The derivation of H4a decision 3: the launch's own record key,
-     * sha256 of sessionId | domain | recordId joined by NUL — exactly the
-     * extension-record key the parent's journal derives. */
+    /** The derivation of H4a decision 3: the launch's own record key —
+     * sha256 hex of the parent's Session id, the `child_run` domain and
+     * the run id, joined by NUL, exactly `ManagedExtensionProjection.recordKey`. */
     public static String childCreationKey(String parentSessionId,
             String childRunId) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] hashed = digest.digest((parentSessionId + '\u0000'
-                    + "child_run" + '\u0000' + childRunId)
-                    .getBytes(StandardCharsets.UTF_8));
-            StringBuilder out = new StringBuilder(64);
-            for (byte value : hashed) {
-                out.append(Character.forDigit((value >> 4) & 0xf, 16));
-                out.append(Character.forDigit(value & 0xf, 16));
-            }
-            return out.toString();
-        } catch (NoSuchAlgorithmException error) {
-            throw new IllegalStateException(error);
-        }
+        return ManagedExtensionProjection.recordKey(parentSessionId,
+                "child_run", childRunId);
     }
 
     public CommandAdmission submitTurn(String tenantId, String actorId,

@@ -355,7 +355,7 @@ class SessionLifecycleCoordinatorTest {
                         .status()).isEqualTo("CLOSED");
                 assertThat(harness.operations)
                         .extracting(op -> op.get("kind"))
-                        .contains("cancel", "close_scope");
+                        .containsSequence("cancel", "close_scope");
                 assertThat(harness.closed).contains(world.session);
             } finally {
                 coordinator.stopRenewals();
@@ -440,8 +440,8 @@ class SessionLifecycleCoordinatorTest {
                 // dispatch and attach replayed before cancel and scope.
                 assertThat(harness.operations)
                         .extracting(op -> op.get("kind"))
-                        .contains("dispatch_started", "attach", "cancel",
-                                "close_scope");
+                        .containsSequence("dispatch_started", "attach",
+                                "cancel", "close_scope");
                 assertThat(harness.operations.stream()
                         .filter(op -> "dispatch_started".equals(
                                 op.get("kind"))).findFirst().orElseThrow())
@@ -543,8 +543,14 @@ class SessionLifecycleCoordinatorTest {
                 assertThat(closeScope).containsEntry("started", true);
                 assertThat(harness.operations)
                         .extracting(op -> op.get("kind"))
-                        .contains("dispatch_started", "attach", "cancel",
-                                "close_scope");
+                        .containsSequence("dispatch_started", "attach",
+                                "cancel", "close_scope");
+                assertThat(harness.operations.stream()
+                        .filter(op -> "dispatch_started".equals(
+                                op.get("kind"))).findFirst().orElseThrow())
+                        .containsEntry("dispatchId",
+                                ManagedAgentService.childCreationKey(
+                                        world.session, "run-1"));
                 assertThat(harness.closed).contains(world.child,
                         world.session);
             } finally {

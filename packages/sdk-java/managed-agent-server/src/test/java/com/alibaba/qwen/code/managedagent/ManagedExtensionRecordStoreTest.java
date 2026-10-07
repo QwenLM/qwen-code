@@ -496,6 +496,16 @@ class ManagedExtensionRecordStoreTest {
                 "reaches accepted or consumed only with its acceptance record",
                 () -> journal.commit(journal.requestDomain("agent-7",
                         "child_run", accepted, List.of(), 7_000)));
+        // The same requirement's second pre-acceptance disjunct:
+        // `consumed` past the first commit must also refuse.
+        ObjectNode consumedPre = unknown.deepCopy();
+        consumedPre.withObject("/run").withObject("/delivery").put("state",
+                "consumed");
+        assertRefused("a delivery reaching consumed without its acceptance",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "reaches accepted or consumed only with its acceptance record",
+                () -> journal.commit(journal.requestDomain("agent-7b",
+                        "child_run", consumedPre, List.of(), 7_500)));
         commitDomain(journal, "accept-1", "child_acceptance",
                 acceptance(resultResource, receiptResource, "accepted"),
                 List.of(resultResource, receiptResource));
@@ -508,9 +518,15 @@ class ManagedExtensionRecordStoreTest {
                 () -> journal.commit(journal.requestDomain("agent-8",
                         "child_run", rejected, List.of(), 8_000)));
         commitDomain(journal, "agent-9", "child_run", accepted, List.of());
+        // And the consumed-with-acceptance commit lands (settlement
+        // vocabulary, not a refusal).
+        ObjectNode consumed = unknown.deepCopy();
+        consumed.withObject("/run").withObject("/delivery").put("state",
+                "consumed");
+        commitDomain(journal, "agent-9b", "child_run", consumed, List.of());
         assertThat(records.listRecords(TENANT, sessionId, "child_run")
                 .get(0).required("run").required("delivery")
-                .required("state").textValue()).isEqualTo("accepted");
+                .required("state").textValue()).isEqualTo("consumed");
     }
 
     /** Commits a child agent through its settled result. */

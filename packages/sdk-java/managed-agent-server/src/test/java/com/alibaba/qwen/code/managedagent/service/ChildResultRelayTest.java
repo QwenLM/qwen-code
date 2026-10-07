@@ -127,9 +127,12 @@ class ChildResultRelayTest {
                             before.parentSessionId(), before.childRunId(),
                             before.creationKey(),
                             (String) args.getArgument(3),
-                            args.getArgument(2), before.claimedBy(),
-                            before.claimedUntil(), before.attempts(),
-                            args.getArgument(4), null, before.createdAt(),
+                            args.getArgument(2),
+                            (String) args.getArgument(1),
+                            ((Number) args.getArgument(6)).longValue(),
+                            before.attempts(),
+                            ((Number) args.getArgument(4)).longValue(),
+                            (String) args.getArgument(5), before.createdAt(),
                             clock.get()));
                     return null;
                 }).when(store).advance(any(RelayRow.class), anyString(),
@@ -167,6 +170,36 @@ class ChildResultRelayTest {
                         + "\"completion\":\"sent\"}");
         when(store.readResource(TENANT, "resource-input")).thenReturn(
                 "{\"description\":\"audit the diff\",\"prompt\":\"review\"}");
+    }
+
+    @Test
+    void completesTheToolArmWithoutANotification() {
+        // The same walk on the tool arm: the same commits, and never a
+        // bundled wake input on the acceptance op.
+        when(store.readResource(TENANT, "resource-body")).thenReturn(
+                "{\"inputRef\":{\"resourceId\":\"resource-input\"},"
+                        + "\"completion\":\"tool\"}");
+        when(sessions.createChildSession(TENANT, PARENT, RUN,
+                "audit the diff", "review")).thenReturn(
+                new CommandAdmission(CHILD, null, "accepted", false));
+        RuntimeBindingRecord binding = mock(RuntimeBindingRecord.class);
+        when(binding.getBindingId()).thenReturn("binding-1");
+        when(binding.getGeneration()).thenReturn(7L);
+        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+                .thenReturn(binding);
+        relay.scan();
+        relay.scan();
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null));
+        when(store.terminalResultText(TENANT, CHILD, "turn-1"))
+                .thenReturn("审阅通过");
+        relay.scan();
+        relay.scan();
+        Map<String, Object> accept = harness.operations.stream()
+                .filter(operation -> "accept".equals(operation.get("kind")))
+                .findFirst().orElseThrow();
+        assertThat(accept).doesNotContainKey("notification");
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
     }
 
     @Test

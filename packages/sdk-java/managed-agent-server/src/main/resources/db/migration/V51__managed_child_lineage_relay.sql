@@ -16,8 +16,9 @@ CREATE INDEX idx_managed_agent_session_parent
 
 -- The child result relay's discovery scan: child_agent runs are the only
 -- child_run rows whose delivery line is materialized (shell rows carry
--- none), so (domain, delivery_state) selects exactly what needs creation
--- or delivery reconciliation.
+-- none). The index keys the domain/delivery half of the discovery
+-- predicate; the ledger state, the due-time/lease guards and the
+-- watching/delivering owed-arm are filtered by PENDING_SQL above it.
 CREATE INDEX idx_managed_session_extension_delivery
     ON qwen_managed_session_extension_record (domain, delivery_state);
 

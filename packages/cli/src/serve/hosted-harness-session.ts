@@ -1908,7 +1908,14 @@ export function registerHostedHarnessSessionRoutes(
         }
       | undefined;
     try {
-      const value = object(body?.['lineage']);
+      const rawLineage = body?.['lineage'];
+      if (
+        rawLineage !== undefined &&
+        rawLineage !== null &&
+        typeof rawLineage !== 'object'
+      )
+        throw new Error('Invalid child lineage.');
+      const value = object(rawLineage);
       if (value !== undefined && value !== null) {
         const parentSessionId = value['parentSessionId'];
         const rootSessionId = value['rootSessionId'];

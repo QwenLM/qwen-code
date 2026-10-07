@@ -160,6 +160,16 @@ class ChildResultRelayStoreTest {
         List<PendingChild> pending = relayStore.findPendingChildren(10);
         assertThat(pending).extracting(PendingChild::childRunId)
                 .containsExactly("run-live");
+        // Every column the relay binds to is selected and mapped (the
+        // discovery claim's projected shape).
+        assertThat(pending.get(0)).satisfies(row -> {
+            assertThat(row.tenantId()).isEqualTo(TENANT);
+            assertThat(row.parentSessionId()).isEqualTo(session);
+            assertThat(row.childRunId()).isEqualTo("run-live");
+            assertThat(row.revision()).isEqualTo(1L);
+            assertThat(row.deliveryState()).isEqualTo("planned");
+            assertThat(row.recordResourceId()).isEqualTo("resource-run-live");
+        });
         assertThat(relayStore.findLiveScopes(TENANT, session))
                 .extracting(ChildResultRelayStore.LiveScope::childRunId)
                 .containsExactly("run-live");

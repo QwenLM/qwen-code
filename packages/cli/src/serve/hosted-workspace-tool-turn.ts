@@ -2607,7 +2607,7 @@ export class HostedWorkspaceToolTurn {
       request.call.callId,
       [
         {
-          text: `Child agent started in the background as ${taskId}; watch the task surface or wait for its completion notification rather than polling. Its terminal result arrives as a durable notification input.`,
+          text: `Child agent started in the background as ${taskId}; the task surface stays current with it. A completed child delivers its result as a durable notification input; a failed or cancelled child produces no notification — read the task surface instead of waiting.`,
         },
       ],
     );
