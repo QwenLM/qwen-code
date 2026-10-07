@@ -1009,6 +1009,59 @@ class OperationRetryTerminalStateTest {
                 anyLong());
     }
 
+    // The exemption is bounded by the Action's own life. Once it expired
+    // while still `requested`, no projection can make this delivery
+    // observable any more, so waiting can no longer succeed — and since Java
+    // keeps no expiry scanner, nothing else would ever end the row, which
+    // would keep blocking every later lifecycle operation on the Session
+    // through the open-operation barrier. It terminates with its own code
+    // rather than action_response_delivery_failed, because the Harness did
+    // answer, and as java_durable because no projection lets Java certify
+    // what it committed.
+    @Test
+    void anAnsweredResponseTerminatesOnceItsActionExpired() throws Exception {
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        // attemptCount == budgetExemptAttempt == 10: the Harness answered an
+        // earlier attempt, so the row is on the exempt path.
+        OperationRecord claimed = new OperationRecord("tenant", "session",
+                "op-action", OperationKind.ACTION_RESPONSE, "digest",
+                "RUNNING", "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner",
+                3, 10, null, null, null, null, 10);
+        JsonNode body = actionBody();
+        when(sessions.claimOperation(eq("tenant"), eq("session"),
+                eq("op-action"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(actions.response("tenant", "session", "op-action")).thenReturn(
+                new ManagedActionStore.Response("action-1", body, null,
+                        null));
+        when(actions.find("tenant", "session", "action-1")).thenReturn(
+                Optional.of(new ManagedActionStore.Action("action-1",
+                        "requested", new ObjectMapper().readTree(
+                                "{\"expiresAt\":1}"),
+                        null, null)));
+        DaemonHttpException unavailable = mock(DaemonHttpException.class);
+        when(unavailable.getStatusCode()).thenReturn(503);
+        doThrow(unavailable).when(harness).resolveAction("tenant", "session",
+                "action-1", body);
+
+        ActionResponseCoordinator coordinator = new ActionResponseCoordinator(
+                sessions, actions, harness,
+                CoordinatorTestSupport.directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties());
+        coordinator.dispatch("tenant", "session", "op-action");
+
+        verify(actions).complete(eq(claimed), anyString(),
+                eq("action_response_decision_expired"), isNull(), eq(false),
+                anyLong());
+        verify(actions, never()).complete(any(), anyString(),
+                eq("action_response_delivery_failed"), any(), anyBoolean(),
+                anyLong());
+        verify(sessions, never()).retryOperation(anyString(), anyString(),
+                anyString(), anyString(), anyLong(), anyLong(), anyBoolean());
+    }
+
     @ParameterizedTest(name = "attemptCount = {0}")
     @ValueSource(ints = {1, 9})
     void actionResponseStillRetriesWhileTheBudgetLasts(int attemptCount)

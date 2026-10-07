@@ -110,7 +110,8 @@ public class ActionResponseCoordinator {
         } catch (RuntimeException error) {
             // A lost answer may follow a committed decision. Inspect the projection
             // again before returning this command to the outbox.
-            if (settled(op, actions.response(tenant, session, operation))) {
+            Response current = actions.response(tenant, session, operation);
+            if (settled(op, current)) {
                 return;
             }
             // The answer is durable, not per-attempt: an answered attempt
@@ -120,6 +121,34 @@ public class ActionResponseCoordinator {
             // answered attempt never records action_response_delivery_failed
             // for a decision the Harness already committed.
             boolean answered = harnessAnswered || op.budgetExemptAttempt() > 0;
+            // That exemption is bounded by the Action's own life. Once it
+            // expired while still `requested`, no projection can make this
+            // delivery observable any more, so the wait can no longer
+            // succeed — and because Java keeps no expiry scanner of its own,
+            // nothing else would ever end it: the row would outlive the
+            // Action and, through the open-operation barrier, every later
+            // lifecycle operation on the Session. The delivery code would be
+            // false here (the Harness did answer), so an expired decision
+            // records its own. It stays java_durable: with no projection
+            // there is nothing the Harness confirmed that Java could certify.
+            if (answered && decisionExpired(tenant, session, current.actionId())) {
+                LOG.error(
+                        "Action response outlived its Action tenant={} session={}"
+                                + " operation={} attempts={}",
+                        tenant,
+                        session,
+                        operation,
+                        op.attemptCount(),
+                        error);
+                actions.complete(
+                        op,
+                        owner,
+                        "action_response_decision_expired",
+                        null,
+                        false,
+                        clock.millis());
+                return;
+            }
             if (!answered
                     && op.attemptCount() - op.budgetExemptAttempt()
                             >= dispatch.getMaxOperationRetries()) {
@@ -169,6 +198,19 @@ public class ActionResponseCoordinator {
                     operation,
                     error.toString());
         }
+    }
+
+    // Admission validates expiresAt as a required number greater than
+    // createdAt, so a real Action always carries a deadline. One that is
+    // absent is therefore not a deadline but a row this code should not
+    // judge: absent a positive expiry the wait continues rather than
+    // recording a terminal invented from a missing field.
+    private boolean decisionExpired(String tenant, String session, String actionId) {
+        long expiresAt =
+                actions.find(tenant, session, actionId)
+                        .map(action -> action.options().path("expiresAt").asLong())
+                        .orElse(0L);
+        return expiresAt > 0 && clock.millis() >= expiresAt;
     }
 
     private boolean settled(OperationRecord op, Response response) {
