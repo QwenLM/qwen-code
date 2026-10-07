@@ -246,8 +246,9 @@ while its operations stay readable. Completed deletion permanently marks an exis
 private journal `DELETED`, clears its writer and recovery references, and fences
 new writes and recovery. Close and archive keep output pinned. Deletion does
 not physically erase the journal, events or resources; output collection stays
-disabled by default and requires the retention deployment gates. With
-`qwen.managed-agent.tool-publication.gc-enabled`, collection also frees
+disabled by default and requires the retention deployment gates. With both
+`qwen.managed-agent.tool-publication.enabled` and
+`qwen.managed-agent.tool-publication.gc-enabled` true, collection also frees
 stream-capture bytes (background Shell and foreground leftovers): eligible
 `PUBLISHED` `MYSQL_INLINE` rows of the `managed-tool-result-{content,page,manifest}`
 kinds with no journal reference on a permanently retired Session are

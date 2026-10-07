@@ -88,15 +88,17 @@ qwen_managed_session_resource_collection
 外，因此即使账本行永久保留，每 tick 扫描的开销也只与未完成工作量成正
 比。V48 同时新增 `idx_output_session_retirement_due (retired_at)`，使到
 期候选扫描（`r.retired_at <= now - grace`）走索引：墓碑永不删除，没有
-索引时每秒一次的扫描代价将永久为 O（已退役 Session 数）。
+索引时每个 60 秒节律周期的扫描代价将永久为 O（已退役 Session 数）。
 
 回收器镜像 `ToolPublicationCollector`：在既有的单线程 `managedToolOutputScheduler`
 上每 tick 一次有界回收，使大 blob UPDATE 永远不占用在线会话调度器。
 
 1. 当某个 Session 的墓碑首次到期（`retired_at + deletion-grace <= now`）时创建账本
-   行；该扫描每次至多检查 32 个到期候选，并按每实例 60 秒的节律运行。一个
-   Session 在其宽限结束后约一分钟内进入可回收状态；这个粗节律为历史级扫
-   描的成本封顶（开放问题 3）。
+   行；该扫描每次至多检查 32 个到期候选（`retired_at` 最老优先），并按每实例
+   60 秒的节律运行。到期积压为空时，一个 Session 在其宽限结束后约一分钟内
+   进入可回收状态；在批量退役之后，或在退役历史很深的集群上首次开启时，积
+   压以每实例约每分钟 32 个 Session 的速度进入回收。这个粗节律为历史级扫描
+   的成本封顶（开放问题 3）。
 2. claim 在 tenant 与 Session 锁下（`ToolPublicationRetentionStore.lockSession`）重估
    资格：墓碑行存在且身份一致、journal head 缺失（写者已关闭 —— 发表必需 head，
    且退役后不可再造）或读取为 `state = 'DELETED'`、`recovery_protected` 为 false、

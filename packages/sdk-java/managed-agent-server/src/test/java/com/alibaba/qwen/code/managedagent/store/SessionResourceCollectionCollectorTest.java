@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Duration;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -339,24 +340,37 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
             publish(String.format("segment-%03d", index), CONTENT, new byte[10]);
         }
         retire();
-        var first = collector(true, Duration.ZERO);
-        assertThat(first.runOnce()).isTrue();
-        var ledger = ledger();
-        assertThat(((Number) ledger.get("collected_bytes")).longValue()).isEqualTo(1000);
-        assertThat(ledger.get("gc_cursor")).isEqualTo("segment-099");
-        assertThat(ledger.get("collected_at")).isNull();
-        // A second instance cannot take over while the claim is alive.
-        assertThat(collector(true, Duration.ZERO).runOnce()).isFalse();
-        assertThat(((Number) ledger().get("collected_bytes")).longValue()).isEqualTo(1000);
-        // An expired claim is handed off and finishes exactly once.
-        jdbc.update("UPDATE qwen_managed_session_resource_collection SET gc_claim_until = 0"
-                + " WHERE session_scope_key = ?", resScope);
-        assertThat(collector(true, Duration.ZERO).runOnce()).isTrue();
-        var finished = ledger();
-        assertThat(((Number) finished.get("collected_bytes")).longValue()).isEqualTo(1050);
-        assertThat(finished.get("collected_at")).isNotNull();
-        assertThat(((Number) finished.get("gc_generation")).longValue()).isEqualTo(2);
-        assertThat(rows()).allSatisfy(row -> assertThat(row.get("inline_bytes")).isNull());
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                .getLogger(SessionResourceCollectionCollector.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            var first = collector(true, Duration.ZERO);
+            assertThat(first.runOnce()).isTrue();
+            var ledger = ledger();
+            assertThat(((Number) ledger.get("collected_bytes")).longValue()).isEqualTo(1000);
+            assertThat(ledger.get("gc_cursor")).isEqualTo("segment-099");
+            assertThat(ledger.get("collected_at")).isNull();
+            // A second instance cannot take over while the claim is alive.
+            assertThat(collector(true, Duration.ZERO).runOnce()).isFalse();
+            assertThat(((Number) ledger().get("collected_bytes")).longValue()).isEqualTo(1000);
+            // An expired claim is handed off and finishes exactly once.
+            jdbc.update("UPDATE qwen_managed_session_resource_collection SET gc_claim_until = 0"
+                    + " WHERE session_scope_key = ?", resScope);
+            assertThat(collector(true, Duration.ZERO).runOnce()).isTrue();
+            var finished = ledger();
+            assertThat(((Number) finished.get("collected_bytes")).longValue()).isEqualTo(1050);
+            assertThat(finished.get("collected_at")).isNotNull();
+            assertThat(((Number) finished.get("gc_generation")).longValue()).isEqualTo(2);
+            assertThat(rows()).allSatisfy(row -> assertThat(row.get("inline_bytes")).isNull());
+            // Only the completing page logs, and it logs the Session total, not its own bytes.
+            assertThat(appender.list).singleElement().satisfies(event -> assertThat(
+                    event.getFormattedMessage()).endsWith("bytes=1050"));
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
     }
 
     @Test
@@ -591,5 +605,114 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
                     assertThat(error.getCode()).isEqualTo("managed_session_resource_corrupt");
                     assertThat(error.getStatus()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
                 });
+    }
+
+    @Test
+    void pagesFetchEligibilityOnceWithoutAnExhaustionProbe() {
+        initSession();
+        head(session);
+        for (int index = 0; index < 250; index++) {
+            publish(String.format("segment-%03d", index), CONTENT, new byte[10]);
+        }
+        retire();
+        var executions = new java.util.concurrent.atomic.AtomicInteger();
+        var intercepted = new JdbcTemplate(jdbc.getDataSource()) {
+            @Override public List<Map<String, Object>> queryForList(String sql, Object... args) {
+                if (sql.startsWith("SELECT resource_id, byte_length FROM qwen_managed_session_resource")) {
+                    executions.incrementAndGet();
+                }
+                return super.queryForList(sql, args);
+            }
+        };
+        var props = new ManagedAgentProperties();
+        props.getToolPublication().setGcEnabled(true);
+        props.getToolPublication().setDeletionGrace(Duration.ZERO);
+        var collector = new SessionResourceCollectionCollector(intercepted, manager, props);
+        assertThat(collector.runOnce()).isTrue();
+        assertThat(collector.runOnce()).isTrue();
+        assertThat(collector.runOnce()).isTrue();
+        var ledger = ledger();
+        assertThat(((Number) ledger.get("collected_bytes")).longValue()).isEqualTo(2500);
+        assertThat(ledger.get("collected_at")).isNotNull();
+        assertThat(executions).hasValue(3);
+    }
+
+    @Test
+    void blockerTransitionLogsOncePerChange() {
+        initSession();
+        head(session);
+        publish("segment", CONTENT, new byte[64]);
+        var lease = retention.read(key);
+        retire();
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                .getLogger(SessionResourceCollectionCollector.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            var collector = collector(true, Duration.ZERO);
+            assertThat(collector.runOnce()).isFalse();
+            assertThat(ledger().get("gc_blocker")).isEqualTo("reader_active");
+            assertThat(appender.list).singleElement().satisfies(event -> assertThat(
+                    event.getFormattedMessage()).contains("blocker=reader_active"));
+            jdbc.update("UPDATE qwen_managed_session_resource_collection SET gc_next_at = 0"
+                    + " WHERE session_scope_key = ?", resScope);
+            assertThat(collector.runOnce()).isFalse();
+            assertThat(ledger().get("gc_blocker")).isEqualTo("reader_active");
+            assertThat(appender.list).hasSize(1);
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+            lease.close();
+        }
+    }
+
+    @Test
+    void collectsRowsPublishedThroughTheRealProducerByteExact() {
+        initSession();
+        head(session);
+        var sessions = new ManagedSessionStore(jdbc);
+        var grant = tx.execute(status -> sessions.acquireWriter(tenant, session, token,
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace-1", "writer", 60000L)));
+        publishThroughStore(sessions, grant.writerGeneration(), "produced-content", CONTENT, new byte[1024]);
+        publishThroughStore(sessions, grant.writerGeneration(), "produced-page", PAGE, new byte[256]);
+        publishThroughStore(sessions, grant.writerGeneration(), "produced-manifest", MANIFEST, new byte[64]);
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET state = 'SEALED',"
+                + " writer_lease_until = '2000-01-01 00:00:00' WHERE tenant_id = ? AND session_id = ?",
+                tenant, session);
+        retire();
+        assertThat(collector(true, Duration.ZERO).runOnce()).isTrue();
+        assertThat(((Number) ledger().get("collected_bytes")).longValue()).isEqualTo(1024 + 256 + 64);
+        assertThat(rows()).allSatisfy(row -> {
+            assertThat(row.get("state")).isEqualTo("COLLECTED");
+            assertThat(row.get("inline_bytes")).isNull();
+        });
+    }
+
+    private void publishThroughStore(ManagedSessionStore sessions, long generation, String resourceId,
+            String kind, byte[] bytes) {
+        sessions.publishToolResult(tenant, session, token,
+                new ManagedSessionStoreModels.PublishToolResultRequest("workspace-1", "writer", generation,
+                        resourceId, kind, 1, bytes.length, ToolPublicationContract.sha256(bytes),
+                        Base64.getEncoder().encodeToString(bytes)));
+    }
+
+    @Test
+    void recoveryReaderAnswersResourceCollectedForPublicationNulledInlineCopy() {
+        initSession();
+        publish("freed", MANIFEST, new byte[64], "REFERENCED", "MYSQL_INLINE");
+        reference("freed");
+        // The shape ToolPublicationCollector.confirm() leaves: bytes nulled, state untouched.
+        jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = NULL"
+                + " WHERE session_scope_key = ? AND resource_id = 'freed'", resScope);
+        var reader = new WorkspaceRecoveryReader(jdbc, null);
+        var source = new ObjectMapper().createObjectNode();
+        source.putObject("head").put("tenantId", tenant).put("workspaceId", "workspace-1")
+                .put("sessionId", session).put("journalRevision", 10)
+                .putNull("latest_checkpoint_resource_id");
+        var ref = new ObjectMapper().createObjectNode().put("resourceId", "freed")
+                .put("kind", MANIFEST).put("schemaVersion", 1).put("byteLength", 64)
+                .put("digest", ToolPublicationContract.sha256(new byte[64]));
+        assertThatThrownBy(() -> reader.resource(source, ref)).hasMessageContaining("resource_collected");
     }
 }

@@ -79,6 +79,8 @@ final class WorkspaceRecoveryReader {
                         + " AND journal_revision <= ?", Long.class, text(head, "tenantId"), text(head, "workspaceId"),
                         text(head, "sessionId"), text(ref, "resourceId"), head.path("journalRevision").asLong());
                 check(published || references != null && references > 0, "resource_out_of_cut");
+                // The publication collector frees inline bytes without moving state off REFERENCED.
+                check(bytes != null, "resource_collected");
             } else {
                 check("TOOL_PUBLICATION".equals(row.get("storage_kind")) && "REFERENCED".equals(row.get("state"))
                         && row.get("inline_bytes") == null && row.get("object_version_id") == null

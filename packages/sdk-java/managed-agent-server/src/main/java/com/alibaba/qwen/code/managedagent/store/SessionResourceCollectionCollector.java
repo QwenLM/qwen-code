@@ -34,7 +34,7 @@ public final class SessionResourceCollectionCollector {
             + " AND resource_id > ? AND NOT EXISTS (SELECT 1 FROM qwen_managed_session_resource_ref r"
             + " WHERE r.session_scope_key = qwen_managed_session_resource.session_scope_key"
             + " AND r.resource_id = qwen_managed_session_resource.resource_id)"
-            + " ORDER BY resource_id LIMIT " + PAGE_ROWS;
+            + " ORDER BY resource_id LIMIT " + (PAGE_ROWS + 1);
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final ManagedAgentProperties properties;
@@ -112,6 +112,8 @@ public final class SessionResourceCollectionCollector {
 
     private Claim claim() {
         long time = ToolPublicationRetentionStore.now(jdbc);
+        // Completed ledgers sit at gc_next_at = -1 forever; the >= 0 predicate keeps this
+        // per-second scan proportional to unfinished work instead of total ledger history.
         var candidates = jdbc.queryForList("SELECT session_scope_key, tenant_id, session_id FROM"
                 + " qwen_managed_session_resource_collection WHERE collected_at IS NULL"
                 + " AND gc_next_at >= 0 AND gc_next_at <= ? AND (gc_owner = ? OR gc_claim_until <= ?)"
@@ -144,6 +146,10 @@ public final class SessionResourceCollectionCollector {
                                 ToolPublicationRetentionStore.hash(tenant), ToolPublicationRetentionStore.hash(session));
                         next = Math.addExact(retiredAt,
                                 properties.getToolPublication().getDeletionGrace().toMillis());
+                    }
+                    if (!java.util.Objects.equals(row.get("gc_blocker"), blocker)) {
+                        LOG.info("Stream capture collection blocked scope={} blocker={} nextAt={}",
+                                row.get("session_scope_key"), blocker, next);
                     }
                     jdbc.update("UPDATE qwen_managed_session_resource_collection SET gc_blocker = ?, gc_next_at = ?"
                             + " WHERE session_scope_key = ?", blocker, next, row.get("session_scope_key"));
@@ -203,9 +209,12 @@ public final class SessionResourceCollectionCollector {
         long bytes = 0;
         var ids = new java.util.ArrayList<String>(PAGE_ROWS);
         String cursor = claim.cursor();
-        for (var candidate : rows) {
+        boolean more = rows.size() > PAGE_ROWS;
+        for (var candidate : rows.subList(0, Math.min(rows.size(), PAGE_ROWS))) {
             long length = ToolPublicationRetentionStore.number(candidate, "byte_length");
             if (!ids.isEmpty() && bytes + length > PAGE_BYTES) {
+                // The row that did not fit stays eligible, so another page exists.
+                more = true;
                 break;
             }
             String resource = (String) candidate.get("resource_id");
@@ -221,8 +230,6 @@ public final class SessionResourceCollectionCollector {
                     + " WHERE session_scope_key = ? AND resource_id IN ("
                     + String.join(", ", java.util.Collections.nCopies(ids.size(), "?")) + ")", args.toArray());
         }
-        // Exactly-PAGE rows can still be the last page; the probe is the source of truth.
-        boolean more = !jdbc.queryForList(ELIGIBLE, claim.scope(), cursor).isEmpty();
         if (more) {
             jdbc.update("UPDATE qwen_managed_session_resource_collection SET gc_cursor = ?,"
                     + " collected_bytes = collected_bytes + ?, gc_claim_until = ? WHERE session_scope_key = ?",

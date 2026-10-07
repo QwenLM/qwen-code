@@ -104,8 +104,8 @@ Completed rows leave `gc_next_at = -1`, outside the claim scan's
 work although ledger rows are kept forever. V48 also adds
 `idx_output_session_retirement_due (retired_at)` so the due-candidate scan
 (`r.retired_at <= now - grace`) is index-served: tombstones are never deleted,
-and an unindexed per-second scan would otherwise cost O(retired Sessions) per
-tick forever.
+and an unindexed scan would otherwise cost O(retired Sessions) on every
+60-second cadence pass forever.
 
 The collector mirrors `ToolPublicationCollector`: one bounded pass per tick on
 the existing single-thread `managedToolOutputScheduler`, so blob-heavy UPDATEs
@@ -113,9 +113,13 @@ never hold the live-session scheduler.
 
 1. A ledger row is created when a tombstone for the Session first becomes due
    (`retired_at + deletion-grace <= now`), during a scan that examines at most
-   32 due candidates and runs at a 60-second cadence per instance. A Session
-   becomes collectible within about a minute after its grace elapses; the
-   coarse cadence caps the cost of the history-wide scan (open question 3).
+   32 due candidates, oldest `retired_at` first, and runs at a 60-second
+   cadence per instance. A Session becomes collectible within about a minute
+   after its grace elapses once the due backlog is empty; after a mass
+   retirement or the first enablement on a fleet with deep retirement history,
+   the backlog drains into collection at roughly 32 Sessions per minute per
+   instance. The coarse cadence caps the cost of the history-wide scan (open
+   question 3).
 2. A claim re-evaluates eligibility under the tenant and Session locks
    (`ToolPublicationRetentionStore.lockSession`): the tombstone row is present
    with matching identity, the journal head is absent (a closed writer —
