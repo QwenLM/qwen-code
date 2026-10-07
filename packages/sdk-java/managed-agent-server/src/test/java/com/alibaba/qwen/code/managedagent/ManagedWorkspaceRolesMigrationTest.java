@@ -87,8 +87,14 @@ class ManagedWorkspaceRolesMigrationTest {
                 + " actor_id, role) VALUES ('tenant', 'workspace', ?,"
                 + " 'SPECTATOR')", OPERATOR))
                 .isInstanceOf(DataIntegrityViolationException.class);
+        // role carries no default: an INSERT omitting it must fail loudly,
+        // as omitting a boolean did under the old NOT NULL columns.
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO"
+                + " managed_workspace_access (tenant_id, workspace_id,"
+                + " actor_id) VALUES ('tenant', 'workspace', ?)", OPERATOR))
+                .isInstanceOf(DataIntegrityViolationException.class);
 
-        // A creation written after V48 keeps owner = creator on the store
+        // A creation written after V51 keeps owner = creator on the store
         // path too; the two columns now only diverge through the handover
         // command that a later slice adds.
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
