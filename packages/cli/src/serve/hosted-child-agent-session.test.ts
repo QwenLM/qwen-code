@@ -483,4 +483,62 @@ describe('hosted child agent session (H4b)', () => {
       );
     });
   });
+
+  it('reuses the committed result references on a replayed settle', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      await settleThroughAttach(children);
+      const payload = {
+        result: Buffer.from('审阅通过', 'utf8'),
+        receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+      };
+      const resultRef = await children.settleCompleted('run-1', payload);
+      const eventsBefore = authority.readEvents({
+        afterSequence: 0,
+        limit: 64,
+      }).length;
+      // The same replay after a lost reply answers with the committed
+      // copies and no second terminal revision.
+      await expect(children.settleCompleted('run-1', payload)).resolves.toEqual(
+        resultRef,
+      );
+      expect(authority.readEvents({ afterSequence: 0, limit: 64 }).length).toBe(
+        eventsBefore,
+      );
+      expect(children.record('run-1')!.resultRef).toEqual(resultRef);
+    });
+  });
+
+  it('refuses a replayed settle that names different bytes', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      await settleThroughAttach(children);
+      await children.settleCompleted('run-1', {
+        result: Buffer.from('审阅通过', 'utf8'),
+        receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+      });
+      const eventsBefore = authority.readEvents({
+        afterSequence: 0,
+        limit: 64,
+      }).length;
+      await expect(
+        children.settleCompleted('run-1', {
+          result: Buffer.from('审阅不通过', 'utf8'),
+          receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+        }),
+      ).rejects.toThrow('was already settled with a different result');
+      expect(authority.readEvents({ afterSequence: 0, limit: 64 }).length).toBe(
+        eventsBefore,
+      );
+      expect(children.record('run-1')!.run.state).toBe('settled');
+    });
+  });
 });

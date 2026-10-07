@@ -301,6 +301,26 @@ export class HostedChildAgentSession {
         `Child result exceeds ${MANAGED_CHILD_LIMITS.maxResultBytes} bytes (byte_limit).`,
       );
     }
+    // A reply lost after the settling revision committed leaves the
+    // already-published copies readable: the replay reuses them after
+    // proving byte equality, instead of minting new resources and a
+    // terminal revision the successor rule must refuse.
+    const prior = this.mustRecord(childRunId);
+    if (prior.resultRef != null && prior.terminalReceiptRef != null) {
+      const committedResult = await this.store.resources.read(prior.resultRef);
+      const committedReceipt = await this.store.resources.read(
+        prior.terminalReceiptRef,
+      );
+      if (
+        committedResult.equals(params.result) &&
+        committedReceipt.equals(params.receipt)
+      ) {
+        return prior.resultRef;
+      }
+      throw new ManagedSessionConflictError(
+        `Child run ${childRunId} was already settled with a different result.`,
+      );
+    }
     const resultRef = await this.store.resources.publish(
       'managed-child-result',
       params.result,

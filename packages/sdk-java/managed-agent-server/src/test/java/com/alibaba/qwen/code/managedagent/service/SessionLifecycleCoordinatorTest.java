@@ -448,6 +448,62 @@ class SessionLifecycleCoordinatorTest {
     }
 
     @Test
+    void aRepairJournalRefusalStillClosesTheChildAndSettlesOnRedrive() {
+        World world = closingWorld("repair-");
+        // The ledger names the child but the first dispatch_started call
+        // fails with a plain RuntimeException — the SDK's refusal and
+        // transport-ambiguous throws are plain RuntimeExceptions, not
+        // IllegalStateException. The physical close must still run, and
+        // the unpaid reconstruction must not block the next drive.
+        liveScope(world, "{\"inputRef\":{\"resourceId\":\"res-input\"}}");
+        ChildResultRelayStore.RelayRow claimed = world.relayStore.claim(
+                "tenant", world.session, "run-1", "key-run-1", "owner",
+                30_000, 100);
+        assertThat(claimed).isNotNull();
+        world.relayStore.advance(claimed, "owner", "watching", world.child,
+                0, null, 30_000, 100);
+        var harness = new CascadingHarness(true, true);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(world.store,
+                    new ManagedSessionStore(world.jdbc), harness,
+                    warmer(true, false), world.relayStore, new ObjectMapper(),
+                    new RequestDigests(),
+                    brokerProvider(bindingOf("binding-1", 7L)), executor,
+                    Clock.systemUTC(), world.properties);
+            try {
+                // First attempt: the reconstruction owes, yet the child is
+                // admitted and physically closed — the refusal never skips
+                // the child's own close.
+                coordinator.dispatch("tenant", world.session,
+                        world.operation);
+                await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
+                        assertThat(harness.closed).contains(world.child));
+                assertThat(childCloseOperation(world)).isNotNull();
+                assertThat(harness.operations)
+                        .extracting(op -> op.get("kind"))
+                        .contains("dispatch_started");
+                assertThat(harness.operations)
+                        .extracting(op -> op.get("kind"))
+                        .doesNotContain("close_scope");
+                assertThat(world.store.findOperation("tenant", world.session,
+                        world.operation).orElseThrow().state())
+                        .isNotEqualTo("COMPLETED");
+                // The replayed reconstruction repairs the chain and the
+                // settling revision lands on re-drive.
+                redispatchUntil(coordinator, world, "COMPLETED");
+                assertThat(world.store.requireSession("tenant", world.child)
+                        .status()).isEqualTo("CLOSED");
+                Map<String, Object> closeScope = harness.operations.stream()
+                        .filter(op -> "close_scope".equals(op.get("kind")))
+                        .findFirst().orElseThrow();
+                assertThat(closeScope).containsEntry("started", true);
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    @Test
     void aChildKnownOnlyToTheCommittedLineageStillCloses() {
         World world = closingWorld("lineage-");
         // Neither the body nor any ledger row remembers the child: the

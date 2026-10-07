@@ -414,12 +414,17 @@ public class SessionLifecycleCoordinator {
                 // Session recorded through valid transitions: dispatch and
                 // attach replay the child's proven identity — the body's
                 // own committed dispatch facts when present, or the
-                // physical Runtime binding the child warms with.
+                // physical Runtime binding the child warms with. The SDK's
+                // refusal and transport-ambiguous throws are plain
+                // RuntimeExceptions (DaemonHttpException,
+                // MutationOutcomeUnknownException): a journal-side failure
+                // owes its revision, but must never skip the child's own
+                // physical close behind it.
                 try {
                     repairChildRecord(operation, scope.childRunId(), body,
                             childSessionId, creationKey);
                     recordReady = true;
-                } catch (IllegalStateException unfixed) {
+                } catch (RuntimeException unfixed) {
                     journalDebt = true;
                     LOG.warn("Managed Session close cascade cannot rebuild"
                                     + " a child's record tenant={} session={}"
