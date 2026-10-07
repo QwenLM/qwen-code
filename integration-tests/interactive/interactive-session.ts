@@ -161,23 +161,27 @@ export class InteractiveSession {
     });
 
     const session = new InteractiveSession(ptyProcess, terminal);
-    // A child that dies before printing its prompt fails fast with its exit
-    // code instead of waiting the budget out; only a live-but-slow boot
-    // (#13552) pays the full readyPromptBudgetMs window. The tail reuses
-    // waitFor's spelling so both failure paths grep the same in a job log —
-    // the catch below closes the session, which disposes the terminal and
-    // would otherwise discard the boot log unread.
+    // A child that dies during startup fails fast with its exit code instead
+    // of waiting the budget out; only a live-but-slow boot (#13552) pays the
+    // full readyPromptBudgetMs window. The tail reuses waitFor's spelling so
+    // both failure paths grep the same in a job log — the catch below closes
+    // the session, which disposes the terminal and would otherwise discard
+    // the boot log unread.
+    let startupUndecided = true;
     const exited = new Promise<never>((_, reject) => {
       ptyProcess.onExit(({ exitCode, signal }) => {
-        // onExit settles ahead of waitFor's next 200ms scan, so a child that
-        // printed the prompt and died inside that gap lands here too — word
-        // the failure from the captured output, not an unchecked ordering.
-        const sawPrompt = stripAnsi(session.rawOutput).includes(
-          'Type your message',
-        );
+        // close()'s kill() fires this handler on every healthy session's
+        // teardown; the strip pass over an unbounded transcript and the
+        // rejection a settled race never observes are waste once startup is
+        // decided.
+        if (!startupUndecided) return;
+        // Worded neutrally: whether the prompt reached rawOutput is not
+        // decidable here — a child that out-writes the parent's read loop
+        // loses every byte past the first 4095-byte chunk — so the tail is
+        // best-effort, not necessarily the fatal lines.
         reject(
           new Error(
-            `CLI exited ${sawPrompt ? 'after printing' : 'before'} the ready prompt (code ${exitCode}, signal ${signal})\n` +
+            `CLI exited during startup (code ${exitCode}, signal ${signal})\n` +
               `Last 500 chars: ${stripAnsi(session.rawOutput).slice(-500)}`,
           ),
         );
@@ -188,7 +192,9 @@ export class InteractiveSession {
         session.waitFor('Type your message', readyPromptBudgetMs(process.env)),
         exited,
       ]);
+      startupUndecided = false;
     } catch (err) {
+      startupUndecided = false;
       // start() must not orphan the child, pty, and terminal it refuses to
       // hand out.
       try {

@@ -21,8 +21,9 @@ import { InteractiveSession } from './interactive-session.js';
 // and interactive-session-start.test.ts), which test:scripts runs on every
 // PR. These real-spawn cases cover the behaviour a source pin cannot: the
 // tight branch's 30s value, options.command, refused-session cleanup,
-// dead-child fail-fast with its captured tail, the exit line's
-// captured-output wording, and a pending waitFor stopping at close().
+// dead-child fail-fast with its captured tail, the exit line's neutral
+// wording for a post-prompt death, and a pending waitFor stopping at
+// close().
 const PROMPT_DELAY_MS = 35_000;
 
 describe('InteractiveSession.start ready-prompt budget', () => {
@@ -91,31 +92,32 @@ setTimeout(() => {}, 120_000);`;
     }).then((s) => {
       session = s;
     });
-    await expect(attempt).rejects.toThrow(
-      'CLI exited before the ready prompt (code 3',
-    );
+    await expect(attempt).rejects.toThrow('CLI exited during startup (code 3');
     await expect(attempt).rejects.toThrow('BOOTCRASH_MARKER');
     expect(Date.now() - startedAt).toBeLessThan(30_000);
   });
 
-  it('words a post-prompt death from the captured output', async () => {
-    // The prompt reaches the pty 50ms before the exit — inside waitFor's
-    // 200ms scan gap — so the rejection must not claim the CLI exited before
-    // the prompt its own tail contains.
+  it('words an immediate post-prompt death from the captured output', async () => {
+    // A >4KB burst ending in the prompt, then an immediate exit: on a fast
+    // host the exit beats waitFor's 200ms scan grid by two orders of
+    // magnitude, and under read lag the burst outruns the parent's final
+    // read so the prompt never reaches rawOutput and waitFor cannot win —
+    // either way the rejection is deterministic, unlike a prompt-then-die
+    // gap whose outcome rode the scan grid's phase. The CLI did print its
+    // prompt, so the line must not claim it exited before it; reverting to
+    // the 'before the ready prompt' wording reds this case.
     const attempt = InteractiveSession.start({
       command: {
         bin: process.execPath,
         args: [
           '-e',
-          "console.log('Type your message'); setTimeout(() => process.exit(4), 50)",
+          "process.stdout.write('BOOT LINE\\n'.repeat(600) + 'Type your message\\n'); process.exit(4)",
         ],
       },
     }).then((s) => {
       session = s;
     });
-    await expect(attempt).rejects.toThrow(
-      'CLI exited after printing the ready prompt (code 4',
-    );
+    await expect(attempt).rejects.toThrow('CLI exited during startup (code 4');
     await expect(attempt).rejects.not.toThrow('before the ready prompt');
   });
 

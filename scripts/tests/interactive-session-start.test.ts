@@ -42,16 +42,19 @@ describe('InteractiveSession.start source pins (#13552)', () => {
   it('races the ready-prompt wait against child exit, keeping the tail', () => {
     // Reverting the race returns a dead-child boot to a full-budget wait;
     // dropping the tail discards the boot log that made #13552 diagnosable
-    // from the job log alone. The exit line is worded from the captured
-    // output: onExit settles ahead of waitFor's 200ms scan, so a child that
-    // printed the prompt and died inside that gap must not be reported as
-    // having exited before it.
+    // from the job log alone. The exit line stays neutral: whether the
+    // prompt reached rawOutput is undecidable once a child out-writes the
+    // parent's final read, so a before/after claim can contradict the very
+    // tail attached to it.
     expect(source).toContain('Promise.race([');
     expect(source).toContain('ptyProcess.onExit(');
-    expect(source).toMatch(
-      /stripAnsi\(session\.rawOutput\)\.includes\(\s*'Type your message',?\s*\)/,
+    // Without the latch, close()'s kill() re-runs the handler's strip passes
+    // and builds a rejection no settled race observes on every healthy
+    // session's teardown.
+    expect(source).toContain('if (!startupUndecided) return;');
+    expect(source).toContain(
+      'CLI exited during startup (code ${exitCode}, signal ${signal})',
     );
-    expect(source).toContain("'after printing' : 'before'");
     expect(source).toContain(
       'Last 500 chars: ${stripAnsi(session.rawOutput).slice(-500)}',
     );
@@ -64,10 +67,11 @@ describe('InteractiveSession.start source pins (#13552)', () => {
 
   it('stops the waitFor poll when the session closes', () => {
     // Without the flag, the race's abandoned loser keeps re-scanning a dead
-    // pty's output every 200ms until its own budget expires. Pin the guard's
-    // semantics, not its byte prefix, so a reflow of the condition cannot
-    // redden a PR-gated lane.
-    expect(source).toMatch(/while\s*\([\s\S]*?!this\.closed\s*&&/);
+    // pty's output every 200ms until its own budget expires. The guard is
+    // pinned leading waitFor's loop condition — displaced into the body it
+    // no longer stops the poll — while prettier's operator-leading reflow of
+    // the condition still matches.
+    expect(source).toMatch(/while\s*\(\s*!this\.closed\s*&&/);
   });
 
   it('fails an abandoned poll with the closed-session error', () => {
