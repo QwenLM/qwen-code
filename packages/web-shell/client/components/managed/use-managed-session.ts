@@ -22,18 +22,22 @@ interface SignalEntry {
 
 class SnapshotLegError extends Error {
   readonly status: number | undefined;
-  readonly code: string | undefined;
 
   constructor(
     readonly leg: 'session' | 'transcript',
     readonly cause: unknown,
   ) {
     super(cause instanceof Error ? cause.message : String(cause));
-    const forwarded = cause as { status?: unknown; code?: unknown };
+    const forwarded = cause as { status?: unknown };
     this.status =
       typeof forwarded.status === 'number' ? forwarded.status : undefined;
-    this.code = typeof forwarded.code === 'string' ? forwarded.code : undefined;
   }
+}
+
+// A terminal answer is a definite, non-auth 4xx: auth failures re-derive
+// credentials on the very next attempt, so they are never terminal.
+function isTerminalAnswer(error: unknown): boolean {
+  return !isAuthFailure(error) && isNonRetryableClientError(error);
 }
 
 // The "stream is not advancing" warning: the one stream record an
@@ -44,6 +48,11 @@ class StreamStallError extends Error {}
 
 const BASE_RETRY_DELAY_MS = 3_000;
 const MAX_RETRY_DELAY_MS = 30_000;
+// Bounded re-arms of a terminally-ended bootstrap: without a bound an
+// alternating definite-4xx/success backend remounts the effect every
+// rung-zero cadence forever, re-spending the transcript read and zeroing
+// the backoff ladders each time.
+const MAX_SESSION_REARMS = 3;
 
 // Rung zero must stay exactly BASE_RETRY_DELAY_MS: ManagedSessionsPage pins
 // the gap-recovery cadence with a 2999/3000ms boundary in another file, and
@@ -76,8 +85,10 @@ interface ManagedSessionState {
   olderCursor?: string;
   loading: boolean;
   // One signal per answer authority. A failure writes into its own leg's
-  // slot; only a later success by that same leg clears it — a live stream
-  // cannot certify history and a summary read cannot certify the event log.
+  // slot; a later success clears it — as a rule only that leg's own: a
+  // summary read cannot certify the event log. The one cross-leg
+  // exception is a genuinely new stream frame, whose live delivery
+  // refutes the transcript leg's record too.
   signals?: Partial<Record<SignalLeg, SignalEntry>>;
 }
 
@@ -98,6 +109,10 @@ export function useManagedSession(
   // session-leg success re-arms the whole effect instead of leaving a
   // silent dead loop next to a live summary.
   const endedRef = useRef(false);
+  // Re-arm budget, per session and reset once a bootstrap actually
+  // completes (see MAX_SESSION_REARMS).
+  const rearmRef = useRef(0);
+  const rearmSessionRef = useRef<string | undefined>(undefined);
   const seqRef = useRef(0);
   // Synchronous mirror of the stream leg's standing terminal verdict: the
   // proof-of-life timer reads it at fire time, which a state updater (run
@@ -119,6 +134,10 @@ export function useManagedSession(
     pagedHeadRef.current = undefined;
     exhaustedRef.current = false;
     endedRef.current = false;
+    if (rearmSessionRef.current !== sessionId) {
+      rearmSessionRef.current = sessionId;
+      rearmRef.current = 0;
+    }
     seqRef.current = 0;
     streamVerdictMessageRef.current = undefined;
     setLoadingOlder(false);
@@ -138,12 +157,12 @@ export function useManagedSession(
         // A standing terminal verdict leaves only through retire(): a
         // weaker later failure on the same leg must not downgrade it.
         if (previous?.final && !final) return current;
-        // A stall warning leaves only through a terminal verdict, its own
-        // re-assertion, or an advancing stream (retire): a weaker transient
-        // would strip the stall flag, and the next clean pass would expire
-        // it without the stream ever advancing.
-        if (previous?.stall && !final && !(error instanceof StreamStallError))
-          return current;
+        // A stall warning leaves only through a terminal verdict or an
+        // advancing stream (retire): a weaker transient would strip the
+        // stall flag, and the next clean pass would expire it without the
+        // stream ever advancing. The stall's own re-assertion is such a
+        // weaker write — the standing record already carries the flag.
+        if (previous?.stall && !final) return current;
         return {
           ...current,
           // Every recorded failure is also the end of any in-flight read;
@@ -169,8 +188,7 @@ export function useManagedSession(
     // endpoint also failed.
     const failed = (error: unknown, leg: SignalLeg): boolean => {
       fail(leg, error);
-      if (isAuthFailure(error) || !isNonRetryableClientError(error))
-        return false;
+      if (!isTerminalAnswer(error)) return false;
       stop(leg, error);
       return true;
     };
@@ -187,7 +205,12 @@ export function useManagedSession(
       });
       if (leg === 'session' && endedRef.current) {
         endedRef.current = false;
-        setRevision((value) => value + 1);
+        // Past the bound the ended loops stay ended: the poll keeps the
+        // summary live and reload() is the way back.
+        if (rearmRef.current < MAX_SESSION_REARMS) {
+          rearmRef.current += 1;
+          setRevision((value) => value + 1);
+        }
       }
     };
     // A terminal record expires only on its own leg's success evidence;
@@ -238,7 +261,15 @@ export function useManagedSession(
       if (sessionRead.status === 'rejected') {
         // A fulfilled transcript read is that leg's own success evidence:
         // retire its stale verdict before the throw discards the read.
+        // When both reads reject and the session leg is transient the
+        // bootstrap retries, so the transcript leg's own answer is
+        // recorded before the throw discards it — a definite transcript
+        // answer would otherwise wait for a resync in which the session
+        // read happens to succeed. A terminal session answer owns the
+        // display, so that case books nothing here.
         if (transcriptRead.status === 'fulfilled') retire('transcript');
+        else if (!isTerminalAnswer(sessionRead.reason))
+          failed(transcriptRead.reason, 'transcript');
         throw new SnapshotLegError('session', sessionRead.reason);
       }
       if (transcriptRead.status === 'rejected') {
@@ -350,9 +381,7 @@ export function useManagedSession(
           // the session: record it stickily but keep retrying so the
           // stream starts as soon as the read recovers.
           if (error instanceof SnapshotLegError && error.leg === 'transcript') {
-            fail('transcript', error);
-            if (!isAuthFailure(error) && isNonRetryableClientError(error))
-              stop('transcript', error);
+            failed(error, 'transcript');
           } else if (failed(error, 'session')) {
             endedRef.current = true;
             return;
@@ -361,6 +390,9 @@ export function useManagedSession(
         }
       }
       if (lastEventId === undefined || abort.signal.aborted) return;
+      // A completed bootstrap certifies the session: the re-arm budget
+      // starts over.
+      rearmRef.current = 0;
       // The durable snapshot read has its own health: the stream can keep
       // delivering while it fails, so it climbs its own ladder instead of
       // being charged to (and zeroed by) the stream's counter.
@@ -425,6 +457,15 @@ export function useManagedSession(
           })) {
             if (abort.signal.aborted) return;
             delivered = true;
+            // A frame landing past the proof-of-life point is the attempt
+            // answering: land the expiry the point was holding — the
+            // replay guard below must not swallow it (a replay counts).
+            // Like a heartbeat, an expiry landed here is never restored
+            // by this connection's later drop.
+            if (proofOfLifePassed) {
+              expiredVerdictMessage = undefined;
+              expireAnswered('stream');
+            }
             if (event.type === 'stream_gap') {
               gap = true;
               break;

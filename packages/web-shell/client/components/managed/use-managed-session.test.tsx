@@ -245,6 +245,45 @@ describe('useManagedSession', () => {
     }
   });
 
+  it('bounds the session-leg re-arm count when the backend alternates definite and success', async () => {
+    vi.useFakeTimers();
+    try {
+      let sessionCalls = 0;
+      const provider = {
+        // The bootstrap read of every run 404s (a stale replica behind
+        // the balancer) while the poll read succeeds: the calls strictly
+        // alternate bootstrap/poll, so odd calls are the bootstrap's.
+        getSession: vi.fn(() => {
+          sessionCalls += 1;
+          return sessionCalls % 2 === 1
+            ? Promise.reject(
+                Object.assign(new Error('session gone'), { status: 404 }),
+              )
+            : Promise.resolve({ sessionId: 'session-1' });
+        }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents: vi.fn(),
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      // Stepped advances: each re-arm cascade (poll success → revision →
+      // bootstrap) needs its own flush boundary, the pattern every
+      // cascade-driving spec in this file follows.
+      for (let step = 0; step < 10; step++)
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(3_000);
+        });
+      // One initial run plus three bounded re-arms spend one transcript
+      // read each. Unbounded, the loop would re-arm every rung-zero
+      // cadence and spend ~10 here, with both ladders pinned at rung
+      // zero forever.
+      expect(provider.getTranscript).toHaveBeenCalledTimes(4);
+      expect(provider.subscribeEvents).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps a transcript-leg verdict while only session-leg reads succeed', async () => {
     vi.useFakeTimers();
     try {
@@ -909,6 +948,65 @@ describe('useManagedSession', () => {
       expect(latest?.stoppedLeg).toBe('stream');
       // …and the keep-alive landing at t=7000 is the attempt answering:
       // it lands the expiry the proof-of-life point was holding.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(latest?.stoppedReason).toBeUndefined();
+      expect(latest?.stoppedLeg).toBeUndefined();
+      expect(latest?.error).toBeUndefined();
+    } finally {
+      restoreBackoff();
+      vi.useRealTimers();
+    }
+  });
+
+  it('expires a terminal stream verdict when a replayed frame lands past the proof-of-life point', async () => {
+    vi.useFakeTimers();
+    const restoreBackoff = deterministicBackoff();
+    try {
+      let subscribeCalls = 0;
+      const subscribeEvents = vi.fn(async function* (
+        _sessionId: string,
+        request: { signal?: AbortSignal },
+      ) {
+        subscribeCalls += 1;
+        if (subscribeCalls === 1) {
+          yield event(1);
+          throw Object.assign(new Error('session gone'), { status: 404 });
+        }
+        // The reconnect answers late: the server replays the tail from
+        // lastEventId after a slow accept, so the first frame lands past
+        // the +3s proof-of-life point — and it is a replay, which the
+        // replay guard then swallows. The idle Session stays open after.
+        await new Promise((resolve) => setTimeout(resolve, 4_000));
+        yield event(1);
+        await new Promise((resolve) =>
+          request.signal?.addEventListener('abort', resolve),
+        );
+      });
+      const provider = {
+        getSession: vi.fn().mockResolvedValue({ sessionId: 'session-1' }),
+        getTranscript: vi.fn().mockResolvedValue(transcript(1)),
+        subscribeEvents,
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      // Attempt 2 opens at t=3000; its proof-of-life point passes at
+      // t=6000 with nothing delivered yet, so the verdict still stands…
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_100);
+      });
+      expect(subscribeCalls).toBe(2);
+      expect(latest?.stoppedReason).toBe('session gone');
+      expect(latest?.stoppedLeg).toBe('stream');
+      // …and the replayed frame landing at t=7000 is the attempt
+      // answering: it lands the expiry the point was holding, even though
+      // the replay guard swallows the frame itself.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1_000);
       });
@@ -1731,6 +1829,45 @@ describe('useManagedSession', () => {
       expect(latest?.stoppedReason).toBe('session gone');
       expect(latest?.stoppedLeg).toBe('session');
       expect(provider.subscribeEvents).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('records a definite transcript answer when both bootstrap reads reject and the session blip is transient', async () => {
+    vi.useFakeTimers();
+    try {
+      const provider = {
+        // A retryable session answer (no status): the bootstrap retries.
+        getSession: vi.fn(() => Promise.reject(new Error('server busy'))),
+        // A definite transcript answer: the history was pruned.
+        getTranscript: vi.fn(() =>
+          Promise.reject(
+            Object.assign(new Error('history pruned'), { status: 404 }),
+          ),
+        ),
+        subscribeEvents: vi.fn(),
+      } as unknown as ManagedAgentProvider;
+      mountReact(<Probe provider={provider} />);
+      await flushReact();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      // The transcript leg's own definite answer survives the session
+      // error's throw…
+      expect(latest?.stoppedReason).toBe('history pruned');
+      expect(latest?.stoppedLeg).toBe('transcript');
+      // …while the session leg's transient shows beside it…
+      expect(latest?.error).toBe('server busy');
+      // …and the bootstrap keeps retrying: neither the transient session
+      // blip nor the definite transcript answer ends it.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_100);
+      });
+      expect(provider.getSession.mock.calls.length).toBeGreaterThan(1);
+      expect(provider.subscribeEvents).not.toHaveBeenCalled();
+      expect(latest?.stoppedReason).toBe('history pruned');
+      expect(latest?.stoppedLeg).toBe('transcript');
     } finally {
       vi.useRealTimers();
     }
@@ -5144,6 +5281,7 @@ describe('useManagedSession', () => {
   it('reveals a still-live paging failure again once a poll blip clears', async () => {
     vi.useFakeTimers();
     let blipNextSummary = false;
+    let pagingDown = true;
     let subscribeCalls = 0;
     const provider = {
       getSession: vi.fn(async () => {
@@ -5155,7 +5293,7 @@ describe('useManagedSession', () => {
       }),
       getTranscript: vi.fn<ManagedAgentProvider['getTranscript']>(
         (_sessionId, request) =>
-          request.before === 'cursor-1'
+          request.before === 'cursor-1' && pagingDown
             ? Promise.reject(new Error('Managed Agent request failed (410)'))
             : Promise.resolve({
                 events: [event(1)],
@@ -5210,6 +5348,16 @@ describe('useManagedSession', () => {
       });
       expect(latest?.error).toBe('Managed Agent request failed (410)');
       expect(latest?.olderCursor).toBe('cursor-1');
+
+      // The dead cursor recovering retires the transcript leg's record:
+      // the dropped stream's still-booked failure is the newest standing
+      // record again — the record the poll blip masked. The reconnect
+      // stays unanswered, so nothing expires it.
+      pagingDown = false;
+      await act(async () => {
+        await latest!.loadOlder();
+      });
+      expect(latest?.error).toBe('Failed to fetch');
     } finally {
       vi.useRealTimers();
     }

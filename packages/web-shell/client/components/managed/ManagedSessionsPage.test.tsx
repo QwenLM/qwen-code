@@ -1788,6 +1788,21 @@ describe('ManagedSessionsPage', () => {
       (el) => el.textContent,
     );
     expect(alerts).toEqual(['Not found', 'Turn already active']);
+    const actionAlert = container.querySelectorAll('[role="alert"]')[1];
+    // The session leg heals on the next poll rung: the sticky stop leaves,
+    // and the still-standing action error must keep its node — index
+    // reconciliation would keep node 0 and rewrite its text, re-announcing
+    // an already-announced alert.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6_000);
+      await flush();
+    });
+    expect(
+      [...container.querySelectorAll('[role="alert"]')].map(
+        (el) => el.textContent,
+      ),
+    ).toEqual(['Turn already active']);
+    expect(container.querySelector('[role="alert"]')).toBe(actionAlert);
   });
 
   it('shows a failed older-page fetch alongside a sticky terminal stop', async () => {
