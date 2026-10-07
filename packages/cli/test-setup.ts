@@ -40,6 +40,14 @@ delete process.env['SANDBOX_SET_UID_GID'];
 // pinning: tests that want the variable set it in-body.
 delete process.env['QWEN_RUNTIME_DIR'];
 
+// QWEN_HOME is the OPERATOR's home override, and it outranks the homedir()
+// mocks every settings test anchors on: exported on a run from inside a Qwen
+// Code session (which always exports it), getUserSettingsPath() resolves to
+// the ambient home, so the mocked user-settings file is never found and the
+// settings suite fails — 13 tests in settings.test.ts, measured. Deleting
+// rather than pinning: tests that exercise QWEN_HOME set it in-body.
+delete process.env['QWEN_HOME'];
+
 // Registration capacity is an OPERATOR daemon setting, and `createServeApp` /
 // `runQwenServe` read it straight from the ambient environment when no explicit
 // option or `daemonEnv` is supplied. A maintainer who exports the documented
