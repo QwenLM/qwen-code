@@ -29,6 +29,10 @@ import type { ManagedSessionJsonValue } from './managed-session-inbox.js';
 import { tryParseHarnessCheckpointV1 } from './managed-harness-checkpoint.js';
 import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.js';
 import {
+  MANAGED_MESSAGE_CHUNKS_KIND,
+  managedMessageChunkParts,
+} from './managed-message-chunks.js';
+import {
   HOSTED_TOOL_RESULT_RESOURCE_LIMITS,
   type DurableToolResultResourceStore,
 } from './resource-tool-result-store.js';
@@ -1613,6 +1617,9 @@ function nestedResourceRefs(
   ref: ManagedSessionDurableRef,
   bytes: Buffer,
 ): ManagedSessionDurableRef[] {
+  if (ref.kind === MANAGED_MESSAGE_CHUNKS_KIND) {
+    return managedMessageChunkParts(ref.kind, bytes);
+  }
   if (ref.kind === 'managed-checkpoint') {
     const parsed = tryParseHarnessCheckpointV1(bytes);
     return parsed.ok ? collectRefs([parsed.checkpoint]) : [];
