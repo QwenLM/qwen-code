@@ -336,7 +336,7 @@ public class WorkspaceStorageGuard {
             throw WorkspaceExecutionStore.unavailable();
         }
         requireMatching(row, actual, tenantId, storageId);
-        verifyHistory(tenantId, storageId);
+        verifyHistory(tenantId, storageId, false);
         if (!marker(row).equals(readMarker(root))) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -352,21 +352,35 @@ public class WorkspaceStorageGuard {
         }
     }
 
-    private void verifyHistory(String tenantId, String storageId) {
+    private void verifyHistory(String tenantId, String storageId, boolean probe) {
         var migrations = jdbc.queryForList("SELECT history_identity_json FROM managed_workspace_migration"
                 + " WHERE tenant_id = ? AND storage_id = ? AND state = 'COMPLETED' ORDER BY updated_at DESC LIMIT 1",
                 tenantId, storageId);
         if (!migrations.isEmpty()) {
+            Identity expected;
             try {
-                Identity expected = json.readValue((String) migrations.getFirst().get("history_identity_json"), Identity.class);
-                String home = System.getenv("QWEN_HOME");
-                if (home == null || !Path.of(home).isAbsolute()
-                        || !Path.of(home).resolve("file-history").toString().equals(expected.root())
-                        || !Path.of(home).toRealPath().equals(Path.of(home))
-                        || !expected.equals(identity(Path.of(expected.root())))) {
+                expected = json.readValue((String) migrations.getFirst().get("history_identity_json"), Identity.class);
+            } catch (IOException error) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            String home = System.getenv("QWEN_HOME");
+            if (home == null || !Path.of(home).isAbsolute()
+                    || !Path.of(home).resolve("file-history").toString().equals(expected.root())) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            try {
+                if (!Path.of(home).toRealPath().equals(Path.of(home))
+                        || !expected.equals(identities.read(Path.of(expected.root())))) {
                     throw WorkspaceExecutionStore.unavailable();
                 }
+            } catch (NoSuchFileException | AccessDeniedException error) {
+                throw WorkspaceExecutionStore.unavailable();
             } catch (IOException error) {
+                if (probe) {
+                    throw WorkspaceExecutionStore.unavailableTransient(error);
+                }
+                throw WorkspaceExecutionStore.unavailable();
+            } catch (RuntimeException error) {
                 throw WorkspaceExecutionStore.unavailable();
             }
         }
@@ -406,7 +420,7 @@ public class WorkspaceStorageGuard {
             throw WorkspaceExecutionStore.unavailable();
         }
         requireMatching(row, actual, tenantId, storageId);
-        verifyHistory(tenantId, storageId);
+        verifyHistory(tenantId, storageId, true);
         if (!marker(row).equals(readMarkerProbe(root))) {
             throw WorkspaceExecutionStore.unavailable();
         }

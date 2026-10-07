@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeB
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -114,6 +115,72 @@ class WorkspaceStorageGuardTest {
         assertUnavailable(() -> guard().verifyProbe(binding));
         assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(registration);
         assertThat(jdbc.queryForMap("SELECT * FROM managed_workspace_migration")).isEqualTo(migration);
+    }
+
+    @Test
+    void historyProbeRetriesIoWithoutChangingAcquireOrStructuralVerdicts() throws Exception {
+        Path home = Files.createDirectory(temp.resolve("home")).toRealPath();
+        Path fixture = Files.createDirectory(temp.resolve("fork"));
+        Path output = temp.resolve("history-probe.log");
+        var builder = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                "-cp", System.getProperty("surefire.test.class.path", System.getProperty("java.class.path")),
+                WorkspaceStorageGuardTest.class.getName(), fixture.toString())
+                .redirectErrorStream(true).redirectOutput(output.toFile());
+        builder.environment().put("QWEN_HOME", home.toString());
+        Process child = builder.start();
+        try {
+            assertThat(child.waitFor(60, TimeUnit.SECONDS)).isTrue();
+            assertThat(child.exitValue()).withFailMessage(Files.readString(output)).isZero();
+        } finally {
+            if (child.isAlive()) {
+                child.destroyForcibly();
+                child.waitFor(10, TimeUnit.SECONDS);
+            }
+        }
+    }
+
+    public static void main(String[] args) throws Exception {
+        var fixture = new WorkspaceStorageGuardTest();
+        fixture.temp = Path.of(args[0]);
+        fixture.setUp();
+        Path history = Files.createDirectory(Path.of(System.getenv("QWEN_HOME")).resolve("file-history"));
+        WorkspaceStorageGuard stable = fixture.guard();
+        stable.register("tenant", "storage", UUID.randomUUID().toString());
+        var attributes = Files.readAttributes(history, BasicFileAttributes.class);
+        String identity = new ObjectMapper().writeValueAsString(new WorkspaceStorageGuard.Identity(
+                history.toString(), "test-host", "test-device", attributes.fileKey().toString(),
+                attributes.creationTime().toInstant().toString()));
+        fixture.jdbc.update("INSERT INTO managed_workspace_migration (operation_id, tenant_id, storage_id, request_digest,"
+                + " request_json, state, history_identity_json, target_registration_id)"
+                + " VALUES (?, 'tenant', 'storage', 'digest', '{}', 'COMPLETED', ?, ?)",
+                UUID.randomUUID().toString(), identity, UUID.randomUUID().toString());
+        stable.verifyProbe(fixture.binding);
+        stable.verify(fixture.binding);
+        var lease = fixture.jdbc.queryForList("SELECT * FROM managed_workspace_execution_lease");
+        var migration = fixture.jdbc.queryForList("SELECT * FROM managed_workspace_migration");
+        IOException fault = new IOException("Input/output error");
+        var transientHistory = new WorkspaceStorageGuard(fixture.jdbc, new DataSourceTransactionManager(fixture.dataSource),
+                fixture.properties, path -> {
+                    if (path.equals(history)) {
+                        throw fault;
+                    }
+                    return stable.migrationIdentity(path);
+                });
+        assertThatThrownBy(() -> transientHistory.verifyProbe(fixture.binding))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                    assertThat(error.isRetryable()).isTrue();
+                    assertThat(error.getCause()).isSameAs(fault);
+                });
+        assertThatThrownBy(() -> transientHistory.verify(fixture.binding))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> assertThat(error.isRetryable()).isFalse());
+        assertThat(fixture.jdbc.queryForList("SELECT * FROM managed_workspace_execution_lease")).isEqualTo(lease);
+        assertThat(fixture.jdbc.queryForList("SELECT * FROM managed_workspace_migration")).isEqualTo(migration);
+        for (String invalid : List.of(identity.replace("test-host", "mismatched-host"), "{broken")) {
+            fixture.jdbc.update("UPDATE managed_workspace_migration SET history_identity_json = ?", invalid);
+            assertThatThrownBy(() -> stable.verifyProbe(fixture.binding))
+                    .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> assertThat(error.isRetryable()).isFalse());
+        }
     }
 
     @Test

@@ -187,12 +187,67 @@ async function fixture() {
 }
 
 describe('workspace recovery private worker', () => {
-  it.each(['unset', 'relative', 'symlink', 'different-history'])(
+  it.each(['canonical', 'trailing-slash', 'doubled-slash'])(
+    'accepts %s QWEN_HOME at the migration environment gate',
+    async (kind) => {
+      const f = await fixture();
+      const home = join(f.root, 'home');
+      const history = join(home, 'file-history');
+      await mkdir(history, { recursive: true });
+      for (const path of [
+        'workspace',
+        'file-history',
+        'authority/objects',
+        '.w1-recovery',
+      ])
+        await mkdir(join(f.context.request.bundleRoot, path), {
+          recursive: true,
+        });
+      vi.stubEnv(
+        'QWEN_HOME',
+        kind === 'trailing-slash'
+          ? `${home}/`
+          : kind === 'doubled-slash'
+            ? `${home.replace('/home', '//home')}//`
+            : home,
+      );
+      const rpc: RecoveryRpc = async (method, params) =>
+        method === 'context'
+          ? {
+              ...f.context,
+              mode: 'verify',
+              request: { ...f.context.request, fileHistoryRoot: history },
+              migration: {
+                targetRoot: join(f.root, 'target'),
+                targetMarker: {
+                  digest: recoveryDigest('marker'),
+                  byteLength: 6,
+                },
+              },
+            }
+          : f.rpc(method, params);
+      await expect(runRecoveryWorker(rpc)).rejects.toThrow(
+        'capture_not_sealed',
+      );
+      expect(f.calls).not.toContain('finish');
+    },
+  );
+
+  it.each([
+    'unset',
+    'relative',
+    'symlink',
+    'different-history',
+    'dot',
+    'parent',
+  ])(
     'refuses the migration before completion with %s QWEN_HOME',
     async (kind) => {
       const f = await fixture();
       const home = join(f.root, 'home');
-      await mkdir(home);
+      const history = join(home, 'file-history');
+      await mkdir(history, { recursive: true });
+      await mkdir(join(home, 'child'));
       if (kind === 'symlink') await symlink(home, join(f.root, 'alias'));
       vi.stubEnv(
         'QWEN_HOME',
@@ -202,12 +257,23 @@ describe('workspace recovery private worker', () => {
             ? '.'
             : kind === 'symlink'
               ? join(f.root, 'alias')
-              : home,
+              : kind === 'dot'
+                ? `${home}/.`
+                : kind === 'parent'
+                  ? `${home}/child/..`
+                  : home,
       );
       const rpc: RecoveryRpc = async (method, params) =>
         method === 'context'
           ? {
               ...f.context,
+              request: {
+                ...f.context.request,
+                fileHistoryRoot:
+                  kind === 'different-history'
+                    ? f.context.request.fileHistoryRoot
+                    : history,
+              },
               migration: {
                 targetRoot: join(f.root, 'target'),
                 targetMarker: {

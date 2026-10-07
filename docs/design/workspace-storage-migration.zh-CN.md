@@ -34,7 +34,7 @@ V50 将两个迁移表的身份比较修正为二进制 utf8mb4，兼容默认�
 
 ## 部署与 Runtime 路由
 
-运维在完成后更新部署挂载并重启 Broker/Harness。配置与 SQL 身份不一致时拒绝执行。私有维护进程必须继承与部署相同的规范绝对 QWEN_HOME，路径不能包含符号链接，fileHistoryRoot 必须等于其规范 file-history 目录。私有 Node 探针使用现有 Storage 解析器和该继承环境，固定历史卷身份，位于源、目标和 bundle 之外。新准入/provisioning 检查环境与目录身份，每 Turn 不扫描备份；无需扩展 Worker boot/attestation 协议。
+运维在完成后更新部署挂载并重启 Broker/Harness。配置与 SQL 身份不一致时拒绝执行。私有维护进程必须继承与部署相同的规范绝对 QWEN_HOME，路径不能包含符号链接，fileHistoryRoot 必须等于其规范 file-history 目录。重复分隔符和尾部分隔符按 Java Path 的写法放行；dot/parent 组件与符号链接别名仍被拒绝。私有 Node 探针使用现有 Storage 解析器和该继承环境，固定历史卷身份，位于源、目标和 bundle 之外。新准入/provisioning 检查环境与目录身份，每 Turn 不扫描备份；无需扩展 Worker boot/attestation 协议。
 
 新文件 Turn 和 undo 获取新的 placement/context/attestation/activation 回执。旧 status/cancel/release 保留保存的 binding/generation/scope。历史 Runtime Session 查找使用精确 tenant/Harness/Runtime 身份，拒绝歧义，不依赖当前挂载 scope。 歧义返回不可重试的 `409 runtime_session_ambiguous`，不选择或释放任何候选。非唯一 Runtime Session ID 索引先定位候选，再检查完整 tenant/Harness 身份和歧义；单列 VARCHAR(512) 在 utf8mb4 下仅需 2048 字节，不新增摘要字段或回填。独立 Broker 初始化同步 schema，并为已有表补齐索引。不改写旧 cwd、持久 handle、执行 ID 或 attestation。
 
@@ -46,4 +46,4 @@ V50 将两个迁移表的身份比较修正为二进制 utf8mb4，兼容默认�
 
 ## 实现区域与决策
 
-Runtime Broker 准入/仓库/退役和精确历史查询；Managed Agent 迁移 store/私有 main/Storage guard；共享 TypeScript 恢复闭包/树验证；加法 SQL 和同目录测试。不增加公共 API、在线 drain、热挂载 resolver、通用编排框架或目录复制实现。范围决策均已确定。
+Runtime Broker 准入/仓库/退役和精确历史查询；Managed Agent 迁移 store/私有 main/Storage guard；共享 TypeScript 恢复闭包/树验证；加法 SQL 和同目录测试。现有公共错误契约声明 Broker 拒绝响应携带的可选 retryable 布尔字段；Managed Agent 的迁移准入 fence 返回 workspace_unavailable，workspace_migrating 属于 Broker binding repository。不增加公共路由、在线 drain、热挂载 resolver、通用编排框架或目录复制实现。范围决策均已确定。

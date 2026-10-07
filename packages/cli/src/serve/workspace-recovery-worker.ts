@@ -343,14 +343,25 @@ export async function runRecoveryWorker(rpc: RecoveryRpc): Promise<unknown> {
       context.request.fileHistoryRoot,
     );
     if (context.migration) {
-      const home = Storage.getGlobalQwenDir();
+      const home = Storage.getGlobalQwenDir()
+        .replace(/\/+/g, '/')
+        .replace(/(.+)\/$/, '$1');
+      const samePath = (left: string, right: string) =>
+        process.platform === 'win32' || process.platform === 'darwin'
+          ? left.toLowerCase() === right.toLowerCase()
+          : left === right;
       if (
         !process.env['QWEN_HOME'] ||
         !isAbsolute(process.env['QWEN_HOME']) ||
-        (await realpath(home)) !== home ||
-        join(home, 'file-history') !== context.request.fileHistoryRoot ||
-        (await realpath(context.request.fileHistoryRoot)) !==
-          context.request.fileHistoryRoot
+        !samePath(await realpath(home), home) ||
+        !samePath(
+          join(home, 'file-history'),
+          context.request.fileHistoryRoot,
+        ) ||
+        !samePath(
+          await realpath(context.request.fileHistoryRoot),
+          context.request.fileHistoryRoot,
+        )
       )
         throw new Error('migration_history_environment_mismatch');
     }
