@@ -8,7 +8,7 @@
  * @fileoverview Per (chat session, agent) run queue. Pure; no I/O.
  *
  * The rule that keeps a native session from being driven by two processes
- * at once (plan §8-3): per agent in a session, at most ONE executing run
+ * at once (session-multi-agent design §8-3): per agent in a session, at most ONE executing run
  * (`running` / `awaiting_approval`) and at most ONE queued run. A trigger
  * that arrives while a run is queued is coalesced into it (its record id is
  * appended and the queued run will read it); one that arrives while a run

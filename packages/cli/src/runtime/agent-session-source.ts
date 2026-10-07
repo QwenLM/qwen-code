@@ -58,7 +58,7 @@ export function agentThreadSessionId(
 
 /**
  * The hidden Qwen session an agent answers from in one chat session
- * (session multi-agent, plan §3.1). Deterministic per (agent, chat session),
+ * (session multi-agent, session-multi-agent design §3.1). Deterministic per (agent, chat session),
  * so every @-mention of that agent in that session resumes one native
  * session. Its own namespace string, distinct from the thread one.
  */

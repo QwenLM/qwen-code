@@ -6,7 +6,7 @@
 
 /**
  * @fileoverview Workspace squads: `<agentsDir>/squads.json`, mode 0600, under
- * the same workspace lock as the agent roster (plan §11.1).
+ * the same workspace lock as the agent roster (session-multi-agent design §11.1).
  *
  * A squad is a name, a leader agent and member agents with optional roles.
  * Names share the agents' namespace (case-insensitive, same pattern), because

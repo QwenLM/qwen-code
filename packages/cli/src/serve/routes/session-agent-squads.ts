@@ -5,7 +5,7 @@
  */
 
 /**
- * Squad CRUD for session multi-agent collaboration (plan §11). Same gates as
+ * Squad CRUD for session multi-agent collaboration (session-multi-agent design §11). Same gates as
  * `registerSessionAgentRoutes`: bearer auth (global), trusted workspace,
  * per-workspace `experimental.agentCollaboration` (404
  * `agent_collaboration_disabled`), and strict `mutate` on every write.

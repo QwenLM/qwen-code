@@ -7,7 +7,7 @@
 /**
  * @fileoverview One workspace agent per program a joined Host offers.
  *
- * When a Host first reports an available program (plan §3.5 / decision 4),
+ * When a Host first reports an available program (session-multi-agent design §3.5 / decision 4),
  * the coordinator adds an agent named `<program>-<host name>` that runs that
  * program on that Host, unless the roster already has one for the pair. A
  * retired agent still counts, so deleting an auto-created agent sticks.

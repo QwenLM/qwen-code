@@ -100,7 +100,7 @@ export function buildClaudeArgs(options: {
     // TODO(multi-agent): verify against real claude CLI — that `default` mode
     // plus `--permission-prompt-tool stdio` emits `control_request` /
     // `can_use_tool` on stdout for every tool needing approval, and that the
-    // allow / deny `control_response` below is honored (plan §9.4). Tools the
+    // allow / deny `control_response` below is honored (session-multi-agent design §9.4). Tools the
     // user's settings already allow never reach us.
     '--permission-mode',
     'default',

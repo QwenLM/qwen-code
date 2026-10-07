@@ -38,7 +38,7 @@ export type AgentPersonaResolution =
  * Which collaboration surface the session belongs to.
  * - `thread`: the legacy thread dispatcher (read-only ceiling, thread tools).
  * - `session`: the session-agents orchestrator — the agent answers inside an
- *   ordinary chat session, with every tool behind approval (plan §8-1).
+ *   ordinary chat session, with every tool behind approval (session-multi-agent design §8-1).
  */
 export type AgentPersonaSurface = 'thread' | 'session';
 
@@ -191,7 +191,7 @@ export async function resolveAgentPersona(
       // The read-only ceiling is applied here, in the session that will run the
       // tools, so a session cannot be started with a wider surface than the
       // boundary allows and then narrowed afterwards. A session-agents session
-      // has no read-only ceiling (plan §8-1); see buildSessionAgentToolConfig.
+      // has no read-only ceiling (session-multi-agent design §8-1); see buildSessionAgentToolConfig.
       toolConfig:
         surface === 'session'
           ? buildSessionAgentToolConfig(definitionTools)

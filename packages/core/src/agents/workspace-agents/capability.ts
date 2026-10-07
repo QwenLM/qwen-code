@@ -198,7 +198,7 @@ export function createAgentToolInvocationGuard(
  * Tool configuration for an agent session started by the session-agents
  * orchestrator (`agents/session-agents`).
  *
- * Product decision 2026-10-05 (plan §8-1): such an agent may use every tool
+ * Product decision 2026-10-05 (session-multi-agent design §8-1): such an agent may use every tool
  * the session offers; writes and command execution are not removed but go
  * through the session's ordinary approval flow, which the orchestrator relays
  * to the chat session. So there is no read-only ceiling here. A linked

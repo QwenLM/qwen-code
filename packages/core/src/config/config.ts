@@ -6146,7 +6146,7 @@ export class Config {
    * session-agents binding that names this session for this agent, so it is
    * a server-side decision, never a client claim.
    *
-   * Effects (product decision 2026-10-05, plan §8-1): no thread tools, and no
+   * Effects (product decision 2026-10-05, session-multi-agent design §8-1): no thread tools, and no
    * read-only ceiling — every tool is available and writes / command
    * execution go through the session's ordinary approval flow, which the
    * orchestrator relays to the chat session. That flow is the only gate, so
@@ -12208,7 +12208,7 @@ export class Config {
       );
     }
     if (this.isWorkspaceAgentSession() && this.isSessionAgentSession()) {
-      // Session-agents sessions skip the read-only ceiling (plan §8-1).
+      // Session-agents sessions skip the read-only ceiling (session-multi-agent design §8-1).
       return createSessionAgentToolInvocationGuard(
         this.toolInvocationGuard,
         this.workspaceAgentExecutionAllowedTools,

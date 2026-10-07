@@ -7,7 +7,7 @@
 /**
  * @fileoverview Session multi-agent orchestrator, one per workspace.
  *
- * Owns, per chat session (plan §3.1): queueing and coalescing of agent runs,
+ * Owns, per chat session (session-multi-agent design §3.1): queueing and coalescing of agent runs,
  * starting them (locally through an adapter, or by handing them to a remote
  * Host through the in-memory pickup queue), live progress frames, run status,
  * permission relay, Host leases, and the agent-to-agent chain.
@@ -20,7 +20,7 @@
  * daemon runs (this assumes one daemon per workspace).
  *
  * Concurrency rules: per (chat session, agent) at most one executing run and
- * at most one queued run (plan §8-3, run-queue.ts), so a native session is
+ * at most one queued run (session-multi-agent design §8-3, run-queue.ts), so a native session is
  * never driven by two processes; and per agent, across chat sessions, at
  * most `maxConcurrentRuns` executing runs (default 1). Queued runs start
  * oldest first across sessions; `queuePosition` on a frame counts the

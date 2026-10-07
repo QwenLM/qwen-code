@@ -48,7 +48,7 @@ const SESSION_ID_PATTERN = /^[0-9a-fA-F-]{32,36}$/;
  * Upper bound on files read when looking up which chat session planned a
  * native session id.
  * TODO(multi-agent): replace the scan with an index of sessions that have a
- * live run (plan §4.1 "有活跃 run 的会话索引").
+ * live run (session-multi-agent design §4.1).
  */
 const MAX_BINDING_SCAN_FILES = 5_000;
 

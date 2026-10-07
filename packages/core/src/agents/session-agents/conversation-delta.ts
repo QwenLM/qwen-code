@@ -9,7 +9,7 @@
  *
  * An agent keeps its own native session, so it only needs what was said in
  * the chat session since it last read it: the delta after its read cursor
- * (a chat-record uuid, plan §9.1). Pure: the caller loads the records and
+ * (a chat-record uuid, session-multi-agent design §9.1). Pure: the caller loads the records and
  * persists the returned cursor.
  *
  * Included: the person's text, the main assistant's reply text, other agents'
@@ -82,7 +82,7 @@ export interface BuildAgentInputOptions {
   squad?: SquadBriefing;
 }
 
-/** What a squad leader is told about its squad (plan §11.3). */
+/** What a squad leader is told about its squad (session-multi-agent design §11.3). */
 export interface SquadBriefing {
   name: string;
   instructions?: string;

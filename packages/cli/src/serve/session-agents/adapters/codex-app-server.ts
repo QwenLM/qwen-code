@@ -914,7 +914,7 @@ export function createCodexAppServerAdapter(
             model: input.model ?? null,
             cwd: input.cwd,
             approvalPolicy: 'on-request',
-            // Pinned to read-only (plan §8-1; the contract in the file
+            // Pinned to read-only (session-multi-agent design §8-1; the contract in the file
             // header): every write, and every command that must leave the
             // read-only sandbox, is escalated and asks the person in the
             // session; read-only commands inside the sandbox run without

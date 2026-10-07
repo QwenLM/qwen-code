@@ -5,7 +5,7 @@
  */
 
 /**
- * @fileoverview `session_send` relay on a Host daemon (plan §9.3).
+ * @fileoverview `session_send` relay on a Host daemon (session-multi-agent design §9.3).
  *
  * A Claude / Codex turn running on a Host gets a stdio MCP server
  * (`qwen agents session-send-mcp --url <relay>`) that posts the agent's

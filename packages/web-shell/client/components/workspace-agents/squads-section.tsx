@@ -290,7 +290,7 @@ function SquadRosterRow({
 
 /**
  * The Agents page's Squads view: list, create, edit, retire. A squad is
- * addressed by `@name` in a chat, which wakes its leader (plan §11.5).
+ * addressed by `@name` in a chat, which wakes its leader (session-multi-agent design §11.5).
  */
 export function SquadsSection({
   squads,

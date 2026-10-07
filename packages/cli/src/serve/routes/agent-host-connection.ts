@@ -5,7 +5,7 @@
  */
 
 /**
- * @fileoverview Joining a coordinator without a restart (plan §3.5).
+ * @fileoverview Joining a coordinator without a restart (session-multi-agent design §3.5).
  *
  * Runtime side (`registerAgentHostRuntimeRoutes`), mounted whatever the
  * boot-time collaboration flag says: `GET hosts/service` describes this

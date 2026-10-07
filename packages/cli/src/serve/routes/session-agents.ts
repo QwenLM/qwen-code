@@ -402,7 +402,7 @@ export function registerSessionAgentRoutes(
       };
       try {
         // TODO(multi-agent): attachments on an @-mention are refused for now
-        // (plan §8-6); the body carries text only.
+        // (session-multi-agent design §8-6); the body carries text only.
         const result = await orchestrator.mention(sessionId, {
           text: body.text,
           clientMessageId: body.clientMessageId,

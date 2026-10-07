@@ -15626,7 +15626,7 @@ class QwenAgent implements Agent {
         // whether the operator opted in.
         // A remote Host runs a coordinator's turn under a binding its daemon
         // wrote for that turn (`remotePersona`); being a runtime does not
-        // require this workspace to run collaboration itself (plan §8-5).
+        // require this workspace to run collaboration itself (session-multi-agent design §8-5).
         const remotePersona = sessionAgentBinding?.remotePersona;
         const collaborationEnabled =
           remotePersona !== undefined ||

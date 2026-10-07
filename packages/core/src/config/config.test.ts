@@ -12268,7 +12268,7 @@ describe('applyWorkspaceAgentPersona', () => {
 
   it('pins a session-agents session to default approval', () => {
     // Every write or command a session agent runs asks the person in the chat
-    // session, whatever the settings say (plan §8-1).
+    // session, whatever the settings say (session-multi-agent design §8-1).
     const config = new Config({
       ...baseParams,
       agentCollaborationEnabled: true,
