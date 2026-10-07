@@ -5485,6 +5485,7 @@ describe('AppContainer State Management', () => {
       );
 
       expect(capturedRenderMode).toBe('raw');
+      expect(mockedUseLlmStream.mock.calls.at(-1)?.[25]?.current).toBe('raw');
     });
 
     it('falls back to rendered Markdown mode for missing or invalid ui.renderMode', () => {
@@ -5509,6 +5510,9 @@ describe('AppContainer State Management', () => {
       );
 
       expect(capturedRenderMode).toBe('render');
+      expect(mockedUseLlmStream.mock.calls.at(-1)?.[25]?.current).toBe(
+        'render',
+      );
     });
 
     it('computes render mode toggles from the global render shortcut', () => {
@@ -5546,6 +5550,9 @@ describe('AppContainer State Management', () => {
       );
 
       expect(capturedRenderMode).toBe('render');
+      const renderModeRef = mockedUseLlmStream.mock.calls.at(-1)?.[25];
+      expect(renderModeRef).toBeDefined();
+      expect(renderModeRef?.current).toBe('render');
       await Promise.resolve();
       await Promise.resolve();
       const handleKeypress = mockedUseKeypress.mock.calls
@@ -5557,7 +5564,19 @@ describe('AppContainer State Management', () => {
             handler.toString().includes('handleRenderModeToggleKey'),
         ) as ((key: Key) => void) | undefined;
       expect(handleKeypress).toBeDefined();
-      expect(() => handleKeypress!(optionMKey)).not.toThrow();
+      await act(async () => handleKeypress!(optionMKey));
+      await vi.waitFor(() => {
+        expect(capturedRenderMode).toBe('raw');
+        expect(renderModeRef.current).toBe('raw');
+      });
+      expect(mockedUseLlmStream.mock.calls.at(-1)?.[25]).toBe(renderModeRef);
+
+      await act(async () => handleKeypress!(optionMKey));
+      await vi.waitFor(() => {
+        expect(capturedRenderMode).toBe('render');
+        expect(renderModeRef.current).toBe('render');
+      });
+      expect(mockedUseLlmStream.mock.calls.at(-1)?.[25]).toBe(renderModeRef);
     });
   });
 

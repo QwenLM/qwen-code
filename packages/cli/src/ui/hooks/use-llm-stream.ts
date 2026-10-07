@@ -128,6 +128,7 @@ import {
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { useSessionStats } from '../contexts/SessionContext.js';
+import type { RenderMode } from '../contexts/RenderModeContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
@@ -598,6 +599,7 @@ export const useLlmStream = (
     submissionInFlightRef?: React.RefObject<boolean>;
     onSubmissionSettled?: () => void;
   } | null>,
+  renderModeRef?: React.RefObject<RenderMode>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -1983,6 +1985,7 @@ export const useLlmStream = (
           commitWidth,
           commitRowBudget,
           tableClampRows,
+          { visualTables: renderModeRef?.current !== 'raw' },
         );
         if (!clipped) break;
         // Back up to the last blank line at or before the kept prefix — the only
@@ -2075,6 +2078,7 @@ export const useLlmStream = (
       terminalHeight,
       availableTerminalHeightRef,
       terminalWidthRef,
+      renderModeRef,
     ],
   );
 

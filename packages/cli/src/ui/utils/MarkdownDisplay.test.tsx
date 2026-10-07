@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import stripAnsi from 'strip-ansi';
 import { MarkdownDisplay } from './MarkdownDisplay.js';
 import { LoadedSettings } from '../../config/settings.js';
-import { renderWithProviders } from '../../test-utils/render.js';
+import { renderWithProviders, withProviders } from '../../test-utils/render.js';
 import { renderMermaidVisual } from './mermaidVisualRenderer.js';
 import { RenderModeProvider } from '../contexts/RenderModeContext.js';
 import { getScreenBuffer } from '../selection/screen-buffer.js';
@@ -1540,6 +1540,101 @@ $$
       expect(output).not.toContain('α + β');
       expect(output).not.toContain('✓ Done');
       expect(output).not.toContain('│ Important');
+    });
+
+    const separatorHeavyTable = [
+      '| A | B |',
+      '| --- | --- |',
+      ...Array.from({ length: 100 }, () => '--- | ---'),
+      '| x | y |',
+      'Done',
+    ];
+
+    it.each([true, false])(
+      'bounds raw table source when pending=%s (including enforced completed plans)',
+      (isPending) => {
+        const { lastFrame } = renderWithProviders(
+          <RenderModeProvider
+            value={{ renderMode: 'raw', setRenderMode: () => undefined }}
+          >
+            <MarkdownDisplay
+              {...baseProps}
+              text={separatorHeavyTable.join(eol)}
+              isPending={isPending}
+              enforceHeightBudget={!isPending}
+              availableTerminalHeight={24}
+            />
+          </RenderModeProvider>,
+        );
+
+        const output = stripAnsi(lastFrame() ?? '').replace(/\n+$/, '');
+        const sourceRows = output
+          .split('\n')
+          .filter((line) => line.includes('|'));
+        expect(sourceRows).toEqual(separatorHeavyTable.slice(0, 22));
+        expect(output).not.toContain('Done');
+        if (isPending) {
+          expect(output.split('\n')).toHaveLength(22);
+          expect(output).not.toContain('more lines not shown');
+        } else {
+          expect(output).toContain('82 more lines not shown');
+        }
+      },
+    );
+
+    it('preserves full raw table source when no height budget is requested', () => {
+      const { lastFrame } = renderWithProviders(
+        <RenderModeProvider
+          value={{ renderMode: 'raw', setRenderMode: () => undefined }}
+        >
+          <MarkdownDisplay
+            {...baseProps}
+            text={separatorHeavyTable.join(eol)}
+          />
+        </RenderModeProvider>,
+      );
+
+      expect(
+        stripAnsi(lastFrame() ?? '')
+          .replace(/\n+$/, '')
+          .split('\n'),
+      ).toEqual(separatorHeavyTable);
+    });
+
+    it('recalculates the pending row budget when the mounted render mode changes', async () => {
+      const tree = (renderMode: 'render' | 'raw') => (
+        <RenderModeProvider
+          value={{ renderMode, setRenderMode: () => undefined }}
+        >
+          <MarkdownDisplay
+            {...baseProps}
+            text={separatorHeavyTable.join(eol)}
+            isPending={true}
+            availableTerminalHeight={24}
+          />
+        </RenderModeProvider>
+      );
+      const { lastFrame, rerender } = renderWithProviders(tree('render'));
+      const visualFrame = stripAnsi(lastFrame() ?? '');
+      expect(visualFrame).toContain('┌');
+      expect(visualFrame).toContain('A');
+      expect(visualFrame).toContain('x');
+      expect(visualFrame).toContain('Done');
+      expect(visualFrame.replace(/\n+$/, '').split('\n')).toHaveLength(8);
+
+      rerender(withProviders(tree('raw')));
+      await vi.waitFor(() => {
+        expect(
+          stripAnsi(lastFrame() ?? '')
+            .replace(/\n+$/, '')
+            .split('\n'),
+        ).toEqual(separatorHeavyTable.slice(0, 22));
+      });
+
+      rerender(withProviders(tree('render')));
+      await vi.waitFor(() => {
+        expect(stripAnsi(lastFrame() ?? '')).toBe(visualFrame);
+      });
     });
 
     it('applies source copy offsets from previous assistant chunks', () => {

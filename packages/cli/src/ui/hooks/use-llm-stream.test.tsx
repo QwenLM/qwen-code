@@ -383,6 +383,7 @@ describe('useLlmStream', () => {
     logger?: Parameters<typeof useLlmStream>[20],
     goalQueueRef?: Parameters<typeof useLlmStream>[24],
     modelSwitchedFromQuotaError = false,
+    renderModeRef?: { current: 'render' | 'raw' },
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -465,6 +466,7 @@ describe('useLlmStream', () => {
           undefined, // terminalWidthRef
           undefined, // midTurnRestoreRef
           goalQueueRef,
+          renderModeRef,
         );
       },
       {
@@ -12179,6 +12181,137 @@ describe('useLlmStream', () => {
         .filter(
           (item) => item.type === 'gemini' || item.type === 'gemini_content',
         );
+
+    it.each(['render', 'raw'] as const)(
+      'uses the %s mode row budget for streamed bare table separators',
+      async (renderMode) => {
+        vi.useFakeTimers();
+        vi.mocked(findLastSafeSplitPoint).mockImplementation(
+          (s: string, cap?: number) =>
+            cap === undefined ? s.length : Math.min(cap, s.length),
+        );
+        const content = [
+          'intro',
+          '',
+          '| A | B |',
+          '| --- | --- |',
+          ...Array.from({ length: 100 }, () => '--- | ---'),
+          '| x | y |',
+        ].join('\n');
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { current: renderMode },
+        );
+        const releaseStream = await streamContent(result, content);
+
+        const committed = llmContentItems();
+        if (renderMode === 'raw') {
+          expect(committed).toHaveLength(1);
+          expect(committed[0].text.trim()).toBe('intro');
+        } else {
+          expect(committed).toHaveLength(0);
+        }
+        expect(result.current.pendingHistoryItems[0]?.text).toContain(
+          '| A | B |',
+        );
+        expect(result.current.pendingHistoryItems[0]?.text).toContain(
+          '| x | y |',
+        );
+
+        act(() => result.current.cancelOngoingRequest());
+        await act(async () => releaseStream());
+      },
+    );
+
+    it.each(['raw', 'render'] as const)(
+      'reads the live %s mode inside an already running stream',
+      async (nextMode) => {
+        vi.useFakeTimers();
+        vi.mocked(findLastSafeSplitPoint).mockImplementation(
+          (s: string, cap?: number) =>
+            cap === undefined ? s.length : Math.min(cap, s.length),
+        );
+        const renderModeRef: { current: 'render' | 'raw' } = {
+          current: nextMode === 'raw' ? 'render' : 'raw',
+        };
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          renderModeRef,
+        );
+        let appendTable!: () => void;
+        const waitForTable = new Promise<void>((resolve) => {
+          appendTable = resolve;
+        });
+        let releaseStream!: () => void;
+        const holdStream = new Promise<void>((resolve) => {
+          releaseStream = resolve;
+        });
+        mockSendMessageStream.mockReturnValue(
+          (async function* () {
+            yield { type: ServerLlmEventType.Content, value: 'intro\n\n' };
+            await waitForTable;
+            yield {
+              type: ServerLlmEventType.Content,
+              value: [
+                '| A | B |',
+                '| --- | --- |',
+                ...Array.from({ length: 100 }, () => '--- | ---'),
+                '| x | y |',
+              ].join('\n'),
+            };
+            await holdStream;
+          })(),
+        );
+        act(() => {
+          void result.current.submitQuery('test query');
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(0);
+          vi.advanceTimersByTime(60);
+        });
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+        expect(llmContentItems()).toHaveLength(0);
+        expect(result.current.pendingHistoryItems[0]?.text).toBe('intro\n\n');
+
+        // The generator retains its original callback; only the ref changes.
+        renderModeRef.current = nextMode;
+        await act(async () => {
+          appendTable();
+          await vi.advanceTimersByTimeAsync(0);
+          vi.advanceTimersByTime(60);
+        });
+        if (nextMode === 'raw') {
+          expect(llmContentItems()).toHaveLength(1);
+          expect(llmContentItems()[0].text.trim()).toBe('intro');
+        } else {
+          expect(llmContentItems()).toHaveLength(0);
+          expect(result.current.pendingHistoryItems[0]?.text).toContain(
+            'intro',
+          );
+        }
+        expect(result.current.pendingHistoryItems[0]?.text).toContain(
+          '| A | B |',
+        );
+        expect(result.current.pendingHistoryItems[0]?.text).toContain(
+          '| x | y |',
+        );
+
+        act(() => result.current.cancelOngoingRequest());
+        await act(async () => releaseStream());
+      },
+    );
 
     it('breaks the commit loop when no safe split point exists (no hang)', async () => {
       vi.useFakeTimers();

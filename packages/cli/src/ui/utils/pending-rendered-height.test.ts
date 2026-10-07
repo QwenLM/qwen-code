@@ -109,6 +109,36 @@ describe('isTableStart', () => {
 describe('fitPendingSlice', () => {
   const CLAMP = 1000; // effectively unclamped unless a test sets it small
 
+  it.each([100, 300])(
+    'charges all %i bare table separators as source rows in raw mode',
+    (separatorCount) => {
+      const lines = [
+        '| A | B |',
+        '| --- | --- |',
+        ...Array.from({ length: separatorCount }, () => '--- | ---'),
+        '| x | y |',
+        'Done',
+      ];
+
+      expect(fitPendingSlice(lines, 80, 22, CLAMP)).toEqual({
+        keptLines: lines.length,
+        clipped: false,
+      });
+      expect(
+        fitPendingSlice(lines, 80, 22, CLAMP, { visualTables: false }),
+      ).toEqual({ keptLines: 22, clipped: true });
+    },
+  );
+
+  it('charges table source wrapping in raw mode instead of applying a table clamp', () => {
+    const lines = ['| abcdefghijklmnop | B |', '| --- | --- |', '| x | y |'];
+
+    expect(fitPendingSlice(lines, 10, 3, 2, { visualTables: false })).toEqual({
+      keptLines: 1,
+      clipped: true,
+    });
+  });
+
   it('keeps everything when the content fits the budget', () => {
     const lines = ['a', 'b', 'c'];
     expect(fitPendingSlice(lines, 80, 10, CLAMP)).toEqual({

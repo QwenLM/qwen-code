@@ -216,6 +216,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       contentWidth,
       pendingRenderedBudget,
       tableClampRows,
+      { visualTables: renderVisualBlocks },
     );
     if (keptLines < allLines.length) {
       lines = allLines.slice(0, keptLines);

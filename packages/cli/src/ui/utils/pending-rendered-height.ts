@@ -168,6 +168,7 @@ export function fitPendingSlice(
   contentWidth: number,
   budget: number,
   tableClampRows: number,
+  { visualTables = true }: { visualTables?: boolean } = {},
 ): PendingSliceResult {
   let rendered = 0;
   let kept = allLines.length;
@@ -203,7 +204,7 @@ export function fitPendingSlice(
       i++;
       continue;
     }
-    if (isTableStart(allLines, i)) {
+    if (visualTables && isTableStart(allLines, i)) {
       let j = i + 2;
       const bodyRowIndices: number[] = [];
       while (j < allLines.length) {
