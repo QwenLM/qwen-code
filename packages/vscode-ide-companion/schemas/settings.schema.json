@@ -1647,12 +1647,12 @@
         "truncateToolOutputThreshold": {
           "description": "Truncate tool output if it is larger than this many characters. Set to -1 to disable.",
           "type": "number",
-          "default": 25000
+          "default": 80000
         },
         "truncateToolOutputLines": {
           "description": "The number of lines to keep when truncating tool output.",
           "type": "number",
-          "default": 1000
+          "default": 2000
         },
         "toolOutputBatchBudget": {
           "description": "Per-message character budget for the combined text output of one batch of tool calls. Oversized batches are reduced deterministically and recoverable output is persisted when possible. Set to -1 to disable.",
