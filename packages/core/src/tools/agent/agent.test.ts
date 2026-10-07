@@ -5618,6 +5618,38 @@ describe('AgentTool', () => {
       );
     });
 
+    it('foreground ERROR keeps its framing when the executor rejects (swallow seam)', async () => {
+      // The framing above is reachable only *because* `runSubagentWithHooks`
+      // catches the executor's throw and returns undefined: the dominant
+      // producer of terminateMode ERROR is that throw, and it never reaches the
+      // outer catch. Every other rejecting-executor case here asserts billing or
+      // span metadata, so nothing composed a rejecting executor with a
+      // populated mode and cause — "cleaning up" that surprising swallow into a
+      // rethrow left the suite green while a real provider failure started
+      // landing in the outer catch, where the parent reads `Failed to run
+      // subagent: <msg>` with `error` set, losing both the mode framing and the
+      // retained cause (the exact #13597 shape). The swallow is load-bearing —
+      // its own docs warn that a rejection escaping the `void` boundary becomes
+      // an unhandled-promise event — so what this pins is that the invocation
+      // *resolves* with the framed text.
+      loadForeground();
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('halfway through');
+      vi.mocked(mockAgent.execute).mockRejectedValue(
+        new Error('provider failed'),
+      );
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.ERROR,
+      );
+      vi.mocked(mockAgent.getLastError).mockReturnValue('provider failed');
+      const result = await invoke(fg()).execute();
+      expectText(
+        textOf(result),
+        ['terminate mode: ERROR', 'provider failed', 'halfway through'],
+        ['Failed to run subagent'],
+      );
+      expect(result.error).toBeUndefined();
+    });
+
     it('foreground GOAL result carries no terminate-mode framing', async () => {
       // Protection test: the success path must stay byte-identical.
       loadForeground();

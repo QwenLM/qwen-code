@@ -1989,6 +1989,53 @@ describe('subagent.ts', () => {
         expect(scope.getLastError()).toBe('API Failure');
       });
 
+      it('does not carry a stale failure cause into a re-executed run (#13597)', async () => {
+        const { config } = await createMockConfig();
+        // Run 1 rejects, so the instance retains a cause.
+        mockSendMessageStream.mockRejectedValue(new Error('API Failure'));
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'API Failure');
+        expect(scope.getLastError()).toBe('API Failure');
+
+        // Run 2 on the same instance (stop-hook continuation, resident turns)
+        // ends in ERROR by *returning* rather than throwing: the loop result
+        // carries the mode and executeTurn copies it without writing a message
+        // (agent-core.ts ends a run this way on the empty-tool-response-parts
+        // arm). Run 2 must not report run 1's cause — otherwise the parent
+        // reads '(terminate mode: ERROR). API Failure' for a failure that had a
+        // different one and debugs the wrong thing. This is the mirror of the
+        // stale loopType attribution #9450 fixed for the field reset below it.
+        vi.spyOn(scope.getCore(), 'runReasoningLoop').mockResolvedValue({
+          text: '',
+          terminateMode: AgentTerminateMode.ERROR,
+          turnsUsed: 1,
+          loopType: null,
+        });
+        await scope.execute(new ContextState());
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+        expect(scope.getLastError()).toBeUndefined();
+      });
+
+      it('retains the chat-creation failure message on the non-throwing ERROR path (#13597)', async () => {
+        const { config } = await createMockConfig();
+        const scope = await createAgent(config);
+        // A provider/auth initialization failure that makes `createChat`
+        // return undefined is the rare early return (workflow-orchestrator
+        // calls it "the rare `createChat` early return"). It sets ERROR by
+        // returning, so nothing rethrows and this assignment is the only thing
+        // that can tell the parent why the run stopped — without it the reason
+        // line regresses to the bare '(terminate mode: ERROR).' that #13597 set
+        // out to remove.
+        vi.spyOn(scope.getCore(), 'createChat').mockResolvedValue(
+          undefined as unknown as LlmChat,
+        );
+        await scope.execute(new ContextState());
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+        expect(scope.getLastError()).toBe(
+          'Failed to create the agent chat session.',
+        );
+      });
+
       it('bounds and sanitizes the retained message before the model reads it (#13597)', async () => {
         // The reason line is spliced into the parent's tool result, persisted
         // into chat history and re-sent on every later turn, so a provider SDK
