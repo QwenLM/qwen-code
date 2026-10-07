@@ -190,6 +190,13 @@ class BrokerVirtualThreadPinningTest {
         }
 
         @Override
+        public RuntimeSessionRecord findHistorical(String tenantId,
+                String harnessSessionId, String runtimeSessionId) {
+            return delegate.findHistorical(tenantId, harnessSessionId,
+                    runtimeSessionId);
+        }
+
+        @Override
         public RuntimeSessionRecord compareAndSet(
                 RuntimeSessionRecord expected,
                 RuntimeSessionRecord replacement) {
