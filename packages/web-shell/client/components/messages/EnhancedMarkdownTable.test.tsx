@@ -4,6 +4,7 @@ import { StrictMode, act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider, type WebShellLanguage } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
+import { InteractionBlockContext } from '../../interactionBlockContext';
 import { immediateClipboardWrite } from '../../test/reactHarness';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 
@@ -491,6 +492,176 @@ function touchEvent(
 }
 
 describe('EnhancedMarkdownTable', () => {
+  it('preserves table state and scroll position through fullscreen and restores focus', async () => {
+    const container = renderTable();
+    click(button(container, 'Sort by Score'));
+    selectValue(button(container, 'Table density'), 'compact');
+    click(button(container, 'View details for row 1'));
+    const scroller = container.querySelector<HTMLElement>('[tabindex="0"]')!;
+    scroller.scrollTop = 80;
+    scroller.scrollLeft = 120;
+    click(button(container, 'Fullscreen'));
+
+    const dialog = container.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.closest('[data-web-shell-portal-root]')).not.toBeNull();
+    expect(container.querySelectorAll('table')).toHaveLength(1);
+    expect(button(dialog, 'Sort by Score, ascending')).toBeTruthy();
+    expect(button(dialog, 'Table density').textContent).toContain('Compact');
+    expect(dialog.textContent).toContain('Row details');
+    const fullscreenScroller =
+      dialog.querySelector<HTMLElement>('[tabindex="0"]')!;
+    expect(fullscreenScroller.scrollTop).toBe(80);
+    expect(fullscreenScroller.scrollLeft).toBe(120);
+    fullscreenScroller.scrollTop = 160;
+    click(button(dialog, 'Exit fullscreen'));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(button(container, 'Sort by Score, ascending')).toBeTruthy();
+    expect(button(container, 'Table density').textContent).toContain('Compact');
+    expect(container.textContent).toContain('Row details');
+    expect(
+      container.querySelector<HTMLElement>('[tabindex="0"]')!.scrollTop,
+    ).toBe(160);
+    expect(
+      container.querySelector<HTMLElement>('[tabindex="0"]')!.scrollLeft,
+    ).toBe(120);
+    expect(document.activeElement).toBe(button(container, 'Fullscreen'));
+  });
+
+  it('dismisses nested cell details and column menus before exiting fullscreen', () => {
+    const container = renderTable();
+    const escape = () =>
+      act(() => {
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            bubbles: true,
+            cancelable: true,
+            key: 'Escape',
+          }),
+        );
+      });
+    click(button(container, 'Fullscreen'));
+    doubleClick(dataCell(container, 0, 0));
+    expect(container.querySelectorAll('[role="dialog"]')).toHaveLength(2);
+    escape();
+    expect(container.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+    expect(button(container, 'Exit fullscreen')).toBeTruthy();
+
+    openColumnMenu(container, 'Team');
+    expect(container.querySelector('[role="menu"]')).not.toBeNull();
+    escape();
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+    expect(button(container, 'Exit fullscreen')).toBeTruthy();
+    escape();
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('uses the scoped shadow portal for fullscreen', () => {
+    const container = renderTable('zh-CN', { shadowPortal: true });
+    click(button(container, '全屏'));
+    const portalRoot = shadowPortalRoot(container);
+    expect(portalRoot.querySelector('[role="dialog"] table')).not.toBeNull();
+    expect(container.querySelector('table')).toBeNull();
+    const cell = dataCell(portalRoot, 0, 0);
+    dragCells(cell, cell);
+    act(() => {
+      cell.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, composed: true }),
+      );
+      window.dispatchEvent(new MouseEvent('mouseup'));
+    });
+    expect(cell.className).toContain('selectedCell');
+    click(button(portalRoot, '退出全屏'));
+    expect(portalRoot.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.querySelector('table')).not.toBeNull();
+  });
+
+  it('blocks chat interactions during fullscreen and releases on unmount', () => {
+    const release = vi.fn();
+    const register = vi.fn(() => release);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        <InteractionBlockContext.Provider value={register}>
+          <I18nProvider language="en">
+            <EnhancedMarkdownTable>
+              <thead>
+                <tr>
+                  <th>Team</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Alpha</td>
+                </tr>
+              </tbody>
+            </EnhancedMarkdownTable>
+          </I18nProvider>
+        </InteractionBlockContext.Provider>,
+      ),
+    );
+    click(button(container, 'Fullscreen'));
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    act(() => root.render(null));
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('hit-tests touch selection inside the fullscreen shadow root', () => {
+    const container = renderTable('en', { shadowPortal: true });
+    click(button(container, 'Fullscreen'));
+    const portalRoot = shadowPortalRoot(container);
+    const first = dataCell(portalRoot, 0, 0);
+    const last = dataCell(portalRoot, 1, 1);
+    const elementFromPoint = vi.fn(() => last);
+    Object.defineProperty(portalRoot.getRootNode(), 'elementFromPoint', {
+      configurable: true,
+      value: elementFromPoint,
+    });
+    act(() => {
+      first.dispatchEvent(
+        touchEvent('touchstart', [{ clientX: 10, clientY: 10 }]),
+      );
+      first.dispatchEvent(
+        touchEvent('touchmove', [{ clientX: 20, clientY: 20 }]),
+      );
+      first.dispatchEvent(touchEvent('touchend', []));
+    });
+    expect(elementFromPoint).toHaveBeenCalledWith(20, 20);
+    expect(last.className).toContain('selectedCell');
+    expect(portalRoot.textContent).toContain('Selected 4');
+  });
+
+  it('restores the fullscreen scroller focus after closing shadow cell details', async () => {
+    const container = renderTable('en', { shadowPortal: true });
+    click(button(container, 'Fullscreen'));
+    const portalRoot = shadowPortalRoot(container);
+    const root = portalRoot.getRootNode() as ShadowRoot;
+    const scroller = portalRoot.querySelector<HTMLElement>('[tabindex="0"]')!;
+    act(() => scroller.focus());
+    doubleClick(dataCell(portalRoot, 0, 0));
+    expect(portalRoot.querySelectorAll('[role="dialog"]')).toHaveLength(2);
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          key: 'Escape',
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(portalRoot.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+    expect(root.activeElement).toBe(scroller);
+  });
+
   it('sorts numeric columns from header clicks', () => {
     const container = renderTable();
 

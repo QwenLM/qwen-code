@@ -26,6 +26,7 @@ let settingsPath = path.join(homedir(), '.qwen', 'settings.json');
 let sessionFailover = false;
 let inflightFailover = false;
 let continuationFailover = false;
+let bigOutput = false;
 let harnessOnly = false;
 let freeze = false;
 
@@ -45,6 +46,8 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     sessionFailover = true;
   } else if (argument === '--inflight-failover') {
     inflightFailover = true;
+  } else if (argument === '--big-output') {
+    bigOutput = true;
   } else if (argument === '--continuation-failover') {
     continuationFailover = true;
   } else if (argument === '--harness-only') {
@@ -53,18 +56,17 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     freeze = true;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover] [--harness-only] [--freeze]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--big-output] [--harness-only] [--freeze]',
     );
   }
 }
 
 if (
-  [sessionFailover, inflightFailover, continuationFailover].filter(Boolean)
-    .length > 1
+  [sessionFailover, inflightFailover, continuationFailover, bigOutput].filter(
+    Boolean,
+  ).length > 1
 ) {
-  throw new Error(
-    '--session-failover, --inflight-failover, and --continuation-failover are exclusive',
-  );
+  throw new Error('The deterministic E2E modes are exclusive');
 }
 if (
   harnessOnly &&
@@ -79,13 +81,14 @@ if (freeze && (!continuationFailover || harnessOnly)) {
 }
 
 const durableFailover =
-  sessionFailover || inflightFailover || continuationFailover;
-const workspaceTurns = inflightFailover || continuationFailover;
+  sessionFailover || inflightFailover || continuationFailover || bigOutput;
+const runtimeTakeover = inflightFailover || continuationFailover;
+const workspaceTurns = runtimeTakeover || bigOutput;
 // The tool-driven modes take over a dead Runtime binding, which needs the
 // durable local-Worker reclaim from the W0e line — Linux-only today. With
 // --harness-only the Spring and its Broker stay alive, the worker is never
 // orphaned, and no reclaim is needed.
-if (workspaceTurns && !harnessOnly && process.platform !== 'linux') {
+if (runtimeTakeover && !harnessOnly && process.platform !== 'linux') {
   throw new Error(
     `${inflightFailover ? '--inflight-failover' : '--continuation-failover'} requires Linux: the replacement owner must retire the dead worker's Runtime binding through the durable local-Worker reclaim (#12380 W0e), which only runs on Linux. Run the mode in the Hosted MySQL CI job or a Linux container.`,
   );
@@ -679,6 +682,7 @@ function runMysql(port: number, sql: string, timeoutMs = 10_000): string {
       // clamp re-admits up to ~2s of overshoot per wedged poll, against the
       // ~10s the budget threading set out to remove.
       timeout: Math.max(2_000, timeoutMs),
+      maxBuffer: 16 * 1024 * 1024,
     },
   );
   // A timed-out spawn sets error and leaves status null with empty stderr:
@@ -691,6 +695,108 @@ function runMysql(port: number, sql: string, timeoutMs = 10_000): string {
     throw new Error(`MySQL command failed: ${result.stderr}`);
   }
   return result.stdout.trim();
+}
+
+function assertStoredAnswer(
+  port: number,
+  tenant: string,
+  sessionId: string,
+  expected: string,
+): void {
+  const rows = runMysql(
+    port,
+    `SELECT resource_id, kind, byte_length, sha256, HEX(inline_bytes) FROM qwen_managed_agent.qwen_managed_session_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(sessionId)} AND kind IN ('managed-message', 'managed-message-chunks', 'managed-message-part')`,
+  ).split('\n');
+  const bodies = new Map<string, { kind: string; bytes: Buffer }>();
+  for (const row of rows) {
+    const [id, kind, length, digest, hex] = row.split('\t');
+    const bytes = Buffer.from(hex ?? '', 'hex');
+    const actualDigest = createHash('sha256').update(bytes).digest('hex');
+    let reason: string | undefined;
+    if (!id) reason = 'missing resource id';
+    else if (!kind) reason = 'missing resource kind';
+    else if (!hex || hex === 'NULL') reason = 'missing inline bytes';
+    else if (bytes.length !== Number(length))
+      reason = `byte_length=${length} actual=${bytes.length}`;
+    else if (actualDigest !== digest)
+      reason = `sha256=${digest} actual=${actualDigest}`;
+    else if (bytes.length > 65_536)
+      reason = `inline body ${bytes.length}B exceeds 65536B`;
+    if (reason) {
+      throw new Error(
+        `Stored message resource failed validation: kind=${kind ?? 'unknown'} id=${id ?? 'unknown'} ${reason}`,
+      );
+    }
+    bodies.set(id, { kind, bytes });
+  }
+  const records = [...bodies.entries()]
+    .filter(([, { kind }]) => kind !== 'managed-message-part')
+    .map(([id, { kind, bytes }]) => {
+      if (kind === 'managed-message-chunks') {
+        let manifest: { parts: Array<{ resourceId: string }> };
+        try {
+          manifest = JSON.parse(bytes.toString('utf8')) as typeof manifest;
+        } catch {
+          throw new Error(
+            `Stored message manifest is invalid JSON: kind=${kind} id=${id}`,
+          );
+        }
+        bytes = Buffer.concat(
+          manifest.parts.map((part) => {
+            const stored = bodies.get(part.resourceId);
+            if (stored?.kind !== 'managed-message-part')
+              throw new Error(
+                `Stored message part is missing: kind=managed-message-part id=${part.resourceId} manifest=${id}`,
+              );
+            return stored.bytes;
+          }),
+        );
+      }
+      try {
+        return JSON.parse(bytes.toString('utf8')) as {
+          type: string;
+          uuid: string;
+          parentUuid: string;
+          message?: { parts?: Array<{ text?: string }> };
+        };
+      } catch {
+        throw new Error(
+          `Stored message ${kind === 'managed-message-chunks' ? 'joined-chunk' : 'inline'} record is invalid JSON: kind=${kind} id=${id}`,
+        );
+      }
+    });
+  const answers = records.filter(
+    (record) =>
+      record.type === 'assistant' &&
+      record.message?.parts?.map((part) => part.text ?? '').join('') ===
+        expected,
+  );
+  if (answers.length !== 1 || !answers[0].uuid || !answers[0].parentUuid)
+    throw new Error('Stored answer is incomplete or duplicated');
+  const manifests = [...bodies.values()].filter(
+    ({ kind }) => kind === 'managed-message-chunks',
+  );
+  if (manifests.length !== 1)
+    throw new Error(
+      `Expected exactly one managed-message-chunks manifest, found ${manifests.length}`,
+    );
+}
+
+function assertPublicAnswer(events: PublicEvent[], expected: string): void {
+  const terminal = events.filter((event) => event.terminal);
+  const text = events
+    .filter((event) => event.type === 'item.output_text.delta')
+    .map(eventText)
+    .join('');
+  if (
+    terminal.length !== 1 ||
+    terminal[0].type !== 'turn.completed' ||
+    text !== expected
+  ) {
+    throw new Error(
+      `Long-answer integrity failed: terminal=${terminal.map((event) => event.type)} expectedChars=${expected.length} actualChars=${text.length}`,
+    );
+  }
 }
 
 function sqlString(value: string): string {
@@ -773,8 +879,22 @@ async function waitForTerminal(
 
 const failoverFirstMarker = 'MANAGED_SESSION_FAILOVER_FIRST_TURN';
 const failoverSecondMarker = 'MANAGED_SESSION_FAILOVER_SECOND_TURN';
-const failoverFirstResponse = 'FIRST_TURN_DURABLY_COMMITTED';
-const failoverSecondResponse = 'SECOND_TURN_RESTORED_CONTEXT';
+const bigOutputSource = 'abcdefghijklmnopqrstu长😀'.repeat(
+  bigOutput ? 8_000 : 0,
+);
+const failoverFirstResponse = bigOutput
+  ? Array.from({ length: 48 }, (_, index) => {
+      // Distinct prefixes keep the provider's cumulative-stream detection out
+      // of this storage regression without changing its character/byte sizes.
+      return (
+        String(index).padStart(4, '0') +
+        bigOutputSource.slice(index * 4_000 + 4, (index + 1) * 4_000)
+      );
+    }).join('')
+  : 'FIRST_TURN_DURABLY_COMMITTED';
+const failoverSecondResponse = bigOutput
+  ? 'CONTROL_ANSWER__'.repeat(500)
+  : 'SECOND_TURN_RESTORED_CONTEXT';
 const failoverMissingResponse = 'SECOND_TURN_CONTEXT_MISSING';
 const inflightMarker = 'MANAGED_SESSION_INFLIGHT_FAILOVER';
 const inflightResponse = 'INFLIGHT_TURN_RECOVERED';
@@ -805,9 +925,11 @@ try {
     ? 'managed-continuation-failover-e2e'
     : inflightFailover
       ? 'managed-inflight-failover-e2e'
-      : sessionFailover
-        ? 'managed-session-failover-e2e'
-        : 'real-model-e2e';
+      : bigOutput
+        ? 'managed-big-output-e2e'
+        : sessionFailover
+          ? 'managed-session-failover-e2e'
+          : 'real-model-e2e';
   const springArguments = ['-jar', springJar];
   springArguments.push(
     `--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=${tenant}`,
@@ -869,7 +991,13 @@ try {
         };
       }
       if (serialized.includes(failoverFirstMarker)) {
-        return { content: failoverFirstResponse };
+        return bigOutput
+          ? {
+              contentChunks: Array.from({ length: 48 }, (_, index) =>
+                failoverFirstResponse.slice(index * 4_000, (index + 1) * 4_000),
+              ),
+            }
+          : { content: failoverFirstResponse };
       }
       return { content: 'UNEXPECTED_FAILOVER_PROMPT' };
     });
@@ -967,13 +1095,13 @@ try {
         QWEN_MANAGED_AGENT_HARNESS_REQUEST_TIMEOUT: '120s',
         QWEN_MANAGED_AGENT_HARNESS_TOKEN: harnessToken,
         // Trusted reboot recovery stays pinned off in every runner mode;
-        // durable local process follows workspaceTurns. Both pins keep each
+        // durable local process follows runtimeTakeover. Both pins keep each
         // mode's previously verified behavior and keep the runner starting
         // off Linux.
         QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false',
         QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
         QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
-        ...(workspaceTurns
+        ...(runtimeTakeover
           ? {
               QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
             }
@@ -1123,7 +1251,9 @@ try {
               ? `${continuationMarker}. Execute the requested tool once and reply exactly ${continuationResponse}.`
               : inflightFailover
                 ? `${inflightMarker}. Execute the requested tool once and reply exactly ${inflightResponse}.`
-                : `${failoverFirstMarker}. Reply exactly ${failoverFirstResponse}.`,
+                : bigOutput
+                  ? `${failoverFirstMarker}. Produce the configured long answer.`
+                  : `${failoverFirstMarker}. Reply exactly ${failoverFirstResponse}.`,
           },
         ],
         ...(workspaceTurns
@@ -1134,7 +1264,9 @@ try {
             ? 'Managed continuation owner failover E2E'
             : inflightFailover
               ? 'Managed in-flight owner failover E2E'
-              : 'Managed Session owner failover E2E',
+              : bigOutput
+                ? 'Managed long-answer persistence E2E'
+                : 'Managed Session owner failover E2E',
         },
       }),
     });
@@ -1255,6 +1387,20 @@ try {
         throw new Error(
           `First failover Turn ended with ${firstTerminal?.type ?? 'no terminal event'}; store head=${storeHead || 'missing'}`,
         );
+      }
+      if (bigOutput) {
+        const modelRequests = fake?.requests.filter(
+          ({ body }) => body['stream'] === true,
+        );
+        if (modelRequests?.length !== 1)
+          throw new Error('The long answer must complete without model retry');
+        assertStoredAnswer(
+          mysqlPort,
+          tenant,
+          session.id,
+          failoverFirstResponse,
+        );
+        assertPublicAnswer(firstTurn.events, failoverFirstResponse);
       }
     }
 
@@ -1425,7 +1571,7 @@ try {
             QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY: 'false',
             QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
             QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
-            ...(workspaceTurns
+            ...(runtimeTakeover
               ? {
                   QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS: 'true',
                 }
@@ -1920,6 +2066,22 @@ try {
         );
       }
 
+      if (bigOutput) {
+        assertPublicAnswer(secondTurn.events, failoverSecondResponse);
+        assertStoredAnswer(
+          mysqlPort,
+          tenant,
+          session.id,
+          failoverFirstResponse,
+        );
+        assertStoredAnswer(
+          mysqlPort,
+          tenant,
+          session.id,
+          failoverSecondResponse,
+        );
+      }
+
       const secondRequest = [...(fake?.requests ?? [])]
         .reverse()
         .find(({ body }) =>
@@ -1977,6 +2139,14 @@ try {
           journalRevision: `${firstHead[1]} -> ${secondHead[1]}`,
           committedSequence: `${firstHead[2]} -> ${secondHead[2]}`,
           terminalTurns: terminalCount,
+          ...(bigOutput
+            ? {
+                expectedCharacters: failoverFirstResponse.length,
+                expectedUtf8Bytes: Buffer.byteLength(failoverFirstResponse),
+                shortControlCharacters: failoverSecondResponse.length,
+                fullTextPreserved: true,
+              }
+            : {}),
           restoredFirstTurnContext: true,
           oldHarnessDiskDeleted: !existsSync(harnessHome),
         },
