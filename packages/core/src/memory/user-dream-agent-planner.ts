@@ -128,13 +128,11 @@ export async function planUserAutoMemoryDreamByAgent(
   });
 
   if (result.status !== 'completed') {
+    // No cancelled arm: on the only path that produces one, the manager
+    // marks the record 'cancelled' before aborting and then skips the
+    // error update, so this text would never reach anyone.
     throw new Error(
-      terminateReasonMessage(
-        result.terminateReason,
-        result.status === 'cancelled'
-          ? 'User Dream agent cancelled before completion'
-          : 'User Dream agent failed',
-      ),
+      terminateReasonMessage(result.terminateReason, 'User Dream agent failed'),
     );
   }
   return result;

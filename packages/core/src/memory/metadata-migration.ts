@@ -510,12 +510,13 @@ async function generateMemoryMetadataWithAgent(
     suppressChatRecording: true,
   });
   if (result.status !== 'completed') {
+    // No cancelled arm: the caller only rethrows this on an aborted
+    // signal, and the manager then logs a cancelled event without the
+    // message, so the text would never reach anyone.
     throw new Error(
       terminateReasonMessage(
         result.terminateReason,
-        result.status === 'cancelled'
-          ? 'Metadata migration agent cancelled before completion'
-          : 'Metadata migration agent failed',
+        'Metadata migration agent failed',
       ),
     );
   }

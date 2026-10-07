@@ -7,34 +7,42 @@
 import { AgentTerminateMode } from './agent-types.js';
 import type { LoopType } from '../../telemetry/types.js';
 
+const LOOP_DETECTED_WORDING =
+  'Agent stopped: duplicate tool-call loop detected';
+
+// Total on purpose, like the severity table in agent-interactive.ts: a new
+// AgentTerminateMode has to choose its wording here or `tsc` fails. `null`
+// means "no wording", which suppresses the UI message and leaves each
+// throwing caller its own text.
+const TERMINATE_MODE_WORDING: Record<AgentTerminateMode, string | null> = {
+  [AgentTerminateMode.MAX_TURNS]: 'Agent stopped: maximum turns reached.',
+  [AgentTerminateMode.TIMEOUT]: 'Agent stopped: time limit reached.',
+  [AgentTerminateMode.ERROR]: 'Agent stopped due to an error.',
+  [AgentTerminateMode.LOOP_DETECTED]: `${LOOP_DETECTED_WORDING}.`,
+  [AgentTerminateMode.GOAL]: null,
+  [AgentTerminateMode.CANCELLED]: null,
+  [AgentTerminateMode.SHUTDOWN]: null,
+};
+
 /**
  * Human-readable wording for a terminate mode. CANCELLED and SHUTDOWN have
  * no wording of their own: the UI suppresses them, and a caller that throws
- * on them is expected to supply its own cancellation text. Undefined for
- * anything else, so callers keep whatever text they were given.
+ * on them is expected to supply its own text. Undefined for anything else,
+ * so callers keep whatever text they were given.
  */
 export function describeAgentTerminateReason(
   reason: string | undefined,
   loopType?: LoopType | null,
 ): string | undefined {
-  switch (reason) {
-    case AgentTerminateMode.MAX_TURNS:
-      return 'Agent stopped: maximum turns reached.';
-    case AgentTerminateMode.TIMEOUT:
-      return 'Agent stopped: time limit reached.';
-    case AgentTerminateMode.ERROR:
-      return 'Agent stopped due to an error.';
-    case AgentTerminateMode.LOOP_DETECTED:
-      return loopType
-        ? // Name the exact detector so a stop is attributable (issue #9450)
-          // instead of collapsing every loop type into one generic label.
-          `Agent stopped: duplicate tool-call loop detected (${loopType}).`
-        : 'Agent stopped: duplicate tool-call loop detected.';
-    case AgentTerminateMode.CANCELLED:
-    case AgentTerminateMode.SHUTDOWN:
-    default:
-      return undefined;
+  if (!reason || !Object.hasOwn(TERMINATE_MODE_WORDING, reason)) {
+    return undefined;
   }
+  if (reason === AgentTerminateMode.LOOP_DETECTED && loopType) {
+    // Name the exact detector so a stop is attributable (issue #9450)
+    // instead of collapsing every loop type into one generic label.
+    return `${LOOP_DETECTED_WORDING} (${loopType}).`;
+  }
+  return TERMINATE_MODE_WORDING[reason as AgentTerminateMode] ?? undefined;
 }
 
 /**

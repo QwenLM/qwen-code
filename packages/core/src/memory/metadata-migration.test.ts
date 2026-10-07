@@ -1577,7 +1577,7 @@ describe('memory metadata migration', () => {
     expect(updated).toContain('name: Migrated memory');
   });
 
-  it('reports a cancelled migration as cancelled, not as a failure', async () => {
+  it('does not surface the raw mode token when a migration is cancelled', async () => {
     // The abort rethrow at the candidate loop only lets a message escape
     // when the caller's signal is aborted, so the mock has to abort during
     // the agent call and the test must not inject its own generateMetadata.
@@ -1602,7 +1602,7 @@ describe('memory metadata migration', () => {
         scope: 'project',
         abortSignal: controller.signal,
       }),
-    ).rejects.toThrow('Metadata migration agent cancelled before completion');
+    ).rejects.toThrow('Metadata migration agent failed');
   });
 
   it('caps the content handed to the agent, not just the reported char count', async () => {

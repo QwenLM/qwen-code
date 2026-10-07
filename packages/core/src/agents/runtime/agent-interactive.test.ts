@@ -437,6 +437,49 @@ describe('AgentInteractive', () => {
     await agent.shutdown();
   });
 
+  it.each([
+    [
+      AgentTerminateMode.MAX_TURNS,
+      'Agent stopped: maximum turns reached.',
+      'warning',
+    ],
+    [
+      AgentTerminateMode.TIMEOUT,
+      'Agent stopped: time limit reached.',
+      'warning',
+    ],
+    [AgentTerminateMode.ERROR, 'Agent stopped due to an error.', 'error'],
+  ] as const)(
+    'reports %s at its own severity',
+    async (terminateMode, text, level) => {
+      // The wording lives in terminate-reason.ts and the severity in this
+      // file's table; nothing else asserts a level, so a wrong one would
+      // ship green even though the user sees it.
+      const { core } = createMockCore({
+        loopResult: { text: '', terminateMode, turnsUsed: 1 },
+      });
+      const agent = new AgentInteractive(
+        createConfig({ initialTask: 'go' }),
+        core,
+      );
+      await agent.start(context);
+      await vi.waitFor(() => {
+        expect(['idle', 'failed']).toContain(agent.getStatus());
+      });
+      await vi.waitFor(() => {
+        expect(agent.getMessages().some((m) => m.role === 'info')).toBe(true);
+      });
+
+      const stop = agent
+        .getMessages()
+        .find((m) => m.role === 'info' && String(m.content) === text);
+      expect(stop).toBeDefined();
+      expect(stop?.metadata).toMatchObject({ level });
+
+      await agent.shutdown();
+    },
+  );
+
   it('should set status to failed when chat creation fails', async () => {
     const agent = await startAgent(createMockCore({ nullChat: true }).core);
 
