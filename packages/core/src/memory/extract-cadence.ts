@@ -31,8 +31,8 @@ export const EXTRACT_CADENCE_MAX_PENDING_ENTRIES = 20;
 
 /**
  * Fallback bound for a pending-turn flush whose caller supplies no budget. The
- * one production caller (ACP session close) always passes its own, smaller
- * deadline residue instead.
+ * one production caller (ACP session close) always passes its own deadline
+ * residue instead, so this value never bounds that path.
  */
 export const EXTRACT_FLUSH_TIMEOUT_MS = 60_000;
 

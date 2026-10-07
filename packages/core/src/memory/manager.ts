@@ -1412,9 +1412,11 @@ export class MemoryManager {
   ): Promise<boolean> {
     try {
       // This session's own in-flight or trailing extraction may hold the
-      // slot; wait for it and for any trailing request it starts. Both maps
-      // are per-manager, and a manager is built per Config, so another
-      // session's extraction lives on another manager and never appears here.
+      // slot, and so can a run recorded for a session this Config has since
+      // left: `startNewSession()` mutates one canonical Config in place, so
+      // this manager outlives the session id, and both maps are keyed by
+      // projectRoot/taskId rather than by session. Wait for it and for any
+      // trailing request it starts.
       for (;;) {
         const taskId = this.extractCurrentTaskId.get(pending.projectRoot);
         const active = taskId ? this.inFlight.get(taskId) : undefined;
