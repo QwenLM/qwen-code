@@ -57,11 +57,17 @@ const mocks = vi.hoisted(() => {
         // `bg` is the one style prop carried through: the dialog gives a
         // background colour to exactly one cell, the software cursor.
         const bg = (config as { bg?: string }).bg;
+        // `flexShrink` comes through too so the frame's shrink behaviour is
+        // assertable without booting the native renderer.
+        const flexShrink = (config as { flexShrink?: number }).flexShrink;
         return React.createElement(
           type === 'box' ? 'div' : 'span',
           {
             ...(key === undefined ? null : { key }),
             ...(bg === undefined ? null : { 'data-bg': bg }),
+            ...(flexShrink === undefined
+              ? null
+              : { 'data-flex-shrink': flexShrink }),
           },
           children,
         );
@@ -1264,6 +1270,44 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     await typeText('flash');
     expect(screen.queryByText(/^deepseek-v4-pro(\s|$)/)).toBeNull();
     expect(recommendedRow('deepseek-v4-flash')).toContain(ICON.RADIO_FILLED);
+  });
+});
+
+describe('the wizard frame keeps its natural height', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+  });
+
+  it('stays unshrinkable for the list-carrying wizard while the static summary sheds rows', () => {
+    // The wizard's radio lists do not window: a shrinkable frame would let a
+    // short region squeeze a list mid-rows while its keys stay live. The
+    // static no-config body keeps `shrinkable` so a short region sheds its
+    // blank rows the way ink does (F5-1).
+    const wizard = render(
+      <OpenTuiAuthDialog
+        config={createMockConfig()}
+        settings={createMockSettings()}
+        onClose={() => {}}
+        notify={() => {}}
+      />,
+    );
+    expect(
+      wizard.container.firstElementChild?.getAttribute('data-flex-shrink'),
+    ).toBe('0');
+    wizard.unmount();
+
+    const summary = render(
+      <OpenTuiAuthDialog
+        settings={createMockSettings()}
+        onClose={() => {}}
+        notify={() => {}}
+      />,
+    );
+    expect(
+      summary.container.firstElementChild?.getAttribute('data-flex-shrink'),
+    ).toBe('1');
   });
 });
 

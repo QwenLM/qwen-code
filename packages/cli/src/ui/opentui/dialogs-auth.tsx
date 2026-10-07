@@ -1390,7 +1390,7 @@ function AuthDialogFlow({
   // -- Render -------------------------------------------------------------------
 
   return (
-    <Shell title={viewTitle} onClose={onClose} borderStyle="single" shrinkable>
+    <Shell title={viewTitle} onClose={onClose} borderStyle="single">
       {viewLevel === 'main' && (
         <>
           <RadioList items={MAIN_ITEMS} cursor={mainCursor} />

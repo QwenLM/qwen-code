@@ -15,7 +15,7 @@
  * mutations are reported to the backend via callbacks.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
@@ -29,10 +29,7 @@ import {
   FooterHint,
   dialogContentWidth,
 } from './dialogs-shared.js';
-import {
-  findNextEnabledIndex,
-  getSelectionScrollOffset,
-} from './dialogs-core.js';
+import { findNextEnabledIndex, followScrollOffset } from './dialogs-core.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { truncateToWidth } from '../utils/textUtils.js';
 
@@ -335,6 +332,31 @@ export interface OpenTuiMcpDialogProps {
   availableTerminalHeight?: number;
 }
 
+/**
+ * BaseSelectionList's scroll-follow for the tool/resource lists: the window
+ * lives in state and only moves when the cursor's row would leave it, so a
+ * hover — which sets the cursor to a painted row — can never shift the window
+ * under the pointer. Deriving the offset from the cursor on every render pins
+ * the cursor to the window's bottom edge instead, and a click then opens a
+ * different row than the one it landed on. A zero-row window has no anchor to
+ * follow to, so the offset is left alone until the budget paints rows again.
+ */
+function useFollowScrollOffset(
+  cursor: number,
+  itemCount: number,
+  windowRows: number,
+): number {
+  const [offset, setOffset] = useState(0);
+  useEffect(() => {
+    if (windowRows < 1) return;
+    const next = followScrollOffset(cursor, offset, itemCount, windowRows);
+    if (next !== offset) setOffset(next);
+  }, [cursor, offset, itemCount, windowRows]);
+  // The state lags one render behind a cursor or budget change; clamp in the
+  // meantime so the slice never starts past the last full window.
+  return Math.max(0, Math.min(offset, Math.max(0, itemCount - windowRows)));
+}
+
 export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
   const {
     servers,
@@ -419,6 +441,17 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
         approveSupported: !!onServerAction,
       })
     : [];
+
+  const toolScrollOffset = useFollowScrollOffset(
+    toolCursor,
+    serverTools.length,
+    listWindowRows,
+  );
+  const resourceScrollOffset = useFollowScrollOffset(
+    resourceCursor,
+    serverResources.length,
+    listWindowRows,
+  );
 
   useKeyboard((key) => {
     const original = toOriginalKey(key);
@@ -809,11 +842,7 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
       return <text fg={C.dim}>{t('No tools available for this server.')}</text>;
     }
     // ink ToolListStep's following window: the cursor's row is always painted.
-    const offset = getSelectionScrollOffset(
-      toolCursor,
-      serverTools.length,
-      listWindowRows,
-    );
+    const offset = toolScrollOffset;
     const visibleTools = serverTools.slice(offset, offset + listWindowRows);
     return (
       <box flexDirection="column">
@@ -878,11 +907,7 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
         <text fg={C.dim}>{t('No resources available for this server.')}</text>
       );
     }
-    const offset = getSelectionScrollOffset(
-      resourceCursor,
-      serverResources.length,
-      listWindowRows,
-    );
+    const offset = resourceScrollOffset;
     const visibleResources = serverResources.slice(
       offset,
       offset + listWindowRows,

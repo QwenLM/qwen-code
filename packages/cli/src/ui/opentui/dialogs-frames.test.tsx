@@ -42,6 +42,30 @@ const buildJsxRuntime = vi.hoisted(() => async () => {
   ) => {
     const config = key === undefined ? props : { ...props, key };
     const children = (config?.children ?? null) as React.ReactNode;
+    if (type === 'scrollbox') {
+      // Same attribute capture as box/text, tagged so tests can find the
+      // scrollbox among the frame's boxes.
+      const captured = JSON.stringify(
+        Object.fromEntries(
+          Object.entries(config ?? {}).filter(
+            ([k, v]) =>
+              k !== 'children' &&
+              (typeof v === 'string' ||
+                typeof v === 'number' ||
+                typeof v === 'boolean'),
+          ),
+        ),
+      );
+      return React.createElement(
+        'div',
+        {
+          ...(key === undefined ? {} : { key }),
+          'data-p': captured,
+          'data-kind': 'scrollbox',
+        },
+        children,
+      );
+    }
     if (type === 'box' || type === 'text') {
       // Keep the layout primitives as an attribute so the frame's declared
       // geometry is readable without booting the native renderer.
@@ -164,5 +188,44 @@ describe('sibling dialog frames (region clips, frame does not shrink)', () => {
       flexShrink: 0,
     });
     expect(layoutOf(container.firstElementChild)['marginTop']).toBeUndefined();
+  });
+
+  it('windows the skills scrollbox from the region budget', () => {
+    // The frame's border, padding, title and the body's margin row take six
+    // rows, so a fifteen-row region leaves the twelve-row body nine. Without
+    // the window the unshrinkable frame paints its border past the region's
+    // bottom edge and the list's tail has no reveal path.
+    const { container } = render(
+      <OpenTuiSkillsDialog
+        config={null}
+        onClose={() => {}}
+        availableTerminalHeight={15}
+      />,
+    );
+    expect(
+      layoutOf(container.querySelector('[data-kind="scrollbox"]')),
+    ).toMatchObject({ height: 9 });
+  });
+
+  it('keeps the twelve-row skills body when no region budget is known', () => {
+    const { container } = render(
+      <OpenTuiSkillsDialog config={null} onClose={() => {}} />,
+    );
+    expect(
+      layoutOf(container.querySelector('[data-kind="scrollbox"]')),
+    ).toMatchObject({ height: 12 });
+  });
+
+  it('windows the skills scrollbox to zero rows when the region cannot pay the chrome', () => {
+    const { container } = render(
+      <OpenTuiSkillsDialog
+        config={null}
+        onClose={() => {}}
+        availableTerminalHeight={5}
+      />,
+    );
+    expect(
+      layoutOf(container.querySelector('[data-kind="scrollbox"]')),
+    ).toMatchObject({ height: 0 });
   });
 });

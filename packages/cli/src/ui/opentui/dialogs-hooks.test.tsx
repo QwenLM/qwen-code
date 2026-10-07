@@ -477,6 +477,60 @@ describe('OpenTuiHooksDialog', () => {
     expect(screen.queryByText(/This menu is read-only/)).toBeNull();
   });
 
+  it('clips a wrapping handler label to the one row the window charges for it', async () => {
+    // Each list row is charged one physical row in the window budget; an
+    // unclipped handler label wraps to two or three rows at this width and
+    // the frame paints past the window it paid for. The label column here is
+    // 92 - 2 (indicator) - 3 (number column) = 87 columns.
+    const longCommand = 'x'.repeat(200);
+    render(
+      <OpenTuiHooksDialog
+        config={configWith({
+          entries: [
+            {
+              eventName: HookEventName.Stop,
+              config: { type: HookType.Command, command: longCommand },
+            },
+          ],
+        })}
+        settings={settingsWith()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    // Stop has no matchers, so Enter on the event opens its handler list.
+    const stopIndex = DISPLAY_HOOK_EVENTS.indexOf(HookEventName.Stop);
+    for (let i = 0; i < stopIndex; i++) await press('down');
+    await press('return');
+
+    expect(screen.queryByText(`[command] ${'x'.repeat(200)}`)).toBeNull();
+    expect(screen.getByText(`[command] ${'x'.repeat(77)}`)).toBeTruthy();
+  });
+
+  it('clips a wrapping matcher name to the one row the window charges for it', async () => {
+    const longMatcher = 'm'.repeat(200);
+    render(
+      <OpenTuiHooksDialog
+        config={configWith({
+          entries: [
+            {
+              eventName: HookEventName.PreToolUse,
+              matcher: longMatcher,
+              config: { type: HookType.Command, command: './lint.sh' },
+            },
+          ],
+        })}
+        settings={settingsWith()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await press('return'); // PreToolUse is the first event → matchers step
+
+    expect(screen.queryByText('m'.repeat(200))).toBeNull();
+    expect(screen.getByText('m'.repeat(87))).toBeTruthy();
+  });
+
   it('says so when an event has no hooks', async () => {
     render(
       <OpenTuiHooksDialog

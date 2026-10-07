@@ -20,6 +20,7 @@ import {
   followScrollOffset,
   getSelectionScrollOffset,
   matchesSearchQuery,
+  regionListWindow,
   selectionWindow,
   type DialogListItem,
 } from './dialogs-core.js';
@@ -120,6 +121,54 @@ describe('scroll window rules (BaseSelectionList parity)', () => {
     });
     // A mid-list offset inside the bound passes through unchanged.
     expect(selectionWindow(12, 20, 3).start).toBe(12);
+  });
+});
+
+describe('regionListWindow (the rows a region-mounted list pays for itself)', () => {
+  it('caps at the ink constant and flags the arrows when truncated without a region', () => {
+    expect(regionListWindow(undefined, 8, 20, 10)).toEqual({
+      maxItemsToShow: 10,
+      showScrollArrows: true,
+    });
+    expect(regionListWindow(undefined, 8, 4, 10)).toEqual({
+      maxItemsToShow: 4,
+      showScrollArrows: false,
+    });
+  });
+
+  it('subtracts the chrome and pays the scroll arrows out of the window', () => {
+    // 15 - 8 = 7 rows left; the window is a strict subset with more than two
+    // rows to spare, so two of them buy the ▲/▼ affordance.
+    expect(regionListWindow(15, 8, 20, 10)).toEqual({
+      maxItemsToShow: 5,
+      showScrollArrows: true,
+    });
+  });
+
+  it('spends a tight window on items instead of arrows', () => {
+    // 10 - 8 = 2 rows: too tight to spend two of them on the affordance.
+    expect(regionListWindow(10, 8, 20, 10)).toEqual({
+      maxItemsToShow: 2,
+      showScrollArrows: false,
+    });
+  });
+
+  it('floors at zero, not one, when the region cannot pay the chrome', () => {
+    expect(regionListWindow(8, 8, 20, 10)).toEqual({
+      maxItemsToShow: 0,
+      showScrollArrows: false,
+    });
+    expect(regionListWindow(3, 8, 20, 10)).toEqual({
+      maxItemsToShow: 0,
+      showScrollArrows: false,
+    });
+  });
+
+  it('never windows past the item count', () => {
+    expect(regionListWindow(40, 8, 6, 10)).toEqual({
+      maxItemsToShow: 6,
+      showScrollArrows: false,
+    });
   });
 });
 

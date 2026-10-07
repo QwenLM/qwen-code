@@ -19,6 +19,7 @@ import {
   sanitizeFilenameForDisplay,
   sanitizeMultilineForDisplay,
   sanitizeSensitiveText,
+  sanitizeTerminalLine,
   sliceTextByVisualHeight,
   toCodePoints,
   truncateToWidth,
@@ -434,6 +435,26 @@ describe('textUtils', () => {
       // A double-width cell that would straddle the budget is dropped whole.
       expect(clipToWidth('目标配置参数设置', 9)).toBe('目标配置');
       expect(clipToWidth('ab目', 3)).toBe('ab');
+    });
+  });
+
+  describe('sanitizeTerminalLine', () => {
+    it('flattens the TAB/CR/LF the input buffer keeps into single spaces', () => {
+      // A surviving newline paints a second physical row the caller's width
+      // budget never charged.
+      expect(sanitizeTerminalLine(' first\n> /evil fake row')).toBe(
+        ' first > /evil fake row',
+      );
+      expect(sanitizeTerminalLine('a\tb\rc\n\nd')).toBe('a b c d');
+    });
+
+    it('strips the bidi override and isolate characters', () => {
+      expect(sanitizeTerminalLine('Ev\u202eil\u202c')).toBe('Evil');
+      expect(sanitizeTerminalLine('\u2066gnirts\u2069')).toBe('gnirts');
+    });
+
+    it('still strips ANSI sequences and the remaining control bytes', () => {
+      expect(sanitizeTerminalLine('\u001b[31mred\u001b[0m\x07')).toBe('red');
     });
   });
 

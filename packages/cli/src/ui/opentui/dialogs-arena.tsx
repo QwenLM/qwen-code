@@ -815,9 +815,16 @@ function ArenaSelect({
       if (row && !row.disabled) void applyWinner(row.key);
     } else if (!o.ctrl && !o.meta) {
       if (o.name === 'p' || o.name === 'd') {
-        if (agentWindowRows < 1) return;
-        if (o.name === 'p') setShowPreview((v) => !v);
-        else setShowDetailedDiff((v) => !v);
+        // A zero-row window refuses to OPEN a pane — its rows come out of the
+        // list — but never refuses to CLOSE one: the open pane is what eats
+        // the rows the list needs.
+        if (o.name === 'p') {
+          if (agentWindowRows < 1 && !showPreview) return;
+          setShowPreview((v) => !v);
+        } else {
+          if (agentWindowRows < 1 && !showDetailedDiff) return;
+          setShowDetailedDiff((v) => !v);
+        }
       } else if (o.name === 'x') void discardAll();
     }
   });

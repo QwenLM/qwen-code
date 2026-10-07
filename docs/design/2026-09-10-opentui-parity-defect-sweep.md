@@ -2448,13 +2448,14 @@ ink's stats dialog clips. One measured correction stands against the first
 phrasing of this rule: the region's clip cuts a child's text rows but not the
 frame's own border strokes, so a frame whose natural height exceeds the region
 still paints its bottom border past it, over whatever mounts below. That is why
-the two sized bodies that can produce such a height — the diff dialog's
-fourteen-row scroll region and the subagents dialog's twelve-row one — now
-window themselves from the region budget, leaving the unshrinkable frame's
-natural height no taller than the region at every budget. A structural test
-pins each frame's flush opening and its refusal to shrink, and the misc
-dialog's tests pin the two windowed heights at the boundary. The skills
-dialog's twelve-row body is not windowed the same way; Follow-ups records it.
+the three sized bodies that can produce such a height — the diff dialog's
+fourteen-row scroll region, the subagents dialog's twelve-row one and the
+skills dialog's twelve-row one — now window themselves from the region
+budget, leaving the unshrinkable frame's natural height no taller than the
+region at every budget. A structural test pins each frame's flush opening and
+its refusal to shrink, the misc dialog's tests pin the diff and subagents
+windowed heights at the boundary, and the frames test pins the skills
+scrollbox's windowed heights.
 
 ## Coverage boundary
 
@@ -3194,15 +3195,6 @@ What was verified, and how far the verification reaches:
   24-hour bracketed time inline, with an identical locale call. Pointing ink at the
   shared one would edit the very file the frame evidence was captured against, so
   the second copy stays and the two are only kept equal by hand.
-- One sized body inside a dialog frame still holds its own height: the skills
-  dialog's twelve-row one. The diff dialog's fourteen-row scroll region and the
-  subagents dialog's twelve-row one were the same shape — a frame whose natural
-  height outgrew the region overpainted its own bottom border, measured at a
-  region of seventeen rows and below for the fourteen-row body and of fifteen
-  rows and below for the twelve-row one — and both now window their height from
-  the region budget, so the unshrinkable frame is never taller than the region.
-  The skills body needs no such windowing: its frame keeps its natural height
-  and the region clips it, the way ink clips /stats.
 - Decision 68's shrink emulation still sits inline in the completion row's map
   body, so the twenty-three measured combinations cannot live in the repo as a
   test, and two of the four numbers the arithmetic reads — the non-shared column

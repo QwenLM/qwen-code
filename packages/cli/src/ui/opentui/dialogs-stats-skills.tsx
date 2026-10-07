@@ -34,6 +34,7 @@ import {
 import { fmtTokens, getSeriesColors } from '../components/stats-helpers.js';
 import { ICON } from '../constants.js';
 import { toOriginalKey } from './key-map.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { C } from './theme.js';
 
 /** Close the dialog on a raw Escape, like the other dialog hosts. */
@@ -402,6 +403,12 @@ export function OpenTuiStatsDialog(props: {
   );
 }
 
+/** ink's fixed skills body height. */
+const SKILLS_BODY_ROWS = 12;
+
+/** The skills frame's rows outside the scrollbox: border 2, padding 2, title 1, body margin 1. */
+const SKILLS_FRAME_CHROME_ROWS = 6;
+
 interface SkillRow {
   name: string;
   description: string;
@@ -410,13 +417,25 @@ interface SkillRow {
 export function OpenTuiSkillsDialog(props: {
   config: Config | null | undefined;
   onClose: () => void;
-  /** The popup region's row budget; the skills body does not window, so it is ignored. */
+  /** The popup region's row budget; the scrollbox windows its height from it. */
   availableTerminalHeight?: number;
 }) {
   const { config, onClose } = props;
   const [rows, setRows] = useState<SkillRow[]>([]);
   const [loading, setLoading] = useState(true);
   useEscToClose(onClose, true);
+  // The frame is unshrinkable and the region's clip cannot cut the border,
+  // so the body's explicit height windows itself from what the region leaves
+  // after the frame's chrome: border and padding 4, the title row 1, the
+  // body's margin row 1. Without a budget the body keeps ink's twelve rows.
+  const regionHeight = clampDialogHeight(props.availableTerminalHeight);
+  const bodyRows =
+    regionHeight === undefined
+      ? SKILLS_BODY_ROWS
+      : Math.max(
+          0,
+          Math.min(SKILLS_BODY_ROWS, regionHeight - SKILLS_FRAME_CHROME_ROWS),
+        );
   useEffect(() => {
     let alive = true;
     const mgr = config?.getSkillManager?.();
@@ -467,7 +486,7 @@ export function OpenTuiSkillsDialog(props: {
         </text>
         <text fg={C.dim}>{'esc to close'}</text>
       </box>
-      <scrollbox height={12} marginTop={1} stickyScroll={false}>
+      <scrollbox height={bodyRows} marginTop={1} stickyScroll={false}>
         {loading ? (
           <text fg={C.dim}>{'loading skills…'}</text>
         ) : rows.length === 0 ? (

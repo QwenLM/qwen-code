@@ -66,7 +66,7 @@ import {
   clipToWidth,
   cpLen,
   getCachedStringWidth,
-  stripUnsafeCharacters,
+  sanitizeTerminalLine,
   toCodePoints,
   truncateToWidth,
 } from '../utils/textUtils.js';
@@ -1319,10 +1319,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             // handling, so the same bytes would be charged against the budget
             // as five columns and cut mid-sequence; strip them instead.
             const hintText = suggestion.argumentHint
-              ? ` ${stripUnsafeCharacters(suggestion.argumentHint)}`
+              ? ` ${sanitizeTerminalLine(suggestion.argumentHint)}`
               : '';
             const badgeText = suggestion.sourceBadge
-              ? ` ${stripUnsafeCharacters(suggestion.sourceBadge)}`
+              ? ` ${sanitizeTerminalLine(suggestion.sourceBadge)}`
               : '';
             // A row with no shared column has no description gutter to pay, so
             // its budget drops only the dropdown margins and the active marker:
@@ -1405,7 +1405,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
                     <text fg={color}>
                       {truncateToWidth(
                         normalizeDescription(
-                          stripUnsafeCharacters(suggestion.description),
+                          sanitizeTerminalLine(suggestion.description),
                         ),
                         descriptionWidth,
                       )}

@@ -460,9 +460,6 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       return;
     }
     if (original.name === 'return') {
-      // A zero-row budget (a region too short for even one list row) leaves
-      // the highlight on a row nothing paints; Enter must not commit it.
-      if (maxItemsToShow < 1) return;
       const item = items[cursorRef.current];
       if (item && !item.disabled) onSelect?.(item.value);
     }

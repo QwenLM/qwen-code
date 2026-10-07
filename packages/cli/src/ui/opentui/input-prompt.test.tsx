@@ -1727,6 +1727,31 @@ describe('OpenTuiInputPrompt completion dropdown (F-19)', () => {
     expect(text).not.toContain('\u001b');
   });
 
+  it('flattens a newline inside an extension-owned hint into one row', async () => {
+    // The hint is painted inside the label column; a surviving \n paints a
+    // second physical row the dropdown's row budget never charged, shifting
+    // every row below it and spoofing a command row the model never produced.
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'Diagnose a hung session',
+      argumentHint: ' first\n> /evil fake row',
+    });
+    expect(text).toContain(' first > /evil fake row');
+    expect(text).not.toContain('first\n');
+  });
+
+  it('strips the bidi overrides an extension-owned badge carries', async () => {
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'Diagnose a hung session',
+      source: 'plugin-command',
+      sourceDetail: 'extension',
+      sourceLabel: 'Ev\u202eil\u202c',
+    });
+    expect(text).toContain('[Evil]');
+    expect(text).not.toContain('\u202e');
+  });
+
   // The wrap alignment measured on a real terminal only holds while these stay
   // three separate flex children: concatenated into one text run, a long hint
   // word-wraps the whole run and the row grows to three lines instead of ink's

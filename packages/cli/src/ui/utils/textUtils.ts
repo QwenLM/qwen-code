@@ -361,6 +361,19 @@ export function sanitizeTerminalText(value: string): string {
     .replace(BIDI_OVERRIDE_CHARS_REGEX, '');
 }
 
+/**
+ * `stripUnsafeCharacters` for a run that must paint as one physical row (a
+ * completion hint or badge): the same ANSI/VT/C0/C1 strip, then the bidi
+ * override/isolate range (Trojan Source) goes too, and the TAB/CR/LF that
+ * sanitizer keeps for pasted data flatten to single spaces — a surviving
+ * newline paints a second row the caller's width budget never charged.
+ */
+export function sanitizeTerminalLine(value: string): string {
+  return stripUnsafeCharacters(value)
+    .replace(BIDI_OVERRIDE_CHARS_REGEX, '')
+    .replace(/[\t\r\n]+/g, ' ');
+}
+
 /* Recursively traverses a JSON-like structure (objects, arrays, primitives)
  * and escapes all ANSI control characters found in any string values.
  *

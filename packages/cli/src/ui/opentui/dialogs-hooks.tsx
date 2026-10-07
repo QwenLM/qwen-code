@@ -49,6 +49,11 @@ import {
 import { regionListWindow } from './dialogs-core.js';
 import { wrappedRows } from './dialogs-modes.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
+import {
+  clipToWidth,
+  getCachedStringWidth,
+  truncateToWidth,
+} from '../utils/textUtils.js';
 import { readHooksEnabled } from './dialogs-misc.js';
 import { C } from './theme.js';
 
@@ -357,6 +362,11 @@ export function OpenTuiHooksDialog({
     handlerItems.length,
     MAX_ROWS,
   );
+  // Every list row is charged one physical row in the windows above, so each
+  // label's runs clip to the columns the row actually owns: the content width
+  // minus DialogSelect's indicator and number columns.
+  const labelBudget = (itemCount: number) =>
+    Math.max(0, contentWidth - 4 - String(itemCount).length);
   const eventSelect = useDialogSelect({
     items: eventItems,
     focused: view.step === 'events',
@@ -445,13 +455,31 @@ export function OpenTuiHooksDialog({
           onSelectIndex={eventSelect.selectIndex}
           renderLabel={(item, context) => {
             const summary = events.find((entry) => entry.event === item.value);
+            const budget = labelBudget(eventItems.length);
+            const nameRun = clipToWidth(item.value, budget);
+            const countRun =
+              summary && summary.count > 0
+                ? clipToWidth(
+                    ` (${summary.count})`,
+                    Math.max(0, budget - getCachedStringWidth(nameRun)),
+                  )
+                : '';
+            const descriptionRun = truncateToWidth(
+              `  ${summary?.description ?? ''}`,
+              Math.max(
+                0,
+                budget -
+                  getCachedStringWidth(nameRun) -
+                  getCachedStringWidth(countRun),
+              ),
+            );
             return (
               <box flexDirection="row">
-                <text fg={context.titleColor}>{item.value}</text>
-                {summary && summary.count > 0 ? (
-                  <text fg={C.green}>{` (${summary.count})`}</text>
+                <text fg={context.titleColor}>{nameRun}</text>
+                {countRun ? <text fg={C.green}>{countRun}</text> : null}
+                {descriptionRun ? (
+                  <text fg={C.dim}>{descriptionRun}</text>
                 ) : null}
-                <text fg={C.dim}>{`  ${summary?.description ?? ''}`}</text>
               </box>
             );
           }}
@@ -490,12 +518,16 @@ export function OpenTuiHooksDialog({
               const group = matchers.find(
                 (entry) => entry.matcher === item.value,
               );
+              const budget = labelBudget(matcherItems.length);
+              const nameRun = clipToWidth(item.value, budget);
+              const countRun = truncateToWidth(
+                `  · ${hookCountLabel(group?.count ?? 0)}`,
+                Math.max(0, budget - getCachedStringWidth(nameRun)),
+              );
               return (
                 <box flexDirection="row">
-                  <text fg={context.titleColor}>{item.value}</text>
-                  <text fg={C.dim}>
-                    {`  · ${hookCountLabel(group?.count ?? 0)}`}
-                  </text>
+                  <text fg={context.titleColor}>{nameRun}</text>
+                  {countRun ? <text fg={C.dim}>{countRun}</text> : null}
                 </box>
               );
             }}
@@ -537,17 +569,33 @@ export function OpenTuiHooksDialog({
               const type = row.runsInBackground
                 ? `${row.hookType} async`
                 : row.hookType;
+              const budget = labelBudget(handlerItems.length);
+              const mainRun = clipToWidth(
+                `[${type}] ${row.displayText}`,
+                budget,
+              );
+              const sourceRun = clipToWidth(
+                `  · ${formatSourceLabel(row.source)}`,
+                Math.max(0, budget - getCachedStringWidth(mainRun)),
+              );
+              const disabledRun = row.enabled
+                ? ''
+                : truncateToWidth(
+                    `  ${t('disabled')}`,
+                    Math.max(
+                      0,
+                      budget -
+                        getCachedStringWidth(mainRun) -
+                        getCachedStringWidth(sourceRun),
+                    ),
+                  );
               return (
                 <box flexDirection="row">
-                  <text fg={context.titleColor}>
-                    {`[${type}] ${row.displayText}`}
-                  </text>
-                  <text
-                    fg={C.dim}
-                  >{`  · ${formatSourceLabel(row.source)}`}</text>
-                  {row.enabled ? null : (
-                    <text fg={C.yellow}>{`  ${t('disabled')}`}</text>
-                  )}
+                  <text fg={context.titleColor}>{mainRun}</text>
+                  {sourceRun ? <text fg={C.dim}>{sourceRun}</text> : null}
+                  {disabledRun ? (
+                    <text fg={C.yellow}>{disabledRun}</text>
+                  ) : null}
                 </box>
               );
             }}
