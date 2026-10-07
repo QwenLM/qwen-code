@@ -3526,6 +3526,34 @@ describe('NativeLspService disk document synchronization', () => {
       },
     );
 
+    it('does not let a downed rust sibling with an explicit mapping veto a clean answer it cannot own', async () => {
+      // The `extensionToLanguage` twin of the identity-mapped cases above: the
+      // mapping sends extension derivation down its keys branch, so `rust`
+      // reaches the owner set only through its alias row. That row carries the
+      // language ID as well as `.rs`, so the downed sibling is still provably
+      // unable to own main.ts and the ready server's empty report stands.
+      mockDiagnosticsResponses(connection);
+      const failedSibling: LspServerHandle = {
+        ...handle,
+        config: {
+          ...handle.config,
+          name: 'rust',
+          languages: ['rust'],
+          extensionToLanguage: { '.rs': 'rust' },
+        },
+        status: 'FAILED',
+        connection: undefined,
+        error: new Error('command not found: rust-analyzer'),
+      };
+      withServers([
+        ['test', handle],
+        ['rust', failedSibling],
+      ]);
+      const result = await run(queryDiagnosticsTool('diagnostics'));
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
     it('does not excuse a failed server whose config key is capitalized', async () => {
       // `.lsp.json` keys reach `languages` unnormalized. `"Python"` derives
       // no attributable extension, so the relevance rule fails CLOSED: the

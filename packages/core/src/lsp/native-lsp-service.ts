@@ -197,10 +197,12 @@ const LANGUAGE_ID_TO_EXTENSIONS: Record<string, string[]> = {
  * fallback would otherwise guess the ID as the extension and an ownership
  * check misreads the server. Kept OUT of LANGUAGE_ID_TO_EXTENSIONS, which
  * also feeds the warmup-file chooser — these rows exist only for veto
- * decisions.
+ * decisions. A row must still carry its own ID when that ID is in
+ * DIAGNOSTIC_LANGUAGE_IDS: the row shadows the `?? [id]` fallback, so
+ * dropping the ID would leave the server with nothing attributable.
  */
 const DIAGNOSTIC_LANGUAGE_ALIASES: Record<string, string[]> = {
-  rust: ['rs'],
+  rust: ['rs', 'rust'],
   yaml: ['yml', 'yaml'],
   markdown: ['md', 'markdown'],
   kotlin: ['kt', 'kts'],
