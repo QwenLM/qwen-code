@@ -77,8 +77,20 @@ describe('renderGoalContinuationPrompt', () => {
       input,
       registryWith(ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL, ToolNames.EXEC),
     );
-    expect(codeModeRegistry).toContain('In Code Mode, discover');
+    expect(codeModeRegistry).toContain(
+      'In Code Mode, discover missing Goal tools with tool_search and invoke them through exec using the returned JavaScript name.',
+    );
     expect(codeModeRegistry).not.toContain('In Direct mode:');
+    // The registry's own mode wins over the exec proxy, and the Code Mode
+    // route needs tool_search as well as exec.
+    const modeOnly = renderGoalContinuationPrompt(input, {
+      getAllToolNames: () => [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
+      isCodeModeOnly: () => true,
+    } as unknown as ToolRegistry);
+    expect(modeOnly).not.toContain('In Direct mode:');
+    expect(
+      renderGoalContinuationPrompt(input, registryWith(ToolNames.EXEC)),
+    ).not.toContain('tool_search');
   });
 
   it('renders the whole prompt without verifier feedback', () => {

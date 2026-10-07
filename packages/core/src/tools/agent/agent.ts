@@ -159,7 +159,7 @@ import {
   type BundledReferenceSurface,
   toolSearchBridgeSentence,
 } from '../../skills/bundled-reference.js';
-import { isDeferredToolBridgeAvailable } from '../tool-search.js';
+import { isDirectToolBridgeAvailable } from '../tool-search.js';
 
 const EXTERNAL_USAGE_NOTICE =
   '\n\n[External executor token usage and cost are unavailable.]';
@@ -986,7 +986,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     const rosterDiscovery =
       this.listAgentsReachable &&
       registry &&
-      isDeferredToolBridgeAvailable(registry) &&
+      isDirectToolBridgeAvailable(registry) &&
       registry.getAllToolNames().includes(ToolNames.LIST_AGENTS)
         ? `In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)}\n\n`
         : '';

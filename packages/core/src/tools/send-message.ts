@@ -34,7 +34,7 @@ import { ToolErrorType } from './tool-error.js';
 import { findMemberByName } from '../agents/team/teamHelpers.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { getAgentName, isTeammate } from '../agents/team/identity.js';
-import { isDeferredToolBridgeAvailable } from './tool-search.js';
+import { isDirectToolBridgeAvailable } from './tool-search.js';
 import { LEADER_NAME } from '../agents/team/types.js';
 import type { ApprovalMode } from '../config/approval-mode.js';
 import {
@@ -541,7 +541,7 @@ function sendMessageDescription(config: Config): string {
   const registry = config.getToolRegistry?.();
   const rosterGuidance = rosterReachable(config)
     ? 'Use list_agents to find a background task id or another session\'s "to" value, exactly as shown — list_agents appends " [ref]" whenever the bare name would not reach that session (another session or a teammate shares it). ' +
-      (registry && isDeferredToolBridgeAvailable(registry)
+      (registry && isDirectToolBridgeAvailable(registry)
         ? `In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)} `
         : '')
     : '';

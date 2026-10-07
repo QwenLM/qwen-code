@@ -138,6 +138,18 @@ export function isDeferredToolBridgeAvailable(registry: ToolRegistry): boolean {
   );
 }
 
+/**
+ * Whether model-facing prose may offer the Direct-mode route (`tool_search`,
+ * then `tool_call`): the bridge is registered and the session is not
+ * CodeModeOnly, which hides and refuses `tool_call` even though both halves
+ * stay registered there.
+ */
+export function isDirectToolBridgeAvailable(registry: ToolRegistry): boolean {
+  return (
+    !registry.isCodeModeOnly?.() && isDeferredToolBridgeAvailable(registry)
+  );
+}
+
 const toolSearchDescription = `Reviews function declarations for deferred tools without changing the active tool list.
 
 Deferred tools appear by name in the deferred-tools startup reminder. This tool takes a query, matches it against the deferred tool list, and returns the matched tools' function declarations (name + description + parameter schema) inside a <functions> block.

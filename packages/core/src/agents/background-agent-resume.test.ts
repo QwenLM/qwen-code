@@ -654,9 +654,7 @@ describe('BackgroundAgentResumeService', () => {
     } as unknown as Config);
     const notice = service.buildRecoveredBackgroundAgentsModelNotice(2);
     expect(notice).not.toContain('list_agents');
-    expect(notice).toBe(
-      '2 background agents were restored from this session. Use send_message with a task_id to continue one.',
-    );
+    expect(notice).toBe('2 background agents were restored from this session.');
   });
 
   it('restores interrupted and completed background agents without notifying again', async () => {

@@ -208,9 +208,11 @@ export function renderGoalContinuationPrompt(
   registry?: ToolRegistry,
 ): string {
   const toolNames = registry?.getAllToolNames() ?? [];
-  // exec is registered only under CodeModeOnly, where tool_call is hidden and
-  // refused, so the Direct-mode route would send the model to a dead end.
-  const codeModeOnly = toolNames.includes(ToolNames.EXEC);
+  // CodeModeOnly hides and refuses tool_call, so the Direct-mode route would
+  // send the model to a dead end there. The registry knows the mode; a bare
+  // registry stub falls back to exec, which only that mode registers.
+  const codeModeOnly =
+    registry?.isCodeModeOnly?.() ?? toolNames.includes(ToolNames.EXEC);
   const discoveryLines: string[] = [];
   if (registry && !codeModeOnly && isDeferredToolBridgeAvailable(registry)) {
     discoveryLines.push(

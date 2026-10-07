@@ -79,7 +79,7 @@ import { toolConfigAllowsSkill } from './runtime/subagent-plan-tool-policy.js';
 import { ToolMode } from '../tools/code-mode.js';
 import { toolSearchBridgeSentence } from '../skills/bundled-reference.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { isDeferredToolBridgeAvailable } from '../tools/tool-search.js';
+import { isDirectToolBridgeAvailable } from '../tools/tool-search.js';
 import type {
   AgentExternalInput,
   PromptConfig,
@@ -448,11 +448,9 @@ function buildRecoveredModelNotice(
   bridgeAvailable: boolean,
 ): string {
   const restored = `${count} background agent${count === 1 ? ' was' : 's were'} restored from this session.`;
-  // Naming list_agents when it is not registered sends the model to a call
-  // that cannot resolve on every recovery.
-  if (!listAgentsAvailable) {
-    return `${restored} Use send_message with a task_id to continue one.`;
-  }
+  // Without list_agents the model has no way to learn the restored agents'
+  // ids, so offer no instruction it cannot follow.
+  if (!listAgentsAvailable) return restored;
   return (
     `${restored} Use list_agents to inspect ${count === 1 ? 'it' : 'them'} ` +
     'and send_message with a task_id to continue one.' +
@@ -1642,7 +1640,7 @@ export class BackgroundAgentResumeService {
     return buildRecoveredModelNotice(
       count,
       !!registry?.getAllToolNames().includes(ToolNames.LIST_AGENTS),
-      !!registry && isDeferredToolBridgeAvailable(registry),
+      !!registry && isDirectToolBridgeAvailable(registry),
     );
   }
 
