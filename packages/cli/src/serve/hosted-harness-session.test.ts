@@ -56,6 +56,7 @@ import {
 import {
   HostedHookRecoveryRequiredError,
   HostedHookSession,
+  hostedHookOccurrenceId,
 } from './hosted-hook-session.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import {
@@ -451,6 +452,194 @@ describe('attributeShellReceipts', () => {
 });
 
 describe('settleCancelledHookTurn', () => {
+  // A parked pre-tool turn: the prompt's assistant message committed its
+  // tool call, then a PreToolUse evaluation fence parked the turn.
+  const preToolParkedSession = (
+    records: unknown[],
+    read: (ref: unknown) => Promise<Buffer>,
+  ) => {
+    const events = [
+      {
+        kind: 'input.accepted',
+        sequence: 5,
+        payload: { turnId: 'prompt', source: 'hosted-harness' },
+      } as unknown as ManagedSessionEvent,
+      {
+        kind: 'model.attempt',
+        sequence: 6,
+        payload: { attemptId: 'attempt-1', state: 'output_committed' },
+      } as unknown as ManagedSessionEvent,
+    ];
+    return {
+      blocked: true,
+      hooks: { hasPendingOperations: false },
+      managed: {
+        authority: {
+          committedSequence: 6,
+          sessionHeader: { sessionKey: { sessionId: 's' } },
+          eventsInSequenceRange: () => events,
+          extensionRecordsInDomain: () => records,
+          domainRecord: () => undefined,
+          harnessRunAuthorization: async () => ({
+            status: 'runnable',
+            checkpoint: { continuation: { phase: 'model_output_committed' } },
+          }),
+        },
+        resources: { read },
+        sink: {
+          project: async () => [
+            {
+              daemonPromptId: 'prompt',
+              type: 'assistant',
+              uuid: 'u-assistant',
+              model: 'test-model',
+              message: {
+                parts: [
+                  {
+                    functionCall: {
+                      id: 'call-0',
+                      name: 'write_file',
+                      args: {},
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    } as unknown as Parameters<typeof settleCancelledHookTurn>[0];
+  };
+
+  const settledPreToolRecord = (occurrenceId: string, resourceId: string) => {
+    const resultRef = {
+      resourceId,
+      kind: 'managed-hook-result',
+      schemaVersion: 1,
+      byteLength: 2,
+      digest: 'b'.repeat(64),
+    };
+    const record = {
+      hookExecutionId: occurrenceId,
+      occurrenceId,
+      runtimeSessionId: 'runtime-1',
+      registrationId: 'registration-1',
+      eventName: HookEventName.PreToolUse,
+      ordinal: 1,
+      hookId: 'hook-1',
+      planRef: {
+        ...resultRef,
+        resourceId: `${resourceId}-plan`,
+        kind: 'managed-hook-plan',
+      },
+      inputRef: {
+        ...resultRef,
+        resourceId: `${resourceId}-input`,
+        kind: 'managed-hook-input',
+      },
+      resultRef,
+      onceKey: null,
+      cancelRequested: false,
+      run: {
+        state: 'settled',
+        reason: null,
+        definition: {
+          definitionId: 'catalog',
+          definitionRevision: 1,
+          definitionDigest: 'a'.repeat(64),
+        },
+        executionCallId: null,
+        effectId: occurrenceId,
+        dispatchId: null,
+        deliveryId: null,
+        execution: 'settled',
+        runtime: null,
+        delivery: null,
+      },
+    };
+    return { record, resultRef };
+  };
+
+  it('does not read a settled PreToolUse result from an unrelated earlier occurrence', async () => {
+    const { record, resultRef } = settledPreToolRecord(
+      hostedHookOccurrenceId(HookEventName.PreToolUse, 'earlier-prompt:call-9'),
+      'r-unrelated',
+    );
+    const read = vi.fn(async () => Buffer.from('{}'));
+    const session = preToolParkedSession([{ record }], read);
+    await settleCancelledHookTurn(session);
+    // The in-memory occurrence filter runs ahead of any durable read, so a
+    // record that cannot match this turn never pays a resources.read —
+    // pre-filter this read fired once per historical record per pass.
+    expect(read).not.toHaveBeenCalledWith(resultRef);
+    expect(read).not.toHaveBeenCalled();
+    // The unrelated record is no fence: the parked turn stays parked.
+    expect(session.blocked).toBe(true);
+  });
+
+  it('treats an unreadable settled PreToolUse result as no fence', async () => {
+    const { record } = settledPreToolRecord(
+      hostedHookOccurrenceId(HookEventName.PreToolUse, 'prompt:call-0'),
+      'r-gone',
+    );
+    const read = vi.fn(async () => {
+      throw new ManagedSessionRecordError('resource gone');
+    });
+    const session = preToolParkedSession([{ record }], read);
+    // One missing result resource on any historical record must not reject
+    // the pass — the open route has no arm for that throw.
+    await expect(settleCancelledHookTurn(session)).resolves.toBeUndefined();
+    expect(session.blocked).toBe(true);
+  });
+
+  it('aborts the pre-model scan when the reconcile signal fires', async () => {
+    const reason = new Error('The Hook reconciliation deadline expired.');
+    const aborted = new AbortController();
+    aborted.abort(reason);
+    const session = {
+      blocked: true,
+      hooks: { hasPendingOperations: false },
+      managed: {
+        authority: {
+          committedSequence: 5,
+          sessionHeader: { sessionKey: { sessionId: 's' } },
+          eventsInSequenceRange: () => [
+            {
+              kind: 'input.accepted',
+              sequence: 5,
+              payload: { turnId: 'prompt', source: 'hosted-harness' },
+            } as unknown as ManagedSessionEvent,
+          ],
+          // The record body is never parsed: the abort lands first.
+          extensionRecordsInDomain: () => [{ record: {} }],
+        },
+        resources: { read: async () => Buffer.from('{}') },
+        sink: { project: async () => [] },
+      },
+    } as unknown as Parameters<typeof settleCancelledHookTurn>[0];
+    await expect(settleCancelledHookTurn(session, aborted.signal)).rejects.toBe(
+      reason,
+    );
+    expect(session.hooksBusy).toBe(false);
+  });
+
+  it('aborts the pre-tool scan when the reconcile signal fires', async () => {
+    const reason = new Error('The prompting client disconnected.');
+    const aborted = new AbortController();
+    aborted.abort(reason);
+    const { record } = settledPreToolRecord(
+      hostedHookOccurrenceId(HookEventName.PreToolUse, 'earlier-prompt:call-9'),
+      'r-unrelated',
+    );
+    const read = vi.fn(async () => Buffer.from('{}'));
+    const session = preToolParkedSession([{ record }], read);
+    await expect(settleCancelledHookTurn(session, aborted.signal)).rejects.toBe(
+      reason,
+    );
+    expect(session.hooksBusy).toBe(false);
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it('does not count a queued monitor notification toward the parked turn', async () => {
     const events = [
       {
@@ -3094,6 +3283,80 @@ describe('Hosted Harness no-tool session', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('ends the prompt-gate reconcile when the prompting client disconnects', async () => {
+    const { server, authorize } = await hookApp();
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+    const original = control.getMockImplementation()!;
+    control.mockImplementation(async (operation) => {
+      if (operation.kind === 'hook-execute')
+        return {
+          operationId: operation.operationId,
+          state: 'outcome_unknown',
+        };
+      return original(operation);
+    });
+    const fenced = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/hooks/operations`),
+    ).send({
+      operationId: randomUUID(),
+      event: 'Notification',
+      input: { message: 'effect', notification_type: 'test' },
+    });
+    expect(fenced.status).toBe(503);
+    // The poll that never answers: only the client's own disconnect ends the
+    // reconcile ahead of its budget here.
+    let statusSeen!: () => void;
+    const firstStatus = new Promise<void>((resolve) => {
+      statusSeen = resolve;
+    });
+    control.mockImplementation(async (operation) => {
+      if (
+        operation.kind === 'hook-status' ||
+        operation.kind === 'hook-cancel'
+      ) {
+        statusSeen();
+        return new Promise<ManagedHookOperationView>(() => {});
+      }
+      return original(operation);
+    });
+    const stderr = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const prompt = [{ type: 'text', text: 'hello' }];
+    const posted = authorize(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    ).send({
+      prompt,
+      promptId: randomUUID(),
+      payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+    });
+    // A supertest request fires on the first then: attach it before the
+    // abort, or the poll below waits on a request that was never sent.
+    const answered = posted.then(
+      (response) => response,
+      (cause: unknown) => cause,
+    );
+    await firstStatus;
+    posted.abort();
+    await answered;
+    // The disconnect reaches the reconcile as its abort reason and is
+    // logged, and the pass releases hooksBusy instead of holding every
+    // other route at 409 for the rest of the budget.
+    await vi.waitFor(
+      () => {
+        expect(stderr.mock.calls.flat().join('\n')).toContain(
+          'The prompting client disconnected.',
+        );
+      },
+      { timeout: 10_000 },
+    );
+    control.mockImplementation(original);
+    const deleted = await authorize(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(deleted.body?.code).not.toBe('hosted_turn_active');
   });
 
   it('answers an invalid prompt on a fenced Session without reconciling first', async () => {

@@ -385,18 +385,25 @@ async function isSettledHookFence(
   if (execution.resultRef === null || execution.run.execution !== 'settled')
     return false;
   if (execution.run.state === 'cancelled') return true;
-  const result = object(
-    JSON.parse(
-      (await session.managed.resources.read(execution.resultRef)).toString(),
-    ),
-  );
-  return result?.['outcome'] === 'timeout';
+  // A result that cannot be read or parsed is no fence: treat it as real
+  // work, or one corrupt historical record would fail every recovery pass.
+  try {
+    const result = object(
+      JSON.parse(
+        (await session.managed.resources.read(execution.resultRef)).toString(),
+      ),
+    );
+    return result?.['outcome'] === 'timeout';
+  } catch {
+    return false;
+  }
 }
 
 async function recoverCancelledPreToolHook(
   session: HostedSession,
   promptId: string,
   events: readonly ManagedSessionEvent[],
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const { authority, sink } = session.managed;
   const attempts = new Map<string, unknown>();
@@ -466,14 +473,28 @@ async function recoverCancelledPreToolHook(
       responded.add(response.id);
     }
   }
+  // The occurrence match below is pure arithmetic and decides whether a
+  // record can matter at all, so run it before any durable read — otherwise
+  // a long-lived Session pays one resources.read per historical settled
+  // record on every recovery pass.
+  const expected = new Set(
+    calls.map((call) =>
+      hostedHookOccurrenceId(
+        HookEventName.PreToolUse,
+        `${promptId}:${call.id}`,
+      ),
+    ),
+  );
   let cancelled = false;
   for (const { record } of authority.extensionRecordsInDomain(
     'hook_execution',
   )) {
+    signal?.throwIfAborted();
     const execution = parseHookExecution(record);
     if (
       execution.eventName !== HookEventName.PreToolUse ||
-      execution.hookId === '__plan__'
+      execution.hookId === '__plan__' ||
+      !expected.has(execution.occurrenceId)
     )
       continue;
     if (
@@ -502,8 +523,10 @@ async function recoverCancelledPreToolHook(
               `${promptId}:${call.id}`,
             ),
       )
-    )
+    ) {
       cancelled = true;
+      break;
+    }
   }
   if (!cancelled) return false;
   const missing = calls.filter((call) => !responded.has(call.id!));
@@ -549,6 +572,7 @@ async function recoverCancelledPreToolHook(
 
 export async function settleCancelledHookTurn(
   session: HostedSession,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (
     !session.blocked ||
@@ -610,6 +634,7 @@ export async function settleCancelledHookTurn(
       for (const { record } of authority.extensionRecordsInDomain(
         'hook_execution',
       )) {
+        signal?.throwIfAborted();
         const execution = parseHookExecution(record);
         const cancelledInstructions =
           execution.eventName === HookEventName.InstructionsLoaded &&
@@ -637,6 +662,7 @@ export async function settleCancelledHookTurn(
         session,
         promptId,
         turnEvents,
+        signal,
       );
     if (!cancelled) return;
     await session.managed.sink.write(
@@ -2490,7 +2516,7 @@ export function registerHostedHarnessSessionRoutes(
           } finally {
             session.hooksBusy = false;
           }
-          await settleCancelledHookTurn(session);
+          await settleCancelledHookTurn(session, reconcileAbort.signal);
         } catch (cause) {
           writeStderrLineSafe(
             `qwen serve: Hosted Session ${req.params['id']} Hook reconciliation failed: ${String(cause)}`,

@@ -85,6 +85,7 @@ const options = { baseUrl: 'http://127.0.0.1:9999', token: 'test' };
 const signal = () => new AbortController().signal;
 
 beforeEach(async () => {
+  hostedHookDebug.mockClear();
   root = await mkdtemp(path.join(tmpdir(), 'qwen-hosted-hooks-'));
   const key = {
     tenantId: 'tenant',
@@ -1717,6 +1718,9 @@ it.each([
         const lines = log.mock.calls.flat().join('\n');
         expect(lines).toContain(unacquired.broker.runtimeSessionId);
         expect(lines).toContain(`${status} ${code}`);
+        // A fenced owner was left attached, not booked released: the
+        // absent-owner wording must never name it.
+        expect(hostedHookDebug).not.toHaveBeenCalled();
         // The fence stays attached, so close reports recovery required rather
         // than letting DELETE answer 204 and drop the retry state.
         await expect(replacement.close()).rejects.toBeInstanceOf(
@@ -1735,7 +1739,7 @@ it.each([
         // An absent owner is routine and self-healing: booked released, and
         // reported only on the debug logger, never the default channel.
         expect(log).not.toHaveBeenCalled();
-        expect(hostedHookDebug).toHaveBeenCalledWith(
+        expect(hostedHookDebug).toHaveBeenCalledExactlyOnceWith(
           `qwen serve: earlier Hook owner release refused (owner absent, booked released): ${unacquired.broker.runtimeSessionId} ${status} ${code}`,
         );
         await replacement.close();
