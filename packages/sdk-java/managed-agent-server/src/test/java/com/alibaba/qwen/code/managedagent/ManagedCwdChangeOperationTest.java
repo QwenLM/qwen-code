@@ -1392,6 +1392,8 @@ class ManagedCwdChangeOperationTest {
                     warmer, new ChildResultRelayStore(jdbc),
                     new ObjectMapper(),
                     new com.alibaba.qwen.code.managedagent.service.RequestDigests(),
+                    org.mockito.Mockito.mock(
+                            org.springframework.beans.factory.ObjectProvider.class),
                     new AbstractExecutorService() {
                         @Override
                         public void shutdown() {

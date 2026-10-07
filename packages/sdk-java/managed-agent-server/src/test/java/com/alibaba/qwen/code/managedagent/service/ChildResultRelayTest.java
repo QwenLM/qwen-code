@@ -235,6 +235,29 @@ class ChildResultRelayTest {
     }
 
     @Test
+    void anAcceptedWatchRowReconcilesThroughItsIdempotentWalk() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        // The acceptance committed, but the advance to delivering died
+        // with the reply: the row stays watching instead.
+        when(store.hasAcceptance(TENANT, PARENT, RUN)).thenReturn(true);
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null));
+        when(store.terminalResultText(TENANT, CHILD, "turn-1"))
+                .thenReturn("审阅通过");
+        // First scan: no early-out; the same idempotent walk re-plays the
+        // result and the acceptance, then advances.
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("delivering");
+        // Next scan: only the owed mark_accepted remains, and it closes.
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(harness.operations.stream()
+                .map(operation -> operation.get("kind")))
+                .containsExactly("commit_result", "accept", "mark_accepted");
+    }
+
+    @Test
     void aTurnFailureSettlesTheRunFailedWithoutAnAcceptance() {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));

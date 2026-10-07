@@ -230,6 +230,24 @@ public class ChildResultRelayStore {
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
+    /**
+     * The child Session the committed lineage names for one run, whatever
+     * any ledger row remembers: createChildSession stamps the child's own
+     * row before the relay records its answer, so a window where both the
+     * parent body and the ledger lack the id still identifies the child
+     * here — the disproving evidence for `not_started_proven`.
+     */
+    public String findLineageChild(String tenantId, String parentSessionId,
+            String childRunId) {
+        List<String> rows = jdbc.query("SELECT session_id FROM"
+                        + " managed_agent_session WHERE tenant_id = ?"
+                        + " AND parent_session_id = ?"
+                        + " AND parent_child_run_id = ?",
+                (result, row) -> result.getString("session_id"), tenantId,
+                parentSessionId, childRunId);
+        return rows.isEmpty() ? null : rows.getFirst();
+    }
+
     /** One held claim advances: state, optional child Session, and the
      * retry/backoff line, all flagged to the claiming worker. */
     public void advance(RelayRow row, String owner, String state,

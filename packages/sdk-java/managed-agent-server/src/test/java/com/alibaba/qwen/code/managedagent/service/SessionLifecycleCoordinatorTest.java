@@ -12,6 +12,8 @@ import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
@@ -28,6 +30,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -62,7 +66,8 @@ class SessionLifecycleCoordinatorTest {
         try (var executor = Executors.newSingleThreadExecutor()) {
             var coordinator = new SessionLifecycleCoordinator(store, new ManagedSessionStore(jdbc),
                     new UnavailableHarnessConnector(), unsupported, new ChildResultRelayStore(jdbc),
-                    new ObjectMapper(), new RequestDigests(), executor, Clock.systemUTC(), properties);
+                    new ObjectMapper(), new RequestDigests(), brokerProvider(null), executor,
+                    Clock.systemUTC(), properties);
             try {
                 coordinator.dispatch("tenant", session, operation);
                 await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
@@ -247,6 +252,29 @@ class SessionLifecycleCoordinatorTest {
         }
     }
 
+    @SuppressWarnings("unchecked")
+    private static ObjectProvider<RuntimeBrokerService> brokerProvider(
+            RuntimeBindingRecord binding) {
+        RuntimeBrokerService broker = Mockito.mock(RuntimeBrokerService.class);
+        if (binding != null) {
+            Mockito.when(broker.findLatestBindingByHarnessSession(
+                    Mockito.anyString(), Mockito.anyString()))
+                    .thenReturn(binding);
+        }
+        ObjectProvider<RuntimeBrokerService> provider =
+                Mockito.mock(ObjectProvider.class);
+        Mockito.when(provider.getIfAvailable()).thenAnswer(ignored -> broker);
+        return provider;
+    }
+
+    private static RuntimeBindingRecord bindingOf(String bindingId,
+            long generation) {
+        RuntimeBindingRecord binding = Mockito.mock(RuntimeBindingRecord.class);
+        Mockito.when(binding.getBindingId()).thenReturn(bindingId);
+        Mockito.when(binding.getGeneration()).thenReturn(generation);
+        return binding;
+    }
+
     private static RuntimeWarmer warmer(boolean supported,
             boolean closeFails) {
         return new RuntimeWarmer() {
@@ -291,8 +319,8 @@ class SessionLifecycleCoordinatorTest {
             var coordinator = new SessionLifecycleCoordinator(world.store,
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
-                    new RequestDigests(), executor, Clock.systemUTC(),
-                    world.properties);
+                    new RequestDigests(), brokerProvider(null), executor,
+                    Clock.systemUTC(), world.properties);
             try {
                 // First attempt: the stop write falters, yet the child's own
                 // lifecycle close is admitted and delivered; the parent's
@@ -336,8 +364,8 @@ class SessionLifecycleCoordinatorTest {
             var coordinator = new SessionLifecycleCoordinator(world.store,
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, true), world.relayStore, new ObjectMapper(),
-                    new RequestDigests(), executor, Clock.systemUTC(),
-                    world.properties);
+                    new RequestDigests(), brokerProvider(null), executor,
+                    Clock.systemUTC(), world.properties);
             try {
                 coordinator.dispatch("tenant", world.session,
                         world.operation);
@@ -386,8 +414,9 @@ class SessionLifecycleCoordinatorTest {
             var coordinator = new SessionLifecycleCoordinator(world.store,
                     new ManagedSessionStore(world.jdbc), harness,
                     warmer(true, false), world.relayStore, new ObjectMapper(),
-                    new RequestDigests(), executor, Clock.systemUTC(),
-                    world.properties);
+                    new RequestDigests(),
+                    brokerProvider(bindingOf("binding-1", 7L)), executor,
+                    Clock.systemUTC(), world.properties);
             try {
                 coordinator.dispatch("tenant", world.session,
                         world.operation);
@@ -398,6 +427,59 @@ class SessionLifecycleCoordinatorTest {
                         .filter(op -> "close_scope".equals(op.get("kind")))
                         .findFirst().orElseThrow();
                 assertThat(closeScope).containsEntry("started", true);
+                // The settling revision rode a rebuilt record chain:
+                // dispatch and attach replayed before cancel and scope.
+                assertThat(harness.operations)
+                        .extracting(op -> op.get("kind"))
+                        .contains("dispatch_started", "attach", "cancel",
+                                "close_scope");
+                assertThat(harness.operations.stream()
+                        .filter(op -> "dispatch_started".equals(
+                                op.get("kind"))).findFirst().orElseThrow())
+                        .containsEntry("dispatchId", "key-run-1")
+                        .containsEntry("runtimeBindingId", "binding-1")
+                        .containsEntry("generation", "7");
+                assertThat(harness.closed).contains(world.child,
+                        world.session);
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    @Test
+    void aChildKnownOnlyToTheCommittedLineageStillCloses() {
+        World world = closingWorld("lineage-");
+        // Neither the body nor any ledger row remembers the child: the
+        // create answer was lost before the first advance — but the
+        // creation pipeline stamped the lineage row at insert time.
+        assertThat(world.relayStore.find("tenant", world.session, "run-1"))
+                .isNull();
+        assertThat(world.relayStore.findLineageChild("tenant", world.session,
+                "run-1")).isEqualTo(world.child);
+        liveScope(world, "{\"inputRef\":{\"resourceId\":\"res-input\"}}");
+        var harness = new CascadingHarness(true, false);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(world.store,
+                    new ManagedSessionStore(world.jdbc), harness,
+                    warmer(true, false), world.relayStore, new ObjectMapper(),
+                    new RequestDigests(),
+                    brokerProvider(bindingOf("binding-1", 7L)), executor,
+                    Clock.systemUTC(), world.properties);
+            try {
+                coordinator.dispatch("tenant", world.session,
+                        world.operation);
+                redispatchUntil(coordinator, world, "COMPLETED");
+                assertThat(world.store.requireSession("tenant", world.child)
+                        .status()).isEqualTo("CLOSED");
+                Map<String, Object> closeScope = harness.operations.stream()
+                        .filter(op -> "close_scope".equals(op.get("kind")))
+                        .findFirst().orElseThrow();
+                assertThat(closeScope).containsEntry("started", true);
+                assertThat(harness.operations)
+                        .extracting(op -> op.get("kind"))
+                        .contains("dispatch_started", "attach", "cancel",
+                                "close_scope");
                 assertThat(harness.closed).contains(world.child,
                         world.session);
             } finally {

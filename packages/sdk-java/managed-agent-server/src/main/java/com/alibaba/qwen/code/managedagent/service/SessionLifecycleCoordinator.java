@@ -11,7 +11,9 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
@@ -24,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -62,6 +65,7 @@ public class SessionLifecycleCoordinator {
     private final ChildResultRelayStore childScopes;
     private final ObjectMapper objectMapper;
     private final RequestDigests digests;
+    private final ObjectProvider<RuntimeBrokerService> brokerProviders;
     private final ExecutorService executor;
     private final Clock clock;
     private final Duration leaseDuration;
@@ -88,6 +92,7 @@ public class SessionLifecycleCoordinator {
             ManagedSessionStore sessionStore, HarnessConnector harness,
             RuntimeWarmer runtimeWarmer, ChildResultRelayStore childScopes,
             ObjectMapper objectMapper, RequestDigests digests,
+            ObjectProvider<RuntimeBrokerService> brokerProviders,
             ExecutorService executor,
             Clock clock, ManagedAgentProperties properties) {
         this.store = store;
@@ -97,6 +102,7 @@ public class SessionLifecycleCoordinator {
         this.childScopes = childScopes;
         this.objectMapper = objectMapper;
         this.digests = digests;
+        this.brokerProviders = brokerProviders;
         this.executor = executor;
         this.clock = clock;
         this.leaseDuration = properties.getDispatch().getLeaseDuration();
@@ -329,8 +335,11 @@ public class SessionLifecycleCoordinator {
      * request, its child Session closes through its own Session lifecycle —
      * recursively, since each child's own close runs this same step for
      * its children — and its terminal revision commits. A run whose body
-     * never learned the child Session id consults the relay ledger, so a
-     * child created but not yet attached is still found. The physical
+     * never learned the child Session id consults the relay ledger and
+     * then the committed lineage row, so a child created but not yet
+     * attached is still found; such a child's dispatch and attach are
+     * replayed from its proven evidence before the settling revision,
+     * whose parse requires a valid chain. The physical
      * effect never waits on the parent's journal: a reachable child
      * closes even while its stop-request and terminal revisions falter.
      * Nothing here rewrites an unproven end as cancelled: a child the
@@ -338,27 +347,47 @@ public class SessionLifecycleCoordinator {
      * close operation re-arms through the dispatch retry with its debt
      * owed, instead of settling on suspicion.
      */
+    /** A child run body's dispatch facts, as the record proves them. */
+    private record ScopeEvidence(String childSessionId, String dispatchId,
+            String runtimeBindingId, String runtimeGeneration) {
+    }
+
+    private static String jsonText(JsonNode node) {
+        return node == null || node.isNull() ? null : node.asText();
+    }
+
     private void cascadeChildScopes(OperationRecord operation) {
         String tenantId = operation.tenantId();
         String sessionId = operation.sessionId();
         boolean journalDebt = false;
         for (ChildResultRelayStore.LiveScope scope : childScopes
                 .findLiveScopes(tenantId, sessionId)) {
-            String childSessionId = null;
+            ScopeEvidence body;
             try {
-                String body = childScopes.readResource(tenantId,
+                String text = childScopes.readResource(tenantId,
                         scope.recordResourceId());
-                if (body != null) {
-                    JsonNode record = objectMapper.readTree(body);
-                    JsonNode value = record.get("childSessionId");
-                    if (value != null && !value.isNull()) {
-                        childSessionId = value.asText();
-                    }
+                if (text == null) {
+                    body = new ScopeEvidence(null, null, null, null);
+                } else {
+                    JsonNode record = objectMapper.readTree(text);
+                    JsonNode run = record.get("run");
+                    JsonNode runtime = run == null ? null : run.get(
+                            "runtime");
+                    body = new ScopeEvidence(
+                            jsonText(record.get("childSessionId")),
+                            run == null ? null : jsonText(
+                                    run.get("dispatchId")),
+                            runtime == null ? null : jsonText(
+                                    runtime.get("runtimeBindingId")),
+                            runtime == null ? null : jsonText(
+                                    runtime.get("generation")));
                 }
             } catch (Exception error) {
                 throw new IllegalStateException(
                         "Child scope evidence is unreadable", error);
             }
+            String creationKey = null;
+            String childSessionId = body.childSessionId();
             if (childSessionId == null) {
                 // The child may exist while its attach revision has not
                 // committed (the create→attach window): the relay ledger
@@ -368,6 +397,36 @@ public class SessionLifecycleCoordinator {
                         tenantId, sessionId, scope.childRunId());
                 if (ledger != null && ledger.childSessionId() != null) {
                     childSessionId = ledger.childSessionId();
+                    creationKey = ledger.creationKey();
+                }
+                if (childSessionId == null) {
+                    // Strongest disproving evidence: creation stamps the
+                    // child's own lineage row before the relay records its
+                    // answer, so a window where both the body and the
+                    // ledger lack the id still identifies the child.
+                    childSessionId = childScopes.findLineageChild(tenantId,
+                            sessionId, scope.childRunId());
+                }
+            }
+            boolean recordReady = body.childSessionId() != null;
+            if (childSessionId != null && !recordReady) {
+                // The close_scope settlement parses only with the child
+                // Session recorded through valid transitions: dispatch and
+                // attach replay the child's proven identity — the body's
+                // own committed dispatch facts when present, or the
+                // physical Runtime binding the child warms with.
+                try {
+                    repairChildRecord(operation, scope.childRunId(), body,
+                            childSessionId, creationKey);
+                    recordReady = true;
+                } catch (IllegalStateException unfixed) {
+                    journalDebt = true;
+                    LOG.warn("Managed Session close cascade cannot rebuild"
+                                    + " a child's record tenant={} session={}"
+                                    + " childRun={} child={} — debt owed;"
+                                    + " failure={}", tenantId, sessionId,
+                            scope.childRunId(), childSessionId,
+                            unfixed.getMessage());
                 }
             }
             Map<String, Object> cancel = new LinkedHashMap<>();
@@ -426,6 +485,12 @@ public class SessionLifecycleCoordinator {
             closeScope.put("operationId", UUID.randomUUID().toString());
             closeScope.put("kind", "close_scope");
             closeScope.put("childRunId", scope.childRunId());
+            if (childSessionId != null && !recordReady) {
+                // The settleCancelled parse accepts only a chain whose
+                // attach committed: the debt above keeps the close owed
+                // instead of committing a revision no parser reads.
+                continue;
+            }
             closeScope.put("started", childSessionId != null);
             try {
                 harness.runChildOperation(tenantId, sessionId, closeScope);
@@ -447,6 +512,60 @@ public class SessionLifecycleCoordinator {
                     "Child cascade journal debt: the stop or terminal"
                             + " revisions are owed");
         }
+    }
+
+    /**
+     * Rebuilds a run's dispatch/attach chain through the child's proven
+     * evidence — its own committed dispatch facts, or the physical Runtime
+     * binding the child warms with — so the settling revision commits over
+     * valid record transitions. Every operation is idempotent: a patched
+     * attempt replays its receipt instead of widening evidence.
+     */
+    private void repairChildRecord(OperationRecord parent, String childRunId,
+            ScopeEvidence body, String childSessionId, String creationKey) {
+        String runtimeBindingId = body.runtimeBindingId();
+        String generation = body.runtimeGeneration();
+        if (runtimeBindingId == null || generation == null) {
+            RuntimeBindingRecord binding = findBinding(parent.tenantId(),
+                    childSessionId);
+            if (binding == null) {
+                throw new IllegalStateException(
+                        "child Runtime binding is not visible");
+            }
+            runtimeBindingId = binding.getBindingId();
+            generation = Long.toString(binding.getGeneration());
+        }
+        String dispatchId = body.dispatchId() != null ? body.dispatchId()
+                : creationKey != null ? creationKey
+                : ManagedAgentService.childCreationKey(parent.sessionId(),
+                        childRunId);
+        Map<String, Object> dispatch = new LinkedHashMap<>();
+        dispatch.put("operationId", UUID.randomUUID().toString());
+        dispatch.put("kind", "dispatch_started");
+        dispatch.put("childRunId", childRunId);
+        dispatch.put("dispatchId", dispatchId);
+        dispatch.put("runtimeBindingId", runtimeBindingId);
+        dispatch.put("generation", generation);
+        harness.runChildOperation(parent.tenantId(), parent.sessionId(),
+                dispatch);
+        Map<String, Object> attach = new LinkedHashMap<>();
+        attach.put("operationId", UUID.randomUUID().toString());
+        attach.put("kind", "attach");
+        attach.put("childRunId", childRunId);
+        attach.put("childSessionId", childSessionId);
+        harness.runChildOperation(parent.tenantId(), parent.sessionId(),
+                attach);
+    }
+
+    /** The physical Runtime binding proving a child's dispatch identity,
+     * or null when no Runtime Broker is wired (legacy deployment shapes). */
+    private RuntimeBindingRecord findBinding(String tenantId,
+            String sessionId) {
+        RuntimeBrokerService broker = brokerProviders == null ? null
+                : brokerProviders.getIfAvailable();
+        return broker == null ? null
+                : broker.findLatestBindingByHarnessSession(tenantId,
+                        sessionId);
     }
 
     private OperationAdmission admitChildClose(OperationRecord parent,

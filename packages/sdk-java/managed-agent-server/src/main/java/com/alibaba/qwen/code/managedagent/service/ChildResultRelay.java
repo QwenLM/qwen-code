@@ -97,12 +97,17 @@ public class ChildResultRelay {
         boolean accepted = relayStore.hasAcceptance(pending.tenantId(),
                 pending.parentSessionId(), pending.childRunId());
         if (accepted) {
-            // An answered acceptance short-circuits only: everything except
-            // `delivering`, whose mark_accepted is the relay's own owed step
-            // (checking it before the switch masked that arm entirely).
+            // An answered acceptance short-circuits arms the relay never
+            // owed a step on (creating/binding), and nothing else — the
+            // delivering arm's mark_accepted is the relay's own owed step,
+            // and a watching row whose accept committed but whose
+            // advance to delivering was lost reconciles through the same
+            // idempotent walk (replay the result, the acceptance, then the
+            // advance) instead of wedging the discovery window closed.
             RelayRow existing = relayStore.find(pending.tenantId(),
                     pending.parentSessionId(), pending.childRunId());
-            if (existing == null || !"delivering".equals(existing.state())) {
+            if (existing == null || !"delivering".equals(existing.state())
+                    && !"watching".equals(existing.state())) {
                 return;
             }
         }
