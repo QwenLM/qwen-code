@@ -39,10 +39,13 @@ public class ChildResultRelayStore {
     // drops every row whose classification is terminal (delivered,
     // orphaned or given up), because the bounded discovery set is for
     // work still owed — accumulated terminal rows would otherwise starve
-    // the fleet-wide scan behind an ORDER BY created_at LIMIT. A record
-    // whose delivery already advanced (the consumer raced ahead) still
-    // owes its delivering ledger row the mark_accepted step, so that one
-    // state surfaces too — the final classify retires it next scan.
+    // the fleet-wide scan behind an ORDER BY created_at LIMIT. A row not
+    // owed yet either a retry backoff or a live lease lying ahead must
+    // not squat a slot either — this set is created_at-ordered and
+    // bounded fleet-wide. A record whose delivery already advanced (the
+    // consumer raced ahead) owes its watching/delivering ledger the
+    // terminal-mark step, so that arm surfaces too — the final classify
+    // retires it next scan.
     private static final String PENDING_SQL =
             "SELECT r.tenant_id, r.session_id, r.record_id, r.revision,"
                     + " r.delivery_state, r.record_resource_id"
@@ -53,9 +56,12 @@ public class ChildResultRelayStore {
                     + " WHERE r.domain = 'child_run'"
                     + " AND ((r.delivery_state IN ('planned', 'accepting',"
                     + " 'unknown') AND (l.state IS NULL OR l.state NOT IN"
-                    + " ('done', 'orphaned', 'unknown')))"
+                    + " ('done', 'orphaned', 'unknown'))"
+                    + " AND (l.next_retry_at IS NULL OR l.next_retry_at <= ?)"
+                    + " AND (l.claimed_until IS NULL OR l.claimed_until <="
+                    + " ?))"
                     + " OR (r.delivery_state IN ('accepted', 'consumed')"
-                    + " AND l.state = 'delivering'))"
+                    + " AND l.state IN ('watching', 'delivering')))"
                     + " ORDER BY r.created_at, r.session_id, r.record_id"
                     + " LIMIT ?";
 
@@ -66,11 +72,17 @@ public class ChildResultRelayStore {
     }
 
     public List<PendingChild> findPendingChildren(int limit) {
+        return findPendingChildren(System.currentTimeMillis(), limit);
+    }
+
+    /** The owed-work page: not terminal, not parked ahead, not leased
+     * ahead, plus the delivering arm whose consumer raced past it. */
+    public List<PendingChild> findPendingChildren(long now, int limit) {
         return jdbc.query(PENDING_SQL, (result, row) -> new PendingChild(
                 result.getString("tenant_id"), result.getString("session_id"),
                 result.getString("record_id"), result.getLong("revision"),
                 result.getString("delivery_state"),
-                result.getString("record_resource_id")), limit);
+                result.getString("record_resource_id")), now, now, limit);
     }
 
     /** One inline resource's bytes, or null when it is not inline-held. */
@@ -299,18 +311,20 @@ public class ChildResultRelayStore {
                 row.childRunId(), owner);
     }
 
-    /** A Classification is terminal: no claim, no retry, no redelivery. */
+    /** A Classification is terminal: no claim, no retry, no redelivery —
+     * and only the claimant may write it. */
     public void classify(RelayRow row, String owner, String state,
             String lastError, long now) {
         jdbc.update("UPDATE qwen_managed_child_result_relay SET state = ?,"
                         + " claimed_by = NULL, claimed_until = NULL,"
                         + " last_error = ?, updated_at = ?"
                         + " WHERE tenant_id = ? AND parent_session_id = ?"
-                        + " AND child_run_id = ?",
+                        + " AND child_run_id = ? AND claimed_by = ?",
                 state,
                 lastError == null ? null
                         : lastError.substring(0,
                                 Math.min(lastError.length(), 1024)),
-                now, row.tenantId(), row.parentSessionId(), row.childRunId());
+                now, row.tenantId(), row.parentSessionId(), row.childRunId(),
+                owner);
     }
 }

@@ -159,20 +159,32 @@ describe('childResultNotificationText', () => {
     );
   });
 
-  it('bounds an XML-hostile result under the inline cap, with the marker', () => {
-    // The real-stack B1 finding: 20 KiB of '<' escapes beyond 64 KiB and
-    // rejected accept at the bundled-input inline bound.
+  it('bounds an XML-hostile result under the packaged-input budget', () => {
+    // The real-stack B1/B1b finding: 20 KiB of '<' escapes beyond the
+    // JSON-serialized cap of the bundled input, then of the wake turn's
+    // own managed-message — the bound is serialized bytes, not the XML.
     const notification = childResultNotificationText({
       taskId: TASK_ID,
       description: 'audit',
       text: '<'.repeat(20 * 1024),
     });
-    expect(Buffer.byteLength(notification, 'utf8')).toBeLessThanOrEqual(
-      CHILD_NOTIFICATION_INLINE_LIMIT,
-    );
+    expect(
+      Buffer.byteLength(JSON.stringify({ text: notification }), 'utf8'),
+    ).toBeLessThanOrEqual(CHILD_NOTIFICATION_INLINE_LIMIT);
     expect(notification).toContain('&lt;');
     expect(notification).toContain('truncated: the full result is on the');
     expect(notification).toContain('acceptance record');
+  });
+
+  it('keeps the result newlines while stripping display controls', () => {
+    const notification = childResultNotificationText({
+      taskId: TASK_ID,
+      description: 'audit',
+      text: 'first line\u202a\nsecond line\u202e\n- item A',
+    });
+    expect(notification).toContain(
+      '<result>first line\nsecond line\n- item A</result>',
+    );
   });
 });
 

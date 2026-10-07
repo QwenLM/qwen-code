@@ -4073,6 +4073,20 @@ export function registerHostedHarnessSessionRoutes(
         await toolTurn.finish();
         await harness.settleConsumedRuntimeContinuation();
         await session.managed.sink.write(turnResultRecord(state));
+        // H4b: a redriven turn that consumed child-agent tool results owes
+        // the same consumption flush as executeHostedTurn — without it the
+        // parent's run settles while its commits never land.
+        if (
+          state === 'completed' &&
+          session.childAgents &&
+          session.childConsumption.size > 0
+        ) {
+          const consumed = [...session.childConsumption].sort();
+          for (const childRunId of consumed) {
+            await session.childAgents.markConsumed(childRunId);
+            session.childConsumption.delete(childRunId);
+          }
+        }
       } catch (cause) {
         if (cause instanceof HostedToolRecoveryRequiredError) {
           session.blocked = true;

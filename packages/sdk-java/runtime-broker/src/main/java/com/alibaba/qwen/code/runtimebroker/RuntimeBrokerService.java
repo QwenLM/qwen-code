@@ -100,26 +100,37 @@ public final class RuntimeBrokerService implements AutoCloseable {
             unknownLookupCooldowns = new ConcurrentHashMap<>();
 
     /**
-     * H4b: the newest physical Runtime binding of a Harness Session —
-     * how the child result relay confirms the child Session's Runtime
-     * identity and generation. {@code warm()} creates the binding when
-     * the Hosted tool turn is constructed, so it exists even for a child
-     * that finishes without ever acquiring a tool Session.
+     * H4b: the live physical Runtime binding of a Harness Session — how
+     * the child result relay and the close cascade confirm the child
+     * Session's Runtime identity and generation. {@code warm()} creates
+     * the binding when the Hosted tool turn is constructed, so it exists
+     * even for a child that finishes without ever acquiring a tool
+     * Session. Only READY rows answer: a drained, lost, recovering or
+     * released binding no longer holds the live Runtime it would pin,
+     * and lexical UUIDs are not generation order; the newest READY id
+     * wins across pages.
      */
     public RuntimeBindingRecord findLatestBindingByHarnessSession(
             String tenantId, String harnessSessionId) {
-        List<RuntimeBindingRecord> page = bindingRepository
-                .findByHarnessSession(tenantId, harnessSessionId, null, 100);
-        RuntimeBindingRecord latest = null;
-        while (!page.isEmpty()) {
-            latest = page.get(page.size() - 1);
-            if (page.size() < 100) {
-                break;
+        String after = null;
+        for (;;) {
+            List<RuntimeBindingRecord> page = bindingRepository
+                    .findByHarnessSession(tenantId, harnessSessionId, after,
+                            100);
+            if (page.isEmpty()) {
+                return null;
             }
-            page = bindingRepository.findByHarnessSession(tenantId,
-                    harnessSessionId, latest.getBindingId(), 100);
+            for (int index = page.size() - 1; index >= 0; index--) {
+                RuntimeBindingRecord candidate = page.get(index);
+                if (candidate.getState() == RuntimeBindingRecord.State.READY) {
+                    return candidate;
+                }
+            }
+            if (page.size() < 100) {
+                return null;
+            }
+            after = page.get(page.size() - 1).getBindingId();
         }
-        return latest;
     }
 
     public RuntimeBrokerService(HarnessSessionResolver sessionResolver,

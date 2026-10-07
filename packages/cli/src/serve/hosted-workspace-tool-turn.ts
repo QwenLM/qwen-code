@@ -1276,6 +1276,21 @@ export class HostedWorkspaceToolTurn {
           } else if (backgroundIllFormed) {
             validationError =
               'Hosted child agent run_in_background must be a boolean.';
+          } else if (!agentBackground && this.acquired) {
+            // v1: a foreground child waits out the parent's own wait, and
+            // the shared Workspace's mount is held by exactly that wait —
+            // its child could never borrow it. Refuse before the deadlock
+            // rather than let both Turns burn down to the deadline.
+            validationError =
+              'Hosted child agent run_in_background=false is unavailable while this Turn holds the Workspace mount; run it in the background or let the current tool work finish first in a fresh turn.';
+          } else if (
+            !agentBackground &&
+            calls.some((other) => other.name !== 'agent')
+          ) {
+            // The same one-batch candidacy: a non-agent sibling holds the
+            // mount for exactly the wait the foreground answer needs.
+            validationError =
+              'Hosted child agent run_in_background=false cannot share a batch with a non-agent tool; the sibling would hold the Workspace mount the child needs.';
           } else if (
             typeof args['description'] !== 'string' ||
             !args['description'].trim() ||

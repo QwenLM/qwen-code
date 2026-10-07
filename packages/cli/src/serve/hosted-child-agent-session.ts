@@ -132,11 +132,22 @@ export function childLaunchAdmission(params: {
   });
 }
 
-/** The inline byte cap of a bundled notification input. */
-export const CHILD_NOTIFICATION_INLINE_LIMIT = 64 * 1024;
+/**
+ * The notification's own budget, far below the 64 KiB inline cap of both
+ * the bundled input and the wake turn's subsequent user `managed-message`
+ * envelope: design 5 names the notification the summary of an accepted
+ * result whose full bytes ride the acceptance record, so the remainder
+ * after its own envelope is owed entirely, never wedged by an escape.
+ */
+export const CHILD_NOTIFICATION_INLINE_LIMIT = 48 * 1024;
 
 const TRUNCATION_MARKER =
   '\n… (truncated: the full result is on the acceptance record, H4b decision 5)';
+
+/** Multiline stripping: display-control chars per line; newlines kept. */
+function stripMultilineControlChars(text: string): string {
+  return text.split('\n').map(stripDisplayControlChars).join('\n');
+}
 
 /** The text of a background child's result, wrapped for its waiting turn. */
 export function childResultNotificationText(params: {
@@ -156,40 +167,27 @@ export function childResultNotificationText(params: {
     '<result>',
   ].join('\n');
   const tail = '</result>\n</task-notification>';
-  const escaped = escapeXml(stripDisplayControlChars(params.text));
-  // Design 5 names the notification the summary, not the full bytes: an
-  // XML-hostile result that only dwells below 64 KiB must still fit the
-  // inline cap of the acceptance transaction's bundled input.
-  if (
-    Buffer.byteLength(head + escaped + tail, 'utf8') <=
-    CHILD_NOTIFICATION_INLINE_LIMIT
-  ) {
+  const stripped = stripMultilineControlChars(params.text);
+  const escaped = escapeXml(stripped);
+  // What actually publishes wraps the envelope in JSON.stringify on the
+  // managed-input resource, and the bound reads those serialized bytes —
+  // measuring the XML text alone would overshoot under escape inflation.
+  const serialized = (body: string) =>
+    Buffer.byteLength(JSON.stringify({ text: head + body + tail }), 'utf8');
+  if (serialized(escaped) <= CHILD_NOTIFICATION_INLINE_LIMIT) {
     return head + escaped + tail;
   }
   const fits = (chars: number): boolean =>
-    Buffer.byteLength(
-      head +
-        escapeXml(
-          stripDisplayControlChars(params.text.slice(0, chars)) +
-            TRUNCATION_MARKER,
-        ) +
-        tail,
-      'utf8',
-    ) <= CHILD_NOTIFICATION_INLINE_LIMIT;
+    serialized(escapeXml(stripped.slice(0, chars) + TRUNCATION_MARKER)) <=
+    CHILD_NOTIFICATION_INLINE_LIMIT;
   let low = 0;
-  let high = params.text.length;
+  let high = stripped.length;
   while (low < high) {
     const middle = (low + high + 1) >> 1;
     if (fits(middle)) low = middle;
     else high = middle - 1;
   }
-  return (
-    head +
-    escapeXml(
-      stripDisplayControlChars(params.text.slice(0, low)) + TRUNCATION_MARKER,
-    ) +
-    tail
-  );
+  return head + escapeXml(stripped.slice(0, low) + TRUNCATION_MARKER) + tail;
 }
 
 export class HostedChildAgentSession {

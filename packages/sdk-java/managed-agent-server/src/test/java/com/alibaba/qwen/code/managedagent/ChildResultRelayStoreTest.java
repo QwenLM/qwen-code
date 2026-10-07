@@ -191,6 +191,30 @@ class ChildResultRelayStoreTest {
         relayStore.classify(relayStore.find(TENANT, session, "run-settled"),
                 "owner", "done", null, 500);
         assertThat(relayStore.findPendingChildren(10)).isEmpty();
+        // A parked backoff row and a lease-ahead row stay out of the
+        // bounded window; each resurfaces exactly when owed.
+        RelayRow parked = relayStore.claim(TENANT, session, "run-parked",
+                "key-parked", "owner", 30_000, 100);
+        insertRecordRow("scope-x", session, "run-parked", "child_agent",
+                "planned", "pending");
+        relayStore.defer(parked, "owner",
+                System.currentTimeMillis() + 60_000, "flap", 30_000, 100);
+        assertThat(relayStore.findPendingChildren(10)).isEmpty();
+        RelayRow leased = relayStore.claim(TENANT, session, "run-leased",
+                "key-leased", "owner",
+                System.currentTimeMillis() + 60_000, 100);
+        insertRecordRow("scope-x", session, "run-leased", "child_agent",
+                "planned", "pending");
+        assertThat(relayStore.findPendingChildren(10)).isEmpty();
+        relayStore.classify(leased, "owner", "done", null, 100);
+        // And classify respects the claimant: a stale writer mutates nothing.
+        RelayRow guarded = relayStore.claim(TENANT, session, "run-guarded",
+                "key-guarded", "owner-a", 30_000, 100);
+        relayStore.classify(guarded, "owner-b", "orphaned", "fake", 100);
+        assertThat(relayStore.find(TENANT, session, "run-guarded").state())
+                .isEqualTo("creating");
+        assertThat(relayStore.find(TENANT, session, "run-guarded")
+                .claimedBy()).isEqualTo("owner-a");
     }
 
     private void insertRecordRow(String scopeKey, String sessionId,

@@ -408,3 +408,61 @@ it('replays a re-driven batch into the original record, never a second one', asy
     1,
   );
 });
+
+it('refuses a foreground agent call that shares its batch with a non-agent tool', async () => {
+  const turn = createTurn();
+  // A sibling tool would hold the Workspace mount for exactly the wait a
+  // foreground answer needs — a deadlock, not a refusal, by accident-order.
+  const batch = await turn.execute(
+    [
+      call(
+        {
+          description: 'audit the diff',
+          prompt: 'review the change',
+          run_in_background: false,
+        },
+        'call-1',
+      ),
+      (() => {
+        const shell = call({ description: 'noop', prompt: 'noop' }, 'call-2');
+        shell.name = 'run_shell_command';
+        shell.args = { command: 'echo ok' };
+        return shell;
+      })(),
+    ],
+    [
+      {
+        functionCall: {
+          id: 'x',
+          name: 'agent',
+          args: { description: 'd', prompt: 'p', run_in_background: false },
+        },
+      },
+      {
+        functionCall: {
+          id: 'y',
+          name: 'run_shell_command',
+          args: { command: 'echo ok' },
+        },
+      },
+    ],
+    'model',
+    new AbortController().signal,
+  );
+  expect(JSON.stringify(batch)).toContain('cannot share a batch');
+  expect(JSON.stringify(batch)).not.toContain('audit-started');
+});
+
+it('admits a batch of only agent calls, foregrounded or queued', async () => {
+  const turn = createTurn();
+  const responses = await executeAgent(
+    turn,
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: true,
+    }),
+  );
+  expect(JSON.stringify(responses)).not.toContain('cannot share a batch');
+  expect(broker.acquire).not.toHaveBeenCalled();
+});

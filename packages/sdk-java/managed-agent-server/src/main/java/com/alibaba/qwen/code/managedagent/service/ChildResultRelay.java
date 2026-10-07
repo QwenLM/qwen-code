@@ -224,9 +224,9 @@ public class ChildResultRelay {
                 fail.put("started", true);
                 harness.runChildOperation(row.tenantId(),
                         row.parentSessionId(), fail);
+                closeFinishedChild(row, now);
                 relayStore.classify(row, owner, "done",
                         "child Turn " + turn.status(), now);
-                closeFinishedChild(row, now);
             }
             // A running child is not a failed watch: look again after the
             // scan gap instead of eating the attempt budget — the lifetime
@@ -309,15 +309,16 @@ public class ChildResultRelay {
         accepted.put("childRunId", row.childRunId());
         harness.runChildOperation(row.tenantId(), row.parentSessionId(),
                 accepted);
-        relayStore.classify(row, owner, "done", null, now);
         closeFinishedChild(row, now);
+        relayStore.classify(row, owner, "done", null, now);
     }
 
-    /** A run whose classification is durable `done` owes its child Session
-     * a close: v1 builds no continueChildRun, so a finished child keeps an
-     * ACTIVE Session and its worker only past this point. The admission is
-     * idempotent, and the coordinator's own recover-operations picks the
-     * pending op up even while this worker moves on. */
+    /** A run whose classification would be durable `done` owes its child
+     * Session the close first: a `done` committed before that admission
+     * exists would park the child with nothing owed anywhere — no ledger
+     * scan and no operation row could ever find it again. The admission
+     * is idempotent, a faltherd is owed and retried via the ordinary
+     * relay defer, never settled on suspicion. */
     private void closeFinishedChild(RelayRow row, long now) {
         if (row.childSessionId() == null) {
             return;
@@ -327,11 +328,15 @@ public class ChildResultRelay {
                     row.parentSessionId(), row.childSessionId(),
                     row.childRunId());
         } catch (RuntimeException error) {
+            relayStore.advance(row, owner, row.state(), row.childSessionId(),
+                    0, "child close admission faltered",
+                    now + LEASE_MS, now);
             LOG.warn("child result relay's close admission for a done child"
                             + " faltered tenant={} parent={} run={} child={}"
-                            + " — owed by its operation row; failure={}",
+                            + " — owed, retried on the ledger row; failure={}",
                     row.tenantId(), row.parentSessionId(), row.childRunId(),
                     row.childSessionId(), error.getMessage());
+            throw error;
         }
     }
 
