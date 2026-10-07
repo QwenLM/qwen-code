@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   csiFileInventory,
   csiFileSession,
+  csiFileInventoryFromSnapshot,
   closeCsiFileFixtures,
 } from '@qwen-code/qwen-code-core/managed-runtime/__tests__/csi-file-session.js';
 import {
@@ -48,6 +49,49 @@ function runEvidence(file: string) {
 }
 
 describe('Managed CSI checkpoint evidence entry', () => {
+  it.each(['original-boundary', 'blocked-boundary'])(
+    'dispatches %s observation without granting release authority',
+    async (kind) => {
+      const directory = mkdtempSync(path.join(tmpdir(), 'qwen-csi-boundary-'));
+      try {
+        const fixture = await csiFileSession('write_file');
+        await fixture.harness.consumeRuntimeResults();
+        const settledInventory = csiFileInventoryFromSnapshot(
+          await fixture.snapshot(),
+          [fixture.originalExecution],
+        );
+        await fixture.session.releaseActivation();
+        if (kind === 'blocked-boundary')
+          settledInventory.executions[0]['state'] = 'UNKNOWN';
+        const file = path.join(directory, 'boundary.json');
+        writeFileSync(
+          file,
+          JSON.stringify({
+            format: 'qwen-csi-session-retirement-boundary/1',
+            settledInventory,
+            terminalSnapshot: await fixture.snapshot(),
+          }),
+        );
+        const result = runEvidence(file);
+        expect(result.error).toBeUndefined();
+        expect(result.stderr).toBe('');
+        expect(result.status).toBe(kind === 'original-boundary' ? 0 : 1);
+        const observation = JSON.parse(result.stdout);
+        expect(observation).toMatchObject(
+          kind === 'original-boundary'
+            ? { status: 'observed', stage: 'original_native_boundary' }
+            : {
+                status: 'unresolved',
+                reason: 'boundary_inventory_not_settled',
+              },
+        );
+        for (const field of ['drained', 'releasable', 'cut', 'finalization'])
+          expect(observation).not.toHaveProperty(field);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
   async function hostedHistoryFixture(name: string) {
     const fixture = await csiFileSession(name);
     const history = await readHostedFileHistory(fixture.session);

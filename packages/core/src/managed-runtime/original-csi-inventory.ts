@@ -58,10 +58,10 @@ function text(value: unknown): string {
 }
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 
-function decodedBytes(value: unknown): number {
+export function originalCsiDecodedBytes(value: unknown): number {
   if (typeof value === 'string') return Buffer.byteLength(value);
   if (Array.isArray(value))
-    return value.reduce((sum, item) => sum + decodedBytes(item), 0);
+    return value.reduce((sum, item) => sum + originalCsiDecodedBytes(item), 0);
   if (value === null || typeof value !== 'object') return 0;
   return Object.entries(value).reduce(
     (sum, [key, item]) =>
@@ -69,7 +69,7 @@ function decodedBytes(value: unknown): number {
       (['recordBytesBase64', 'bytesBase64', 'inlineBytes'].includes(key) &&
       typeof item === 'string'
         ? Buffer.from(item, 'base64').length
-        : decodedBytes(item)),
+        : originalCsiDecodedBytes(item)),
     0,
   );
 }
@@ -89,7 +89,7 @@ export async function inspectOriginalCsiInventory(
       'inventory_size_exceeded',
     );
     requireFact(
-      decodedBytes(root) <= 32 * 1024 * 1024,
+      originalCsiDecodedBytes(root) <= 32 * 1024 * 1024,
       'inventory_decoded_size_exceeded',
     );
     const csi = object(root['originalCSI']);

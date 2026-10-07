@@ -341,6 +341,16 @@ export async function csiFileInventory(empty = false) {
   const f = await csiFileSession('write_file');
   await f.harness.consumeRuntimeResults();
   const snapshot = empty ? f.initialSnapshot : await f.snapshot();
+  return csiFileInventoryFromSnapshot(
+    snapshot,
+    empty ? [] : [f.originalExecution],
+  );
+}
+
+export function csiFileInventoryFromSnapshot<T extends Record<string, unknown>>(
+  snapshot: Awaited<ReturnType<typeof csiSessionSnapshot>>,
+  executions: T[],
+) {
   const scope = {
     tenantId: 't',
     workspaceId: 'w',
@@ -366,7 +376,7 @@ export async function csiFileInventory(empty = false) {
         sessionState: 'READY',
       },
     ],
-    executions: empty ? [] : [f.originalExecution],
+    executions,
     publications: [] as Array<Record<string, unknown>>,
     workerAcks: [] as Array<Record<string, unknown>>,
     sessionSnapshots: [snapshot],

@@ -18,6 +18,10 @@ import {
   inspectOriginalCsiInventory,
   type OriginalCsiInventoryObservation,
 } from '@qwen-code/qwen-code-core/managed-runtime/original-csi-inventory.js';
+import {
+  inspectOriginalCsiRetirementBoundary,
+  type OriginalCsiRetirementBoundaryObservation,
+} from '@qwen-code/qwen-code-core/managed-runtime/original-csi-retirement-boundary.js';
 
 const file = process.argv[2];
 if (process.argv.length !== 3 || file === undefined) {
@@ -26,7 +30,8 @@ if (process.argv.length !== 3 || file === undefined) {
 let result:
   | OriginalReceiptCheckpointObservation
   | OriginalFileCheckpointObservation
-  | OriginalCsiInventoryObservation;
+  | OriginalCsiInventoryObservation
+  | OriginalCsiRetirementBoundaryObservation;
 try {
   const handle = await open(file, 'r');
   const limit = 48 * 1024 * 1024;
@@ -59,11 +64,13 @@ try {
       ? snapshot['format']
       : undefined;
   result = await (
-    format === 'qwen-csi-retirement-inventory/1'
-      ? inspectOriginalCsiInventory
-      : format === 'qwen-csi-session-checkpoint-snapshot/1'
-        ? inspectOriginalFileCheckpointCoverage
-        : inspectOriginalReceiptCheckpointCoverage
+    format === 'qwen-csi-session-retirement-boundary/1'
+      ? inspectOriginalCsiRetirementBoundary
+      : format === 'qwen-csi-retirement-inventory/1'
+        ? inspectOriginalCsiInventory
+        : format === 'qwen-csi-session-checkpoint-snapshot/1'
+          ? inspectOriginalFileCheckpointCoverage
+          : inspectOriginalReceiptCheckpointCoverage
   )(snapshot);
 } catch (error) {
   result = {
