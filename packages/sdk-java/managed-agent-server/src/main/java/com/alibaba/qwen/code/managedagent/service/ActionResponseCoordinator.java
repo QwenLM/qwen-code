@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.HostedHarnessCapabilityMismatchException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
@@ -96,6 +97,18 @@ public class ActionResponseCoordinator {
                 return;
             }
             throw new IllegalStateException("The Action has no committed decision yet");
+        } catch (HostedHarnessCapabilityMismatchException error) {
+            // A Harness whose capability digest no longer matches will
+            // still mismatch on every future negotiation, so returning
+            // this command to the outbox would retry it forever. Complete
+            // it with the mismatch as the terminal answer — the same
+            // terminal path the coordinator takes.
+            actions.complete(op, owner, error.getCode(), null,
+                    clock.millis());
+            LOG.warn("Action response completed terminally operation={}"
+                            + " code={}",
+                    operation, error.getCode());
+            return;
         } catch (RuntimeException error) {
             // A lost answer may follow a committed decision. Inspect the projection
             // again before returning this command to the outbox.
