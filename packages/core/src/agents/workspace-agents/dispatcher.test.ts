@@ -799,6 +799,38 @@ describe('dispatchOnce', () => {
     });
   });
 
+  it.each([undefined, TOKEN_BUDGET_EXHAUSTED])(
+    'forwards the actual cancellation source (%s)',
+    async (error) => {
+      const thread = await seedQueued({
+        runs: [
+          run({
+            status: 'cancelling',
+            attempts: 1,
+            ...(error ? { error } : {}),
+          }),
+        ],
+      });
+      const cancel = vi.fn(async () => true);
+      await dispatchOnce(PROJECT_ROOT, {
+        ...port({
+          state: {
+            kind: 'running',
+            threadId: thread.id,
+            runId: 'rn_1',
+            attempt: 1,
+          },
+        }),
+        cancel,
+      });
+      expect(cancel).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cancelReason: error ? 'interrupted' : 'user',
+        }),
+      );
+    },
+  );
+
   it('keeps cancellation pending until the body stops and charges its usage', async () => {
     const thread = await seedQueued({
       runs: [

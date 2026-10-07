@@ -94,6 +94,7 @@ export interface AgentDispatchPort {
     runId: string;
     attempt: number;
     sessionId?: string;
+    cancelReason?: 'user' | 'interrupted';
   }): Promise<boolean>;
   deliver?(input: {
     agent: WorkspaceAgent;
@@ -576,6 +577,8 @@ async function reconcileInterruptedRuns(
             threadId: thread.id,
             runId: run.id,
             attempt: run.attempts,
+            cancelReason:
+              run.error === TOKEN_BUDGET_EXHAUSTED ? 'interrupted' : 'user',
             ...(run.sessionId ? { sessionId: run.sessionId } : {}),
           });
           if (

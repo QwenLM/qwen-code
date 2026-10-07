@@ -4285,9 +4285,18 @@ export function createSessionControlPlane(
     pending: PendingPromptEntry,
     notification: CancelNotification,
   ): Promise<void> => {
-    if (pending.cancelForwardInitial) {
+    const reason =
+      getPromptCancelAbortReason(notification._meta) ===
+      USER_CANCEL_ABORT_REASON
+        ? 'user'
+        : 'interrupted';
+    if (
+      pending.cancelForwardInitial &&
+      !(pending.cancelForwardReason === 'interrupted' && reason === 'user')
+    ) {
       return pending.cancelForwardInitial;
     }
+    const previousDrain = pending.cancelForwardDrain;
     const initial = (async () => {
       try {
         const extension = entry.connection
@@ -4337,13 +4346,16 @@ export function createSessionControlPlane(
       throw error;
     });
     pending.cancelForwardInitial = initial;
+    pending.cancelForwardReason = reason;
     // The same-revision extension resolves only after cancellation is handled
     // (or the target prompt has already settled). ACP-compatible custom agents
     // that do not implement it receive one standard session/cancel notification.
     // The FIFO tail awaits this promise so no extension request remains in flight
     // when prompt ownership advances, except when the prompt deadline invokes the
     // documented DAEMON-003 overlap policy.
-    pending.cancelForwardDrain = initial;
+    pending.cancelForwardDrain = previousDrain
+      ? Promise.allSettled([previousDrain, initial]).then(() => {})
+      : initial;
     void initial.catch(() => {});
     return initial;
   };

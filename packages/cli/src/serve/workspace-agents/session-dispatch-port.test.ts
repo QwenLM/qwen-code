@@ -103,6 +103,43 @@ describe('session dispatch port', () => {
     expect(agentThreadSessionId(AGENT.id, 'th_2')).not.toBe(id);
     expect(agentThreadSessionId('ag_bob', TURN.threadId)).not.toBe(id);
   });
+  it.each(['user', 'interrupted'] as const)(
+    'passes %s cancellation through to the bridge',
+    async (cancelReason) => {
+      const { bridge, sendPrompt } = makeBridge([
+        {
+          sessionId: agentThreadSessionId(AGENT.id, TURN.threadId),
+          sourceType: 'agent',
+          sourceId: AGENT.id,
+          workspaceCwd: WS,
+        },
+      ]);
+      vi.mocked(sendPrompt).mockReturnValue(new Promise(() => {}));
+      const port = createSessionDispatchPort({ bridge, workspaceCwd: WS });
+      const result = await port.start({
+        agent: AGENT,
+        prompt: 'work',
+        ...TURN,
+      });
+      if (result.status !== 'started') throw new Error(result.status);
+      result.activate?.();
+      await vi.waitFor(() => expect(sendPrompt).toHaveBeenCalled());
+      await expect(
+        port.cancel?.({
+          agent: AGENT,
+          threadId: TURN.threadId,
+          runId: TURN.runId,
+          attempt: TURN.attempt,
+          cancelReason,
+        }),
+      ).resolves.toBe(true);
+      expect(bridge.cancelSession).toHaveBeenCalledWith(result.sessionId, {
+        sessionId: result.sessionId,
+        _meta: { [PROMPT_CANCEL_REASON_META_KEY]: cancelReason },
+      });
+    },
+  );
+
   it('tells the agent which run its opening turn belongs to', async () => {
     // Without this the child boots with the right persona and then throws on
     // its first thread tool, because nothing else carries the run identity

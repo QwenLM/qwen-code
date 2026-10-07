@@ -6,7 +6,10 @@
 
 import type { Content, Part } from '@google/genai';
 import { isTurnResultRecordPayload } from './turn-result-record.js';
-import { isApiUserPrompt } from './api-user-prompt.js';
+import {
+  isApiUserPrompt,
+  isTodoStopGuardPromptText,
+} from './api-user-prompt.js';
 import { effectiveHistoryEnd } from '../core/turn-interruption.js';
 import type {
   ChatCompressionRecordPayload,
@@ -95,13 +98,21 @@ export function getSessionTurnSettlementHint(
 
 export function getLastApiHistoryPromptId(
   history: readonly Content[],
-  trailingSystemNotifications?: number,
+  trailingSystemNotifications = 0,
 ): string | undefined {
   const prompt = history
     .slice(0, effectiveHistoryEnd(history, trailingSystemNotifications))
     .findLast(
       (content) =>
-        isApiUserPrompt(content) ||
+        isApiUserPrompt(
+          content,
+          getApiHistoryPromptId(content)
+            ? undefined
+            : {
+                excludeTextPart: isTodoStopGuardPromptText,
+                excludeTaskNotifications: true,
+              },
+        ) ||
         (content.role === 'user' &&
           !content.parts?.some((part) => part.functionResponse) &&
           content.parts?.some((part) => part.inlineData || part.fileData)),

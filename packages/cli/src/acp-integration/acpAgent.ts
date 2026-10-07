@@ -7110,7 +7110,7 @@ class QwenAgent implements Agent {
       // cancelPendingPrompt cannot see them. Abort their controllers too, or a
       // cancelled prompt would run in full once admission frees.
       for (const call of this.activePromptCalls.get(sessionId) ?? []) {
-        call.controller.abort(abortReason);
+        session.cancelPromptAdmission(call.controller, abortReason);
       }
     });
   }
@@ -9689,7 +9689,9 @@ class QwenAgent implements Agent {
           return { cancelled: false };
         }
         const abortReason = getPromptCancelAbortReason(params['_meta']);
-        targetedCalls.forEach((call) => call.controller.abort(abortReason));
+        targetedCalls.forEach((call) =>
+          session.cancelPromptAdmission(call.controller, abortReason),
+        );
         await Promise.all(Array.from(targetedCalls, (call) => call.settled));
         return { cancelled: true };
       }

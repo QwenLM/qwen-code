@@ -704,7 +704,7 @@ export class DaemonChannelBridge
       prompt.push({ type: 'text', text });
       if (controller.signal.aborted) {
         rollbackUploadedAttachments = true;
-        controller.signal.throwIfAborted();
+        throw new DOMException('aborted', 'AbortError');
       }
       // Always presented: the daemon validates it for the channel-turn
       // classification as well as the display projection, and channel
@@ -717,7 +717,7 @@ export class DaemonChannelBridge
       // would leak. Non-admission is certain at this point; roll back.
       if (controller.signal.aborted) {
         rollbackUploadedAttachments = true;
-        throw controller.signal.reason;
+        throw new DOMException('aborted', 'AbortError');
       }
 
       let result: { stopReason?: string; [key: string]: unknown };
@@ -845,7 +845,7 @@ export class DaemonChannelBridge
   ): Promise<void> {
     const session = this.ensureSession(sessionId);
     this.resolveTurnBarrier(sessionId);
-    this.abortActivePrompts(sessionId);
+    this.abortActivePrompts(sessionId, options?.cancelReason ?? 'user');
     this.activePrompts.delete(sessionId);
     if (options) {
       await session.cancel(options);
@@ -1482,13 +1482,18 @@ export class DaemonChannelBridge
       : fallback;
   }
 
-  private abortActivePrompts(sessionId: string): void {
+  private abortActivePrompts(
+    sessionId: string,
+    reason: 'user' | 'interrupted' = 'interrupted',
+  ): void {
     const promptControllers = this.activePromptControllers.get(sessionId);
     if (!promptControllers) {
       return;
     }
     for (const controller of promptControllers) {
-      controller.abort();
+      controller.abort(
+        reason === 'user' ? 'qwen:user-cancel' : 'qwen:prompt-interrupted',
+      );
     }
     this.activePromptControllers.delete(sessionId);
   }

@@ -12,7 +12,15 @@ import { detectTurnInterruption } from '../core/turn-interruption.js';
 import {
   buildApiHistoryFromConversation,
   buildSessionHistoryFromConversation,
+  getLastApiHistoryPromptId,
+  isLastApiPromptCancelled,
+  markApiHistoryPrompt,
 } from './session-api-history.js';
+
+import {
+  TODO_STOP_GUARD_PROMPT_PREFIX,
+  TODO_STOP_GUARD_PROMPT_BODY_SUFFIX,
+} from './api-user-prompt.js';
 
 const permit = { goalId: 'goal', revision: 1, turnId: 'turn' };
 
@@ -607,5 +615,49 @@ describe('trailingSystemNotifications provenance signal', () => {
         messages: [delivered, notificationRecord()],
       }).trailingSystemNotifications,
     ).toBe(1);
+  });
+});
+
+describe('cancelled prompt identity with automatic tails', () => {
+  const guard = `${TODO_STOP_GUARD_PROMPT_PREFIX}1${TODO_STOP_GUARD_PROMPT_BODY_SUFFIX}`;
+  it.each([
+    guard,
+    '<task-notification><task-id>t</task-id><status>completed</status><summary>ready</summary></task-notification>',
+  ])(
+    'retains the client identity through an untagged automatic tail (%s)',
+    (text) => {
+      const original: Content = { role: 'user', parts: [{ text: 'work' }] };
+      markApiHistoryPrompt(original, 'client-1');
+      const history: Content[] = [
+        original,
+        { role: 'user', parts: [{ text }] },
+      ];
+      expect(getLastApiHistoryPromptId(history)).toBe('client-1');
+      expect(
+        isLastApiPromptCancelled(history, [
+          { kind: 'prompt', promptId: 'client-1', daemonPromptId: 'daemon-1' },
+          { kind: 'attempt', promptId: 'client-1', daemonPromptId: 'daemon-2' },
+          {
+            kind: 'result',
+            promptId: 'daemon-2',
+            state: 'cancelled',
+            cancelledAt: 100,
+          },
+        ]),
+      ).toBe(true);
+      markApiHistoryPrompt(history[1]!, 'real-newer-input');
+      expect(getLastApiHistoryPromptId(history)).toBe('real-newer-input');
+      expect(isLastApiPromptCancelled(history, [])).toBe(false);
+    },
+  );
+  it('keeps untagged ordinary newer user input as an unknown ownership boundary', () => {
+    const original: Content = { role: 'user', parts: [{ text: 'work' }] };
+    markApiHistoryPrompt(original, 'client-1');
+    expect(
+      getLastApiHistoryPromptId([
+        original,
+        { role: 'user', parts: [{ text: 'new real input' }] },
+      ]),
+    ).toBeUndefined();
   });
 });

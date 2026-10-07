@@ -261,6 +261,30 @@ describe('LlmChat', async () => {
   const config: GenerateContentConfig = {};
 
   describe('cancelled recovery history basis', () => {
+    it('preserves cancellation when failed setup rolls a new user push back', async () => {
+      chat.setHistory([userText('unfinished')]);
+      chat.markLastTurnCancelled();
+      const before = chat.getHistory();
+      const countBefore = chat.getUserContentPushCount();
+      vi.spyOn(
+        chat as unknown as { getRequestHistoryForRoute: () => unknown },
+        'getRequestHistoryForRoute',
+      ).mockImplementation(() => {
+        throw new Error('post-push setup failure');
+      });
+      await expect(
+        chat.sendMessageStream(
+          'test-model',
+          { message: 'new prompt' },
+          'new-prompt',
+        ),
+      ).rejects.toThrow('post-push setup failure');
+      expect(chat.getHistory()).toEqual(before);
+      expect(chat.getUserContentPushCount()).toBe(countBefore);
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+      expect(chat.isLastTurnCancelled()).toBe(true);
+    });
+
     it('keeps the marker across history clones and clears it on replacement of equal length', () => {
       chat.setHistory([userText('unfinished')]);
       chat.markLastTurnCancelled();

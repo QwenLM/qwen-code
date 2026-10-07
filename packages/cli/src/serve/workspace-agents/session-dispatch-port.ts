@@ -559,6 +559,7 @@ export function createSessionDispatchPort(
       runId,
       attempt,
       sessionId,
+      cancelReason = 'user',
     }): Promise<boolean> {
       const expected = sessionId ?? agentThreadSessionId(agent.id, threadId);
       const execution = executions.get(expected);
@@ -579,11 +580,9 @@ export function createSessionDispatchPort(
       );
       if (!session) return false;
       try {
-        // Budget enforcement is infrastructure, not the person, so it must not
-        // be stamped as an explicit user cancel.
         await bridge.cancelSession(session.sessionId, {
           sessionId: session.sessionId,
-          _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+          _meta: { [PROMPT_CANCEL_REASON_META_KEY]: cancelReason },
         });
         return true;
       } catch {

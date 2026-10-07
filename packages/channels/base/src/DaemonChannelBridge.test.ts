@@ -4547,6 +4547,7 @@ describe('DaemonChannelBridge', () => {
     await expect(promptPromise).rejects.toThrow('aborted');
     expect(session.cancel).toHaveBeenCalledOnce();
     expect(order).toEqual(['abort', 'cancel']);
+    expect(session.prompt.mock.calls[0]?.[1]?.reason).toBe('qwen:user-cancel');
 
     events.close();
     bridge.stop();

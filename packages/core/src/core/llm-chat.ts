@@ -3392,7 +3392,6 @@ export class LlmChat {
       }
       // Add user content to history ONCE before any attempts. Later object
       // spreads preserve the identity marked before compression.
-      this.cancelledHistory = undefined;
       this.history.push(userContent);
       this.syncReviewedSchemasForContent(userContent);
       currentUserContent = userContent;

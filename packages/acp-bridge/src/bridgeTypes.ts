@@ -1614,6 +1614,7 @@ export interface PendingPromptEntry {
   terminalPublished?: boolean;
   /** Cancellation handshake; duplicate callers await rather than resend it. */
   cancelForwardInitial?: Promise<void>;
+  cancelForwardReason?: 'user' | 'interrupted';
   /** Full cancellation handshake, used to fence the next FIFO dispatch. */
   cancelForwardDrain?: Promise<void>;
   /** Releases the cancellation fence when the prompt deadline expires. */

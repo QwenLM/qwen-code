@@ -276,6 +276,12 @@ import {
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { getLastApiHistoryPromptId } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import {
+  isTodoStopGuardPromptText,
+  TODO_STOP_GUARD_PROMPT_PREFIX,
+  TODO_STOP_GUARD_PROMPT_BODY_SUFFIX,
+  TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX,
+} from '@qwen-code/qwen-code-core/services/api-user-prompt.js';
 import { parsePromptAgentRun } from './agent-run-meta.js';
 import {
   CHANNEL_OUTPUT_MODE_META_KEY,
@@ -556,37 +562,6 @@ function readDaemonInputAnnotations(
   );
   return annotations.length > 0 ? structuredClone(annotations) : undefined;
 }
-const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
-const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
-  ' todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
-const TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX =
-  ' This is the final automatic continuation. Before ending, either complete/update the todos or report the completed progress and the exact blocker.';
-// Content has no private metadata slot, so history cleanup recognizes only
-// these exact templates; byte-identical user text is intentionally ambiguous.
-function isTodoStopGuardPromptText(text: unknown): text is string {
-  if (typeof text !== 'string') return false;
-  if (!text.startsWith(TODO_STOP_GUARD_PROMPT_PREFIX)) return false;
-
-  const remainder = text.slice(TODO_STOP_GUARD_PROMPT_PREFIX.length);
-  const separator = remainder.indexOf(' ');
-  if (separator <= 0) return false;
-  const countText = remainder.slice(0, separator);
-  const count = Number(countText);
-  if (
-    !Number.isSafeInteger(count) ||
-    count <= 0 ||
-    String(count) !== countText
-  ) {
-    return false;
-  }
-
-  const body = `${countText}${TODO_STOP_GUARD_PROMPT_BODY_SUFFIX}`;
-  return (
-    remainder === body ||
-    remainder === body + TODO_STOP_GUARD_FINAL_PROMPT_SUFFIX
-  );
-}
-
 /**
  * ACP rewind's binding of the shared user-prompt classifier
  * (`isApiUserPrompt` in core). The three deltas from the TUI binding are
@@ -2175,6 +2150,7 @@ function isCallerCausedModelRefusal(error: Error): boolean {
 export class Session implements SessionContext {
   private readonly mcpAppCalls = new Map<string, AbortController>();
   private pendingPrompt: AbortController | null = null;
+  private readonly userPromptCancellations = new WeakMap<AbortSignal, number>();
   private activeGoalProposalTurn?: AgentResponseCapture['goalProposalTurn'];
   /**
    * Tracks the completion of the current prompt so that the next prompt
@@ -4894,6 +4870,35 @@ export class Session implements SessionContext {
     );
   }
 
+  #classifyPromptCancelAbortReason(requestedReason: string): string {
+    return this.closing || this.disposed
+      ? SESSION_DISPOSE_ABORT_REASON
+      : requestedReason;
+  }
+
+  cancelPromptAdmission(
+    controller: AbortController,
+    requestedReason: string,
+  ): void {
+    const reason = this.#classifyPromptCancelAbortReason(requestedReason);
+    // AbortSignal.reason cannot change once aborted; retain later human intent
+    // on this admission only, without transferring it to another prompt.
+    if (
+      reason === USER_CANCEL_ABORT_REASON &&
+      !this.userPromptCancellations.has(controller.signal)
+    ) {
+      this.userPromptCancellations.set(controller.signal, Date.now());
+    }
+    controller.abort(reason);
+  }
+
+  #isUserPromptCancellation(signal?: AbortSignal): boolean {
+    return (
+      signal?.reason === USER_CANCEL_ABORT_REASON ||
+      (signal !== undefined && this.userPromptCancellations.has(signal))
+    );
+  }
+
   async cancelPendingPrompt(
     requestedAbortReason: string = USER_CANCEL_ABORT_REASON,
   ): Promise<void> {
@@ -4922,9 +4927,7 @@ export class Session implements SessionContext {
 
     this.todoStopGuard.suspend();
     const abortReason =
-      this.closing || this.disposed
-        ? SESSION_DISPOSE_ABORT_REASON
-        : requestedAbortReason;
+      this.#classifyPromptCancelAbortReason(requestedAbortReason);
     for (const capture of this.channelTaskCaptures) {
       capture.controller.abort(abortReason);
     }
@@ -5036,9 +5039,12 @@ export class Session implements SessionContext {
     const recordAdmissionCancellation = () => {
       if (
         turnRecording &&
-        admissionCancellation?.reason === USER_CANCEL_ABORT_REASON
+        this.#isUserPromptCancellation(admissionCancellation)
       ) {
-        turnRecording.cancelledAt ??= Date.now();
+        turnRecording.cancelledAt ??= admissionCancellation
+          ? (this.userPromptCancellations.get(admissionCancellation) ??
+            Date.now())
+          : Date.now();
       }
     };
     admissionCancellation?.addEventListener(
@@ -5062,6 +5068,7 @@ export class Session implements SessionContext {
       if (channelTask && result.stopReason === 'end_turn') {
         result = await this.#waitForChannelTaskResult(channelTask, result);
       }
+      recordAdmissionCancellation();
       await this.#settleTurnRecording(
         result.stopReason === 'cancelled' ? 'cancelled' : 'completed',
         turnRecording,
@@ -5069,6 +5076,7 @@ export class Session implements SessionContext {
       );
       return result;
     } catch (error) {
+      recordAdmissionCancellation();
       const pendingSend = turnRecording?.abortController;
       const abortReason =
         pendingSend?.signal.aborted === true
@@ -5527,7 +5535,8 @@ export class Session implements SessionContext {
         if (
           !cancelledHistoryBound &&
           this.pendingPromptCompletion === recoveryCompletion &&
-          pendingSend.signal.reason === USER_CANCEL_ABORT_REASON &&
+          (this.#isUserPromptCancellation(pendingSend.signal) ||
+            this.#isUserPromptCancellation(admissionCancellation)) &&
           !this.config.getManagedSessionBlock?.() &&
           recoverySessionId === this.config.getSessionId() &&
           baselinePushCount !== undefined &&

@@ -5963,53 +5963,85 @@ describe('Session', () => {
     });
   });
 
+  it.each(['closing', 'disposed'] as const)(
+    'classifies pending and admitted cancellation consistently while %s',
+    async (flag) => {
+      const internals = session as unknown as {
+        closing: boolean;
+        disposed: boolean;
+        pendingPrompt: AbortController | null;
+      };
+      internals[flag] = true;
+      const pending = new AbortController();
+      const admitted = new AbortController();
+      internals.pendingPrompt = pending;
+      try {
+        session.cancelPromptAdmission(admitted, 'qwen:user-cancel');
+        await session.cancelPendingPrompt();
+        expect(admitted.signal.reason).toBe('qwen:session-dispose');
+        expect(pending.signal.reason).toBe(admitted.signal.reason);
+      } finally {
+        internals[flag] = false;
+      }
+    },
+  );
+
   describe('continueLastTurn', () => {
-    it('persists retry ownership before sending and retains the original user identity', async () => {
-      const original: Content = {
-        role: 'user',
-        parts: [{ text: 'retry me' }],
-      };
-      markApiHistoryPrompt(original, 'client-1');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
-        original,
-        {
+    it.each([
+      '<task-notification><task-id>t</task-id><status>completed</status><summary>ready</summary></task-notification>',
+      '[Todo Stop Guard] 1 todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.',
+    ])(
+      'persists retry ownership before sending through an untagged automatic tail (%s)',
+      async (text) => {
+        const original: Content = {
           role: 'user',
-          parts: [{ text: '<task-notification>ready</task-notification>' }],
-        },
-      ]);
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue(createEmptyStream());
-      let releaseAttempt!: () => void;
-      mockChatRecordingService.recordTurnAttempt.mockReturnValue(
-        new Promise<void>((resolve) => {
-          releaseAttempt = resolve;
-        }),
-      );
-      const request = {
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text' as const, text: 'retry me' }],
-        retry: true,
-      };
-      const prompt = session.prompt(request, {
-        version: 1,
-        sessionId: 'test-session-id',
-        promptId: 'daemon-2',
-      });
-      await vi.waitFor(() =>
-        expect(mockChatRecordingService.recordTurnAttempt).toHaveBeenCalledWith(
-          'client-1',
-          'daemon-2',
-        ),
-      );
-      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
-      releaseAttempt();
-      await prompt;
-      expect(mockChatRecordingService.recordUserMessage).not.toHaveBeenCalled();
-      expect(vi.mocked(mockChat.sendMessageStream).mock.calls[0]?.[4]).toEqual({
-        promptId: 'client-1',
-      });
-    });
+          parts: [{ text: 'retry me' }],
+        };
+        markApiHistoryPrompt(original, 'client-1');
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
+          original,
+          {
+            role: 'user',
+            parts: [{ text }],
+          },
+        ]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        let releaseAttempt!: () => void;
+        mockChatRecordingService.recordTurnAttempt.mockReturnValue(
+          new Promise<void>((resolve) => {
+            releaseAttempt = resolve;
+          }),
+        );
+        const request = {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text' as const, text: 'retry me' }],
+          retry: true,
+        };
+        const prompt = session.prompt(request, {
+          version: 1,
+          sessionId: 'test-session-id',
+          promptId: 'daemon-2',
+        });
+        await vi.waitFor(() =>
+          expect(
+            mockChatRecordingService.recordTurnAttempt,
+          ).toHaveBeenCalledWith('client-1', 'daemon-2'),
+        );
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        releaseAttempt();
+        await prompt;
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).not.toHaveBeenCalled();
+        expect(
+          vi.mocked(mockChat.sendMessageStream).mock.calls[0]?.[4],
+        ).toEqual({
+          promptId: 'client-1',
+        });
+      },
+    );
 
     it('records retry ownership before a pre-loop interruption settles', async () => {
       const original: Content = { role: 'user', parts: [{ text: 'retry me' }] };
@@ -11667,51 +11699,57 @@ describe('Session', () => {
         expect(payload.resultCode).toBe('RESULT_TEXT_TRUNCATED');
       });
 
-      it('records a cancelled turn when admission aborts before dispatch', async () => {
-        let now = 1_000;
-        vi.spyOn(Date, 'now').mockImplementation(() => now);
-        let releaseAdmission!: () => void;
-        const admission = new Promise<void>((resolve) => {
-          releaseAdmission = resolve;
-        });
-        mockConfig.assertCanStartTurn = vi.fn().mockReturnValue(admission);
-        const cancellation = new AbortController();
+      it.each([false, true])(
+        'records explicit admission cancellation after interruption=%s',
+        async (interruptedFirst) => {
+          let now = 1_000;
+          vi.spyOn(Date, 'now').mockImplementation(() => now);
+          let releaseAdmission!: () => void;
+          const admission = new Promise<void>((resolve) => {
+            releaseAdmission = resolve;
+          });
+          mockConfig.assertCanStartTurn = vi.fn().mockReturnValue(admission);
+          const cancellation = new AbortController();
 
-        const prompt = session.prompt(
-          {
-            sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'cancelled prompt' }],
-          },
-          trustedContext,
-          cancellation.signal,
-        );
-        await vi.waitFor(() =>
-          expect(mockConfig.assertCanStartTurn).toHaveBeenCalledOnce(),
-        );
-        now = 4_500;
-        cancellation.abort('qwen:user-cancel');
-        now = 9_500;
-        releaseAdmission();
-
-        await expect(prompt).resolves.toMatchObject({
-          stopReason: 'cancelled',
-          _meta: {
-            'qwen.promptCancelled': {
-              cancelledAt: 4_500,
-              elapsedMs: 0,
+          const prompt = session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'cancelled prompt' }],
             },
-          },
-        });
-        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
-          expect.objectContaining({
-            promptId: 'daemon-prompt-id',
-            state: 'cancelled',
+            trustedContext,
+            cancellation.signal,
+          );
+          await vi.waitFor(() =>
+            expect(mockConfig.assertCanStartTurn).toHaveBeenCalledOnce(),
+          );
+          if (interruptedFirst) cancellation.abort('qwen:prompt-interrupted');
+          now = 4_500;
+          session.cancelPromptAdmission(cancellation, 'qwen:user-cancel');
+          now = 9_500;
+          releaseAdmission();
+
+          await expect(prompt).resolves.toMatchObject({
             stopReason: 'cancelled',
-            cancelledAt: 4_500,
-            endedAt: 9_500,
-          }),
-        );
-      });
+            _meta: {
+              'qwen.promptCancelled': {
+                cancelledAt: 4_500,
+                elapsedMs: 0,
+              },
+            },
+          });
+          expect(
+            mockChatRecordingService.recordTurnResult,
+          ).toHaveBeenCalledWith(
+            expect.objectContaining({
+              promptId: 'daemon-prompt-id',
+              state: 'cancelled',
+              stopReason: 'cancelled',
+              cancelledAt: 4_500,
+              endedAt: 9_500,
+            }),
+          );
+        },
+      );
 
       it.each([
         new DOMException('response closed', 'AbortError'),
