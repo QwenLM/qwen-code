@@ -23,7 +23,10 @@ import com.alibaba.qwen.code.managedagent.store.ChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.store.JdbcChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.store.JdbcChannelRouteRepository;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Duration;
@@ -96,14 +99,19 @@ class ManagedChannelServiceTest {
                         + " VALUES (?, ?, ?, TRUE, TRUE)",
                 TENANT, WORKSPACE, ACTOR.getBytes(StandardCharsets.UTF_8));
         channel = "mail-" + UUID.randomUUID();
-        harness = new RecordingHarness((sessionId, deliveryId, state) ->
-                // The Session store materializes the committed revision's
-                // delivery line in the same transaction; the recording
-                // Harness mirrors that projection.
-                jdbc.update("UPDATE qwen_managed_session_extension_record"
-                                + " SET delivery_state = ? WHERE tenant_id = ?"
-                                + " AND session_id = ? AND record_id = ?",
-                        state, TENANT, sessionId, deliveryId));
+        harness = new RecordingHarness((sessionId, deliveryId, state) -> {
+            // The Session store materializes the committed revision's
+            // delivery line in the same transaction — and the segment
+            // receipts in the record body; the recording Harness mirrors
+            // both projections.
+            jdbc.update("UPDATE qwen_managed_session_extension_record"
+                            + " SET delivery_state = ? WHERE tenant_id = ?"
+                            + " AND session_id = ? AND record_id = ?",
+                    state, TENANT, sessionId, deliveryId);
+            if ("delivered".equals(state)) {
+                mirrorReceiptIntoRecord(sessionId, deliveryId);
+            }
+        });
         clock = new AtomicLong(1_000_000L);
         service = new ManagedChannelService(instances,
                 new JdbcChannelRouteRepository(jdbc),
@@ -347,6 +355,111 @@ class ManagedChannelServiceTest {
     }
 
     @Test
+    void reconcilesAClaimCommittedBeforeItsAnswerWasLost() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:81", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId,
+                admitted.routeId(), "Done.");
+        // The claim_delivery commit landed; its answer died on the wire, so
+        // the ledger never stepped past planned.
+        harness.loseClaimAnswerOnce = true;
+        assertThat(service.claimDeliveries(TENANT, channel, 16).deliveries())
+                .isEmpty();
+        assertThat(instances.findClaim(TENANT, channel, deliveryId))
+                .isPresent();
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.state()).isEqualTo("planned");
+        assertThat(jdbc.queryForObject("SELECT delivery_state FROM"
+                        + " qwen_managed_session_extension_record"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND record_id = ?", String.class, TENANT,
+                admitted.sessionId(), deliveryId)).isEqualTo("sending");
+        // Neither recovery entry point saw the committed claim: the record
+        // is sending, so no pending poll owes it, and the planned ledger
+        // hid the claim from an unreconciled scan. The lease expiry routes
+        // it through the ledger — converged to sending, then settled
+        // unknown, never offered to another adapter.
+        assertThat(service.claimDeliveries(TENANT, channel, 16).deliveries())
+                .isEmpty();
+        expire(deliveryId);
+        service.reconcile();
+        assertThat(harness.operations.getLast().get("kind"))
+                .isEqualTo("settle_delivery");
+        assertThat(harness.operations.getLast().get("outcome"))
+                .isEqualTo("unknown");
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.state()).isEqualTo("unknown");
+    }
+
+    @Test
+    void convergesAReceiptCommittedBeforeItsAnswerWasLost() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:82", "please reply"));
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId,
+                admitted.routeId(), "Done.");
+        service.claimDeliveries(TENANT, channel, 16);
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.state()).isEqualTo("sending");
+        // The accepted receipt committed, with the provider id, but its
+        // answer died before the ledger stepped.
+        harness.loseReceiptAnswerOnce = true;
+        assertThatThrownBy(() -> service.receipt(TENANT, channel, deliveryId,
+                new ReceiptRequest("accepted", 0, "<m1@example.com>",
+                        1_750_000_000_000L)))
+                .isInstanceOf(RuntimeException.class);
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.state()).isEqualTo("sending");
+        assertThat(jdbc.queryForObject("SELECT delivery_state FROM"
+                        + " qwen_managed_session_extension_record"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND record_id = ?", String.class, TENANT,
+                admitted.sessionId(), deliveryId)).isEqualTo("delivered");
+        // The reconciler converges from the committed record — delivered
+        // with its provider receipt — and never asks the authority to
+        // settle the delivered delivery unknown.
+        expire(deliveryId);
+        int before = harness.operations.size();
+        service.reconcile();
+        assertThat(harness.operations).hasSize(before);
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.state()).isEqualTo("delivered");
+        assertThat(service.ledger(TENANT, channel, deliveryId)).get()
+                .extracting(row -> row.providerReceipt())
+                .isEqualTo("<m1@example.com>");
+    }
+
+    @Test
+    void claimsDeliveriesOwedByAnyBindingNotOnlyTheNewest() {
+        InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                event(1, "1700:83", "please reply"));
+        // Sixty-four newer threads crowd the route's binding out of any
+        // newest-first window, and none of them owes a delivery.
+        for (int i = 0; i < 64; i++) {
+            String crowdSession = "crowd-" + i + '-' + channel;
+            jdbc.update("INSERT IGNORE INTO managed_agent_session"
+                            + " (tenant_id, session_id, agent_id, title,"
+                            + " status, created_at, updated_at)"
+                            + " VALUES (?, ?, 'qwen-code', 'mail thread',"
+                            + " 'ACTIVE', 1, 1)",
+                    TENANT, crowdSession);
+            instances.bind(new ChannelInstanceStore.ChannelBinding(TENANT,
+                    channel, "chrt-crowd-" + i, crowdSession, "chat_thread",
+                    "alice@example.com", "chat-" + i, "thread-" + i, 0));
+        }
+        String deliveryId = admitted.inputId() + ":reply";
+        plannedDelivery(admitted.sessionId(), deliveryId,
+                admitted.routeId(), "The oldest thread's reply.");
+        ClaimResponse claimed = service.claimDeliveries(TENANT, channel, 16);
+        assertThat(claimed.deliveries())
+                .extracting(entry -> entry.deliveryId())
+                .containsExactly(deliveryId);
+        assertThat(claimed.deliveries().getFirst().text())
+                .isEqualTo("The oldest thread's reply.");
+    }
+
+    @Test
     void servesChannelsWithTheirRoutesToReadersOnly() {
         service.submitInbound(TENANT, channel, event(1, "1700:90", "a"));
         service.submitInbound(TENANT, channel, event(1, "1700:91", "b"));
@@ -452,6 +565,55 @@ class ManagedChannelServiceTest {
         harness.replies.put(deliveryId, text);
     }
 
+    /** The record body gains the committed segment receipt, as the Session
+     * store writes it with the delivered revision. */
+    private void mirrorReceiptIntoRecord(String sessionId,
+            String deliveryId) {
+        for (Map<String, Object> row : jdbc.queryForList(
+                "SELECT resource_id, inline_bytes"
+                        + " FROM qwen_managed_session_resource"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND kind = 'managed-channel_delivery'"
+                        + " AND state = 'REFERENCED'",
+                TENANT, sessionId)) {
+            JsonNode tree;
+            try {
+                tree = mapper.readTree(
+                        new String((byte[]) row.get("inline_bytes"),
+                                StandardCharsets.UTF_8));
+            } catch (JsonProcessingException error) {
+                throw new IllegalStateException(error);
+            }
+            if (!deliveryId.equals(tree.path("deliveryId").asText())) {
+                continue;
+            }
+            ObjectNode receipt = mapper.createObjectNode();
+            receipt.put("providerMessageId", "<m1@example.com>");
+            receipt.put("acceptedAt", 1_750_000_000_000L);
+            for (JsonNode segment : tree.path("segments")) {
+                ((ObjectNode) segment).set("receipt", receipt.deepCopy());
+            }
+            try {
+                jdbc.update("UPDATE qwen_managed_session_resource"
+                                + " SET inline_bytes = ?"
+                                + " WHERE tenant_id = ? AND resource_id = ?",
+                        mapper.writeValueAsString(tree)
+                                .getBytes(StandardCharsets.UTF_8),
+                        TENANT, row.get("resource_id"));
+            } catch (JsonProcessingException error) {
+                throw new IllegalStateException(error);
+            }
+        }
+    }
+
+    /** Back-dates the claim so the reconciler sees it as expired. */
+    private void expire(String deliveryId) {
+        jdbc.update("UPDATE qwen_managed_channel_claim SET claimed_at = ?"
+                        + " WHERE tenant_id = ? AND delivery_id = ?",
+                clock.get() - Duration.ofMinutes(11).toMillis(), TENANT,
+                deliveryId);
+    }
+
     private static String scopeKey(String sessionId) {
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
@@ -468,6 +630,8 @@ class ManagedChannelServiceTest {
     }
 
     static final class RecordingHarness implements HarnessConnector {
+        private static final java.util.Set<String> TERMINAL = java.util.Set.of(
+                "delivered", "unknown", "rejected", "cancelled");
         final List<Map<String, Object>> operations = new ArrayList<>();
         final Map<String, String> replies = new LinkedHashMap<>();
         private final Map<String, Map<String, Object>> inputs =
@@ -476,6 +640,8 @@ class ManagedChannelServiceTest {
                 new LinkedHashMap<>();
         private final Projection projection;
         boolean loseAnswerOnce;
+        boolean loseClaimAnswerOnce;
+        boolean loseReceiptAnswerOnce;
 
         RecordingHarness(Projection projection) {
             this.projection = projection;
@@ -546,6 +712,11 @@ class ManagedChannelServiceTest {
                 case "claim_delivery" -> {
                     deliveryStates.put(deliveryId, "sending");
                     projection.deliveryState(sessionId, deliveryId, "sending");
+                    if (loseClaimAnswerOnce) {
+                        loseClaimAnswerOnce = false;
+                        throw new IllegalStateException(
+                                "answer lost after commit");
+                    }
                     answer.put("delivery", delivery(deliveryId, "sending"));
                     Map<String, Object> reply = new LinkedHashMap<>();
                     reply.put("text", replies.get(deliveryId));
@@ -561,10 +732,24 @@ class ManagedChannelServiceTest {
                     deliveryStates.put(deliveryId, "delivered");
                     projection.deliveryState(sessionId, deliveryId,
                             "delivered");
+                    if (loseReceiptAnswerOnce) {
+                        loseReceiptAnswerOnce = false;
+                        throw new IllegalStateException(
+                                "answer lost after commit");
+                    }
                     answer.put("delivery", delivery(deliveryId, "delivered"));
                 }
                 case "settle_delivery" -> {
                     String outcome = String.valueOf(body.get("outcome"));
+                    String current = deliveryStates.get(deliveryId);
+                    // The H5a successor rules freeze a terminal line: the
+                    // real authority refuses an outcome that disagrees.
+                    if (current != null && TERMINAL.contains(current)
+                            && !current.equals(outcome)) {
+                        throw new IllegalStateException("Channel delivery"
+                                + " line " + outcome + " does not match its"
+                                + " run and segment receipts");
+                    }
                     deliveryStates.put(deliveryId, outcome);
                     projection.deliveryState(sessionId, deliveryId, outcome);
                     answer.put("delivery", delivery(deliveryId, outcome));

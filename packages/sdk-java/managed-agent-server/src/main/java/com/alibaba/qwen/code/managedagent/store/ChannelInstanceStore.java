@@ -51,6 +51,11 @@ public class ChannelInstanceStore {
             long revision, String deliveryState, String recordResourceId) {
     }
 
+    /** The projection's mirror of one committed delivery, any state. */
+    public record DeliveryRecordState(String deliveryState,
+            String recordResourceId) {
+    }
+
     private static final RowMapper<ChannelInstance> INSTANCE = (row, index) ->
             new ChannelInstance(row.getString("tenant_id"),
                     row.getString("channel_id"), row.getString("platform"),
@@ -179,13 +184,45 @@ public class ChannelInstanceStore {
                 candidate.routeId()).orElseThrow();
     }
 
-    /** The channel's bound Sessions, newest binding first. */
-    public List<ChannelBinding> listBindings(String tenantId,
+    /**
+     * The channel's Sessions that owe a dispatcher at least one delivery,
+     * oldest owed first. Scoping on the store's delivery projection — not
+     * on a window of the newest bindings — lets a claim reach a delivery
+     * owed by any binding, however many the channel has.
+     */
+    public List<String> listSessionsWithPendingDeliveries(String tenantId,
             String channelId, int limit) {
-        return jdbc.query("SELECT * FROM qwen_managed_channel_binding"
-                        + " WHERE tenant_id = ? AND channel_id = ?"
-                        + " ORDER BY created_at DESC, route_id DESC LIMIT ?",
-                BINDING, tenantId, channelId, limit);
+        return jdbc.query("SELECT r.session_id, MIN(r.created_at) AS"
+                        + " oldest_due"
+                        + " FROM qwen_managed_session_extension_record r"
+                        + " JOIN qwen_managed_channel_binding b"
+                        + " ON b.tenant_id = r.tenant_id"
+                        + " AND b.session_id = r.session_id"
+                        + " JOIN managed_agent_session s"
+                        + " ON s.tenant_id = r.tenant_id"
+                        + " AND s.session_id = r.session_id"
+                        + " AND s.status = 'ACTIVE'"
+                        + " WHERE r.tenant_id = ? AND b.channel_id = ?"
+                        + " AND r.domain = 'channel_delivery'"
+                        + " AND r.delivery_state IN ('planned', 'partial')"
+                        + " GROUP BY r.session_id"
+                        + " ORDER BY oldest_due, r.session_id LIMIT ?",
+                (row, index) -> row.getString(1), tenantId, channelId,
+                limit);
+    }
+
+    /** One delivery's committed mirror state and record resource. */
+    public Optional<DeliveryRecordState> findDeliveryRecord(String tenantId,
+            String sessionId, String deliveryId) {
+        return jdbc.query("SELECT delivery_state, record_resource_id"
+                        + " FROM qwen_managed_session_extension_record"
+                        + " WHERE session_scope_key = ?"
+                        + " AND domain = 'channel_delivery'"
+                        + " AND record_id = ?",
+                (row, index) -> new DeliveryRecordState(row.getString(1),
+                        row.getString(2)),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                deliveryId).stream().findFirst();
     }
 
     /**
@@ -248,15 +285,15 @@ public class ChannelInstanceStore {
                 CLAIM, tenantId, channelId, deliveryId).stream().findFirst();
     }
 
-    /** Claims older than {@code before} whose ledger row still says sending. */
-    public List<ChannelClaim> findExpiredSendingClaims(long before,
-            int limit) {
+    /** Claims older than {@code before} whose ledger row is still open. */
+    public List<ChannelClaim> findExpiredClaims(long before, int limit) {
         return jdbc.query("SELECT c.* FROM qwen_managed_channel_claim c"
                         + " JOIN qwen_managed_channel_delivery d"
                         + " ON d.tenant_id = c.tenant_id"
                         + " AND d.channel_instance_id = c.channel_id"
                         + " AND d.delivery_id = c.delivery_id"
-                        + " WHERE c.claimed_at < ? AND d.state = 'sending'"
+                        + " WHERE c.claimed_at < ?"
+                        + " AND d.state IN ('planned', 'sending', 'partial')"
                         + " ORDER BY c.claimed_at, c.delivery_id LIMIT ?",
                 CLAIM, before, limit);
     }

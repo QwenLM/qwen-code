@@ -83,6 +83,8 @@ class FakeControlPlane implements ManagedChannelControlPlane {
   receipts: Array<{ deliveryId: string; receipt: ManagedReceipt }> = [];
   outbox: ManagedClaimedDelivery[] = [];
   failSubmits = 0;
+  refuseSubmitsWithStatus = 0;
+  submitAttempts = 0;
   disconnected = false;
 
   async register(request: { accountGeneration: number }) {
@@ -92,7 +94,14 @@ class FakeControlPlane implements ManagedChannelControlPlane {
     this.disconnected = true;
   }
   async submitInbound(event: ManagedInboundEvent) {
+    this.submitAttempts += 1;
     const key = `${event.accountGeneration}:${event.platformEventId}`;
+    if (this.refuseSubmitsWithStatus) {
+      // A deterministic refusal: nothing was admitted.
+      throw Object.assign(new Error(`HTTP ${this.refuseSubmitsWithStatus}`), {
+        status: this.refuseSubmitsWithStatus,
+      });
+    }
     if (this.failSubmits > 0) {
       this.failSubmits -= 1;
       // The control plane admitted it, but the answer was lost.
@@ -331,6 +340,83 @@ describe('managed email inbound', () => {
     });
   });
 
+  it('skips a deterministically refused admission visibly, never re-driving it', async () => {
+    const log = vi.fn();
+    const adapter = make();
+    (adapter as unknown as { log: (line: string) => void }).log = log;
+    await adapter.connect();
+    plane.refuseSubmitsWithStatus = 400;
+    append(raw('poison', 'this body is refused'));
+    await adapter.tick();
+    expect(state(adapter).pending).toEqual([]);
+    expect(plane.admitted.size).toBe(0);
+    expect(plane.events).toHaveLength(0);
+    expect(plane.submitAttempts).toBe(1);
+    expect(log.mock.calls.map((call) => String(call[0])).join('\n')).toContain(
+      'refused (400)',
+    );
+    // The message is gone from the in-flight set, so no later poll
+    // re-drives it, and the rest of the mailbox still flows.
+    plane.refuseSubmitsWithStatus = 0;
+    append(raw('fine', 'ordinary mail'));
+    await adapter.tick();
+    expect(plane.events).toHaveLength(1);
+    expect(plane.events[0]!.text).toBe('ordinary mail');
+    expect(plane.submitAttempts).toBe(2);
+  });
+
+  it('clamps the upload bound to what the control plane can carry', async () => {
+    const adapter = make();
+    await adapter.connect();
+    const base64 = (bytes: Buffer) =>
+      bytes
+        .toString('base64')
+        .match(/.{1,76}/g)!
+        .join('\r\n');
+    const mime = (
+      id: string,
+      file: string,
+      size: string,
+      content: string,
+    ): Buffer =>
+      Buffer.from(
+        [
+          'From: Alice <alice@example.com>',
+          'To: agent@example.com',
+          `Message-ID: <${id}@example.com>`,
+          'Subject: Files',
+          'Content-Type: multipart/mixed; boundary="b1"',
+          '',
+          '--b1',
+          'Content-Type: text/plain',
+          '',
+          'see attached',
+          '--b1',
+          `Content-Type: application/octet-stream; name="${file}"`,
+          `Content-Disposition: attachment; filename="${file}"; size=${size}`,
+          'Content-Transfer-Encoding: base64',
+          '',
+          content,
+          '--b1--',
+          '',
+        ].join('\r\n'),
+      );
+    const oversized = base64(Buffer.alloc(1_500_001, 0x61));
+    append(mime('big', 'big.pdf', String(1_500_001), oversized));
+    await adapter.tick();
+    expect(plane.events).toHaveLength(1);
+    expect(plane.events[0]!.text).toBe('see attached');
+    expect(plane.events[0]!.attachments).toEqual([]);
+    // The exact wire bound still uploads: 1,500,000 decoded bytes are
+    // 2,000,000 base64 characters, the most the control plane admits.
+    const exact = base64(Buffer.alloc(1_500_000, 0x62));
+    append(mime('exact', 'exact.pdf', String(1_500_000), exact));
+    await adapter.tick();
+    expect(plane.events).toHaveLength(2);
+    expect(plane.events[1]!.attachments).toHaveLength(1);
+    expect(plane.events[1]!.attachments[0]!.bytesBase64.length).toBe(2_000_000);
+  });
+
   it('stages bounded attachments as base64 and skips calendar and message parts', async () => {
     const adapter = make();
     await adapter.connect();
@@ -493,6 +579,7 @@ describe('managed email outbound', () => {
         deliveryId: 'd-crash',
         ordinal: 0,
         messageId: expect.stringMatching(/^<.+@example\.com>$/),
+        receipt: { outcome: 'unknown' },
       },
     ]);
     plane.receipt = original;
@@ -501,6 +588,44 @@ describe('managed email outbound', () => {
     expect(plane.receipts).toEqual([
       { deliveryId: 'd-crash', receipt: { outcome: 'unknown' } },
     ]);
+    expect(state(restarted).outbound).toEqual([]);
+    expect(sent).toHaveBeenCalledTimes(1);
+  });
+
+  it('replays the persisted provider receipt on restart instead of settling unknown', async () => {
+    const adapter = make();
+    await adapter.connect();
+    plane.outbox = [delivery('d-receipted')];
+    // The provider accepted the segment and the control plane committed
+    // the receipt — only the HTTP answer was lost.
+    const original = plane.receipt.bind(plane);
+    plane.receipt = async (deliveryId: string, receipt: ManagedReceipt) => {
+      await original(deliveryId, receipt);
+      throw new Error('answer lost');
+    };
+    await expect(adapter.tick()).rejects.toThrow('answer lost');
+    await adapter.disconnect();
+    const persisted = state(adapter).outbound;
+    expect(persisted).toHaveLength(1);
+    expect(persisted[0]).toMatchObject({
+      deliveryId: 'd-receipted',
+      receipt: { outcome: 'accepted' },
+    });
+    plane.receipt = original;
+    const restarted = make();
+    await restarted.connect();
+    // The committed outcome is replayed verbatim, so a delivery the
+    // server already settled still converges — never a blanket unknown.
+    expect(plane.receipts).toHaveLength(2);
+    expect(plane.receipts[1]).toEqual({
+      deliveryId: 'd-receipted',
+      receipt: {
+        outcome: 'accepted',
+        ordinal: 0,
+        providerMessageId: persisted[0].receipt.providerMessageId,
+        acceptedAt: 1_750_000_000_000,
+      },
+    });
     expect(state(restarted).outbound).toEqual([]);
     expect(sent).toHaveBeenCalledTimes(1);
   });

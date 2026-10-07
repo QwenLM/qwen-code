@@ -38,10 +38,10 @@ H5a 钉住了*可以提交什么*：以 `routeId` 为链身份、各修订携带
 7. **channel 轮走 H3 的 wake 路径。** input 的 `source` 为 `channel`；内嵌 wake 调度器在 `monitor` 与 `child_agent` 之外也放行它，于是它在 Session 空闲时作为普通文本轮运行，有轮次运行时在 journal 中排队，Session 被阻塞时准确地保持待处理。轮次文本是渲染为 `<channel-message>` 块的信封：发送者、平台身份、不可信的主题元数据、附件列表与消息正文。channel input 像 monitor input 一样排除在停泊轮次计算之外，关闭路径以无模型方式结算待处理的 channel input 且不产生回复。
 8. **回复在结束时幂等地规划，并在打开时对账。** channel wake 轮以 `completed` 结束且助手文本非空后，漏斗发布回复资源（`managed-channel-reply`：文本与 input 携带的适配器不透明回复上下文）和每段一个 `managed-channel-segment` 资源，然后提交 `channel_delivery` 修订 1（`planned`），`deliveryId = <inputId>:reply`，`sourceTurnId = turnId`，并带上信封中的路由钉。email 的计划是一个分段：回复文本截断到 48 KiB 并附截断提示。以 `error` 或 `cancelled` 结束、或在关闭时无模型结算的轮次不规划任何内容。`reconcileReplies()` 在 Session 打开时运行，为任何尚无交付的已结束 channel 轮规划交付，于是结束与规划之间的崩溃既不丢失也不重复。
 9. **outbox 由适配器经控制面拉取，每一步都是记录修订。** 适配器调用 `deliveries:claim`；控制面找出该 channel 各 Session 的 `planned` 交付（通过绑定索引与扩展记录投影），插入 V47 台账行（`planned`），请求 Harness 提交 `sending`（`kind: claim_delivery`）并把台账推进到 `sending`，然后返回各分段内容与回复上下文。逐段 `receipt` 提交该分段的回执（仍有分段未完成时为 `partial`，最后一段为 `delivered`），台账带 provider 回执随之推进。`unknown`（适配器无法证明 provider 未持有该消息）提交 `waiting`/`unknown`；`rejected`（provider 明确拒绝）提交 `failed`/`rejected`；两者对自动工作都是终态。Harness 的应答是权威：台账只在记录提交后推进，发现记录已在该状态的台账步骤即幂等重放。
-10. **unknown 由租约对账，绝不由重发对账。** 台账行停留在 `sending` 超过认领租约（默认 10 分钟）且无回执时，由控制面的定时对账器结算为 `unknown`（Harness `settle_delivery`，`outcome: unknown`）：适配器可能在发送后死亡。该路径上不重发任何内容（参考设计第 14 节第 5 项）。Session 不再 `ACTIVE` 的 `planned` 交付已没有 writer 可以修订它：claim 跳过非活动 Session，记录保持可见的 `planned`。
+10. **unknown 由租约对账，绝不由重发对账。** 超出认领租约（默认 10 分钟）的 claim 由控制面的定时对账器结算为 `unknown`（Harness `settle_delivery`，`outcome: unknown`）：适配器可能在发送后死亡。结算之前，每个过期 claim 的台账先与其已提交记录实际到达的状态收敛——应答丢失的回执落成带 provider id 的 `delivered`，应答丢失的 `claim_delivery` 把台账推进到 `sending`——于是任何恢复入口都不会对一次已提交的步骤保持盲目。该路径上不重发任何内容（参考设计第 14 节第 5 项）。Session 不再 `ACTIVE` 的 `planned` 交付已没有 writer 可以修订它：claim 跳过非活动 Session，记录保持可见的 `planned`。
 11. **重发是新链、显式且带警告。** `deliveries/{deliveryId}:resend` 只对 `unknown`、`rejected` 或 `partial` 后 `unknown` 的交付准入；Harness 开启 `<deliveryId>:r<n>`（`planned`），使用相同的路由钉、`sourceTurnId` 与 `contentRef`，只携带没有回执的分段（序号从 0 重新致密编号，分段身份保留）。原记录不动。应答携带 `possibleDuplicate: true`。v1 只在可信适配器面暴露它；公开 mutation 需要自己的契约工作。
 12. **启用按适配器划定范围。** `channel_route` 与 `channel_delivery` 加入 `MANAGED_SESSION_ENABLED_DOMAINS`，旁边新增门控 `MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS = ['email']`，由 authority 在每个路由首修订上检查：读取已提交的 `policyRef` 资源（`managed-channel-policy`：`{ adapter, senderPolicy, allowedSenders, dispatchMode }`），拒绝不在列表中的适配器。交付只在已提交、非终态且修订与所钉 `routeRevision` 一致的路由上准入（两种语言新增的跨记录检查），因此交付被传递地门控。服务端优先的顺序保持：Java store 自 H5a 起校验两个记录体，并在本切片获得跨记录检查。
-13. **可信适配器面是内部的。** `/internal/managed-channels/v1/channels/{channelId}`（注册/连接、`disconnect`）、`.../inbound`、`.../deliveries:claim`、`.../deliveries/{deliveryId}:receipt` 与 `.../deliveries/{deliveryId}:resend` 像 Session store 一样挂在内部监听器上，从 `X-Qwen-Tenant-Id` 解析租户（过滤器增加该前缀），只有部署内的可信 channel 工作者可达。注册提供所属 actor、平台、账号身份与代数、Workspace 选择与 policy；重新配键上报更高的代数。
+13. **可信适配器面是内部的。** `/internal/managed-channels/v1/channels/{channelId}`（注册/连接、`disconnect`）、`.../inbound`、`.../deliveries:claim`、`.../deliveries/{deliveryId}:receipt` 与 `.../deliveries/{deliveryId}:resend` 像 Session store 一样挂在内部监听器上，从 `X-Qwen-Tenant-Id` 解析租户（过滤器增加该前缀），只有部署内的可信 channel 工作者可达。隔离在启动期强制执行：这组路由仅凭租户头认证，因此 broker 拒绝在开启 `qwen.managed-agent.channels.enabled` 而未配置隔离的 `qwen.managed-agent.internal-server.port` 时运行。注册提供所属 actor、平台、账号身份与代数、Workspace 选择与 policy；重新配键上报更高的代数。
 14. **email 适配器的 managed 模式是复用 Legacy 解析辅助的独立循环，Legacy 路径不变。** `ManagedEmailAdapter` 复用 `message.ts`（发送者接受、有界文本、回复路由）与 IMAP/SMTP 模块，维护自己的加锁状态（`uidValidity`、代数、`lastUid`、带已准入 `inputId` 的在途 `pending` 事件、在途 `outbound` 分段），并驱动流水线：轮询 → ingress 事件 → 控制面 → 持久化准入；claim → SMTP 发送 → 回执（`accepted` 携带生成的 Message-ID，SMTP 5xx 应答为 `rejected`，其余含糊情况为 `unknown`）。`uidValidity` 变化推进代数并重置游标。CLI 以 `qwen channel managed-email` 暴露它，这是实验性子命令，Legacy 的 `qwen channel start` 永远不会选中它。
 
 ## 流水线：逐修订
@@ -57,22 +57,22 @@ H5a 钉住了*可以提交什么*：以 `routeId` 为链身份、各修订携带
 | 7    | 控制面 `claim`           | 台账 `planned`；Harness `claim_delivery` → 修订 `running`/`sending`；台账 `sending`                                                           |
 | 8    | 适配器                   | 逐段 SMTP 发送，发送前持久化 `outbound`                                                                                                       |
 | 9    | 控制面 `receipt`         | Harness `segment_receipt` → `partial`/`delivered`（run `settled`），或 `settle_delivery` → `unknown`/`rejected`；台账带 provider 回执随之推进 |
-| 10   | 控制面对账器             | 租约过期的 `sending` → `unknown`；非活动 Session 的 `planned` 交付被 claim 跳过并保持可见                                                     |
+| 10   | 控制面对账器             | 租约过期的 claim 台账先与已提交记录收敛（携带回执）；仍为 `sending` 的 → `unknown`；非活动 Session 的 `planned` 交付被 claim 跳过并保持可见   |
 | 11   | 适配器 / 操作者 `resend` | 新链 `<deliveryId>:r<n>` `planned` 携带未发送分段；返回警告                                                                                   |
 
 每次提交让每条状态线最多前进一个允许的步骤（H0b 后继规则），因此任意两行之间的崩溃都从最后提交的行对账；每个控制面动词在行动前重读已提交的记录，并把"已在该状态"视为自己的重放。
 
 ## 配额
 
-| 界限                | 值                                                           | 拒绝                                                      |
-| ------------------- | ------------------------------------------------------------ | --------------------------------------------------------- |
-| 入站文本            | ≤ 32,000 字符（email `maxTextLength` 默认值），信封 ≤ 64 KiB | 适配器截断文本；超限信封以 `channel_input_too_large` 拒绝 |
-| 附件                | 每事件 ≤ 16 个；每个内联暂存 ≤ 64 KiB，更大者列为 `omitted`  | 无（可见的省略）                                          |
-| 回复分段            | ≤ 48 KiB，email 为一个分段                                   | 截断并附提示                                              |
-| 每交付分段数        | 1–64（契约）                                                 | 规划拒绝                                                  |
-| 认领租约            | 10 分钟（`qwen.managed-agent.channels.claim-lease`）         | 对账器结算为 `unknown`                                    |
-| 认领批量            | 每次调用 ≤ 16 个交付                                         | —                                                         |
-| 每 channel 在途入站 | ≤ 32 个待处理事件（适配器）                                  | 适配器停止准入直到有一个结算                              |
+| 界限                | 值                                                                                                                                  | 拒绝                                                                 |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| 入站文本            | ≤ 32,000 字符（email `maxTextLength` 默认值），信封 ≤ 64 KiB                                                                        | 适配器截断文本；超限信封以 `channel_input_too_large` 拒绝            |
+| 附件                | 每事件 ≤ 16 个；适配器上传上限 1,500,000 解码字节（线路的 2,000,000 字符 base64 上限）；每个内联暂存 ≤ 64 KiB，更大者列为 `omitted` | 超出上传上限：由适配器过滤（线路上不可准入）；其余：无（可见的省略） |
+| 回复分段            | ≤ 48 KiB，email 为一个分段                                                                                                          | 截断并附提示                                                         |
+| 每交付分段数        | 1–64（契约）                                                                                                                        | 规划拒绝                                                             |
+| 认领租约            | 10 分钟（`qwen.managed-agent.channels.claim-lease`）                                                                                | 对账器结算为 `unknown`                                               |
+| 认领批量            | 每次调用 ≤ 16 个交付                                                                                                                | —                                                                    |
+| 每 channel 在途入站 | ≤ 32 个待处理事件（适配器）                                                                                                         | 适配器停止准入直到有一个结算                                         |
 
 ## 非目标
 

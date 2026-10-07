@@ -187,6 +187,7 @@ function settleTurn(
   turnId: string,
   text: string,
   state: 'completed' | 'error' | 'cancelled' = 'completed',
+  parts?: Array<{ text: string; thought?: boolean }>,
 ): void {
   const base = {
     parentUuid: null,
@@ -208,7 +209,7 @@ function settleTurn(
       uuid: `${turnId}:assistant`,
       type: 'assistant',
       daemonPromptId: turnId,
-      message: { role: 'model', parts: [{ text }] },
+      message: { role: 'model', parts: parts ?? [{ text }] },
     } as ChatRecord,
     {
       ...base,
@@ -458,6 +459,46 @@ describe('HostedChannelSession outbound', () => {
       settleTurn(harness, empty, '   ');
       expect(await channels.planReply(empty)).toBeUndefined();
       expect(await channels.reconcileReplies()).toEqual([]);
+    });
+  });
+
+  it('excludes thought parts from the planned reply', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (channels, authority) => {
+      const inputId = (await channels.submitInput(inbound())).inputId;
+      settleTurn(harness, inputId, 'unused', 'completed', [
+        { text: 'private reasoning marker', thought: true },
+        { text: 'Public answer.' },
+      ]);
+      await settleInJournal(authority, inputId);
+      const planned = (await channels.planReply(inputId))!;
+      const claimed = await channels.claim(planned.deliveryId);
+      // Reasoning the model marked as thinking never becomes mail text.
+      expect(claimed.reply.text).toBe('Public answer.');
+      expect(claimed.segments).toEqual([
+        {
+          ordinal: 0,
+          segmentId: `${planned.deliveryId}:0`,
+          text: 'Public answer.',
+        },
+      ]);
+    });
+  });
+
+  it('plans a reply the publish bound can take, truncated on plan', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (channels, authority) => {
+      const inputId = (await channels.submitInput(inbound())).inputId;
+      settleTurn(harness, inputId, 'x'.repeat(100_000));
+      await settleInJournal(authority, inputId);
+      const planned = (await channels.planReply(inputId))!;
+      const claimed = await channels.claim(planned.deliveryId);
+      // The reply resource carries the planned segment, not the raw 100 KB
+      // turn, so publishing it stays inside the inline bound.
+      expect(claimed.reply.text).toContain('Reply truncated');
+      expect(claimed.reply.text.length).toBeLessThanOrEqual(48 * 1024);
+      expect(claimed.segments).toHaveLength(1);
+      expect(claimed.segments[0]!.text).toBe(claimed.reply.text);
     });
   });
 

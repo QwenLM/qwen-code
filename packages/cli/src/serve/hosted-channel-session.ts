@@ -385,20 +385,27 @@ export class HostedChannelSession {
           entry.type === 'assistant' && entry.daemonPromptId === turnId,
       )
       .flatMap((entry) =>
-        (entry.message?.parts ?? []).map((part) =>
-          typeof part.text === 'string' ? part.text : '',
-        ),
+        (entry.message?.parts ?? [])
+          .filter((part) => !part.thought)
+          .map((part) => (typeof part.text === 'string' ? part.text : '')),
       )
       .join('')
       .trim();
     if (text.length === 0) return undefined;
-    const reply: ChannelReply = { text, replyContext: envelope.replyContext };
+    // Publish the planned segment text, not the raw turn output: the reply
+    // resource must satisfy the inline bound itself, or a long answer
+    // would fail the publish before the truncation plan could truncate it.
+    const segmentPlan = planChannelSegments(text);
+    const reply: ChannelReply = {
+      text: segmentPlan.join(''),
+      replyContext: envelope.replyContext,
+    };
     const contentRef = await this.store.resources.publish(
       CHANNEL_RESOURCE_KINDS.reply,
       encodeChannelReply(reply),
     );
     const segments = [];
-    for (const [ordinal, part] of planChannelSegments(text).entries()) {
+    for (const [ordinal, part] of segmentPlan.entries()) {
       segments.push({
         segmentId: `${deliveryId}:${ordinal}`,
         contentRef: await this.store.resources.publish(

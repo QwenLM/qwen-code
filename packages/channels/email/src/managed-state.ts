@@ -27,10 +27,26 @@ export interface ManagedPendingEvent {
   inputId?: string;
 }
 
+/** The outcome one segment's send proved, persisted before its receipt. */
+export type ManagedReceipt =
+  | {
+      outcome: 'accepted';
+      ordinal: number;
+      providerMessageId: string;
+      acceptedAt: number;
+    }
+  | { outcome: 'unknown' | 'rejected' };
+
 export interface ManagedOutboundSegment {
   deliveryId: string;
   ordinal: number;
   messageId: string;
+  /**
+   * Set once the provider answered. A crash before the control plane's
+   * own answer replays this receipt idempotently — never a uniform
+   * unknown — so a delivery the server already settled still converges.
+   */
+  receipt?: ManagedReceipt;
 }
 
 export interface ManagedEmailState {
@@ -50,6 +66,24 @@ const isUid = (value: unknown): value is number =>
   Number.isSafeInteger(value) &&
   Number(value) > 0 &&
   Number(value) <= 0xffffffff;
+
+function validManagedReceipt(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const receipt = value as Partial<ManagedReceipt>;
+  if (receipt.outcome === 'unknown' || receipt.outcome === 'rejected')
+    return Object.keys(receipt).length === 1;
+  return (
+    receipt.outcome === 'accepted' &&
+    Number.isSafeInteger(receipt.ordinal) &&
+    (receipt.ordinal as number) >= 0 &&
+    typeof receipt.providerMessageId === 'string' &&
+    receipt.providerMessageId.length > 0 &&
+    receipt.providerMessageId.length <= 512 &&
+    Number.isSafeInteger(receipt.acceptedAt) &&
+    (receipt.acceptedAt as number) >= 0
+  );
+}
 
 export function validManagedState(value: unknown): value is ManagedEmailState {
   if (!value || typeof value !== 'object') return false;
@@ -90,7 +124,8 @@ export function validManagedState(value: unknown): value is ManagedEmailState {
         entry.deliveryId.length > 0 &&
         Number.isSafeInteger(entry.ordinal) &&
         entry.ordinal >= 0 &&
-        isMessageId(entry.messageId),
+        isMessageId(entry.messageId) &&
+        validManagedReceipt(entry.receipt),
     )
   );
 }

@@ -77,7 +77,7 @@ public class ManagedChannelService {
     static final String INPUT_PREFIX = "chin-";
     static final String ROUTE_PREFIX = "chrt-";
     static final String CREATION_PREFIX = "chcr-";
-    private static final int MAX_BINDINGS_PER_CLAIM = 64;
+    private static final int MAX_CLAIM_SESSIONS = 64;
     private static final int RECONCILE_LIMIT = 50;
     private static final String SEPARATOR = "\u0000";
 
@@ -239,17 +239,15 @@ public class ManagedChannelService {
                     "The channel is not connected.");
         }
         List<ClaimedDelivery> claimed = new ArrayList<>();
-        for (ChannelBinding binding : instances.listBindings(tenantId,
-                channelId, MAX_BINDINGS_PER_CLAIM)) {
+        // The discovery query, not a window of the newest bindings, is what
+        // makes every owed delivery reachable however old its thread is.
+        for (String sessionId : instances.listSessionsWithPendingDeliveries(
+                tenantId, channelId, MAX_CLAIM_SESSIONS)) {
             if (claimed.size() >= limit) {
                 break;
             }
-            if (!"ACTIVE".equals(instances.sessionStatus(tenantId,
-                    binding.sessionId()))) {
-                continue;
-            }
             for (PendingDelivery pending : instances.findPendingDeliveries(
-                    tenantId, binding.sessionId(), limit - claimed.size())) {
+                    tenantId, sessionId, limit - claimed.size())) {
                 try {
                     claimed.add(claimOne(tenantId, channelId, pending));
                 } catch (RuntimeException error) {
@@ -335,32 +333,20 @@ public class ManagedChannelService {
     /**
      * A claim that outlived its lease without a receipt: the adapter may
      * have died after sending, so the outcome is unknown — recorded, never
-     * resent (reference design section 14, item 5).
+     * resent (reference design section 14, item 5). Before anything is
+     * settled, each expired claim's ledger converges with whatever the
+     * committed record already reached while a commit answer was being
+     * lost, so a delivered delivery is never requested unknown and a
+     * committed claim is never invisible to both recovery entry points.
      */
     @Scheduled(fixedDelayString =
             "${qwen.managed-agent.channels.scan-delay:30s}")
     public void reconcile() {
         long before = clock.get() - claimLease.toMillis();
-        for (ChannelClaim claim : instances.findExpiredSendingClaims(before,
+        for (ChannelClaim claim : instances.findExpiredClaims(before,
                 RECONCILE_LIMIT)) {
             try {
-                if (!"ACTIVE".equals(instances.sessionStatus(claim.tenantId(),
-                        claim.sessionId()))) {
-                    // No writer is left to revise the record: the ledger,
-                    // the public read model, records the unknown outcome.
-                    stepLedger(claim.tenantId(), claim.channelId(),
-                            claim.deliveryId(), "unknown", null);
-                    continue;
-                }
-                Map<String, Object> body = new LinkedHashMap<>();
-                body.put("operationId", UUID.randomUUID().toString());
-                body.put("kind", "settle_delivery");
-                body.put("deliveryId", claim.deliveryId());
-                body.put("outcome", "unknown");
-                Map<String, Object> result = harness.runChannelOperation(
-                        claim.tenantId(), claim.sessionId(), body);
-                stepLedger(claim.tenantId(), claim.channelId(),
-                        claim.deliveryId(), deliveryState(result), null);
+                reconcileClaim(claim);
             } catch (RuntimeException error) {
                 LOG.warn("channel claim reconcile failed tenant={} channel={}"
                         + " delivery={} failure={}", claim.tenantId(),
@@ -368,6 +354,69 @@ public class ManagedChannelService {
                         error.getMessage());
             }
         }
+    }
+
+    private void reconcileClaim(ChannelClaim claim) {
+        String tenantId = claim.tenantId();
+        String channelId = claim.channelId();
+        String deliveryId = claim.deliveryId();
+        // Converge the ledger with the committed record first: a receipt
+        // the answer was lost for still landed, and a claim_delivery commit
+        // the ledger never saw still moved the record to sending.
+        instances.findDeliveryRecord(tenantId, claim.sessionId(), deliveryId)
+                .ifPresent(record -> {
+                    String state = record.deliveryState();
+                    if (!"planned".equals(state)) {
+                        stepLedger(tenantId, channelId, deliveryId, state,
+                                "delivered".equals(state)
+                                        ? committedProviderReceipt(tenantId,
+                                                record)
+                                        : null);
+                    }
+                });
+        Optional<ChannelDelivery> ledger = deliveries.find(tenantId,
+                channelId, deliveryId);
+        if (ledger.isEmpty() || !"sending".equals(ledger.get().state())) {
+            // Nothing provably in flight here: a delivery whose claim never
+            // committed sits in the pending view for a live adapter, and a
+            // terminal row needs no recovery.
+            return;
+        }
+        if (!"ACTIVE".equals(instances.sessionStatus(tenantId,
+                claim.sessionId()))) {
+            // No writer is left to revise the record: the ledger, the
+            // public read model, records the unknown outcome.
+            stepLedger(tenantId, channelId, deliveryId, "unknown", null);
+            return;
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("operationId", UUID.randomUUID().toString());
+        body.put("kind", "settle_delivery");
+        body.put("deliveryId", deliveryId);
+        body.put("outcome", "unknown");
+        Map<String, Object> result = harness.runChannelOperation(tenantId,
+                claim.sessionId(), body);
+        stepLedger(tenantId, channelId, deliveryId, deliveryState(result),
+                null);
+    }
+
+    /** The last provider receipt the committed record holds, when any. */
+    private String committedProviderReceipt(String tenantId,
+            ChannelInstanceStore.DeliveryRecordState record) {
+        String json = instances.readResource(tenantId,
+                record.recordResourceId());
+        if (json == null) {
+            return null;
+        }
+        JsonNode tree = readJson(json, "channel delivery record");
+        String receipt = null;
+        for (JsonNode segment : tree.path("segments")) {
+            JsonNode node = segment.path("receipt");
+            if (node.isObject() && node.path("providerMessageId").isTextual()) {
+                receipt = node.path("providerMessageId").asText();
+            }
+        }
+        return receipt;
     }
 
     // --- public reads ---

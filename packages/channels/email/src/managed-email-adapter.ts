@@ -17,7 +17,9 @@ import {
   ManagedEmailStateStore,
   digest,
 } from './managed-state.js';
-import type { ManagedEmailState } from './managed-state.js';
+import type { ManagedEmailState, ManagedReceipt } from './managed-state.js';
+
+export type { ManagedReceipt } from './managed-state.js';
 
 // H5b/H5c of #12827: the email reference adapter on the managed path. It
 // never drives a model: an inbound message becomes one platform event the
@@ -74,15 +76,6 @@ export interface ManagedClaimedDelivery {
   segments: Array<{ ordinal: number; segmentId: string; text: string }>;
 }
 
-export type ManagedReceipt =
-  | {
-      outcome: 'accepted';
-      ordinal: number;
-      providerMessageId: string;
-      acceptedAt: number;
-    }
-  | { outcome: 'unknown' | 'rejected' };
-
 /** The trusted control-plane surface the adapter talks to. */
 export interface ManagedChannelControlPlane {
   register(request: {
@@ -120,6 +113,15 @@ export interface ManagedEmailAdapterOptions {
 
 const CLAIM_BATCH = 16;
 const SUBMIT_RETRY_MS = 5_000;
+
+/**
+ * The control plane carries an attachment as one base64 string bounded at
+ * 2,000,000 characters — 1,500,000 decoded bytes — so an upload beyond
+ * that can never be admitted and meets a deterministic 400. The upload
+ * bound is clamped to what the wire can carry, and the funnel lists
+ * anything over the inline staging bound as `omitted: 'too_large'`.
+ */
+const MAX_UPLOAD_ATTACHMENT_BYTES = 1_500_000;
 
 export class ManagedEmailAdapter {
   readonly settings: EmailSettings;
@@ -482,7 +484,14 @@ export class ManagedEmailAdapter {
     const text = boundedText(mail.text ?? '', this.settings.maxTextLength);
     const attachments = mail.attachments
       .slice(0, 16)
-      .filter((part) => part.size <= this.settings.maxAttachmentBytes)
+      .filter(
+        (part) =>
+          part.size <=
+          Math.min(
+            this.settings.maxAttachmentBytes,
+            MAX_UPLOAD_ATTACHMENT_BYTES,
+          ),
+      )
       .map((part) => ({
         fileName: (part.filename ?? 'attachment')
           .replace(/[\r\n\0]/g, '')
@@ -546,6 +555,25 @@ export class ManagedEmailAdapter {
         );
       }
     } catch (error) {
+      const status = (error as { status?: unknown }).status;
+      if (
+        typeof status === 'number' &&
+        (status === 400 || status === 403 || status === 409)
+      ) {
+        // A deterministic refusal (a failing body, a closed actor scope, a
+        // dead route or generation): re-driving the identical event can
+        // never converge, and a claim that outlives the pending limit
+        // would stall the whole mailbox, so the event is dropped visibly
+        // instead. Everything else — a lost answer, a reset listener, a
+        // vanished registration the next connect restores — re-drives.
+        this.log(
+          `Managed email admission of ${event.platformEventId} was refused (${status}); the message is skipped.`,
+        );
+        state.pending = state.pending.filter((entry) => entry.uid !== uid);
+        this.pendingEvents.delete(uid);
+        this.persist();
+        return;
+      }
       // The claim stays pending with its event; the next poll re-drives it.
       this.log(
         `Managed email admission of ${event.platformEventId} did not answer; it will be re-driven: ${String(error)}`,
@@ -625,7 +653,14 @@ export class ManagedEmailAdapter {
       text: boundedText(mail.text ?? '', this.settings.maxTextLength),
       attachments: mail.attachments
         .slice(0, 16)
-        .filter((part) => part.size <= this.settings.maxAttachmentBytes)
+        .filter(
+          (part) =>
+            part.size <=
+            Math.min(
+              this.settings.maxAttachmentBytes,
+              MAX_UPLOAD_ATTACHMENT_BYTES,
+            ),
+        )
         .map((part) => ({
           fileName: (part.filename ?? 'attachment')
             .replace(/[\r\n\0]/g, '')
@@ -646,7 +681,14 @@ export class ManagedEmailAdapter {
   private async reportOrphanedOutbound(): Promise<void> {
     const state = this.state!;
     for (const entry of [...state.outbound]) {
-      await this.controlPlane.receipt(entry.deliveryId, { outcome: 'unknown' });
+      // A segment whose send produced a persisted receipt replays that
+      // receipt — the control plane may already hold it (its answer was
+      // lost) and settles idempotently. Only a segment whose send never
+      // produced an outcome settles unknown.
+      await this.controlPlane.receipt(
+        entry.deliveryId,
+        entry.receipt ?? { outcome: 'unknown' },
+      );
       state.outbound = state.outbound.filter(
         (candidate) => candidate !== entry,
       );
@@ -746,6 +788,16 @@ export class ManagedEmailAdapter {
             ? { outcome: 'rejected' }
             : { outcome: 'unknown' };
       }
+      // The receipt is persisted before it crosses the wire: a crash in
+      // the delivery's answer replays this outcome on restart instead of
+      // settling a delivered delivery unknown.
+      const entry = state.outbound.find(
+        (candidate) =>
+          candidate.deliveryId === delivery.deliveryId &&
+          candidate.ordinal === segment.ordinal,
+      );
+      if (entry) entry.receipt = outcome;
+      this.persist();
       await this.controlPlane.receipt(delivery.deliveryId, outcome);
       state.outbound = state.outbound.filter(
         (entry) =>
