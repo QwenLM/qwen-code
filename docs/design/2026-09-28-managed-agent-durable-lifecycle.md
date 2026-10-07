@@ -224,6 +224,21 @@ reading byte-identical to a healthy retry. The recovery scan still re-drives
 both, so publishing bounds nothing; it only makes an unbounded wait legible
 to the operator who has to clear its cause.
 
+`BLOCKED` is a published state, not a hold. The recovery scan's deliverable
+query selects every lifecycle operation — anything that is not an
+`ACTION_RESPONSE` — whose `delivery_state` is `PENDING` or `BLOCKED` and
+whose `available_at` has passed, and `claimOperation` accepts the same two
+states, so publishing a wait never removes its row from the scan; the backoff
+written into `available_at` is the only pacing. The population is
+deliberately not narrowed by operation kind or Session status: only close and
+delete are ever delivered as lifecycle operations, since an archive completes
+at admission, and both publish waits. A scan restricted to some blocked
+shapes — close only, or a delete whose Session already reached `closed` or
+`archived` — would strand exactly the rows this publication creates, among
+them a delete of an active Session waiting on a residual writer, and nothing
+else would ever pick them up. `recovery_blocked` therefore labels a row that
+is still being retried; it is neither a terminal state nor a pause.
+
 A budget-terminated operation leaves its Session in the pending status
 (`closing` or `deleting`) with the failure code on the operation row, and no
 route admits a fresh operation onto that status today: once the cause the
