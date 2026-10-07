@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  attachToolOutputProvenance,
+  measureToolOutput,
+} from '../tools/tool-output-size.js';
+import { logToolResultSize } from '../telemetry/loggers.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type OpenAI from 'openai';
 import type {
@@ -137,6 +142,7 @@ const {
 }));
 
 vi.mock('../telemetry/loggers.js', () => ({
+  logToolResultSize: vi.fn(),
   logContentRetry: mockLogContentRetry,
   logContentRetryFailure: mockLogContentRetryFailure,
   logProtocolTagSanitized: mockLogProtocolTagSanitized,
@@ -11824,6 +11830,184 @@ describe('LlmChat', async () => {
   // #9454: API counts describe the serialization of the route (model + auth
   // + endpoint) that produced them. /model keeps this LlmChat, so the old
   // route's counts must not anchor admission, clamp or compression.
+  describe('pressure-aware tool submission', () => {
+    beforeEach(() => {
+      mockConfig.getTruncateToolOutputThreshold = () => 80000;
+      mockConfig.getTruncateToolOutputLines = () => 2000;
+      mockConfig.isTruncateToolOutputThresholdExplicit = () => false;
+      mockConfig.isTruncateToolOutputLinesExplicit = () => false;
+      mockConfig.getToolOutputBatchBudget = () => 200000;
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        model: 'test-model',
+        contextWindowSize: 1000000,
+      });
+      vi.spyOn(chat, 'tryCompress').mockResolvedValue({
+        compressionStatus: CompressionStatus.NOOP,
+        originalTokenCount: 0,
+        newTokenCount: 0,
+      });
+    });
+    const result = () =>
+      attachToolOutputProvenance(
+        [
+          fnResponse(
+            'shell',
+            { output: 'x'.repeat(20000) },
+            'anonymous-result',
+          ),
+        ],
+        {
+          callId: 'anonymous-result',
+          toolName: 'shell',
+          toolType: 'native',
+          promptId: 'p',
+          rawSize: { chars: 20000, estimatedTokens: 5000 },
+          persistedOutputFiles: [],
+          truncated: false,
+        },
+      );
+    const injected = (index: number) => requestAt(index).contents as Content[];
+    const resultChars = (index: number) =>
+      measureToolOutput(
+        injected(index)
+          .flatMap((entry) => entry.parts ?? [])
+          .filter((part) => part.functionResponse),
+      ).chars;
+
+    it('shrinks only after a fresh same-chat usage report and records the final request once', async () => {
+      mockStreamsOnce(
+        textStream('ok', { promptTokenCount: 970000, totalTokenCount: 970010 }),
+        textStream('done'),
+        textStream('again'),
+      );
+      await sendDrain('start', 'first');
+      await sendDrain(result(), 'second');
+      expect(resultChars(1)).toBeLessThan(20000);
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection'),
+      ).toHaveLength(1);
+      const event = vi
+        .mocked(logToolResultSize)
+        .mock.calls.find(([, entry]) => entry.layer === 'injection')![1];
+      expect(event.raw_content_length).toBe(20000);
+      expect(event.injected_content_length).toBe(resultChars(1));
+      await sendDrain('next', 'third');
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, entry]) => entry.layer === 'injection'),
+      ).toHaveLength(1);
+    });
+
+    it('shares pressure capacity across parallel results and preserves user steering', async () => {
+      mockStreamsOnce(
+        textStream('ok', { promptTokenCount: 970000, totalTokenCount: 970000 }),
+        textStream('done'),
+      );
+      await sendDrain('start', 'first');
+      const second = attachToolOutputProvenance(
+        [fnResponse('read_file', { output: 'y'.repeat(20000) }, 'second')],
+        {
+          callId: 'second',
+          toolName: 'read_file',
+          toolType: 'native',
+          promptId: 'p',
+          rawSize: { chars: 20000, estimatedTokens: 5000 },
+          persistedOutputFiles: [],
+          truncated: false,
+        },
+      );
+      await sendDrain(
+        [...result(), ...second, { text: 'Preserve this user instruction.' }],
+        'second',
+      );
+      expect(resultChars(1)).toBeLessThan(20000);
+      expect(
+        injected(1)
+          .flatMap((entry) => entry.parts ?? [])
+          .some((part) => part.text === 'Preserve this user instruction.'),
+      ).toBe(true);
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection'),
+      ).toHaveLength(2);
+    });
+
+    it('counts a retried generator request once', async () => {
+      mockRetryWithBackoff.mockImplementation(async (apiCall) => {
+        try {
+          return await apiCall();
+        } catch {
+          return apiCall();
+        }
+      });
+      streamMock()
+        .mockRejectedValueOnce(new Error('temporary transport failure'))
+        .mockResolvedValueOnce(textStream('done'));
+      await sendDrain(result(), 'retry');
+      expect(streamMock()).toHaveBeenCalledTimes(2);
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection'),
+      ).toHaveLength(1);
+    });
+
+    it.each(['explicit', 'estimated', 'restored', 'foreign', 'other-chat'])(
+      'keeps static output for %s ownership',
+      async (mode) => {
+        mockStreamsOnce(
+          textStream('ok', {
+            promptTokenCount: 970000,
+            totalTokenCount: 970000,
+          }),
+          textStream('done'),
+        );
+        await sendDrain('start', 'first');
+        let target = chat;
+        if (mode === 'explicit') {
+          mockConfig.isTruncateToolOutputThresholdExplicit = () => true;
+          mockConfig.isTruncateToolOutputLinesExplicit = () => true;
+        }
+        if (mode === 'estimated') chat.setLastPromptTokenCount(970000, true);
+        if (mode === 'restored') chat.setHistory(chat.getHistory());
+        if (mode === 'foreign')
+          vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
+            'other-route',
+          );
+        if (mode === 'other-chat') target = newChat();
+        vi.spyOn(target, 'tryCompress').mockResolvedValue({
+          compressionStatus: CompressionStatus.NOOP,
+          originalTokenCount: 0,
+          newTokenCount: 0,
+        });
+        await sendDrain(result(), 'second', target);
+        expect(resultChars(1)).toBe(20000);
+      },
+    );
+
+    it('does not count a request cancelled before generator dispatch', async () => {
+      const controller = new AbortController();
+      controller.abort();
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: result(), config: { abortSignal: controller.signal } },
+        'cancelled',
+      );
+      await expect(drain(stream)).rejects.toThrow();
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(
+        vi
+          .mocked(logToolResultSize)
+          .mock.calls.filter(([, event]) => event.layer === 'injection'),
+      ).toHaveLength(0);
+    });
+  });
+
   describe('route-scoped token counts (#9454)', () => {
     const switchRoute = (routeKey: string) => {
       vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(routeKey);

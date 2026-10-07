@@ -230,6 +230,8 @@ export function estimatePartChars(
       total += output.length;
     } else if (typeof error === 'string') {
       total += error.length;
+    } else {
+      total += JSON.stringify(part.functionResponse.response ?? {}).length;
     }
     const nested = getFunctionResponseParts(part);
     if (nested) {

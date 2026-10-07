@@ -4,6 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  attachToolOutputProvenance,
+  getToolOutputProvenance,
+  measureToolOutput,
+  pressureAwareToolBudget,
+  type ToolOutputProvenance,
+} from '../tools/tool-output-size.js';
+import { logToolResultSize } from '../telemetry/loggers.js';
+import { ToolResultSizeEvent } from '../telemetry/types.js';
 // DISCLAIMER: This is a copied version of https://github.com/googleapis/js-genai/blob/main/src/chats.ts with the intention of working around a key bug
 // where function responses are not treated as "valid" responses: https://b.corp.google.com/issues/420354090
 
@@ -18,7 +27,10 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent, FinishReason } from './genai-compat.js';
-import { enforceFunctionResponseBudget } from '../tools/tool-response-finalizer.js';
+import {
+  finalizeToolResponses,
+  enforceFunctionResponseBudget,
+} from '../tools/tool-response-finalizer.js';
 import {
   retryWithBackoff,
   isUnattendedMode,
@@ -103,6 +115,7 @@ import {
   replaceImagePayloadsInPlace,
 } from '../services/image-payload-references.js';
 import {
+  CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR,
   estimateContentTokens,
   estimatePromptTokens,
   getUsageOutputTokenCountForPromptEstimate,
@@ -2193,6 +2206,12 @@ export class LlmChat {
    * (which intentionally don't write to the global telemetry singleton) can
    * still make compaction decisions based on their *own* context size.
    */
+  private toolBudgetUsageAnchor?: {
+    routeKey: string;
+    tokens: number;
+    history: Content[];
+  };
+  private readonly injectedToolResults = new WeakSet<ToolOutputProvenance>();
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountIsEstimated = false;
 
@@ -2612,6 +2631,7 @@ export class LlmChat {
    * inherit this chat's last response metadata.
    */
   setLastPromptTokenCount(count: number, isEstimated = false): void {
+    this.toolBudgetUsageAnchor = undefined;
     this.lastPromptTokenCount = count;
     this.lastPromptTokenCountIsEstimated = isEstimated;
     this.lastOutputTokenCount = 0;
@@ -2647,6 +2667,7 @@ export class LlmChat {
     outputTokenCount: number,
     isEstimated = false,
   ): void {
+    this.toolBudgetUsageAnchor = undefined;
     this.lastPromptTokenCount = Number.isFinite(promptTokenCount)
       ? Math.max(0, promptTokenCount)
       : 0;
@@ -3095,6 +3116,151 @@ export class LlmChat {
       // gap where `lastPromptTokenCount === 0` and the gate would otherwise
       // see only the stale prior-turn count (0).
       let userContent = createUserContent(params.message);
+      // Restored responses have no original-size provenance. Never infer it from a preview.
+      userContent = {
+        ...userContent,
+        parts: userContent.parts?.map((part) =>
+          part.functionResponse && !getToolOutputProvenance(part)
+            ? attachToolOutputProvenance([part], {
+                callId: part.functionResponse.id ?? '',
+                toolName: part.functionResponse.name ?? '',
+                promptId: prompt_id,
+                toolType: part.functionResponse.name?.startsWith('mcp__')
+                  ? 'mcp'
+                  : 'native',
+                truncated: false,
+              })[0]
+            : part,
+        ),
+      };
+      // Only this chat's last successful report can authorize pressure reduction.
+      const anchor = this.toolBudgetUsageAnchor;
+      const knownWindow = cgConfigForThresholds?.contextWindowSize;
+      if (
+        anchor &&
+        anchor.routeKey === requestRouteKey &&
+        typeof knownWindow === 'number' &&
+        Number.isFinite(knownWindow) &&
+        knownWindow > 0 &&
+        anchor.history.length <= this.history.length &&
+        anchor.history.every(
+          (content, index) => content === this.history[index],
+        )
+      ) {
+        const newNonToolContent: Content[] = [
+          ...this.history.slice(anchor.history.length),
+          {
+            ...userContent,
+            parts: userContent.parts?.filter((part) => !part.functionResponse),
+          },
+        ];
+        const imageEstimate = resolveSlimmingConfig(
+          this.config.getChatCompression(),
+        ).imageTokenEstimate;
+        const hardCeiling = computeThresholds(
+          knownWindow,
+          this.config.getAutoCompactThreshold(),
+        ).hard;
+        const resultOverhead = (userContent.parts ?? [])
+          .filter((part) => part.functionResponse)
+          .reduce((total, part) => {
+            const size = measureToolOutput(part, imageEstimate);
+            return (
+              total +
+              Math.max(0, size.estimatedTokens - Math.ceil(size.chars / 4))
+            );
+          }, 0);
+        const remaining =
+          (hardCeiling -
+            anchor.tokens -
+            Math.ceil(
+              estimateContentTokens(newNonToolContent, imageEstimate) *
+                CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR,
+            ) -
+            Math.ceil(resultOverhead * CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR) -
+            2) /
+          CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR;
+        const limits = pressureAwareToolBudget(
+          this.config.getTruncateToolOutputThreshold(),
+          this.config.getTruncateToolOutputLines(),
+          remaining,
+          this.config.isTruncateToolOutputThresholdExplicit?.() ?? false,
+          this.config.isTruncateToolOutputLinesExplicit?.() ?? false,
+        );
+        const reduced: Part[] = [];
+        for (const part of userContent.parts ?? []) {
+          if (
+            !part.functionResponse ||
+            (limits.chars >= this.config.getTruncateToolOutputThreshold() &&
+              limits.lines >= this.config.getTruncateToolOutputLines())
+          ) {
+            reduced.push(part);
+            continue;
+          }
+          const provenance = getToolOutputProvenance(part);
+          const [finalized] = await finalizeToolResponses(
+            this.config,
+            [
+              {
+                callId:
+                  provenance?.callId ??
+                  part.functionResponse.id ??
+                  'context-result',
+                toolName: part.functionResponse.name ?? '',
+                responseParts: [part],
+                persistedOutputFiles: provenance?.persistedOutputFiles,
+              },
+            ],
+            undefined,
+            true,
+            false,
+            {
+              budget: limits.chars,
+              source: 'context',
+              lines:
+                provenance?.budgetSource === 'per_tool'
+                  ? undefined
+                  : limits.lines,
+            },
+          );
+          reduced.push(...finalized.responseParts);
+        }
+        if (
+          !this.config.isTruncateToolOutputThresholdExplicit?.() &&
+          limits.chars < this.config.getTruncateToolOutputThreshold()
+        ) {
+          const entries = reduced.flatMap((part, index) =>
+            part.functionResponse
+              ? [
+                  {
+                    callId:
+                      getToolOutputProvenance(part)?.callId ??
+                      `context-result-${index}`,
+                    toolName: part.functionResponse.name ?? '',
+                    responseParts: [part],
+                    persistedOutputFiles:
+                      getToolOutputProvenance(part)?.persistedOutputFiles,
+                  },
+                ]
+              : [],
+          );
+          const bounded = await finalizeToolResponses(
+            this.config,
+            entries,
+            undefined,
+            true,
+            false,
+            { budget: limits.chars, source: 'context' },
+          );
+          let index = 0;
+          userContent = {
+            ...userContent,
+            parts: reduced.flatMap((part) =>
+              part.functionResponse ? bounded[index++].responseParts : [part],
+            ),
+          };
+        } else userContent = { ...userContent, parts: reduced };
+      }
       const toolOutputBudget = this.config.getToolOutputBatchBudget?.();
       if (
         toolOutputBudget !== undefined &&
@@ -5232,6 +5398,38 @@ export class LlmChat {
           continuationInFlight: true,
         }),
       };
+      this.toolBudgetUsageAnchor = undefined;
+      params.config?.abortSignal?.throwIfAborted();
+      const groups = new Map<ToolOutputProvenance, Part[]>();
+      for (const content of requestContents)
+        for (const part of content.parts ?? []) {
+          const provenance = getToolOutputProvenance(part);
+          if (!provenance || this.injectedToolResults.has(provenance)) continue;
+          const parts = groups.get(provenance) ?? [];
+          parts.push(part);
+          groups.set(provenance, parts);
+        }
+      for (const [provenance, parts] of groups) {
+        this.injectedToolResults.add(provenance);
+        const injected = measureToolOutput(parts);
+        logToolResultSize(
+          this.config,
+          new ToolResultSizeEvent(
+            provenance.toolName,
+            provenance.toolType,
+            'injection',
+            provenance.rawSize?.chars,
+            injected.chars,
+            provenance.rawSize?.estimatedTokens,
+            injected.estimatedTokens,
+            provenance.truncated,
+            Number.isFinite(provenance.budget) ? provenance.budget : undefined,
+            provenance.budgetSource,
+            provenance.callId,
+            provenance.promptId || prompt_id,
+          ),
+        );
+      }
       return generator.generateContentStream(request, prompt_id);
     };
     const cgConfig = this.config.getContentGeneratorConfig();
@@ -5545,6 +5743,7 @@ export class LlmChat {
    * Clears the chat history.
    */
   clearHistory(): void {
+    this.toolBudgetUsageAnchor = undefined;
     this.history = [];
     this.completedToolCallIds = [];
     if (!this.isForkedChat) {
@@ -6784,6 +6983,19 @@ export class LlmChat {
       role: 'model',
       parts: acceptedTurnParts,
     });
+    this.toolBudgetUsageAnchor =
+      usageMetadata &&
+      typeof usageMetadata.promptTokenCount === 'number' &&
+      Number.isFinite(usageMetadata.promptTokenCount) &&
+      usageMetadata.promptTokenCount > 0
+        ? {
+            routeKey,
+            tokens:
+              usageMetadata.promptTokenCount +
+              getUsageOutputTokenCountForPromptEstimate(usageMetadata),
+            history: this.history.slice(),
+          }
+        : undefined;
     // Persist before these synthetic yields: the consumer may cancel and
     // close the generator immediately after receiving a tool call.
     if (pendingProtocolChunk) yield pendingProtocolChunk;

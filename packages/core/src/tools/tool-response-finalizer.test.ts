@@ -77,6 +77,33 @@ describe('tool response finalization', () => {
     }));
   });
 
+  it.each([80000, Infinity])(
+    'bounds a context line preview with char budget %s and reuses its artifact',
+    async (budget) => {
+      const raw = 'line\n'.repeat(3000);
+      const [finalized] = await finalizeToolResponses(
+        config(200000),
+        [
+          entry(
+            'context',
+            [fnResponse('shell', { output: raw }, 'context')],
+            ['/tmp/full.txt'],
+          ),
+        ],
+        undefined,
+        true,
+        false,
+        { budget, source: 'context', lines: 500 },
+      );
+      const text = finalized.responseParts[0].functionResponse?.response?.[
+        'output'
+      ] as string;
+      expect(text.split('\n').length).toBeLessThanOrEqual(500);
+      expect(text).toContain('/tmp/full.txt');
+      expect(persist).not.toHaveBeenCalled();
+    },
+  );
+
   it('fits exec output to a batch budget without persisting known-empty artifacts', async () => {
     const result = await finalizeToolResponses(config(1000), [
       {

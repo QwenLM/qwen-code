@@ -2185,6 +2185,9 @@ describe('DiscoveredMCPTool', () => {
       const discoverToolsForServer = vi.fn().mockResolvedValue(undefined);
       const ensureTool = vi.fn().mockResolvedValue(rediscoveredTool);
       const mockConfig = {
+        getTruncateToolOutputThreshold: () => 80000,
+        getTruncateToolOutputLines: () => 2000,
+        storage: { getProjectTempDir: () => '/tmp/test-project' },
         isTrustedFolder: () => true,
         getToolRegistry: () => ({ discoverToolsForServer, ensureTool }),
       };

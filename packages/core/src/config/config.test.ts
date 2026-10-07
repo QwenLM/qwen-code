@@ -9769,8 +9769,8 @@ describe('Server Config (config.ts)', () => {
     // where asserted.
     it.each`
       title                                                            | params                                                        | threshold                   | explicit
-      ${'should return the default threshold'}                         | ${{}}                                                         | ${25_000}                   | ${false}
-      ${'treats a null runtime threshold as unset'}                    | ${{ truncateToolOutputThreshold: null as unknown as number }} | ${25_000}                   | ${false}
+      ${'should return the default threshold'}                         | ${{}}                                                         | ${80_000}                   | ${false}
+      ${'treats a null runtime threshold as unset'}                    | ${{ truncateToolOutputThreshold: null as unknown as number }} | ${80_000}                   | ${false}
       ${'should use a custom truncateToolOutputThreshold if provided'} | ${{ truncateToolOutputThreshold: 50000 }}                     | ${50000}                    | ${undefined}
       ${'should return infinity when threshold is zero or negative'}   | ${{ truncateToolOutputThreshold: 0 }}                         | ${Number.POSITIVE_INFINITY} | ${undefined}
       ${'tracks an explicit threshold of 25000'}                       | ${{ truncateToolOutputThreshold: 25_000 }}                    | ${25_000}                   | ${true}
