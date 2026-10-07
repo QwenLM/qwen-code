@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
@@ -17,11 +18,12 @@ public class MessageMaterializer {
     private static final int EVENT_LIMIT = 200;
     // Selection gate for failing targets: retry on streaks 1, 2, 4, ...,
     // up to the cap, and once every MAX_BACKOFF_STREAK passes at and past
-    // it. Only a skipped pass rotates the target behind fresher rows (the
-    // catch already rotates after a failed attempt, so a pre-attempt defer
-    // would just double the queue writes on every pass), and only the
-    // exponential phase warns with the stack, so a poisoned session can
-    // neither starve healthy ones nor warn at 10 Hz forever.
+    // it. A skipped pass rotates the target behind fresher rows only when
+    // the selection window is full — below the limit the row is selected
+    // again anyway, so the write would buy nothing — and the catch already
+    // rotates after a failed attempt. Only the exponential phase warns with
+    // the stack, so a poisoned session can neither starve healthy ones nor
+    // warn at 10 Hz forever.
     private static final int MAX_BACKOFF_STREAK = 64;
     private final AgentStateStore store;
     private final Map<String, Integer> failures = new ConcurrentHashMap<>();
@@ -33,8 +35,10 @@ public class MessageMaterializer {
     @Scheduled(fixedDelayString =
             "${qwen.managed-agent.events.materialize-interval:100ms}")
     public void materialize() {
-        for (MaterializationTarget target :
-                store.findMaterializationTargets(TARGET_LIMIT)) {
+        List<MaterializationTarget> targets =
+                store.findMaterializationTargets(TARGET_LIMIT);
+        boolean saturated = targets.size() == TARGET_LIMIT;
+        for (MaterializationTarget target : targets) {
             String key = target.tenantId() + ":" + target.sessionId();
             int streak = failures.getOrDefault(key, 0);
             if (streak > 0) {
@@ -42,7 +46,9 @@ public class MessageMaterializer {
                         ? (streak & (streak - 1)) == 0
                         : streak % MAX_BACKOFF_STREAK == 0;
                 if (!due) {
-                    deferQuietly(target);
+                    if (saturated) {
+                        deferQuietly(target);
+                    }
                     failures.put(key, streak + 1);
                     continue;
                 }
@@ -68,14 +74,16 @@ public class MessageMaterializer {
     }
 
     // A store fault while rotating a target must degrade that one target,
-    // not abort the pass for every other selected session.
+    // not abort the pass for every other selected session. The warn never
+    // carries the stack: a persistently faulting rotation fires at
+    // scheduler rate, and the stack buys nothing per pass.
     private void deferQuietly(MaterializationTarget target) {
         try {
             store.deferMaterializationTarget(target.tenantId(),
                     target.sessionId());
         } catch (RuntimeException deferError) {
-            LOG.warn("Failed to defer Managed Agent session {}",
-                    target.sessionId(), deferError);
+            LOG.warn("Failed to defer Managed Agent session {}: {}",
+                    target.sessionId(), deferError.toString());
         }
     }
 }

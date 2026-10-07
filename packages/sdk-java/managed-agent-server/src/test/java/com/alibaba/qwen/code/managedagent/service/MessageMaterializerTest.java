@@ -12,6 +12,7 @@ import static org.mockito.Mockito.when;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationResult;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarget;
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataAccessResourceFailureException;
@@ -31,17 +32,18 @@ class MessageMaterializerTest {
 
         // A hard-poisoned target used to head every pass at 10 Hz and starve
         // every healthy session behind it; now it retries on streaks
-        // 1, 2, 4, 8, ... and rotates to the back of the queue otherwise.
-        // Nine passes attempt on streaks 1, 2, 4 and 8 plus the first look
-        // and write exactly one rotation each: the pre-attempt deferral
-        // outside the due gate used to double the catch's write into 13.
+        // 1, 2, 4, 8, ... and a failed attempt rotates it to the back of
+        // the queue. Nine passes attempt on streaks 1, 2, 4 and 8 plus the
+        // first look and write one rotation each. The skipped passes write
+        // nothing: this single-row window is below TARGET_LIMIT, so the row
+        // would be selected again with or without the write.
         for (int pass = 0; pass < 9; pass++) {
             materializer.materialize();
         }
 
         verify(store, times(5)).materializeNextBatch("tenant", "poison",
                 200);
-        verify(store, times(9)).deferMaterializationTarget("tenant",
+        verify(store, times(5)).deferMaterializationTarget("tenant",
                 "poison");
     }
 
@@ -117,10 +119,15 @@ class MessageMaterializerTest {
     @Test
     void aFailingDeferralDegradesOnlyItsOwnTarget() {
         AgentStateStore store = mock(AgentStateStore.class);
-        MaterializationTarget healthy =
-                new MaterializationTarget("tenant", "healthy");
-        when(store.findMaterializationTargets(32))
-                .thenReturn(List.of(POISON, healthy));
+        // A saturated window (TARGET_LIMIT rows) with the poisoned row at
+        // its head: only a full window rotates on the skip path, and the
+        // faulting first row is the one that must not abort the pass.
+        List<MaterializationTarget> targets = new ArrayList<>();
+        targets.add(POISON);
+        for (int i = 1; i < 32; i++) {
+            targets.add(new MaterializationTarget("tenant", "healthy-" + i));
+        }
+        when(store.findMaterializationTargets(32)).thenReturn(targets);
         when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
                 .thenThrow(new IllegalStateException("gap"));
         doThrow(new DataAccessResourceFailureException("lock wait"))
@@ -136,13 +143,16 @@ class MessageMaterializerTest {
         logged.start();
         logger.addAppender(logged);
         try {
-            // Pass one poisons the target; pass two retries it (streak 1 is
-            // due) and exercises the catch-path deferral, both throwing.
-            // Catching the escape keeps the verdict on the assertions below
-            // rather than on which call threw.
+            // Four passes: attempts land on streaks 0, 1 and 2, and streak
+            // 3 is the first non-due streak, so pass four is the first that
+            // exercises the skip-path deferral — under a fault, and in a
+            // saturated window so the rotation actually fires. Catching the
+            // escape keeps the verdict on the assertions below rather than
+            // on which call threw.
             try {
-                materializer.materialize();
-                materializer.materialize();
+                for (int pass = 0; pass < 4; pass++) {
+                    materializer.materialize();
+                }
             } catch (RuntimeException escaped) {
                 // An unguarded deferral lets the store fault escape the pass.
             }
@@ -150,11 +160,14 @@ class MessageMaterializerTest {
             logger.detachAppender(logged);
         }
 
-        // A store fault while deferring must not abort the pass: the healthy
-        // target is still attempted on every pass, and the WARN still names
-        // the poisoned session.
-        verify(store, times(2)).materializeNextBatch("tenant", "healthy",
+        // A store fault while deferring must not abort the pass: the tail
+        // target is still attempted on every due pass and still rotated on
+        // the skipped one — three catch-path rotations plus one skip-path
+        // rotation, and the WARNs still name the failing sessions.
+        verify(store, times(3)).materializeNextBatch("tenant", "healthy-31",
                 200);
+        verify(store, times(4)).deferMaterializationTarget("tenant",
+                "healthy-31");
         assertThat(logged.list).anySatisfy(event -> {
             assertThat(event.getLevel())
                     .isEqualTo(ch.qos.logback.classic.Level.WARN);
@@ -162,6 +175,21 @@ class MessageMaterializerTest {
                     .contains("Failed to materialize Managed Agent session")
                     .contains("poison");
         });
+        // The rotation failure is logged, and never with a stack: a
+        // persistently faulting deferral must not bury the one-line signal
+        // at scheduler rate.
+        assertThat(logged.list).anySatisfy(event -> {
+            assertThat(event.getLevel())
+                    .isEqualTo(ch.qos.logback.classic.Level.WARN);
+            assertThat(event.getFormattedMessage())
+                    .contains("Failed to defer Managed Agent session")
+                    .contains("poison");
+        });
+        assertThat(logged.list.stream()
+                .filter(event -> event.getFormattedMessage()
+                        .contains("Failed to defer")))
+                .allSatisfy(event -> assertThat(event.getThrowableProxy())
+                        .isNull());
     }
 
     @Test
@@ -171,20 +199,27 @@ class MessageMaterializerTest {
                 .thenReturn(List.of(POISON));
         when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
                 .thenThrow(new IllegalStateException("gap"))
-                .thenReturn(new MaterializationResult(true, 1L),
-                        new MaterializationResult(true, 2L));
+                .thenThrow(new IllegalStateException("gap"))
+                .thenThrow(new IllegalStateException("gap"))
+                .thenReturn(new MaterializationResult(true, 1L))
+                .thenThrow(new IllegalStateException("gap"))
+                .thenReturn(new MaterializationResult(true, 2L));
         MessageMaterializer materializer = new MessageMaterializer(store);
 
-        materializer.materialize();
-        materializer.materialize();
-        materializer.materialize();
+        // Seven passes: fail on 1-3, pass 4 skips because streak 3 is not
+        // due, pass 5 succeeds and must clear the streak, pass 6 fails and
+        // pass 7 retries on streak 1 — six attempts. Without the reset
+        // pass 7 would read streak 5, skip, and the count would be five.
+        for (int pass = 0; pass < 7; pass++) {
+            materializer.materialize();
+        }
 
-        // fail, retry-and-succeed, then a normal pass: full attempts, and
-        // the only rotation is the first failure's catch-path deferral — a
-        // due retry does not write the progress row ahead of the attempt.
-        verify(store, times(3)).materializeNextBatch("tenant", "poison",
+        verify(store, times(6)).materializeNextBatch("tenant", "poison",
                 200);
-        verify(store, times(1)).deferMaterializationTarget("tenant",
+        // One rotation per failed attempt; the skipped pass 4 writes
+        // nothing below TARGET_LIMIT, and a due retry does not write the
+        // progress row ahead of the attempt.
+        verify(store, times(4)).deferMaterializationTarget("tenant",
                 "poison");
     }
 }

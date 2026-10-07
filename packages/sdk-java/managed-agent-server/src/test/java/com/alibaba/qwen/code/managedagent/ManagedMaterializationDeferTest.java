@@ -17,10 +17,12 @@ import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
- * Pins the deferral SQL on H2 in MySQL mode: {@code updated_at} moves so
- * the target rotates behind fresher rows, and {@code covered_sequence}
- * stays put so the gap guard in materializeNextBatch still freezes on a
- * failure.
+ * Pins the deferral SQL on H2 in MySQL mode against the three columns the
+ * target scan reads: {@code updated_at} moves so the target rotates behind
+ * fresher rows, {@code covered_sequence} stays put so the gap guard in
+ * materializeNextBatch still freezes on a failure, and
+ * {@code snapshot_stale_since} stays put so a session whose snapshot
+ * rewrite was deferred keeps being re-selected.
  */
 class ManagedMaterializationDeferTest {
     @Test
@@ -39,8 +41,9 @@ class ManagedMaterializationDeferTest {
                 "tenant", "session", "qwen-code", "ACTIVE", 1L, 1L, 9L);
         jdbc.update("INSERT INTO managed_agent_consumer_progress (tenant_id,"
                         + " session_id, consumer_name, covered_sequence,"
-                        + " updated_at) VALUES (?, ?, ?, ?, ?)",
-                "tenant", "session", "message_projection", 9L, 1L);
+                        + " updated_at, snapshot_stale_since) VALUES (?, ?,"
+                        + " ?, ?, ?, ?)",
+                "tenant", "session", "message_projection", 9L, 1L, 7L);
         ManagedAgentStore store = new ManagedAgentStore(jdbc,
                 new ObjectMapper(),
                 Clock.fixed(Instant.ofEpochMilli(123456789L),
@@ -51,13 +54,15 @@ class ManagedMaterializationDeferTest {
 
         store.deferMaterializationTarget("tenant", "session");
 
-        var row = jdbc.queryForMap("SELECT covered_sequence, updated_at"
-                        + " FROM managed_agent_consumer_progress WHERE"
+        var row = jdbc.queryForMap("SELECT covered_sequence, updated_at,"
+                        + " snapshot_stale_since FROM"
+                        + " managed_agent_consumer_progress WHERE"
                         + " tenant_id = ? AND session_id = ? AND"
                         + " consumer_name = ?",
                 "tenant", "session", "message_projection");
         assertThat(row.get("updated_at")).isEqualTo(123456789L);
         assertThat(row.get("covered_sequence")).isEqualTo(9L);
+        assertThat(row.get("snapshot_stale_since")).isEqualTo(7L);
     }
 
     /**

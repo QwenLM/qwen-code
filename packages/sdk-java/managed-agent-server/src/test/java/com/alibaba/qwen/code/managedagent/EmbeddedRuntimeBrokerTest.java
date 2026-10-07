@@ -323,7 +323,8 @@ class EmbeddedRuntimeBrokerTest {
                 new InMemoryToolExecutionRepository())) {
             // The admission fence refuses new work on a closed Session, but
             // release is a teardown route: it must still resolve the
-            // Session's scope so a binding held across the close settles.
+            // Session's scope so an already-released Runtime Session
+            // answers idempotently.
             HttpURLConnection connection = (HttpURLConnection) broker
                     .getBaseUri().resolve("/internal/runtime-broker/v1/"
                             + "tool-sessions/" + RUNTIME_ID + ":release")

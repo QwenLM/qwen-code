@@ -212,9 +212,10 @@ Close and delete reject an active Turn and seal input as soon as they are
 admitted. A background worker then closes the Hosted Harness Session, waits
 until no Harness holds its journal writer under an unexpired lease (the
 holding Harness seals it when closing), drains the Runtime binding (fenced by
-the persisted Session status the Broker checks before re-admitting an unbound
-Session, so the fence survives restarts; an in-process flag is kept only for a
-Session row that has vanished) and completes the operation; a failed
+the persisted Session status the Broker checks on the warm admission resolve
+for an unbound Session, so the fence survives restarts; an in-process flag is
+kept only for a Session row that has vanished) and completes the operation; a
+failed
 attempt is retried with the dispatch backoff until it succeeds, so a `202`
 never means that tools stopped (a Harness whose capability digest no longer
 matches retries the same way, logged with the permanent reason — nothing
