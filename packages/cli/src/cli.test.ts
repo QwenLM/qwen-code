@@ -51,6 +51,16 @@ const mocks = vi.hoisted(() => ({
   mcpRemoveHandler: vi.fn(),
   getCliVersion: vi.fn(),
   installManagedNpmUpdate: vi.fn(),
+  runWorkspaceRecoveryWorker: vi.fn(),
+  runManagedRuntimeAttestationWorker: vi.fn(),
+}));
+
+vi.mock('./serve/workspace-recovery-worker.js', () => ({
+  runWorkspaceRecoveryWorker: mocks.runWorkspaceRecoveryWorker,
+}));
+
+vi.mock('./serve/managed-runtime-attestation-worker.js', () => ({
+  runManagedRuntimeAttestationWorker: mocks.runManagedRuntimeAttestationWorker,
 }));
 
 vi.mock('./llm.js', () => ({
@@ -119,12 +129,15 @@ vi.mock('./commands/mcp.js', () => ({
 }));
 
 describe('resolveBootstrapRoute', () => {
-  it('routes top-level help, version, serve, and mcp correctly', async () => {
+  it('routes top-level help, version, serve, mcp, and the Runtime worker correctly', async () => {
     expect(resolveBootstrapRoute(['--help'])).toBe('help');
     expect(resolveBootstrapRoute(['--version'])).toBe('version');
     expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('version');
     expect(resolveBootstrapRoute(['serve', '--help'])).toBe('serve');
     expect(resolveBootstrapRoute(['mcp', '--help'])).toBe('mcp');
+    expect(resolveBootstrapRoute(['managed-runtime-worker'])).toBe(
+      'managed-runtime-worker',
+    );
   });
 
   it('keeps bundled entrypoint paths out of the route detection', async () => {
@@ -752,6 +765,43 @@ describe('runCliEntry', () => {
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
   });
 
+  it('runs private recovery before inherited updates or normal CLI startup', async () => {
+    process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] = '2.0.0';
+    await runCliEntry(['--workspace-recovery-worker']);
+    expect(mocks.runWorkspaceRecoveryWorker).toHaveBeenCalledOnce();
+    expect(mocks.installManagedNpmUpdate).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['managed-runtime-worker', '--help'],
+    ['managed-runtime-worker', '--container-boot'],
+    ['managed-runtime-worker', '--container-boot', '/boot.json', 'extra'],
+    ['managed-runtime-worker', '/boot.json', '--container-boot'],
+  ])('rejects invalid hidden Runtime worker arguments: %j', async (...argv) => {
+    await runCliEntry(argv);
+
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain(
+      'Managed Runtime worker arguments are invalid.',
+    );
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.runManagedRuntimeAttestationWorker).not.toHaveBeenCalled();
+  });
+
+  it('passes the boot file to the container worker without starting the CLI', async () => {
+    await runCliEntry([
+      'managed-runtime-worker',
+      '--container-boot',
+      '/boot.json',
+    ]);
+    expect(mocks.runManagedRuntimeAttestationWorker).toHaveBeenCalledWith(
+      '/boot.json',
+    );
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
   it('runs a managed update worker without starting the CLI', async () => {
     process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] = '2.0.0';
     process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] = 'guard-secret';
@@ -914,6 +964,16 @@ describe('runCliEntry', () => {
 
     expect(mocks.main).toHaveBeenCalledTimes(1);
     expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+  });
+
+  it('lets the entrypoint report a fatal MCP configuration failure once', async () => {
+    const error = new FatalError('Repair operator settings and restart.', 52);
+    mocks.mcpListHandler.mockRejectedValueOnce(error);
+    const stdout = vi.spyOn(process.stdout, 'write');
+    const stderr = vi.spyOn(process.stderr, 'write');
+    await expect(runCliEntry(['mcp', 'list'])).rejects.toBe(error);
+    expect(stdout).not.toHaveBeenCalled();
+    expect(stderr).not.toHaveBeenCalled();
   });
 
   it('fails MCP fast-path validation without loading the full CLI', async () => {
@@ -1211,7 +1271,10 @@ describe('bootstrap import boundaries', () => {
   it('uses the bootstrap file as the production bundle entry', () => {
     const source = readFileSync('../../esbuild.config.js', 'utf8');
 
-    expect(source).toContain("entryPoints: { cli: 'packages/cli/src/cli.ts' }");
+    expect(source).toContain("cli: 'packages/cli/src/cli.ts'");
+    expect(source).toContain(
+      "'execution-worker': 'packages/core/src/services/execution-worker-main.ts'",
+    );
   });
 
   it('keeps bootstrap fast paths in-process in the npm bin wrapper', () => {
@@ -1361,7 +1424,9 @@ describe('bootstrap import boundaries', () => {
         expect(JSON.parse(output)).toEqual({
           args: ['--prompt', 'a&b'],
           skip: 'true',
-          hasLauncherPid: true,
+          // Outside Windows the CLI runs inside the launcher process, so
+          // there is no separate launcher pid to wait for.
+          hasLauncherPid: false,
         });
       } finally {
         rmSync(tempDir, { recursive: true, force: true });
@@ -1734,11 +1799,14 @@ describe('bootstrap import boundaries', () => {
     const configSource = readFileSync('src/config/config.ts', 'utf8');
     const commandNameByIdentifier = new Map([
       ['authCommand', 'auth'],
+      ['batchCommand', 'batch'],
+      ['boardCommand', 'board'],
       ['channelCommand', 'channel'],
       ['extensionsCommand', 'extensions'],
       ['hooksCommand', 'hooks'],
       ['mcpCommand', 'mcp'],
       ['reviewCommand', 'review'],
+      ['sandboxCommand', 'sandbox'],
       ['serveCommand', 'serve'],
       ['sessionsCommand', 'sessions'],
       ['updateCommand', 'update'],

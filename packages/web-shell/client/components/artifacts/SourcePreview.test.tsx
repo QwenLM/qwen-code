@@ -203,6 +203,20 @@ describe('source preview', () => {
     expect(mock.sessionActions.readAttachment).not.toHaveBeenCalled();
   });
 
+  it('uses original attachment bytes rather than decoded UTF-8 size for the preview limit', async () => {
+    const content = 'a'.repeat(512 * 1024);
+    const bytes = Buffer.from('\uFEFF' + content, 'utf16le');
+    mock.sessionActions.readAttachment.mockResolvedValue({
+      data: bytes.toString('base64'),
+      mimeType: 'text/markdown',
+    });
+    await render(source({ type: 'attachment', attachmentId: 'large.md' }));
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('File is large.');
+      expect(container.querySelector('.cm-editor')).not.toBeNull();
+    });
+  });
+
   it('opens URL metadata without fetching it', async () => {
     await render(source({ type: 'url', url: 'https://example.com/docs#part' }));
     expect(
@@ -221,9 +235,17 @@ describe('source preview', () => {
     await render(
       source({ type: 'workspace_file', workspacePath: 'input.html' }),
     );
-    expect(mock.actions.readWorkspaceFile).toHaveBeenCalledWith('input.html');
+    expect(mock.actions.readWorkspaceFile).toHaveBeenCalledWith('input.html', {
+      maxBytes: 256 * 1024,
+    });
     expect(container.querySelector('iframe')).toBeNull();
     expect(container.textContent).toContain('window.shouldNotRun');
+    const viewport = container
+      .querySelector('.cm-editor')
+      ?.closest('.relative');
+    expect(viewport?.previousElementSibling?.textContent).toContain(
+      'input.html',
+    );
   });
   it('rejects a changed workspace and revoked owner without reading', async () => {
     mock.connection.workspaceCwd = '/different';
@@ -237,7 +259,7 @@ describe('source preview', () => {
     await render(source({ type: 'attachment', attachmentId: 'image.png' }));
     expect(mock.sessionActions.readAttachment).not.toHaveBeenCalled();
   });
-  it('offers download for unsupported attachments and revokes blob URLs on removal', async () => {
+  it('places attachment download in the source header and revokes its blob URL', async () => {
     const create = vi.fn(() => 'blob:source-test');
     const revoke = vi.fn();
     Object.defineProperty(URL, 'createObjectURL', {
@@ -254,9 +276,13 @@ describe('source preview', () => {
     });
     await render(source({ type: 'attachment', attachmentId: 'data.bin' }));
     expect(mock.sessionActions.readAttachment).toHaveBeenCalledOnce();
-    expect(container.querySelector('a[download]')?.getAttribute('href')).toBe(
-      'blob:source-test',
-    );
+    expect(container.querySelectorAll('a[download]')).toHaveLength(1);
+    const download = container.querySelector<HTMLAnchorElement>('a[download]');
+    expect(download?.getAttribute('href')).toBe('blob:source-test');
+    const sourceHeader = container.querySelector(
+      'span[title="data.bin"]',
+    )?.parentElement;
+    expect(sourceHeader?.contains(download ?? null)).toBe(true);
     await act(async () => root.render(null));
     expect(revoke).toHaveBeenCalledWith('blob:source-test');
   });

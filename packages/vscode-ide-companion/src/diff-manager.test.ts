@@ -6,7 +6,11 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { JSONRPCNotification } from '@modelcontextprotocol/sdk/types.js';
+import path from 'node:path';
 import { DiffContentProvider, DiffManager } from './diff-manager.js';
+
+const workspaceRoot = path.resolve('/test/workspace1');
+const workspaceFile = path.join(workspaceRoot, 'src/foo.ts');
 
 const { workspaceMock, openTextDocument, executeCommand, tabGroups } =
   vi.hoisted(() => ({
@@ -52,7 +56,7 @@ vi.mock('vscode', () => ({
   Uri: {
     file: (fsPath: string) => makeUri(fsPath),
     joinPath: (base: { fsPath: string }, filePath: string) =>
-      makeUri(`${base.fsPath}/${filePath}`),
+      makeUri(path.join(base.fsPath, filePath)),
   },
   EventEmitter: class {
     private listeners: Array<(e: unknown) => void> = [];
@@ -82,7 +86,7 @@ describe('DiffManager path resolution', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    workspaceMock.workspaceFolders = [{ uri: { fsPath: '/test/workspace1' } }];
+    workspaceMock.workspaceFolders = [{ uri: { fsPath: workspaceRoot } }];
     tabGroups.all = [];
     // The right-hand pane is read back through openTextDocument when a diff is
     // closed; the text it returns is what closeDiff resolves with.
@@ -104,13 +108,13 @@ describe('DiffManager path resolution', () => {
   it('closes a relative-opened diff when asked with the absolute path', async () => {
     await diffManager.showDiff('src/foo.ts', 'old', 'new');
 
-    await expect(
-      diffManager.closeDiff('/test/workspace1/src/foo.ts'),
-    ).resolves.toBe('new content');
+    await expect(diffManager.closeDiff(workspaceFile)).resolves.toBe(
+      'new content',
+    );
   });
 
   it('closes an absolute-opened diff when asked with the relative path', async () => {
-    await diffManager.showDiff('/test/workspace1/src/foo.ts', 'old', 'new');
+    await diffManager.showDiff(workspaceFile, 'old', 'new');
 
     await expect(diffManager.closeDiff('src/foo.ts')).resolves.toBe(
       'new content',
@@ -122,7 +126,7 @@ describe('DiffManager path resolution', () => {
     // dedupes on identical old/new content: a webview permission-preview
     // diff opened with the absolute form, and a second session's differently
     // proposed edit opened with the relative form.
-    await diffManager.showDiff('/test/workspace1/src/foo.ts', 'o1', 'n1');
+    await diffManager.showDiff(workspaceFile, 'o1', 'n1');
     const firstRightUri = executeCommand.mock.calls.find(
       (call) => call[0] === 'vscode.diff',
     )?.[2];
@@ -145,7 +149,7 @@ describe('DiffManager path resolution', () => {
 
   it('echoes the path the diff was opened with, not the one used to close', async () => {
     await diffManager.showDiff('src/foo.ts', 'old', 'new');
-    await diffManager.closeDiff('/test/workspace1/src/foo.ts');
+    await diffManager.closeDiff(workspaceFile);
 
     expect(notifications).toHaveLength(1);
     expect(notifications[0].params).toMatchObject({
@@ -174,15 +178,15 @@ describe('DiffManager path resolution', () => {
     const diffCall = executeCommand.mock.calls.find(
       (call) => call[0] === 'vscode.diff',
     );
-    expect(diffCall?.[1].fsPath).toBe('/test/workspace1/src/foo.ts');
-    expect(diffCall?.[2].fsPath).toBe('/test/workspace1/src/foo.ts');
+    expect(diffCall?.[1].fsPath).toBe(workspaceFile);
+    expect(diffCall?.[2].fsPath).toBe(workspaceFile);
   });
 
   it('reads the old content from the resolved path', async () => {
     await diffManager.showDiff('src/foo.ts', 'new');
 
     expect(openTextDocument).toHaveBeenCalledWith(
-      expect.objectContaining({ fsPath: '/test/workspace1/src/foo.ts' }),
+      expect.objectContaining({ fsPath: workspaceFile }),
     );
   });
 
@@ -197,7 +201,7 @@ describe('DiffManager path resolution', () => {
     const diffCall = executeCommand.mock.calls.find(
       (call) => call[0] === 'vscode.diff',
     );
-    expect(diffCall?.[1].fsPath).toBe('src/foo.ts');
+    expect(diffCall?.[1].fsPath).toBe(path.normalize('src/foo.ts'));
   });
 
   it('returns undefined when no diff matches the requested path', async () => {

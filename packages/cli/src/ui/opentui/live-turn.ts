@@ -131,8 +131,8 @@ export interface OpenTuiLiveTurn {
   isReceivingContent: boolean;
   /** Scheduler calls parked in awaiting_approval, awaiting a dialog. */
   waitingCalls: readonly WaitingCallInfo[];
-  /** Number of mid-turn prompts queued (composer queueLength parity). */
-  queueLength: number;
+  /** Mid-turn queued prompts, oldest first (composer badge + Esc pop-back). */
+  messageQueue: readonly string[];
   /** Pops the whole queue back into the composer (Esc parity). */
   popQueue(): string | null;
   /**
@@ -173,7 +173,10 @@ export function useOpenTuiLiveTurn(
     [],
   );
   const queueRef = useRef<string[]>([]);
-  const [queueLength, setQueueLength] = useState(0);
+  // queueRef stays the synchronous source — a turn drains and restores within
+  // one tick, before any render. This mirror only exists to be displayed.
+  const [queue, setQueue] = useState<readonly string[]>([]);
+  const syncQueue = useCallback(() => setQueue([...queueRef.current]), []);
   const abortRef = useRef<AbortController | null>(null);
 
   const streamingRef = useRef(false);
@@ -207,24 +210,30 @@ export function useOpenTuiLiveTurn(
     setItems((prev) => foldLiveEvent(prev, ev));
   }, []);
 
-  const pushQueue = useCallback((text: string) => {
-    queueRef.current.push(text);
-    setQueueLength(queueRef.current.length);
-  }, []);
+  const pushQueue = useCallback(
+    (text: string) => {
+      queueRef.current.push(text);
+      syncQueue();
+    },
+    [syncQueue],
+  );
 
   const drainQueue = useCallback((): string[] => {
     const drained = queueRef.current;
     queueRef.current = [];
-    setQueueLength(0);
+    syncQueue();
     return drained;
-  }, []);
+  }, [syncQueue]);
 
-  const restoreQueue = useCallback((texts: readonly string[]) => {
-    const restored = texts.map((text) => text.trim()).filter(Boolean);
-    if (restored.length === 0) return;
-    queueRef.current = [...restored, ...queueRef.current];
-    setQueueLength(queueRef.current.length);
-  }, []);
+  const restoreQueue = useCallback(
+    (texts: readonly string[]) => {
+      const restored = texts.map((text) => text.trim()).filter(Boolean);
+      if (restored.length === 0) return;
+      queueRef.current = [...restored, ...queueRef.current];
+      syncQueue();
+    },
+    [syncQueue],
+  );
 
   const runTurn = useCallback(
     async (
@@ -315,7 +324,7 @@ export function useOpenTuiLiveTurn(
           if (rest.length > 0) {
             const [text, ...remaining] = rest;
             queueRef.current = remaining;
-            setQueueLength(remaining.length);
+            syncQueue();
             apply({ type: 'user', text });
             // ink keeps provenance for a queued submission, and the raw text
             // is what the stream layer expands `@path` mentions from.
@@ -326,7 +335,7 @@ export function useOpenTuiLiveTurn(
         }
       }
     },
-    [config, apply, drainQueue, restoreQueue, setBusy, setReceiving],
+    [config, apply, drainQueue, restoreQueue, setBusy, setReceiving, syncQueue],
   );
 
   const submit = useCallback(
@@ -387,7 +396,7 @@ export function useOpenTuiLiveTurn(
       }
       abort?.abort();
       queueRef.current = [];
-      setQueueLength(0);
+      syncQueue();
       waitingCallsRef.current = [];
       setWaitingCalls([]);
       // Synchronous: a submit right after the reset must start a fresh turn,
@@ -395,7 +404,7 @@ export function useOpenTuiLiveTurn(
       setBusy(false);
       setItems(foldBatch(events));
     },
-    [setBusy],
+    [setBusy, syncQueue],
   );
 
   const settleWaitingCall = useCallback((callId: string) => {
@@ -419,7 +428,7 @@ export function useOpenTuiLiveTurn(
     streamingCharsRef,
     isReceivingContent,
     waitingCalls,
-    queueLength,
+    messageQueue: queue,
     popQueue,
     submit,
     interrupt,

@@ -46,6 +46,12 @@ import { hasVerifiableInode } from '../utils/file-identity.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
+  isManagedExecutionTranscriptSync,
+  isManagedOwnerRecord,
+  isManagedSessionTranscriptSync,
+  managedSessionResourceRoot,
+  readManagedSessionTitleInfoSync,
+  readManagedSessionSourceSync,
   readLastJsonStringFieldSync,
   readLastMatchingLineFieldSync,
   readSessionTitleInfoFromFileSync,
@@ -73,12 +79,14 @@ import {
   type SessionLiveRestoreProjection,
   type SessionRestoreProjection,
 } from './session-transcript-reader.js';
+import { SessionExecutionEngineError } from './session-execution-engine.js';
 import {
   SessionWriterError,
   SessionWriterLease,
   SessionTranscriptChangedError,
   SessionTranscriptIdentityUnavailableError,
   SessionWriterUnavailableError,
+  type SealedManagedMaintenanceLease,
   type SessionWriterProcessKind,
 } from './session-writer-lease.js';
 import {
@@ -86,9 +94,13 @@ import {
   resolveBranchPoints,
 } from './branch-points.js';
 import { recoverGoalFromRecords } from '../goals/goal-persistence.js';
+import { findRunningLegacyGoalCard } from '../goals/goal-legacy-cards.js';
 import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
 export {
   buildApiHistoryFromConversation,
+  findApiHistoryPromptIndex,
+  getApiHistoryPromptId,
+  markApiHistoryPrompt,
   type BuildApiHistoryOptions,
 } from './session-api-history.js';
 import {
@@ -103,10 +115,25 @@ export {
 
 const debugLogger = createDebugLogger('SESSION');
 
+function isManagedFirstRecord(record: ChatRecord): boolean {
+  // New Managed logs write the execution-engine marker before the header.
+  return (
+    record.subtype === 'managed_session_header_v1' ||
+    isManagedOwnerRecord(record)
+  );
+}
+
 export class BranchPointInvalidError extends Error {
   constructor(readonly recordId: string) {
     super(`Invalid or inactive branch point: ${recordId}`);
     this.name = 'BranchPointInvalidError';
+  }
+}
+
+export class SessionForkSourceUnavailableError extends Error {
+  constructor(readonly sessionId: string) {
+    super(`Source session not found or empty: ${sessionId}`);
+    this.name = 'SessionForkSourceUnavailableError';
   }
 }
 
@@ -285,6 +312,8 @@ export interface ListSessionsOptions {
   archiveState?: SessionArchiveState;
   /** Aborts an in-progress catalog scan. */
   signal?: AbortSignal;
+  /** Omits records carrying any of these immutable creator attributions. */
+  excludeSourceTypes?: readonly string[];
 }
 
 /**
@@ -895,6 +924,21 @@ export class SessionService {
     });
   }
 
+  async acquireSealedManagedMaintenanceLease(
+    sessionId: string,
+  ): Promise<SealedManagedMaintenanceLease | undefined> {
+    const location = await this.getSessionLocation(sessionId);
+    if (location !== 'active' && location !== 'archived') return undefined;
+    const transcriptPath = this.getSessionFilePath(sessionId, location);
+    if (!isManagedSessionTranscriptSync(transcriptPath)) return undefined;
+    return SessionWriterLease.acquireSealedManagedMaintenance({
+      runtimeBaseDir: this.storage.getRuntimeBaseDir(),
+      sessionId,
+      activeTranscriptPath: this.getSessionFilePath(sessionId, 'active'),
+      transcriptPath,
+    });
+  }
+
   private warn(message: string): void {
     debugLogger.warn(message);
     this.onWarning?.(message);
@@ -1018,6 +1062,17 @@ export class SessionService {
    */
   getSessionTranscriptPath(sessionId: string): string {
     return this.getSessionFilePath(sessionId, 'active');
+  }
+
+  assertLegacySessionExecution(sessionId: string): void {
+    if (
+      isManagedExecutionTranscriptSync(this.getSessionTranscriptPath(sessionId))
+    ) {
+      throw new SessionExecutionEngineError(
+        sessionId,
+        'belongs to managed, cannot execute with legacy',
+      );
+    }
   }
 
   getWorktreeSessionPathForArchiveState(
@@ -1990,11 +2045,20 @@ export class SessionService {
   private readSessionTitleInfoFromFile(
     filePath: string,
     tailBuffer?: Buffer,
+    knownManaged?: boolean,
   ): {
     title?: string;
     source?: TitleSource;
   } {
-    return readSessionTitleInfoFromFileSync(filePath, tailBuffer);
+    const managed =
+      knownManaged === false
+        ? undefined
+        : readManagedSessionTitleInfoSync(
+            filePath,
+            this.storage.getRuntimeBaseDir(),
+            tailBuffer,
+          );
+    return managed ?? readSessionTitleInfoFromFileSync(filePath, tailBuffer);
   }
 
   /**
@@ -2050,6 +2114,7 @@ export class SessionService {
     filePath: string,
     records: ChatRecord[],
     tailBuffer?: Buffer,
+    knownManaged?: boolean,
   ): {
     parentSessionId?: string;
     sourceType?: string;
@@ -2059,7 +2124,19 @@ export class SessionService {
     if (metadata.sourceType !== undefined) return metadata;
 
     const tailSource = this.readSessionSourceFromTail(filePath, tailBuffer);
-    if (tailSource.sourceType === undefined) return metadata;
+    if (tailSource.sourceType === undefined) {
+      const managedSource =
+        knownManaged === false
+          ? undefined
+          : readManagedSessionSourceSync(
+              filePath,
+              this.storage.getRuntimeBaseDir(),
+              tailBuffer,
+            );
+      return managedSource?.sourceType === undefined
+        ? metadata
+        : { ...metadata, ...managedSource };
+    }
     return {
       ...metadata,
       ...tailSource,
@@ -2268,11 +2345,14 @@ export class SessionService {
     records: ChatRecord[],
   ): string | undefined {
     const recovery = recoverGoalFromRecords(records);
+    // A build before #7895 journaled the Goal as a card, not state. The
+    // runtime restores no Goal from it, but the card is still the only thing
+    // that labels a session whose one prompt was `/goal`.
     const objective =
       recovery.kind === 'v2'
         ? recovery.payload.snapshot.goal?.objective
-        : recovery.kind === 'legacy'
-          ? recovery.objective
+        : recovery.kind === 'none'
+          ? findRunningLegacyGoalCard(records)?.condition.trim()
           : undefined;
     return objective ? this.truncatePromptForDisplay(objective) : undefined;
   }
@@ -2531,7 +2611,13 @@ export class SessionService {
   async listSessions(
     options: ListSessionsOptions = {},
   ): Promise<ListSessionsResult> {
-    const { cursor, size = 20, archiveState = 'active', signal } = options;
+    const {
+      cursor,
+      size = 20,
+      archiveState = 'active',
+      signal,
+      excludeSourceTypes,
+    } = options;
     const chatsDir = this.getChatsDirForState(archiveState);
     const isArchived = archiveState === 'archived';
     signal?.throwIfAborted();
@@ -2636,9 +2722,27 @@ export class SessionService {
         continue;
       }
 
+      const knownManaged = isManagedFirstRecord(firstRecord);
+      const source = this.extractCreationMetadataFromFile(
+        filePath,
+        records,
+        tailBuffer,
+        knownManaged,
+      );
+      if (
+        excludeSourceTypes !== undefined &&
+        source.sourceType !== undefined &&
+        excludeSourceTypes.includes(source.sourceType)
+      ) {
+        continue;
+      }
       const prompt = this.extractFirstPromptFromRecords(records);
       signal?.throwIfAborted();
-      const titleInfo = this.readSessionTitleInfoFromFile(filePath, tailBuffer);
+      const titleInfo = this.readSessionTitleInfoFromFile(
+        filePath,
+        tailBuffer,
+        knownManaged,
+      );
       signal?.throwIfAborted();
       const goalObjective = this.resolveGoalObjective(
         prompt,
@@ -2646,11 +2750,6 @@ export class SessionService {
         filePath,
         records,
         readResult.complete,
-        tailBuffer,
-      );
-      const source = this.extractCreationMetadataFromFile(
-        filePath,
-        records,
         tailBuffer,
       );
       items.push({
@@ -2718,8 +2817,18 @@ export class SessionService {
     ) {
       return undefined;
     }
-    const titleInfo = this.readSessionTitleInfoFromFile(filePath);
-    const source = this.extractCreationMetadataFromFile(filePath, records);
+    const knownManaged = isManagedFirstRecord(firstRecord);
+    const titleInfo = this.readSessionTitleInfoFromFile(
+      filePath,
+      undefined,
+      knownManaged,
+    );
+    const source = this.extractCreationMetadataFromFile(
+      filePath,
+      records,
+      undefined,
+      knownManaged,
+    );
     const prompt = this.extractFirstPromptFromRecords(records);
     return {
       sessionId: firstRecord.sessionId,
@@ -2753,16 +2862,19 @@ export class SessionService {
    *
    * Same disk-walk shape as {@link findSessionTitlesByPrefix} /
    * {@link findSessionsByTitle}: `readdir` the chats dir, cap at the
-   * file-processing safety limit, then read only the first JSONL record for
-   * project membership. Title/prompt/message hydration is skipped entirely.
+   * file-processing safety limit, then read the first JSONL record for project
+   * membership. A requested source exclusion adds one bounded tail read;
+   * title/prompt/message hydration is still skipped.
    *
    * Still an O(n) disk walk — callers (and HTTP clients of
    * `GET .../session-info`) must not poll this in a tight loop.
    */
-  async getSessionInfoCounts(): Promise<SessionInfoCounts> {
+  async getSessionInfoCounts(
+    options: { excludeSourceTypes?: readonly string[] } = {},
+  ): Promise<SessionInfoCounts> {
     const [active, archived] = await Promise.all([
-      this.countSessionsInState('active'),
-      this.countSessionsInState('archived'),
+      this.countSessionsInState('active', options.excludeSourceTypes),
+      this.countSessionsInState('archived', options.excludeSourceTypes),
     ]);
     return {
       active: active.count,
@@ -2774,6 +2886,7 @@ export class SessionService {
 
   private async countSessionsInState(
     archiveState: SessionArchiveState,
+    excludeSourceTypes?: readonly string[],
   ): Promise<{ count: number; truncated: boolean }> {
     const chatsDir = this.getChatsDirForState(archiveState);
     let fileNames: string[];
@@ -2789,6 +2902,10 @@ export class SessionService {
     let count = 0;
     let filesProcessed = 0;
     let truncated = false;
+    const tailBuffer =
+      excludeSourceTypes === undefined
+        ? undefined
+        : Buffer.alloc(LITE_READ_BUF_SIZE);
 
     for (const name of fileNames) {
       if (!SESSION_FILE_PATTERN.test(name)) continue;
@@ -2814,6 +2931,15 @@ export class SessionService {
             firstRecord.sessionId,
             firstRecord.cwd,
           ))
+        ) {
+          continue;
+        }
+        if (
+          excludeSourceTypes !== undefined &&
+          excludeSourceTypes.includes(
+            this.extractCreationMetadataFromFile(filePath, records, tailBuffer)
+              .sourceType ?? '',
+          )
         ) {
           continue;
         }
@@ -3421,6 +3547,11 @@ export class SessionService {
     this.removePromptLedgers(sessionId);
     assertCleanupOwned?.();
     this.removeFileHistoryBackups(sessionId);
+    assertCleanupOwned?.();
+    fs.rmSync(
+      managedSessionResourceRoot(this.storage.getRuntimeBaseDir(), sessionId),
+      { recursive: true, force: true },
+    );
   }
 
   private async removeSessionFiles(sessionId: string): Promise<boolean> {
@@ -3813,6 +3944,16 @@ export class SessionService {
         return false;
       }
 
+      // An owner record alone refuses too: a Managed create that stops before
+      // its header leaves one, and the next Managed open completes that
+      // create only while the transcript holds nothing but owner records.
+      if (isManagedExecutionTranscriptSync(filePath)) {
+        throw new SessionExecutionEngineError(
+          sessionId,
+          'belongs to managed, rename must go through its session authority',
+        );
+      }
+
       // Read the last record's UUID so the custom_title record is properly
       // chained into the parent history.  reconstructHistory() walks from the
       // tail record upward via parentUuid; a null parentUuid would sever the
@@ -3885,10 +4026,17 @@ export class SessionService {
     const sourcePath = path.join(chatsDir, `${sourceSessionId}.jsonl`);
     const targetPath = path.join(chatsDir, `${newSessionId}.jsonl`);
 
+    if (isManagedExecutionTranscriptSync(sourcePath)) {
+      throw new SessionExecutionEngineError(
+        sourceSessionId,
+        'belongs to managed, cannot fork with the legacy session service',
+      );
+    }
+
     // Read + parse the full source transcript.
     const records = await jsonl.read<ChatRecord>(sourcePath);
     if (records.length === 0) {
-      throw new Error(`Source session not found or empty: ${sourceSessionId}`);
+      throw new SessionForkSourceUnavailableError(sourceSessionId);
     }
 
     if (
@@ -3953,7 +4101,7 @@ export class SessionService {
         ),
     );
     if (sourceRecords.length === 0) {
-      throw new Error(`Source session not found or empty: ${sourceSessionId}`);
+      throw new SessionForkSourceUnavailableError(sourceSessionId);
     }
 
     // Rebuild the parentUuid chain in active-history order so the fork is a
@@ -4025,6 +4173,16 @@ export class SessionService {
           sessionId: newSessionId,
           cwd: this.projectRoot,
           systemPayload,
+          // Keep record identities in the fork's session namespace.
+          ...(typeof record.promptId === 'string'
+            ? {
+                promptId: remapForkPromptId(
+                  record.promptId,
+                  sourceSessionId,
+                  newSessionId,
+                ),
+              }
+            : {}),
           parentUuid:
             isArtifactRecord &&
             record.parentUuid !== null &&
@@ -4476,8 +4634,10 @@ export class SessionService {
    *
    * @returns Session data for resumption, or undefined if no sessions exist
    */
-  async loadLastSession(): Promise<ResumedSessionData | undefined> {
-    const result = await this.listSessions({ size: 1 });
+  async loadLastSession(
+    options: Pick<ListSessionsOptions, 'excludeSourceTypes'> = {},
+  ): Promise<ResumedSessionData | undefined> {
+    const result = await this.listSessions({ size: 1, ...options });
     if (result.items.length === 0) {
       return;
     }
@@ -4534,18 +4694,30 @@ export class SessionService {
   }
 }
 
+function remapForkPromptId(
+  promptId: string,
+  sourceSessionId: string,
+  newSessionId: string,
+): string {
+  const sourcePrefix = `${sourceSessionId}########`;
+  if (!promptId.startsWith(sourcePrefix)) {
+    return promptId;
+  }
+  return `${newSessionId}########${promptId.slice(sourcePrefix.length)}`;
+}
+
 function remapSnapshotPromptId(
   snapshot: FileHistorySnapshot,
   sourceSessionId: string,
   newSessionId: string,
 ): FileHistorySnapshot {
-  const sourcePrefix = `${sourceSessionId}########`;
-  if (!snapshot.promptId.startsWith(sourcePrefix)) {
-    return snapshot;
-  }
   return {
     ...snapshot,
-    promptId: `${newSessionId}########${snapshot.promptId.slice(sourcePrefix.length)}`,
+    promptId: remapForkPromptId(
+      snapshot.promptId,
+      sourceSessionId,
+      newSessionId,
+    ),
   };
 }
 
@@ -4577,6 +4749,20 @@ function remapSystemPayloadForFork(
   remappedArtifactIds: Map<string, string>,
 ): ChatRecord['systemPayload'] {
   if (record.type !== 'system') return record.systemPayload;
+  if (record.subtype === 'chat_compression') {
+    const payload = record.systemPayload as
+      | { promptIds?: Array<string | null> }
+      | undefined;
+    if (!Array.isArray(payload?.promptIds)) return record.systemPayload;
+    return {
+      ...(payload ?? {}),
+      promptIds: payload.promptIds.map((promptId) =>
+        typeof promptId === 'string'
+          ? remapForkPromptId(promptId, sourceSessionId, newSessionId)
+          : promptId,
+      ),
+    } as ChatRecord['systemPayload'];
+  }
   if (record.subtype === 'file_history_snapshot') {
     return remapFileHistorySnapshotPayload(
       record.systemPayload,

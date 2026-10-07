@@ -110,6 +110,13 @@ describe('sessionMatchesSource', () => {
     ).toBe(false);
   });
 
+  it('includes Qwen Live tasks without treating them as channels', () => {
+    const task = session({ sourceType: 'qwen-live' });
+    expect(sessionMatchesSource(task, 'default')).toBe(true);
+    expect(sessionMatchesSource(task, 'channel')).toBe(false);
+    expect(task.sourceType).toBe('qwen-live');
+  });
+
   it('lists everything without an active filter', () => {
     expect(
       sessionMatchesSource(session({ sourceType: 'channel' }), undefined),

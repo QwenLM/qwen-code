@@ -4,14 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import { SendMessageTool } from './send-message.js';
-import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
+import {
+  BackgroundTaskRegistry,
+  type AgentTaskRegistration,
+} from '../agents/background-tasks.js';
 import { SHARED_RECORD_SLOT } from '../services/session-registry.js';
 import { ToolErrorType } from './tool-error.js';
 import type { ApprovalMode, Config } from '../config/config.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 import type { BroadcastResult } from '../agents/team/TeamManager.js';
+import type { ToolResult } from './tools.js';
 
 const sendToPeer = vi.fn();
 vi.mock('../ipc/peer-send.js', () => ({
@@ -28,13 +32,15 @@ beforeEach(() => {
 const DEFAULT_MODE = 'default' as ApprovalMode;
 const PLAN_MODE = 'plan' as ApprovalMode;
 
+interface TeamManagerStub {
+  sendMessage: (...args: unknown[]) => Promise<void>;
+  broadcast: (...args: unknown[]) => Promise<BroadcastResult>;
+  getTeamFile?: () => { members: Array<{ name: string }> };
+}
+
 function makeTeamConfig(opts?: {
   registry?: BackgroundTaskRegistry;
-  teamManager?: {
-    sendMessage: (...args: unknown[]) => Promise<void>;
-    broadcast: (...args: unknown[]) => Promise<BroadcastResult>;
-    getTeamFile?: () => { members: Array<{ name: string }> };
-  } | null;
+  teamManager?: TeamManagerStub | null;
   approvalMode?: ApprovalMode;
 }) {
   const teamManager = opts?.teamManager
@@ -52,14 +58,80 @@ function makeTeamConfig(opts?: {
   } as unknown as Config;
 }
 
+const signal = () => new AbortController().signal;
+const noTeamTool = () => new SendMessageTool(makeTeamConfig());
+
+/** A tool over an active team (alice, bob); sendMessage resolves by default. */
+function teamTool(
+  teamManager: Partial<TeamManagerStub> = {},
+  opts: { registry?: BackgroundTaskRegistry; approvalMode?: ApprovalMode } = {},
+) {
+  const sendMessage = (teamManager.sendMessage ??
+    vi.fn().mockResolvedValue(undefined)) as Mock;
+  const tool = new SendMessageTool(
+    makeTeamConfig({
+      ...opts,
+      teamManager: { broadcast: vi.fn(), ...teamManager, sendMessage },
+    }),
+  );
+  return { tool, sendMessage };
+}
+
+function run(tool: SendMessageTool, to: string, message = 'hi') {
+  return tool.build({ to, message }).execute(signal());
+}
+
+function asTeammate<T>(
+  agentName: string,
+  fn: () => T,
+  extra: { planModeRequired?: boolean } = {},
+) {
+  const agentId = `${agentName}@team`;
+  return runWithTeammateIdentity(
+    { agentName, teamName: 'team', agentId, isTeamLead: false, ...extra },
+    fn,
+  );
+}
+
+function registerTask(
+  registry: BackgroundTaskRegistry,
+  overrides: Partial<AgentTaskRegistration> = {},
+) {
+  registry.register({
+    agentId: 'agent-1',
+    description: 'test agent',
+    status: 'running',
+    startTime: Date.now(),
+    abortController: new AbortController(),
+    isBackgrounded: true,
+    outputFile: '/tmp/test.jsonl',
+    ...overrides,
+  });
+}
+
+/** `call` is [to, message, from]: the team delivered it with no summary. */
+function expectDelivered(sendMessage: Mock, ...call: string[]) {
+  expect(sendMessage).toHaveBeenCalledWith(...call, undefined);
+}
+
+function expectLlm(result: ToolResult, has: string[], lacks: string[] = []) {
+  for (const s of has) expect(result.llmContent).toContain(s);
+  for (const s of lacks) expect(result.llmContent).not.toContain(s);
+}
+
 describe('SendMessageTool — team mode', () => {
   it('has the correct name', () => {
-    const tool = new SendMessageTool(makeTeamConfig());
-    expect(tool.name).toBe('send_message');
+    expect(noTeamTool().name).toBe('send_message');
+    expect(noTeamTool().description).toContain(
+      'In Direct mode: If the list_agents tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
+    );
+    expect(noTeamTool().description).toContain(
+      'If tool_search does not offer list_agents in this context, do not invoke it; use a known teammate name or task_id.',
+    );
   });
 
   it('describes text invisibility as peer-only for teammates', () => {
-    const tool = new SendMessageTool(makeTeamConfig());
+    const tool = noTeamTool();
     expect(tool.description).toContain(
       'Your text output is NOT visible to teammates or to other sessions',
     );
@@ -67,74 +139,39 @@ describe('SendMessageTool — team mode', () => {
   });
 
   it('sends a message via TeamManager', async () => {
-    const sendMessage = vi.fn().mockResolvedValue(undefined);
-    const tool = new SendMessageTool(
-      makeTeamConfig({
-        teamManager: {
-          sendMessage,
-          broadcast: vi.fn(),
-        },
-      }),
-    );
+    const { tool, sendMessage } = teamTool();
 
-    const invocation = tool.build({
-      to: 'alice',
-      message: 'hello',
-    });
-    const result = await invocation.execute(new AbortController().signal);
+    const result = await run(tool, 'alice', 'hello');
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('alice');
-    expect(sendMessage).toHaveBeenCalledWith(
-      'alice',
-      'hello',
-      'leader',
-      undefined,
-    );
+    expectDelivered(sendMessage, 'alice', 'hello', 'leader');
   });
 
   it('broadcasts with "*"', async () => {
     const broadcast = vi
       .fn()
       .mockResolvedValue({ total: 2, failedRecipients: [] });
-    const tool = new SendMessageTool(
-      makeTeamConfig({
-        teamManager: {
-          sendMessage: vi.fn(),
-          broadcast,
-        },
-      }),
-    );
+    const { tool } = teamTool({ sendMessage: vi.fn(), broadcast });
 
-    const invocation = tool.build({
-      to: '*',
-      message: 'hey all',
-    });
-    const result = await invocation.execute(new AbortController().signal);
+    const result = await run(tool, '*', 'hey all');
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('broadcast');
     expect(broadcast).toHaveBeenCalledWith('hey all', 'leader');
   });
 
   it('returns error when no team is active and no task_id given', async () => {
-    const tool = new SendMessageTool(makeTeamConfig());
-    const invocation = tool.build({
-      to: 'alice',
-      message: 'hello',
-    });
-    const result = await invocation.execute(new AbortController().signal);
+    const result = await run(noTeamTool(), 'alice', 'hello');
     expect(result.error).toBeDefined();
     expect(result.llmContent).toContain('No active team');
   });
 
-  // #9276: the tool used to carry an optional single-value enum
-  // `type: ['shutdown_request']` described as "structured message type for
-  // control flow". Models filled it while writing an ordinary report, the
-  // call was rejected leader-only, and the report content was discarded.
-  // The fix is that the field no longer exists — assert the *absence*, since
-  // a reworded description would still leave the state representable.
+  // #9276: an optional single-value enum `type: ['shutdown_request']`,
+  // described as "structured message type for control flow", got filled in
+  // ordinary reports; the call was rejected leader-only and the report
+  // discarded. The field is gone: assert its *absence*, since a reworded
+  // description would still leave the state representable.
   it('exposes no control discriminator on the schema', () => {
-    const tool = new SendMessageTool(makeTeamConfig());
-    const schema = tool.schema.parametersJsonSchema as {
+    const schema = noTeamTool().schema.parametersJsonSchema as {
       properties: Record<string, unknown>;
     };
     expect(Object.keys(schema.properties)).not.toContain('type');
@@ -142,66 +179,30 @@ describe('SendMessageTool — team mode', () => {
   });
 
   it('rejects an empty message at build time', () => {
-    const tool = new SendMessageTool(makeTeamConfig());
-    expect(() => tool.build({ to: 'alice', message: '' })).toThrow(/message/i);
+    expect(() => noTeamTool().build({ to: 'alice', message: '' })).toThrow(
+      /message/i,
+    );
   });
 
   it("delivers a teammate's ordinary message to the leader", async () => {
-    const sendMessage = vi.fn().mockResolvedValue(undefined);
-    const tool = new SendMessageTool(
-      makeTeamConfig({
-        teamManager: { sendMessage, broadcast: vi.fn() },
-      }),
-    );
+    const { tool, sendMessage } = teamTool();
 
-    const invocation = tool.build({
-      to: 'leader',
-      message: 'Task completed and verified',
-    });
-    const result = await runWithTeammateIdentity(
-      {
-        agentName: 'worker',
-        teamName: 'team',
-        agentId: 'worker@team',
-        isTeamLead: false,
-      },
-      () => invocation.execute(new AbortController().signal),
+    const report = 'Task completed and verified';
+    const result = await asTeammate('worker', () =>
+      run(tool, 'leader', report),
     );
 
     expect(result.error).toBeUndefined();
-    expect(sendMessage).toHaveBeenCalledWith(
-      'leader',
-      'Task completed and verified',
-      'worker',
-      undefined,
-    );
+    expectDelivered(sendMessage, 'leader', report, 'worker');
   });
 
   it('blocks plan-required teammates before leader approval', async () => {
-    const sendMessage = vi.fn().mockResolvedValue(undefined);
-    const tool = new SendMessageTool(
-      makeTeamConfig({
-        approvalMode: PLAN_MODE,
-        teamManager: {
-          sendMessage,
-          broadcast: vi.fn(),
-        },
-      }),
-    );
+    const { tool, sendMessage } = teamTool({}, { approvalMode: PLAN_MODE });
 
-    const invocation = tool.build({
-      to: 'alice',
-      message: 'execute this before approval',
-    });
-    const result = await runWithTeammateIdentity(
-      {
-        agentName: 'planner',
-        teamName: 'team',
-        agentId: 'planner@team',
-        isTeamLead: false,
-        planModeRequired: true,
-      },
-      () => invocation.execute(new AbortController().signal),
+    const result = await asTeammate(
+      'planner',
+      () => run(tool, 'alice', 'execute this before approval'),
+      { planModeRequired: true },
     );
 
     expect(result.error).toBeDefined();
@@ -210,7 +211,7 @@ describe('SendMessageTool — team mode', () => {
   });
 
   it('validates required params', () => {
-    const tool = new SendMessageTool(makeTeamConfig());
+    const tool = noTeamTool();
     // `message` is required.
     expect(() => tool.build({} as never)).toThrow();
     expect(() => tool.build({ to: 'alice' } as never)).toThrow();
@@ -218,30 +219,12 @@ describe('SendMessageTool — team mode', () => {
 
   it('rejects ambiguous teammate and background-task destinations', async () => {
     const registry = new BackgroundTaskRegistry();
-    registry.register({
-      agentId: 'agent-1',
-      description: 'test agent',
-      status: 'running',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      isBackgrounded: true,
-      outputFile: '/tmp/test.jsonl',
-    });
-    const sendMessage = vi.fn().mockResolvedValue(undefined);
-    const tool = new SendMessageTool(
-      makeTeamConfig({
-        registry,
-        teamManager: { sendMessage, broadcast: vi.fn() },
-      }),
-    );
+    registerTask(registry);
+    const { tool, sendMessage } = teamTool({}, { registry });
 
     const result = await tool.validateBuildAndExecute(
-      {
-        to: 'alice',
-        task_id: 'agent-1',
-        message: 'ambiguous destination',
-      },
-      new AbortController().signal,
+      { to: 'alice', task_id: 'agent-1', message: 'ambiguous destination' },
+      signal(),
     );
 
     expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
@@ -253,16 +236,19 @@ describe('SendMessageTool — team mode', () => {
 
 describe('SendMessageTool — background-task mode', () => {
   let registry: BackgroundTaskRegistry;
-  let config: Config;
   let tool: SendMessageTool;
   let resumeBackgroundAgent: ReturnType<typeof vi.fn>;
   let reviveCompletedBackgroundAgent: ReturnType<typeof vi.fn>;
+  const COMPLETED = {
+    status: 'completed',
+    metaPath: '/tmp/test.meta.json',
+  } as const;
 
   beforeEach(() => {
     registry = new BackgroundTaskRegistry();
     resumeBackgroundAgent = vi.fn();
     reviveCompletedBackgroundAgent = vi.fn();
-    config = {
+    tool = new SendMessageTool({
       getBackgroundTaskRegistry: () => registry,
       getTeamManager: () =>
         ({
@@ -270,25 +256,28 @@ describe('SendMessageTool — background-task mode', () => {
         }) as ReturnType<Config['getTeamManager']>,
       resumeBackgroundAgent,
       reviveCompletedBackgroundAgent,
-    } as unknown as Config;
-    tool = new SendMessageTool(config);
+    } as unknown as Config);
   });
 
-  it('queues a message for a running task', async () => {
-    registry.register({
-      agentId: 'agent-1',
-      description: 'test agent',
-      status: 'running',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      isBackgrounded: true,
-      outputFile: '/tmp/test.jsonl',
-    });
+  const register = (overrides: Partial<AgentTaskRegistration> = {}) =>
+    registerTask(registry, overrides);
+  const send = (message: string, task_id = 'agent-1', via = tool) =>
+    via.validateBuildAndExecute({ task_id, message }, signal());
+  const pending = () => registry.get('agent-1')!.pendingMessages;
 
-    const result = await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'do more work' },
-      new AbortController().signal,
-    );
+  /** Not-found for task "nope" with no teammate hint in either output. */
+  function expectPlainNotFound(result: ToolResult) {
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expect(result.llmContent).toContain('No background task found');
+    expect(result.llmContent).not.toContain('use `to:');
+    expect(result.returnDisplay).toContain('Task not found.');
+    expect(result.returnDisplay).not.toContain('use "to"');
+  }
+
+  it('queues a message for a running task', async () => {
+    register();
+
+    const result = await send('do more work');
 
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('Message queued');
@@ -298,55 +287,27 @@ describe('SendMessageTool — background-task mode', () => {
     expect(result.llmContent).toContain(
       'Do not relaunch the task while waiting',
     );
-    expect(registry.get('agent-1')!.pendingMessages).toEqual(['do more work']);
+    expect(pending()).toEqual(['do more work']);
   });
 
   it('queues multiple messages in order', async () => {
-    registry.register({
-      agentId: 'agent-1',
-      description: 'test agent',
-      status: 'running',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      isBackgrounded: true,
-      outputFile: '/tmp/test.jsonl',
-    });
+    register();
 
-    await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'first' },
-      new AbortController().signal,
-    );
-    await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'second' },
-      new AbortController().signal,
-    );
+    await send('first');
+    await send('second');
 
-    expect(registry.get('agent-1')!.pendingMessages).toEqual([
-      'first',
-      'second',
-    ]);
+    expect(pending()).toEqual(['first', 'second']);
   });
 
   it('revives a task when it finishes while a message waits at the finalization boundary', async () => {
-    registry.register({
-      agentId: 'agent-1',
-      description: 'test agent',
-      status: 'running',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      isBackgrounded: true,
-      outputFile: '/tmp/test.jsonl',
-    });
+    register();
     registry.beginFinishing('agent-1');
     reviveCompletedBackgroundAgent.mockResolvedValue(registry.get('agent-1'));
 
-    const resultPromise = tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'late correction' },
-      new AbortController().signal,
-    );
+    const resultPromise = send('late correction');
     await Promise.resolve();
 
-    expect(registry.get('agent-1')!.pendingMessages).toEqual([]);
+    expect(pending()).toEqual([]);
     expect(reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
 
     registry.complete('agent-1', 'done');
@@ -361,40 +322,21 @@ describe('SendMessageTool — background-task mode', () => {
   });
 
   it('returns error for non-existent task', async () => {
-    const result = await tool.validateBuildAndExecute(
-      { task_id: 'nope', message: 'hello' },
-      new AbortController().signal,
-    );
+    const result = await send('hello', 'nope');
 
-    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
+    expectPlainNotFound(result);
     expect(result.error?.message).toBe('Task not found: nope');
-    expect(result.llmContent).toContain('No background task found');
-    expect(result.llmContent).not.toContain('use `to:');
-    expect(result.returnDisplay).toContain('Task not found.');
-    expect(result.returnDisplay).not.toContain('use "to"');
   });
 
   it('returns error for non-existent task without an active team', async () => {
     const noTeamTool = new SendMessageTool(
       makeTeamConfig({ registry, teamManager: null }),
     );
-    const result = await noTeamTool.validateBuildAndExecute(
-      { task_id: 'nope', message: 'hello' },
-      new AbortController().signal,
-    );
-
-    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
-    expect(result.llmContent).toContain('No background task found');
-    expect(result.llmContent).not.toContain('use `to:');
-    expect(result.returnDisplay).toContain('Task not found.');
-    expect(result.returnDisplay).not.toContain('use "to"');
+    expectPlainNotFound(await send('hello', 'nope', noTeamTool));
   });
 
   it('suggests the teammate destination for a matching task ID', async () => {
-    const result = await tool.validateBuildAndExecute(
-      { task_id: 'QA Reviewer', message: 'hello' },
-      new AbortController().signal,
-    );
+    const result = await send('hello', 'QA Reviewer');
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
     expect(result.error?.message).toContain(
@@ -407,21 +349,10 @@ describe('SendMessageTool — background-task mode', () => {
   });
 
   it('returns error for a failed (non-running, non-revivable) task', async () => {
-    registry.register({
-      agentId: 'agent-1',
-      description: 'test agent',
-      status: 'running',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      isBackgrounded: true,
-      outputFile: '/tmp/test.jsonl',
-    });
+    register();
     registry.fail('agent-1', 'boom');
 
-    const result = await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'hello' },
-      new AbortController().signal,
-    );
+    const result = await send('hello');
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
     expect(result.llmContent).toContain('not running');
@@ -429,46 +360,23 @@ describe('SendMessageTool — background-task mode', () => {
   });
 
   it('rejects messages for a cancelled task', async () => {
-    // Once task_stop fires, the reasoning loop is winding down — there is
-    // no next tool-round boundary to drain into, so the message would be
-    // silently dropped. Reject instead of accepting a message that will
-    // never be delivered.
-    registry.register({
-      agentId: 'agent-1',
-      description: 'test agent',
-      status: 'running',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      isBackgrounded: true,
-      outputFile: '/tmp/test.jsonl',
-    });
+    // Once task_stop fires the reasoning loop is winding down, with no next
+    // tool-round boundary to drain into: an accepted message would be silently
+    // dropped and never delivered, so reject it instead.
+    register();
     registry.cancel('agent-1');
 
-    const result = await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'too late' },
-      new AbortController().signal,
-    );
+    const result = await send('too late');
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
-    expect(registry.get('agent-1')!.pendingMessages).toEqual([]);
+    expect(pending()).toEqual([]);
   });
 
   it('resumes a paused task and injects the message as continuation input', async () => {
-    registry.register({
-      agentId: 'agent-1',
-      description: 'test agent',
-      status: 'paused',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      isBackgrounded: true,
-      outputFile: '/tmp/test.jsonl',
-    });
+    register({ status: 'paused' });
     resumeBackgroundAgent.mockResolvedValue(registry.get('agent-1'));
 
-    const result = await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'pick up from the TODO list' },
-      new AbortController().signal,
-    );
+    const result = await send('pick up from the TODO list');
 
     expect(resumeBackgroundAgent).toHaveBeenCalledWith(
       'agent-1',
@@ -479,26 +387,14 @@ describe('SendMessageTool — background-task mode', () => {
   });
 
   it('continues a completed task on its resident runtime', async () => {
-    registry.register({
-      agentId: 'agent-1',
-      description: 'test agent',
-      status: 'completed',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      isBackgrounded: true,
-      outputFile: '/tmp/test.jsonl',
-      metaPath: '/tmp/test.meta.json',
-    });
-    const continueResident = vi.fn().mockReturnValue(true);
+    register(COMPLETED);
+    const continueResident = vi.fn().mockReturnValue('continued');
     registry.registerResidentAgent('agent-1', {
       continue: continueResident,
       dispose: vi.fn(),
     });
 
-    const result = await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'now refactor the helper' },
-      new AbortController().signal,
-    );
+    const result = await send('now refactor the helper');
 
     expect(continueResident).toHaveBeenCalledWith('now refactor the helper');
     expect(reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
@@ -508,23 +404,25 @@ describe('SendMessageTool — background-task mode', () => {
     expect(result.returnDisplay).toContain('Continued');
   });
 
-  it('revives a completed task when no resident runtime is available', async () => {
-    registry.register({
-      agentId: 'agent-1',
-      description: 'test agent',
-      status: 'completed',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      isBackgrounded: true,
-      outputFile: '/tmp/test.jsonl',
-      metaPath: '/tmp/test.meta.json',
+  it('reports resident capacity without attempting a cold revive', async () => {
+    register(COMPLETED);
+    registry.registerResidentAgent('agent-1', {
+      continue: vi.fn().mockReturnValue('capacity_wait'),
+      dispose: vi.fn(),
     });
+
+    const result = await send('now refactor the helper');
+
+    expect(reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
+    expect(result.llmContent).toContain('capacity');
+  });
+
+  it('revives a completed task when no resident runtime is available', async () => {
+    register(COMPLETED);
     reviveCompletedBackgroundAgent.mockResolvedValue(registry.get('agent-1'));
 
-    const result = await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'now refactor the helper' },
-      new AbortController().signal,
-    );
+    const result = await send('now refactor the helper');
 
     expect(reviveCompletedBackgroundAgent).toHaveBeenCalledWith(
       'agent-1',
@@ -537,44 +435,23 @@ describe('SendMessageTool — background-task mode', () => {
   });
 
   it('returns error when a completed task cannot be revived', async () => {
-    registry.register({
-      agentId: 'agent-1',
-      description: 'test agent',
-      status: 'completed',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      isBackgrounded: true,
-      outputFile: '/tmp/test.jsonl',
-      metaPath: '/tmp/test.meta.json',
-    });
+    register(COMPLETED);
     reviveCompletedBackgroundAgent.mockResolvedValue(undefined);
 
-    const result = await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'try again' },
-      new AbortController().signal,
-    );
+    const result = await send('try again');
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
     expect(result.llmContent).toContain('could not be revived');
   });
 
   it('reports the retained-state reason without attempting continuation', async () => {
-    registry.register({
-      agentId: 'agent-1',
+    register({
+      ...COMPLETED,
       description: 'unsafe restored agent',
-      status: 'completed',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      isBackgrounded: true,
-      outputFile: '/tmp/test.jsonl',
-      metaPath: '/tmp/test.meta.json',
       resumeBlockedReason: 'Background task transcript is missing.',
     });
 
-    const result = await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'try again' },
-      new AbortController().signal,
-    );
+    const result = await send('try again');
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
     expect(result.llmContent).toContain(
@@ -585,54 +462,44 @@ describe('SendMessageTool — background-task mode', () => {
   });
 
   it('includes task description in success display', async () => {
-    registry.register({
-      agentId: 'agent-1',
-      description: 'Search for auth code',
-      status: 'running',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      isBackgrounded: true,
-      outputFile: '/tmp/test.jsonl',
-    });
+    register({ description: 'Search for auth code' });
 
-    const result = await tool.validateBuildAndExecute(
-      { task_id: 'agent-1', message: 'focus on login' },
-      new AbortController().signal,
-    );
+    const result = await send('focus on login');
 
     expect(result.returnDisplay).toContain('Search for auth code');
   });
 });
 
 describe('SendMessageTool — destination validation (#10073)', () => {
-  it('rejects calls that specify both "to" and "task_id" at build time', () => {
-    const tool = new SendMessageTool(makeTeamConfig());
+  /** Looks up `task_id` with an empty registry and a team file `teamFile`. */
+  function lookup(teamFile: object, task_id: string) {
+    const tool = new SendMessageTool({
+      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+      getApprovalMode: () => DEFAULT_MODE,
+      getTeamManager: () => ({ getTeamFile: () => teamFile }),
+    } as unknown as Config);
+    return tool.validateBuildAndExecute(
+      { task_id, message: 'hello' },
+      signal(),
+    );
+  }
 
+  it('rejects calls that specify both "to" and "task_id" at build time', () => {
     expect(() =>
-      tool.build({ to: 'alice', task_id: 'agent-1', message: 'hello' }),
+      noTeamTool().build({ to: 'alice', task_id: 'agent-1', message: 'hello' }),
     ).toThrow('Only one of "to" or "task_id" may be provided.');
   });
 
   it('declares the two destination fields mutually exclusive', () => {
-    const tool = new SendMessageTool(makeTeamConfig());
-    expect(tool.description).toContain('Specify exactly one of the two fields');
+    expect(noTeamTool().description).toContain(
+      'Specify exactly one of the two fields',
+    );
   });
 
   it('suggests "to" when a failed task_id matches a teammate name', async () => {
-    const config = {
-      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
-      getApprovalMode: () => DEFAULT_MODE,
-      getTeamManager: () => ({
-        getTeamFile: () => ({
-          members: [{ agentId: 'qa-reviewer@team', name: 'qa-reviewer' }],
-        }),
-      }),
-    } as unknown as Config;
-    const tool = new SendMessageTool(config);
-
-    const result = await tool.validateBuildAndExecute(
-      { task_id: 'QA Reviewer', message: 'hello' },
-      new AbortController().signal,
+    const result = await lookup(
+      { members: [{ agentId: 'qa-reviewer@team', name: 'qa-reviewer' }] },
+      'QA Reviewer',
     );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
@@ -644,111 +511,89 @@ describe('SendMessageTool — destination validation (#10073)', () => {
     expect(result.error?.message).toContain('instead of `task_id`');
   });
 
-  it('adds no teammate hint when the task_id matches no teammate', async () => {
-    const config = {
-      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
-      getApprovalMode: () => DEFAULT_MODE,
-      getTeamManager: () => ({
-        getTeamFile: () => ({
-          members: [{ agentId: 'alice@team', name: 'alice' }],
-        }),
-      }),
-    } as unknown as Config;
-    const tool = new SendMessageTool(config);
-
-    const result = await tool.validateBuildAndExecute(
-      { task_id: 'definitely-not-a-teammate', message: 'hello' },
-      new AbortController().signal,
-    );
-
-    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
-    expect(result.error?.message).not.toContain('use `to:');
-  });
-
-  it('suggests "to" when the task_id is the reserved leader name', async () => {
-    const config = {
-      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
-      getApprovalMode: () => DEFAULT_MODE,
-      getTeamManager: () => ({
-        getTeamFile: () => ({ members: [] }),
-      }),
-    } as unknown as Config;
-    const tool = new SendMessageTool(config);
-
-    const result = await tool.validateBuildAndExecute(
-      { task_id: 'Leader', message: 'hello' },
-      new AbortController().signal,
-    );
+  // Rows: title, team file, task_id, whether error.message suggests `to`.
+  it.each([
+    [
+      'adds no teammate hint when the task_id matches no teammate',
+      { members: [{ agentId: 'alice@team', name: 'alice' }] },
+      'definitely-not-a-teammate',
+      false,
+    ],
+    [
+      'suggests "to" when the task_id is the reserved leader name',
+      { members: [] },
+      'Leader',
+      true,
+    ],
+    [
+      'adds no hint for leader spellings the "to" route would reject',
+      { members: [] },
+      'Leader!',
+      false,
+    ],
+    [
+      'suggests "to" when the task_id is the leader agent ID',
+      { members: [], leadAgentId: 'leader@test-team' },
+      'leader@test-team',
+      true,
+    ],
+  ])('%s', async (_title, teamFile, taskId, hinted) => {
+    const result = await lookup(teamFile, taskId);
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
-    expect(result.error?.message).toContain('instead of `task_id`');
-  });
-
-  it('adds no hint for leader spellings the "to" route would reject', async () => {
-    const config = {
-      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
-      getApprovalMode: () => DEFAULT_MODE,
-      getTeamManager: () => ({
-        getTeamFile: () => ({ members: [] }),
-      }),
-    } as unknown as Config;
-    const tool = new SendMessageTool(config);
-
-    const result = await tool.validateBuildAndExecute(
-      { task_id: 'Leader!', message: 'hello' },
-      new AbortController().signal,
-    );
-
-    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
-    expect(result.error?.message).not.toContain('use `to:');
-  });
-
-  it('suggests "to" when the task_id is the leader agent ID', async () => {
-    const config = {
-      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
-      getApprovalMode: () => DEFAULT_MODE,
-      getTeamManager: () => ({
-        getTeamFile: () => ({
-          members: [],
-          leadAgentId: 'leader@test-team',
-        }),
-      }),
-    } as unknown as Config;
-    const tool = new SendMessageTool(config);
-
-    const result = await tool.validateBuildAndExecute(
-      { task_id: 'leader@test-team', message: 'hello' },
-      new AbortController().signal,
-    );
-
-    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
-    expect(result.error?.message).toContain('instead of `task_id`');
+    if (hinted) expect(result.error?.message).toContain('instead of `task_id`');
+    else expect(result.error?.message).not.toContain('use `to:');
   });
 });
 
 describe('SendMessageTool — peer mode', () => {
-  function toolWithoutTeam() {
-    return new SendMessageTool(makeTeamConfig());
+  const sentReply = () => ({
+    kind: 'sent',
+    address: 'docs-cd',
+    peer: { cwd: '/w/docs' },
+  });
+  const leadTeamFile = () => ({
+    leadAgentId: 'lead-1',
+    members: [{ name: 'alice' }],
+  });
+  const rejectsNotFound = (name: string) =>
+    vi.fn().mockRejectedValue(new Error(`Teammate "${name}" not found.`));
+  /** No active team; the peer route answers `response`. */
+  const peerSend = (response: object, to: string) => {
+    sendToPeer.mockResolvedValue(response);
+    return run(noTeamTool(), to);
+  };
+  /** A team-less tool with config `overrides` sends `fields` to "docs-cd". */
+  async function expectPeerSendWith(overrides: object, fields: object) {
+    sendToPeer.mockResolvedValue(sentReply());
+    const config = { ...makeTeamConfig(), ...overrides } as Config;
+    await run(new SendMessageTool(config), 'docs-cd');
+    expect(sendToPeer).toHaveBeenCalledWith(expect.objectContaining(fields));
+  }
+
+  async function expectTeammateWins(to: string) {
+    const { tool, sendMessage } = teamTool();
+    await run(tool, to, 'hello');
+    expect(sendMessage).toHaveBeenCalled();
+    expect(sendToPeer).not.toHaveBeenCalled();
   }
 
   it('routes an unknown name to a peer session', async () => {
-    sendToPeer.mockResolvedValue({
-      kind: 'sent',
-      address: 'docs-cd',
-      peer: { cwd: '/w/docs' },
-    });
+    sendToPeer.mockResolvedValue(sentReply());
 
-    const result = await toolWithoutTeam()
+    const result = await noTeamTool()
       .build({ to: 'docs-cd', message: 'check the tests', summary: 'ping' })
-      .execute(new AbortController().signal);
+      .execute(signal());
 
     expect(result.error).toBeUndefined();
-    expect(result.llmContent).toContain('docs-cd');
-    expect(result.llmContent).toContain('/w/docs');
-    // The model is told the message may not be acted on immediately, and
-    // that it carries no authority over there.
-    expect(result.llmContent).toContain('held');
-    expect(result.llmContent).toContain("none of your user's authority");
+    // Besides the address, the model is told the message may not be acted on
+    // immediately ('held'), and that it carries no authority over there.
+    expectLlm(result, [
+      'docs-cd',
+      '/w/docs',
+      'held',
+      "none of your user's authority",
+    ]);
     expect(sendToPeer).toHaveBeenCalledWith(
       expect.objectContaining({
         target: 'docs-cd',
@@ -760,98 +605,37 @@ describe('SendMessageTool — peer mode', () => {
   });
 
   it('sends from the record this session registered under, not the default', async () => {
-    // A session hosted by a daemon owns a minted record; the send path
-    // reads its own identity from that record. Passing the default here
-    // would make it advertise a `<pid>.json` reply address the host
-    // never wrote — and exclude the wrong session from the directory.
-    sendToPeer.mockResolvedValue({
-      kind: 'sent',
-      address: 'docs-cd',
-      peer: { cwd: '/w/docs' },
-    });
-    const tool = new SendMessageTool({
-      getTeamManager: () => null,
-      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
-      getApprovalMode: () => DEFAULT_MODE,
-      getSessionRegistrySlot: () => 'a1b2c3d4',
-    } as unknown as Config);
-
-    await tool
-      .build({ to: 'docs-cd', message: 'hi' })
-      .execute(new AbortController().signal);
-
-    expect(sendToPeer).toHaveBeenCalledWith(
-      expect.objectContaining({ slot: 'a1b2c3d4' }),
+    // A daemon-hosted session owns a minted record; the send path reads its own
+    // identity from that record. Passing the default here would advertise a
+    // `<pid>.json` reply address the host never wrote — and exclude the wrong
+    // session from the directory.
+    await expectPeerSendWith(
+      { getSessionRegistrySlot: () => 'a1b2c3d4' },
+      { slot: 'a1b2c3d4' },
     );
   });
 
   it('asserts nothing about its mode when the mode is unreadable', async () => {
-    sendToPeer.mockResolvedValue({
-      kind: 'sent',
-      address: 'docs-cd',
-      peer: { cwd: '/w/docs' },
-    });
-    const tool = new SendMessageTool({
-      getTeamManager: () => null,
-      getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
-      getApprovalMode: () => {
-        throw new Error('not yet');
-      },
-      getSessionRegistrySlot: () => SHARED_RECORD_SLOT,
-    } as unknown as Config);
-
-    await tool
-      .build({ to: 'docs-cd', message: 'hi' })
-      .execute(new AbortController().signal);
-
-    expect(sendToPeer).toHaveBeenCalledWith(
-      expect.objectContaining({ approvalMode: null }),
-    );
+    const getApprovalMode = () => {
+      throw new Error('not yet');
+    };
+    await expectPeerSendWith({ getApprovalMode }, { approvalMode: null });
   });
 
-  it('prefers a teammate over a same-named peer session', async () => {
-    const sendMessage = vi.fn().mockResolvedValue(undefined);
-    const tool = new SendMessageTool(
-      makeTeamConfig({ teamManager: { sendMessage, broadcast: vi.fn() } }),
-    );
+  it('prefers a teammate over a same-named peer session', () =>
+    expectTeammateWins('alice'));
 
-    await tool
-      .build({ to: 'alice', message: 'hello' })
-      .execute(new AbortController().signal);
-
-    expect(sendMessage).toHaveBeenCalled();
-    expect(sendToPeer).not.toHaveBeenCalled();
-  });
-
-  it('recognises a teammate by its sanitized name, not the raw string', async () => {
-    // TeamManager.sendMessage resolves through findMemberByName, which
-    // sanitizes; the precedence check must use the same rule or "Alice"
-    // would go looking for a session.
-    const sendMessage = vi.fn().mockResolvedValue(undefined);
-    const tool = new SendMessageTool(
-      makeTeamConfig({ teamManager: { sendMessage, broadcast: vi.fn() } }),
-    );
-    await tool
-      .build({ to: 'Alice', message: 'hello' })
-      .execute(new AbortController().signal);
-    expect(sendMessage).toHaveBeenCalled();
-    expect(sendToPeer).not.toHaveBeenCalled();
-  });
+  // TeamManager.sendMessage resolves through findMemberByName, which
+  // sanitizes; the precedence check must use the same rule or "Alice"
+  // would go looking for a session.
+  it('recognises a teammate by its sanitized name, not the raw string', () =>
+    expectTeammateWins('Alice'));
 
   it('reaches a peer even while a team is active, when no teammate has that name', async () => {
-    const sendMessage = vi.fn().mockResolvedValue(undefined);
-    sendToPeer.mockResolvedValue({
-      kind: 'sent',
-      address: 'docs-cd',
-      peer: { cwd: '/w/docs' },
-    });
-    const tool = new SendMessageTool(
-      makeTeamConfig({ teamManager: { sendMessage, broadcast: vi.fn() } }),
-    );
+    sendToPeer.mockResolvedValue(sentReply());
+    const { tool, sendMessage } = teamTool();
 
-    const result = await tool
-      .build({ to: 'docs-cd', message: 'hello' })
-      .execute(new AbortController().signal);
+    const result = await run(tool, 'docs-cd', 'hello');
 
     expect(result.error).toBeUndefined();
     expect(sendToPeer).toHaveBeenCalled();
@@ -859,9 +643,7 @@ describe('SendMessageTool — peer mode', () => {
   });
 
   it('never broadcasts across sessions', async () => {
-    const result = await toolWithoutTeam()
-      .build({ to: '*', message: 'hey all' })
-      .execute(new AbortController().signal);
+    const result = await run(noTeamTool(), '*', 'hey all');
 
     expect(result.error).toBeDefined();
     expect(result.llmContent).toContain('not supported');
@@ -869,104 +651,64 @@ describe('SendMessageTool — peer mode', () => {
   });
 
   it('tells the model when it addressed itself', async () => {
-    sendToPeer.mockResolvedValue({ kind: 'self', name: 'app-ab' });
-
-    const result = await toolWithoutTeam()
-      .build({ to: 'app-ab', message: 'hi' })
-      .execute(new AbortController().signal);
+    const result = await peerSend({ kind: 'self', name: 'app-ab' }, 'app-ab');
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
     expect(result.llmContent).toContain("this session's own name");
   });
 
   it('surfaces an ambiguous name with the candidates', async () => {
-    sendToPeer.mockResolvedValue({
-      kind: 'ambiguous',
-      matches: ['app-ab [aaa111] in /w/one', 'app-ab [bbb222] in /w/two'],
-    });
-
-    const result = await toolWithoutTeam()
-      .build({ to: 'app-ab', message: 'hi' })
-      .execute(new AbortController().signal);
+    const matches = ['app-ab [aaa111] in /w/one', 'app-ab [bbb222] in /w/two'];
+    const result = await peerSend({ kind: 'ambiguous', matches }, 'app-ab');
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
-    expect(result.llmContent).toContain('aaa111');
-    expect(result.llmContent).toContain('name [ref]');
+    expectLlm(result, ['aaa111', 'name [ref]']);
   });
 
   it('suggests near-misses for an unknown name', async () => {
-    sendToPeer.mockResolvedValue({
-      kind: 'not-found',
-      suggestions: ['qwen-code-f7'],
-    });
-
-    const result = await toolWithoutTeam()
-      .build({ to: 'qwen-code', message: 'hi' })
-      .execute(new AbortController().signal);
+    const result = await peerSend(
+      { kind: 'not-found', suggestions: ['qwen-code-f7'] },
+      'qwen-code',
+    );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_FOUND);
     expect(result.llmContent).toContain('qwen-code-f7');
   });
 
   it('falls through to the team error when nothing resembles the name', async () => {
-    sendToPeer.mockResolvedValue({ kind: 'not-found', suggestions: [] });
-
-    const result = await toolWithoutTeam()
-      .build({ to: 'zzz', message: 'hi' })
-      .execute(new AbortController().signal);
+    const result = await peerSend(
+      { kind: 'not-found', suggestions: [] },
+      'zzz',
+    );
 
     expect(result.error).toBeDefined();
-    expect(result.llmContent).toContain('No active team');
-    expect(result.llmContent).toContain('"zzz"');
+    expectLlm(result, ['No active team', '"zzz"']);
   });
 
   it('reports a delivery failure against the address it tried', async () => {
-    sendToPeer.mockResolvedValue({
-      kind: 'failed',
-      address: 'docs-cd',
-      peer: { cwd: '/w/docs' },
-      reason: 'that session just exited',
-    });
-
-    const result = await toolWithoutTeam()
-      .build({ to: 'docs-cd', message: 'hi' })
-      .execute(new AbortController().signal);
+    const result = await peerSend(
+      { ...sentReply(), kind: 'failed', reason: 'that session just exited' },
+      'docs-cd',
+    );
 
     expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
-    expect(result.llmContent).toContain('docs-cd');
-    expect(result.llmContent).toContain('just exited');
+    expectLlm(result, ['docs-cd', 'just exited']);
   });
 
   it('falls through to the team error when messaging is off', async () => {
-    sendToPeer.mockResolvedValue({ kind: 'disabled' });
-
-    const result = await toolWithoutTeam()
-      .build({ to: 'docs-cd', message: 'hi' })
-      .execute(new AbortController().signal);
+    const result = await peerSend({ kind: 'disabled' }, 'docs-cd');
 
     expect(result.llmContent).toContain('No active team');
   });
 
   it("never routes a teammate's report to the leader through the peer directory", async () => {
-    const sendMessage = vi.fn().mockResolvedValue(undefined);
     // A session named "leaderboard-3c" is reachable: the peer route would
     // suggest it for "leader" and swallow the report.
     sendToPeer.mockResolvedValue({
       kind: 'not-found',
       suggestions: ['leaderboard-3c'],
     });
-    const tool = new SendMessageTool(
-      makeTeamConfig({
-        teamManager: {
-          sendMessage,
-          broadcast: vi.fn(),
-          getTeamFile: () => ({
-            leadAgentId: 'lead-1',
-            members: [{ name: 'alice' }],
-          }),
-        },
-      }),
-    );
+    const { tool, sendMessage } = teamTool({ getTeamFile: leadTeamFile });
 
     // The padded spellings are the regression: `resolvePeerTarget` trims its
     // target while the in-process check matches exactly, so without a single
@@ -974,25 +716,9 @@ describe('SendMessageTool — peer mode', () => {
     // whatever peer session happened to carry that name.
     for (const to of ['leader', 'Leader', 'lead-1', 'leader ', '\nlead-1']) {
       sendMessage.mockClear();
-      const result = await runWithTeammateIdentity(
-        {
-          agentName: 'alice',
-          teamName: 'team',
-          agentId: 'alice@team',
-          isTeamLead: false,
-        },
-        () =>
-          tool
-            .build({ to, message: 'report' })
-            .execute(new AbortController().signal),
-      );
+      const result = await asTeammate('alice', () => run(tool, to, 'report'));
       expect(result.error).toBeUndefined();
-      expect(sendMessage).toHaveBeenCalledWith(
-        to.trim(),
-        'report',
-        'alice',
-        undefined,
-      );
+      expectDelivered(sendMessage, to.trim(), 'report', 'alice');
     }
     expect(sendToPeer).not.toHaveBeenCalled();
   });
@@ -1002,108 +728,64 @@ describe('SendMessageTool — peer mode', () => {
       kind: 'not-found',
       suggestions: ['docs-cd'],
     });
-    const tool = new SendMessageTool(
-      makeTeamConfig({
-        teamManager: { sendMessage: vi.fn(), broadcast: vi.fn() },
-      }),
-    );
-    const result = await tool
-      .build({ to: 'docs', message: 'hi' })
-      .execute(new AbortController().signal);
-    expect(result.llmContent).toContain('and no teammate');
-    expect(result.llmContent).toContain('docs-cd');
+    const { tool } = teamTool({ sendMessage: vi.fn() });
+
+    expectLlm(await run(tool, 'docs'), ['and no teammate', 'docs-cd']);
   });
 
   it("appends the session search to the team's not-found error", async () => {
     sendToPeer.mockResolvedValue({ kind: 'not-found', suggestions: [] });
-    const tool = new SendMessageTool(
-      makeTeamConfig({
-        teamManager: {
-          sendMessage: vi
-            .fn()
-            .mockRejectedValue(new Error('Teammate "zed" not found.')),
-          broadcast: vi.fn(),
-        },
-      }),
-    );
-    const result = await tool
-      .build({ to: 'zed', message: 'hi' })
-      .execute(new AbortController().signal);
+    const { tool } = teamTool({ sendMessage: rejectsNotFound('zed') });
+
+    const result = await run(tool, 'zed');
+
     expect(result.error).toBeDefined();
-    expect(result.llmContent).toContain('Teammate "zed" not found.');
-    expect(result.llmContent).toContain(
+    expectLlm(result, [
+      'Teammate "zed" not found.',
       'No reachable session has that name either',
-    );
+    ]);
   });
 
   it("names the disabled setting in the team's not-found error", async () => {
     sendToPeer.mockResolvedValue({ kind: 'disabled' });
-    const tool = new SendMessageTool(
-      makeTeamConfig({
-        teamManager: {
-          sendMessage: vi
-            .fn()
-            .mockRejectedValue(new Error('Teammate "zed" not found.')),
-          broadcast: vi.fn(),
-        },
-      }),
-    );
-    const result = await tool
-      .build({ to: 'zed', message: 'hi' })
-      .execute(new AbortController().signal);
+    const { tool } = teamTool({ sendMessage: rejectsNotFound('zed') });
+
+    const result = await run(tool, 'zed');
+
     expect(result.error).toBeDefined();
-    expect(result.llmContent).toContain('Teammate "zed" not found.');
-    expect(result.llmContent).toContain('agents.crossSessionMessaging');
-    expect(result.llmContent).not.toContain(
-      'No reachable session has that name',
+    expectLlm(
+      result,
+      ['Teammate "zed" not found.', 'agents.crossSessionMessaging'],
+      ['No reachable session has that name'],
     );
   });
 
   it('says messaging is off, rather than that a lookup found nothing', async () => {
-    sendToPeer.mockResolvedValue({ kind: 'disabled' });
-    const result = await toolWithoutTeam()
-      .build({ to: 'docs-cd', message: 'hi' })
-      .execute(new AbortController().signal);
-    expect(result.llmContent).toContain('No active team');
-    expect(result.llmContent).toContain('agents.crossSessionMessaging');
-    expect(result.llmContent).not.toContain('no reachable session');
+    expectLlm(
+      await peerSend({ kind: 'disabled' }, 'docs-cd'),
+      ['No active team', 'agents.crossSessionMessaging'],
+      ['no reachable session'],
+    );
   });
 
   it('tells the model it will not learn the outcome and must not re-send', async () => {
-    sendToPeer.mockResolvedValue({
-      kind: 'sent',
-      address: 'docs-cd',
-      peer: { cwd: '/w/docs' },
-    });
-    const result = await toolWithoutTeam()
-      .build({ to: 'docs-cd', message: 'hi' })
-      .execute(new AbortController().signal);
-    expect(result.llmContent).toContain('do not re-send');
-    expect(result.llmContent).toContain('<cross_session_message>');
+    expectLlm(await peerSend(sentReply(), 'docs-cd'), [
+      'do not re-send',
+      '<cross_session_message>',
+    ]);
   });
 
   it('hands the peer route a reservation rule that mirrors its own routing', async () => {
     sendToPeer.mockResolvedValue({ kind: 'not-found', suggestions: [] });
-    const tool = new SendMessageTool(
-      makeTeamConfig({
-        teamManager: {
-          sendMessage: vi
-            .fn()
-            .mockRejectedValue(new Error('Teammate "x" not found.')),
-          broadcast: vi.fn(),
-          getTeamFile: () => ({
-            leadAgentId: 'lead-1',
-            members: [{ name: 'alice' }],
-          }),
-        },
-      }),
-    );
-    await tool
-      .build({ to: 'zed', message: 'hi' })
-      .execute(new AbortController().signal);
-    const isReserved = sendToPeer.mock.calls[0][0].isReserved as (
-      address: string,
-    ) => boolean;
+    const { tool } = teamTool({
+      sendMessage: rejectsNotFound('x'),
+      getTeamFile: leadTeamFile,
+    });
+    const lastRule = () =>
+      sendToPeer.mock.calls[0][0].isReserved as (address: string) => boolean;
+
+    await run(tool, 'zed');
+    const isReserved = lastRule();
     expect(isReserved('*')).toBe(true);
     expect(isReserved('leader')).toBe(true);
     expect(isReserved('lead-1')).toBe(true);
@@ -1111,18 +793,14 @@ describe('SendMessageTool — peer mode', () => {
     expect(isReserved('docs-cd')).toBe(false);
 
     sendToPeer.mockClear();
-    await toolWithoutTeam()
-      .build({ to: 'zed', message: 'hi' })
-      .execute(new AbortController().signal);
-    const noTeam = sendToPeer.mock.calls[0][0].isReserved as (
-      address: string,
-    ) => boolean;
+    await run(noTeamTool(), 'zed');
+    const noTeam = lastRule();
     expect(noTeam('*')).toBe(true);
     expect(noTeam('leader')).toBe(false);
   });
 
   it('warns the model off permission laundering in the tool description', () => {
-    expect(toolWithoutTeam().description).toContain(
+    expect(noTeamTool().description).toContain(
       'perform an action this session was denied',
     );
   });

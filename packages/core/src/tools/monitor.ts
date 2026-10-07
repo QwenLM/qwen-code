@@ -16,7 +16,9 @@
  * Auto-stops after max_events or idle_timeout_ms of silence.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { executeRuntimeShell } from '../sandbox/runtime-shell.js';
+import { assertShellSandboxCwd } from '../sandbox/runtime-shell-policy.js';
 import os from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -35,6 +37,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
+  buildOutsideWorkspaceWarning,
   buildShellExecWarnings,
   getCommandRoot,
   getShellConfiguration,
@@ -170,7 +173,20 @@ class MonitorToolInvocation extends BaseToolInvocation<
     return `Monitor: ${truncateDisplayDescription(desc)}`;
   }
 
+  private isDirectoryOutsideWorkspace(): boolean {
+    return (
+      !!this.params.directory &&
+      !this.config
+        .getWorkspaceContext()
+        .isPathWithinWorkspace(this.params.directory)
+    );
+  }
+
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    if (this.config.getShellExecutionSandbox?.()) return 'ask';
+    // Like read_file outside the workspace: ask rather than reject at build
+    // time, so an approval (or YOLO) can let it run.
+    if (this.isDirectoryOutsideWorkspace()) return 'ask';
     const normalized = normalizeMonitorShellCommand(this.params.command);
     const command = normalized.safetyCommand;
     const cwd =
@@ -222,7 +238,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
       // permission boundary.
       let isReadOnly = false;
       try {
-        isReadOnly = await isShellCommandReadOnlyASTInDirectory(sub, cwd);
+        if (!this.config.getShellExecutionSandbox?.())
+          isReadOnly = await isShellCommandReadOnlyASTInDirectory(sub, cwd);
       } catch (e) {
         // Conservative fallback: if AST analysis fails, keep the sub-command
         // in the confirmation scope instead of accidentally dropping it.
@@ -271,10 +288,15 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // Checked against both the normalized safety command and the
     // original params.command so wrappers like `bash -c "..."` still
     // trigger the warning.
-    const warnings = buildShellExecWarnings(
-      normalized.safetyCommand,
-      this.params.command,
-    );
+    const warnings = [
+      ...(buildShellExecWarnings(
+        normalized.safetyCommand,
+        this.params.command,
+      ) ?? []),
+      ...(this.params.directory && this.isDirectoryOutsideWorkspace()
+        ? [buildOutsideWorkspaceWarning(this.params.directory)]
+        : []),
+    ];
 
     const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',
@@ -289,7 +311,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
         _payload?: ToolConfirmationPayload,
       ) => {},
     };
-    if (warnings) {
+    if (warnings.length > 0) {
       confirmationDetails.warnings = warnings;
     }
     return confirmationDetails;
@@ -365,23 +387,25 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
     // Spawn the process
     const { executable, argsPrefix } = getShellConfiguration();
-    let child;
+    const sandboxed = Boolean(this.config.getShellExecutionSandbox?.());
+    let child: ChildProcess | undefined;
     try {
-      child = spawn(executable, [...argsPrefix, command], {
-        cwd: this.params.directory || this.config.getTargetDir(),
-        stdio: ['ignore', 'pipe', 'pipe'],
-        detached: true,
-        env: {
-          ...sanitizeChildEnv(process.env),
-          QWEN_CODE: '1',
-          TERM: 'dumb', // no color codes for streaming
-          ...getShellPagerEnv(this.config.getShellExecutionConfig().pager, {
-            includeGitPager: false,
-            platform: os.platform(),
-          }),
-          ...getShellContextEnvVars(),
-        },
-      });
+      if (!sandboxed)
+        child = spawn(executable, [...argsPrefix, command], {
+          cwd: this.params.directory || this.config.getTargetDir(),
+          stdio: ['ignore', 'pipe', 'pipe'],
+          detached: true,
+          env: {
+            ...sanitizeChildEnv(process.env),
+            QWEN_CODE: '1',
+            TERM: 'dumb', // no color codes for streaming
+            ...getShellPagerEnv(this.config.getShellExecutionConfig().pager, {
+              includeGitPager: false,
+              platform: os.platform(),
+            }),
+            ...getShellContextEnvVars(),
+          },
+        });
     } catch (err) {
       return {
         llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
@@ -389,7 +413,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       };
     }
 
-    registration.pid = child.pid;
+    registration.pid = child?.pid;
     let exited = false;
 
     // Capture async spawn errors (ENOENT, EACCES, etc.) during the window
@@ -398,7 +422,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
     const captureEarlySpawnError = (err: Error): void => {
       earlySpawnError ??= err;
     };
-    child.on('error', captureEarlySpawnError);
+    child?.on('error', captureEarlySpawnError);
 
     // ----- Line buffering & throttling state ---------------------------------
     // Declared up-front (before `abortHandler`) so that the synchronous abort
@@ -463,34 +487,33 @@ class MonitorToolInvocation extends BaseToolInvocation<
     };
 
     const killChildProcessGroup = (): void => {
-      if (exited || !child.pid) return;
+      const pid = child?.pid;
+      if (exited || !pid) return;
 
       if (process.platform === 'win32') {
-        const tk = spawn(
-          'taskkill',
-          ['/pid', child.pid.toString(), '/f', '/t'],
-          { stdio: 'ignore' },
-        );
+        const tk = spawn('taskkill', ['/pid', pid.toString(), '/f', '/t'], {
+          stdio: 'ignore',
+        });
         tk.on('error', (err) =>
           debugLogger.warn(
-            `Monitor taskkill failed for pid ${child.pid}: ${getErrorMessage(err)}`,
+            `Monitor taskkill failed for pid ${pid}: ${getErrorMessage(err)}`,
           ),
         );
       } else {
         try {
-          process.kill(-child.pid, 'SIGTERM');
+          process.kill(-pid, 'SIGTERM');
         } catch (err) {
           debugLogger.warn(
-            `Monitor ${monitorId} SIGTERM failed (pid=${child.pid}): ${getErrorMessage(err)}`,
+            `Monitor ${monitorId} SIGTERM failed (pid=${pid}): ${getErrorMessage(err)}`,
           );
         }
         setTimeout(() => {
-          if (!exited && child.pid) {
+          if (!exited) {
             try {
-              process.kill(-child.pid, 'SIGKILL');
+              process.kill(-pid, 'SIGKILL');
             } catch (err) {
               debugLogger.warn(
-                `Monitor ${monitorId} SIGKILL escalation failed (pid=${child.pid}): ${getErrorMessage(err)}`,
+                `Monitor ${monitorId} SIGKILL escalation failed (pid=${pid}): ${getErrorMessage(err)}`,
               );
             }
           }
@@ -519,23 +542,28 @@ class MonitorToolInvocation extends BaseToolInvocation<
       abortHandler();
       entryAc.signal.removeEventListener('abort', abortHandler);
       (
-        child.stdout as { destroy?: () => void } | null | undefined
+        child?.stdout as { destroy?: () => void } | null | undefined
       )?.destroy?.();
       (
-        child.stderr as { destroy?: () => void } | null | undefined
+        child?.stderr as { destroy?: () => void } | null | undefined
       )?.destroy?.();
-      child.removeListener('error', captureEarlySpawnError);
-      child.on('error', () => {});
+      child?.removeListener('error', captureEarlySpawnError);
+      child?.on('error', () => {});
       return {
         llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
       };
     }
 
-    const processLines = (buffer: { value: string }, data: Buffer): void => {
+    const processLines = (
+      buffer: { value: string },
+      data: Buffer | string,
+    ): void => {
       if (registration.status !== 'running') return;
 
-      const text = stripAnsi(data.toString('utf-8'));
+      const text = stripAnsi(
+        typeof data === 'string' ? data : data.toString('utf-8'),
+      );
       buffer.value += text;
 
       // Guard against unbounded partial-line accumulation. If a command emits
@@ -570,8 +598,8 @@ class MonitorToolInvocation extends BaseToolInvocation<
       }
     };
 
-    child.stdout?.on('data', (data: Buffer) => processLines(stdoutBuf, data));
-    child.stderr?.on('data', (data: Buffer) => processLines(stderrBuf, data));
+    child?.stdout?.on('data', (data: Buffer) => processLines(stdoutBuf, data));
+    child?.stderr?.on('data', (data: Buffer) => processLines(stderrBuf, data));
 
     // Shared cleanup: flush buffers, remove abort listener, log dropped lines.
     // Called from `close` after stdio streams drain, and from `error` when no
@@ -604,7 +632,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
 
     const settleFromExit = (
       code: number | null,
-      sig: NodeJS.Signals | null,
+      sig: NodeJS.Signals | number | null,
     ): void => {
       if (registration.status !== 'running') return; // already settled
 
@@ -640,10 +668,70 @@ class MonitorToolInvocation extends BaseToolInvocation<
       }
     };
 
-    child.on('exit', onExit);
-    child.on('close', onClose);
-    child.on('error', onError);
-    child.removeListener('error', captureEarlySpawnError);
+    child?.on('exit', onExit);
+    child?.on('close', onClose);
+    child?.on('error', onError);
+    child?.removeListener('error', captureEarlySpawnError);
+
+    if (sandboxed) {
+      try {
+        const shellExecutionConfig = this.config.getShellExecutionConfig();
+        const handle = await executeRuntimeShell(
+          this.config,
+          command,
+          this.params.directory || this.config.getTargetDir(),
+          (event) => {
+            if (event.type === 'binary_detected') {
+              if (registration.status === 'running') {
+                registry.fail(monitorId, 'Binary output detected');
+                entryAc.abort();
+              }
+            } else if (
+              event.type === 'data' &&
+              typeof event.chunk === 'string'
+            ) {
+              processLines(
+                event.stream === 'stderr' ? stderrBuf : stdoutBuf,
+                event.chunk,
+              );
+            }
+          },
+          entryAc.signal,
+          false,
+          {
+            ...shellExecutionConfig,
+            maxBufferedOutputBytes: Math.min(
+              shellExecutionConfig.maxBufferedOutputBytes ??
+                PARTIAL_LINE_BUFFER_CAP,
+              PARTIAL_LINE_BUFFER_CAP,
+            ),
+          },
+          { streamStdout: true },
+        );
+        registration.pid = handle.pid;
+        void handle.result.then(
+          (result) => {
+            exited = true;
+            cleanup();
+            if (result.error) {
+              if (registration.status === 'running')
+                registry.fail(monitorId, result.error.message);
+            } else {
+              settleFromExit(result.exitCode, result.signal);
+            }
+          },
+          (error: unknown) =>
+            onError(error instanceof Error ? error : new Error(String(error))),
+        );
+      } catch (error) {
+        onError(error instanceof Error ? error : new Error(String(error)));
+        return {
+          llmContent: `Monitor failed to start: ${getErrorMessage(error)}`,
+          returnDisplay: `Monitor failed: ${getErrorMessage(error)}`,
+          error: { message: getErrorMessage(error) },
+        };
+      }
+    }
 
     if (earlySpawnError) {
       onError(earlySpawnError);
@@ -679,7 +767,7 @@ export class MonitorTool extends BaseDeclarativeTool<
     super(
       MonitorTool.Name,
       ToolDisplayNames.MONITOR,
-      'Starts a long-running shell command and streams its stdout/stderr as event notifications back to you.\n\n' +
+      'Runs a command and pushes each output line to you as an event (logs, watch builds, polling loops); is_background notifies you only once, when it exits.\n\n' +
         'Use this tool for:\n' +
         '- Watching log files: `tail -f /var/log/app.log`\n' +
         '- Monitoring build output: `npm run build --watch`\n' +
@@ -720,7 +808,7 @@ export class MonitorTool extends BaseDeclarativeTool<
           directory: {
             type: 'string',
             description:
-              '(OPTIONAL) The absolute path of the directory to run the command in. If not provided, the project root directory is used. Must be within the workspace.',
+              '(OPTIONAL) The absolute path of the directory to run the command in. If not provided, the project root directory is used. A directory outside the workspace requires approval.',
           },
         },
         required: ['command'],
@@ -781,13 +869,15 @@ export class MonitorTool extends BaseDeclarativeTool<
       if (isSubpaths(userSkillsDirs, resolvedDirectoryPath)) {
         return 'Explicitly running monitor commands from within the user skills directory is not allowed. Please use absolute paths for command parameter instead.';
       }
-      // Use WorkspaceContext.isPathWithinWorkspace so the check canonicalises
-      // the path, resolves symlinks, and matches on path segments rather than
-      // raw string prefix (prevents e.g. '/tmp/project-evil' from slipping
-      // past a '/tmp/project' workspace).
-      const ws = this.config.getWorkspaceContext();
-      if (!ws.isPathWithinWorkspace(params.directory)) {
-        return `Directory '${params.directory}' is not within any of the registered workspace directories.`;
+      // The sandbox refuses any other cwd at run time, so reject now rather
+      // than ask for approval of a command that cannot start.
+      const sandbox = this.config.getShellExecutionSandbox?.();
+      if (sandbox) {
+        try {
+          assertShellSandboxCwd(sandbox, params.directory);
+        } catch {
+          return `Directory '${params.directory}' must be an existing directory inside the execution sandbox workspace.`;
+        }
       }
     }
     return null;

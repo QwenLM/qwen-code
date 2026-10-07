@@ -16,6 +16,7 @@ import type {
 
 const AUTH_PROVIDER_STEPS: ServeAuthProviderDescriptor['steps'] = [
   'protocol',
+  'wireApi',
   'baseUrl',
   'apiKey',
   'models',
@@ -296,6 +297,18 @@ export function parseAuthProviderInstallRequest(
     };
   }
   const protocol = body['protocol'];
+  const wireApi = body['wireApi'];
+  if (
+    wireApi !== undefined &&
+    wireApi !== 'chat-completions' &&
+    wireApi !== 'responses'
+  ) {
+    return {
+      ok: false,
+      code: 'invalid_api',
+      error: '`wireApi` must be chat-completions or responses',
+    };
+  }
   const baseUrl = parseAuthProviderBaseUrl(
     body['baseUrl'],
     options?.allowPrivateBaseUrl === true,
@@ -331,6 +344,7 @@ export function parseAuthProviderInstallRequest(
   if (
     purpose === 'voice' &&
     ((protocol ?? 'openai') !== 'openai' ||
+      wireApi === 'responses' ||
       !baseUrl ||
       !modelIds?.length ||
       modelIds.some((id) => resolveVoiceTransport(id) === 'unsupported'))
@@ -339,7 +353,7 @@ export function parseAuthProviderInstallRequest(
       ok: false,
       code: 'invalid_voice_model',
       error:
-        'Voice transcription requires OpenAI protocol and a supported ASR model ID',
+        'Voice transcription requires OpenAI Chat Completions and a supported ASR model ID',
     };
   }
   if (
@@ -404,6 +418,7 @@ export function parseAuthProviderInstallRequest(
     ok: true,
     value: {
       providerId: providerId.trim(),
+      ...(wireApi ? { wireApi } : {}),
       ...(typeof protocol === 'string' && protocol.trim()
         ? {
             protocol:

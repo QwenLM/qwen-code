@@ -17,6 +17,7 @@
  * `qwen-serve-streaming.test.ts`, backed by the local fake OpenAI server.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   appendFileSync,
   mkdirSync,
@@ -136,6 +137,31 @@ function chatRecord(
 
 beforeAll(async () => {
   homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-routes-home-'));
+  mkdirSync(path.join(homeDir, '.qwen'));
+  writeFileSync(
+    path.join(homeDir, '.qwen', 'settings.json'),
+    JSON.stringify({
+      model: { reasoningEffort: 'none' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'qwen-startup-test',
+            name: 'Startup test',
+            baseUrl: 'http://127.0.0.1:9/v1',
+            envKey: 'OPENAI_API_KEY',
+            capabilities: {
+              reasoning: {
+                thinking: true,
+                efforts: ['low', 'high'],
+                defaultEffort: 'low',
+                disableField: 'reasoning_effort',
+              },
+            },
+          },
+        ],
+      },
+    }),
+  );
   nativeDirectoryPickerAtBoot = isNativeDirectoryPickerAvailable();
   localPathOpenAtBoot = isLocalPathOpenAvailable();
   localTerminalOpenAtBoot = isLocalTerminalAvailable();
@@ -334,27 +360,37 @@ describe('qwen serve — capabilities envelope', () => {
     // `scheduled_task_session_reuse` appears only after the managed runtime
     // mounts, so the fast-path bootstrap and runtime envelopes legitimately
     // differ by that tag. Its transition is covered by the serve startup tests.
+    // `workspace_runtime_stop` skews the same way (#12490): stop readiness
+    // depends on the mounted runtime's bridge, which the bootstrap envelope
+    // cannot see, so the tag appears only once the runtime app serves the
+    // envelope.
     expect(
       caps.features.filter(
-        (feature) => feature !== 'scheduled_task_session_reuse',
+        (feature) =>
+          feature !== 'scheduled_task_session_reuse' &&
+          feature !== 'workspace_runtime_stop',
       ),
     ).toEqual([
       'health',
       'daemon_status',
+      'daemon_update',
       'capabilities',
       'session_create',
+      'session_startup_config',
       'session_id_override',
       'session_scope_override',
       'session_load',
       'session_resume',
       'unstable_session_resume',
       'session_list',
+      'session_catalog_batch',
       'session_info',
       'session_source_metadata',
       'session_side_task',
       'session_prompt',
       'session_turn_status',
       'session_attachments',
+      'session_attachment_chunk_upload',
       'session_attachment_list',
       'session_mid_turn_message_mutation',
       'session_mid_turn_message_query',
@@ -431,10 +467,12 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_permissions',
       'workspace_voice',
       'workspace_trust',
+      'workspace_trust_grant',
       'workspace_trust_hot_reload',
       'workspace_init',
       'workspace_github_setup',
       'workspace_github_prs',
+      'workspace_git_worktrees',
       'workspace_mcp_restart',
       'session_recap',
       'session_generation',
@@ -452,10 +490,12 @@ describe('qwen serve — capabilities envelope', () => {
       'session_hooks',
       'workspace_extensions',
       'session_branch',
+      'session_branch_worktree',
       'workspace_reload',
       'channel_delivery',
       'channel_control',
       'channel_management',
+      'channel_delete_config_loss_convergence',
       'workspace_channel_observed_contacts',
       'dynamic_workspace_registration',
       'persistent_workspace_registration',
@@ -468,6 +508,7 @@ describe('qwen serve — capabilities envelope', () => {
       ...(localTerminalOpenAtBoot ? ['workspace_local_terminal'] : []),
       'workspace_qualified_rest_core',
       'extension_management_v2',
+      'extension_list_details',
       'extension_state',
       'extension_git_credentials',
       'extension_local_path_install',
@@ -742,27 +783,34 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
   });
 
   it('honors and reserves a normalized caller-supplied session ID', async () => {
-    const requestedId = '550E8400-E29B-41D4-A716-446655440000';
+    // Fresh id per attempt: vitest `retry` re-enters this body against the
+    // same long-lived daemon, and a fixed id turns one timed-out create into
+    // deterministic 409 session_id_conflict failures on every retry — the
+    // session a failed attempt left live (or abandoned-but-later-registered)
+    // still owns the reservation the retry's first POST collides with. The
+    // ACP_INITIALIZE_TIMEOUT_MS note above names the load class.
+    const requestedId = randomUUID().toUpperCase();
     const normalizedId = requestedId.toLowerCase();
-    const created = await fetch(`${base}/session`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        cwd: REPO_ROOT,
-        sessionId: requestedId,
-        sessionScope: 'single',
-      }),
-    });
-    expect(created.status).toBe(200);
-    await expect(created.json()).resolves.toMatchObject({
-      sessionId: normalizedId,
-      attached: false,
-    });
-
     try {
+      const created = await fetch(`${base}/session`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          cwd: REPO_ROOT,
+          sessionId: requestedId,
+          sessionScope: 'single',
+        }),
+      });
+      const createdBody = await created.json();
+      expect(created.status, JSON.stringify(createdBody)).toBe(200);
+      expect(createdBody).toMatchObject({
+        sessionId: normalizedId,
+        attached: false,
+      });
+
       let conflict: unknown;
       try {
         await client.createOrAttachSession({
@@ -837,6 +885,112 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
     expect(a.sessionId).toBe(b.sessionId);
     // Exactly one of the two reports `attached: false` (the spawn owner).
     expect([a.attached, b.attached].sort()).toEqual([false, true]);
+  });
+
+  it('confirms real model-only startup and the cached model notification', async () => {
+    const modelServiceId = 'qwen-startup-test(openai)';
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      startupConfig: { modelServiceId },
+    });
+    try {
+      expect(session).toMatchObject({
+        modelApplied: true,
+        startupConfigApplied: { modelServiceId },
+      });
+      expect(session.startupConfigApplied).not.toHaveProperty(
+        'reasoningEffort',
+      );
+      const status = await client.daemonStatus('full');
+      expect(
+        status.full?.sessions.find(
+          (entry) => entry.sessionId === session.sessionId,
+        )?.currentModelId,
+      ).toBe(modelServiceId);
+    } finally {
+      await client.closeSession(session.sessionId);
+    }
+  });
+
+  it('applies high over shared none and tears down only rejected startup selections', async () => {
+    const modelServiceId = 'qwen-startup-test(openai)';
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      startupConfig: { modelServiceId, reasoningEffort: 'high' },
+    });
+    try {
+      expect(session.startupConfigApplied).toEqual({
+        modelServiceId,
+        reasoningEffort: 'high',
+        effectiveReasoning: { state: 'enabled', effort: 'high' },
+      });
+      const context = await client.sessionContext(
+        session.sessionId,
+        session.clientId,
+      );
+      expect(context.state.configOptions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 'reasoning_effort',
+            currentValue: 'high',
+          }),
+        ]),
+      );
+    } finally {
+      await client.closeSession(session.sessionId);
+    }
+    const sessionId = randomUUID();
+    const failed = await fetch(`${base}/session`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        cwd: REPO_ROOT,
+        sessionId,
+        startupConfig: { modelServiceId, reasoningEffort: 'max' },
+      }),
+    });
+    const failureBody = await failed.json();
+    expect(failed.status, JSON.stringify(failureBody)).toBe(422);
+    expect(failureBody).toMatchObject({
+      code: 'startup_config_rejected',
+    });
+    const missing = await fetch(`${base}/session/${sessionId}`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(missing.status).toBe(404);
+  });
+
+  it('rolls back rejected standalone startup so its caller id can be reused', async () => {
+    const sessionId = randomUUID();
+    const modelServiceId = 'qwen-startup-test(openai)';
+    await expect(
+      client.createStandaloneSession({
+        sessionId,
+        startupConfig: { modelServiceId, reasoningEffort: 'max' },
+      }),
+    ).rejects.toMatchObject({
+      status: 422,
+      body: { code: 'startup_config_rejected' },
+    });
+    await expect(client.getStandaloneSession(sessionId)).rejects.toMatchObject({
+      status: 404,
+    });
+    const retried = await client.createStandaloneSession({
+      sessionId,
+      startupConfig: { modelServiceId, reasoningEffort: 'high' },
+    });
+    try {
+      expect(retried).toMatchObject({
+        sessionId,
+        modelApplied: true,
+        startupConfigApplied: { modelServiceId, reasoningEffort: 'high' },
+      });
+    } finally {
+      await client.closeSession(sessionId);
+    }
   });
 
   it('bad modelServiceId keeps the session alive on the default model', async () => {
@@ -1097,6 +1251,108 @@ describe('qwen serve — DELETE /session/:id', () => {
     await client.closeSession(session.sessionId);
     await client.closeSession(session.sessionId);
   });
+});
+
+describe('qwen serve — session approval-mode recovery', () => {
+  it('restores Full Access, explicit overrides, and Plan execution mode after cold load', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+      sourceType: 'approval-mode-persistence-test',
+      sourceId: `cold-load-${Date.now()}`,
+    });
+    expect(session.clientId).toBeTypeOf('string');
+    expect(session.sourcePersisted).toBe(true);
+
+    try {
+      const waitUntilClosed = async () => {
+        await expect
+          .poll(
+            async () => {
+              try {
+                await client.sessionStatus(session.sessionId);
+                return false;
+              } catch (error) {
+                return error instanceof DaemonHttpError && error.status === 404;
+              }
+            },
+            { timeout: 15_000 },
+          )
+          .toBe(true);
+      };
+      await client.setSessionApprovalMode(session.sessionId, 'yolo');
+      await client.detachSession(session.sessionId, session.clientId);
+      await waitUntilClosed();
+
+      const restored = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+      });
+      const modes = restored.state.modes as { currentModeId?: string };
+      const configOptions = restored.state.configOptions as Array<{
+        id: string;
+        currentValue: string;
+      }>;
+
+      expect(modes.currentModeId).toBe('yolo');
+      expect(
+        configOptions.find((option) => option.id === 'mode'),
+      ).toMatchObject({ currentValue: 'yolo' });
+
+      await client.reload({ clientId: restored.clientId });
+      const afterReload = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+      });
+      expect(
+        (afterReload.state.modes as { currentModeId?: string }).currentModeId,
+      ).toBe('yolo');
+      await client.detachSession(session.sessionId, afterReload.clientId);
+
+      expect(restored.clientId).toBeTypeOf('string');
+      await client.detachSession(session.sessionId, restored.clientId);
+      await waitUntilClosed();
+      const overridden = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+        approvalMode: 'default',
+      });
+      expect(
+        (overridden.state.modes as { currentModeId?: string }).currentModeId,
+      ).toBe('default');
+
+      expect(overridden.clientId).toBeTypeOf('string');
+      await client.detachSession(session.sessionId, overridden.clientId);
+      await waitUntilClosed();
+      const restoredOverride = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+      });
+      expect(
+        (restoredOverride.state.modes as { currentModeId?: string })
+          .currentModeId,
+      ).toBe('default');
+
+      await client.setSessionApprovalMode(session.sessionId, 'yolo');
+      await client.setSessionApprovalMode(session.sessionId, 'yolo', {
+        planMode: true,
+      });
+      await client.setSessionApprovalMode(session.sessionId, 'auto-edit', {
+        planMode: true,
+      });
+      expect(restoredOverride.clientId).toBeTypeOf('string');
+      await client.detachSession(session.sessionId, restoredOverride.clientId);
+      await waitUntilClosed();
+
+      const restoredPlan = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+      });
+      const planModes = restoredPlan.state.modes as {
+        currentModeId?: string;
+        _meta?: { planExecutionMode?: string };
+      };
+      expect(planModes.currentModeId).toBe('plan');
+      expect(planModes._meta?.planExecutionMode).toBe('auto-edit');
+    } finally {
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 45_000);
 });
 
 describe('qwen serve — PATCH /session/:id/metadata', () => {

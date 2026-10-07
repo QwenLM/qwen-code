@@ -29,6 +29,14 @@ export type FakeOpenAIResponse = {
   model?: string;
   content?: string;
   contentChunks?: string[];
+  /**
+   * Reasoning text, emitted on the wire as `reasoning_content` — the field the
+   * OpenAI-compatible converter reads into a thought part. Streamed as one
+   * delta per entry of `reasoningChunks`, or as a single delta otherwise, and
+   * always before the content deltas of the same choice.
+   */
+  reasoning?: string;
+  reasoningChunks?: string[];
   errorContent?: string;
   disconnectAfterContentChunks?: number;
   /**
@@ -56,6 +64,8 @@ export type FakeOpenAIChoice = {
   index: number;
   content?: string;
   contentChunks?: string[];
+  reasoning?: string;
+  reasoningChunks?: string[];
   /**
    * Streaming-only mid-stream provider error: emits one chunk carrying this
    * string as `delta.content` together with `finish_reason: 'error_finish'`,
@@ -270,6 +280,9 @@ function writeNonStreamed(
         message: {
           role: 'assistant',
           content: choice.content ?? choice.contentChunks?.join('') ?? null,
+          ...(choiceReasoning(choice)
+            ? { reasoning_content: choiceReasoning(choice) }
+            : {}),
           ...(choice.toolCalls ? { tool_calls: choice.toolCalls } : {}),
         },
         finish_reason: finishReason(choice),
@@ -327,6 +340,10 @@ async function writeStreamed(
         chunk(choice.index, { content: choice.errorContent }, 'error_finish'),
       );
       continue;
+    }
+    for (const reasoning of choice.reasoningChunks ??
+      (choice.reasoning ? [choice.reasoning] : [])) {
+      send(chunk(choice.index, { reasoning_content: reasoning }));
     }
     for (const [contentIndex, content] of (
       choice.contentChunks ?? []
@@ -403,12 +420,20 @@ function responseChoices(message: FakeOpenAIResponse): FakeOpenAIChoice[] {
         index: 0,
         content: message.content,
         contentChunks: message.contentChunks,
+        reasoning: message.reasoning,
+        reasoningChunks: message.reasoningChunks,
         errorContent: message.errorContent,
         toolCalls: message.toolCalls,
         finishReason: message.finishReason,
       },
     ]
   );
+}
+
+function choiceReasoning(
+  choice: Pick<FakeOpenAIChoice, 'reasoning' | 'reasoningChunks'>,
+): string | undefined {
+  return choice.reasoningChunks?.join('') ?? choice.reasoning;
 }
 
 function finishReason(

@@ -17,6 +17,56 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('SKILL');
 
 /**
+ * The session's own SkillManager, recorded on a subagent Config whose tool
+ * policy withholds it (#12424). Registered in the global symbol registry so
+ * `SubagentManager` can write the record and the scheduler can read it
+ * without either module importing the other's internals.
+ */
+export const SESSION_SKILL_MANAGER: unique symbol = Symbol.for(
+  'qwen-code.subagent.sessionSkillManager',
+);
+
+/**
+ * The SkillManager the session itself holds, looking past any ancestor
+ * subagent that withheld it from its own Config.
+ *
+ * Path-gated skill activation is session-shared state: `matchAndActivateByPaths`
+ * mutates the session registry and notifies every SkillTool, the parent's
+ * included. A subagent that cannot invoke `skill` itself must still feed it —
+ * otherwise a restricted child's file reads stop activating skills for a
+ * parent that can invoke them, and because `matchAndConsume` is one-shot
+ * nothing else in the session can consume the rule later.
+ *
+ * Activation only. The announcement stays gated on declaration, and the
+ * bundled-reference route still reads `config.getSkillManager()`, so a
+ * withheld agent still resolves that route to `inline` and still gets no
+ * listing.
+ */
+export function sessionSkillManager(config: Config): SkillManager | null {
+  const recorded = (config as unknown as Record<symbol, unknown>)[
+    SESSION_SKILL_MANAGER
+  ] as SkillManager | null | undefined;
+  return recorded !== undefined ? recorded : config.getSkillManager();
+}
+
+/**
+ * Why the model cannot invoke a skill right now, or `undefined` when it can.
+ * Shared by the availability filter and the resume path, so a resumed session
+ * never re-arms a skill no tool call could load. Read live, not off
+ * `SkillTool`'s asynchronously refreshed snapshots.
+ */
+export function skillModelInvocationBlock(
+  config: Config,
+  skillManager: SkillManager,
+  skill: SkillConfig,
+): 'disabled' | 'inactive' | 'hidden' | undefined {
+  if (!config.isSkillEnabled(skill)) return 'disabled';
+  if (skill.disableModelInvocation) return 'hidden';
+  if (!skillManager.isSkillActive(skill)) return 'inactive';
+  return undefined;
+}
+
+/**
  * Builds the LLM-facing content string when a skill body is injected.
  * Shared between SkillToolInvocation (runtime) and /context (estimation)
  * so that token estimates stay in sync with actual usage.
@@ -137,19 +187,14 @@ async function collectAvailableSkillEntriesUncached(
   skillManager: SkillManager,
   config: Config,
 ): Promise<CollectedAvailableSkills> {
-  // Include a skill only when (a) it is not hidden from the model
-  // (`disable-model-invocation`), (b) it is not user-disabled via
-  // `skills.disabled`, and (c) it is unconditional or already activated by a
-  // matching file path this session. Keeps the listing small in large monorepos
+  // Include a skill only when the model could invoke it right now (see
+  // `skillModelInvocationBlock`). Keeps the listing small in large monorepos
   // where most conditional skills are not yet relevant.
   const allSkills = await skillManager.listSkills();
   const isEnabled = (skill: SkillConfig) => config.isSkillEnabled(skill);
 
   const availableSkills = allSkills.filter(
-    (s) =>
-      !s.disableModelInvocation &&
-      skillManager.isSkillActive(s) &&
-      isEnabled(s),
+    (s) => skillModelInvocationBlock(config, skillManager, s) === undefined,
   );
   const hiddenSkillNames = new Set(
     allSkills.filter((s) => s.disableModelInvocation).map((s) => s.name),
@@ -224,6 +269,16 @@ function compareSkillEntries(
   if (aGroup !== bGroup) return aGroup - bGroup;
   return a.name.localeCompare(b.name);
 }
+
+/**
+ * Opening sentence of the block coreToolScheduler adds to a tool result when
+ * reading a file activates a path-gated skill. The scheduler folds that
+ * envelope into the tool response rather than emitting it as its own text
+ * part, so `isSkillListingReminder` deliberately does not match it and
+ * `/context` bills it with the tool result (#12235).
+ */
+export const SKILLS_ACTIVATED_OPENER =
+  'The following skill(s) became available via the Skill tool based on the file you just accessed';
 
 /**
  * Renders normalized skill entries into the `<available_skills>` body. Pure: no
@@ -413,12 +468,27 @@ export class ReviewWorkflowActivationError extends Error {
 export async function applySkillSideEffects(
   config:
     | (Pick<Config, 'getHookSystem' | 'getSessionId' | 'getPermissionManager'> &
-        Pick<Config, 'isTrustedFolder' | 'enableReviewWorkflow'>)
+        Pick<
+          Config,
+          'isTrustedFolder' | 'enableReviewWorkflow' | 'isWorkspaceAgentSession'
+        >)
     | null
     | undefined,
   skill: SkillConfig,
 ): Promise<void> {
   if (!config) {
+    return;
+  }
+  // A workspace agent runs inside a read-only capability boundary. The skill's
+  // body still reaches the model, but its hooks spawn commands (PreToolUse
+  // fires before the invocation guard), and its grants and workflow
+  // registration have no place there.
+  if (config.isWorkspaceAgentSession?.()) {
+    if (skill.allowedTools?.length || skill.hooks) {
+      debugLogger.warn(
+        `Skill "${skill.name}" loaded in a workspace-agent session; ignoring its allowedTools and hooks.`,
+      );
+    }
     return;
   }
   if (!canApplySkillSideEffects(skill, config)) {

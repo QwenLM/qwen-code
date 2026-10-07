@@ -15,6 +15,9 @@
  *  - the callbacks the mount hands a dialog do the real thing — persist through
  *    the data helpers, reach the composer owner, or report a seam this shell
  *    does not wire rather than closing over a no-op;
+ *  - a dialog outcome ink writes to the transcript reaches both the transcript
+ *    and the chat recording, while one ink keeps transient stays on the shell's
+ *    notice slot;
  *  - the help request routes to HelpOverlay and drives tab/scroll keys through
  *    the mount's own useKeyboard handler;
  *  - an unknown dialog kind hits the never-default and throws.
@@ -29,6 +32,8 @@ import { OpenTuiDialogMount } from './opentui-dialog-mount.js';
 import {
   addWorkspaceDirectory,
   applyModelSelection,
+  applyMcpServerAction,
+  applyThemeSelection,
   removeWorkspaceDirectory,
 } from './dialog-data.js';
 import type { OpenTuiDialogRequest } from './commands-registry.js';
@@ -142,7 +147,7 @@ vi.mock('./dialog-data.js', () => ({
   removeWorkspaceDirectory: vi.fn(),
   buildMcpServers: () => [],
   enrichMcpOAuthState: async () => [],
-  applyMcpServerAction: async () => ({ message: null, changed: false }),
+  applyMcpServerAction: vi.fn(async () => ({ message: null, changed: false })),
   getMcpServerTools: () => [],
   getMcpServerResources: () => [],
   buildExtensionRows: () => [],
@@ -155,7 +160,7 @@ vi.mock('./dialog-data.js', () => ({
   buildModelEntries: () => [],
   computeModelDialogInitialKey: () => undefined,
   applyModelSelection: vi.fn(async () => ({ ok: true as const })),
-  applyThemeSelection: () => ({ applied: undefined, error: undefined }),
+  applyThemeSelection: vi.fn(() => ({ applied: undefined, error: undefined })),
 }));
 
 vi.mock('./help-overlay.js', () => ({ HelpOverlay: mocks.stub('help') }));
@@ -194,11 +199,13 @@ vi.mock('./dialogs-stats-skills.js', () => ({
   OpenTuiStatsDialog: mocks.stub('stats'),
   OpenTuiSkillsDialog: mocks.stub('skills_manage'),
 }));
+vi.mock('./dialogs-hooks.js', () => ({
+  OpenTuiHooksDialog: mocks.stub('hooks'),
+}));
 vi.mock('./dialogs-misc.js', () => ({
   OpenTuiDeleteDialog: mocks.stub('delete'),
   OpenTuiDiffDialog: mocks.stub('diff'),
   OpenTuiEditorDialog: mocks.stub('editor'),
-  OpenTuiHooksDialog: mocks.stub('hooks'),
   OpenTuiResumeDialog: mocks.stub('resume'),
   OpenTuiRewindDialog: mocks.stub('rewind'),
   OpenTuiSubagentCreateDialog: mocks.stub('subagent_create'),
@@ -206,7 +213,13 @@ vi.mock('./dialogs-misc.js', () => ({
   OpenTuiTrustDialog: mocks.stub('trust'),
 }));
 
-const CONFIG = { getModel: () => 'fake-model' } as unknown as Config;
+const mockGetHookSystem = vi.fn<Config['getHookSystem']>();
+const recordSlashCommand = vi.fn();
+const CONFIG = {
+  getModel: () => 'fake-model',
+  getHookSystem: mockGetHookSystem,
+  getChatRecordingService: () => ({ recordSlashCommand }),
+} as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
 const addItem = vi.fn();
 const HOST = {
@@ -297,6 +310,7 @@ describe('OpenTuiDialogMount routing', () => {
     mocks.state.helpLineCount = 0;
     mocks.state.terminalHeight = 40;
     vi.clearAllMocks();
+    mockGetHookSystem.mockReset();
   });
 
   it('routes every dialog request to its own component', () => {
@@ -307,6 +321,23 @@ describe('OpenTuiDialogMount routing', () => {
       unmount();
     }
   });
+
+  it.each([true, false])(
+    'gates the hooks reload notice on hook system availability: %s',
+    (available) => {
+      mockGetHookSystem.mockReturnValue(
+        available ? ({} as ReturnType<Config['getHookSystem']>) : undefined,
+      );
+
+      mount({ dialog: 'hooks' });
+
+      expect(mocks.state.dialogProps['hooks']?.['notice']).toBe(
+        available
+          ? 'Reopen this menu to reload hook definitions.\nHook controls and HTTP security settings require a restart.'
+          : undefined,
+      );
+    },
+  );
 
   it('persists working-directory changes made in the permissions dialog', () => {
     mount({ dialog: 'permissions' });
@@ -459,6 +490,15 @@ describe('OpenTuiDialogMount routing', () => {
     expect(addItem.mock.calls[0]![0]).toMatchObject({
       text: expect.stringContaining('Kept model as'),
     });
+    // ink ModelDialog records the row it adds, so a resumed session replays it.
+    expect(recordSlashCommand).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [
+        { type: 'info', text: expect.stringContaining('Kept model as') },
+      ],
+    });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -475,11 +515,17 @@ describe('OpenTuiDialogMount routing', () => {
     dialogProp('model', 'onSelect')('fake-model');
     dialogProp('model', 'onClose')();
     expect(addItem).not.toHaveBeenCalled();
+    expect(recordSlashCommand).not.toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
     await act(async () => {
       settle({ ok: true, message: 'Model set to fake-model' });
     });
     expect(addItem).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledWith({
+      phase: 'result',
+      rawCommand: '/model',
+      outputHistoryItems: [{ type: 'info', text: 'Model set to fake-model' }],
+    });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
@@ -506,7 +552,142 @@ describe('OpenTuiDialogMount routing', () => {
     select('fake-model');
     expect(applyModelSelection).toHaveBeenCalledTimes(1);
     expect(addItem).toHaveBeenCalledTimes(1);
+    expect(recordSlashCommand).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('records nothing for a pick that fails to apply', async () => {
+    vi.mocked(applyModelSelection).mockImplementationOnce(async () => ({
+      ok: false,
+      error: 'Selected model is unavailable.',
+    }));
+    const onClose = vi.fn();
+    mount({ dialog: 'model', mode: 'primary' }, { onClose });
+    dialogProp('model', 'onSelect')('fake-model');
+    await act(async () => {});
+    // ink keeps the dialog open with the error: a row here would let a resume
+    // replay a switch that never landed.
+    expect(addItem).not.toHaveBeenCalled();
+    expect(recordSlashCommand).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  // ink's split, ported: the outcomes it writes to the transcript must survive
+  // the dialog closing, and the commands it records must replay on resume.
+  const persistedOutcomes: Array<{
+    request: OpenTuiDialogRequest;
+    args: string[];
+    rawCommand: string | null;
+    type: string;
+  }> = [
+    {
+      request: { dialog: 'editor' },
+      args: ['Editor set to vim.'],
+      rawCommand: '/editor',
+      type: 'info',
+    },
+    {
+      request: { dialog: 'effort' },
+      args: ['Reasoning effort: high (requested; clamped per model).'],
+      rawCommand: '/effort',
+      type: 'info',
+    },
+    {
+      request: { dialog: 'output-style' },
+      args: ['Failed to set "general.outputStyle": disk full', 'error'],
+      rawCommand: '/output-style',
+      type: 'error',
+    },
+    {
+      // /delete is in SLASH_COMMANDS_SKIP_RECORDING: added, not recorded.
+      request: { dialog: 'delete' },
+      args: ['Failed to delete session.', 'error'],
+      rawCommand: null,
+      type: 'error',
+    },
+    {
+      request: { dialog: 'auth', openedViaCommand: true },
+      args: ['Authenticated with Qwen OAuth.'],
+      rawCommand: '/auth',
+      type: 'info',
+    },
+    {
+      // The boot auth-error open is not a command, so ink records nothing.
+      request: { dialog: 'auth', initialError: 'Token expired.' },
+      args: ['Authenticated with Qwen OAuth.'],
+      rawCommand: null,
+      type: 'info',
+    },
+    {
+      request: { dialog: 'arena', mode: 'select' },
+      args: ['Arena session started.'],
+      rawCommand: '/arena select',
+      type: 'info',
+    },
+    {
+      request: { dialog: 'arena', mode: 'stop' },
+      args: ['No arena session is running.', 'error'],
+      rawCommand: '/arena stop',
+      type: 'error',
+    },
+  ];
+
+  it.each(persistedOutcomes)(
+    '%# writes the outcome ink persists for $request.dialog',
+    ({ request, args, rawCommand, type }) => {
+      mount(request);
+      dialogProp(request.dialog, 'notify')(...args);
+
+      const text = args[0]!;
+      expect(addItem).toHaveBeenCalledTimes(1);
+      expect(addItem.mock.calls[0]![0]).toEqual({ type, text });
+      if (rawCommand) {
+        expect(recordSlashCommand).toHaveBeenCalledWith({
+          phase: 'result',
+          rawCommand,
+          outputHistoryItems: [{ type, text }],
+        });
+      } else {
+        expect(recordSlashCommand).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('keeps the theme, mcp and arena-start outcomes off the transcript', async () => {
+    const notices: string[] = [];
+    const notify = (text: string) => notices.push(text);
+
+    // ink reports these inside the dialog or through addItem-free paths, so a
+    // transcript row here would outlive state the user can still change.
+    vi.mocked(applyThemeSelection).mockReturnValueOnce({
+      applied: 'Ayu',
+      error: undefined,
+    });
+    const theme = mount({ dialog: 'theme' }, { notify });
+    dialogProp('theme', 'onSelect')('Ayu', 'user');
+    theme.unmount();
+
+    vi.mocked(applyMcpServerAction).mockResolvedValueOnce({
+      message: 'Auth started.',
+      changed: false,
+    });
+    const mcp = mount({ dialog: 'mcp' }, { notify });
+    await act(async () => {
+      dialogProp('mcp', 'onServerAction')({ name: 'srv' }, 'auth');
+    });
+    mcp.unmount();
+
+    const arena = mount({ dialog: 'arena', mode: 'start' }, { notify });
+    dialogProp('arena', 'notify')('The arena session is already running.');
+    arena.unmount();
+
+    expect(notices).toEqual([
+      'Theme set to Ayu.',
+      'Auth started.',
+      'The arena session is already running.',
+    ]);
+    expect(addItem).not.toHaveBeenCalled();
+    expect(recordSlashCommand).not.toHaveBeenCalled();
   });
 
   it('throws for an unhandled dialog kind', () => {

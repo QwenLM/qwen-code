@@ -381,6 +381,10 @@ export class MonitorRegistry {
     this.statusChangeCallback = cb;
   }
 
+  clearStatusChangeCallback(cb: MonitorStatusChangeCallback): void {
+    if (this.statusChangeCallback === cb) this.statusChangeCallback = undefined;
+  }
+
   abortAll(options: MonitorCancelOptions = {}): void {
     for (const entry of Array.from(this.monitors.values())) {
       this.cancel(entry.monitorId, options);

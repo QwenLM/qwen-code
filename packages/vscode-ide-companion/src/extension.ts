@@ -289,16 +289,13 @@ export async function activate(context: vscode.ExtensionContext) {
         }
         // If any chat surface is requesting permission, actively select allow (prefer once)
         try {
-          for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
-            []) {
-            if (!isManagedDiff) continue;
-            if (permissionRequestId) {
+          if (permissionRequestId) {
+            for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
+              []) {
               provider.respondToPendingPermission('allow', {
                 fromDiffEditor: true,
                 permissionRequestId,
               });
-            } else if (provider?.hasPendingPermission()) {
-              provider.respondToPendingPermission('allow');
             }
           }
         } catch (err) {
@@ -321,16 +318,13 @@ export async function activate(context: vscode.ExtensionContext) {
         }
         // If any chat surface is requesting permission, actively select reject/cancel
         try {
-          for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
-            []) {
-            if (!isManagedDiff) continue;
-            if (permissionRequestId) {
+          if (permissionRequestId) {
+            for (const provider of chatProviderRegistry?.getPermissionAwareProviders() ??
+              []) {
               provider.respondToPendingPermission('cancel', {
                 fromDiffEditor: true,
                 permissionRequestId,
               });
-            } else if (provider?.hasPendingPermission()) {
-              provider.respondToPendingPermission('cancel');
             }
           }
         } catch (err) {

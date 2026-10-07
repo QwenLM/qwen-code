@@ -24,12 +24,14 @@ import {
   isUnattendedMode,
   type HeartbeatInfo,
 } from '../utils/retry.js';
+import { beginRetryWait } from '../utils/retry-wait.js';
 import {
   isQuotaExhaustedError,
   formatQuotaExhaustedMessage,
 } from '../utils/quotaErrorDetection.js';
 import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { findCodeRegions } from '../utils/memoryImportProcessor.js';
 import {
   containsXmlToolCalls,
   markdownFenceRanges,
@@ -72,6 +74,7 @@ import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
+import { completedToolCallBoundary } from './turn-interruption.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { StructuredError } from './turn.js';
 import {
@@ -154,6 +157,7 @@ import {
 } from './tool-call-preparation.js';
 import { InvalidStreamError } from './invalid-stream-error.js';
 import type { GoalTurnPermit } from '../goals/goal-protocol.js';
+import { markApiHistoryPrompt } from '../services/session-api-history.js';
 
 export { InvalidStreamError };
 
@@ -415,7 +419,7 @@ function consolidateModelResponseParts(allModelParts: Part[]): Part[] {
 
   const flushThoughtEpisode = () => {
     if (!hasOpenEpisode) return;
-    const text = openEpisodeText.trim();
+    const text = openEpisodeText;
     // A signature-only episode (no text) is kept, not dropped: it is
     // still potentially replayable per Anthropic's spec, and this is
     // the ACTIVE (latest) turn's thinking, which must replay byte-exact
@@ -423,7 +427,7 @@ function consolidateModelResponseParts(allModelParts: Part[]): Part[] {
     // this same empty-text shape but only from non-latest turns, where
     // the rationale is that prior-turn thinking is disposable, not that
     // an empty-text signed block is inherently invalid.
-    if (text !== '' || openEpisodeSignature !== '') {
+    if (text.trim() !== '' || openEpisodeSignature !== '') {
       const episodePart: Part = { text, thought: true };
       if (openEpisodeSignature) {
         episodePart.thoughtSignature = openEpisodeSignature;
@@ -588,6 +592,17 @@ export type StreamEvent =
 export interface LlmChatSendOptions {
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
+  /** Internal identity for the user prompt added to model history. */
+  promptId?: string;
+  /**
+   * The consumer retracts already-delivered output when a retry restarts, so
+   * a cut that already delivered content replays the original request instead
+   * of asking the model to continue from it. The Hosted Harness sets this:
+   * its deltas are published durably, and a continuation answered with a
+   * fresh full answer would glue the retracted attempt's prefix onto the
+   * public transcript (#13319).
+   */
+  retractDeliveredOutputOnRetry?: boolean;
 }
 
 /** @deprecated Use `LlmChatSendOptions`; retained until a future major release. */
@@ -1386,25 +1401,33 @@ function delay(
 } {
   let resolveRef: () => void;
   let timeoutId: ReturnType<typeof setTimeout>;
+  // Every settle path ends the announced retry wait synchronously — a skip or
+  // abort must not keep shielding the request until the generator resumes.
+  let endWait = () => {};
 
   const promise = new Promise<void>((resolve, reject) => {
-    resolveRef = resolve;
+    resolveRef = () => {
+      endWait();
+      resolve();
+    };
 
     if (signal?.aborted) {
       reject(signal.reason);
       return;
     }
 
-    timeoutId = setTimeout(resolve, delayMs);
+    timeoutId = setTimeout(resolveRef, delayMs);
 
     signal?.addEventListener(
       'abort',
       () => {
         clearTimeout(timeoutId);
+        endWait();
         reject(signal.reason);
       },
       { once: true },
     );
+    endWait = beginRetryWait(delayMs);
   });
 
   return {
@@ -1677,12 +1700,12 @@ const LEAKED_TOOL_CALL_TAGS = /<\/parameter>\s*<\/(function|invoke)>/iy;
 const STRICT_JSON_TOOL_CALL_LEAK =
   /[}\]]\s*<\/parameter>\s*<\/(function|invoke)>/iy;
 const TOOL_CALL_OPEN_TAG =
-  /<(?:(invoke)\s+name=["'][^"']+["'][^<>]*|(function)=[^\s<>]+(?:\s+[^<>]*)?|(function)\s+name=["'][^"']+["'][^<>]*)>/iy;
+  /<(?:(invoke)\s+name=["'][^"']+["'][^<>]*|(function)=[^\s<>][^<>]*|(function)\s+name=["'][^"']+["'][^<>]*)>/iy;
 const TOOL_CALL_CLOSE_TAG = /<\/(function|invoke)>/iy;
 const PARAMETER_OPEN_TAG = /<parameter\b[^>]*>/iy;
 const PARAMETER_CLOSE_TAG = /<\/parameter>/iy;
 const TOOL_CALL_BLOCK =
-  /<invoke\s+name=["'][^"']+["'][^<>]*>[\s\S]*?<\/invoke>|<function(?:=[^\s<>]+(?:\s+[^<>]*)?|\s+name=["'][^"']+["'][^<>]*)>[\s\S]*?<\/function>/gi;
+  /<invoke\s+name=["'][^"']+["'][^<>]*>[\s\S]*?<\/invoke>|<function(?:=[^\s<>][^<>]*|\s+name=["'][^"']+["'][^<>]*)>[\s\S]*?<\/function>/gi;
 
 interface OpenToolCallTag {
   tag: string;
@@ -1742,10 +1765,18 @@ function markdownFenceRangesForToolCallLeak(
 function markdownIndentedCodeRanges(text: string): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
   let lineStart = 0;
+  let paragraph = false;
+  let indentedBlock = false;
   for (const line of text.split('\n')) {
     const lineEnd = lineStart + line.length;
-    if (/^(?: {4}|\t)/.test(line)) {
+    if (!line.trim()) {
+      paragraph = false;
+    } else if (/^(?: {4}|\t)/.test(line) && (indentedBlock || !paragraph)) {
       ranges.push([lineStart, lineEnd]);
+      indentedBlock = true;
+    } else {
+      indentedBlock = false;
+      paragraph = true;
     }
     lineStart = lineEnd + 1;
   }
@@ -1755,6 +1786,20 @@ function markdownIndentedCodeRanges(text: string): Array<[number, number]> {
 function markdownCodeRangesForToolCallLeak(
   text: string,
 ): Array<[number, number]> {
+  // The shared CommonMark lexer handles paragraph indentation and multiline
+  // code spans. Cap its work: malformed emphasis can make inline lexing slow.
+  if (text.length <= 4096) {
+    let cursor = 0;
+    let prose = '';
+    for (const [start, end] of computeToolCallBlockRanges(text)) {
+      prose +=
+        text.slice(cursor, start) +
+        text.slice(start, end).replace(/[^\r\n]/g, ' ');
+      cursor = end;
+    }
+    prose += text.slice(cursor);
+    return findCodeRegions(prose).sort(([left], [right]) => left - right);
+  }
   return [
     ...markdownFenceRangesForToolCallLeak(text),
     ...markdownIndentedCodeRanges(text),
@@ -1879,7 +1924,7 @@ function scanToolCallTagLeaks(
       if (leakMatch) {
         if (
           !enclosingTag ||
-          enclosingTag.tag !== leakMatch[1] ||
+          enclosingTag.tag !== leakMatch[1]?.toLowerCase() ||
           enclosingTag.parameterDepth === 0
         ) {
           return { leaked: true, openToolCallTags };
@@ -1910,7 +1955,7 @@ function scanToolCallTagLeaks(
       if (openMatch) {
         if (!/\/\s*>$/.test(openMatch[0])) {
           openToolCallTags.push({
-            tag: (openMatch[1] ?? openMatch[2] ?? openMatch[3])!,
+            tag: (openMatch[1] ?? openMatch[2] ?? openMatch[3])!.toLowerCase(),
             parameterDepth: 0,
           });
         }
@@ -1919,7 +1964,7 @@ function scanToolCallTagLeaks(
       }
       TOOL_CALL_CLOSE_TAG.lastIndex = i;
       const closeMatch = TOOL_CALL_CLOSE_TAG.exec(text);
-      if (closeMatch && enclosingTag?.tag === closeMatch[1]) {
+      if (closeMatch && enclosingTag?.tag === closeMatch[1]?.toLowerCase()) {
         openToolCallTags.pop();
         i = TOOL_CALL_CLOSE_TAG.lastIndex - 1;
       }
@@ -2420,6 +2465,14 @@ export class LlmChat {
   private lastOutputTokenCount = 0;
 
   /**
+   * Per-chat last cached-content token count from usageMetadata. Mirrors
+   * UiTelemetryService for the main session so /context in a `serve`
+   * daemon does not subtract another session's cache from this chat's
+   * total (#12047).
+   */
+  private lastCachedContentTokenCount = 0;
+
+  /**
    * Route identity (model + auth type + endpoint; see
    * Config.getModelRouteIdentity) of the content generator that produced
    * the counts above. API-reported sizes are wire-specific: one route's
@@ -2515,6 +2568,25 @@ export class LlmChat {
    */
   private userContentPushCount = 0;
   private manualPlanExitNoticesEnabled = false;
+  private completedToolCallIds: string[] = [];
+
+  setCompletedToolCallIds(toolCallIds: readonly string[] | undefined): void {
+    this.completedToolCallIds = [...new Set(toolCallIds)].filter(
+      (id) => completedToolCallBoundary(this.history, [id]) > 0,
+    );
+  }
+
+  getCompletedToolCallIds(): readonly string[] {
+    return [...this.completedToolCallIds];
+  }
+
+  getHistoryForRecovery(): Content[] {
+    const boundary = completedToolCallBoundary(
+      this.history,
+      this.completedToolCallIds,
+    );
+    return this.history.slice(boundary).map(copyContentContainer);
+  }
 
   /**
    * True for forked/speculative chats built by `createForkedChat` on the
@@ -2645,6 +2717,7 @@ export class LlmChat {
       this.lastPromptTokenCountIsEstimated =
         retained.promptTokenCountIsEstimated;
       this.lastOutputTokenCount = retained.outputTokenCount;
+      this.lastCachedContentTokenCount = retained.cachedContentTokenCount;
       this.tokenCountsRouteKey = targetRouteKey;
       this.telemetryService?.setLastPromptTokenCount(retained.promptTokenCount);
       this.telemetryService?.setLastCachedContentTokenCount(
@@ -2666,6 +2739,7 @@ export class LlmChat {
     this.lastPromptTokenCount = 0;
     this.lastPromptTokenCountIsEstimated = false;
     this.lastOutputTokenCount = 0;
+    this.lastCachedContentTokenCount = 0;
     this.tokenCountsRouteKey = targetRouteKey;
     // Keep the telemetry mirror in sync, or the UI context counters
     // and compression banners keep reading the foreign count. The cached
@@ -2678,8 +2752,8 @@ export class LlmChat {
    * Save the current slots into {@link tokenCountsByRouteKey} under their
    * owning route key so a later read keyed back to that route restores the
    * exact API-reported values. Zero slots carry nothing worth retaining;
-   * the telemetry mirror still holds the owning route's cached-content
-   * count at this point, so it is captured here too.
+   * the cached-content count is carried in the per-chat slot and retained
+   * with it so a route switch cannot substitute another session's value.
    */
   private retainCurrentTokenCounts(): void {
     if (
@@ -2698,10 +2772,7 @@ export class LlmChat {
       promptTokenCount: this.lastPromptTokenCount,
       promptTokenCountIsEstimated: this.lastPromptTokenCountIsEstimated,
       outputTokenCount: this.lastOutputTokenCount,
-      // Optional chaining keeps partial telemetry test mocks from throwing
-      // (same convention as currentRouteKey's Config lookups).
-      cachedContentTokenCount:
-        this.telemetryService?.getLastCachedContentTokenCount?.() ?? 0,
+      cachedContentTokenCount: this.lastCachedContentTokenCount,
     });
   }
 
@@ -2721,6 +2792,16 @@ export class LlmChat {
   getLastOutputTokenCount(): number {
     this.adoptTokenCountsForRoute();
     return this.lastOutputTokenCount;
+  }
+
+  /**
+   * Most recent cached-content token count reported by the model for *this*
+   * chat. Prefer this over {@link UiTelemetryService} in multi-session
+   * daemons (#12047).
+   */
+  getLastCachedContentTokenCount(targetRouteKey?: string): number {
+    this.adoptTokenCountsForRoute(targetRouteKey);
+    return this.lastCachedContentTokenCount;
   }
 
   /**
@@ -2786,14 +2867,16 @@ export class LlmChat {
    * threshold check sees `0` and refuses to compress — so the first API call
    * can 400 from oversized history. Callers pass the parent chat's
    * `getLastPromptTokenCount()` here. This also clears any remembered
-   * previous-response output token count because the seeded prompt count
-   * comes from a different chat instance and should not inherit this chat's
-   * last response size.
+   * previous-response output and cached-content token counts because the
+   * seeded prompt count comes from a different chat instance and should not
+   * inherit this chat's last response metadata.
    */
   setLastPromptTokenCount(count: number, isEstimated = false): void {
     this.lastPromptTokenCount = count;
     this.lastPromptTokenCountIsEstimated = isEstimated;
     this.lastOutputTokenCount = 0;
+    this.lastCachedContentTokenCount = 0;
+    this.telemetryService?.setLastCachedContentTokenCount(0);
     this.tokenCountsRouteKey = this.currentRouteKey();
     // A fresh count supersedes anything this route retained while another
     // route owned the slots. Without the delete this writer alone among the
@@ -2934,14 +3017,27 @@ export class LlmChat {
       // explicit authoritative `false`.
       info.newTokenCountIsEstimated ??= true;
       if (!options?.deferChatCompressionRecord) {
+        // Resume replaces history with this snapshot, so include the pending
+        // question and do not share the live array mutated later in the turn.
         this.chatRecordingService?.recordChatCompression({
           info,
-          compressedHistory: newHistory,
+          compressedHistory: options?.pendingUserMessage
+            ? [...newHistory, options.pendingUserMessage]
+            : newHistory,
+          completedToolCallIds: this.completedToolCallIds,
         });
       }
-      this.setHistory(newHistory);
+      this.setHistory(newHistory, this.completedToolCallIds);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
+      try {
+        await this.config.getExecutionEnvironment?.()?.invalidateReadCache();
+      } catch (error) {
+        debugLogger.warn(
+          'Execution cache invalidation after compression failed',
+          error,
+        );
+      }
       // Compression rewrote the shared history every retained entry sizes,
       // so ALL retained counts are stale — not just the current route's.
       // Drop them, or a later keyed read adopts a pre-compression count and
@@ -3070,6 +3166,7 @@ export class LlmChat {
     this.chatRecordingService?.recordChatCompression({
       info,
       compressedHistory: newHistory,
+      completedToolCallIds: this.completedToolCallIds,
     });
     logChatCompression(
       this.config,
@@ -3078,15 +3175,17 @@ export class LlmChat {
         tokens_after: info.newTokenCount,
       }),
     );
-    this.setHistory(newHistory);
+    this.setHistory(newHistory, this.completedToolCallIds);
     this.lastPromptTokenCount = adjustedTokenCount;
     this.lastPromptTokenCountIsEstimated = true;
+    this.lastCachedContentTokenCount = 0;
     this.tokenCountsRouteKey = this.currentRouteKey();
     // Fast compression rewrote the shared history every retained entry
     // sizes, so ALL retained counts are stale — the other routes' entries
     // describe the same pre-compression history (#9506).
     this.tokenCountsByRouteKey.clear();
     this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);
+    this.telemetryService?.setLastCachedContentTokenCount(0);
     this.consecutiveFailures = 0;
 
     return { info, microcompactMeta: mcMeta };
@@ -3155,6 +3254,10 @@ export class LlmChat {
     goalContext?: GoalTurnPermit,
     options?: LlmChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
+    // After a Managed Runtime call ended without a known outcome, the model
+    // must not continue: it could repeat a call that already took effect.
+    const managedSessionBlock = this.config.getManagedSessionBlock?.();
+    if (managedSessionBlock) throw managedSessionBlock;
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
     const exactRoute = fullTurnRoute
@@ -3329,15 +3432,15 @@ export class LlmChat {
       const historyBeforeHardRescue = shouldForceFromHard
         ? this.getHistoryShallow()
         : undefined;
+      const completedToolCallIdsBeforeHardRescue = this.completedToolCallIds;
       const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
       const lastPromptTokenCountWasEstimatedBeforeHardRescue =
         this.lastPromptTokenCountIsEstimated;
-      // The rescue's COMPRESSED stamp zeroes lastOutputTokenCount (via
-      // setLastPromptTokenCount), so the rollback below must restore the
-      // output half of the resurrected count pair alongside the prompt
-      // half, or the next turn's additive prompt estimate under-counts by
-      // the last response's size (#9506).
+      // The rescue's COMPRESSED stamp clears response metadata (via
+      // setLastPromptTokenCount), so rollback must restore both counts.
       const lastOutputTokenCountBeforeHardRescue = this.lastOutputTokenCount;
+      const lastCachedContentTokenCountBeforeHardRescue =
+        this.lastCachedContentTokenCount;
       // tryCompress re-stamps tokenCountsRouteKey to the ACTIVE route (via
       // setLastPromptTokenCount on the success path) even though this send
       // targets the REQUEST route — and hard-rescue only fires for
@@ -3366,6 +3469,8 @@ export class LlmChat {
         );
       }
 
+      // Compression derives prompt ids before the user content is pushed.
+      markApiHistoryPrompt(userContent, options?.promptId);
       if (exactRoute || (isHardTier && !shouldForceFromHard)) {
         compressionInfo = {
           originalTokenCount: effectiveTokens,
@@ -3427,13 +3532,18 @@ export class LlmChat {
           // prompt is still too large to send, restore the pre-compression
           // state. The JSONL compression checkpoint is intentionally not
           // written because the send is about to be rejected.
-          this.setHistory(historyBeforeHardRescue);
+          this.setHistory(
+            historyBeforeHardRescue,
+            completedToolCallIdsBeforeHardRescue,
+          );
           // setHistory conservatively cleared loaded-skill tracking; the
           // restored bodies re-arm it on their next invoke.
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
           this.lastPromptTokenCountIsEstimated =
             lastPromptTokenCountWasEstimatedBeforeHardRescue;
           this.lastOutputTokenCount = lastOutputTokenCountBeforeHardRescue;
+          this.lastCachedContentTokenCount =
+            lastCachedContentTokenCountBeforeHardRescue;
           this.tokenCountsRouteKey = tokenCountsRouteKeyBeforeHardRescue;
           // Restore the retention map alongside the slots: the rescue's
           // compression consumed/cleared entries mid-flight, and without
@@ -3450,6 +3560,9 @@ export class LlmChat {
           }
           this.telemetryService?.setLastPromptTokenCount(
             lastPromptTokenCountBeforeHardRescue,
+          );
+          this.telemetryService?.setLastCachedContentTokenCount(
+            lastCachedContentTokenCountBeforeHardRescue,
           );
         }
         const compressionStatus =
@@ -3471,9 +3584,11 @@ export class LlmChat {
         shouldForceFromHard &&
         compressionInfo.compressionStatus === CompressionStatus.COMPRESSED
       ) {
+        // Keep the pending question with the compressed answer on resume.
         this.chatRecordingService?.recordChatCompression({
           info: compressionInfo,
-          compressedHistory: this.getHistoryShallow(),
+          compressedHistory: [...this.getHistoryShallow(), userContent],
+          completedToolCallIds: this.completedToolCallIds,
         });
       }
 
@@ -3508,8 +3623,10 @@ export class LlmChat {
           userContentPushSnapshotKey
         ] = this.userContentPushCount;
       }
-      // Add user content to history ONCE before any attempts.
+      // Add user content to history ONCE before any attempts. Later object
+      // spreads preserve the identity marked before compression.
       this.history.push(userContent);
+      this.syncReviewedSchemasForContent(userContent);
       currentUserContent = userContent;
       userContentAdded = true;
       // Record that the user content landed (see `userContentPushCount`). The
@@ -3606,6 +3723,9 @@ export class LlmChat {
     } catch (error) {
       if (userContentAdded) {
         this.history.pop();
+        if (currentUserContent) {
+          this.syncReviewedSchemasForContent(currentUserContent);
+        }
         // The push above was rolled back, so undo its count too.
         this.userContentPushCount--;
       }
@@ -3691,6 +3811,7 @@ export class LlmChat {
         // model's answer starting mid-sentence.
         let transportContinuationPrefix: Part[] = [];
         let reactiveCompressionAttempted = false;
+        let omniMediaDegradeAttempts = 0;
         let suppressNextRetryEvent = false;
         let streamYieldedAnyChunk = false;
 
@@ -4087,18 +4208,27 @@ export class LlmChat {
             // from that attempt can appear twice. Thinking models can
             // spend minutes in that phase, exactly when gateways
             // close long-lived SSE connections (#7832).
+            //
+            // A consumer that retracts delivered output on a fresh retry
+            // (the Hosted Harness) replays even after content delivery: the
+            // resend replaces the retracted output, where a continuation
+            // answered with a fresh full answer would glue it back on
+            // (#13319). Such sends never take the continuation arm below.
+            const replayAdmitsDeliveredContent =
+              options?.retractDeliveredOutputOnRetry === true;
             if (
               isReplayableStreamError &&
-              !streamYieldedContentChunk &&
-              // `streamYieldedContentChunk` is per-attempt, so on its own it
-              // cannot tell "nothing has been delivered" from "this attempt
-              // was cut while thinking, after earlier attempts already put
-              // text on screen". Only the first is replayable; replaying the
-              // second discards output the caller is watching. The
-              // accumulated buffer is what distinguishes them, and it must be
-              // consulted here because this branch is checked before the
-              // continuation one below.
-              transportContinuationText.trim().length === 0 &&
+              (replayAdmitsDeliveredContent ||
+                (!streamYieldedContentChunk &&
+                  // `streamYieldedContentChunk` is per-attempt, so on its own it
+                  // cannot tell "nothing has been delivered" from "this attempt
+                  // was cut while thinking, after earlier attempts already put
+                  // text on screen". Only the first is replayable; replaying the
+                  // second discards output the caller is watching. The
+                  // accumulated buffer is what distinguishes them, and it must be
+                  // consulted here because this branch is checked before the
+                  // continuation one below.
+                  transportContinuationText.trim().length === 0)) &&
               streamReplayRetryCount < STREAM_RETRY_CONFIG.maxRetries
             ) {
               self.popPendingPartialAssistantTurn();
@@ -4128,11 +4258,12 @@ export class LlmChat {
               );
               yield { type: StreamEventType.RETRY };
               // A replay is a fresh restart, so anything a previous
-              // continuation had staged must go. The gate above now admits
-              // only an empty accumulated buffer, which leaves nothing for
-              // this to clear — it stays as an assertion of that invariant,
-              // so a future gate change cannot leak staged text into a
-              // restarted attempt.
+              // continuation had staged must go. Without
+              // `retractDeliveredOutputOnRetry` the gate above admits only an
+              // empty accumulated buffer, which leaves nothing for this to
+              // clear; with it the buffer holds the delivered text the caller
+              // is about to retract, and clearing it keeps the resend from
+              // asking the model to resume output the caller no longer has.
               resetTransportContinuation();
               suppressNextRetryEvent = true;
               await delay(delayMs, params.config?.abortSignal).promise;
@@ -4182,8 +4313,13 @@ export class LlmChat {
               attemptFinishReason !== undefined &&
               CLOSED_FINISH_REASONS.has(attemptFinishReason) &&
               streamYieldedContentChunk;
+            // A consumer retracting delivered output replays instead: a
+            // continuation tail is only correct when the provider honors the
+            // resume instruction, and a restart is indistinguishable from a
+            // perfect continuation — so append is not safe for it (#13319).
             const canContinueAfterTransportCut =
               isContinuableStreamCut &&
+              !replayAdmitsDeliveredContent &&
               !attemptClosedWithOwnOutput &&
               !streamYieldedFunctionCall &&
               transportContinuationText.trim().length > 0 &&
@@ -4266,6 +4402,72 @@ export class LlmChat {
               contextOverflow.isExceeded ||
               requestPayloadOverflow.isTooLarge
             ) {
+              // Server-limit fallback for omni media (server-feedback-driven
+              // transport guard): a request carrying oss:// media that the
+              // server rejected as over its input limit is retried with the
+              // media degraded one guard-ladder rung further. Runs BEFORE
+              // reactive compression — history compression cannot shrink
+              // media tokens, which dominate these rejections. Bounded by
+              // the guard's maxTransportPasses and only armed when a
+              // normalized omni processing config exists (omni sessions).
+              const omniDegradeMaxAttempts =
+                self.config.getOmniProcessingConfig?.()?.limits
+                  .maxTransportPasses ?? 0;
+              if (
+                contextOverflow.isExceeded &&
+                !exactRoute &&
+                omniMediaDegradeAttempts < omniDegradeMaxAttempts
+              ) {
+                const degradeAttempt = omniMediaDegradeAttempts++;
+                let degradeOutcome:
+                  | { replacedParts: number; degradedResources: number }
+                  | undefined;
+                try {
+                  // Dynamic import keeps the omni pipeline out of the send
+                  // path for non-omni sessions (mirrors fileUtils).
+                  const { degradeOmniMediaAfterServerReject } = await import(
+                    '../omni/reactive-degrade.js'
+                  );
+                  degradeOutcome = await degradeOmniMediaAfterServerReject(
+                    self.config,
+                    self.history,
+                    degradeAttempt,
+                    {
+                      signal: params.config?.abortSignal,
+                      observedLimitTokens: contextOverflow.limitTokens,
+                    },
+                  );
+                } catch (degradeError) {
+                  if (
+                    params.config?.abortSignal?.aborted ||
+                    isAbortError(degradeError)
+                  ) {
+                    throw degradeError;
+                  }
+                  debugLogger.warn(
+                    'Omni media degradation fallback failed.',
+                    degradeError,
+                  );
+                }
+                if (degradeOutcome && degradeOutcome.replacedParts > 0) {
+                  self.popPendingPartialAssistantTurn();
+                  requestContents = self.getRequestHistoryForRoute(
+                    currentUserContent,
+                    requestModalities,
+                  );
+                  debugLogger.warn(
+                    `Server input limit exceeded; degraded ` +
+                      `${degradeOutcome.degradedResources} omni media ` +
+                      `resource(s) in place (attempt ${degradeAttempt + 1}/` +
+                      `${omniDegradeMaxAttempts}); retrying.`,
+                  );
+                  resetTransportContinuation();
+                  yield { type: StreamEventType.RETRY };
+                  suppressNextRetryEvent = true;
+                  rearmQuietAcceptanceIfBudgetSpent();
+                  continue;
+                }
+              }
               // Whether this pass (or a previous one) spent the one-shot
               // payload-overflow recovery; when it did and the error is
               // still a payload overflow, the wrap below turns it into an
@@ -5513,6 +5715,24 @@ export class LlmChat {
   }
 
   /**
+   * Iterates raw history newest-first and returns the first entry satisfying
+   * `predicate`, without the O(history) clone `getHistoryShallow` pays. For
+   * read-only checks on hot per-send paths — callers must not mutate the
+   * returned objects.
+   */
+  findLastHistoryEntry(
+    predicate: (entry: Content) => boolean,
+  ): Content | undefined {
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const entry = this.history[i];
+      if (predicate(entry)) {
+        return entry;
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * Returns concatenated text from the last model entry without cloning the
    * full history. Used by stop hooks, where only the latest assistant text is
    * needed.
@@ -5612,6 +5832,10 @@ export class LlmChat {
    */
   clearHistory(): void {
     this.history = [];
+    this.completedToolCallIds = [];
+    if (!this.isForkedChat) {
+      this.config.getToolRegistry()?.clearReviewedDeclarations?.();
+    }
     // Any pending partial-push state points into the now-empty history;
     // resetting prevents `popPendingPartialAssistantTurn` from splicing whatever
     // shows up at that index in a future send (defense-in-depth — the
@@ -5628,6 +5852,7 @@ export class LlmChat {
    */
   addHistory(content: Content): void {
     this.history.push(content);
+    this.syncReviewedSchemasForContent(content);
     // addHistory only runs between sends, so the partial-push marker
     // should already be cleared. If it is not, a new caller is
     // violating that invariant — surface it at error level so the
@@ -5643,6 +5868,19 @@ export class LlmChat {
       );
     }
     this.clearPendingPartialState();
+  }
+
+  private syncReviewedSchemasForContent(content: Content): void {
+    if (
+      !this.isForkedChat &&
+      content.parts?.some(
+        (part) => part.functionResponse?.name === ToolNames.TOOL_SEARCH,
+      )
+    ) {
+      this.config
+        .getToolRegistry()
+        ?.syncReviewedDeclarations?.(this.history, this);
+    }
   }
 
   /**
@@ -5763,8 +6001,12 @@ export class LlmChat {
     }
   }
 
-  setHistory(history: Content[]): void {
+  setHistory(
+    history: Content[],
+    completedToolCallIds?: readonly string[],
+  ): void {
     this.history = history;
+    this.setCompletedToolCallIds(completedToolCallIds);
     // History replacement (compression, /clear, --resume reload) wipes
     // the index basis the partial-push marker was captured against. The
     // marker MUST be cleared — otherwise `popPendingPartialAssistantTurn` could find
@@ -5781,12 +6023,16 @@ export class LlmChat {
     // body costs at most one duplicate injection on the next invoke.
     if (!this.isForkedChat) {
       clearLoadedSkillTracking(this.config.getToolRegistry(), 'setHistory');
+      this.config
+        .getToolRegistry()
+        ?.syncReviewedDeclarations?.(this.history, this);
     }
   }
 
   truncateHistory(keepCount: number): void {
     const prevLen = this.history.length;
     this.history = this.history.slice(0, keepCount);
+    this.setCompletedToolCallIds(this.completedToolCallIds);
     // Truncation can drop the entry the partial-push marker points at,
     // or leave it valid but shift the meaning of nearby indices. Reset
     // both fields rather than try to fix them up — they're per-send and
@@ -5800,6 +6046,9 @@ export class LlmChat {
         this.config.getToolRegistry(),
         'truncateHistory',
       );
+      this.config
+        .getToolRegistry()
+        ?.syncReviewedDeclarations?.(this.history, this);
     }
     this.clearPendingPartialState();
   }
@@ -5808,6 +6057,7 @@ export class LlmChat {
     this.history = this.history
       .map(stripThoughtPartsFromContent)
       .filter((content): content is Content => content !== null);
+    this.setCompletedToolCallIds(this.completedToolCallIds);
     // Filter+map replaces `this.history` with a new array, so any pending
     // partial-push marker is now indexed against an array that no longer
     // exists. Clear it for the same reason setHistory does — and drop
@@ -5823,8 +6073,12 @@ export class LlmChat {
    */
   stripOrphanedUserEntriesFromHistory(): Content[] {
     const strippedEntries: Content[] = [];
+    const boundary = completedToolCallBoundary(
+      this.history,
+      this.completedToolCallIds,
+    );
     while (
-      this.history.length > 0 &&
+      this.history.length > boundary &&
       this.history[this.history.length - 1]!.role === 'user'
     ) {
       // Never pop a *pure* system-reminder user entry. These are structural,
@@ -5866,6 +6120,9 @@ export class LlmChat {
         this.config.getToolRegistry(),
         'stripOrphanedUserEntries',
       );
+      this.config
+        .getToolRegistry()
+        ?.syncReviewedDeclarations?.(this.history, this);
     }
     this.clearPendingPartialState();
     return strippedEntries;
@@ -6207,11 +6464,13 @@ export class LlmChat {
             this.telemetryService?.setLastPromptTokenCount(
               lastPromptTokenCount,
             );
-            if (cachedContentTokenCount && this.telemetryService) {
-              this.telemetryService.setLastCachedContentTokenCount(
-                cachedContentTokenCount,
-              );
-            }
+            // Always mirror onto the chat — including zero — so a later
+            // /context in this session cannot keep another session's cache
+            // hit, and route retain/restore has a per-chat source (#12047).
+            this.lastCachedContentTokenCount = cachedContentTokenCount;
+            this.telemetryService?.setLastCachedContentTokenCount(
+              cachedContentTokenCount,
+            );
           }
         }
 

@@ -1,0 +1,242 @@
+// ============================================================================
+// Omni 固定策略(fixedPolicy)预设 —— 覆盖设计文档 4.1–4.9 全部 9 条
+// ----------------------------------------------------------------------------
+// 用法:把 "omni" 对象合并进工作区 .qwen/settings.json(或用户级
+// ~/.qwen/settings.json)。settings 解析支持 JSONC 注释。
+//
+// 说明:
+//  - 本预设只占用 "omni.processing" 子树;omni.enabled 等其他键按需在
+//    你自己的 settings 里设置(omni 未启用时 fixedPolicies 不会运行)。
+//  - 长链超时:4.1/4.4 的 ASR 链可能跑几十分钟(81 分钟电影 ≈ 28 个
+//    转写分段),务必一并拷贝 policyTools 里的 runtime.timeoutMs 放大项。
+//  - 4.1–4.4 依赖 S7 的 memory.* 条件命名空间(子图可见性:抽音轨→转写
+//    的转写产物挂在派生音频版本下,对视频版本同样可见)。
+//  - 执行顺序由 priority 保证(大者先跑):抽轨/预处理(90–100)→
+//    链内条件分支(70–90)→ 独立降级(50–60)。priority 只决定同一资源
+//    上的匹配顺序;跨模态互不影响。
+//  - 已知限制:4.5 无法表达"判定为文档/文字类图片"(DSL 无图像内容
+//    分类字段),本预设实现为"大图才 OCR"(既省 token 又是最常见文档
+//    形态);需要别的口径时自行改 when。
+// ============================================================================
+{
+  "omni": {
+    "processing": {
+      "fixedPolicies": {
+        // ---- 4.1 长视频(>30min)抽音轨 → ASR(三步链,优先级 100→90→80)----
+        // 设计:长视频的语音内容整体转为带时间戳的文本,模型不再"看"全片。
+        // 链式触发:抽轨产物 origin 为 policy,由下一步接力;reprocessMedia
+        // 让产物重新进入匹配。memory.hasTranscript 门控:已有 ASR 结果(包括
+        // 模型此前自己转写的)就不再重复触发。
+        "long-video-extract-audio": {
+          "priority": 100,
+          "mediaTypes": ["video"],
+          "origins": ["user", "tool"],
+          "when": [
+            "all",
+            [">", ["field", "resource.durationMs"], 1800000],
+            ["==", ["field", "memory.hasTranscript"], 0]
+          ],
+          "toolName": "omni_extract_audio",
+          "arguments": {
+            "format": "wav",
+            "sampleRateHz": 16000,
+            "channels": 1
+          },
+          "output": { "reprocessMedia": true, "source": "keep" }
+        },
+        // 音轨超过 ASR 入参上限(100MB)时先压码率;省略大音轨,小音轨接力。
+        "long-video-audio-downsample": {
+          "priority": 90,
+          "mediaTypes": ["audio"],
+          "origins": ["policy"],
+          "when": [">", ["field", "resource.sizeBytes"], 104857600],
+          "toolName": "omni_downsample_audio",
+          "arguments": {
+            "bitrateKbps": 24,
+            "sampleRateHz": 16000,
+            "channels": 1
+          },
+          "output": { "reprocessMedia": true, "source": "omit" }
+        },
+        "long-video-transcribe": {
+          "priority": 80,
+          "mediaTypes": ["audio"],
+          "origins": ["policy"],
+          "when": ["<=", ["field", "resource.sizeBytes"], 104857600],
+          "toolName": "omni_transcribe_audio",
+          "output": { "source": "omit" }
+        },
+
+        // ---- 4.4 长音频(>30min)直接 ASR(一步,与 4.1 共用转写条件)----
+        "long-audio-transcribe": {
+          "priority": 90,
+          "mediaTypes": ["audio"],
+          "origins": ["user", "tool"],
+          "when": [
+            "all",
+            [">", ["field", "resource.durationMs"], 1800000],
+            ["==", ["field", "memory.hasTranscript"], 0]
+          ],
+          "toolName": "omni_transcribe_audio",
+          // source 保留:转写文本内联投递,原音频是否一并投递由你决定
+          // (长音频通常体积也大,想省 token 就改 "omit" 只留转写)。
+          "output": { "source": "keep" }
+        },
+
+        // ---- 4.2 大图(宽或高>2000px)降采样 --------------------------------
+        // tokenBudget 档位按计费 token 说话(small=256 tokens,按 28px
+        // patch 网格对齐),比裸 maxDimension 更贴近模型计费语义。
+        "large-image-downsample": {
+          "priority": 60,
+          "mediaTypes": ["image"],
+          "origins": ["user", "tool", "policy"],
+          "when": [
+            "any",
+            [">", ["field", "resource.width"], 2000],
+            [">", ["field", "resource.height"], 2000]
+          ],
+          "toolName": "omni_downsample_image",
+          "arguments": { "tokenBudget": "normal" },
+          "output": { "source": "omit" }
+        },
+
+        // ---- 4.3 上下文紧张时抽关键帧 -------------------------------------
+        // 视频本身装不进剩余上下文时,改用 8 帧小档位关键帧代替。
+        "tight-context-keyframes": {
+          "priority": 60,
+          "mediaTypes": ["video"],
+          "origins": ["user", "tool"],
+          "when": [
+            ">",
+            ["field", "resource.estimatedTokenCount"],
+            ["field", "session.availableContextTokens"]
+          ],
+          "onConditionUnavailable": "skip",
+          "toolName": "omni_extract_keyframes",
+          "arguments": { "maxFrames": 8, "frameTokenBudget": "small" },
+          "output": { "source": "omit" }
+        },
+
+        // ---- 4.5 文档/文字图片 OCR(已知限制:按大图近似判定)--------------
+        "document-image-ocr": {
+          "priority": 50,
+          "mediaTypes": ["image"],
+          "origins": ["user", "tool"],
+          "when": [
+            "all",
+            [
+              "any",
+              [">", ["field", "resource.width"], 2000],
+              [">", ["field", "resource.height"], 2000]
+            ],
+            ["==", ["field", "memory.hasOcr"], 0]
+          ],
+          "toolName": "omni_ocr_image",
+          // source 保留:OCR 文本进上下文的同时,图片仍由 4.2 降采样后投递,
+          // 模型同时拿到"准确文字层 + 压缩视觉层"。
+          "output": { "source": "keep" }
+        },
+
+        // ---- 4.6 大视频(最长边>1920)降分辨率 ------------------------------
+        "large-video-downscale": {
+          "priority": 50,
+          "mediaTypes": ["video"],
+          "origins": ["user", "tool", "policy"],
+          "when": [
+            "any",
+            [">", ["field", "resource.width"], 1920],
+            [">", ["field", "resource.height"], 1920]
+          ],
+          "toolName": "omni_downscale_video",
+          "arguments": { "maxHeight": 480, "fps": 10 },
+          "output": { "source": "omit" }
+        },
+
+        // ---- 4.7/4.8/4.9 超限兜底(>10MB,与上游 inline 上限对齐)-----------
+        // 与 transport guard 的关系:guard 是无条件的系统兜底(永远启用、
+        // 不可删);这三条是更早、更聪明的预处理——图片按 token 档位降到
+        // 小档,音频直接转写成文本,视频抽帧——比 guard 的机械降码率保留
+        // 更多语义。处理后仍超限的由 guard 接力。
+        "oversize-image-downsample": {
+          "priority": 40,
+          "mediaTypes": ["image"],
+          "origins": ["user", "tool", "policy"],
+          "when": [">", ["field", "resource.sizeBytes"], 10485760],
+          "toolName": "omni_downsample_image",
+          "arguments": { "tokenBudget": "small", "quality": 85 },
+          "output": { "source": "omit" }
+        },
+        "oversize-audio-transcribe": {
+          "priority": 40,
+          "mediaTypes": ["audio"],
+          "origins": ["user", "tool", "policy"],
+          "when": [
+            "all",
+            [">", ["field", "resource.sizeBytes"], 10485760],
+            ["==", ["field", "memory.hasTranscript"], 0]
+          ],
+          "toolName": "omni_transcribe_audio",
+          "output": { "source": "omit" }
+        },
+        "oversize-video-keyframes": {
+          "priority": 40,
+          "mediaTypes": ["video"],
+          "origins": ["user", "tool", "policy"],
+          "when": [">", ["field", "resource.sizeBytes"], 10485760],
+          "toolName": "omni_extract_keyframes",
+          "arguments": { "maxFrames": 16, "frameTokenBudget": "normal" },
+          "output": { "source": "omit" }
+        }
+      },
+
+      // ---- 工具级配套:ASR 链的超时放大(30 分钟不足以转写长片)----------
+      // transcribe 的 settings.maxInputBytes 放大到 100MB,与链内 downsample
+      // 分支的 100MB 阈值一致(默认 10MB 会在第二步就拒绝)。
+      //
+      // modelAccess.enabled: 默认所有 policy 工具对模型隐藏(只能被
+      // fixedPolicies 触发)。打开后模型可以基于已投递媒体的 resourceId
+      // 自行调用——即"渐进式理解":先看降级产物,需要细节时自己裁剪/
+      // 抽帧/转写更高保真证据。系统提示会列出已开放的工具。
+      // 只开放"取证"类工具;纯降级工具(downsample/downscale)保持
+      // operator-only,模型没有主动降低证据质量的理由。
+      "policyTools": {
+        "omni_transcribe_audio": {
+          "settings": { "maxInputBytes": 104857600 },
+          "runtime": { "timeoutMs": 1800000 },
+          "modelAccess": { "enabled": true }
+        },
+        "omni_extract_audio": {
+          "runtime": { "timeoutMs": 1800000 },
+          "modelAccess": { "enabled": true }
+        },
+        "omni_downsample_audio": {
+          "runtime": { "timeoutMs": 1800000 }
+        },
+        "omni_clip_video": {
+          "runtime": { "timeoutMs": 1800000 },
+          "modelAccess": { "enabled": true }
+        },
+        "omni_clip_audio": {
+          "modelAccess": { "enabled": true }
+        },
+        "omni_extract_keyframes": {
+          "runtime": { "timeoutMs": 1800000 },
+          "modelAccess": { "enabled": true }
+        },
+        "omni_understand_video_segments": {
+          "runtime": { "timeoutMs": 1800000 },
+          "modelAccess": { "enabled": true }
+        },
+        "omni_ocr_image": {
+          "modelAccess": { "enabled": true }
+        },
+        "omni_caption_image": {
+          "modelAccess": { "enabled": true }
+        }
+      },
+
+      // ---- 链式派生预算:默认 1GiB/根对长片抽轨偏紧,放宽到 4GiB ---------
+      "limits": { "maxDerivedBytesPerRoot": 4294967296 }
+    }
+  }
+}

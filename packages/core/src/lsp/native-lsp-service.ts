@@ -779,7 +779,11 @@ export class NativeLspService {
     try {
       // Even disk-reading servers need a readable discovery candidate, but
       // ordinary queries need not read text that cannot be delivered.
-      fs.accessSync(filePath, fs.constants.R_OK);
+      if (!this.isUsableWorkspaceSymbolFile(filePath)) {
+        throw new Error(
+          'Workspace symbol warmup candidate is no longer usable.',
+        );
+      }
       await this.ensureDocumentSynchronized(
         serverName,
         handle as LspServerHandle & { connection: LspConnectionInterface },

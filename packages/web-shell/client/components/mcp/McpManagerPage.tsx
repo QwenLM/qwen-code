@@ -30,6 +30,7 @@ import { useMcp } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { extractErrorDetail } from '../../utils/errorDetail';
+import { isAcpChildCapacityError } from '../../daemon/session/httpErrors.js';
 import styles from './McpManagerPage.module.css';
 import type { SerializedMcpStatusMessage } from '../messages/McpStatusMessage';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
@@ -573,13 +574,18 @@ export function McpManagerPage({
     })()
       .catch((error: unknown) => {
         if (mountedRef.current) {
-          setNotice({ text: extractErrorDetail(error), error: true });
+          setNotice({
+            text: isAcpChildCapacityError(error)
+              ? t('daemon.capacity.exhausted')
+              : extractErrorDetail(error),
+            error: true,
+          });
         }
       })
       .finally(() => {
         if (mountedRef.current) setInitializing(false);
       });
-  }, [initialMessage, loadReadyRuntime, mcp, observeDiscovery]);
+  }, [initialMessage, loadReadyRuntime, mcp, observeDiscovery, t]);
 
   const servers = useMemo(
     () => (status.servers ?? []).filter(isManagedServerVisible),
@@ -704,7 +710,12 @@ export function McpManagerPage({
         throw new Error(t('mcp.discovery.timeout'));
       }
     } catch (error) {
-      setNotice({ text: extractErrorDetail(error), error: true });
+      setNotice({
+        text: isAcpChildCapacityError(error)
+          ? t('daemon.capacity.exhausted')
+          : extractErrorDetail(error),
+        error: true,
+      });
     } finally {
       setRefreshing(false);
     }
@@ -729,7 +740,11 @@ export function McpManagerPage({
         ...(description ? { description } : {}),
       };
     } catch (error) {
-      setAddError(extractErrorDetail(error));
+      setAddError(
+        isAcpChildCapacityError(error)
+          ? t('daemon.capacity.exhausted')
+          : extractErrorDetail(error),
+      );
       return;
     }
     setAddError(null);
@@ -754,7 +769,11 @@ export function McpManagerPage({
       setServerDescription('');
       setServerConfig(DEFAULT_MCP_SERVER_CONFIG);
     } catch (error) {
-      setAddError(extractErrorDetail(error));
+      setAddError(
+        isAcpChildCapacityError(error)
+          ? t('daemon.capacity.exhausted')
+          : extractErrorDetail(error),
+      );
     } finally {
       setAdding(false);
     }
@@ -799,7 +818,11 @@ export function McpManagerPage({
     } catch (error) {
       setNotice({
         serverName: serverToRemove.name,
-        text: t('mcp.action.failed', { error: extractErrorDetail(error) }),
+        text: t('mcp.action.failed', {
+          error: isAcpChildCapacityError(error)
+            ? t('daemon.capacity.exhausted')
+            : extractErrorDetail(error),
+        }),
         error: true,
       });
     } finally {
@@ -845,7 +868,11 @@ export function McpManagerPage({
       } catch (error) {
         setNotice({
           serverName: server.name,
-          text: t('mcp.action.failed', { error: extractErrorDetail(error) }),
+          text: t('mcp.action.failed', {
+            error: isAcpChildCapacityError(error)
+              ? t('daemon.capacity.exhausted')
+              : extractErrorDetail(error),
+          }),
           error: true,
         });
       } finally {
@@ -1046,7 +1073,9 @@ export function McpManagerPage({
           setNotice({
             serverName: server.name,
             text: t('mcp.action.failed', {
-              error: extractErrorDetail(error),
+              error: isAcpChildCapacityError(error)
+                ? t('daemon.capacity.exhausted')
+                : extractErrorDetail(error),
             }),
             error: true,
           });
@@ -1077,7 +1106,11 @@ export function McpManagerPage({
     void loadServerData(server).catch((error: unknown) => {
       setNotice({
         serverName: server.name,
-        text: t('mcp.action.failed', { error: extractErrorDetail(error) }),
+        text: t('mcp.action.failed', {
+          error: isAcpChildCapacityError(error)
+            ? t('daemon.capacity.exhausted')
+            : extractErrorDetail(error),
+        }),
         error: true,
       });
     });

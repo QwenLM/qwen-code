@@ -89,8 +89,11 @@ export function hasComputedTreeSummary(
   return status?.computedAt !== undefined;
 }
 
-/** Compact badge tone for the icon-only (compact) chip; null when clean. */
-function badgeTone(s: DerivedStatus): BadgeTone | null {
+/**
+ * Severity tone for a status dot. The compact chip's badge and the sidebar
+ * details row both read it; null when there is nothing to flag.
+ */
+export function gitBranchBadgeTone(s: DerivedStatus): BadgeTone | null {
   if (s.conflicted > 0) return 'error';
   if (s.operation) return 'warning';
   if (s.detached) return 'warning';
@@ -153,7 +156,7 @@ export function GitBranchChipContent({
 }) {
   const { t } = useI18n();
   const s = deriveStatus(status);
-  const tone = badgeTone(s);
+  const tone = gitBranchBadgeTone(s);
   return (
     <>
       <span className={styles.gitBranchIconWrap}>

@@ -71,7 +71,7 @@ const GLOBS = [
   'packages/*',
   'packages/channels/base',
   'packages/channels/telegram',
-  '!packages/desktop-shell',
+  '!packages/desktop',
 ];
 
 // Skipped on win32, and not for convenience: `mountRootFor` refuses every
@@ -104,30 +104,22 @@ describe('isWorkspaceMember', () => {
   });
 
   it('honours a negated glob', () => {
-    expect(
-      isWorkspaceMember('packages/desktop-shell/src/a.test.ts', GLOBS),
-    ).toBe(false);
+    expect(isWorkspaceMember('packages/desktop/src/a.test.ts', GLOBS)).toBe(
+      false,
+    );
   });
 
   it('honours workspace-glob ORDER — a positive after a negation re-includes', () => {
     // npm evaluates the list in order. Filtering all negations first let a
     // negation win wherever it sat, which would file a false `unreachable`.
-    const globs = [
-      'packages/*',
-      '!packages/desktop-shell',
-      'packages/desktop-shell',
-    ];
-    expect(
-      isWorkspaceMember('packages/desktop-shell/src/a.test.ts', globs),
-    ).toBe(true);
-    const reordered = [
-      'packages/*',
-      'packages/desktop-shell',
-      '!packages/desktop-shell',
-    ];
-    expect(
-      isWorkspaceMember('packages/desktop-shell/src/a.test.ts', reordered),
-    ).toBe(false);
+    const globs = ['packages/*', '!packages/desktop', 'packages/desktop'];
+    expect(isWorkspaceMember('packages/desktop/src/a.test.ts', globs)).toBe(
+      true,
+    );
+    const reordered = ['packages/*', 'packages/desktop', '!packages/desktop'];
+    expect(isWorkspaceMember('packages/desktop/src/a.test.ts', reordered)).toBe(
+      false,
+    );
   });
 
   it('does not match a sibling directory by prefix', () => {
@@ -716,7 +708,7 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       appendFileSync(
         join(dir, '.git', 'config'),
         `[filter "evil"]\n\tsmudge = echo ${'x'.repeat(1200000)}\n` +
-          `\tsmudge = touch ${canary}\n`,
+          `\tsmudge = touch ${canary.replaceAll('\\', '/')}\n`,
       );
       writeFileSync(join(dir, 'a.ts'), 'dirtied by a previous run\n');
 
@@ -829,7 +821,11 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     }
   });
 
-  it('REFUSES an include whose `..` the kernel resolves through a symlink', () => {
+  it('REFUSES an include whose `..` the kernel resolves through a symlink', (ctx) => {
+    if (process.platform === 'win32') {
+      ctx.skip();
+      return;
+    }
     // The other half of the test above, and the one that makes the `dangling`
     // bucket safe to drop anything at all. `<repo>/.git/link` is a symlink and
     // `include.path = link/../evil.cfg` names a payload one level ABOVE the

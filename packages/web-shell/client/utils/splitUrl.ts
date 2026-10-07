@@ -58,6 +58,34 @@ export function parseSplitSessionIds(search: string): string[] {
 }
 
 const SPLIT_STORAGE_KEY = 'qwen-webshell-split-sessions';
+const SPLIT_OWNER_KEY = 'qwen-webshell-split-sessions-for';
+
+/**
+ * The daemon target this document is pointed at.
+ *
+ * `sessionStorage` is partitioned by the PAGE origin, and a `?daemon=` switch
+ * changes only the query — so one storage is shared by every target this tab
+ * has visited. Tagging the saved set with the target it belongs to is what
+ * stops a target change that never passes through `navigateToDaemon` (history
+ * Back/Forward, a bookmark, an address-bar edit, a hand-built link) from
+ * restoring the previous daemon's session ids into the next one.
+ *
+ * Deliberately a plain parse rather than `getAllowedDaemonOrigin`: this tags
+ * state ownership, it does not decide what to connect to, and importing
+ * `config/daemon` here would be circular (it imports `clearSplitSessions`). A
+ * tag that does not match the live target drops the set, which is the safe
+ * direction — the operator loses a restored split, never gains a foreign one.
+ */
+function splitOwner(): string {
+  try {
+    const raw = new URLSearchParams(window.location.search).get('daemon');
+    return raw
+      ? new URL(raw, window.location.origin).origin
+      : window.location.origin;
+  } catch {
+    return window.location.origin;
+  }
+}
 
 /**
  * Persist the in-window split's session set so a refresh restores it. Uses
@@ -73,14 +101,19 @@ export function saveSplitSessions(sessions: readonly string[]): void {
   );
   try {
     sessionStorage.setItem(SPLIT_STORAGE_KEY, JSON.stringify(ids));
+    sessionStorage.setItem(SPLIT_OWNER_KEY, splitOwner());
   } catch {
     // Private mode / quota / SSR — persistence is best-effort.
   }
 }
 
-/** The persisted split session set, or `[]` when absent/unavailable/malformed. */
+/**
+ * The persisted split session set, or `[]` when absent/unavailable/malformed —
+ * and when it was saved for a different daemon target than the live one.
+ */
 export function loadSplitSessions(): string[] {
   try {
+    if (sessionStorage.getItem(SPLIT_OWNER_KEY) !== splitOwner()) return [];
     const raw = sessionStorage.getItem(SPLIT_STORAGE_KEY);
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
@@ -101,6 +134,7 @@ export function loadSplitSessions(): string[] {
 export function clearSplitSessions(): void {
   try {
     sessionStorage.removeItem(SPLIT_STORAGE_KEY);
+    sessionStorage.removeItem(SPLIT_OWNER_KEY);
   } catch {
     // best-effort
   }

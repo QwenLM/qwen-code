@@ -872,7 +872,10 @@ describe('DaemonWorkspaceProvider', () => {
     const root = createRoot(container);
     await act(async () => {
       root.render(
-        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170" token="token-a">
+        <DaemonWorkspaceProvider
+          baseUrl="http://127.0.0.1:4170"
+          token="token-a"
+        >
           <Harness />
         </DaemonWorkspaceProvider>,
       );
@@ -884,7 +887,10 @@ describe('DaemonWorkspaceProvider', () => {
 
     await act(async () => {
       root.render(
-        <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170" token="token-b">
+        <DaemonWorkspaceProvider
+          baseUrl="http://127.0.0.1:4170"
+          token="token-b"
+        >
           <Harness />
         </DaemonWorkspaceProvider>,
       );
@@ -960,7 +966,7 @@ describe('DaemonWorkspaceProvider', () => {
     container.remove();
   });
 
-  it('never publishes the previous client\'s brand on the re-point commit', async () => {
+  it("never publishes the previous client's brand on the re-point commit", async () => {
     // The reset lives in the render that observes the client change, so no
     // committed frame may carry daemon A's brand beside daemon B's baseUrl —
     // a consumer effect keyed on baseUrl must see the reset state.

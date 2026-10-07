@@ -35,6 +35,11 @@ context files (count). Hooks are available but off by default. Facets load
 only while the popover or the workspace header menu is open; the last
 snapshot stays put while both are closed.
 
+The same popover's branch row is interactive: it opens that workspace's Git
+picker (branch checkout, pull/push, View Changes, Commit) and carries the
+branch's dirty or conflicted state as a dot beside the name. A workspace with
+no Git wiring keeps the plain-text summary the demand-loading pass left.
+
 - MCP, skills and hooks are discovered by the workspace's ACP child. Until it
   reports `initialized`, the chip shows `—` and the tooltip says the runtime
   is not initialized yet. A placeholder is never rendered as `0`.
@@ -155,7 +160,7 @@ of every registered workspace, styled after the Session Overview panel:
 name with primary/untrusted badges, path, active session counts (running /
 needs-attention, 30 s cadence), MCP health (`connected/configured`, unknown
 while the runtime is not initialized), branch plus dirty count (60 s, the
-sidebar chip's discipline) and last activity. Daemon-owned `kind: 'live'`
+sidebar Git discipline) and last activity. Daemon-owned `kind: 'live'`
 runtimes are not rows. Per-row actions: New task (targets that workspace)
 and Remove where the sidebar row would offer it. Entries: a "Manage
 workspaces…" row at the end of the Projects section (hidden when the

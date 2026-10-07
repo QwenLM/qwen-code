@@ -6,6 +6,7 @@
 
 import type { InputModalities } from './contentGenerator.js';
 import { normalize } from './tokenLimits.js';
+import { lookupModelCatalog } from '../models/model-catalog.js';
 import { parseModelReasoningCapabilities } from './reasoning-effort.js';
 
 const FULL_MULTIMODAL: InputModalities = {
@@ -41,6 +42,11 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // -------------------
   // Alibaba / Qwen
   // -------------------
+  // Qwen Omni models: full multimodal (image + audio + video) — the omni
+  // harness targets these. Must precede the qwen3.x-plus/qwen fallbacks:
+  // "qwen3.5-omni-plus" would otherwise match /^qwen/ and be text-only.
+  [/^qwen\d*\.?\d*-omni/, FULL_MULTIMODAL],
+  [/^qwen-omni/, FULL_MULTIMODAL],
   // Qwen Plus models: image + video support
   [/^qwen3\.5-plus/, { image: true, video: true }],
   [/^qwen3\.6-plus/, { image: true, video: true }],
@@ -107,18 +113,22 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
 /**
  * Return the default input modalities for a model based on its name.
  *
- * Uses the same normalize-then-regex pattern as {@link tokenLimit}.
- * Unknown models default to text-only (empty object) to avoid sending
- * unsupported media types that would cause unrecoverable API errors.
+ * Uses the same normalize-then-regex pattern as {@link tokenLimit}, merged
+ * with the models.dev catalog entry. PDF stays explicit because it selects a
+ * different file-reading path; other catalog modalities can extend a known
+ * family. A model neither source knows stays text-only (empty object) to avoid
+ * sending unsupported media types that would cause unrecoverable API errors.
  */
 export function defaultModalities(model: string): InputModalities {
   const norm = normalize(model);
+  const fromCatalog = { ...lookupModelCatalog(norm)?.modalities };
+  delete fromCatalog.pdf;
   for (const [regex, modalities] of MODALITY_PATTERNS) {
     if (regex.test(norm)) {
-      return { ...modalities };
+      return { ...fromCatalog, ...modalities };
     }
   }
-  return {};
+  return fromCatalog;
 }
 
 /**

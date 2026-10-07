@@ -9,8 +9,10 @@ import {
   buildInstallPlan,
   findProviderById,
   REASONING_EFFORT_TIERS,
+  parseModelReasoningCapabilities,
   resolveBaseUrl,
 } from '@qwen-code/qwen-code-core';
+import { resolveReasoningCapabilities } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
 import type { LoadedSettings } from '../config/settings.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -19,6 +21,8 @@ import {
   buildModelReasoningConfigPreview,
   clearReasoningRequestOverrides,
   getConfiguredModelReasoning,
+  getReasoningForDisplay,
+  buildModelReasoningRoutePreview,
   getDefaultReasoningConfig,
   getModelConfiguration,
   getGptReasoningOverrideState,
@@ -123,7 +127,9 @@ describe('model configuration manifest', () => {
         apiKey: 'test-key',
         modelIds: [model],
       }).modelProviders![0].models[0];
-      const reasoning = installed.capabilities?.reasoning;
+      const reasoning = parseModelReasoningCapabilities(
+        installed.capabilities?.reasoning,
+      );
       expect(reasoning).toBeDefined();
       const option = buildModelReasoningConfigOption(model, {}, reasoning);
       expect(
@@ -767,4 +773,142 @@ describe('getReasoningEffortsForConfig', () => {
       REASONING_EFFORT_TIERS,
     );
   });
+});
+
+describe('external reasoning controls', () => {
+  const declaration = {
+    profile: 'openai-effort',
+    efforts: ['low', 'medium', 'high'],
+    defaultEffort: 'medium',
+  } as const;
+  const generation = {
+    model: 'company-alias',
+    authType: 'openai',
+    baseUrl: 'https://gateway.example/v1',
+  } as ContentGeneratorConfig;
+
+  it('shows concrete defaults without persisting them as a selection', () => {
+    const config = {
+      getModel: () => generation.model,
+      getContentGeneratorConfig: () => generation,
+      getResolvedModelConfig: () => ({
+        capabilities: { reasoning: declaration },
+      }),
+    } as unknown as Config;
+    const reasoning = getConfiguredModelReasoning(config);
+    expect(
+      buildModelReasoningRoutePreview(generation, reasoning, undefined)?.[0],
+    ).toMatchObject({
+      currentValue: 'medium',
+      options: [
+        { value: 'none' },
+        { value: 'low' },
+        { value: 'medium' },
+        { value: 'high' },
+      ],
+    });
+    expect(getReasoningForDisplay(config, generation)).toEqual({
+      effort: 'medium',
+    });
+    expect(generation.reasoning).toBeUndefined();
+    const limited = resolveReasoningCapabilities(generation, {
+      ...declaration,
+      efforts: ['low', 'high'],
+      defaultEffort: 'low',
+    });
+    expect(
+      buildModelReasoningRoutePreview(generation, limited, 'medium')?.[0]
+        .currentValue,
+    ).toBe('high');
+  });
+
+  it('uses the captured exact route while live settings change', () => {
+    const active = {
+      ...generation,
+      reasoningRouteBaseUrl: null,
+      reasoningSnapshot: [
+        {
+          id: generation.model,
+          authType: generation.authType!,
+          baseUrl: generation.baseUrl,
+          reasoning: declaration,
+        },
+        {
+          id: generation.model,
+          authType: generation.authType!,
+          baseUrl: generation.baseUrl,
+          registryBaseUrl: generation.baseUrl,
+          reasoning: { ...declaration, defaultEffort: 'high' as const },
+        },
+      ],
+    };
+    const config = {
+      getModel: () => generation.model,
+      getContentGeneratorConfig: () => active,
+      getResolvedModelConfig: () => {
+        throw new Error('must not read live registry');
+      },
+    } as unknown as Config;
+    expect(getReasoningForDisplay(config, active)).toEqual({
+      effort: 'medium',
+    });
+    expect(
+      getReasoningForDisplay(config, {
+        ...active,
+        reasoningRouteBaseUrl: generation.baseUrl,
+      }),
+    ).toEqual({ effort: 'high' });
+  });
+
+  it.each(['openai-effort', 'openai-reasoning'] as const)(
+    'projects canonical raw overrides for %s aliases',
+    (profile) => {
+      const reasoning = resolveReasoningCapabilities(generation, {
+        ...declaration,
+        profile,
+      });
+      expect(
+        getGptReasoningOverrideState(
+          {
+            ...generation,
+            baseUrl: 'https://openrouter.ai/api/v1',
+            extra_body: { reasoning: { enabled: false } },
+          },
+          reasoning,
+        )?.enabled,
+      ).toBe(false);
+      const extra_body =
+        profile === 'openai-effort'
+          ? { reasoning_effort: 'high' }
+          : { reasoning: { effort: 'high' } };
+      const raw = {
+        ...generation,
+        extra_body,
+        reasoningSnapshot: [
+          {
+            id: generation.model,
+            authType: generation.authType!,
+            baseUrl: generation.baseUrl,
+            reasoning: { ...declaration, profile },
+          },
+        ],
+      };
+      clearReasoningRequestOverrides(raw);
+      expect(raw.extra_body).toEqual(extra_body);
+      expect(
+        buildModelReasoningRoutePreview(
+          { ...generation, extra_body },
+          reasoning,
+          undefined,
+        )?.[0].currentValue,
+      ).toBe('high');
+      expect(
+        buildModelReasoningRoutePreview(
+          { ...generation, extra_body, reasoning: false },
+          reasoning,
+          undefined,
+        )?.[0].currentValue,
+      ).toBe('none');
+    },
+  );
 });

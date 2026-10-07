@@ -40,7 +40,7 @@ Point the tool at a ModelStudio Standard/Token Plan or another verified DashScop
   "modelProviders": {
     "openai": [
       {
-        "id": "qwen3.6-plus",
+        "id": "qwen3.8-flash",
         "envKey": "DASHSCOPE_API_KEY",
         "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1"
       }
@@ -49,17 +49,19 @@ Point the tool at a ModelStudio Standard/Token Plan or another verified DashScop
   "tools": {
     "webSearch": {
       "enabled": true,
-      "model": "qwen3.6-plus"
+      "model": "qwen3.8-flash"
     }
   }
 }
 ```
 
-| Setting                        | Env override           | Meaning                                                                                                                                                                                                                                                                       |
-| ------------------------------ | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tools.webSearch.enabled`      | `ENABLE_WEB_SEARCH`    | Set `false` to turn the tool off. Implicit startup activation requires leaving `enabled`, `model`, and the env-only backend unset. Setting `true` permits automatic derivation only when the env-only backend is also unset; otherwise a `model` is required.                 |
-| `tools.webSearch.model`        | `WEB_SEARCH_MODEL`     | Search model selector for the explicit path (`modelId` or `authType:modelId`). With `WEB_SEARCH_BASE_URL` it is the plain model id for that endpoint; otherwise it must match a declared DashScope-compatible `modelProviders` entry. The automatic path uses `qwen3.6-plus`. |
-| `tools.webSearch.webExtractor` | `WEB_SEARCH_EXTRACTOR` | Let the search agent open result pages for better-grounded answers (default `true`; billed separately by DashScope).                                                                                                                                                          |
+| Setting                         | Env override                 | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ------------------------------- | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tools.webSearch.enabled`       | `ENABLE_WEB_SEARCH`          | Set `false` to turn the tool off. Implicit startup activation requires leaving `enabled`, `model`, and the env-only backend unset. Setting `true` permits automatic derivation only when the env-only backend is also unset; otherwise a `model` is required.                                                                                                                                                                                                                                                                                                                          |
+| `tools.webSearch.model`         | `WEB_SEARCH_MODEL`           | Search model selector for the explicit path (`modelId` or `authType:modelId`). With `WEB_SEARCH_BASE_URL` it is the plain model id for that endpoint; otherwise it must match a declared DashScope-compatible `modelProviders` entry. The automatic path uses `qwen3.8-flash`.                                                                                                                                                                                                                                                                                                         |
+| `tools.webSearch.webExtractor`  | `WEB_SEARCH_EXTRACTOR`       | Let the search agent open result pages for better-grounded answers (default `true`; billed separately by DashScope).                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `tools.webSearch.timeoutMs`     | `WEB_SEARCH_TIMEOUT_MS`      | Total time budget for one search, in milliseconds (default `120000`, max `600000`; other values fall back to the default). A search that runs out of time returns what arrived as a partial result once at least one search call has completed; if the budget expires before the first search call finishes, the tool reports a timeout error instead, because narration with no executed search is not auditable evidence. A per-tool execution cap (`QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS`) below this budget fires first and discards the partial result; keep it above `timeoutMs`. |
+| `tools.webSearch.maxPerSession` | `WEB_SEARCH_MAX_PER_SESSION` | Maximum `web_search` calls in one session (default `200`, max `10000`; other values fall back to the default). The count is shared with subagents and resets when the session changes (`/clear`, `/resume`, branching). Once it is reached, further searches are skipped and the model is told to continue with what it has gathered.                                                                                                                                                                                                                                                  |
 
 ### Env-only configuration (no settings.json)
 
@@ -69,7 +71,7 @@ variables — no `modelProviders` entry needed:
 
 ```bash
 export ENABLE_WEB_SEARCH=true
-export WEB_SEARCH_MODEL=qwen3.6-plus
+export WEB_SEARCH_MODEL=qwen3.8-flash
 export WEB_SEARCH_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 export DASHSCOPE_API_KEY=sk-...        # or set WEB_SEARCH_API_KEY instead
 ```
@@ -88,6 +90,8 @@ Notes:
 - If enabled explicitly but misconfigured, the tool stays off and a startup notice explains which condition failed. Automatic activation never emits a notice.
 - Searches bill your DashScope key (`usage.x_tools` counts). Auto approval mode (the default) lets the classifier approve searches without prompting; in `default` approval mode the tool asks, and approving with "always allow" persists a standard `WebSearch` permission rule, like other tools.
 - There is no client-side model allowlist; a model the Responses endpoint does not serve fails loudly on first use.
+- A search that exceeds its time budget returns what arrived as a partial result once at least one search call has completed; if the budget expires before the first search call finishes, the tool reports a timeout error instead, because narration with no executed search is not auditable evidence. When a search call did complete but the narrated answer never arrived, the result carries at most 6,000 characters of the page text the agent had read, labeled as raw page content.
+- The per-session cap counts `web_search` tool calls, not the searches one call runs internally, and a call that fails still counts because the request was sent. A skipped call is not an error: it tells the model the budget is used and to ask you to raise `tools.webSearch.maxPerSession` if more searches are genuinely needed.
 
 ## MCP alternatives
 
@@ -302,5 +306,70 @@ qwen mcp add web-search-prime \
 ```
 
 Replace `${GLM_API_KEY}` with your actual ZhipuAI API key, or set it as an environment variable.
+
+---
+
+### Firecrawl
+
+The official hosted MCP server from Firecrawl, providing web search, page scraping, website crawling and mapping, browser interaction, and file parsing. Search results can include each page's content as Markdown, so the model can read its sources without a separate fetch step. The hosted server works without an API key for search, scrape, and parse. Search queries, the URLs you ask it to read, and any files you parse are sent to Firecrawl.
+
+- **Documentation:** https://docs.firecrawl.dev/mcp-server
+- **Cost:** No API key needed for search, scrape, and parse (daily limit per IP); paid plans for higher limits
+- **Get API Key:** https://www.firecrawl.dev/app/api-keys
+- **Best for:** Web search where the model also needs to read the pages it finds, and trying MCP web search without an API key
+
+#### Available Tools
+
+- `firecrawl_search` — Web search, optionally returning each result's page content as Markdown
+- `firecrawl_scrape` — Get a single page as clean Markdown
+- `firecrawl_parse` — Convert a local file (PDF, Word, spreadsheet, and more) to Markdown
+
+With an API key, the server also offers tools to map and crawl websites, interact with pages (click, type, navigate), and search developer sources like GitHub issues and docs.
+
+#### Setup
+
+**Method 1: CLI command (Remote MCP)**
+
+```bash
+qwen mcp add firecrawl \
+  -t http \
+  "https://mcp.firecrawl.dev/v2/mcp" \
+  -H "Authorization: Bearer ${FIRECRAWL_API_KEY}"
+```
+
+To try it without a key, leave out the `-H` line. You get `firecrawl_search`, `firecrawl_scrape`, and `firecrawl_parse` within a daily per-IP limit.
+
+**Method 2: `settings.json` (Remote MCP)**
+
+```json
+{
+  "mcpServers": {
+    "firecrawl": {
+      "httpUrl": "https://mcp.firecrawl.dev/v2/mcp",
+      "headers": {
+        "Authorization": "Bearer ${FIRECRAWL_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace `${FIRECRAWL_API_KEY}` with your actual API key, or set it as an environment variable. If the key is empty, the server still connects but only offers the three keyless tools.
+
+**Method 3: `settings.json` (Local NPX)**
+
+```json
+{
+  "mcpServers": {
+    "firecrawl-mcp": {
+      "command": "npx",
+      "args": ["-y", "firecrawl-mcp@latest"],
+      "env": {
+        "FIRECRAWL_API_KEY": "your-api-key-here"
+      }
+    }
+  }
+}
+```
 
 ---

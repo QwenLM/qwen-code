@@ -1,5 +1,7 @@
 # External Context extension
 
+For normal Mem0 use, configure `memory.mem0` in the main CLI's user settings instead. This private direct integration is the advanced, separately managed profile; it is not required for the bundled path and does not require a separate npm package release.
+
 This private Qwen Code integration connects one interactive CLI process to one
 administrator-bound external context corpus without changing Qwen Core. It has
 three managed deployment variants:
@@ -12,9 +14,11 @@ three managed deployment variants:
 - **Auto-recall:** version 2 configuration and an administrator-installed
   `UserPromptSubmit` Hook, with no external-context MCP server.
 
-The built-in adapters support Mem0 Platform V3 search and a small Generic HTTP
-Search V1 contract for existing knowledge or RAG services. Only Mem0 has an
-optional write path. There is no generic ingestion protocol, personal memory,
+The built-in adapters support Mem0 Platform V3, the stock self-hosted Mem0
+REST server, the Aliyun PolarDB Mem0 management API, and a small Generic HTTP
+Search V1 contract for existing knowledge or RAG services. Only Mem0 providers
+with a verified direct-import operation have an optional write path.
+There is no generic ingestion protocol, personal memory,
 trusted user identity, per-document ACL, or tamper-resistant audit.
 
 Provider teams that need a separately owned and released integration should
@@ -35,8 +39,8 @@ query. In the Mem0 write variant, it can additionally provide only the exact
 content to store. In the auto-recall profile, the query is derived only from
 Qwen's optional `submitted_prompt` provenance, captured before model-bound
 expansions.
-Provider type, endpoint, credential, Mem0 `app_id`, and all other corpus
-selectors are fixed before either process starts.
+Provider type, endpoint, credential, Mem0 `app_id`, `user_id`, `agent_id`, and
+all other corpus selectors are fixed before either process starts.
 
 The actual corpus-isolation boundary is the provider-side credential, project,
 index, or corpus. A Mem0 `app_id` or any other client-supplied filter is
@@ -95,9 +99,9 @@ confirmation; use the governed profile when that is required.
    select another corpus.
 2. Copy the applicable provider configuration from `examples/` to an
    administrator-owned location outside the repository that the CLI user
-   cannot modify. Configure `apiKeyEnv` or `tokenEnv` if needed, then set the
-   referenced environment variable to the credential. `timeoutMs` defaults to
-   5000 and may be between 1 and 30000 milliseconds.
+   cannot modify. Configure `apiKeyEnv`, `credentialEnv`, or `tokenEnv` if
+   needed, then set the referenced environment variable to the credential.
+   `timeoutMs` defaults to 5000 and may be between 1 and 30000 milliseconds.
 3. Have the managed launcher set `QWEN_EXTERNAL_CONTEXT_CONFIG` to the absolute
    configuration path.
 4. From the Qwen Code checkout, install dependencies and build this workspace:
@@ -127,7 +131,7 @@ confirmation; use the governed profile when that is required.
    through an environment-aware dispatcher. If the provider requires an
    egress proxy, the launcher must include the administrator-approved proxy
    variables in that clean environment. Include `localhost`, `127.0.0.1`, and
-   `[::1]` in `NO_PROXY` when using the loopback Generic HTTP provider.
+   `[::1]` in `NO_PROXY` when using any loopback provider endpoint.
 
 6. Point `QWEN_CODE_SYSTEM_SETTINGS_PATH` at an administrator-controlled copy
    of `examples/managed-settings.json` only inside this managed launcher; do not
@@ -225,7 +229,7 @@ UTF-16. It never accepts a model-selected tenant, Project, `app_id`, filter, or
 metadata. Each approval performs exactly one request; the integration does not
 pre-search, retry, poll, cache, or deduplicate.
 
-Mem0 V3 Add is asynchronous in normal operation. `PENDING` with a valid
+Mem0 V3 Add is asynchronous in normal operation. `PENDING` with a UUID
 `event_id` is therefore the expected successful response and returns
 `accepted`, not `stored`. A valid synchronous `SUCCEEDED` response returns
 `stored` as a defensive compatibility path. Explicit `FAILED` and HTTP 400,
@@ -375,16 +379,110 @@ it disabled when search must have no semantic provider-side state change.
 Provider audit or access logs may still be retained. See
 [Mem0 Memory Decay](https://docs.mem0.ai/platform/features/memory-decay).
 
+## Versioned Mem0-compatible providers
+
+New Mem0-compatible deployments use one `mem0` provider type and select a
+reviewed built-in wire contract through `preset`. The endpoint is split into an
+`origin` and optional static `basePath`, while the credential and fixed scope
+remain administrator-owned:
+
+```json
+{
+  "type": "mem0",
+  "preset": "aliyun-polardb-mysql-2026-08",
+  "endpoint": {
+    "origin": "https://memory.example.com",
+    "basePath": ""
+  },
+  "credentialEnv": "MEM0_API_KEY",
+  "scope": {
+    "userId": "repository-memory",
+    "agentId": "qwen-code"
+  }
+}
+```
+
+The built-in presets are:
+
+- `mem0-v2`: PolarDB-style V2 search with `limit`, V1 direct import, and single-user direct-import message decoding.
+- `mem0-v3`: the same contract as `mem0-platform-v3`.
+- `mem0-oss-2026-08`: the same contract as `mem0-oss-rest-2026-08`.
+- `mem0-platform-v3`: `/v3` Platform API, `Authorization: Token`, fixed
+  `appId`.
+- `mem0-oss-rest-2026-08`: stock self-hosted Mem0 `/search` and `/memories`,
+  `X-API-Key`, fixed `userId`, and optional `agentId`.
+- `aliyun-polardb-mysql-2026-08`: PolarDB `/v2/memories/search` and
+  `/v1/memories`, `Authorization: Token`, fixed `userId`, optional
+  `agentId`, historical `top_k`, and raw search content.
+
+#### Connecting a PolarDB Mem0 instance
+
+After the instance finishes initializing, obtain its private or public address
+and `secret.access.apikey` from the console. Public access must be requested
+separately, and the application whitelist must allow the client independently
+of any PolarDB cluster whitelist. The console endpoint is plain HTTP with an IP
+address and port rather than a TLS name, so pasting it into the HTTPS example
+fails the URL policy: the credential, queries, and returned memories would
+otherwise cross the network in cleartext.
+
+`examples/polardb-mem0-loopback.json` is the path that needs no policy opt-in.
+Use a jump host that can reach the endpoint and is allowed by the application
+whitelist, then relay the endpoint to loopback:
+
+```bash
+ssh -N -L 127.0.0.1:8080:<endpoint-host>:<endpoint-port> <jump-host>
+export MEM0_API_KEY=<the console's secret.access.apikey>
+```
+
+Then copy that example to an administrator-owned path, replace
+`<your-user-id>`, and point `QWEN_EXTERNAL_CONTEXT_CONFIG` at it. Loopback
+HTTP needs no `allowInsecureHttp` opt-in. A new instance has no searchable
+memories; seed it through the PolarDB API or the explicitly enabled managed
+write profile before validating search.
+
+Two alternatives, in preference order: bind a domain to the instance and
+terminate TLS, then use `examples/polardb-mem0.json`; or, only when the operator
+explicitly accepts cleartext traffic on an isolated trusted network, keep the
+console endpoint and add `"allowInsecureHttp": true`.
+
+Put the API key in the environment variable named by `credentialEnv`, never in
+the configuration file. PolarDB documents optional `agentId` at the request
+root; use a stable value when memories must be isolated by application.
+
+The preset records the whole protocol, not just one API version. Search always
+sends a maximum of five through the preset's `top_k` or `limit` field. The engine does not
+probe versions or fall back to a different preset. See
+`examples/polardb-mem0.json`, `examples/polardb-mem0-loopback.json`,
+`examples/mem0-oss.json`, and the
+[preset design](../../docs/design/direct-external-context-mem0-presets.md).
+
+Non-loopback plain HTTP remains an explicit `allowInsecureHttp` endpoint
+opt-in. Because it sends credentials, queries, and memory content in cleartext,
+prefer HTTPS or a loopback relay such as `ssh -L`. The HTTPS example and the
+loopback HTTP example both omit the non-loopback insecure-HTTP opt-in.
+
+Preset scope is fixed in configuration and never supplied by the model. A
+missing required scope or an unused configured scope fails startup. The
+examples are read-only as shipped: `context_remember` is registered only when
+the version 1 configuration carries `"write": { "enabled": true }` and the
+selected preset defines verified direct import. Enabling writes must reuse the
+managed write-confirmation Hook and permissions above.
+
 ## Rollout and rollback
 
 Start with the pinned read-only on-demand MCP for one workspace and validate
 search quality and provenance. For writes, first run the repository's
 interactive fake-Mem0 test harness, then progress through an isolated temporary
 Mem0 Project, one trusted repository, and a small team. The shipped Mem0
-configuration always targets Mem0 Platform; only the test harness injects a
-local endpoint. Enable auto-recall only after the administrator accepts
-automatic query forwarding. Do not run auto-recall and an on-demand MCP in one
-process.
+Platform configuration always targets Mem0 Platform, and only the test harness
+injects a local endpoint. A versioned `mem0` configuration instead points at
+the operator-selected endpoint — plain HTTP included when
+`allowInsecureHttp` is on — so treat that endpoint, credential, preset, scope,
+and network policy as one immutable access boundary and validate search
+read-only before enabling writes. Enable auto-recall only after the
+administrator accepts automatic query forwarding. Do not run auto-recall and
+an on-demand MCP in one process, and do not expose this server alongside a
+second Mem0 Extension for the same corpus.
 
 Removing the pinned MCP or auto-recall Hook from the managed launcher rolls
 back the Qwen integration; local on-demand trials can instead disable or remove

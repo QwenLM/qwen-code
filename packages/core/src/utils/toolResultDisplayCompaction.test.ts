@@ -23,11 +23,11 @@ import {
   compactStringForRecording,
   compactToolResultDisplayForHistory,
   compactToolResultDisplayForRecording,
-  MAX_RETAINED_AGENT_FIELD_CHARS,
-  MAX_RETAINED_ANSI_OUTPUT_LINES,
-  MAX_RETAINED_FILE_CONTENT_CHARS,
-  MAX_RETAINED_FILE_DIFF_CHARS,
-  MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+  MAX_RETAINED_AGENT_FIELD_CHARS as AGENT_FIELD_MAX,
+  MAX_RETAINED_ANSI_OUTPUT_LINES as ANSI_LINES_MAX,
+  MAX_RETAINED_FILE_CONTENT_CHARS as FILE_CONTENT_MAX,
+  MAX_RETAINED_FILE_DIFF_CHARS as FILE_DIFF_MAX,
+  MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS as DISPLAY_MAX,
 } from './toolResultDisplayCompaction.js';
 
 function hasUnpairedSurrogate(value: string): boolean {
@@ -45,6 +45,48 @@ function hasUnpairedSurrogate(value: string): boolean {
   }
   return false;
 }
+
+// A plain (unstyled) ANSI output token.
+const ansiToken = (text: string) => ({
+  text,
+  bold: false,
+  italic: false,
+  underline: false,
+  dim: false,
+  inverse: false,
+  fg: '',
+  bg: '',
+});
+
+// One single-token line per index: `line-0`, `line-1`, ...
+const ansiLines = (count: number) =>
+  Array.from({ length: count }, (_, index) => [ansiToken(`line-${index}`)]);
+
+// One model-added line and char, `removed` model-removed lines and chars.
+const modelDiffStat = (removed: number) => ({
+  model_added_lines: 1,
+  model_removed_lines: removed,
+  model_added_chars: 1,
+  model_removed_chars: removed,
+  user_added_lines: 0,
+  user_removed_lines: 0,
+  user_added_chars: 0,
+  user_removed_chars: 0,
+});
+
+// The demo dashboard MCP App display; tests override the fields under test.
+const mcpAppDisplay = (
+  overrides: Partial<McpAppResultDisplay> = {},
+): McpAppResultDisplay => ({
+  type: 'mcp_app',
+  serverName: 'demo',
+  resourceUri: 'ui://demo/dashboard',
+  html: '<main>PROBE_MCP_APP_HTML_UNIQUE_MARKER</main>',
+  toolResult: { content: [{ type: 'text', text: 'Dashboard ready' }] },
+  toolArguments: { region: 'APAC' },
+  fallbackText: 'Dashboard ready',
+  ...overrides,
+});
 
 describe('toolResultDisplayCompaction', () => {
   it.each([
@@ -107,9 +149,7 @@ describe('toolResultDisplayCompaction', () => {
         result.answers[0].question,
         result.answers[0].answer,
       ]) {
-        expect(value.length).toBeLessThanOrEqual(
-          MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
-        );
+        expect(value.length).toBeLessThanOrEqual(DISPLAY_MAX);
         expect(value).toContain('start-');
         expect(value).toContain('-end');
         expect(value).toContain(
@@ -130,15 +170,11 @@ describe('toolResultDisplayCompaction', () => {
   });
 
   it('keeps head and tail when compacting long strings', () => {
-    const value = `start-${'x'.repeat(
-      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
-    )}-end`;
+    const value = `start-${'x'.repeat(DISPLAY_MAX)}-end`;
 
     const compacted = compactStringForHistory(value);
 
-    expect(compacted.length).toBeLessThanOrEqual(
-      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
-    );
+    expect(compacted.length).toBeLessThanOrEqual(DISPLAY_MAX);
     expect(compacted).toContain('start-');
     expect(compacted).toContain('-end');
     expect(compacted).toContain('truncated from');
@@ -156,9 +192,7 @@ describe('toolResultDisplayCompaction', () => {
   });
 
   it('uses saved session wording when compacting recording strings', () => {
-    const value = `start-${'x'.repeat(
-      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
-    )}-end`;
+    const value = `start-${'x'.repeat(DISPLAY_MAX)}-end`;
 
     const compacted = compactStringForRecording(value);
 
@@ -168,9 +202,7 @@ describe('toolResultDisplayCompaction', () => {
   });
 
   it('preserves unmatched surrogate code units when compacting', () => {
-    const value = `start-\uD800-${'x'.repeat(
-      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
-    )}-end`;
+    const value = `start-\uD800-${'x'.repeat(DISPLAY_MAX)}-end`;
 
     const compacted = compactStringForHistory(value);
 
@@ -193,14 +225,12 @@ describe('toolResultDisplayCompaction', () => {
   });
 
   it('drops subagent display fields that are not rendered in CLI history', () => {
-    const nestedDisplay = `nested-${'x'.repeat(
-      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
-    )}-done`;
+    const nestedDisplay = `nested-${'x'.repeat(DISPLAY_MAX)}-done`;
     const display: AgentResultDisplay = {
       type: 'task_execution',
       subagentName: 'researcher',
       taskDescription: 'research',
-      taskPrompt: 'p'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS + 100),
+      taskPrompt: 'p'.repeat(AGENT_FIELD_MAX + 100),
       status: 'completed',
       toolCalls: [
         {
@@ -222,9 +252,7 @@ describe('toolResultDisplayCompaction', () => {
 
     const compacted = compactToolResultDisplayForHistory(display);
 
-    expect(compacted.taskPrompt.length).toBeLessThanOrEqual(
-      MAX_RETAINED_AGENT_FIELD_CHARS,
-    );
+    expect(compacted.taskPrompt.length).toBeLessThanOrEqual(AGENT_FIELD_MAX);
     expect(compacted.toolCalls?.[0]).not.toHaveProperty('args');
     expect(compacted.toolCalls?.[0]).not.toHaveProperty('responseParts');
     expect(compacted.toolCalls?.[0]).not.toHaveProperty('result');
@@ -236,35 +264,20 @@ describe('toolResultDisplayCompaction', () => {
   it('compacts file diffs through the history display path', () => {
     const display: FileDiff = {
       fileName: 'large.txt',
-      fileDiff: `diff-${'d'.repeat(MAX_RETAINED_FILE_DIFF_CHARS)}-done`,
-      originalContent: `old-${'o'.repeat(
-        MAX_RETAINED_FILE_CONTENT_CHARS,
-      )}-done`,
-      newContent: `new-${'n'.repeat(MAX_RETAINED_FILE_CONTENT_CHARS)}-done`,
-      diffStat: {
-        model_added_lines: 1,
-        model_removed_lines: 1,
-        model_added_chars: 1,
-        model_removed_chars: 1,
-        user_added_lines: 0,
-        user_removed_lines: 0,
-        user_added_chars: 0,
-        user_removed_chars: 0,
-      },
+      fileDiff: `diff-${'d'.repeat(FILE_DIFF_MAX)}-done`,
+      originalContent: `old-${'o'.repeat(FILE_CONTENT_MAX)}-done`,
+      newContent: `new-${'n'.repeat(FILE_CONTENT_MAX)}-done`,
+      diffStat: modelDiffStat(1),
     };
 
     const compacted = compactToolResultDisplayForHistory(display);
 
     expect(compacted).not.toBe(display);
-    expect(compacted.fileDiff.length).toBeLessThanOrEqual(
-      MAX_RETAINED_FILE_DIFF_CHARS,
-    );
+    expect(compacted.fileDiff.length).toBeLessThanOrEqual(FILE_DIFF_MAX);
     expect(compacted.originalContent?.length).toBeLessThanOrEqual(
-      MAX_RETAINED_FILE_CONTENT_CHARS,
+      FILE_CONTENT_MAX,
     );
-    expect(compacted.newContent.length).toBeLessThanOrEqual(
-      MAX_RETAINED_FILE_CONTENT_CHARS,
-    );
+    expect(compacted.newContent.length).toBeLessThanOrEqual(FILE_CONTENT_MAX);
     expect(compacted.truncatedForSession).toBe(true);
     expect(compacted.fileDiffLength).toBe(display.fileDiff.length);
     expect(compacted.originalContentLength).toBe(
@@ -282,17 +295,8 @@ describe('toolResultDisplayCompaction', () => {
       fileName: 'new.txt',
       fileDiff: 'new file',
       originalContent: null,
-      newContent: `new-${'n'.repeat(MAX_RETAINED_FILE_CONTENT_CHARS)}-done`,
-      diffStat: {
-        model_added_lines: 1,
-        model_removed_lines: 0,
-        model_added_chars: 1,
-        model_removed_chars: 0,
-        user_added_lines: 0,
-        user_removed_lines: 0,
-        user_added_chars: 0,
-        user_removed_chars: 0,
-      },
+      newContent: `new-${'n'.repeat(FILE_CONTENT_MAX)}-done`,
+      diffStat: modelDiffStat(0),
     };
 
     const compacted = compactToolResultDisplayForHistory(display);
@@ -306,22 +310,7 @@ describe('toolResultDisplayCompaction', () => {
   it('compacts ansi output tokens under the retained line limit', () => {
     const display: AnsiOutputDisplay = {
       totalLines: 1,
-      ansiOutput: [
-        [
-          {
-            text: `line-${'x'.repeat(
-              MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
-            )}-done`,
-            bold: false,
-            italic: false,
-            underline: false,
-            dim: false,
-            inverse: false,
-            fg: '',
-            bg: '',
-          },
-        ],
-      ],
+      ansiOutput: [[ansiToken(`line-${'x'.repeat(DISPLAY_MAX)}-done`)]],
     };
 
     const compacted = compactToolResultDisplayForHistory(display);
@@ -336,20 +325,7 @@ describe('toolResultDisplayCompaction', () => {
   it('keeps unchanged ansi output displays by reference', () => {
     const display: AnsiOutputDisplay = {
       totalLines: 1,
-      ansiOutput: [
-        [
-          {
-            text: 'short',
-            bold: false,
-            italic: false,
-            underline: false,
-            dim: false,
-            inverse: false,
-            fg: '',
-            bg: '',
-          },
-        ],
-      ],
+      ansiOutput: [[ansiToken('short')]],
     };
 
     expect(compactToolResultDisplayForRecording(display)).toBe(display);
@@ -357,59 +333,28 @@ describe('toolResultDisplayCompaction', () => {
 
   it('bounds long ansi output and keeps the tail lines', () => {
     const display: AnsiOutputDisplay = {
-      ansiOutput: Array.from(
-        { length: MAX_RETAINED_ANSI_OUTPUT_LINES + 5 },
-        (_, index) => [
-          {
-            text: `line-${index}`,
-            bold: false,
-            italic: false,
-            underline: false,
-            dim: false,
-            inverse: false,
-            fg: '',
-            bg: '',
-          },
-        ],
-      ),
+      ansiOutput: ansiLines(ANSI_LINES_MAX + 5),
     };
 
     const compacted = compactToolResultDisplayForHistory(display);
 
-    expect(compacted.ansiOutput).toHaveLength(MAX_RETAINED_ANSI_OUTPUT_LINES);
+    expect(compacted.ansiOutput).toHaveLength(ANSI_LINES_MAX);
     expect(compacted.ansiOutput[0][0].text).toContain('terminal lines omitted');
     expect(compacted.ansiOutput.at(-1)?.[0].text).toBe(
-      `line-${MAX_RETAINED_ANSI_OUTPUT_LINES + 4}`,
+      `line-${ANSI_LINES_MAX + 4}`,
     );
   });
 
   it('uses saved session wording when compacting recording ansi output', () => {
     const display: AnsiOutputDisplay = {
-      ansiOutput: Array.from(
-        { length: MAX_RETAINED_ANSI_OUTPUT_LINES + 5 },
-        (_, index) => [
-          {
-            text: `line-${index}`,
-            bold: false,
-            italic: false,
-            underline: false,
-            dim: false,
-            inverse: false,
-            fg: '',
-            bg: '',
-          },
-        ],
-      ),
+      ansiOutput: ansiLines(ANSI_LINES_MAX + 5),
     };
 
-    const compacted = compactToolResultDisplayForRecording(display);
+    const { text } =
+      compactToolResultDisplayForRecording(display).ansiOutput[0][0];
 
-    expect(compacted.ansiOutput[0][0].text).toContain(
-      'terminal lines omitted from saved session preview',
-    );
-    expect(compacted.ansiOutput[0][0].text).not.toContain(
-      'CLI history display',
-    );
+    expect(text).toContain('terminal lines omitted from saved session preview');
+    expect(text).not.toContain('CLI history display');
   });
 
   it('compacts todo, plan, and MCP progress displays', () => {
@@ -419,19 +364,19 @@ describe('toolResultDisplayCompaction', () => {
         {
           id: '1',
           status: 'pending',
-          content: `todo-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+          content: `todo-${'x'.repeat(AGENT_FIELD_MAX)}-done`,
         },
       ],
     };
     const planDisplay: PlanResultDisplay = {
       type: 'plan_summary',
-      message: `message-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
-      plan: `plan-${'x'.repeat(MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS)}-done`,
+      message: `message-${'x'.repeat(AGENT_FIELD_MAX)}-done`,
+      plan: `plan-${'x'.repeat(DISPLAY_MAX)}-done`,
     };
     const progressDisplay: McpToolProgressData = {
       type: 'mcp_tool_progress',
       progress: 1,
-      message: `progress-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+      message: `progress-${'x'.repeat(AGENT_FIELD_MAX)}-done`,
     };
 
     const compactedTodo = compactToolResultDisplayForHistory(todoDisplay);
@@ -456,11 +401,11 @@ describe('toolResultDisplayCompaction', () => {
           confidence: 'high',
           file: 'src/foo.ts',
           line: 42,
-          summary: `summary-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+          summary: `summary-${'x'.repeat(AGENT_FIELD_MAX)}-done`,
           shortSummary: 'short',
-          failureScenario: `scenario-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+          failureScenario: `scenario-${'x'.repeat(AGENT_FIELD_MAX)}-done`,
           outcome: 'skipped',
-          outcomeNote: `note-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+          outcomeNote: `note-${'x'.repeat(AGENT_FIELD_MAX)}-done`,
           direction: 'fails-closed',
           baseline: 'new-surface',
         },
@@ -522,9 +467,7 @@ describe('toolResultDisplayCompaction', () => {
         (f.outcomeNote?.length ?? 0),
       0,
     );
-    expect(retainedChars).toBeLessThanOrEqual(
-      MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
-    );
+    expect(retainedChars).toBeLessThanOrEqual(DISPLAY_MAX);
     // The retained prefix keeps the list's own order, unsorted.
     expect(compacted.findings.map((f) => f.id)).toEqual(
       findings.slice(0, compacted.findings.length).map((f) => f.id),
@@ -538,15 +481,15 @@ describe('toolResultDisplayCompaction', () => {
         {
           id: '1',
           status: 'pending',
-          subject: `task-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
-          owner: `owner-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+          subject: `task-${'x'.repeat(AGENT_FIELD_MAX)}-done`,
+          owner: `owner-${'x'.repeat(AGENT_FIELD_MAX)}-done`,
         },
       ],
     };
     const teamDisplay: TeamResultDisplay = {
       type: 'team_result',
       action: 'created',
-      teamName: `team-${'x'.repeat(MAX_RETAINED_AGENT_FIELD_CHARS)}-done`,
+      teamName: `team-${'x'.repeat(AGENT_FIELD_MAX)}-done`,
     };
 
     const compactedTask = compactToolResultDisplayForHistory(taskDisplay);
@@ -557,17 +500,11 @@ describe('toolResultDisplayCompaction', () => {
     expect(compactedTeam.teamName).toContain('truncated from');
   });
 
-  it('drops MCP App HTML and tool results from retained displays', () => {
+  it('drops MCP App HTML and tool results from retained history displays', () => {
     const marker = 'PROBE_MCP_APP_HTML_UNIQUE_MARKER';
-    const display: McpAppResultDisplay = {
-      type: 'mcp_app',
-      serverName: 'demo',
-      resourceUri: 'ui://demo/dashboard',
+    const display = mcpAppDisplay({
       html: `<main>${marker}${'x'.repeat(2000)}</main>`,
-      toolResult: { content: [{ type: 'text', text: 'Dashboard ready' }] },
-      toolArguments: { region: 'APAC' },
-      fallbackText: 'Dashboard ready',
-    };
+    });
 
     const compacted = compactToolResultDisplayForHistory(display);
 
@@ -576,9 +513,89 @@ describe('toolResultDisplayCompaction', () => {
     expect(compacted.fallbackText).toBe('Dashboard ready');
     expect(JSON.stringify(compacted)).not.toContain(marker);
   });
+
+  // The recording purpose feeds the replayed transcript, and the Web Shell
+  // mounts the MCP App iframe only when `html` is non-empty (it never
+  // re-fetches the `ui://` resource). See #10369.
+  it('keeps maximum escaped MCP App HTML within the replay byte budget', () => {
+    const display: McpAppResultDisplay = {
+      type: 'mcp_app',
+      serverName: 'demo',
+      resourceUri: 'ui://demo/dashboard',
+      html: `<main>${'\u0001'.repeat(4 * 1024 * 1024 - 13)}</main>`,
+      toolResult: { content: [{ type: 'text', text: 'Dashboard ready' }] },
+      toolArguments: { region: 'APAC' },
+      fallbackText: 'Dashboard ready',
+    };
+
+    const compacted = compactToolResultDisplayForRecording(display);
+
+    expect(Buffer.byteLength(display.html, 'utf8')).toBe(4 * 1024 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(compacted), 'utf8')).toBeLessThan(
+      32 * 1024 * 1024,
+    );
+    expect(compacted.html).toBe(display.html);
+    expect(compacted.toolResult).toEqual(display.toolResult);
+    expect(compacted.toolArguments).toEqual(display.toolArguments);
+    expect(compacted.fallbackText).toBe('Dashboard ready');
+  });
+
+  it('still bounds an oversized MCP App fallbackText when recording', () => {
+    const display = mcpAppDisplay({
+      html: '<main>app</main>',
+      toolResult: {},
+      toolArguments: {},
+      fallbackText: `head-${'x'.repeat(DISPLAY_MAX)}-tail`,
+    });
+
+    const compacted = compactToolResultDisplayForRecording(display);
+
+    expect(compacted.html).toBe(display.html);
+    expect(compacted.fallbackText.length).toBeLessThanOrEqual(DISPLAY_MAX);
+    expect(compacted.fallbackText).toContain(
+      'truncated for saved session preview',
+    );
+  });
+
+  // `toolResult` is unbounded at the producer (`content[].data` base64,
+  // `structuredContent`) and the record is the only full copy once the
+  // transcript offload drops `persistedOutputFiles`, so an over-budget payload
+  // must not be persisted verbatim. Removing the bound reds this test.
+  it('drops an oversized MCP App toolResult when recording', () => {
+    const marker = 'PROBE_MCP_APP_TOOL_RESULT_UNIQUE_MARKER';
+    const display = mcpAppDisplay({
+      toolResult: {
+        content: [
+          {
+            type: 'text',
+            text: `${marker}${'x'.repeat(DISPLAY_MAX)}`,
+          },
+        ],
+        structuredContent: {
+          rows: 'y'.repeat(DISPLAY_MAX),
+        },
+      },
+    });
+
+    const compacted = compactToolResultDisplayForRecording(display);
+
+    expect(compacted.toolResult).toEqual({});
+    expect(JSON.stringify(compacted)).not.toContain(marker);
+    // The mounted iframe only needs `html`, which the producer already caps at
+    // the configured resource limit, so replay can still render the app.
+    expect(compacted.html).toBe(display.html);
+    expect(JSON.stringify(compacted).length).toBeLessThanOrEqual(
+      DISPLAY_MAX * 2,
+    );
+  });
 });
 
 describe('compactString limit', () => {
+  const compactFor = {
+    history: compactStringForHistory,
+    recording: compactStringForRecording,
+  };
+
   // The compaction marker embeds the original length, so it is 60-80
   // characters on its own. It used to be appended whatever the limit was,
   // which meant a small caller-supplied limit got back more than it asked
@@ -593,10 +610,7 @@ describe('compactString limit', () => {
     'keeps %s output within bounds for input %d at limit %d',
     (purpose, inputLength, limit) => {
       const value = 'x'.repeat(inputLength);
-      const compact =
-        purpose === 'recording'
-          ? compactStringForRecording(value, limit)
-          : compactStringForHistory(value, limit);
+      const compact = compactFor[purpose](value, limit);
 
       expect(compact.length).toBeLessThanOrEqual(limit);
       // Compacting must never hand back more characters than it was given.
@@ -614,10 +628,7 @@ describe('compactString limit', () => {
     'still explains the truncation for %s at input %d, limit %d',
     (purpose, inputLength, limit) => {
       const value = 'x'.repeat(inputLength);
-      const compact =
-        purpose === 'recording'
-          ? compactStringForRecording(value, limit)
-          : compactStringForHistory(value, limit);
+      const compact = compactFor[purpose](value, limit);
 
       expect(compact.length).toBeLessThanOrEqual(limit);
       expect(compact).toContain('truncated');
@@ -637,10 +648,7 @@ describe('compactString limit', () => {
     'does not split a surrogate pair when the marker does not fit, for %s at limit %d',
     (purpose, limit) => {
       const value = '😀'.repeat(40);
-      const compact =
-        purpose === 'recording'
-          ? compactStringForRecording(value, limit)
-          : compactStringForHistory(value, limit);
+      const compact = compactFor[purpose](value, limit);
 
       expect(compact.length).toBeLessThanOrEqual(limit);
       expect(hasUnpairedSurrogate(compact)).toBe(false);

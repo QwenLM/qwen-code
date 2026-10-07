@@ -1,176 +1,178 @@
-# Web Shell 浏览器任务通知：独立实现设计
+# Web Shell Browser Task Notifications: Independent Implementation Design
 
-状态：2026-09-08 基础版历史设计。以下默认关闭、通用文案、点击仅聚焦、不增加公共 API 等条款描述 #11398 当时的基线；当前行为已由[通知内容与会话导航](web-shell-browser-notification-details.zh-CN.md)及[可配置品牌](web-shell-browser-notification-branding.zh-CN.md)取代，英文对应文档通过两份设计的语言链接提供。
+[English](web-shell-browser-turn-notifications.md) | [简体中文](web-shell-browser-turn-notifications.zh-CN.md)
 
-## 决策与范围
+Status: historical design for the 2026-09-08 baseline. The provisions below about being disabled by default, generic copy, focusing the window only on click, and adding no public API describe the baseline at #11398. For current behavior, see [notification content and session navigation](web-shell-browser-notification-details.zh-CN.md) and [configurable branding](web-shell-browser-notification-branding.zh-CN.md), which supersede this baseline. English counterparts are available through the language links in those two designs.
 
-基于当前 main 独立实现，不依赖 #11251。首版只修改 Web Shell client，复用已有 `turn_complete` / `turn_error`，增加通知专用的内部事件适配和一个用户开关。先浏览器通知，再支持 Channel。
+## Decisions and scope
 
-产品名称为“浏览器任务通知”，但事件语义是一次 assistant 回合结束，不代表整个项目、多轮目标或所有后台 agent 都完成。首版覆盖页面仍在运行且当前聊天或 Split View 仍被观察的情形，包括浏览器切到后台、窗口失焦。切换到别的聊天后未挂载会话的即时提醒、关闭网页、浏览器冻结或系统休眠不在首版保证内。
+Implement independently against the current main branch, without depending on #11251. The first version changes only the Web Shell client, reuses the existing `turn_complete` / `turn_error` events, and adds an internal event adapter dedicated to notifications and a user toggle. Deliver browser notifications first, then Channel support.
 
-## 当前代码依据
+The product name is “browser task notifications,” but the event means that one assistant turn has ended, not that the entire project, a multi-turn goal, or every background agent has finished. The first version covers cases where the page is still running and the current chat or Split View is still being observed, including when the browser is in the background or the window loses focus. Immediate alerts for an unmounted session after switching chats, a closed page, a frozen browser, and system sleep are outside the guarantees of the first version.
 
-源码基线：`1a73f5bff6201473f237c5106367e944ba2d092b`。设计依据为该基线；后续实现及验证记录见文末。
+## Current code basis
 
-| 当前实现                                                             | 可复用部分与限制                                                                                              |
-| -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `packages/acp-bridge/src/bridge.ts`                                  | 发布权威 turn_complete / turn_error，包含 session、prompt 标识。兼容类型允许缺少 promptId，通知不能猜测标识。 |
-| `packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx` | 已有 live 事件、历史恢复、重连及终态前 transcript flush；是通知观察接入点。                                   |
-| `packages/web-shell/client/daemon/session/actions.ts`                | 普通及队列提交已有 onPromptAdmitted，确认移除已有 onPromptRemoved，可复用作恢复时的跟踪证据。                 |
-| `packages/web-shell/client/main.tsx`                                 | StandaloneApp 已管理浏览器本地 theme/language；根节点覆盖主聊天和 Split View。                                |
-| `packages/web-shell/client/components/messages/SettingsMessage.tsx`  | 已有本地 chatWidth 项及共享 Switch、SettingsRow。                                                             |
-| `packages/cli/src/serve/routes/workspace-settings.ts`                | general.terminalBell、general.notificationMode 被归为 TUI-only，不能复用为浏览器开关。                        |
-| `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts`          | 有 lastEventId/epoch 恢复能力；SSE 结束也会拒绝 pending promise，不能据任意 reject 发任务失败通知。           |
+Source baseline: `1a73f5bff6201473f237c5106367e944ba2d092b`. The design is based on that revision; subsequent implementation and validation records appear at the end.
 
-App 的旧 onSessionChange(turn_complete) 和侧边栏 completedUnread 来自 UI/摘要变化，不作为新通知输入。旧原型位于独立的 `codex/browser-turn-notifications` 分支；只参考其权限、文案及设置逻辑，不整体引入已关闭 #10398 的历史。#11251 的宿主回调、最终 assistant 消息提取不属于本功能范围。
+| Current implementation                                               | Reusable parts and limitations                                                                                                                                                            |
+| -------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/acp-bridge/src/bridge.ts`                                  | Publishes authoritative turn_complete / turn_error events with session and prompt identifiers. Compatibility types allow promptId to be absent; notifications must not guess identifiers. |
+| `packages/web-shell/client/daemon/session/DaemonSessionProvider.tsx` | Already has live observation, history recovery, reconnection, and transcript flush before terminal events. This is the notification observation integration point.                        |
+| `packages/web-shell/client/daemon/session/actions.ts`                | Ordinary and queued submissions already have onPromptAdmitted, and confirmed removal has onPromptRemoved. These can be reused for recovery tracking.                                      |
+| `packages/web-shell/client/main.tsx`                                 | StandaloneApp already manages browser-local theme/language; its root covers the main chat and Split View.                                                                                 |
+| `packages/web-shell/client/components/messages/SettingsMessage.tsx`  | Already has a local chatWidth setting and shared Switch and SettingsRow components.                                                                                                       |
+| `packages/cli/src/serve/routes/workspace-settings.ts`                | general.terminalBell and general.notificationMode are classified as TUI-only and cannot be reused for the browser toggle.                                                                 |
+| `packages/sdk-typescript/src/daemon/DaemonSessionClient.ts`          | Supports lastEventId/epoch recovery. SSE termination also rejects pending promises, so an arbitrary rejection must not trigger a task-failure notification.                               |
 
-## 用户开关
+The App's old onSessionChange(turn_complete) callback and the sidebar's completedUnread state come from UI/summary changes and are not inputs to the new notifications. The old prototype lives on the separate `codex/browser-turn-notifications` branch; use only its permission, copy, and settings logic as reference, without importing the full history of closed #10398. The host callback and final assistant-message extraction in #11251 are outside this feature's scope.
 
-入口：**Settings → UI → 浏览器任务通知**。默认关闭，立即生效，无需刷新或重启 daemon。
+## User toggle
+
+Entry point: **Settings → UI → Browser task notifications**. Disabled by default; changes take effect immediately without refreshing the page or restarting the daemon.
 
 ```text
-浏览器任务通知                                  [关闭 / 开启]
-页面在后台或窗口失焦时，提醒当前聊天和分屏聊天的回合结束或失败。
-仅保存在此浏览器站点；关闭网页后不再提醒。
+Browser task notifications                      [Off / On]
+Notify when a turn in the current chat or split-view chats ends or fails while the page is in the background or the window is unfocused.
+Saved only for this browser site; notifications stop when the page is closed.
 
-状态：未开启 / 已开启 / 等待授权 / 浏览器已阻止 / 当前环境不可用
+Status: Off / On / Awaiting permission / Blocked by browser / Unavailable in this environment
 ```
 
-复用已有 Switch 与 SettingsRow；增加 local 类型设置项，明确标注“此浏览器站点”。Settings 的 workspace/user scope 切换不改变该值，也不向 daemon settings API 写入。
+Reuse the existing Switch and SettingsRow. Add a local setting explicitly labeled “this browser site.” Switching the Settings workspace/user scope does not change the value, and no write is sent to the daemon settings API.
 
-| 配置项           | 决定                                                                           |
-| ---------------- | ------------------------------------------------------------------------------ |
-| 内部名称         | browserNotificationsEnabled: boolean                                           |
-| localStorage key | qwen-code-web-shell-browser-notifications                                      |
-| 持久化值         | 字符串 true/false；不存在或非法时为 false                                      |
-| 范围             | 当前 browser profile + origin；不随 workspace 变化，不同步到其他设备           |
-| 默认与启停       | 默认 false，即使权限已授予也不自动开启；关闭停止新通知，开启不补发已处理的回合 |
-| 标签页同步       | 监听 storage 事件；写入页面直接更新本地状态                                    |
-| 存储失败         | 本页面内继续可用，提示“设置仅在当前页面有效”                                   |
+| Setting              | Decision                                                                                                                                          |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Internal name        | browserNotificationsEnabled: boolean                                                                                                              |
+| localStorage key     | qwen-code-web-shell-browser-notifications                                                                                                         |
+| Persisted value      | The string true/false; absent or invalid values mean false.                                                                                       |
+| Scope                | Current browser profile + origin; independent of the workspace and not synchronized to other devices.                                             |
+| Default and toggling | Defaults to false, even if permission is already granted. Disabling stops new notifications; enabling does not replay previously processed turns. |
+| Tab synchronization  | Listen for storage events; the writing page updates its local state directly.                                                                     |
+| Storage failure      | Remains usable within this page and displays “This setting applies only to the current page.”                                                     |
 
-不写入 `.qwen/settings.json`：浏览器权限是设备/站点状态，daemon 配置不能代替用户授权；同一个 workspace 可以同时被权限不同的浏览器打开。
+Do not write to `.qwen/settings.json`: browser permission is a device/site state, and daemon configuration cannot replace user authorization. The same workspace can be open in browsers with different permissions at the same time.
 
-### 权限与设置状态
+### Permission and settings state
 
-开关表示用户偏好，状态文字表示当前是否可用。发送需同时满足偏好开启、权限 granted、环境支持及后台条件。
+The toggle represents user preference; the status text represents current availability. Sending requires the preference to be enabled, permission to be granted, environment support, and the background condition to hold.
 
-| 操作或状态                           | 行为                                                                                                            |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
-| 关闭→开启，permission=granted        | 保存 true，立即生效。                                                                                           |
-| 关闭→开启，permission=default        | 在点击的同步调用链中 requestPermission；等待期间禁用重复提交，允许后才保存 true。拒绝或关闭对话框则保持 false。 |
-| 关闭→开启，permission=denied         | 保持 false，提示去浏览器站点设置允许通知，不重复请求。                                                          |
-| 开启→关闭                            | 保存 false，不撤销浏览器权限，不补发。                                                                          |
-| 已保存 true，权限后来被撤回          | 保留偏好，显示“浏览器已阻止，当前不会通知”；可关闭开关。发送前重新检查权限。                                    |
-| 已保存 true，permission 回到 default | 显示“等待授权”和“允许通知”操作；页面加载不自动申请。                                                            |
-| 非安全上下文、API 缺失               | 显示不可用原因并禁止开启，不自动改写持久偏好。                                                                  |
+| Action or state                           | Behavior                                                                                                                                                                                 |
+| ----------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Off → on, permission=granted              | Save true and take effect immediately.                                                                                                                                                   |
+| Off → on, permission=default              | Call requestPermission in the synchronous click call chain. Disable duplicate submissions while waiting and save true only after permission is granted. Denial or dismissal keeps false. |
+| Off → on, permission=denied               | Keep false and direct the user to allow notifications in the browser's site settings, without requesting again.                                                                          |
+| On → off                                  | Save false; do not revoke browser permission or replay notifications.                                                                                                                    |
+| Saved true, permission later revoked      | Preserve the preference and show “Blocked by browser; notifications are currently unavailable.” The toggle can be turned off. Recheck permission before sending.                         |
+| Saved true, permission returns to default | Show “Awaiting permission” and an “Allow notifications” action. Do not request automatically on page load.                                                                               |
+| Insecure context or missing API           | Show the reason for unavailability and prevent enabling, without automatically rewriting the persisted preference.                                                                       |
 
-设置页打开、窗口重新聚焦和实际发送前重新读取权限，不依赖持续权限订阅。迟到的授权结果不得覆盖其他标签页在等待期间作出的关闭操作，使用请求代次和最新偏好检查丢弃失效结果。
+Reread permission when the settings page opens, when the window regains focus, and before actually sending, without relying on a continuous permission subscription. A late permission result must not override a disable action from another tab while the request was pending. Discard stale results using a request generation and the latest preference check.
 
-首版面向桌面浏览器；Notification 对象存在不代表手机支持构造器。构造失败或 error 事件更新本地可用状态，不能影响聊天或重复弹错误。用户手势、安全上下文和跨源 iframe 限制参见 [MDN Notifications API](https://developer.mozilla.org/en-US/docs/Web/API/Notifications_API/Using_the_Notifications_API)。
+The first version targets desktop browsers. The presence of a Notification object does not mean its constructor is supported on mobile. Constructor failures or error events update local availability without affecting chat or repeatedly showing errors. For user gestures, secure contexts, and cross-origin iframe restrictions, see [MDN Notifications API](https://developer.mozilla.org/en-US/docs/Web/API/Notifications_API/Using_the_Notifications_API).
 
-## 触发与文案
+## Triggers and copy
 
-| 输入                                   | 行为                                                              |
-| -------------------------------------- | ----------------------------------------------------------------- |
-| turn_complete，stopReason=end_turn     | 通知“本轮已完成”。                                                |
-| turn_error                             | 通知“本轮执行失败，请返回查看”，不显示错误正文。                  |
-| turn_complete，stopReason=cancelled    | 不通知，静默消费终态。                                            |
-| 其他合法 turn_complete stopReason      | “本轮已结束，请返回查看”，不把 token 上限等停止原因说成任务成功。 |
-| prompt_cancelled                       | 只是取消请求，不抢先消费最终终态。                                |
-| 排队 prompt 确认 removed               | 清理对应跟踪记录并静默处理，不改变其他回合。                      |
-| SSE 断开、重试、HTTP/权限错误、UI idle | 不作为任务失败证据。                                              |
-| 缺失或冲突的 sessionId/promptId        | 不通知，不用当前会话替代事件来源。                                |
+| Input                                                        | Behavior                                                                                                           |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ |
+| turn_complete, stopReason=end_turn                           | Notify “This turn is complete.”                                                                                    |
+| turn_error                                                   | Notify “This turn failed. Return to view details,” without displaying the error body.                              |
+| turn_complete, stopReason=cancelled                          | Do not notify; silently consume the terminal event.                                                                |
+| Other valid turn_complete stopReason                         | “This turn has ended. Return to view details.” Do not describe token limits or other stop reasons as task success. |
+| prompt_cancelled                                             | This is only a cancellation request; do not consume the final terminal state prematurely.                          |
+| Queued prompt confirmed removed                              | Clear its tracking record and handle it silently, without changing other turns.                                    |
+| SSE disconnects, retries, HTTP/permission errors, or UI idle | Not evidence of task failure.                                                                                      |
+| Missing or conflicting sessionId/promptId                    | Do not notify or substitute the current session for the event source.                                              |
 
-展示条件为 `document.visibilityState !== 'visible' || !document.hasFocus()`。前台聚焦时消费终态但不展示，后来失焦不补弹。首版不增加时长阈值、声音选择或自定义正文。
+The display condition is `document.visibilityState !== 'visible' || !document.hasFocus()`. Consume terminal events without displaying notifications while the page is in the foreground and focused; losing focus later does not replay them. The first version adds no duration threshold, sound selection, or custom body.
 
-标题固定 Qwen Code，正文仅上述通用文案，不含 prompt、答复、错误、会话标题、路径或 workspace 名。点击尝试 window.focus() 并关闭通知，不自动切换会话；操作系统可能拒绝聚焦，不能保证成功。展示失败不改变回合结果。
+The title is fixed to Qwen Code. The body uses only the generic copy above, with no prompt, response, error, session title, path, or workspace name. Clicking attempts window.focus() and closes the notification, without automatically switching sessions. The operating system may refuse to focus the window, so success cannot be guaranteed. A display failure does not change the turn result.
 
-## 内部架构
+## Internal architecture
 
 ```mermaid
 flowchart TD
-    A[现有 daemon SSE 与恢复快照] --> B[DaemonSessionProvider]
-    P[已有 admission / removal 回调] --> B
-    B --> C[内部通知观察接口]
-    C --> D[Standalone 根部通知协调器]
-    S[本地开关与浏览器权限] --> D
-    D --> E[去重与后台判断]
+    A[Existing daemon SSE and recovery snapshots] --> B[DaemonSessionProvider]
+    P[Existing admission / removal callbacks] --> B
+    B --> C[Internal notification observer interface]
+    C --> D[Notification coordinator at the standalone root]
+    S[Local toggle and browser permission] --> D
+    D --> E[Deduplication and background check]
     E --> N[Notification API]
 ```
 
-在 `client/daemon/session/` 增加包内通知观察 Context，默认 undefined，仅传纯数据，不访问 Notification 或 localStorage。实现由 standalone 根协调器提供，主聊天和 Split View 共用。非 standalone 宿主无此祖先时不跟踪、不显示设置、不申请权限；standalone 页面被 iframe 加载时也不挂载通知协调器。
+Add a package-internal notification observation Context under `client/daemon/session/`, defaulting to undefined. It carries only plain data and does not access Notification or localStorage. The standalone root coordinator provides the implementation, shared by the main chat and Split View. Non-standalone hosts without this ancestor do not track notifications, display the setting, or request permission. A standalone page loaded in an iframe also does not mount the notification coordinator.
 
-接口最小数据：来源范围、sessionId、promptId、事件类别、stopReason、live/restore 来源，以及 admission/removal 信号。不传正文，不导出公共 SDK API，不修改既有宿主回调。下层 session 只依赖内部类型，上层浏览器模块消费它，避免循环依赖。
+The minimum interface data consists of the source scope, sessionId, promptId, event kind, stopReason, live/restore origin, and admission/removal signals. It carries no body, exports no public SDK API, and does not change existing host callbacks. The lower session layer depends only on internal types, consumed by the upper browser module, avoiding circular dependencies.
 
-来源范围由规范化 daemon base URL、产品 session context 和已解析 workspace 身份组成，取自捕获的 session owner。异步发送不能再读取已经切换的全局 connection。token、URL 查询参数和 fragment 不得进入通知标识或共享记录。
+The source scope consists of the normalized daemon base URL, product session context, and resolved workspace identity, taken from the captured session owner. Asynchronous sending must not reread a global connection that has already switched. Tokens, URL query parameters, and fragments must not enter notification identifiers or shared records.
 
-### 终态与恢复顺序
+### Terminal events and recovery ordering
 
-1. 在现有 live 终态完成 normalize、flush 和 assistant.done 投影后发布通知数据；先校验 owner，避免在 active/observer 两个分支重复发布。
-2. 复用 onPromptAdmitted，只读 owner/promptId，保留已有 turn navigation 行为。普通及队列提交都登记；确认 removal 后移除。带明确 promptId 的 live 启动证据也可登记，历史用户消息不能建立新 admission。
-3. live 流（包括 cursor 增量恢复）的真实终态可以直接进入统一去重。终态先于本地 admission 回调抵达时先处理，晚到 admission 不能重新登记为未结束。
-4. 初始历史、历史分页和跳转加载保持静默。恢复快照的终态只有匹配本页面此前跟踪的未结束 prompt 才可补发，且在快照提交后发布。
-5. 同会话重连、epoch 重置和 ring eviction 重载保留待跟踪身份；不能只存在可能被清理的 activePromptsRef 中。根协调器保存最小集合。
-6. 页面刷新不持久化待跟踪列表；新页面不补发刷新前已完成历史，之后 live 到达的新终态仍可通知。恢复数据不含目标终态时，不依据 hasActivePrompt=false 推测成功。
-7. 明确切换会话或关闭 pane 后，不另保留连接；最后一个对应观察者退出时清理其跟踪。连接重试及 React StrictMode 的同身份重建不算用户离开，不能误清理。
+1. Publish notification data after existing live terminal processing completes normalization, flush, and assistant.done projection. Validate the owner first and avoid duplicate publication from the active/observer branches.
+2. Reuse onPromptAdmitted, reading only owner/promptId and preserving existing turn navigation behavior. Register both ordinary and queued submissions; remove the record after confirmed removal. Live start evidence with an explicit promptId can also register a turn, but historical user messages cannot establish a new admission.
+3. Real terminal events from the live stream, including incremental cursor recovery, can enter unified deduplication directly. Process terminal events even if they arrive before the local admission callback; a late admission must not register the turn as unfinished again.
+4. Initial history, history pagination, and jump loads remain silent. A recovery snapshot's terminal event may notify only when it matches an unfinished prompt previously tracked by this page, and it is published after the snapshot is committed.
+5. Preserve tracked identities across same-session reconnection, epoch resets, and ring eviction reloads. They must not exist only in activePromptsRef, which may be cleared. The root coordinator retains a minimal set.
+6. Do not persist the tracking list across page refreshes. A new page does not replay history completed before the refresh, but new terminal events arriving live afterward can still notify. If recovery data lacks the target terminal event, do not infer success from hasActivePrompt=false.
+7. Do not retain a separate connection after an explicit session switch or pane closure. Clear the tracking when the last corresponding observer leaves. Connection retries and same-identity reconstruction in React StrictMode do not count as the user leaving and must not incorrectly clear tracking.
 
-当前观察范围的终态在开关关闭/前台时仍被消费，以防重复事件在后来开启时补弹。上述集合属于通知模块，不能反向改变 transcript、输入或 daemon 生命周期。
+Terminal events within the current observation scope are still consumed when the toggle is off or the page is in the foreground, preventing duplicate events from displaying later when notifications are enabled. These sets belong to the notification module and must not alter the transcript, input, or daemon lifecycle.
 
-## 去重保证
+## Deduplication guarantees
 
-键包含来源范围 + sessionId + promptId。通知 tag 和共享记录使用稳定指纹，源数据只留在内存，不存正文/token。已处理记录采用有界近期缓存，候选上限 1024 条，不增加用户配置；历史终态始终先经过跟踪门槛，因此缓存淘汰不应重放历史通知。
+The key includes source scope + sessionId + promptId. Notification tags and shared records use stable fingerprints; source data stays in memory, and neither bodies nor tokens are stored. Processed records use a bounded recent cache, with a proposed limit of 1024 entries and no new user configuration. Historical terminal events always pass through the tracking gate first, so cache eviction should not replay historical notifications.
 
-- 同页面先认领终态，再判断取消、开关、权限及前后台。主聊天和分屏重复事件只触发一次通知尝试；取消/前台/关闭也算已处理。
-- 同源多标签页在 Web Locks 与共享存储可用时，用短锁保护已认领指纹的检查及写入，锁内重新检查开关和权限。只有满足本地展示条件的页面参与跨页发送认领；未开启的页面不能吞掉有效页面的资格。
-- 同一键使用稳定 tag，支持时 renotify=false。无锁或无共享存储时退回同页面去重及同 tag 替换，不保证跨标签页严格只提醒一次。
-- 跨页记录表示已认领一次尝试，不表示用户收到或看到。写入后崩溃或系统通知失败可能漏提醒；首版不增加持久投递队列与重试，不宣称 exactly-once delivery。
-- 可见性以发送页面为准：一个标签页前台、另一个后台时，后者仍可能提醒。首版不增加跨页阅读状态协调。
+- Within a page, claim the terminal event first, then check cancellation, the toggle, permission, and foreground/background state. Duplicate events from the main chat and split panes trigger only one notification attempt. Cancellation, foreground presence, and a disabled toggle also count as processed.
+- Across same-origin tabs, when Web Locks and shared storage are available, protect the check and write of claimed fingerprints with a short lock, rechecking the toggle and permission inside it. Only pages meeting their local display conditions participate in cross-tab send claims; a page where notifications are disabled must not consume an eligible page's opportunity.
+- Use a stable tag for the same key, with renotify=false where supported. Without locks or shared storage, fall back to same-page deduplication and replacement using the same tag, without guaranteeing strictly one alert across tabs.
+- A cross-tab record means that an attempt has been claimed, not that the user received or saw it. A crash after writing or an operating-system notification failure may cause a missed alert. The first version adds no persistent delivery queue or retries and makes no exactly-once delivery claim.
+- Visibility is determined by the sending page. If one tab is in the foreground and another is in the background, the latter may still notify. The first version adds no cross-tab read-state coordination.
 
-Web Locks 提供同源互斥，tag 是通知替换而非事务幂等。参见 [MDN Web Locks](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API) 和 [MDN renotify](https://developer.mozilla.org/en-US/docs/Web/API/Notification/renotify)。
+Web Locks provide same-origin mutual exclusion; a tag replaces notifications rather than providing transactional idempotency. See [MDN Web Locks](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API) and [MDN renotify](https://developer.mozilla.org/en-US/docs/Web/API/Notification/renotify).
 
-## 实际改动
+## Actual changes
 
-实现涉及以下位置及对应测试。
+The implementation involves the following locations and their corresponding tests.
 
-| 位置（packages/web-shell）                         | 责任                                                                        |
-| -------------------------------------------------- | --------------------------------------------------------------------------- |
-| client/daemon/session/turn-notification-context.ts | 包内观察接口及类型，不导出公共 barrel。                                     |
-| client/daemon/session/DaemonSessionProvider.tsx    | admission/removal、live 终态及恢复快照提交点。                              |
-| client/browser-turn-notifications.tsx              | 根协调器、本地设置 context、权限/展示及有限去重状态；避免提前建设通用框架。 |
-| client/main.tsx                                    | 仅顶层 standalone 挂载协调器，传入当前语言。                                |
-| client/components/messages/SettingsMessage.tsx     | UI 本地开关、权限状态及授权操作。                                           |
-| client/i18n.tsx、README、对应测试                  | 文案、产品边界和回归验证。                                                  |
+| Location (packages/web-shell)                      | Responsibility                                                                                                                                          |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| client/daemon/session/turn-notification-context.ts | Package-internal observer interface and types, not exported through the public barrel.                                                                  |
+| client/daemon/session/DaemonSessionProvider.tsx    | Admission/removal, live terminal events, and recovery snapshot commit points.                                                                           |
+| client/browser-turn-notifications.tsx              | Root coordinator, local settings context, permission/display handling, and bounded deduplication state; avoid building a general framework prematurely. |
+| client/main.tsx                                    | Mount the coordinator only in top-level standalone mode and pass the current language.                                                                  |
+| client/components/messages/SettingsMessage.tsx     | Local UI toggle, permission state, and authorization action.                                                                                            |
+| client/i18n.tsx, README, corresponding tests       | Copy, product boundaries, and regression verification.                                                                                                  |
 
-不新增 SSE 连接或额外 transcript provider，不改 daemon route、settings schema、CLI 通知服务、Channel worker 或 SDK 公共合同。#11251 若后来合并，可评估复用入口，但不是交付条件。
+Do not add SSE connections or extra transcript providers, or change daemon routes, the settings schema, the CLI notification service, Channel workers, or public SDK contracts. If #11251 merges later, reusing its entry point can be evaluated, but that is not a delivery prerequisite.
 
-## 验证与交付
+## Validation and delivery
 
-实施前按仓库要求使用全局 qwen 做基线 dry-run；设计阶段不运行。实施后运行 build、typecheck、相关单测与桌面浏览器 E2E。模拟 Notification 的单测不能代替 OS 通知接收证据。
+Before implementation, perform a baseline dry-run with the global qwen CLI as required by the repository; do not run it during the design phase. After implementation, run build, typecheck, relevant unit tests, and desktop-browser E2E tests. Unit tests that mock Notification cannot replace evidence of operating-system notification receipt.
 
-| 测试组     | 验收重点                                                                                        |
-| ---------- | ----------------------------------------------------------------------------------------------- |
-| 开关       | 默认关闭、granted 不自动启用、workspace/user scope 不影响、刷新持久化、storage 同步及失败降级。 |
-| 权限       | 点击才请求、三个权限状态、撤回、迟到授权、iframe/API/安全上下文、构造及 error 事件失败。        |
-| 终态       | 完成/失败/取消/其他 stopReason、冲突 ID、取消请求不抢占终态、断网不是任务失败。                 |
-| 身份与排序 | 投影先于通知、终态先于 admission、主聊天/分屏重复、workspace 切换和旧 owner 隔离。              |
-| 恢复       | 历史静默、跟踪回合的增量/快照补发、epoch/ring 重载、StrictMode、刷新不补旧历史。                |
-| 去重       | 前台/关闭消费后不补弹、缓存边界、多页锁竞争、无锁/存储降级、失败不改变聊天。                    |
-| 手工       | Chrome/Safari 桌面后台完成和失败、OS 权限、点击聚焦；其他浏览器未测需明确标注，手机不宣称支持。 |
+| Test group            | Acceptance focus                                                                                                                                                                       |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Toggle                | Disabled by default; granted permission does not automatically enable it; unaffected by workspace/user scope; persistence after refresh; storage synchronization and failure fallback. |
+| Permission            | Request only on click; all three permission states; revocation; late authorization; iframe/API/secure-context conditions; constructor and error-event failures.                        |
+| Terminal events       | Completion, failure, cancellation, other stopReason values, conflicting IDs, cancellation requests not preempting terminal events, and network loss not counting as task failure.      |
+| Identity and ordering | Projection precedes notification; terminal events before admission; duplicates from main chat/split panes; workspace switching and old-owner isolation.                                |
+| Recovery              | Silent history; incremental/snapshot notifications for tracked turns; epoch/ring reloads; StrictMode; no old-history notifications after refresh.                                      |
+| Deduplication         | No replay after consumption in the foreground or while disabled; cache boundaries; cross-tab lock contention; fallback without locks/storage; failures do not change chat.             |
+| Manual                | Completion and failure in the background on desktop Chrome/Safari; OS permission; click to focus. Explicitly identify other browsers not tested and do not claim mobile support.       |
 
-E2E 清单见 `.qwen/e2e-tests/web-shell-browser-turn-notifications-independent.md`。实现完成后审阅完整 diff，按仓库要求完成两轮干净自审和独立代码复核；提交 PR 另按用户指示执行。
+The E2E checklist is at `.qwen/e2e-tests/web-shell-browser-turn-notifications-independent.md`. After implementation, review the full diff and complete two clean self-audit passes and an independent code review as required by the repository. Submit the PR separately according to user instructions.
 
-## 后续能力
+## Follow-up capabilities
 
-切换聊天后仍提醒旧聊天，可另加针对未结束 prompt 的轻量观察或评估 workspace 终态流，不能靠 running-to-idle 猜测，也不为全部历史会话建立连接。
+To keep notifying for an old chat after switching chats, add lightweight observation for unfinished prompts or evaluate a workspace terminal-event stream. Do not infer completion from running-to-idle transitions or establish connections for every historical session.
 
-关闭网页后提醒优先由服务端 Channel 承担。已有 prompt delivery 投递正常 end_turn 的最终答复，不等同于状态通知或失败提醒；简短完成/失败提醒需另接服务端终态，并沿用明确授权目标和所属 workspace，不由浏览器收到事件后代发。
+Notifications after the page closes should preferably be handled by server-side Channels. Existing prompt delivery sends the final response for a normal end_turn; it is not equivalent to a status or failure notification. Brief completion/failure alerts need separate integration with server-side terminal events and must reuse an explicitly authorized target and its owning workspace, rather than having the browser relay messages after receiving events.
 
-网页关闭后的浏览器推送需要另外的 Push 投递链路，单独注册 Service Worker 不够，首版不包含。参见 [MDN Push API](https://developer.mozilla.org/en-US/docs/Web/API/Push_API)。
+Browser push after the page closes requires a separate Push delivery path. Registering a Service Worker alone is insufficient and is outside the first version. See [MDN Push API](https://developer.mozilla.org/en-US/docs/Web/API/Push_API).
 
-## 实现与验证记录
+## Implementation and validation records
 
-实现仅修改 Web Shell：根组件提供页面级通知状态和本地设置，DaemonSessionProvider 在 live / recovery 已完成 transcript 投影后观察权威终态，既有提交回调用于恢复跟踪。没有新增 daemon 路由、SSE 连接或公开 SDK 回调。页面验证同时发现并修正共享 Switch 的状态选择器：匹配 Radix 的 data-state 属性，以正确显示开关颜色和滑块位置。
+The implementation changed only Web Shell. The root component provides page-level notification state and local settings. DaemonSessionProvider observes authoritative terminal events after live/recovery transcript projection is complete, and existing submission callbacks support recovery tracking. No daemon route, SSE connection, or public SDK callback was added. Page validation also identified and fixed the shared Switch state selector: it matches Radix's data-state attribute to display the toggle color and thumb position correctly.
 
-单元测试覆盖终态分类、权限与偏好、重复消费、历史静默、存储受限、通知失败隔离，以及实际 Provider 的终态投影顺序和 epoch reset 恢复。页面级验证使用真实 Web Shell、mockDaemon SSE、Chromium 和 Notification stub，覆盖设置入口、无 daemon 设置写入、前后台差异、双页开关同步与真实 Web Locks 竞争。操作系统最终展示、移动端及关闭页面后的推送不属于本次验证。详细命令和结果位于本地 `.qwen/e2e-tests/web-shell-browser-turn-notifications-independent.md`。
+Unit tests cover terminal-event classification, permissions and preferences, duplicate consumption, silent history, restricted storage, notification-failure isolation, and the actual Provider's terminal projection ordering and epoch reset recovery. Page-level validation used the real Web Shell, mockDaemon SSE, Chromium, and a Notification stub, covering the settings entry point, absence of daemon settings writes, foreground/background differences, cross-tab toggle synchronization, and real Web Locks contention. Final operating-system display, mobile devices, and push after page closure were outside this validation. Detailed commands and results are in the local `.qwen/e2e-tests/web-shell-browser-turn-notifications-independent.md`.
 
-最终源码通过全仓 `npm run build`、`npm run typecheck`、`npm run bundle`，6 个相关测试文件合计 365 项通过；修改文件 ESLint、Prettier 和 diff 检查通过。独立复核发现并修复迟到授权覆盖其他标签页关闭操作的竞态，修复后的复核无新增问题。
+The final source passed repository-wide `npm run build`, `npm run typecheck`, and `npm run bundle`, with 365 passing tests across 6 relevant test files. Changed-file ESLint, Prettier, and diff checks passed. Independent review found and fixed the race where a late permission grant could override a disable action from another tab; the review after the fix found no new issues.

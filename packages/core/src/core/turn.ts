@@ -37,13 +37,13 @@ import {
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
 import type { LoopType } from '../telemetry/types.js';
-import type { ActiveGoal } from '../goals/goal-legacy-projection.js';
 import type {
   GoalSnapshotV2,
   GoalStateCause,
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
 import { getProviderToolCallId } from './toolCallIdUtils.js';
+import { toolCallArgumentsWereIncomplete } from './incomplete-tool-call-args.js';
 
 const ERROR_REPORT_HISTORY_TAIL_COUNT = 8;
 const ERROR_REPORT_TEXT_PREVIEW_CHARS = 200;
@@ -79,7 +79,6 @@ export enum LlmEventType {
   UserPromptSubmitBlocked = 'user_prompt_submit_blocked',
   StopHookLoop = 'stop_hook_loop',
   GoalState = 'goal_state',
-  ActiveGoal = 'active_goal',
   /** The system switched to a fallback model after the primary (or prior
    *  fallback) exhausted retries on a capacity/availability error. */
   ModelFallback = 'model_fallback',
@@ -128,6 +127,48 @@ export interface LlmFinishedEventValue {
   usageMetadata: GenerateContentResponseUsageMetadata | undefined;
 }
 
+/**
+ * Provenance of a tool-call request. Set exclusively by in-process callers
+ * when they construct the {@link ToolCallRequestInfo} — it is NEVER parsed
+ * from tool parameters, wire protocols, or model output, and it is NEVER
+ * inferred from `isClientInitiated`. A missing origin fails closed as
+ * `{ kind: 'model' }` (the least-privileged origin).
+ *
+ * `fixed_policy` marks calls issued by the omni fixed-policy orchestrator:
+ * they bypass the interactive permission flow (no confirmation dialog, no
+ * plan/auto classification) but still honor PreToolUse hooks and the
+ * PermissionManager tool-enablement check.
+ */
+export type ToolExecutionOrigin =
+  | { kind: 'model' }
+  | { kind: 'client' }
+  | {
+      kind: 'fixed_policy';
+      /** ID of the fixed policy that issued this call. */
+      policyId: string;
+      /** Pipeline stage the policy ran in. */
+      stage: 'preprocessing' | 'transport_guard';
+    };
+
+/**
+ * Raw, successful media-policy tool artifacts captured by the scheduler
+ * BEFORE PostToolUse hook artifacts are merged in — hook-produced artifacts
+ * must never impersonate policy outputs. Carried on
+ * {@link ToolCallResponseInfo.policyArtifacts} for the fixed-policy
+ * orchestrator (and the model-call artifact bridge) to consume.
+ */
+export interface PolicyArtifactBatch {
+  /** Canonical tool name that produced the artifacts. */
+  toolName: string;
+  /** The call id of the invocation (the orchestrator uses its staging
+   * invocation id as the call id, so this keys the staging directory). */
+  invocationId: string;
+  /** Origin the call executed under (missing origins fail closed to model
+   * before this batch is built, so this is always concrete). */
+  executionOrigin: ToolExecutionOrigin;
+  /** The tool's own `ToolResult.artifacts`, unmerged and in order. */
+  artifacts: ToolArtifact[];
+}
 /** @deprecated Use `LlmErrorEventValue`; retained until a future major release. */
 export type GeminiErrorEventValue = LlmErrorEventValue;
 
@@ -148,7 +189,20 @@ export interface ToolCallRequestInfo {
   response_id?: string;
   /** Set to true when the LLM response was truncated due to max_tokens. */
   wasOutputTruncated?: boolean;
+  /**
+   * Set to true when this call's arguments arrived unterminated and were
+   * repaired into shape, but the output token limit was *not* what cut them.
+   * The data-loss guard needs this fact; the user-visible wording needs the
+   * distinction. See `incomplete-tool-call-args.ts`.
+   */
+  hadIncompleteArguments?: boolean;
   goalContext?: GoalTurnPermit;
+  /**
+   * Provenance of this request. Only set by in-process callers; absent on
+   * every request materialized from model output or a wire protocol.
+   * Consumers treat a missing value as `{ kind: 'model' }` (fail closed).
+   */
+  executionOrigin?: ToolExecutionOrigin;
   /** Parent model tool call for a programmatically dispatched child call. */
   parentCallId?: string;
   source?: 'model' | 'code_mode';
@@ -173,8 +227,21 @@ export interface ToolCallResponseInfo {
   persistedOutputFiles?: string[];
   modelOverride?: string;
   terminateTurn?: boolean;
+  /**
+   * Set only when the call was denied because it needed user approval and the
+   * session had no way to ask for it (non-interactive mode). Headless front
+   * ends use it to suggest an approval mode; every other denial, such as a
+   * hook block or a deny rule, reports its own reason instead.
+   */
+  approvalRequired?: true;
   visionBridgeNotice?: string;
   artifacts?: ToolArtifact[];
+  /**
+   * Raw successful artifacts of a media-policy tool, captured before
+   * PostToolUse hook artifact merging. Absent for non-media-policy tools,
+   * failed calls, and calls that produced no artifacts.
+   */
+  policyArtifacts?: PolicyArtifactBatch;
   boundaryArtifact?: ToolResultBoundaryArtifact;
 }
 
@@ -516,11 +583,6 @@ export type ServerLlmStopHookLoopEvent = {
   };
 };
 
-export type ServerLlmActiveGoalEvent = {
-  type: LlmEventType.ActiveGoal;
-  value: ActiveGoal | null;
-};
-
 export type ServerLlmGoalStateEvent = {
   type: LlmEventType.GoalState;
   value: GoalSnapshotV2;
@@ -530,7 +592,6 @@ export type ServerLlmGoalStateEvent = {
 // The original union type, now composed of the individual types
 export type ServerLlmStreamEvent =
   | ServerLlmGoalStateEvent
-  | ServerLlmActiveGoalEvent
   | ServerLlmChatCompressedEvent
   | ServerLlmCitationEvent
   | ServerLlmContentEvent
@@ -593,8 +654,6 @@ export type ServerGeminiUserPromptSubmitBlockedEvent =
   ServerLlmUserPromptSubmitBlockedEvent;
 /** @deprecated Use `ServerLlmStopHookLoopEvent`; retained until a future major release. */
 export type ServerGeminiStopHookLoopEvent = ServerLlmStopHookLoopEvent;
-/** @deprecated Use `ServerLlmActiveGoalEvent`; retained until a future major release. */
-export type ServerGeminiActiveGoalEvent = ServerLlmActiveGoalEvent;
 /** @deprecated Use `ServerLlmGoalStateEvent`; retained until a future major release. */
 export type ServerGeminiGoalStateEvent = ServerLlmGoalStateEvent;
 /** @deprecated Use `ServerLlmStreamEvent`; retained until a future major release. */
@@ -646,6 +705,8 @@ export class Turn {
     private readonly chat: LlmChat,
     private readonly prompt_id: string,
     goalContext?: GoalTurnPermit,
+    private readonly promptIdentity?: string,
+    private readonly retractDeliveredOutputOnRetry?: boolean,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -658,6 +719,18 @@ export class Turn {
     try {
       // Note: This assumes `sendMessageStream` yields events like
       // { type: StreamEventType.RETRY } or { type: StreamEventType.CHUNK, value: GenerateContentResponse }
+      // Keep the no-options call shape: callers without either flag pass
+      // `undefined`, as before either option existed.
+      const sendOptions =
+        this.promptIdentity !== undefined ||
+        this.retractDeliveredOutputOnRetry === true
+          ? {
+              ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
+              ...(this.retractDeliveredOutputOnRetry
+                ? { retractDeliveredOutputOnRetry: true }
+                : {}),
+            }
+          : undefined;
       const responseStream = await this.chat.sendMessageStream(
         model,
         {
@@ -668,6 +741,7 @@ export class Turn {
         },
         this.prompt_id,
         this.goalContext,
+        sendOptions,
       );
 
       for await (const streamEvent of responseStream) {
@@ -857,6 +931,9 @@ export class Turn {
       isClientInitiated: false,
       prompt_id: this.prompt_id,
       response_id: this.currentResponseId,
+      ...(toolCallArgumentsWereIncomplete(fnCall)
+        ? { hadIncompleteArguments: true }
+        : {}),
       ...(this.goalContext ? { goalContext: { ...this.goalContext } } : {}),
     };
 

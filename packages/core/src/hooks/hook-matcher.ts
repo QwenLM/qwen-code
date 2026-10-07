@@ -55,6 +55,53 @@ function splitListEntries(pattern: string): string[] {
 }
 
 /**
+ * Removes padding whitespace around the whole matcher without eating
+ * whitespace the expression escapes: a trailing whitespace char preceded by
+ * an odd number of backslashes is part of the regular expression (`\.env\ `
+ * matches "a.env "), so trimming it would leave a trailing backslash that
+ * fails to compile. An even number of backslashes is an escaped backslash, so
+ * the whitespace after it stays padding. Leading escaped whitespace starts
+ * with a backslash, so `trimStart` can never touch it.
+ */
+function trimMatcherEdges(matcher: string): string {
+  let end = matcher.length;
+  while (end > 0 && /\s/.test(matcher[end - 1])) {
+    let backslashes = 0;
+    for (let i = end - 2; i >= 0 && matcher[i] === '\\'; i--) {
+      backslashes++;
+    }
+    if (backslashes % 2 === 1) {
+      break;
+    }
+    end--;
+  }
+  return matcher.slice(0, end).trimStart();
+}
+
+/**
+ * Removes the padding around a list entry. Trailing whitespace preceded by an
+ * odd run of backslashes is escaped, so it belongs to the expression and
+ * stays; after an even run the backslashes escape each other, so `C:\\ `
+ * still trims to `C:\\`. Leading whitespace is always padding, because an
+ * escaped leading space starts with its backslash.
+ */
+function trimEntryEdges(entry: string): string {
+  const start = entry.length - entry.trimStart().length;
+  let end = entry.length;
+  while (end > start && /\s/.test(entry[end - 1])) {
+    let backslashes = 0;
+    while (entry[end - 2 - backslashes] === '\\') {
+      backslashes++;
+    }
+    if (backslashes % 2 === 1) {
+      break;
+    }
+    end--;
+  }
+  return entry.slice(start, end);
+}
+
+/**
  * Tests a hook `matcher` against the value an event is matched on, using the
  * same rules for every event and for both settings and session hooks:
  *
@@ -66,6 +113,7 @@ function splitListEntries(pattern: string): string[] {
  *   and not escaped by a backslash separates entries: the pipes in
  *   `notes\|todo\.md`, `foo[ |]bar` and `a(b | c)` belong to the expression,
  *   spaces around them included. Entries are never compiled on their own.
+ *   An escaped space at an entry's edge, as in `\.env\ |\.pem`, is kept.
  * - Otherwise the matcher is an unanchored regular expression tested against
  *   the subject only; aliases are never matched through a regex. For a list
  *   that does not start with `^` or `(`, the expression is rebuilt from the
@@ -79,7 +127,7 @@ export function matchesHookPattern(
   subject: string,
   options: HookPatternOptions = {},
 ): boolean {
-  const pattern = matcher.trim();
+  const pattern = trimMatcherEdges(matcher);
   if (pattern === '' || pattern === '*' || pattern === '.*') {
     return true;
   }
@@ -99,7 +147,7 @@ export function matchesHookPattern(
     // from the same trimmed entries, so `read_.* | edit` reads as
     // `read_.*|edit` while `foo[ |]bar` keeps its space.
     const alternatives = splitListEntries(pattern)
-      .map((entry) => entry.trim())
+      .map((entry) => trimEntryEdges(entry))
       .filter((entry) => entry !== '');
     if (
       alternatives.some(

@@ -53,6 +53,95 @@ const sessionData = {
 };
 
 describe('ExportTranscriptDocumentV1', () => {
+  it('exports a complete outer transcript while retaining raw internal evidence', () => {
+    const results = [
+      {
+        id: 'nested-write',
+        name: 'write_file',
+        output: CANARY,
+        provenance: 'tool_result',
+        subtype: 'code_mode_tool_result',
+      },
+      {
+        id: 'nested-goal',
+        name: 'get_goal',
+        output: CANARY,
+        provenance: 'goal_runtime',
+        subtype: 'code_mode_tool_result',
+      },
+      {
+        id: 'outer',
+        name: 'exec',
+        output: 'script finished',
+        provenance: 'execution_output',
+      },
+      {
+        id: 'direct-goal',
+        name: 'get_goal',
+        output: 'direct goal result',
+        provenance: 'goal_runtime',
+      },
+    ];
+    const records = [
+      record('calls', null, {
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'outer',
+                name: 'exec',
+                args: { source: 'await tools.write_file({})' },
+              },
+            },
+            { functionCall: { id: 'direct-goal', name: 'get_goal', args: {} } },
+          ],
+        },
+      }),
+      ...results.map(({ id, name, output, ...options }, index) =>
+        record(id, index === 0 ? 'calls' : results[index - 1].id, {
+          type: 'tool_result',
+          ...options,
+          message: {
+            role: 'user',
+            parts: [{ functionResponse: { id, name, response: { output } } }],
+          },
+          toolCallResult: {
+            callId: id,
+            status: 'success',
+            resultDisplay:
+              id === 'nested-write'
+                ? {
+                    fileName: 'internal.txt',
+                    fileDiff: `@@ -0,0 +1 @@\n+${output}`,
+                    originalContent: null,
+                    newContent: output,
+                  }
+                : output,
+          },
+        }),
+      ),
+    ];
+    const original = JSON.stringify(records);
+    const document = createExportTranscriptDocumentV1(
+      records,
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    expect(document.metadata).toMatchObject({
+      complete: true,
+      truncated: false,
+    });
+    expect(document.diagnostics).toEqual([]);
+    expect(
+      document.blocks
+        .filter((block) => block.kind === 'tool')
+        .map((block) => block.toolName),
+    ).toEqual(['exec', 'get_goal']);
+    expect(JSON.stringify(document)).not.toContain(CANARY);
+    expect(JSON.stringify(records)).toBe(original);
+  });
   it('projects records through an explicit allowlist without raw leakage', () => {
     const records = [
       record('user-1', null, {
@@ -1213,6 +1302,71 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(document.diagnostics).toContainEqual(
       expect.objectContaining({ code: 'envelope_budget_exceeded' }),
     );
+  });
+
+  it('keeps structured shell fallback text in the HTML document safe preview', () => {
+    const text = 'Health check complete\nSaved under /Users/alice/project';
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('shell-start', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'shell-1',
+                  name: 'run_shell_command',
+                  args: { command: 'true' },
+                },
+              },
+            ],
+          },
+        }),
+        record('shell-result', 'shell-start', {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'shell-1',
+                  name: 'run_shell_command',
+                  response: { output: 'Different legacy envelope' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: 'shell-1',
+            resultDisplay: {
+              type: 'shell_result',
+              version: 1,
+              text,
+              output: 'Health check complete',
+              directory: '/Users/alice/project',
+              exitCode: 0,
+              signal: null,
+              pid: 42,
+              error: null,
+              outcome: 'completed',
+              notices: [],
+              truncated: false,
+              outputFiles: [],
+            },
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const tool = document.blocks.find((block) => block.kind === 'tool');
+    expect(tool?.resultPreview).toEqual({
+      kind: 'text',
+      text: 'Health check complete\nSaved under [home]/project',
+    });
+    expect(JSON.stringify(document)).not.toContain('Different legacy envelope');
+    expect(() => assertExportTranscriptDocumentV1(document)).not.toThrow();
   });
 
   it('exports structured question answers through the safe preview allowlist', () => {

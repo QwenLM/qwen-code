@@ -185,6 +185,14 @@ export class AgentHeadless implements SubagentExecutor {
     taskName?: string,
     subagentId?: string,
   ): Promise<AgentHeadless> {
+    if (
+      runtimeContext.getAgentExecutionBackend?.() === 'container' &&
+      !runtimeContext.getExecutionEnvironment?.()
+    ) {
+      throw new Error(
+        'Container execution is required, but this agent has no execution environment. Start a supported regular subagent.',
+      );
+    }
     const core = new AgentCore(
       name,
       runtimeContext,
@@ -217,7 +225,10 @@ export class AgentHeadless implements SubagentExecutor {
   async execute(
     context: ContextState,
     externalSignal?: AbortSignal,
-    options: { resetStats?: boolean } = {},
+    options: {
+      resetStats?: boolean;
+      enforceTimeLimitDuringRetryWait?: boolean;
+    } = {},
   ): Promise<void> {
     if (this.executing) {
       throw new Error(
@@ -238,7 +249,14 @@ export class AgentHeadless implements SubagentExecutor {
     }
 
     try {
-      await this.executeTurn(context, externalSignal, !resetStats);
+      await this.core.runInHookFrame(() =>
+        this.executeTurn(
+          context,
+          externalSignal,
+          !resetStats,
+          options.enforceTimeLimitDuringRetryWait,
+        ),
+      );
     } finally {
       this.executing = false;
     }
@@ -259,16 +277,15 @@ export class AgentHeadless implements SubagentExecutor {
     context: ContextState,
     externalSignal?: AbortSignal,
     preserveStats = false,
+    enforceTimeLimitDuringRetryWait?: boolean,
   ): Promise<void> {
     const initialMessagesOverride = context.get('initial_messages_override') as
       | Content[]
       | undefined;
     const isContinuation = this.hasStartedReasoning;
-    const externalInputsOverride = isContinuation
-      ? (context.get('external_inputs_override') as
-          | AgentExternalInput[]
-          | undefined)
-      : undefined;
+    const externalInputsOverride = context.get('external_inputs_override') as
+      | AgentExternalInput[]
+      | undefined;
     // Record the initial user turn in the observable message log before
     // anything that can throw — createChat / prepareTools failures still
     // get a transcript showing the task that was asked, which is what
@@ -277,8 +294,8 @@ export class AgentHeadless implements SubagentExecutor {
     const initialTaskText = String(
       (context.get('task_prompt') as string) ?? 'Get Started!',
     );
-    if (isContinuation) {
-      const transcriptInputs = externalInputsOverride ?? [initialTaskText];
+    if (externalInputsOverride) {
+      const transcriptInputs = externalInputsOverride;
       for (const input of transcriptInputs) {
         this.core.eventEmitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
           subagentId: this.core.subagentId,
@@ -287,6 +304,13 @@ export class AgentHeadless implements SubagentExecutor {
           timestamp: Date.now(),
         });
       }
+    } else if (isContinuation) {
+      this.core.eventEmitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
+        subagentId: this.core.subagentId,
+        kind: 'message',
+        text: initialTaskText,
+        timestamp: Date.now(),
+      });
     } else if (
       !initialMessagesOverride ||
       initialMessagesOverride.length === 0
@@ -387,6 +411,7 @@ export class AgentHeadless implements SubagentExecutor {
             getExternalMessages: this.externalMessageProvider,
             waitForExternalMessages: this.externalMessageWaiter,
             shouldWaitForExternalMessages: this.externalMessageWaitPredicate,
+            enforceTimeLimitDuringRetryWait,
           },
         );
 

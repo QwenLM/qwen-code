@@ -1,12 +1,115 @@
 # @qwen-code/cua-sdk/computer-use
 
-Thin Computer Use wrapper included in the single `@qwen-code/cua-sdk` npm
-package. It calls that package's typed driver API directly and does not depend
-on Qwen Code, a Node REPL, or a Skill.
+Computer Use API included in `@qwen-code/cua-sdk`. It uses the typed native
+SDK and works in ordinary Node.js or a persistent Node REPL.
 
-The wrapper exposes a small surface — application discovery, exact-window
-observation, opaque element-token actions, and state verification — while
-keeping raw SDK constructors and arbitrary tool dispatch out of its public API.
+## Platform workflows
+
+`await computer.getPlatform()` returns `macos`, `windows`, or `linux` from the
+connected driver's inventory. It does not infer the target from the CLI or Node
+host and does not capture the desktop. Missing or invalid platform metadata
+raises `driver_platform_unavailable`; update the driver and SDK before continuing.
+
+The single [Computer Use Skill](./SKILL.md) contains the complete App workflow
+for all three platforms. After changing connections, query the platform again.
+
+## App workflow
+
+On macOS, Linux and Windows, bind an application by name, identifier or installation path. The
+handle resolves its current native window or owned dialog and owns targeting internally:
+
+```js
+import { ComputerUse } from "@qwen-code/cua-sdk/computer-use";
+
+const computer = await ComputerUse.create();
+const app = await computer.getApp("Microsoft Excel");
+console.log((await app.getState()).text);
+// Use an ID from the returned state.
+await app.click(37);
+await app.typeText("hello");
+console.log((await app.getState()).text);
+await computer.close();
+```
+
+`getApp()` binds identity without launching. `getState()` can open a discovered
+stopped app through the native background launcher; actions never restart an app.
+Ambiguous names or identifiers require a unique installation path from
+the caller. Public `listApps()` returns only `id`, `displayName` and
+`isRunning`; internal process and window addressing stays on the app handle.
+Native selection uses focused/main AX windows and sheets on macOS, native
+active/stacking order and transient ownership on X11, and foreground/Z-order
+plus owned popup relationships on Windows. Ambiguous or unavailable targets
+fail without dispatching input. Wayland requires compositor support for window
+discovery and activation; an unsupported desktop reports the limitation.
+
+App methods accept short observed IDs or screenshot coordinates, and do not
+accept process IDs, window IDs, opaque tokens or delivery options.
+`getState()` returns `{ app, window, mode, text, screenshot? }`. Native accessibility projections preserve controls, meaningful state and text
+and render compact full/diff/no-change output. macOS additionally removes
+redundant layout/text structure and includes immediate menu-bar items. Its
+selected open menu supplies nested and disabled commands.
+Normal actions do not emit another full tree or image.
+
+App text defaults to at most 12,000 characters; `maxTextChars` (minimum 512)
+adjusts the limit. Warnings and truncation notices appear before whole captured
+rows. To see more text, call `app.getState({ disableDiff: true, maxTextChars: 24000 })`.
+The App retains current short-ID action bindings even when text is truncated.
+A traversal-limited capture can return no-change when its captured state is
+identical; changed bounded state returns full. Read failures require using only
+IDs from the latest observation. Omitted rows do not prove absence.
+
+Call `getState()` after a dialog, sheet or menu opens or closes before acting
+on its IDs. A process/window/session change invalidates prior IDs. Every App
+observation captures a current screenshot internally so a later AX-only
+diff/no-change does not discard the coordinate frame. The default return omits
+that image; use `getState({ includeScreenshot: true })` when the caller needs to
+inspect it.
+
+Native code selects semantic or synthesized input after checking the target.
+App input makes one guarded activation of the exact target, dispatches once and
+restores the prior app. Failed, partial, unverifiable and cancelled
+possible-dispatch actions are never replayed.
+Errors request fresh observation before another action; they do not ask the
+model to choose a delivery mode. Argument errors detected before native dispatch
+retain their specific correction; uncertain post-dispatch failures retain the
+cautious observe-before-retry message.
+
+## macOS text operations
+
+`app.paste(text, { format?, signal? })` pastes once into the current app window.
+`format` defaults to `text`; `md` and `html` supply formatted content, and the
+receiving app chooses which supplied format it accepts. The clipboard is restored
+only while the transaction still owns it, preserving newer external clipboard
+changes.
+The App method activates the exact window only for the Command-V dispatch and
+restores the previous foreground app. The exact-window `computer.paste(...)`
+method retains PID-addressed background delivery.
+
+`app.selectText(element, text, { prefix?, suffix?, selection?, signal? })` uses a
+current short element ID and selects one exact, case-sensitive text match. Prefix
+and suffix are optional immediately adjacent context; no match or multiple matches
+fail. `selection` defaults to `text`; `cursor_before` and `cursor_after` place the
+insertion point at that boundary. The element must support writable text selection.
+
+```js
+await app.selectText(37, "draft", { prefix: "Status: " });
+console.log((await app.getState()).text);
+// After confirming the intended selection:
+await app.paste("ready");
+console.log((await app.getState()).text);
+```
+
+Both methods return the native action effect. An error, cancellation or completed
+dispatch does not establish what changed; observe before deciding whether to retry.
+Neither method accepts delivery options. Exact-window callers can use
+`computer.paste({ pid, windowId, text, format? })` or
+`computer.selectText({ pid, windowId, elementToken, text, prefix?, suffix?, selection? })`.
+These operations are macOS-only and reject other driver platforms before mutation.
+
+## Exact-window SDK compatibility
+
+The lower-level `ComputerUse` methods remain available to programmatic clients.
+The bundled model Skill uses the App workflow on all platforms. The rest of this document describes the existing exact-window contract.
 
 ## Observation revisions
 
@@ -25,11 +128,15 @@ compatibility alias; passing both names is rejected. If a base is stale, the
 native driver returns a full resync and the wrapper adopts the replacement
 revision. The wrapper never computes a second semantic diff.
 
-An incomplete capture clears the cursor and receives one automatic observation
-retry without disabling diffs. If that retry is still incomplete, the returned
-tree is marked observation-only, `elements` is empty, and
-`diagnostics.captureComplete` is false. Observe normally after the UI settles
-or use the screenshot; disabling diffs does not repair capture completeness.
+Successful native accessibility reads bounded by traversal limits retain a separate
+baseline. Identical captured state returns `no_change`; changed bounded state
+returns full, since nodes outside the budget cannot be reported as deleted.
+`diagnostics.captureComplete` remains false and `captureTruncated` is true.
+Read failures invalidate the baseline and receive one automatic retry, including
+failures mixed with truncation. `captureReadComplete` distinguishes them from pure
+budget truncation, which does not retry. Current snapshot tokens remain available in
+`elements`; when `stableElementIds` is false, use only the latest observation's
+tokens. `captureIncompleteDetails` explains the capture limitation.
 
 Drivers that do not advertise the capability keep the legacy full-snapshot
 behavior; observations then report `diagnostics.revisionSupported: false`.
@@ -38,13 +145,31 @@ Revision and lineage identifiers are internal to `ComputerUse` and are not
 returned on `WindowObservation`. Normal callers receive the current `mode`, an
 optional `resyncReason`, AX text/elements, and an optional screenshot. Protocol
 metrics live under `diagnostics`; the raw native response is not exposed.
+`context` preserves native `backgroundInput`, `degraded`, `degradedReason`,
+`escalation`, `windowBounds`, `screenshotScale`, `screenshotFrameValid`, and
+`screenshotError` when available. Consult this context before deciding whether
+pixel input or an explicit foreground request is appropriate. Coordinates for
+SDK actions remain screenshot pixels; `windowBounds` describes screen points.
+The native revision's `capture_complete` flag takes precedence over a legacy
+root-level flag.
 
-Treat a full response as the complete current AX state. Apply later diffs to
-that state; a no-change response leaves it intact. `elements` remains the
-current full actionable list for retained full, diff, and no-change responses.
+Treat a full response as the current captured AX state, subject to capture and
+text limits. Apply later diffs to that state; a no-change response leaves it
+intact within the captured scope. `elements` remains the current captured
+actionable list for retained full, diff, and no-change responses.
 While the same stable lineage is retained, tokens for unchanged elements remain
 current across all three modes; only removed or replaced element tokens become
 invalid.
+
+Text is capped at 12,000 characters by default. `maxTextChars`
+(minimum 512) controls this output budget independently of the native
+`maxElements` and `maxDepth` capture limits. `diagnostics.textTruncated` and
+`textChars` describe the returned text; capture warnings and truncation notices
+appear first. Rows are never cut in half. The full captured element array stays
+in `elements`, so filter it for the controls or text you need before printing.
+For more full text, request `disableDiff: true` with a larger `maxTextChars`.
+An omitted row does not prove absence, and the character budget is not a token
+count. Do not repeatedly print the entire element array.
 
 Screenshot capture is independent from the observation revision mode.
 `includeScreenshot: true` requests the image; `disableDiff: true` requests a
@@ -57,7 +182,14 @@ Actions that support input delivery resolve their mode in this order:
 
 1. the action's explicit `deliveryMode`;
 2. `QWEN_CUA_SDK_DEFAULT_DELIVERY_MODE` (`background` or `foreground`);
-3. `background`.
+3. the connected platform's default: Linux permits guarded focus preparation;
+   Windows and the macOS exact-window compatibility API retain `background`.
+
+On Linux, ordinary callers omit delivery options. The facade passes the existing
+`foreground` permission ceiling internally, allowing the native driver to choose
+semantic or target-addressed input and prepare exact-window focus when needed.
+This uses the connected platform, not the Node host OS. Explicit overrides remain
+available to legacy programmatic clients.
 
 The resolved value is passed to the typed driver for every supported action.
 Use the environment default when a whole isolated process, such as a test
@@ -66,32 +198,36 @@ overrides it. Invalid environment values fail facade creation, and the public
 JavaScript option remains camelCase: `delivery_mode` is rejected instead of
 being silently ignored.
 
-## Usage
+## Exact-window usage
+
+Programmatic clients can still select an exact window from `listWindows()`.
+Use application-specific criteria to identify it before dispatching input.
 
 ```js
 import { ComputerUse } from "@qwen-code/cua-sdk/computer-use";
 
 const computer = await ComputerUse.create(); // configured in-process runtime + trusted session
 try {
-  const apps = await computer.listApps();
-  const windows = await computer.listWindows({ pid: apps[0].pid });
+  const windows = await computer.listWindows();
+  const target = windows.find((window) => window.title === "Task document");
+  if (!target) throw new Error("Open the task document first");
 
   const first = await computer.observeWindow({
-    pid: apps[0].pid,
-    windowId: windows[0].window_id,
+    pid: target.pid,
+    windowId: target.window_id,
   });
   // ... deliver first.text downstream, act on element tokens ...
-  await computer.click({ pid: apps[0].pid, elementToken: first.elements[0].element_token });
+  await computer.click({ pid: target.pid, elementToken: first.elements[0].element_token });
 
   const second = await computer.observeWindow({
-    pid: apps[0].pid,
-    windowId: windows[0].window_id,
+    pid: target.pid,
+    windowId: target.window_id,
   });
   console.log(second.mode); // "diff" | "no_change" | "full"
 
   await computer.drag({
-    pid: apps[0].pid,
-    windowId: windows[0].window_id,
+    pid: target.pid,
+    windowId: target.window_id,
     fromX: 100,
     fromY: 100,
     toX: 300,
@@ -100,8 +236,8 @@ try {
   });
 
   const complete = await computer.observeWindow({
-    pid: apps[0].pid,
-    windowId: windows[0].window_id,
+    pid: target.pid,
+    windowId: target.window_id,
     disableDiff: true,
   });
   console.log(complete.mode); // "full"
@@ -117,7 +253,7 @@ identity and permissions.
 
 ## Tests
 
-- `npm test` — hermetic unit tests against a fake driver handle.
+- `npm test` — hermetic facade tests against a fake driver handle and Skill packaging checks.
 - `npm run test:e2e` — standalone high-level wrapper run against a real target;
   set `COMPUTER_USE_PID` and `COMPUTER_USE_WINDOW`. It uses an isolated
   configured runtime by default; set `COMPUTER_USE_SOCKET` only when testing a

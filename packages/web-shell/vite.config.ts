@@ -1,9 +1,10 @@
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
-import type { ProxyOptions } from 'vite';
+import type { PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import pkg from './package.json' with { type: 'json' };
+import { getAllowedDaemonOrigin } from './client/config/daemon';
 
 const daemonProxy: ProxyOptions = {
   target: process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170',
@@ -44,8 +45,15 @@ const daemonProxy: ProxyOptions = {
   },
 };
 
+const managedAgentJavaProxy: ProxyOptions = {
+  target: process.env['QWEN_MANAGED_AGENT_JAVA_URL'] ?? 'http://127.0.0.1:8080',
+  changeOrigin: true,
+};
+
 export const QUALIFIED_VOICE_STREAM_PROXY =
   '^/workspaces/[^/]+/voice/stream/?$';
+export const MANAGED_AGENT_JAVA_ROUTE_PROXY = '/api/agent/web-shell/v1';
+export const MANAGED_AGENT_PUBLIC_ROUTE_PROXY = '/v1/agents';
 
 // Exact-path on purpose. A bare `/brand` prefix would also match
 // `/brandContext.ts` — the client source module `main.tsx` and `App.tsx` import
@@ -58,9 +66,75 @@ export const BRAND_ROUTE_PROXY = '^/brand/?$';
 // bridge hangs in `connecting`.
 export const QUALIFIED_ACP_WS_PROXY = '^/workspaces/[^/]+/acp/?$';
 
+// Shared with vite.lib.config.ts so the app and lib builds can never drift
+// onto different syntax floors: esbuild miscompiles xterm's logical
+// assignments below ES2021 (#11643), and the lib build bundles the same
+// xterm for npm hosts.
+export const WEB_SHELL_BUILD_TARGET = 'es2021';
+
+// Development permits same-origin ancestors; production denies them by default.
+function developmentCsp(requestUrl: string): string {
+  const queryStart = requestUrl.indexOf('?');
+  const raw = new URLSearchParams(
+    queryStart === -1 ? '' : requestUrl.slice(queryStart + 1),
+  ).get('daemon');
+  const origin = getAllowedDaemonOrigin(raw || '');
+  const connectOrigins: string[] = [];
+  if (origin) {
+    const websocket = new URL(origin);
+    websocket.protocol = websocket.protocol === 'https:' ? 'wss:' : 'ws:';
+    connectOrigins.push(origin, websocket.origin);
+  }
+  const clientMcpOverWs = process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+  if (
+    clientMcpOverWs !== undefined &&
+    !['0', 'false'].includes(clientMcpOverWs.trim().toLowerCase())
+  ) {
+    connectOrigins.push('http://127.0.0.1:47821');
+  }
+  return [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
+    "style-src 'self' 'unsafe-inline'",
+    "font-src 'self' data:",
+    "img-src 'self' data: blob:",
+    "media-src 'self' data:",
+    `connect-src 'self' ${connectOrigins.join(' ')}`.trim(),
+    "worker-src 'self' blob:",
+    "base-uri 'none'",
+    'frame-src http: https: blob:',
+    "frame-ancestors 'self'",
+  ].join('; ');
+}
+
+function configureDevelopmentMiddleware(
+  server: ViteDevServer | PreviewServer,
+): void {
+  server.middlewares.use((req, res, next) => {
+    res.setHeader('Content-Security-Policy', developmentCsp(req.url || '/'));
+    // Vite resolves the extensionless settings page to settings.ts before SPA fallback.
+    if (
+      req.method === 'GET' &&
+      /^\/settings\/?(?:\?|$)/.test(req.url || '') &&
+      req.headers.accept?.includes('text/html')
+    ) {
+      req.url = '/index.html';
+    }
+    next();
+  });
+}
+
 export default defineConfig(({ command }) => ({
   root: 'client',
-  plugins: [react(), tailwindcss()],
+  plugins: [
+    react(),
+    tailwindcss(),
+    {
+      name: 'web-shell-development-middleware',
+      configureServer: configureDevelopmentMiddleware,
+      configurePreviewServer: configureDevelopmentMiddleware,
+    },
+  ],
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(
@@ -89,35 +163,51 @@ export default defineConfig(({ command }) => ({
   },
   build: {
     // Avoid esbuild lowering xterm's logical assignments into invalid code.
-    target: 'es2021',
+    target: WEB_SHELL_BUILD_TARGET,
     outDir: '../dist',
     emptyOutDir: true,
+    // The Live Voice capture worklet is loaded with audioWorklet.addModule(),
+    // which the Web Shell CSP (`script-src 'self'`, no `data:`) only allows
+    // from a same-origin URL. At ~2 KB it is under Vite's default inline
+    // limit and would be turned into a `data:` URL — silently, because the
+    // client then falls back to the main-thread capture node. Keep it a file.
+    assetsInlineLimit: (filePath) =>
+      /[\\/]live[\\/]capture-worklet\.js$/.test(filePath) ? false : undefined,
+    rollupOptions: {
+      input: {
+        index: resolve(__dirname, 'client/index.html'),
+        // This import-free worker must remain at the origin root so it can
+        // control all Web Shell navigation.
+        sw: resolve(__dirname, 'client/sw.js'),
+      },
+      output: {
+        entryFileNames: (chunk) =>
+          chunk.name === 'sw' ? '[name].js' : 'assets/[name]-[hash].js',
+        format: 'es',
+      },
+    },
   },
   define: {
     __WEB_SHELL_VERSION__: JSON.stringify(pkg.version),
   },
   server: {
     cors: false,
-    // Mirrors buildWebShellCsp() in packages/cli/src/serve/web-shell-static.ts;
-    // dev intentionally permits same-origin ancestors instead of denying all.
     headers: {
-      'Content-Security-Policy': [
-        "default-src 'self'",
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'",
-        "style-src 'self' 'unsafe-inline'",
-        "font-src 'self' data:",
-        "img-src 'self' data: blob:",
-        "media-src 'self' data:",
-        "connect-src 'self'",
-        "worker-src 'self' blob:",
-        "base-uri 'none'",
-        'frame-src http: https: blob:',
-        "frame-ancestors 'self'",
-      ].join('; '),
       'Referrer-Policy': 'no-referrer',
     },
     port: 5173,
+    // Dev launchers (scripts/managed-agent-dev.js) hand the token-bearing
+    // open path through the environment instead of argv: npm echoes expanded
+    // argv to its inherited stdio, and argv is world-readable in
+    // /proc/<pid>/cmdline. Caveat: server.open spawns the browser launcher
+    // with the full URL as an argv element, so on POSIX the token still
+    // reaches one world-readable argv before landing in the page — this
+    // transport removes only the npm hop's echo. Unset means no browser is
+    // opened, as before.
+    open: process.env['QWEN_WEB_SHELL_OPEN_PATH'],
     proxy: {
+      [MANAGED_AGENT_JAVA_ROUTE_PROXY]: managedAgentJavaProxy,
+      [MANAGED_AGENT_PUBLIC_ROUTE_PROXY]: managedAgentJavaProxy,
       '/health': daemonProxy,
       '/capabilities': daemonProxy,
       // Web Shell brand (`GET /brand`). Without it the SPA fallback answers with
@@ -134,9 +224,17 @@ export default defineConfig(({ command }) => ({
       '/standalone/sessions': daemonProxy,
       '/session': daemonProxy,
       '/permission': daemonProxy,
+      '^/workspaces/[^/]+/agent(?:/|$)': daemonProxy,
+      '/agent-hosts': daemonProxy,
       [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },
       [QUALIFIED_ACP_WS_PROXY]: { ...daemonProxy, ws: true },
       '/workspace': daemonProxy,
+      // Remote-daemon browse/register proxies. Keys are path-prefix matches,
+      // so the `/workspace` entry above cannot reach these; without them the
+      // SPA fallback returns index.html in dev and the Add-workspace dialog
+      // fails JSON parsing on the browse leg.
+      '/remote-workspace-path-suggestions': daemonProxy,
+      '/remote-workspaces': daemonProxy,
       '/extensions': daemonProxy,
       '/file': daemonProxy,
       '/stat': daemonProxy,

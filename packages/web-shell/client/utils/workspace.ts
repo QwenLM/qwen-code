@@ -10,6 +10,30 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 
+const AGENT_COLLABORATION_FEATURE = 'agent_collaboration_v1';
+
+export function isAgentCollaborationEnabledForWorkspace(
+  capabilities: DaemonCapabilities | undefined,
+  cwd: string | undefined,
+): boolean {
+  if (!capabilities?.features?.includes(AGENT_COLLABORATION_FEATURE)) {
+    return false;
+  }
+  const workspaces = capabilities.workspaces;
+  if (
+    !workspaces?.some((entry) => entry.agentCollaborationEnabled !== undefined)
+  ) {
+    return true;
+  }
+  if (!cwd) {
+    return workspaces.some((entry) => entry.agentCollaborationEnabled === true);
+  }
+  return (
+    workspaces.find((entry) => entry.cwd === cwd)?.agentCollaborationEnabled ===
+    true
+  );
+}
+
 /**
  * Last path segment of an absolute workspace cwd, for a compact per-workspace
  * label (e.g. `/home/me/projects/api` → `api`). Falls back to the full path when
@@ -20,16 +44,27 @@ export function workspaceBasename(cwd: string): string {
   return parts.at(-1) ?? cwd;
 }
 
-export function workspaceLabel(
-  workspace: Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName'>,
+export function sshWorkspaceLabel(
+  ssh: NonNullable<DaemonWorkspaceCapability['ssh']>,
 ): string {
-  return workspace.displayName?.trim() || workspaceBasename(workspace.cwd);
+  return `${ssh.host}${ssh.port === undefined ? '' : `:${ssh.port}`}:${ssh.directory}`;
+}
+
+export function workspaceLabel(
+  workspace: Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName' | 'ssh'>,
+): string {
+  return (
+    workspace.displayName?.trim() ||
+    (workspace.ssh
+      ? sshWorkspaceLabel(workspace.ssh)
+      : workspaceBasename(workspace.cwd))
+  );
 }
 
 export function workspaceLabelForCwd(
   cwd: string,
   workspaces:
-    | readonly Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName'>[]
+    | readonly Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName' | 'ssh'>[]
     | undefined,
 ): string {
   const workspace = workspaces?.find((entry) => entry.cwd === cwd);

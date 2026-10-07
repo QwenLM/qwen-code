@@ -14,12 +14,25 @@ import {
   runForkedAgent,
   runWithForkedChatModel,
 } from './forkedAgent.js';
-import type { Content, GenerateContentConfig } from '@google/genai';
+import type { CachePathParams } from './forkedAgent.js';
+import type {
+  Content,
+  GenerateContentConfig,
+  GenerateContentResponse,
+} from '@google/genai';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { LlmChat, StreamEventType } from '../core/llm-chat.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import type { RuntimeContentGeneratorView } from './runtime/agent-context.js';
+import {
+  content,
+  fnCall,
+  modelChunk,
+  modelText,
+  streamOf,
+  userText,
+} from '../test-utils/model-fixtures.js';
 
 vi.mock('../core/llm-chat.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../core/llm-chat.js')>();
@@ -49,6 +62,8 @@ function makeRuntimeView(model: string): RuntimeContentGeneratorView {
     },
   };
 }
+
+type Decls = Array<{ functionDeclarations: unknown[] }>;
 
 describe('CacheSafeParams', () => {
   beforeEach(() => {
@@ -97,26 +112,18 @@ describe('CacheSafeParams', () => {
         systemInstruction: 'test',
         tools: [{ functionDeclarations: [{ name: 'tool1' }] }],
       };
+      const savedDecls = () =>
+        (getCacheSafeParams()!.generationConfig.tools as Decls)[0]
+          .functionDeclarations;
 
       saveCacheSafeParams(config, [], 'model');
 
-      // Mutate original — should not affect saved params
-      (
-        config.tools![0] as { functionDeclarations: unknown[] }
-      ).functionDeclarations.push({ name: 'tool2' });
+      // Neither mutating the original nor the returned copy leaks into the store.
+      (config.tools as Decls)[0].functionDeclarations.push({ name: 'tool2' });
+      expect(savedDecls()).toHaveLength(1);
 
-      const params = getCacheSafeParams();
-      const savedTools = params!.generationConfig.tools as Array<{
-        functionDeclarations: unknown[];
-      }>;
-      expect(savedTools[0].functionDeclarations).toHaveLength(1);
-
-      savedTools[0].functionDeclarations.push({ name: 'tool3' });
-      const rereadParams = getCacheSafeParams();
-      const rereadTools = rereadParams!.generationConfig.tools as Array<{
-        functionDeclarations: unknown[];
-      }>;
-      expect(rereadTools[0].functionDeclarations).toHaveLength(1);
+      savedDecls().push({ name: 'tool3' });
+      expect(savedDecls()).toHaveLength(1);
     });
 
     it('copies history containers and Part objects', () => {
@@ -124,20 +131,14 @@ describe('CacheSafeParams', () => {
       const nestedPart = {
         inlineData: { mimeType: 'image/png', data: 'screenshot' },
       };
-      const historyEntry: Content = {
-        role: 'user',
-        parts: [
-          historyPart,
-          {
-            functionResponse: {
-              id: 'call-1',
-              name: 'screenshot',
-              response: {},
-              parts: [nestedPart],
-            },
-          },
-        ],
-      };
+      const historyEntry: Content = content('user', historyPart, {
+        functionResponse: {
+          id: 'call-1',
+          name: 'screenshot',
+          response: {},
+          parts: [nestedPart],
+        },
+      });
       const historyEntryWithoutParts: Content = { role: 'model' };
       const history: Content[] = [historyEntry, historyEntryWithoutParts];
 
@@ -160,10 +161,7 @@ describe('CacheSafeParams', () => {
       expect(params!.history[1]).not.toBe(historyEntryWithoutParts);
       expect('parts' in params!.history[1]!).toBe(false);
 
-      params!.history.push({
-        role: 'model',
-        parts: [{ text: 'returned mutation' }],
-      });
+      params!.history.push(modelText('returned mutation'));
       params!.history[0]!.parts!.push({ text: 'returned part mutation' });
       expect(getCacheSafeParams()!.history).toHaveLength(2);
       expect(getCacheSafeParams()!.history[0]!.parts).toHaveLength(2);
@@ -181,32 +179,31 @@ describe('CacheSafeParams', () => {
   });
 
   describe('version detection', () => {
+    /** Saves `config` and `history` and returns the stored version. */
+    const versionAfter = (
+      config: GenerateContentConfig,
+      history: Content[] = [],
+    ) => {
+      saveCacheSafeParams(config, history, 'model');
+      return getCacheSafeParams()!.version;
+    };
+
     it('increments version when systemInstruction changes', () => {
-      saveCacheSafeParams({ systemInstruction: 'version1' }, [], 'model');
-      const v1 = getCacheSafeParams()!.version;
-
-      saveCacheSafeParams({ systemInstruction: 'version2' }, [], 'model');
-      const v2 = getCacheSafeParams()!.version;
-
-      expect(v2).toBeGreaterThan(v1);
+      const v1 = versionAfter({ systemInstruction: 'version1' });
+      expect(versionAfter({ systemInstruction: 'version2' })).toBeGreaterThan(
+        v1,
+      );
     });
 
     it('increments version when tools change', () => {
-      saveCacheSafeParams(
-        { tools: [{ functionDeclarations: [{ name: 'a' }] }] },
-        [],
-        'model',
-      );
-      const v1 = getCacheSafeParams()!.version;
-
-      saveCacheSafeParams(
-        { tools: [{ functionDeclarations: [{ name: 'a' }, { name: 'b' }] }] },
-        [],
-        'model',
-      );
-      const v2 = getCacheSafeParams()!.version;
-
-      expect(v2).toBeGreaterThan(v1);
+      const v1 = versionAfter({
+        tools: [{ functionDeclarations: [{ name: 'a' }] }],
+      });
+      expect(
+        versionAfter({
+          tools: [{ functionDeclarations: [{ name: 'a' }, { name: 'b' }] }],
+        }),
+      ).toBeGreaterThan(v1);
     });
 
     it('does not increment version when only history changes', () => {
@@ -214,18 +211,8 @@ describe('CacheSafeParams', () => {
         systemInstruction: 'stable',
         tools: [],
       };
-
-      saveCacheSafeParams(config, [], 'model');
-      const v1 = getCacheSafeParams()!.version;
-
-      saveCacheSafeParams(
-        config,
-        [{ role: 'user', parts: [{ text: 'hi' }] }],
-        'model',
-      );
-      const v2 = getCacheSafeParams()!.version;
-
-      expect(v2).toBe(v1);
+      const v1 = versionAfter(config);
+      expect(versionAfter(config, [userText('hi')])).toBe(v1);
     });
   });
 });
@@ -249,6 +236,49 @@ describe('createForkedChat', () => {
     expect(chat.isForkedChat).toBe(true);
   });
 });
+
+const TOOL_DESCRIPTIONS: Record<string, string> = {
+  edit: 'Edit a file',
+  shell: 'Run a command',
+};
+/** Parent tool list `[{ functionDeclarations }]` with the named tools. */
+const parentTools = (...names: string[]) => [
+  {
+    functionDeclarations: names.map((name) => ({
+      name,
+      description: TOOL_DESCRIPTIONS[name],
+    })),
+  },
+];
+const USAGE = { promptTokenCount: 10, candidatesTokenCount: 5 };
+
+/** Every forked LlmChat streams `chunks`; returns its sendMessageStream spy. */
+function mockForkStream(chunks: GenerateContentResponse[], extra = {}) {
+  const send = vi.fn((..._args: unknown[]) =>
+    Promise.resolve(
+      streamOf(
+        ...chunks.map((value) => ({ type: StreamEventType.CHUNK, value })),
+      ),
+    ),
+  );
+  vi.mocked(LlmChat).mockImplementation(
+    () => ({ sendMessageStream: send, ...extra }) as unknown as LlmChat,
+  );
+  return send;
+}
+
+/** Per-request config of the first sendMessageStream call. */
+const sentConfig = (send: ReturnType<typeof mockForkStream>) =>
+  (send.mock.calls[0][1] as { config: GenerateContentConfig }).config;
+
+/** Runs the cache path on the saved params; `opts` override the defaults. */
+const runFork = (opts: Partial<CachePathParams> = {}) =>
+  runForkedAgent({
+    config: {} as Config,
+    userMessage: 'suggest something',
+    cacheSafeParams: getCacheSafeParams()!,
+    ...opts,
+  });
 
 describe('runForkedAgent (cache path)', () => {
   beforeEach(() => {
@@ -288,100 +318,47 @@ describe('runForkedAgent (cache path)', () => {
   );
 
   it('passes tools: [] in per-request config so the model cannot produce function calls', async () => {
-    // Save cache params with real tools to simulate a normal conversation
+    // Real tools simulate a normal conversation.
     saveCacheSafeParams(
       {
         systemInstruction: 'You are helpful',
-        tools: [
-          {
-            functionDeclarations: [
-              { name: 'edit', description: 'Edit a file' },
-              { name: 'shell', description: 'Run a command' },
-            ],
-          },
-        ],
+        tools: parentTools('edit', 'shell'),
       },
-      [{ role: 'user', parts: [{ text: 'hello' }] }],
+      [userText('hello')],
       'test-model',
     );
-
-    // Track what sendMessageStream receives
-    let capturedParams: unknown = null;
-
-    const mockSendMessageStream = vi.fn(
-      (_model: string, params: unknown, _promptId: string) => {
-        capturedParams = params;
-        async function* generate() {
-          yield {
-            type: StreamEventType.CHUNK,
-            value: {
-              candidates: [
-                {
-                  content: {
-                    role: 'model',
-                    parts: [{ text: 'commit this' }],
-                  },
-                },
-              ],
-              usageMetadata: {
-                promptTokenCount: 10,
-                candidatesTokenCount: 5,
-                totalTokenCount: 15,
-              },
-            },
-          };
-        }
-        return Promise.resolve(generate());
-      },
-    );
-
     const enableManualPlanExitNotices = vi.fn();
-    vi.mocked(LlmChat).mockImplementation(
-      () =>
-        ({
-          sendMessageStream: mockSendMessageStream,
-          enableManualPlanExitNotices,
-        }) as unknown as LlmChat,
+    const send = mockForkStream(
+      [
+        modelChunk([{ text: 'commit this' }], undefined, {
+          ...USAGE,
+          totalTokenCount: 15,
+        }),
+      ],
+      { enableManualPlanExitNotices },
     );
 
-    const mockConfig = {} as unknown as Config;
+    const result = await runFork();
 
-    const result = await runForkedAgent({
-      config: mockConfig,
-      userMessage: 'suggest something',
-      cacheSafeParams: getCacheSafeParams()!,
-    });
-
-    // Verify LlmChat was constructed with the full generationConfig
-    // (including tools) — createForkedChat retains tools for speculation callers
+    // LlmChat keeps the full generationConfig (tools included):
+    // createForkedChat retains tools for speculation callers.
     expect(LlmChat).toHaveBeenCalledOnce();
     const ctorArgs = vi.mocked(LlmChat).mock.calls[0];
     const chatGenerationConfig = ctorArgs[1] as GenerateContentConfig;
-    expect(chatGenerationConfig.tools).toEqual([
-      {
-        functionDeclarations: [
-          { name: 'edit', description: 'Edit a file' },
-          { name: 'shell', description: 'Run a command' },
-        ],
-      },
-    ]);
-    // chatRecordingService and telemetryService must be undefined
-    // to avoid polluting the main session's recordings
+    expect(chatGenerationConfig.tools).toEqual(parentTools('edit', 'shell'));
+    // No chatRecordingService / telemetryService, so the main session's
+    // recordings are not polluted.
     expect(ctorArgs[3]).toBeUndefined(); // chatRecordingService
     expect(ctorArgs[4]).toBeUndefined(); // telemetryService
     expect(enableManualPlanExitNotices).not.toHaveBeenCalled();
 
-    // Verify sendMessageStream was called
-    expect(capturedParams).not.toBeNull();
+    expect(send.mock.calls[0][1]).not.toBeNull();
+    // KEY ASSERTION (Root Cause 1 fix): per-request tools: [] prevents the
+    // model from producing function calls.
+    expect(sentConfig(send)).toBeDefined();
+    expect(sentConfig(send).tools).toEqual([]);
 
-    // KEY ASSERTION: per-request config must have tools: [] to prevent
-    // the model from producing function calls (Root Cause 1 fix)
-    const sendParams = capturedParams as { config?: { tools?: unknown } };
-    expect(sendParams.config).toBeDefined();
-    expect(sendParams.config!.tools).toEqual([]);
-
-    // Verify prompt_id is 'forked_query' and message is passed correctly
-    expect(mockSendMessageStream).toHaveBeenCalledExactlyOnceWith(
+    expect(send).toHaveBeenCalledExactlyOnceWith(
       'test-model',
       expect.objectContaining({
         message: [{ text: 'suggest something' }],
@@ -390,7 +367,6 @@ describe('runForkedAgent (cache path)', () => {
       'forked_query',
     );
 
-    // Verify result is correct
     expect(result.text).toBe('commit this');
     expect(result.usage.inputTokens).toBe(10);
     expect(result.usage.outputTokens).toBe(5);
@@ -398,33 +374,14 @@ describe('runForkedAgent (cache path)', () => {
 
   it('disables model fallbacks without changing the requested route', async () => {
     saveCacheSafeParams({}, [], 'test-model');
+    const send = mockForkStream([modelChunk([{ text: 'review' }])]);
 
-    const mockSendMessageStream = vi.fn(() => {
-      async function* generate() {
-        yield {
-          type: StreamEventType.CHUNK,
-          value: {
-            candidates: [
-              { content: { role: 'model', parts: [{ text: 'review' }] } },
-            ],
-          },
-        };
-      }
-      return Promise.resolve(generate());
-    });
-    vi.mocked(LlmChat).mockImplementation(
-      () =>
-        ({ sendMessageStream: mockSendMessageStream }) as unknown as LlmChat,
-    );
-
-    const result = await runForkedAgent({
-      config: {} as Config,
+    const result = await runFork({
       userMessage: 'review this',
-      cacheSafeParams: getCacheSafeParams()!,
       disableModelFallbacks: true,
     });
 
-    expect(mockSendMessageStream).toHaveBeenCalledWith(
+    expect(send).toHaveBeenCalledWith(
       'test-model',
       expect.any(Object),
       'forked_query',
@@ -434,298 +391,119 @@ describe('runForkedAgent (cache path)', () => {
     expect(result.model).toBe('test-model');
   });
 
-  it('preserves tools: [] even when jsonSchema is provided', async () => {
+  it('keeps the first structured response when the provider emits another schema call', async () => {
     saveCacheSafeParams(
-      {
-        tools: [{ functionDeclarations: [{ name: 'edit' }] }],
-      },
+      { tools: [{ functionDeclarations: [{ name: 'edit' }] }] },
       [],
       'test-model',
     );
-
-    let capturedParams: unknown = null;
-
-    const mockSendMessageStream = vi.fn(
-      (_model: string, params: unknown, _promptId: string) => {
-        capturedParams = params;
-        async function* generate() {
-          yield {
-            type: StreamEventType.CHUNK,
-            value: {
-              candidates: [
-                {
-                  content: {
-                    role: 'model',
-                    parts: [{ text: '{"suggestion":"run tests"}' }],
-                  },
-                },
-              ],
-              usageMetadata: {
-                promptTokenCount: 5,
-                candidatesTokenCount: 3,
-              },
-            },
-          };
-        }
-        return Promise.resolve(generate());
-      },
-    );
-
-    vi.mocked(LlmChat).mockImplementation(
-      () =>
-        ({
-          sendMessageStream: mockSendMessageStream,
-        }) as unknown as LlmChat,
-    );
-
+    const send = mockForkStream([
+      modelChunk(
+        [fnCall('respond_in_schema', { suggestion: 'run tests' })],
+        undefined,
+        { promptTokenCount: 5, candidatesTokenCount: 3 },
+      ),
+      modelChunk([fnCall('respond_in_schema', {})]),
+    ]);
     const schema = {
       type: 'object',
       properties: { suggestion: { type: 'string' } },
     };
 
-    const result = await runForkedAgent({
-      config: {} as Config,
+    const result = await runFork({
       userMessage: 'suggest',
-      cacheSafeParams: getCacheSafeParams()!,
       jsonSchema: schema,
     });
 
-    const sendParams = capturedParams as {
-      config?: {
-        tools?: unknown;
-        responseMimeType?: string;
-        responseJsonSchema?: unknown;
-      };
-    };
-    // tools: [] must still be present alongside JSON schema options
-    expect(sendParams.config!.tools).toEqual([]);
-    expect(sendParams.config!.responseMimeType).toBe('application/json');
-    expect(sendParams.config!.responseJsonSchema).toBe(schema);
-
-    // Verify JSON was parsed correctly
+    expect(sentConfig(send).tools).toEqual([
+      {
+        functionDeclarations: [
+          {
+            name: 'respond_in_schema',
+            description: 'Provide the response in the required schema',
+            parameters: schema,
+          },
+        ],
+      },
+    ]);
+    expect(sentConfig(send).toolConfig).toEqual({
+      functionCallingConfig: {
+        mode: 'ANY',
+        allowedFunctionNames: ['respond_in_schema'],
+      },
+    });
     expect(result.jsonResult).toEqual({ suggestion: 'run tests' });
   });
 
-  it('routes a cross-auth fast model through a runtime content-generator view', async () => {
+  /** A `fast` selector naming an OpenAI model other than the parent's. */
+  async function expectFastModelRoute(
+    parentModel: string,
+    parentAuth: AuthType,
+    configuredOpenAi: string[],
+  ) {
     const fastModel = 'deepseek-v4-flash';
-    const runtimeView = makeRuntimeView(fastModel);
-    vi.mocked(createRuntimeContentGeneratorView).mockResolvedValue(runtimeView);
-
-    saveCacheSafeParams(
-      {
-        systemInstruction: 'You are helpful',
-      },
-      [{ role: 'user', parts: [{ text: 'hello' }] }],
-      'claude-main',
+    vi.mocked(createRuntimeContentGeneratorView).mockResolvedValue(
+      makeRuntimeView(fastModel),
     );
-
-    const mockSendMessageStream = vi.fn(
-      (_model: string, _params: unknown, _promptId: string) => {
-        async function* generate() {
-          yield {
-            type: StreamEventType.CHUNK,
-            value: {
-              candidates: [
-                {
-                  content: {
-                    role: 'model',
-                    parts: [{ text: 'commit this' }],
-                  },
-                },
-              ],
-            },
-          };
-        }
-        return Promise.resolve(generate());
-      },
-    );
-
-    vi.mocked(LlmChat).mockImplementation(
-      () =>
-        ({
-          sendMessageStream: mockSendMessageStream,
-        }) as unknown as LlmChat,
-    );
-
-    const mockConfig = {
-      getModel: vi.fn().mockReturnValue('claude-main'),
-      getContentGeneratorConfig: vi.fn().mockReturnValue({
-        model: 'claude-main',
-        authType: AuthType.USE_ANTHROPIC,
-      }),
-      getFastModel: vi
-        .fn()
-        .mockReturnValue(`${AuthType.USE_OPENAI}:${fastModel}`),
-      getAllConfiguredModels: vi.fn((authTypes?: AuthType[]) =>
-        authTypes?.includes(AuthType.USE_OPENAI)
-          ? [
-              {
-                id: fastModel,
-                label: fastModel,
-                authType: AuthType.USE_OPENAI,
-              },
-            ]
-          : [],
-      ),
-    } as unknown as Config;
-
-    const result = await runForkedAgent({
-      config: mockConfig,
-      userMessage: 'suggest something',
-      cacheSafeParams: getCacheSafeParams()!,
-      model: 'fast',
-    });
-
-    expect(result.text).toBe('commit this');
-    expect(result.model).toBe(fastModel);
-    expect(createRuntimeContentGeneratorView).toHaveBeenCalledWith(
-      mockConfig,
-      mockConfig,
-      fastModel,
-      { authType: AuthType.USE_OPENAI },
-    );
-    expect(mockSendMessageStream).toHaveBeenCalledWith(
-      fastModel,
-      expect.objectContaining({
-        message: [{ text: 'suggest something' }],
-      }),
-      'forked_query',
-    );
-  });
-
-  it('routes a same-auth fast model through a runtime content-generator view when the model differs', async () => {
-    const fastModel = 'deepseek-v4-flash';
-    const runtimeView = makeRuntimeView(fastModel);
-    vi.mocked(createRuntimeContentGeneratorView).mockResolvedValue(runtimeView);
-
-    saveCacheSafeParams(
-      {
-        systemInstruction: 'You are helpful',
-      },
-      [{ role: 'user', parts: [{ text: 'hello' }] }],
-      'gpt-4',
-    );
-
-    const mockSendMessageStream = vi.fn(
-      (_model: string, _params: unknown, _promptId: string) => {
-        async function* generate() {
-          yield {
-            type: StreamEventType.CHUNK,
-            value: {
-              candidates: [
-                {
-                  content: {
-                    role: 'model',
-                    parts: [{ text: 'commit this' }],
-                  },
-                },
-              ],
-            },
-          };
-        }
-        return Promise.resolve(generate());
-      },
-    );
-
-    vi.mocked(LlmChat).mockImplementation(
-      () =>
-        ({
-          sendMessageStream: mockSendMessageStream,
-        }) as unknown as LlmChat,
-    );
-
-    const mockConfig = {
-      getModel: vi.fn().mockReturnValue('gpt-4'),
-      getContentGeneratorConfig: vi.fn().mockReturnValue({
-        model: 'gpt-4',
-        authType: AuthType.USE_OPENAI,
-      }),
-      getFastModel: vi
-        .fn()
-        .mockReturnValue(`${AuthType.USE_OPENAI}:${fastModel}`),
-      getAllConfiguredModels: vi.fn((authTypes?: AuthType[]) =>
-        authTypes?.includes(AuthType.USE_OPENAI)
-          ? [
-              {
-                id: 'gpt-4',
-                label: 'gpt-4',
-                authType: AuthType.USE_OPENAI,
-              },
-              {
-                id: fastModel,
-                label: fastModel,
-                authType: AuthType.USE_OPENAI,
-              },
-            ]
-          : [],
-      ),
-    } as unknown as Config;
-
-    const result = await runForkedAgent({
-      config: mockConfig,
-      userMessage: 'suggest something',
-      cacheSafeParams: getCacheSafeParams()!,
-      model: 'fast',
-    });
-
-    expect(result.text).toBe('commit this');
-    expect(result.model).toBe(fastModel);
-    expect(createRuntimeContentGeneratorView).toHaveBeenCalledWith(
-      mockConfig,
-      mockConfig,
-      fastModel,
-      { authType: AuthType.USE_OPENAI },
-    );
-    expect(mockSendMessageStream).toHaveBeenCalledWith(
-      fastModel,
-      expect.objectContaining({
-        message: [{ text: 'suggest something' }],
-      }),
-      'forked_query',
-    );
-  });
-
-  it('falls back to the parent model when `fast` cannot resolve (no fast model configured)', async () => {
-    // Public API footgun: a caller passing `model: 'fast'` while the user
-    // has no fast model configured must not see the literal `'fast'` sent
-    // to the provider. The forked path should inherit the parent model in
-    // that case, matching the subagent path's semantics.
     saveCacheSafeParams(
       { systemInstruction: 'You are helpful' },
-      [{ role: 'user', parts: [{ text: 'hello' }] }],
+      [userText('hello')],
+      parentModel,
+    );
+    const send = mockForkStream([modelChunk([{ text: 'commit this' }])]);
+    const mockConfig = {
+      getModel: vi.fn().mockReturnValue(parentModel),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        model: parentModel,
+        authType: parentAuth,
+      }),
+      getFastModel: vi
+        .fn()
+        .mockReturnValue(`${AuthType.USE_OPENAI}:${fastModel}`),
+      getAllConfiguredModels: vi.fn((authTypes?: AuthType[]) =>
+        authTypes?.includes(AuthType.USE_OPENAI)
+          ? [...configuredOpenAi, fastModel].map((id) => ({
+              id,
+              label: id,
+              authType: AuthType.USE_OPENAI,
+            }))
+          : [],
+      ),
+    } as unknown as Config;
+
+    const result = await runFork({ config: mockConfig, model: 'fast' });
+
+    expect(result.text).toBe('commit this');
+    expect(result.model).toBe(fastModel);
+    expect(createRuntimeContentGeneratorView).toHaveBeenCalledWith(
+      mockConfig,
+      mockConfig,
+      fastModel,
+      { authType: AuthType.USE_OPENAI },
+    );
+    expect(send).toHaveBeenCalledWith(
+      fastModel,
+      expect.objectContaining({ message: [{ text: 'suggest something' }] }),
+      'forked_query',
+    );
+  }
+
+  it('routes a cross-auth fast model through a runtime content-generator view', () =>
+    expectFastModelRoute('claude-main', AuthType.USE_ANTHROPIC, []));
+
+  it('routes a same-auth fast model through a runtime content-generator view when the model differs', () =>
+    expectFastModelRoute('gpt-4', AuthType.USE_OPENAI, ['gpt-4']));
+
+  it('falls back to the parent model when `fast` cannot resolve (no fast model configured)', async () => {
+    // Public API footgun: `model: 'fast'` with no fast model configured must
+    // not send the literal `'fast'` to the provider; the forked path inherits
+    // the parent model, matching the subagent path's semantics.
+    saveCacheSafeParams(
+      { systemInstruction: 'You are helpful' },
+      [userText('hello')],
       'parent-model',
     );
-
-    let capturedModel: string | undefined;
-    const mockSendMessageStream = vi.fn(
-      (model: string, _params: unknown, _promptId: string) => {
-        capturedModel = model;
-        async function* generate() {
-          yield {
-            type: StreamEventType.CHUNK,
-            value: {
-              candidates: [
-                {
-                  content: {
-                    role: 'model',
-                    parts: [{ text: 'ok' }],
-                  },
-                },
-              ],
-            },
-          };
-        }
-        return Promise.resolve(generate());
-      },
-    );
-
-    vi.mocked(LlmChat).mockImplementation(
-      () =>
-        ({
-          sendMessageStream: mockSendMessageStream,
-        }) as unknown as LlmChat,
-    );
-
+    const send = mockForkStream([modelChunk([{ text: 'ok' }])]);
     const mockConfig = {
       getModel: vi.fn().mockReturnValue('parent-model'),
       getContentGeneratorConfig: vi.fn().mockReturnValue({
@@ -736,14 +514,9 @@ describe('runForkedAgent (cache path)', () => {
       getAllConfiguredModels: vi.fn(() => []),
     } as unknown as Config;
 
-    const result = await runForkedAgent({
-      config: mockConfig,
-      userMessage: 'suggest something',
-      cacheSafeParams: getCacheSafeParams()!,
-      model: 'fast',
-    });
+    const result = await runFork({ config: mockConfig, model: 'fast' });
 
-    expect(capturedModel).toBe('parent-model');
+    expect(send.mock.calls[0][0]).toBe('parent-model');
     expect(result.model).toBe('parent-model');
     expect(createRuntimeContentGeneratorView).not.toHaveBeenCalled();
   });
@@ -752,348 +525,103 @@ describe('runForkedAgent (cache path)', () => {
     saveCacheSafeParams(
       {
         systemInstruction: 'You are helpful',
-        tools: [
-          {
-            functionDeclarations: [
-              { name: 'edit', description: 'Edit a file' },
-              { name: 'shell', description: 'Run a command' },
-            ],
-          },
-        ],
+        tools: parentTools('edit', 'shell'),
       },
-      [{ role: 'user', parts: [{ text: 'hello' }] }],
+      [userText('hello')],
       'test-model',
     );
+    const send = mockForkStream([
+      modelChunk([{ text: '{"suggestion":"run tests"}' }], undefined, USAGE),
+    ]);
 
-    let capturedParams: unknown = null;
+    await runFork({ preserveTools: true });
 
-    const mockSendMessageStream = vi.fn(
-      (_model: string, params: unknown, _promptId: string) => {
-        capturedParams = params;
-        async function* generate() {
-          yield {
-            type: StreamEventType.CHUNK,
-            value: {
-              candidates: [
-                {
-                  content: {
-                    role: 'model',
-                    parts: [{ text: '{"suggestion":"run tests"}' }],
-                  },
-                },
-              ],
-              usageMetadata: {
-                promptTokenCount: 10,
-                candidatesTokenCount: 5,
-              },
-            },
-          };
-        }
-        return Promise.resolve(generate());
-      },
-    );
-
-    vi.mocked(LlmChat).mockImplementation(
-      () =>
-        ({
-          sendMessageStream: mockSendMessageStream,
-        }) as unknown as LlmChat,
-    );
-
-    await runForkedAgent({
-      config: {} as Config,
-      userMessage: 'suggest something',
-      cacheSafeParams: getCacheSafeParams()!,
-      preserveTools: true,
-    });
-
-    const sendParams = capturedParams as {
-      config?: { tools?: unknown };
-    };
-    expect(sendParams.config!.tools).toBeUndefined();
+    expect(sentConfig(send).tools).toBeUndefined();
   });
 
   it('strips tools when preserveTools is explicitly false', async () => {
-    saveCacheSafeParams(
-      {
-        tools: [
-          {
-            functionDeclarations: [
-              { name: 'edit', description: 'Edit a file' },
-            ],
-          },
-        ],
-      },
-      [],
-      'test-model',
-    );
+    saveCacheSafeParams({ tools: parentTools('edit') }, [], 'test-model');
+    const send = mockForkStream([modelChunk([{ text: 'ok' }])]);
 
-    let capturedParams: unknown = null;
+    await runFork({ preserveTools: false });
 
-    const mockSendMessageStream = vi.fn(
-      (_model: string, params: unknown, _promptId: string) => {
-        capturedParams = params;
-        async function* generate() {
-          yield {
-            type: StreamEventType.CHUNK,
-            value: {
-              candidates: [
-                {
-                  content: {
-                    role: 'model',
-                    parts: [{ text: 'ok' }],
-                  },
-                },
-              ],
-            },
-          };
-        }
-        return Promise.resolve(generate());
-      },
-    );
-
-    vi.mocked(LlmChat).mockImplementation(
-      () =>
-        ({
-          sendMessageStream: mockSendMessageStream,
-        }) as unknown as LlmChat,
-    );
-
-    await runForkedAgent({
-      config: {} as Config,
-      userMessage: 'suggest something',
-      cacheSafeParams: getCacheSafeParams()!,
-      preserveTools: false,
-    });
-
-    const sendParams = capturedParams as {
-      config?: { tools?: unknown };
-    };
-    expect(sendParams.config!.tools).toEqual([]);
+    expect(sentConfig(send).tools).toEqual([]);
   });
 
-  it('filters out functionCall parts when preserveTools is true', async () => {
-    saveCacheSafeParams(
-      {
-        systemInstruction: 'You are helpful',
-        tools: [
-          {
-            functionDeclarations: [
-              { name: 'edit', description: 'Edit a file' },
-            ],
-          },
-        ],
-      },
-      [],
-      'test-model',
-    );
+  it.each([undefined, 'container'] as const)(
+    'filters out functionCall parts with preserveTools and operator backend %s',
+    async (backend) => {
+      saveCacheSafeParams(
+        { systemInstruction: 'You are helpful', tools: parentTools('edit') },
+        [],
+        'test-model',
+      );
+      mockForkStream([
+        modelChunk(
+          [{ text: 'some text' }, fnCall('edit', { file: 'a.ts' })],
+          undefined,
+          { ...USAGE, totalTokenCount: 15 },
+        ),
+      ]);
 
-    const mockSendMessageStream = vi.fn(
-      (_model: string, _params: unknown, _promptId: string) => {
-        async function* generate() {
-          yield {
-            type: StreamEventType.CHUNK,
-            value: {
-              candidates: [
-                {
-                  content: {
-                    role: 'model',
-                    parts: [
-                      { text: 'some text' },
-                      {
-                        functionCall: {
-                          name: 'edit',
-                          args: { file: 'a.ts' },
-                        },
-                      },
-                    ],
-                  },
-                },
-              ],
-              usageMetadata: {
-                promptTokenCount: 10,
-                candidatesTokenCount: 5,
-                totalTokenCount: 15,
-              },
-            },
-          };
-        }
-        return Promise.resolve(generate());
-      },
-    );
+      const result = await runFork({
+        config: { getAgentExecutionBackend: () => backend } as Config,
+        preserveTools: true,
+      });
 
-    vi.mocked(LlmChat).mockImplementation(
-      () =>
-        ({
-          sendMessageStream: mockSendMessageStream,
-        }) as unknown as LlmChat,
-    );
-
-    const result = await runForkedAgent({
-      config: {} as Config,
-      userMessage: 'suggest something',
-      cacheSafeParams: getCacheSafeParams()!,
-      preserveTools: true,
-    });
-
-    expect(result.text).toBe('some text');
-  });
+      expect(result.text).toBe('some text');
+    },
+  );
 
   it('returns null text when response contains only functionCall parts', async () => {
     saveCacheSafeParams(
-      {
-        systemInstruction: 'You are helpful',
-        tools: [
-          {
-            functionDeclarations: [
-              { name: 'edit', description: 'Edit a file' },
-            ],
-          },
-        ],
-      },
+      { systemInstruction: 'You are helpful', tools: parentTools('edit') },
       [],
       'test-model',
     );
+    mockForkStream([
+      modelChunk([fnCall('edit', { file: 'a.ts' })], undefined, {
+        ...USAGE,
+        totalTokenCount: 15,
+      }),
+    ]);
 
-    const mockSendMessageStream = vi.fn(
-      (_model: string, _params: unknown, _promptId: string) => {
-        async function* generate() {
-          yield {
-            type: StreamEventType.CHUNK,
-            value: {
-              candidates: [
-                {
-                  content: {
-                    role: 'model',
-                    parts: [
-                      {
-                        functionCall: {
-                          name: 'edit',
-                          args: { file: 'a.ts' },
-                        },
-                      },
-                    ],
-                  },
-                },
-              ],
-              usageMetadata: {
-                promptTokenCount: 10,
-                candidatesTokenCount: 5,
-                totalTokenCount: 15,
-              },
-            },
-          };
-        }
-        return Promise.resolve(generate());
-      },
-    );
-
-    vi.mocked(LlmChat).mockImplementation(
-      () =>
-        ({
-          sendMessageStream: mockSendMessageStream,
-        }) as unknown as LlmChat,
-    );
-
-    const result = await runForkedAgent({
-      config: {} as Config,
-      userMessage: 'suggest something',
-      cacheSafeParams: getCacheSafeParams()!,
-      preserveTools: true,
-    });
+    const result = await runFork({ preserveTools: true });
 
     expect(result.text).toBeNull();
   });
 
-  it('preserves tools and includes jsonSchema fields when both preserveTools and jsonSchema are set', async () => {
+  it('preserves the parent tool prefix for structured suggestions', async () => {
     saveCacheSafeParams(
       {
         systemInstruction: 'You are helpful',
-        tools: [
-          {
-            functionDeclarations: [
-              { name: 'edit', description: 'Edit a file' },
-              { name: 'shell', description: 'Run a command' },
-            ],
-          },
-        ],
+        tools: parentTools('edit', 'shell'),
       },
       [],
       'test-model',
     );
-
-    let capturedParams: unknown = null;
-
-    const mockSendMessageStream = vi.fn(
-      (_model: string, params: unknown, _promptId: string) => {
-        capturedParams = params;
-        async function* generate() {
-          yield {
-            type: StreamEventType.CHUNK,
-            value: {
-              candidates: [
-                {
-                  content: {
-                    role: 'model',
-                    parts: [{ text: '{"suggestion":"run tests"}' }],
-                  },
-                },
-              ],
-              usageMetadata: {
-                promptTokenCount: 10,
-                candidatesTokenCount: 5,
-              },
-            },
-          };
-        }
-        return Promise.resolve(generate());
-      },
-    );
-
-    vi.mocked(LlmChat).mockImplementation(
-      () =>
-        ({
-          sendMessageStream: mockSendMessageStream,
-        }) as unknown as LlmChat,
-    );
-
+    const send = mockForkStream([
+      modelChunk([{ text: '{"suggestion":"run tests"}' }], undefined, USAGE),
+    ]);
     const schema = {
       type: 'object',
       properties: { suggestion: { type: 'string' } },
     };
 
-    await runForkedAgent({
-      config: {} as Config,
-      userMessage: 'suggest something',
-      cacheSafeParams: getCacheSafeParams()!,
-      preserveTools: true,
-      jsonSchema: schema,
-    });
+    const result = await runFork({ preserveTools: true, jsonSchema: schema });
 
-    const sendParams = capturedParams as {
-      config?: {
-        tools?: unknown;
-        responseMimeType?: string;
-        responseJsonSchema?: unknown;
-      };
-    };
-    expect(sendParams.config!.tools).toBeUndefined();
-    expect(sendParams.config!.responseMimeType).toBe('application/json');
-    expect(sendParams.config!.responseJsonSchema).toBe(schema);
+    const config = sentConfig(send);
+    expect(config.tools).toBeUndefined();
+    expect(config.toolConfig).toBeUndefined();
+    expect(config.responseMimeType).toBe('application/json');
+    expect(config.responseJsonSchema).toEqual(schema);
+    expect(result.jsonResult).toEqual({ suggestion: 'run tests' });
   });
 
   it('throws when CacheSafeParams are not available', async () => {
-    const mockConfig = {} as unknown as Config;
-
-    // Deliberately do not save any CacheSafeParams
-    const params = getCacheSafeParams();
-    expect(params).toBeNull();
-
-    // runForkedAgent cache path requires cacheSafeParams to be passed explicitly;
-    // the caller (btwCommand, suggestionGenerator) is responsible for checking
-    // getCacheSafeParams() and handling null before calling runForkedAgent.
-    // This test verifies the LlmChat path is taken when cacheSafeParams present.
-    // The null guard lives in the callers.
-    void mockConfig; // suppress unused
+    // Deliberately saves nothing. The cache path takes cacheSafeParams
+    // explicitly; the null guard lives in the callers (btwCommand,
+    // suggestionGenerator), which check getCacheSafeParams() first.
+    expect(getCacheSafeParams()).toBeNull();
   });
 });

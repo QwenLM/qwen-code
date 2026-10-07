@@ -8,7 +8,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { CodeModeBindingPlan } from '../tools/code-mode.js';
 import { resolveBundleDir } from '../utils/bundlePaths.js';
 import {
@@ -56,7 +56,7 @@ function hostCommand(): { command: string; args: string[] } {
       command: process.execPath,
       args: [
         '--import',
-        require.resolve('tsx'),
+        pathToFileURL(require.resolve('tsx')).href,
         path.join(path.dirname(currentFile), 'host.ts'),
       ],
     };

@@ -125,7 +125,8 @@ export type HookExecutionOutcome =
   | 'success' // Hook executed successfully
   | 'blocking' // Hook blocked the operation
   | 'non_blocking_error' // Hook failed but doesn't block
-  | 'cancelled'; // Hook was cancelled/aborted
+  | 'cancelled' // Hook was cancelled/aborted by the caller
+  | 'timeout'; // Hook ran past its timeout; distinct from a user cancel
 
 /**
  * Context provided to function hooks for state access
@@ -388,6 +389,27 @@ export function createHookOutput(
     default:
       return new DefaultHookOutput(data);
   }
+}
+
+/**
+ * Whether a hook's output is a blocking decision on this event: for PreToolUse
+ * the permission decision wins over the generic `decision` field. The HTTP
+ * runner and the progress reporting both use this one test, so they report
+ * such a decision the same way.
+ *
+ * It covers decisions only. Output that stops the turn with `continue: false`,
+ * or a PreToolUse `ask`, also keeps a tool call from proceeding but is not a
+ * blocking decision here, and the function runner applies its own test that
+ * counts `continue: false`. Reporting a stop is left to the progress display.
+ */
+export function isBlockingHookOutput(
+  eventName: string,
+  data: Partial<HookOutput>,
+): boolean {
+  const output = createHookOutput(eventName, data);
+  return output instanceof PreToolUseHookOutput
+    ? output.isDenied()
+    : output.isBlockingDecision();
 }
 
 /**
@@ -1340,6 +1362,9 @@ export function detectTodoChanges(
  * Hook execution result
  */
 export interface HookExecutionResult {
+  /** True only if a managed command never starts or its owned cgroup is empty. */
+  processTreeDrained?: boolean;
+  httpRequestState?: 'not_started' | 'response_received' | 'outcome_unknown';
   hookConfig: HookConfig;
   eventName: HookEventName;
   success: boolean;

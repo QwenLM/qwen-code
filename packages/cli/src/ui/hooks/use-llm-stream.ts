@@ -83,6 +83,7 @@ import {
   MAX_BACKGROUND_NOTIFICATION_QUEUE,
   type BackgroundNotificationKind,
   renderGoalContinuationTurn,
+  getApiHistoryPromptId,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -558,6 +559,10 @@ export const useLlmStream = (
   onDebugMessage: (message: string) => void,
   handleSlashCommand: (
     cmd: PartListUnion,
+    oneTimeShellAllowlist?: Set<string>,
+    overwriteConfirmed?: boolean,
+    existingInvocationItemId?: number,
+    invocationPromptId?: string,
   ) => Promise<SlashCommandProcessorResult | false>,
   shellModeActive: boolean,
   getPreferredEditor: () => EditorType | undefined,
@@ -1583,6 +1588,7 @@ export const useLlmStream = (
       submitType: SendMessageType,
       submittedPrompt: string | undefined,
       preserveTurnOwnership: boolean,
+      shellModeIntent?: boolean,
     ): Promise<{
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
@@ -1641,7 +1647,13 @@ export const useLlmStream = (
 
         // Handle UI-only commands first
         const slashCommandResult = isSlashCommand(trimmedQuery)
-          ? await handleSlashCommand(trimmedQuery)
+          ? await handleSlashCommand(
+              trimmedQuery,
+              undefined,
+              undefined,
+              undefined,
+              submitType === SendMessageType.UserQuery ? prompt_id : undefined,
+            )
           : false;
 
         if (slashCommandResult) {
@@ -1654,6 +1666,11 @@ export const useLlmStream = (
                 args: toolArgs,
                 isClientInitiated: true,
                 prompt_id,
+                // Client-direct provenance (omni policy design): slash
+                // commands scheduling a tool are the in-process `client`
+                // channel — subject to the same media-policy modelAccess
+                // gate as model calls, never to fixed-policy semantics.
+                executionOrigin: { kind: 'client' },
               };
               registerToolBatch(toolCallRequest);
               scheduleToolCalls([toolCallRequest], abortSignal);
@@ -1725,7 +1742,12 @@ export const useLlmStream = (
           }
         }
 
-        if (shellModeActive && handleShellCommand(trimmedQuery, abortSignal)) {
+        // A queued submission carries the shell intent recorded when the
+        // user submitted it; the live flag may have flipped while the
+        // entry waited in the queue (#11626). Other producers record no
+        // intent and route on the live flag, as before.
+        const routeToShell = shellModeIntent ?? shellModeActive;
+        if (routeToShell && handleShellCommand(trimmedQuery, abortSignal)) {
           return { queryToSend: null, shouldProceed: false };
         }
 
@@ -3039,8 +3061,6 @@ export const useLlmStream = (
               llmMessageBuffer = '';
               assistantOutputStarted = false;
               break;
-            case ServerLlmEventType.ActiveGoal:
-              break;
             case ServerLlmEventType.GoalState:
               if (event.cause && shouldDisplayGoalStateCause(event.cause)) {
                 flushBufferedStreamEvents();
@@ -3203,6 +3223,16 @@ export const useLlmStream = (
         }
 
         if (executableToolCallRequests.length > 0) {
+          // The scheduler may complete a fast tool before this stream's caller
+          // regains control. Seal streamed assistant text first so the tool
+          // group cannot enter static history ahead of it.
+          if (pendingHistoryItemRef.current) {
+            commitItemInOrder(
+              pendingHistoryItemRef.current,
+              userMessageTimestamp,
+            );
+            setPendingHistoryItem(null);
+          }
           if (toolContinuationOwner) {
             for (const request of executableToolCallRequests) {
               continuationOwnersByToolCallIdRef.current.set(
@@ -3290,6 +3320,8 @@ export const useLlmStream = (
         const message = messages[index];
         if (GOAL_COMMAND_RE.test(message)) {
           await handleSlashCommand(message);
+          // The command has already taken effect; restoring it after cancelled
+          // steering preparation would execute that side effect again.
           continue;
         }
 
@@ -3299,11 +3331,24 @@ export const useLlmStream = (
         if (isAtCommand(message)) {
           const timeout = new AbortController();
           const atCommandSignal = AbortSignal.any([signal, timeout.signal]);
-          const timeoutId = setTimeout(() => {
-            timeout.abort(
-              new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
-            );
-          }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
+          // URL media refs are exempt from the fixed mid-turn budget: the
+          // omni URL path downloads and uploads media end-to-end inside
+          // resolveAtCommandQuery under its own watchdogs (30s header, 60s
+          // idle), so a 10s cap would structurally kill every mid-turn
+          // @https reference — and inside the resolver the timeout abort is
+          // indistinguishable from a user cancel, so the message would be
+          // dropped quietly rather than failing with a named error.
+          // Filesystem resolution keeps the cap unchanged.
+          const hasUrlMediaRef =
+            /@https?:\/\//i.test(message) &&
+            (config.isOmniEnabled?.() ?? false);
+          const timeoutId = hasUrlMediaRef
+            ? undefined
+            : setTimeout(() => {
+                timeout.abort(
+                  new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
+                );
+              }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
           try {
             const atCommandResult = await resolveWithAbort(
               atCommandSignal,
@@ -3522,6 +3567,13 @@ export const useLlmStream = (
         onRequestStarted?: () => void;
         steerInput?: SteerInput;
         submittedPrompt?: string;
+        /**
+         * Shell intent recorded when the user submitted this query
+         * (queued submissions carry it from the message queue). When set,
+         * it overrides the live `shellModeActive` flag for shell routing,
+         * so a flip after enqueue cannot misroute the entry (#11626).
+         */
+        shellMode?: boolean;
         goal?: QueuedGoalTurn;
         claimGoalTurn?: () => QueuedGoalTurn | undefined;
         userAdmission?: DirectUserAdmission;
@@ -3758,6 +3810,15 @@ export const useLlmStream = (
 
       const releaseSubmissionActivity =
         retainSubmissionActivity(submissionGeneration);
+      if (
+        submitType === SendMessageType.UserQuery &&
+        !allowConcurrentBtwDuringResponse &&
+        !isDetachedToolContinuation
+      ) {
+        // Media preparation can upload before the model stream starts.
+        // Submission activity owns clearing this state on every exit path.
+        setIsResponding(true);
+      }
       const submission = promptIdContext.run(prompt_id, async () => {
         let queuedGoal = metadata?.goal;
         let preparedQuery: {
@@ -3785,6 +3846,7 @@ export const useLlmStream = (
                     submittedPrompt,
                     allowConcurrentBtwDuringResponse ||
                       isDetachedToolContinuation,
+                    metadata?.shellMode,
                   );
         } catch (error) {
           await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
@@ -4129,7 +4191,10 @@ export const useLlmStream = (
                     errorType: response.errorType,
                     executionStatus: response.executionStatus,
                   },
-                  goalToolResultProvenance(request),
+                  goalToolResultProvenance(
+                    request,
+                    finalized[index].responseParts,
+                  ),
                 );
               },
             );
@@ -4239,7 +4304,7 @@ export const useLlmStream = (
             });
           }
         } finally {
-          if (cleanupReviewLease) {
+          if (cleanupReviewLease && !config.getShellExecutionSandbox?.()) {
             cleanupReviewWorktreeLeases({
               sessionId: config.getSessionId(),
               promptId: prompt_id!,
@@ -4516,7 +4581,10 @@ export const useLlmStream = (
       };
       const orphanedEntries: Part[][] = [];
       try {
-        const history = llmClient?.getHistoryShallow?.() ?? [];
+        const history =
+          llmClient?.getChat?.()?.getHistoryForRecovery?.() ??
+          llmClient?.getHistoryShallow?.() ??
+          [];
         for (let i = history.length - 1; i >= 0; i--) {
           const entry = history[i];
           if (!entry || entry.role !== 'user') break;
@@ -5415,7 +5483,10 @@ export const useLlmStream = (
             errorType: response.errorType,
             executionStatus: response.executionStatus,
           },
-          goalToolResultProvenance(request),
+          goalToolResultProvenance(
+            request,
+            finalizedResponses[index].responseParts,
+          ),
         );
       });
 
@@ -5995,10 +6066,10 @@ export const useLlmStream = (
         // Reasoning renders above the streaming answer.
         pendingThoughtItem,
         ...pendingAssistantItems,
+        pendingToolCallGroupDisplay,
         pendingHistoryItem,
         pendingRetryErrorItem,
         pendingRetryCountdownItem,
-        pendingToolCallGroupDisplay,
       ].filter((i) => i !== undefined && i !== null),
     [
       pendingThoughtItem,
@@ -6060,6 +6131,11 @@ export const useLlmStream = (
             const fileName = path.basename(filePath);
             const toolCallWithSnapshotFileName = `${timestamp}-${fileName}-${toolName}.json`;
             const clientHistory = llmClient?.getHistoryShallow();
+            // JSON.stringify drops the Symbol-keyed prompt identity, so
+            // persist it as a parallel array for /restore to re-mark against.
+            const promptIds = clientHistory?.map(
+              (content) => getApiHistoryPromptId(content) ?? null,
+            );
             const toolCallWithSnapshotFilePath = path.join(
               checkpointDir,
               toolCallWithSnapshotFileName,
@@ -6071,6 +6147,7 @@ export const useLlmStream = (
                 {
                   history,
                   clientHistory,
+                  ...(promptIds?.some(Boolean) ? { promptIds } : {}),
                   toolCall: {
                     name: toolCall.request.name,
                     args: toolCall.request.args,
@@ -6343,11 +6420,17 @@ export const useLlmStream = (
     };
   }, [admitNotification, config]);
 
-  // Register background workflow completions onto the shared queue. The
-  // registry keeps this separate from its terminal-bell subscriber.
+  // Register background and client-started foreground workflow completions.
+  // The registry keeps this separate from its terminal-bell subscriber.
   useEffect(() => {
     const registry = config.getWorkflowRunRegistry();
     registry.setCompletionCallback((displayText, modelText, meta) => {
+      // The result must remain visible even if the model request is delayed
+      // or fails. Background notifications retain their existing drain timing.
+      const displayed = meta.isBackgrounded === false;
+      if (displayed) {
+        addItem({ type: 'notification', text: displayText }, Date.now());
+      }
       admitNotification({
         displayText,
         modelText,
@@ -6355,12 +6438,13 @@ export const useLlmStream = (
         kind: 'workflow',
         taskId: meta.runId,
         todoWorkChainId: meta.todoWorkChainId,
+        displayed,
       });
     });
     return () => {
       registry.setCompletionCallback(undefined);
     };
-  }, [admitNotification, config]);
+  }, [addItem, admitNotification, config]);
 
   // Register monitor notification callback onto the shared queue.
   useEffect(() => {

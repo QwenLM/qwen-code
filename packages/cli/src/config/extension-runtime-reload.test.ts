@@ -27,6 +27,11 @@ describe('reloadPluginsRuntime', () => {
           commands: ['a', 'b'],
           skills: [{ name: 's1' }],
           agents: [{ name: 'a1' }, { name: 'a2' }],
+          workflows: [
+            { name: 'ext:w1' },
+            { name: 'ext:w2' },
+            { name: 'ext:w3' },
+          ],
           hooks: {
             UserPromptSubmit: [
               {
@@ -59,6 +64,7 @@ describe('reloadPluginsRuntime', () => {
       commandCount: 2,
       skillCount: 1,
       agentCount: 2,
+      workflowCount: 3,
       hookCount: 2,
       mcpServerCount: 1,
       lspServerCount: 1,

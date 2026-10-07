@@ -200,7 +200,6 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [96. review-scan · Scan for PRs with new feedback — Same admission as the scheduled scan below. In-repo PRs fail CLOSED on a missing…](#af-096)
 - [97. review-scan · Scan for PRs with new feedback — Skip-labeled PRs are excluded HERE, not only at the address gate: that gate…](#af-097)
 - [98. review-scan · Scan for PRs with new feedback — Dispatch-pending marker: a scan that dispatched this PR within…](#af-098)
-- [99. review-scan · Scan for PRs with new feedback — Delay-window fallback: a review run parked BEFORE its job starts (the 10-minute…](#af-099)
 - [100. review-scan · Scan for PRs with new feedback — Auto-rerun a check that died on INFRASTRUCTURE, not the code (see…](#af-100)
 - [101. review-scan · Scan for PRs with new feedback — startedAt is the only staleness clock: a check blocks only if it started within…](#af-101)
 - [102. review-scan · Scan for PRs with new feedback — Ack-on-defer (#8888): a real-time human review routed this scan straight here,…](#af-102)
@@ -2770,28 +2769,6 @@ after the metadata fetch, so it consumes inspection budget;
 acceptable because the case is rare (a PR dispatched <30m ago).
 ```
 
-<a id="af-099"></a>
-
-### 99. review-scan · Scan for PRs with new feedback — Delay-window fallback: a review run parked BEFORE its job starts (the 10-minute…
-
-In `review-scan` · `Scan for PRs with new feedback`.
-
-```text
-Delay-window fallback: a review run parked BEFORE its job
-starts (the 10-minute environment wait) has no review-pr
-check-run yet, but a push now would still supersede it
-(#10110): a parked or pre-threshold run yields to the push
-and its work is discarded exactly as the old synchronize
-cancel did. Only pull_request_target runs share the PR-scoped
-concurrency group — comment/review-triggered runs use per-run
-groups that a push never queues behind or supersedes, so
-holding the round for one would defer autofix for nothing
-(R2-1). Match against the
-scan's REVIEW_RUNS_JSON fetch — one page of the review
-workflow's runs, empty on lookup failure — by immutable head
-SHA or PR number, never by fork-controlled bare branch name.
-```
-
 <a id="af-100"></a>
 
 ### 100. review-scan · Scan for PRs with new feedback — Auto-rerun a check that died on INFRASTRUCTURE, not the code (see…
@@ -4293,15 +4270,19 @@ reviews (QWEN_CI_REVIEW_EXPECTED_HEAD_SHA) and its guard blocks the
 final post when the head moved, so even the uncancellable per-run-group
 reviews lose their whole run to a head move.
 
-So the retry probes for a live review first, with the scan gate's probe
-pair: the statusCheckRollup filter (any live review-pr check from the
-review workflow), then the runs-API fallback for runs still parked in
-the 10-minute delay window with no check-run yet. The probe sees
-LIFECYCLE runs only: a command-triggered run executes against the base
-branch, so its review-pr check attaches to main's commit and never
-shows under the PR's rollup (the review ack comment says the same), and
-the runs fallback is event-scoped to pull_request_target exactly like
-the scan gate's (af-099). An in-flight command review therefore does
+So the retry probes for a live review first: the statusCheckRollup
+filter (any live review-pr check from the review workflow), then its OWN
+runs-API fallback for runs still parked in the 10-minute delay window
+with no check-run yet. That fallback is this probe's alone — the scan's
+dispatch gate dropped it when the `ecs-review` pool let a queued review
+sit out a whole closed window, so the scan now holds only on
+IN_PROGRESS; holding here is cheaper, because it defers one stale-base
+merge that the next round retries rather than a whole round.
+The probe sees LIFECYCLE runs only: a command-triggered run executes
+against the base branch, so its review-pr check attaches to main's
+commit and never shows under the PR's rollup (the review ack comment
+says the same), and the runs fallback is event-scoped to
+pull_request_target. An in-flight command review therefore does
 NOT hold the refresh, and the merge push can still invalidate its
 posting — the second hazard named above, still open. Giving command
 runs a PR-head-visible signal (a pending check posted at the ack step,

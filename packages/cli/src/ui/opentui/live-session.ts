@@ -32,6 +32,7 @@ import {
   ApprovalMode,
   clampInlineMediaPart,
   compactToolResultDisplayForHistory,
+  computeInitialTurnFromHistory,
   CoreToolScheduler,
   didWriteProjectContextFile,
   formatFullTurnVisionNotice,
@@ -194,14 +195,18 @@ export function resetPromptCountForTesting(): void {
  * file checkpoints are recorded under.
  */
 export function nextLivePromptId(config: Config): string {
-  const id = `${config.getSessionId()}########${promptCount}`;
+  const sessionId = config.getSessionId();
+  const resumedRecords =
+    config.getResumedSessionData?.()?.conversation.messages;
+  if (resumedRecords?.length) {
+    promptCount = Math.max(
+      promptCount,
+      computeInitialTurnFromHistory(resumedRecords, sessionId) + 1,
+    );
+  }
+  const id = `${sessionId}########${promptCount}`;
   promptCount += 1;
   return id;
-}
-
-/** Compact token count for task-end stats (matches the scripted demo form). */
-function formatTokenCount(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
 /**
@@ -832,16 +837,7 @@ export async function* livePromptEvents(
           });
         }
         if (agent.status !== 'running' && agent.status !== 'background') {
-          const stats = agent.executionSummary;
-          out.push({
-            type: 'task-end',
-            id: callId,
-            tools: stats?.totalToolCalls ?? agent.toolCalls?.length ?? 0,
-            seconds: Math.round((stats?.totalDurationMs ?? 0) / 100) / 10,
-            tokens: formatTokenCount(
-              stats?.totalTokens ?? agent.tokenCount ?? 0,
-            ),
-          });
+          out.push({ type: 'task-end', id: callId });
         }
         return out;
       }
@@ -861,6 +857,9 @@ export async function* livePromptEvents(
     // callIds whose real invocation description already went out (one per
     // call, ink mapToDisplay parity).
     const descriptionSeen = new Set<string>();
+    // Calls last seen in the scheduler's queued state, so a status only goes
+    // out when it changes.
+    const queuedSeen = new Set<string>();
     const scheduler = new CoreToolScheduler({
       config,
       getPreferredEditor: () => undefined,
@@ -879,6 +878,19 @@ export async function* livePromptEvents(
           const invocation = 'invocation' in c ? c.invocation : undefined;
           if (!invocation) continue;
           descriptionSeen.add(callId);
+          if (
+            'modelFacingName' in c.request &&
+            c.request.modelFacingName === ToolNames.TOOL_CALL &&
+            'tool' in c &&
+            c.tool
+          ) {
+            live.push({
+              type: 'tool-start',
+              id: callId,
+              tool: c.tool.name,
+              title: c.tool.displayName,
+            });
+          }
           live.push({
             type: 'tool-description',
             id: callId,
@@ -931,6 +943,17 @@ export async function* livePromptEvents(
             name: c.request.name,
             confirmationDetails: c.confirmationDetails,
           });
+        }
+        // A call approved while the batch still holds another approval goes
+        // back to 'scheduled' rather than straight to 'executing'; ink's card
+        // reads that status and holds its pending glyph until the call runs.
+        for (const c of calls) {
+          const callId = c.request.callId;
+          const queued = c.status === 'scheduled';
+          if (queuedSeen.has(callId) === queued) continue;
+          if (queued) queuedSeen.add(callId);
+          else queuedSeen.delete(callId);
+          live.push({ type: 'tool-queued', id: callId, queued });
         }
       },
       onAllToolCallsComplete: async (calls) => {

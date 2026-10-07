@@ -9,16 +9,14 @@ import { randomUUID } from 'node:crypto';
 import { rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHookOutput, HookEventName, HookType } from './types.js';
+import { HookEventName, HookType } from './types.js';
 import { resolveCommandHookTimeoutMs } from './hook-timeout.js';
+import { applyHookOutputToInput } from './hook-sequential-input.js';
 import type {
   HookConfig,
   HookInput,
   HookOutput,
   HookExecutionResult,
-  PreToolUseInput,
-  UserPromptExpansionInput,
-  UserPromptSubmitInput,
   CommandHookConfig,
   FunctionHookContext,
   PromptHookConfig,
@@ -38,6 +36,10 @@ import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
 import type { Config } from '../config/config.js';
 import { getShellContextEnvVars } from '../services/shellContextEnv.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
+import {
+  HookCommandCgroup,
+  HookCommandIsolationUnavailableError,
+} from './hook-command-cgroup.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -50,6 +52,7 @@ const MAX_OUTPUT_LENGTH = 1024 * 1024;
 const HOOK_TERMINATE_GRACE_MS = 2000;
 const HOOK_PROCESS_GROUP_POLL_MS = 50;
 const HOOK_CHILD_CLOSE_WAIT_MS = 1000;
+const activeHookCgroups = new Map<ChildProcess, HookCommandCgroup>();
 const WINDOWS_TASKKILL_TIMEOUT_MS = 2000;
 const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
 const SURVIVING_HOOK_TIMEOUT_EXIT_CODE = 124;
@@ -103,7 +106,7 @@ const removeInput = () => {
 };
 
 const signalGroup = (signal) => {
-  if (!hook?.pid) return false;
+  if (!Number.isSafeInteger(hook?.pid) || hook.pid <= 1) return false;
   try {
     process.kill(-hook.pid, signal);
     return true;
@@ -117,7 +120,7 @@ const signalGroup = (signal) => {
 };
 
 const groupAlive = () => {
-  if (!hook?.pid) return false;
+  if (!Number.isSafeInteger(hook?.pid) || hook.pid <= 1) return false;
   if (process.platform === 'win32') return hook.exitCode === null;
   try {
     process.kill(-hook.pid, 0);
@@ -273,6 +276,13 @@ function signalProcessGroup(
   pid: number,
   signal: NodeJS.Signals,
 ): 'sent' | 'gone' | 'failed' {
+  // Negating PID 1 broadcasts to every permitted process on POSIX.
+  if (!Number.isSafeInteger(pid) || pid <= 1) {
+    debugLogger.warn(
+      `Refusing ${signal} for hook process group ${pid}: not a safe integer greater than 1`,
+    );
+    return 'gone';
+  }
   try {
     process.kill(-pid, signal);
     return 'sent';
@@ -288,6 +298,7 @@ function signalProcessGroup(
 }
 
 function isProcessGroupAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return false;
   try {
     process.kill(-pid, 0);
     return true;
@@ -323,6 +334,16 @@ function killDirectChild(child: ChildProcess, signal: NodeJS.Signals): void {
 
 function forceKillActivePosixHookProcesses(): void {
   for (const child of activePosixHookProcesses) {
+    const unit = activeHookCgroups.get(child);
+    if (unit) {
+      killDirectChild(child, 'SIGKILL');
+      try {
+        unit.kill();
+      } catch {
+        // A failed cgroup cleanup cannot provide a drained receipt.
+      }
+      continue;
+    }
     const pid = child.pid;
     if (!pid) {
       killDirectChild(child, 'SIGKILL');
@@ -364,6 +385,7 @@ function registerActivePosixHookProcess(child: ChildProcess): void {
 }
 
 function unregisterActivePosixHookProcess(child: ChildProcess): void {
+  activeHookCgroups.delete(child);
   activePosixHookProcesses.delete(child);
   if (activePosixHookProcesses.size === 0 && parentExitCleanupRegistered) {
     process.removeListener('exit', forceKillActivePosixHookProcesses);
@@ -514,6 +536,12 @@ async function terminateSurvivingHookProcessGroup(
   pid: number,
   graceMs = HOOK_TERMINATE_GRACE_MS,
 ): Promise<void> {
+  if (!Number.isSafeInteger(pid) || pid <= 1) {
+    debugLogger.warn(
+      `Skipping reap of surviving hook ${pid}: not a safe integer greater than 1`,
+    );
+    return;
+  }
   if (process.platform === 'win32') {
     // The surviving hook runs under a detached supervisor, so the parent's own
     // `terminateHookProcessTree` on the supervisor may miss it: the supervisor
@@ -649,6 +677,13 @@ export class HookRunner {
     eventName: HookEventName,
     input: HookInput,
     contextOrSignal?: FunctionHookContext | AbortSignal,
+    options?: {
+      waitForProcessTree?: true;
+      cgroupRoot?: string;
+      environment?: NodeJS.ProcessEnv;
+      trackHttpRequest?: true;
+      httpRequestSignal?: AbortSignal;
+    },
   ): Promise<HookExecutionResult> {
     const startTime = Date.now();
 
@@ -674,7 +709,9 @@ export class HookRunner {
     try {
       // Check if this is an async command hook
       if (this.isAsyncHook(hookConfig)) {
-        return this.executeAsyncHook(
+        // Awaited so a rejection lands in the catch below: executeHook never
+        // throws, and the caller's onHookEnd always runs.
+        return await this.executeAsyncHook(
           hookConfig as CommandHookConfig,
           eventName,
           input,
@@ -691,6 +728,7 @@ export class HookRunner {
             input,
             startTime,
             signal,
+            options,
           );
         case HookType.Http:
           return await this.httpRunner.execute(
@@ -698,6 +736,8 @@ export class HookRunner {
             eventName,
             input,
             signal,
+            options?.trackHttpRequest,
+            options?.httpRequestSignal,
           );
         case HookType.Function: {
           // Function hooks accept context, not just signal
@@ -741,6 +781,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         error: error instanceof Error ? error : new Error(errorMessage),
         duration,
       };
@@ -831,6 +872,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         duration: 0,
         isAsync: true,
         error: new Error(
@@ -861,6 +903,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         duration: 0,
         isAsync: true,
         error: new Error(
@@ -904,6 +947,7 @@ export class HookRunner {
       hookConfig,
       eventName,
       success: true,
+      outcome: 'success',
       duration: 0,
       isAsync: true,
       output: { continue: true },
@@ -968,7 +1012,11 @@ export class HookRunner {
     eventName: HookEventName,
     input: HookInput,
     onHookStart?: (config: HookConfig, index: number) => void,
-    onHookEnd?: (config: HookConfig, result: HookExecutionResult) => void,
+    onHookEnd?: (
+      config: HookConfig,
+      result: HookExecutionResult,
+      index: number,
+    ) => void,
     signal?: AbortSignal,
     context?: FunctionHookContext,
   ): Promise<HookExecutionResult[]> {
@@ -978,7 +1026,7 @@ export class HookRunner {
         ...context,
         signal,
       });
-      onHookEnd?.(config, result);
+      onHookEnd?.(config, result, index);
       return result;
     });
 
@@ -994,7 +1042,11 @@ export class HookRunner {
     eventName: HookEventName,
     input: HookInput,
     onHookStart?: (config: HookConfig, index: number) => void,
-    onHookEnd?: (config: HookConfig, result: HookExecutionResult) => void,
+    onHookEnd?: (
+      config: HookConfig,
+      result: HookExecutionResult,
+      index: number,
+    ) => void,
     signal?: AbortSignal,
     context?: FunctionHookContext,
   ): Promise<HookExecutionResult[]> {
@@ -1012,12 +1064,12 @@ export class HookRunner {
         ...context,
         signal,
       });
-      onHookEnd?.(config, result);
+      onHookEnd?.(config, result, i);
       results.push(result);
 
       // If the hook succeeded and has output, use it to modify the input for the next hook
       if (result.success && result.output) {
-        currentInput = this.applyHookOutputToInput(
+        currentInput = applyHookOutputToInput(
           currentInput,
           result.output,
           eventName,
@@ -1026,71 +1078,6 @@ export class HookRunner {
     }
 
     return results;
-  }
-
-  /**
-   * Apply hook output to modify input for the next hook in sequential execution
-   */
-  private applyHookOutputToInput(
-    originalInput: HookInput,
-    hookOutput: HookOutput,
-    eventName: HookEventName,
-  ): HookInput {
-    // Create a copy of the original input
-    const modifiedInput = { ...originalInput };
-
-    // Apply modifications based on hook output and event type
-    if (hookOutput.hookSpecificOutput) {
-      switch (eventName) {
-        case HookEventName.UserPromptSubmit:
-          {
-            const additionalContext =
-              hookOutput.hookSpecificOutput['additionalContext'];
-            if (
-              typeof additionalContext === 'string' &&
-              additionalContext &&
-              'prompt' in modifiedInput
-            ) {
-              (modifiedInput as UserPromptSubmitInput).prompt +=
-                '\n\n' + additionalContext;
-            }
-          }
-          break;
-
-        case HookEventName.UserPromptExpansion:
-          {
-            const additionalContext = createHookOutput(
-              eventName,
-              hookOutput,
-            ).getAdditionalContext();
-            if (additionalContext && 'prompt' in modifiedInput) {
-              (modifiedInput as UserPromptExpansionInput).prompt +=
-                '\n\n' + additionalContext;
-            }
-          }
-          break;
-
-        case HookEventName.PreToolUse:
-          if ('tool_input' in hookOutput.hookSpecificOutput) {
-            const newToolInput = hookOutput.hookSpecificOutput[
-              'tool_input'
-            ] as Record<string, unknown>;
-            if (newToolInput && 'tool_input' in modifiedInput) {
-              (modifiedInput as PreToolUseInput).tool_input = {
-                ...(modifiedInput as PreToolUseInput).tool_input,
-                ...newToolInput,
-              };
-            }
-          }
-          break;
-
-        default:
-          // For other events, no special input modification is needed
-          break;
-      }
-    }
-
-    return modifiedInput;
   }
 
   /**
@@ -1107,6 +1094,12 @@ export class HookRunner {
     input: HookInput,
     startTime: number,
     signal?: AbortSignal,
+    options?: {
+      waitForProcessTree?: true;
+      cgroupRoot?: string;
+      environment?: NodeJS.ProcessEnv;
+      trackHttpRequest?: true;
+    },
   ): Promise<HookExecutionResult> {
     const timeout = resolveCommandHookTimeoutMs(
       hookConfig.timeout,
@@ -1136,6 +1129,7 @@ export class HookRunner {
       let settled = false;
       let terminationPromise: Promise<void> | undefined;
       let childClosed = false;
+      let processTreeDrained = false;
       let survivingHookPid: number | undefined;
       let survivingHookOutcome:
         | 'completed'
@@ -1203,7 +1197,7 @@ export class HookRunner {
       const env: NodeJS.ProcessEnv = {
         // Hook commands are child processes launched on the agent's behalf,
         // so they must not inherit Qwen-internal daemon secrets.
-        ...sanitizeChildEnv(process.env),
+        ...sanitizeChildEnv(options?.environment ?? process.env),
         GEMINI_PROJECT_DIR: input.cwd,
         CLAUDE_PROJECT_DIR: input.cwd, // For compatibility
         QWEN_PROJECT_DIR: input.cwd, // For Qwen Code compatibility
@@ -1211,10 +1205,30 @@ export class HookRunner {
         ...hookConfig.env,
       };
 
+      let processUnit: HookCommandCgroup | undefined;
+      if (options?.waitForProcessTree) {
+        try {
+          processUnit = HookCommandCgroup.create(options.cgroupRoot);
+        } catch {
+          resolve({
+            hookConfig,
+            eventName,
+            success: false,
+            outcome: 'non_blocking_error',
+            error: new HookCommandIsolationUnavailableError(),
+            processTreeDrained: true,
+            duration: Date.now() - startTime,
+          });
+          return;
+        }
+      }
+      let isolationUnavailable = false;
+
       const survivesParentExit =
-        eventName === HookEventName.MessageDisplay ||
-        eventName === HookEventName.StopFailure ||
-        eventName === HookEventName.SessionDelete;
+        !options?.waitForProcessTree &&
+        (eventName === HookEventName.MessageDisplay ||
+          eventName === HookEventName.StopFailure ||
+          eventName === HookEventName.SessionDelete);
       let parentIndependentInputPath: string | undefined;
       let child: ChildProcess;
       if (survivesParentExit) {
@@ -1261,18 +1275,33 @@ export class HookRunner {
         }
       } else {
         resolveSupervisorStarted();
-        child = spawn(
+        const launch = processUnit?.launch(
           shellConfig.executable,
           [...shellConfig.argsPrefix, command],
+          env,
+        );
+        child = spawn(
+          launch?.executable ?? shellConfig.executable,
+          launch?.args ?? [...shellConfig.argsPrefix, command],
           {
-            env,
+            env: launch?.env ?? env,
             cwd: input.cwd,
-            stdio: ['pipe', 'pipe', 'pipe'],
+            stdio: processUnit
+              ? ['pipe', 'pipe', 'pipe', 'pipe']
+              : ['pipe', 'pipe', 'pipe'],
             shell: false,
-            // Own a process group so cancellation can signal the entire tree.
+            // Own a process group for legacy cancellation.
             detached: process.platform !== 'win32',
           },
         );
+        if (processUnit) {
+          let status = '';
+          child.stdio[3]?.on('data', (data: Buffer) => {
+            status += data.toString();
+            isolationUnavailable = status.includes('unavailable\n');
+          });
+          activeHookCgroups.set(child, processUnit);
+        }
       }
       if (!survivesParentExit) {
         registerActivePosixHookProcess(child);
@@ -1289,8 +1318,18 @@ export class HookRunner {
           rmSync(parentIndependentInputPath, { force: true });
           parentIndependentInputPath = undefined;
         }
-        if (!survivesParentExit) {
+        if (
+          !survivesParentExit &&
+          (!options?.waitForProcessTree || processTreeDrained)
+        ) {
           unregisterActivePosixHookProcess(child);
+        }
+        if (processTreeDrained) {
+          try {
+            processUnit?.remove();
+          } catch {
+            debugLogger.warn('Failed to remove an empty hook cgroup');
+          }
         }
         if (signal && abortListenerAttached) {
           signal.removeEventListener('abort', abortHandler);
@@ -1304,7 +1343,11 @@ export class HookRunner {
         }
         settled = true;
         cleanup();
-        resolve(result);
+        resolve(
+          options?.waitForProcessTree
+            ? { ...result, processTreeDrained }
+            : result,
+        );
       };
 
       const finishCancellation = async () => {
@@ -1338,11 +1381,17 @@ export class HookRunner {
           child.stderr?.destroy();
         }
 
+        if (processUnit) {
+          processTreeDrained =
+            childClosed &&
+            (await processUnit.waitForEmpty(HOOK_CHILD_CLOSE_WAIT_MS));
+        }
         const duration = Date.now() - startTime;
         finish({
           hookConfig,
           eventName,
           success: false,
+          outcome: aborted ? 'cancelled' : 'timeout',
           error: new Error(
             aborted
               ? 'Hook execution cancelled (aborted)'
@@ -1356,12 +1405,19 @@ export class HookRunner {
 
       const startTermination = () => {
         if (!terminationPromise) {
-          const childTermination = terminateHookProcessTree(
-            child,
-            survivesParentExit
-              ? SURVIVING_HOOK_SUPERVISOR_GRACE_MS
-              : HOOK_TERMINATE_GRACE_MS,
-          );
+          const childTermination = processUnit
+            ? (async () => {
+                // Stop the trusted launcher even if cancellation raced its
+                // initial cgroup join. The unit owns all command descendants.
+                killDirectChild(child, 'SIGKILL');
+                await processUnit.terminate(HOOK_TERMINATE_GRACE_MS);
+              })()
+            : terminateHookProcessTree(
+                child,
+                survivesParentExit
+                  ? SURVIVING_HOOK_SUPERVISOR_GRACE_MS
+                  : HOOK_TERMINATE_GRACE_MS,
+              );
           terminationPromise = survivesParentExit
             ? Promise.all([
                 childTermination,
@@ -1451,14 +1507,38 @@ export class HookRunner {
       });
 
       // Handle process exit
-      child.on('close', (exitCode) => {
+      child.on('close', async (exitCode) => {
         childClosed = true;
         resolveChildClosed();
         resolveSupervisorStarted();
-        if (aborted || timedOut) {
+        if (settled || aborted || timedOut) {
           return;
         }
+        if (processUnit) {
+          processTreeDrained = await processUnit.waitForEmpty(
+            Math.max(0, timeout - (Date.now() - startTime)),
+            () => aborted || timedOut,
+          );
+          if (aborted || timedOut) return;
+          if (!processTreeDrained) {
+            timedOut = true;
+            startTermination();
+            return;
+          }
+        }
         const duration = Date.now() - startTime;
+
+        if (isolationUnavailable) {
+          finish({
+            hookConfig,
+            eventName,
+            success: false,
+            outcome: 'non_blocking_error',
+            error: new HookCommandIsolationUnavailableError(),
+            duration,
+          });
+          return;
+        }
 
         if (survivesParentExit && survivingHookOutcome === 'timed_out') {
           timedOut = true;
@@ -1466,6 +1546,7 @@ export class HookRunner {
             hookConfig,
             eventName,
             success: false,
+            outcome: 'timeout',
             error: new Error(`Hook timed out after ${timeout / 1000}s`),
             stdout,
             stderr,
@@ -1510,19 +1591,31 @@ export class HookRunner {
             !Array.isArray(parsed)
           ) {
             output = parsed as HookOutput;
+          } else if (
+            parseFailed &&
+            !isBlockingError &&
+            textToParse.startsWith('{')
+          ) {
+            // Output that starts like a JSON object but does not parse is a
+            // broken structured payload, not context or a message: as in
+            // Claude Code, it is a non-blocking error and nothing of it reaches
+            // the model. Exit code 2 still blocks on its stderr text below.
+            debugLogger.warn(
+              `Hook "${hookConfig.name || hookConfig.command}" printed output that starts like a JSON object but is not valid JSON; it is ignored`,
+            );
+            finish({
+              hookConfig,
+              eventName,
+              success: false,
+              outcome: 'non_blocking_error',
+              error: new Error('Hook output is not valid JSON'),
+              stdout,
+              stderr,
+              exitCode: exitCode ?? -1,
+              duration,
+            });
+            return;
           } else {
-            // Output shaped like a JSON object that fails to parse is a broken
-            // structured payload, not context: as in Claude Code, it is kept
-            // out of the model.
-            const malformedObject =
-              parseFailed &&
-              textToParse.startsWith('{') &&
-              textToParse.endsWith('}');
-            if (malformedObject) {
-              debugLogger.warn(
-                `Hook "${hookConfig.name || hookConfig.command}" printed output that looks like a JSON object but is not valid JSON; it is not added to model context`,
-              );
-            }
             output = this.convertPlainTextToHookOutput(
               textToParse,
               isBlockingError
@@ -1530,7 +1623,7 @@ export class HookRunner {
                 : exitCode === EXIT_CODE_SUCCESS
                   ? EXIT_CODE_SUCCESS
                   : EXIT_CODE_NON_BLOCKING_ERROR,
-              parsedFromStdout && !malformedObject ? eventName : undefined,
+              parsedFromStdout ? eventName : undefined,
             );
           }
         }
@@ -1540,6 +1633,14 @@ export class HookRunner {
           hookConfig,
           eventName,
           success: exitCode === EXIT_CODE_SUCCESS,
+          // A signal this runner did not send (it returned above for its own
+          // abort and timeout) leaves exitCode null: a failure, not a cancel.
+          outcome:
+            exitCode === EXIT_CODE_SUCCESS
+              ? 'success'
+              : exitCode === 2
+                ? 'blocking'
+                : 'non_blocking_error',
           output,
           stdout,
           stderr,
@@ -1553,6 +1654,8 @@ export class HookRunner {
 
       // Handle process errors
       child.on('error', (error) => {
+        if (options?.waitForProcessTree && !child.pid)
+          processTreeDrained = true;
         if (aborted || timedOut) {
           return;
         }
@@ -1562,6 +1665,7 @@ export class HookRunner {
           hookConfig,
           eventName,
           success: false,
+          outcome: 'non_blocking_error',
           error,
           stdout,
           stderr,
@@ -1572,18 +1676,32 @@ export class HookRunner {
   }
 
   /**
-   * Expand command with environment variables and input context
+   * Resolve project directory variables in a command string before launch.
+   *
+   * `QWEN_PROJECT_DIR`, `CLAUDE_PROJECT_DIR` and `GEMINI_PROJECT_DIR` are
+   * always exported in the hook's environment. Bash expands exported
+   * variables itself, so a bash command is passed through unchanged: a text
+   * substitution would put shell quotes inside a double-quoted
+   * `"$CLAUDE_PROJECT_DIR/..."` and break the path. cmd.exe never expands
+   * `$VAR`, and PowerShell reads a bare `$VAR` as an undefined variable, so
+   * for those shells each variable is replaced with the quoted project
+   * directory. `$env:QWEN_PROJECT_DIR` in PowerShell does not match and is
+   * left for the shell to read.
    */
   private expandCommand(
     command: string,
     input: HookInput,
     shellType: ShellType,
   ): string {
+    if (shellType === 'bash') {
+      return command;
+    }
     debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
     const escapedCwd = escapeShellArg(input.cwd, shellType);
     return command
-      .replace(/\$GEMINI_PROJECT_DIR/g, () => escapedCwd)
-      .replace(/\$CLAUDE_PROJECT_DIR/g, () => escapedCwd); // For compatibility
+      .replace(/\$GEMINI_PROJECT_DIR\b/g, () => escapedCwd)
+      .replace(/\$CLAUDE_PROJECT_DIR\b/g, () => escapedCwd)
+      .replace(/\$QWEN_PROJECT_DIR\b/g, () => escapedCwd);
   }
 
   /**
