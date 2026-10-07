@@ -117,34 +117,6 @@ export function wrapSystemReminder(body: string): string {
   return `${SYSTEM_REMINDER_OPEN}\n${escapeSystemReminderTags(body)}\n${SYSTEM_REMINDER_CLOSE}`;
 }
 
-/**
- * Display-side inverse of `wrapSystemReminder`, for human-facing panes whose
- * output users copy back into a file: drop the envelope framing and undo the
- * one escape that can be undone unambiguously, so the body reads as it does on
- * disk. The request payload must keep using `wrapSystemReminder` — this is for
- * display only, and must never be applied to a value that is matched by string
- * equality elsewhere (e.g. `Config.getAutoMemoryContext()`).
- *
- * Only the closing-tag escape is reversed. `escapeSystemReminderTags` is not
- * injective on its other branch: a body holding a literal `<system-reminder>`
- * and one holding the already-escaped `&lt;system-reminder&gt;` both produce
- * `&lt;system-reminder&gt;`, so "un-escaping" those would rewrite text the user
- * really stored. `<\/system-reminder>` has no such ambiguity — the backslash
- * form is produced only by the escaper.
- *
- * Returns `text` unchanged when it is not a wrapped envelope, so callers can
- * pass any string.
- */
-export function unwrapSystemReminder(text: string): string {
-  const open = `${SYSTEM_REMINDER_OPEN}\n`;
-  if (!text.startsWith(open)) return text;
-  const trimmed = text.trimEnd();
-  if (!trimmed.endsWith(SYSTEM_REMINDER_CLOSE)) return text;
-  return trimmed
-    .slice(open.length, trimmed.length - SYSTEM_REMINDER_CLOSE.length)
-    .replaceAll('<\\/system-reminder>', SYSTEM_REMINDER_CLOSE);
-}
-
 const SKILLS_AVAILABLE_OPENER =
   'The following skills are available for use with the Skill tool.';
 const NO_SKILLS_OPENER = 'No skills are currently available.';

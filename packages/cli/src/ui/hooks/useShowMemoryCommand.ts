@@ -8,10 +8,7 @@ import type { Message } from '../types.js';
 import { MessageType } from '../types.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
-import {
-  createDebugLogger,
-  unwrapSystemReminder,
-} from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('SHOW_MEMORY');
 
@@ -37,13 +34,7 @@ export function createShowMemoryAction(
     const currentMemory = [
       contextMemory,
       autoMemoryPrompt,
-      // The catalog reaches the model inside a `<system-reminder>` envelope with
-      // its body escaped. This pane is for humans and its output gets copied
-      // back into MEMORY.md, so show the body as it exists on disk instead of
-      // the transport framing. Display-only: `getAutoMemoryContext()` itself is
-      // untouched, since the request tail and the context-usage attribution
-      // both match that exact string.
-      unwrapSystemReminder(config.getAutoMemoryContext?.() ?? ''),
+      config.getAutoMemoryContext?.() ?? '',
     ]
       .filter((section) => section.trim().length > 0)
       .join('\n\n---\n\n');
