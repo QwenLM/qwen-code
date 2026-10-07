@@ -77,7 +77,8 @@ correct `cursor_expired` or resync.
   `PublicContentPart.part_id`. A Part id ends with a sequence, so it exceeds 64
   characters once the sequence has ten digits.
 - `replay_floor_sequence` gains a description: events at or below it may be
-  pruned, and a cursor below it has expired.
+  pruned, and a cursor below it has expired while the Snapshot backs the
+  floor.
 - `SessionResyncRequired` tells a client to resume after the
   `snapshot_through_sequence` that the Items list returns, since the value in
   the frame can be older than the Snapshot the client then reads.
@@ -152,8 +153,9 @@ follows tells clients to reload the Snapshot.
 
 ### 4.4 Replay floor
 
-- A cursor has expired when it is below the floor. A cursor equal to the floor
-  is valid, because the next event is retained.
+- A cursor has expired when it is below the floor and the Snapshot backs the
+  floor. A cursor equal to the floor is valid, because the next event is
+  retained.
 - A read checks the floor after it reads the events. The floor only rises and
   the retention work prunes only below it, so a floor that is not above the
   cursor after the read was not above it during the read.

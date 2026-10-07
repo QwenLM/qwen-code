@@ -61,7 +61,9 @@ public final class StoreModels {
     /**
      * Events at or below {@code floorSequence} may be pruned. A client that
      * falls below it reloads the Snapshot, which covers events through
-     * {@code snapshotThroughSequence}.
+     * {@code snapshotThroughSequence}. A stream reconciliation discards the
+     * Snapshot without lowering the floor, so the floor can exceed the
+     * coverage while the Items rebuild; the cursor is still served then.
      */
     public record ReplayWindow(long floorSequence,
             long snapshotThroughSequence) {

@@ -11,7 +11,8 @@ import org.springframework.stereotype.Component;
 /**
  * Raises each Session's replay floor as far as its Snapshot proves safe, the
  * first half of the Session event retention work (#12380): events at or below
- * the floor may be pruned later, and a replay cursor below it has expired.
+ * the floor may be pruned later, and a replay cursor below it expires while
+ * the Snapshot backs the floor.
  * Nothing deletes events here, and the pass is disabled until a deployment
  * opts in; the retention window and the reader-aware cleanup remain separate
  * decisions.

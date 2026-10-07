@@ -48,7 +48,11 @@ deltas lose their text and identity, later deltas may name other Parts, and a
 `stream.reconciled` event announces it. A client that sees one reloads the
 Items and resumes after their `snapshot_through_sequence`. A
 cursor below a Session's replay floor gets `409 cursor_expired` from the JSON
-event query and one `agent.session.resync_required` frame from either stream.
+event query and one `agent.session.resync_required` frame from either stream
+only while the Snapshot backs the floor
+(`replay_floor_sequence <= snapshot_through_sequence`); a stream reconciliation
+discards the Snapshot without lowering the floor, and during that rebuild such
+a cursor is served from the retained events.
 `GET /v1/agents/sessions/{id}/turns` lists a Session's Turns newest first with
 an opaque cursor, and `GET /v1/agents/sessions/{id}/turns/{turnId}` reads one.
 Design: [English](../../../docs/design/2026-09-27-managed-agent-api-contract.md) |

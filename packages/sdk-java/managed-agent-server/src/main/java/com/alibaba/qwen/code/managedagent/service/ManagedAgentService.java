@@ -917,6 +917,7 @@ public class ManagedAgentService {
      * Reads the next catch-up page of a stream.
      *
      * @throws ReplayCursorExpired when the cursor is below the replay floor
+     *         while the Snapshot backs it
      */
     List<EventRecord> streamEvents(SessionRecord session, long afterSequence) {
         requireEventCursor(afterSequence);

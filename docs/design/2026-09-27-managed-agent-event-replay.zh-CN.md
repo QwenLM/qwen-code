@@ -66,8 +66,8 @@ resync。
 - `content_part_id` 与 `contentPartId` 允许 128 个字符，与
   `PublicContentPart.part_id` 一致。Part id 以 sequence 结尾，sequence 达到十位数
   时就会超过 64 个字符。
-- `replay_floor_sequence` 增加说明：不超过它的事件可能被清理，低于它的游标已
-  过期。
+- `replay_floor_sequence` 增加说明：不超过它的事件可能被清理，低于它的游标在
+  Snapshot 支撑下限时才过期。
 - `SessionResyncRequired` 要求客户端从 Items 列表返回的 `snapshot_through_sequence`
   之后继续，因为帧中的值可能比客户端随后读到的 Snapshot 更旧。
 - WebShell transcript 写明它原本的返回内容：没有游标时，有 Snapshot 的 Session
@@ -126,7 +126,8 @@ Snapshot。
 
 ### 4.4 回放下限
 
-- 游标低于下限即为过期。等于下限的游标有效，因为下一条事件仍被保留。
+- 游标低于下限且 Snapshot 支撑下限时即为过期。等于下限的游标有效，因为下一条
+  事件仍被保留。
 - 读取在读完事件之后才检查下限。下限只会上升，保留策略也只清理下限以下的事件，
   因此读取之后不高于游标的下限，在读取期间也不高于游标。
 - JSON 查询对过期游标返回 `409 cursor_expired`，错误信封带有契约早已定义的
