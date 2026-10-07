@@ -1723,6 +1723,9 @@ async function discoverToolsWithMetadata(
             {
               appResourceMaxBytes: mcpServerConfig.appResourceMaxBytes,
               appResourceTimeoutMs: mcpServerConfig.appResourceTimeoutMs,
+              // Raw, not defaulted: lets App warnings tell a written
+              // `timeout` from `MCP_DEFAULT_TIMEOUT_MSEC`.
+              timeout: mcpServerConfig.timeout,
               extensionName: mcpServerConfig.extensionName,
               scope: mcpServerConfig.scope,
             },

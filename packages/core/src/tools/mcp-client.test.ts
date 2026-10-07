@@ -1517,6 +1517,7 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         'apps',
         {
           command: 'test-command',
+          timeout: 45_000,
           appResourceMaxBytes: 2_097_152,
           appResourceTimeoutMs: 30_000,
         },
@@ -1527,9 +1528,12 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         applyConfigFilters: false,
       });
 
+      // The raw written `timeout` rides along (not the defaulted
+      // `mcpTimeout`), so App warnings can tell it from the default.
       expect(snapshot.tools[0]?.appResourceLimits).toEqual({
         appResourceMaxBytes: 2_097_152,
         appResourceTimeoutMs: 30_000,
+        timeout: 45_000,
       });
       expect(snapshot.tools[0]?.appResourceUri).toBe('ui://demo/dash');
       expect(snapshot.tools[0]?.appResourceUi).toEqual({

@@ -299,9 +299,16 @@ const MCP_APP_RESOURCE_MIME_TYPE = 'text/html;profile=mcp-app';
 // that actually declares the server — a `mcpServers.<name>` settings path is
 // destructive advice for an extension-declared server (a same-named settings
 // entry replaces the whole server object) and ineffective for a project one.
+// `timeout` is the raw written value: `mcpTimeout` arrives already defaulted
+// (`timeout ?? MCP_DEFAULT_TIMEOUT_MSEC`), so only this field tells a written
+// server `timeout` apart from the default.
 type McpAppResourceLimits = Pick<
   MCPServerConfig,
-  'appResourceMaxBytes' | 'appResourceTimeoutMs' | 'extensionName' | 'scope'
+  | 'appResourceMaxBytes'
+  | 'appResourceTimeoutMs'
+  | 'extensionName'
+  | 'scope'
+  | 'timeout'
 >;
 
 // Discriminated union for MCP Content Blocks to ensure type safety.
@@ -958,13 +965,21 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       // and why raising it changed nothing, and points at a key the operator
       // never set. Below DEFAULT the cap is not binding and raising
       // `timeout` does work, so naming the cap would only mislead.
+      //
+      // "Derived from `timeout`" is decided on the WRITTEN value, never on
+      // `mcpTimeout`: that one is `timeout ?? MCP_DEFAULT_TIMEOUT_MSEC` and is
+      // finite even when nothing was written. A written value that is not a
+      // finite number (a hand-edited `"60000"` string -- `mcpServers` is not
+      // validated at runtime) is ignored by `boundedAppLimit` too, so the
+      // App resource default owns the deadline and is the key to name.
       const hasExplicitAppTimeout =
         typeof configuredTimeoutMs === 'number' &&
         Number.isFinite(configuredTimeoutMs);
+      const writtenServerTimeout = this.appResourceLimits?.timeout;
       const derivedFromServerTimeout =
         !hasExplicitAppTimeout &&
-        typeof this.mcpTimeout === 'number' &&
-        Number.isFinite(this.mcpTimeout);
+        typeof writtenServerTimeout === 'number' &&
+        Number.isFinite(writtenServerTimeout);
       const capIsBinding =
         derivedFromServerTimeout &&
         defaultTimeoutMs === MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS;
@@ -972,7 +987,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         ? `${this.appLimitSettingRef('timeout')}, capped at ${MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS} ms; only appResourceTimeoutMs lifts that cap`
         : derivedFromServerTimeout
           ? this.appLimitSettingRef('timeout')
-          : this.appLimitSettingRef('appResourceTimeoutMs');
+          : hasExplicitAppTimeout
+            ? this.appLimitSettingRef('appResourceTimeoutMs')
+            : `${this.appLimitSettingRef('appResourceTimeoutMs')} (default ${MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS} ms)`;
       const reason =
         timeoutSignal.aborted ||
         (error instanceof Error && error.name === 'TimeoutError') ||
