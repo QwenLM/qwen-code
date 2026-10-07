@@ -2,7 +2,7 @@
 
 [English](2026-10-01-hosted-workspace-context.md) | [简体中文](2026-10-01-hosted-workspace-context.zh-CN.md)
 
-Status: implemented. Resolves #13057. Stacks on #13166.
+Status: implemented. Part of #13057. Stacks on #13166.
 
 ## Problem and scope
 
@@ -115,3 +115,11 @@ Whether the
 context should be pinned durably (and revisioned through the ContextBinding
 contract) remains the maintainers' call; the injection point built here does
 not change under either answer.
+
+The latch is directory-blind: a committed
+`POST /v1/agents/sessions/{id}/cwd` settles without Harness or worker
+involvement, so the attachment keeps injecting the previous directory's rules
+while its tools already run in the new one, and the new directory's files are
+never read. Invalidating it needs the resolved directory or the ContextBinding
+`contextRevision` on the `workspace-context` result, whose shape is closed —
+the same revisioning question as above, not a local fix.

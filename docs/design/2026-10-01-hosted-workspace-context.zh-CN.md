@@ -2,7 +2,7 @@
 
 [English](2026-10-01-hosted-workspace-context.md) | [简体中文](2026-10-01-hosted-workspace-context.zh-CN.md)
 
-状态：已实现。解决 #13057。叠加在 #13166 之上。
+状态：已实现。部分解决 #13057。叠加在 #13166 之上。
 
 ## 问题与范围
 
@@ -96,3 +96,10 @@ stderr 上反复出现的 `qwen serve: Hosted Workspace context read failed` 日
 上下文是否应持久固定（并经
 ContextBinding 契约带上 revision）由维护者决定；本切片建立的注入点在两种
 答案下都不改变。
+
+锁存对目录无感：已提交的 `POST /v1/agents/sessions/{id}/cwd` 在不涉及
+Harness 与 worker 的情况下结算，因此该接入会继续注入上一个目录的规则，而它
+的工具已经在新目录中运行，新目录的指令文件永远不会被读取。要让它失效，需要
+把解析后的目录或 ContextBinding 的 `contextRevision` 放到
+`workspace-context` 结果上，而该结果的 shape 是封闭的——与上面是同一个
+revision 问题，不是本地可完成的修补。
