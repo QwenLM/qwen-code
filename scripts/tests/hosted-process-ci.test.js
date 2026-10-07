@@ -236,9 +236,9 @@ describe('Hosted real-process gates', () => {
       (total, step) => total + (step['timeout-minutes'] ?? 0),
       0,
     );
-    // Step ceilings today (25 + 8x10 + 12); the uncapped setup steps need
+    // Step ceilings today (25 + 9x10 + 12); the uncapped setup steps need
     // their own allowance, which is exactly what the job comment claims.
-    expect(summed).toBe(117);
+    expect(summed).toBe(127);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 10);
   });
 
@@ -280,7 +280,7 @@ describe('Hosted real-process gates', () => {
     ],
   ])('pins the %s arm into the Hosted MySQL job', (stepName, script, flags) => {
     const job = java.jobs['hosted-harness-mysql'];
-    expect(job['timeout-minutes']).toBe(130);
+    expect(job['timeout-minutes']).toBe(140);
     const install = job.steps.find(
       (step) => step.name === 'Install MySQL binaries for the failover E2E',
     );
