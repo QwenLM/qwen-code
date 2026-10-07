@@ -362,7 +362,11 @@ it('keeps another disabled agent running when retiring the last enabled agent', 
     .expect(200);
 
   expect(bridge.closeSession).not.toHaveBeenCalledWith('alice-session');
-  expect(bridge.cancelSession).not.toHaveBeenCalledWith('alice-session');
+  // Arity-insensitive: cancelSession now takes a provenance argument, and
+  // toHaveBeenCalledWith matches the argument list exactly.
+  expect(
+    vi.mocked(bridge.cancelSession).mock.calls.map((call) => call[0]),
+  ).not.toContain('alice-session');
 });
 
 it('shows an online host offering the bound program when the first host is offline', async () => {
