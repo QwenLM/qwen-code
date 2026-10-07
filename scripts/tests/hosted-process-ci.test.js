@@ -166,8 +166,8 @@ describe('Hosted real-process gates', () => {
     // 25 min on Verify: the measurement basis lives in the
     // hosted-harness-mysql job comment (issue #13471). Keyed by step name --
     // a positional list stays green when a ceiling migrates between steps or
-    // a step loses its hang guard entirely. A bump to any of the ten fails
-    // here and prompts updating the job comment's sum.
+    // a step loses its hang guard entirely. A bump to any of the eleven
+    // fails here and prompts updating the job comment's sum.
     const ceilingsByName = Object.fromEntries(
       job.steps
         .filter((step) => step['timeout-minutes'] !== undefined)
@@ -179,6 +179,7 @@ describe('Hosted real-process gates', () => {
       'Run session owner failover E2E': 10,
       'Run in-flight owner failover E2E': 10,
       'Run continuation owner failover E2E': 10,
+      'Run long-answer persistence E2E': 10,
       'Run Harness-restart session failover E2E': 10,
       'Run Harness-restart in-flight failover E2E': 10,
       'Run Harness-restart continuation failover E2E': 10,
@@ -188,7 +189,7 @@ describe('Hosted real-process gates', () => {
     // Pin the cap too: no single ceiling may exceed it, or that step's hang
     // guard is disarmed outright. The cumulative sum-vs-cap tradeoff is the
     // job comment's, cross-checked by the summed-ceilings test below.
-    expect(job['timeout-minutes']).toBe(130);
+    expect(job['timeout-minutes']).toBe(140);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(
       Math.max(...Object.values(ceilingsByName)),
     );
@@ -270,9 +271,9 @@ describe('Hosted real-process gates', () => {
       (total, step) => total + (step['timeout-minutes'] ?? 0),
       0,
     );
-    // Step ceilings today (25 + 8x10 + 12); the uncapped setup steps need
+    // Step ceilings today (25 + 9x10 + 12); the uncapped setup steps need
     // their own allowance, which is exactly what the job comment claims.
-    expect(summed).toBe(117);
+    expect(summed).toBe(127);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 10);
   });
 
@@ -314,7 +315,7 @@ describe('Hosted real-process gates', () => {
     ],
   ])('pins the %s arm into the Hosted MySQL job', (stepName, script, flags) => {
     const job = java.jobs['hosted-harness-mysql'];
-    expect(job['timeout-minutes']).toBe(130);
+    expect(job['timeout-minutes']).toBe(140);
     const install = job.steps.find(
       (step) => step.name === 'Install MySQL binaries for the failover E2E',
     );

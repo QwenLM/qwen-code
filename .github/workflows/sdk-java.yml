@@ -504,11 +504,11 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (25 + 8×10 + 12 = 117, pinned by
+    # The step ceilings (25 + 9×10 + 12 = 127, pinned by
     # scripts/tests/hosted-process-ci.test.js -- the Verify step's 25 sits
     # above its failsafe fork timeout) plus ~10 minutes for the uncapped
     # setup steps (Checkout..Install MySQL binaries, the report checks)
-    # need ~127; 130 keeps a thin margin, and each arm buys its own 10
+    # need ~137; 140 keeps a thin margin, and each arm buys its own 10
     # instead of sharing an envelope. Each ceiling is a per-step hang
     # guard, not a share of a budget -- and not a tight one: under pool
     # contention the runner's own output/enforcement loop can stall, and
@@ -531,7 +531,7 @@ jobs:
     # the slowest green Verify step and keeps the ceiling above the
     # measured pre-fork phases (~220 s) plus the hosted profile's fork
     # timeout, so failsafe's own hang diagnostic stays reachable.
-    timeout-minutes: 130
+    timeout-minutes: 140
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -624,6 +624,10 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-continuation-failover
+      - name: 'Run long-answer persistence E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-big-output
       - name: 'Run Harness-restart session failover E2E'
         timeout-minutes: 10
         run: >-
