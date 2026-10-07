@@ -1833,11 +1833,12 @@ const SYSTEM_REMINDER_ECHO_MAX_BUFFER = 16_000;
  *   - only blocks whose opening backtick run (1-3 ticks) sits at stream start
  *     or at the start of a line are candidates — an inline mid-sentence
  *     mention never triggers;
- *   - the block must be COMPLETE: `</system-reminder>` followed (after
- *     optional gap whitespace) by a backtick run at least as long as the
- *     opener. Anything else — unterminated block, early-closing code span,
- *     oversized candidate — is released unchanged;
- *   - a backtick run before the close tag means the code span closed early
+ *   - the block must be COMPLETE: a line-start `</system-reminder>` followed
+ *     by the matching backtick run. Inline spans close on the same line;
+ *     three-tick fences may close on the next line. Anything else —
+ *     unterminated block, early-closing code span,
+ *     oversized candidate or intervening fence — is released unchanged;
+ *   - a backtick run on the opener's line means the code span closed early
  *     (an inline mention like "`<system-reminder>`"), which also releases
  *     everything unchanged.
  *
@@ -1949,7 +1950,10 @@ class SystemReminderEchoFilter {
    * a hold-release loop over the same bytes.
    */
   private scan(text: string, startsAtLineStart = false): string {
-    if (!text) return '';
+    if (!text) {
+      this.carryAnchored ||= startsAtLineStart;
+      return '';
+    }
     // `text` may begin with the previous carry, which was held precisely
     // because it starts at a line start (or at the absolute stream start).
     const startIsLineStart =
@@ -2029,9 +2033,21 @@ class SystemReminderEchoFilter {
           searchEnd,
           this.openingTicks,
         ) !== -1;
+      const crossesFence = /^[ \t]*`{3,}/m.test(
+        this.buffer.slice(
+          this.openingRunEnd,
+          closeIdx === -1 ? undefined : closeIdx,
+        ),
+      );
       if (closeIdx !== -1) {
         const after = closeIdx + SYSTEM_REMINDER_CLOSE.length;
-        const gap = /^[ \t]*\r?\n?[ \t]*/.exec(this.buffer.slice(after))![0];
+        const closeLineStart = this.buffer.lastIndexOf('\n', closeIdx) + 1;
+        const closeIsAnchored = /^[ \t]*$/.test(
+          this.buffer.slice(closeLineStart, closeIdx),
+        );
+        const gap = (
+          this.openingTicks === 3 ? /^[ \t]*\r?\n?[ \t]*/ : /^[ \t]*/
+        ).exec(this.buffer.slice(after))![0];
         let ticksAfter = 0;
         const ticksAt = after + gap.length;
         while (
@@ -2040,7 +2056,12 @@ class SystemReminderEchoFilter {
         ) {
           ticksAfter++;
         }
-        if (!earlyClose && ticksAfter >= this.openingTicks) {
+        if (
+          !earlyClose &&
+          !crossesFence &&
+          closeIsAnchored &&
+          ticksAfter === this.openingTicks
+        ) {
           let end = ticksAt + ticksAfter;
           if (this.buffer[end] === '\r' && this.buffer[end + 1] === '\n') {
             end += 2;
@@ -2048,17 +2069,17 @@ class SystemReminderEchoFilter {
             end += 1;
           }
           const remainder = this.buffer.slice(end);
+          const startsAtLineStart =
+            this.buffer[end - 1] === '\n' || this.buffer[end - 1] === '\r';
           this.holding = false;
           this.buffer = '';
-          // The consumed newline leaves `remainder` at a line start; carry
-          // that anchor into the rescan or a following echoed reminder line
-          // would be scanned as mid-line and leak.
-          emitted += this.scan(remainder, true);
+          emitted += this.scan(remainder, startsAtLineStart);
           continue;
         }
       }
       if (
-        (closeIdx !== -1 && earlyClose) ||
+        earlyClose ||
+        crossesFence ||
         this.buffer.length > SYSTEM_REMINDER_ECHO_MAX_BUFFER ||
         final
       ) {
@@ -6244,7 +6265,7 @@ export class LlmChat {
     // and the stripped rebuild below.
     let textReleasedThroughDetectors = false;
     const isEchoTextPart = (part: Part): part is Part & { text: string } =>
-      typeof part.text === 'string' && !part.thought;
+      isValidNonThoughtTextPart(part);
     const takePendingProtocolPartsStripped = (): Part[] => {
       const parts = pendingProtocolParts;
       pendingProtocolParts = [];
@@ -6262,12 +6283,23 @@ export class LlmChat {
       return released;
     };
     const finishEchoFilterAndTakePending = (): Part[] => {
-      const tail = systemReminderEchoFilter.finish();
       if (!textReleasedThroughDetectors) {
-        // The leading detector never released: pending parts still carry the
-        // full text verbatim and the echo filter saw no bytes.
-        return takePendingProtocolParts();
+        // Only replay after the leading detector has ruled out a leak. Its
+        // JSON hold must not bypass the same echo filter used by streaming.
+        const released: Part[] = [];
+        for (const part of takePendingProtocolParts()) {
+          if (!isEchoTextPart(part)) {
+            released.push(part);
+          } else {
+            const text = systemReminderEchoFilter.accept(part.text);
+            if (text) released.push({ ...part, text });
+          }
+        }
+        const tail = systemReminderEchoFilter.finish();
+        if (tail) released.push({ text: tail });
+        return released;
       }
+      const tail = systemReminderEchoFilter.finish();
       const released = takePendingProtocolPartsStripped();
       return tail ? [...released, { text: tail }] : released;
     };
@@ -6545,8 +6577,14 @@ export class LlmChat {
     } catch (e) {
       streamError = e;
       if (textReleasedThroughDetectors && !abortSignal?.aborted) {
-        const parts = finishEchoFilterAndTakePending();
+        const parts = normalizeModelToolCallIds(
+          finishEchoFilterAndTakePending(),
+          usedToolCallIds,
+          rawToolCallIdsInCurrentTurn,
+          reservedToolCallIds,
+        );
         if (parts.length > 0) {
+          hasToolCall ||= parts.some((part) => part.functionCall);
           allModelParts.push(...parts);
           const chunk = {
             candidates: [{ content: { role: 'model', parts } }],
@@ -6556,9 +6594,6 @@ export class LlmChat {
         }
       }
     } finally {
-      if (abortSignal?.aborted && textReleasedThroughDetectors) {
-        allModelParts.push(...finishEchoFilterAndTakePending());
-      }
       // Cancellation can close the generator at a yield, skipping everything
       // after this finally. Keep the delivered partial in both history and JSONL.
       if (abortSignal?.aborted) {

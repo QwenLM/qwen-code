@@ -9815,28 +9815,232 @@ describe('LlmChat', async () => {
     },
   );
 
-  it('does not replay signed text while the echo filter holds (#10797)', async () => {
+  it('preserves signed text and its signature as one part (#10797)', async () => {
+    const signedPart = {
+      text: '`<system-reminder>\nheld',
+      thoughtSignature: 'opaque-signature',
+    };
+    const tail = '\n</system-reminder>`\nAnswer';
     mockStreamsOnce(
-      streamOf(
-        modelChunk([
-          {
-            text: '`<system-reminder>\nheld',
-            thoughtSignature: 'opaque-signature',
-          },
-        ]),
-        textChunk('\n</system-reminder>`\nAnswer'),
-        stopResponse([]),
-      ),
+      streamOf(modelChunk([signedPart]), textChunk(tail), stopResponse([])),
     );
+    const events = await sendCollect('test', 'prompt-10797-regression');
+    const delivered = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+    expect(delivered).toEqual([signedPart, { text: tail }]);
+    expect(chat.getHistory().at(-1)?.parts).toEqual(delivered);
+    expectStreamCalls(1);
+  });
+
+  it('streams a closed inline tag mention before the next chunk (#10797)', async () => {
+    const first = '`<system-reminder>` is a literal tag.\n';
+    mockStreamsOnce(
+      streamOf(textChunk(first), textChunk('More prose.'), stopResponse([])),
+    );
+    const stream = await send('test', 'prompt-10797-inline-streaming');
+    let next = await stream.next();
+    while (!next.done && next.value.type !== StreamEventType.CHUNK) {
+      next = await stream.next();
+    }
+    if (next.done || next.value.type !== StreamEventType.CHUNK) {
+      throw new Error('Expected a visible first chunk.');
+    }
+    expect(next.value.value.candidates?.[0]?.content?.parts).toEqual([
+      { text: first },
+    ]);
+    await drain(stream);
+    expect(chat.getLastModelMessageText()).toBe(first + 'More prose.');
+    expectStreamCalls(1);
+  });
+
+  it('retains the line anchor between separate complete echoes (#10797)', async () => {
+    const echo = '`<system-reminder>\nstale todos\n</system-reminder>`\n';
+    mockStreamsOnce(
+      streamOf(textChunk(echo), textChunk(echo + 'Answer'), stopResponse([])),
+    );
+    const events = await sendCollect('test', 'prompt-10797-split-echoes');
+    const delivered = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? [])
+      .map((part) => part.text ?? '')
+      .join('');
+    expect(delivered).toBe('Answer');
+    expect(chat.getLastModelMessageText()).toBe(delivered);
+    expectStreamCalls(1);
+  });
+
+  it.each([
+    [
+      'a later inline closing-tag mention',
+      '`<system-reminder>\n- [ ] unfinished\n\nHere is the real answer.\n' +
+        'The tag `</system-reminder>` ends a reminder.\n',
+    ],
+    [
+      'an outer fence closer',
+      '```md\n`<system-reminder>\n- [ ] unfinished\n</system-reminder>\n' +
+        '```\nHere is the real answer.\n',
+    ],
+  ])('preserves an unfinished echo before %s (#10797)', async (_name, text) => {
+    mockStreamsOnce(streamOf(textChunk(text), stopResponse([])));
     let delivered = '';
-    for await (const event of await send('test', 'prompt-10797-regression')) {
-      if (event.type === StreamEventType.CHUNK)
+    for await (const event of await send(
+      'test',
+      'prompt-10797-ambiguous-close',
+    )) {
+      if (event.type === StreamEventType.CHUNK) {
         delivered += (event.value.candidates?.[0]?.content?.parts ?? [])
           .map((part) => part.text ?? '')
           .join('');
+      }
     }
-    expect(delivered).toBe('Answer');
-    expect(chat.getLastModelMessageText()).toBe('Answer');
+    expect(delivered).toBe(text);
+    expect(chat.getLastModelMessageText()).toBe(text);
+    expectStreamCalls(1);
+  });
+
+  it('filters echoes held behind a leading JSON reply (#10797)', async () => {
+    const call = fnCall('read_file', { path: 'fixture' }, 'json-call');
+    mockStreamsOnce(
+      streamOf(
+        modelChunk([call, { text: '{"ok":true}\n' }]),
+        textChunk(
+          '`<system-reminder>\nstale todos\n</system-reminder>`\nAnswer',
+        ),
+        stopResponse([]),
+      ),
+    );
+    const events = await sendCollect('test', 'prompt-10797-json-hold');
+    const delivered = events
+      .filter((event) => event.type === StreamEventType.CHUNK)
+      .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
+    expect(delivered).toContainEqual(call);
+    expect(delivered.map((part) => part.text ?? '').join('')).toBe(
+      '{"ok":true}\nAnswer',
+    );
+    expect(chat.getHistory().at(-1)?.parts).toEqual(delivered);
+    expectStreamCalls(1);
+  });
+
+  it('normalizes and records a parked tool call released on error (#10797)', async () => {
+    const record = vi.fn();
+    const recordingChat = chatWithRecorder(record);
+    const call = {
+      functionCall: {
+        id: 'call-raw-1',
+        name: 'read_file',
+        args: { path: 'fixture' },
+      },
+    };
+    recordingChat.setHistory([
+      userText('prior'),
+      content('model', call),
+      content('user', {
+        functionResponse: {
+          id: 'call-raw-1',
+          name: 'read_file',
+          response: { output: 'old' },
+        },
+      }),
+      modelText('Done.'),
+    ]);
+    mockStreamsOnce(
+      (async function* () {
+        yield textChunk('Before\n`<system-reminder>unfinished');
+        yield modelChunk([call]);
+        throw new Error('ordinary stream failure');
+      })(),
+    );
+    const delivered: Part[] = [];
+    await expect(
+      (async () => {
+        for await (const event of await send(
+          'test',
+          'prompt-10797-parked-error',
+          recordingChat,
+        )) {
+          if (event.type === StreamEventType.CHUNK) {
+            delivered.push(
+              ...(event.value.candidates?.[0]?.content?.parts ?? []),
+            );
+          }
+        }
+      })(),
+    ).rejects.toThrow('ordinary stream failure');
+    const deliveredCall = delivered.find(
+      (part) => part.functionCall,
+    )?.functionCall;
+    expect(deliveredCall).toMatchObject({
+      name: 'read_file',
+      args: { path: 'fixture' },
+    });
+    expect(deliveredCall?.id).not.toBe('call-raw-1');
+    expect(recordingChat.getHistory().at(-1)?.parts).toContainEqual({
+      functionCall: deliveredCall,
+    });
+    expect(record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: expect.arrayContaining([{ functionCall: deliveredCall }]),
+      }),
+    );
+    expectStreamCalls(1);
+  });
+
+  it('records only delivered parts when cancelled during an echo hold (#10797)', async () => {
+    const controller = new AbortController();
+    const record = vi.fn();
+    const recordingChat = chatWithRecorder(record);
+    const deliveredCall = {
+      functionCall: {
+        id: 'delivered-call',
+        name: 'read_file',
+        args: { path: 'fixture' },
+      },
+    };
+    const parkedCall = {
+      functionCall: {
+        id: 'parked-call',
+        name: 'read_file',
+        args: { path: 'other' },
+      },
+    };
+    mockStreamsOnce(
+      (async function* () {
+        yield modelChunk([deliveredCall, { text: 'Here is the plan:\n' }]);
+        yield modelChunk([
+          { text: '`<system-reminder>unfinished' },
+          parkedCall,
+        ]);
+        controller.abort();
+        controller.signal.throwIfAborted();
+      })(),
+    );
+    const delivered: Part[] = [];
+    const stream = await recordingChat.sendMessageStream(
+      'test-model',
+      {
+        message: 'test',
+        config: { abortSignal: controller.signal },
+      },
+      'prompt-10797-held-abort',
+    );
+    await expect(
+      (async () => {
+        for await (const event of stream) {
+          if (event.type === StreamEventType.CHUNK) {
+            delivered.push(
+              ...(event.value.candidates?.[0]?.content?.parts ?? []),
+            );
+          }
+        }
+      })(),
+    ).rejects.toThrow();
+    expect(delivered).toEqual([deliveredCall, { text: 'Here is the plan:\n' }]);
+    expect(recordingChat.getHistory().at(-1)?.parts).toEqual(delivered);
+    expect(record).toHaveBeenCalledWith(
+      expect.objectContaining({ message: delivered }),
+    );
+    expectStreamCalls(1);
   });
 
   it('releases unfinished echo-looking answer text before a stream failure (#10797)', async () => {
