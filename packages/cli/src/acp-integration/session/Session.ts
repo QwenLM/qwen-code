@@ -1059,13 +1059,6 @@ function recordDaemonToolCalls(
     return loopState?.loopDetected ?? false;
   loopState.totalToolCalls += calls.length;
   for (const call of calls) {
-    loopState.explorationBudget?.record(
-      getToolExplorationKind(
-        config.getToolRegistry(),
-        call.name ?? '',
-        call.args ?? {},
-      ),
-    );
     const key = getToolCallRepeatKey(call.name ?? '', call.args ?? {});
     const count = (loopState.toolCallKeyCounts.get(key) ?? 0) + 1;
     loopState.toolCallKeyCounts.set(key, count);
@@ -1126,6 +1119,18 @@ function recordDaemonToolCalls(
       LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
       `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
       loopState,
+    );
+  }
+  // Deliberately after both halt checks: a halted batch is skipped whole and
+  // never executes, so its calls must not feed the exploration budget (nor
+  // trigger the registry lookups classifying them needs).
+  for (const call of calls) {
+    loopState.explorationBudget?.record(
+      getToolExplorationKind(
+        config.getToolRegistry(),
+        call.name ?? '',
+        call.args ?? {},
+      ),
     );
   }
   return false;
