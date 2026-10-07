@@ -115,19 +115,18 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 : new WorkspaceRuntimeProvisioner(baseProvisioner, workspaces, workspaceExecutionStore);
         HarnessSessionResolver resolver = new HarnessSessionResolver() {
             @Override
-            public CompletionStage<RuntimeScope> resolve(
-                    String sessionId) {
-                return resolveSession(sessionId, false);
+            public CompletionStage<RuntimeScope> resolve(String sessionId) {
+                return resolveScope(sessionId, false);
             }
 
             @Override
-            public CompletionStage<RuntimeScope> resolveForTeardown(
+            public CompletionStage<RuntimeScope> resolveAdmission(
                     String sessionId) {
-                return resolveSession(sessionId, true);
+                return resolveScope(sessionId, true);
             }
 
-            private CompletionStage<RuntimeScope> resolveSession(
-                    String sessionId, boolean teardown) {
+            private CompletionStage<RuntimeScope> resolveScope(
+                    String sessionId, boolean admission) {
                 SessionRecord session = store.findSessionById(sessionId)
                         .orElse(null);
                 if (session == null) {
@@ -147,12 +146,13 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                                     "Hosted Workspace execution is not available.",
                                     false));
                 }
-                // The durable row is the fence for closing/closed, archived
-                // and deleted Sessions: unlike the in-process retired set it
-                // survives restarts and never accumulates in memory.
-                // Bootstrap only: teardown (release, reconciliation) must
-                // still converge after the Session closed.
-                if (!teardown && LIFECYCLE_FENCED.contains(session.status())) {
+                // The durable row is the admission fence for closing/closed,
+                // archived and deleted Sessions: unlike the in-process
+                // retired set it survives restarts and never accumulates in
+                // memory. Only the admission resolve fences: release and the
+                // unknown-outcome reconcile run after a close and must still
+                // resolve the scope to settle the binding.
+                if (admission && LIFECYCLE_FENCED.contains(session.status())) {
                     return CompletableFuture.failedFuture(
                             new RuntimeBrokerException(409,
                                     "runtime_broker_session_closed",
@@ -244,8 +244,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     @Override
     public CompletionStage<Void> drain(String sessionId) {
         // drain() runs while the row still reads CLOSING/DELETING; the
-        // resolver fences every lifecycle status durably, so only a vanished
-        // row needs the in-process entry.
+        // admission resolve fences every lifecycle status durably, so only
+        // a vanished row needs the in-process entry.
         if (store.findSessionById(sessionId).isEmpty()) {
             retired.add(sessionId);
         }

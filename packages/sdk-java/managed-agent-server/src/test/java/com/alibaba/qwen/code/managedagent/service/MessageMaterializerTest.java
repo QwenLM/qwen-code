@@ -46,35 +46,6 @@ class MessageMaterializerTest {
     }
 
     @Test
-    void atTheCapRetriesOnceEveryMaxStreakPasses() {
-        AgentStateStore store = mock(AgentStateStore.class);
-        when(store.findMaterializationTargets(32))
-                .thenReturn(List.of(POISON));
-        when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
-                .thenThrow(new IllegalStateException("gap"));
-        MessageMaterializer materializer = new MessageMaterializer(store);
-
-        // Attempts land on streaks 0, 1, 2, 4, 8, 16 and 32; the streak
-        // reaches the 64 cap after 64 passes.
-        for (int pass = 0; pass < 64; pass++) {
-            materializer.materialize();
-        }
-        verify(store, times(7)).materializeNextBatch("tenant", "poison",
-                200);
-
-        // At the cap the gate retries once every MAX_BACKOFF_STREAK passes
-        // instead of attempting and warning on every pass.
-        for (int pass = 0; pass < 64; pass++) {
-            materializer.materialize();
-        }
-        verify(store, times(8)).materializeNextBatch("tenant", "poison",
-                200);
-        materializer.materialize();
-        verify(store, times(9)).materializeNextBatch("tenant", "poison",
-                200);
-    }
-
-    @Test
     void warnsWithTheStackOnlyDuringTheExponentialPhase() {
         AgentStateStore store = mock(AgentStateStore.class);
         when(store.findMaterializationTargets(32))
@@ -115,6 +86,35 @@ class MessageMaterializerTest {
     }
 
     @Test
+    void atTheCapRetriesOnceEveryMaxStreakPasses() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        when(store.findMaterializationTargets(32))
+                .thenReturn(List.of(POISON));
+        when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
+                .thenThrow(new IllegalStateException("gap"));
+        MessageMaterializer materializer = new MessageMaterializer(store);
+
+        // Attempts land on streaks 0, 1, 2, 4, 8, 16 and 32; the streak
+        // reaches the 64 cap after 64 passes.
+        for (int pass = 0; pass < 64; pass++) {
+            materializer.materialize();
+        }
+        verify(store, times(7)).materializeNextBatch("tenant", "poison",
+                200);
+
+        // At the cap the gate retries once every MAX_BACKOFF_STREAK passes
+        // instead of attempting and warning on every pass.
+        for (int pass = 0; pass < 64; pass++) {
+            materializer.materialize();
+        }
+        verify(store, times(8)).materializeNextBatch("tenant", "poison",
+                200);
+        materializer.materialize();
+        verify(store, times(9)).materializeNextBatch("tenant", "poison",
+                200);
+    }
+
+    @Test
     void aFailingDeferralDegradesOnlyItsOwnTarget() {
         AgentStateStore store = mock(AgentStateStore.class);
         MaterializationTarget healthy =
@@ -136,8 +136,8 @@ class MessageMaterializerTest {
         logged.start();
         logger.addAppender(logged);
         try {
-            // Pass one poisons both targets; pass two retries them (streak 1
-            // is due), and every failure-path rotation throws a store fault.
+            // Pass one poisons the target; pass two retries it (streak 1 is
+            // due) and exercises the catch-path deferral, both throwing.
             // Catching the escape keeps the verdict on the assertions below
             // rather than on which call threw.
             try {
@@ -179,8 +179,9 @@ class MessageMaterializerTest {
         materializer.materialize();
         materializer.materialize();
 
-        // fail, retry-and-succeed, then a normal pass: three attempts and a
-        // single rotation (only the failure pass defers now).
+        // fail, retry-and-succeed, then a normal pass: full attempts, and
+        // the only rotation is the first failure's catch-path deferral — a
+        // due retry does not write the progress row ahead of the attempt.
         verify(store, times(3)).materializeNextBatch("tenant", "poison",
                 200);
         verify(store, times(1)).deferMaterializationTarget("tenant",

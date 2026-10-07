@@ -370,7 +370,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         String harnessId = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
                 "harnessSessionId");
-        return resolveScope(harnessId)
+        return resolveScope(harnessId, true)
                 .thenCompose(scope -> ensureBinding(
                         provisionRequest(scope, harnessId)))
                 .thenApply(BindingContext::record);
@@ -1473,11 +1473,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private CompletionStage<RuntimeSessionRecord> persistedSession(
             String harnessSessionId, String runtimeSessionId) {
-        // Teardown routes resolve through the permissive channel: a
-        // lifecycle-closed Harness Session must still converge its durable
-        // release and reconciliation instead of dying on the bootstrap
-        // fence.
-        return resolveScope(harnessSessionId, true).thenApply(scope -> {
+        return resolveScope(harnessSessionId).thenApply(scope -> {
             RuntimeSessionRecord record = sessionRepository.findById(scope,
                     runtimeSessionId);
             if (record == null) {
@@ -4075,10 +4071,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private CompletionStage<RuntimeScope> resolveScope(
-            String harnessSessionId, boolean teardown) {
+            String harnessSessionId, boolean admission) {
         return mapFailure(safeStage(
-                () -> teardown
-                        ? sessionResolver.resolveForTeardown(harnessSessionId)
+                () -> admission
+                        ? sessionResolver.resolveAdmission(harnessSessionId)
                         : sessionResolver.resolve(harnessSessionId)),
                 "runtime_scope_resolution_failed",
                 "Runtime scope resolution failed").thenApply(scope -> {
