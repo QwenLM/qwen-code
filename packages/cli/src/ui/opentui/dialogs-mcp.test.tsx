@@ -94,6 +94,7 @@ vi.mock('./theme.js', () => ({
 import { MCPServerStatus } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
 import {
   OpenTuiMcpDialog,
+  resolveFollowScrollOffset,
   type McpResourceInfo,
   type McpServerInfo,
   type McpToolInfo,
@@ -371,9 +372,11 @@ describe('OpenTuiMcpDialog list windows', () => {
     );
     await press('down');
     await press('return');
-    // No resource detail opens: the committed resource's URI would paint in
-    // the header, and it never does.
-    expect(screen.queryByText('res://resource_0')).toBeNull();
+    // No resource detail opens: had the keys moved and committed, the cursor
+    // would carry resource_1, whose URI the detail paints in both the header
+    // and the body. (Asserting resource_0's absence would be vacuous — that
+    // row cannot paint in either world at a zero-row window.)
+    expect(screen.queryAllByText('res://resource_1')).toHaveLength(0);
   });
 
   it('refuses the tool list keys at a zero-row window', async () => {
@@ -401,5 +404,84 @@ describe('OpenTuiMcpDialog list windows', () => {
     // No tool detail opens: the tool body ('(no description)') never mounts.
     expect(screen.queryByText('(no description)')).toBeNull();
     expect(screen.queryByText('tool_0')).toBeNull();
+  });
+
+  it('re-anchors the window to the cursor in the committed frame when the list changes identity', () => {
+    // The state offset holds the previous list's window for a render after
+    // the cursor resets (another server's tools, a re-entered step): the
+    // committed frame must re-derive the window around the cursor, or Enter
+    // would commit a row nothing painted.
+    expect(resolveFollowScrollOffset(3, 0, 12, 3)).toBe(0);
+    // A cursor inside the window leaves the offset alone (the hover rule).
+    expect(resolveFollowScrollOffset(3, 5, 12, 3)).toBe(3);
+    // A cursor past the window's bottom edge scrolls the window to it.
+    expect(resolveFollowScrollOffset(3, 6, 12, 3)).toBe(4);
+    // A zero-row window has no anchor; the offset only clamps into range.
+    expect(resolveFollowScrollOffset(5, 0, 3, 0)).toBe(3);
+  });
+
+  it('paints every server the region can pay for, beyond the ten-row list cap', () => {
+    // ink caps the tool and resource lists at ten rows but leaves the server
+    // list unwindowed; the region budget — not the cap — bounds it. Region
+    // 35 leaves the window 26 rows, and thirteen server rows paint.
+    render(
+      <OpenTuiMcpDialog
+        servers={twelveServers}
+        availableTerminalHeight={35}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByText('srv_0')).toBeTruthy();
+    expect(screen.getByText('srv_11')).toBeTruthy();
+  });
+
+  it('paints the server error in full, charged the rows it wraps into', async () => {
+    // A 201-column error wraps to four rows at the value's 72-column width.
+    // The region-15 window pays six rows and follows the action cursor, so
+    // the whole error paints with the cursor's action while the info rows
+    // above the window stay off — including Prompts:, which would paint if
+    // the wrap's rows were not charged into the window's row count.
+    const error = `Failed to connect: ${'x'.repeat(140)} retry with --debug for the transport log`;
+    render(
+      <OpenTuiMcpDialog
+        servers={[serverWith({ error })]}
+        availableTerminalHeight={15}
+        onClose={() => {}}
+      />,
+    );
+    await press('return'); // server list → server detail
+    expect(screen.getByText(/transport log$/)).toBeTruthy();
+    expect(screen.queryByText('Status:')).toBeNull();
+    expect(screen.queryByText('Prompts:')).toBeNull();
+    expect(screen.getByText('Disable')).toBeTruthy();
+  });
+
+  it('windows the server detail column, so Enter only commits a painted action', async () => {
+    // Seven info rows (the command wraps to two), the spacer and three
+    // actions make twelve rows; the region-12 window pays three, and it
+    // follows the action cursor in physical rows.
+    const onServerAction = vi.fn();
+    render(
+      <OpenTuiMcpDialog
+        servers={[
+          serverWith({ toolCount: 12, command: 'x'.repeat(80), error: 'boom' }),
+        ]}
+        availableTerminalHeight={12}
+        onClose={() => {}}
+        onServerAction={onServerAction}
+      />,
+    );
+    await press('return'); // server list → server detail
+    expect(screen.getByText('View tools')).toBeTruthy();
+    expect(screen.queryByText('Status:')).toBeNull();
+
+    await press('down');
+    await press('down');
+    expect(screen.getByText('Authenticate')).toBeTruthy();
+    await press('return');
+    expect(onServerAction).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'srv' }),
+      'authenticate',
+    );
   });
 });

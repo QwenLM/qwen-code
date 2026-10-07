@@ -29,7 +29,11 @@ import {
   FooterHint,
   dialogContentWidth,
 } from './dialogs-shared.js';
-import { findNextEnabledIndex, followScrollOffset } from './dialogs-core.js';
+import {
+  findNextEnabledIndex,
+  followScrollOffset,
+  wrappedRows,
+} from './dialogs-core.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 import {
   clipToWidth,
@@ -338,13 +342,38 @@ export interface OpenTuiMcpDialogProps {
 }
 
 /**
+ * The window a committed frame slices with: the state offset clamped into
+ * range, then re-anchored to the cursor when the cursor sits outside it. The
+ * state the effect maintains lags one render behind a cursor or budget
+ * change, and a list that changed identity (another server's tools, a
+ * re-entered step) resets the cursor while the state still holds the previous
+ * list's window — an un-anchored return would paint that window with the
+ * cursor's row absent while Enter keeps committing it. followScrollOffset
+ * leaves an in-window cursor's offset untouched, so a hover still cannot
+ * shift the window under the pointer; a zero-row window has no anchor to
+ * follow to, so the offset only clamps.
+ */
+export function resolveFollowScrollOffset(
+  offset: number,
+  cursor: number,
+  itemCount: number,
+  windowRows: number,
+): number {
+  const clamped = Math.max(
+    0,
+    Math.min(offset, Math.max(0, itemCount - windowRows)),
+  );
+  if (windowRows < 1) return clamped;
+  return followScrollOffset(cursor, clamped, itemCount, windowRows);
+}
+
+/**
  * BaseSelectionList's scroll-follow for the tool/resource lists: the window
  * lives in state and only moves when the cursor's row would leave it, so a
  * hover — which sets the cursor to a painted row — can never shift the window
  * under the pointer. Deriving the offset from the cursor on every render pins
  * the cursor to the window's bottom edge instead, and a click then opens a
- * different row than the one it landed on. A zero-row window has no anchor to
- * follow to, so the offset is left alone until the budget paints rows again.
+ * different row than the one it landed on.
  */
 function useFollowScrollOffset(
   cursor: number,
@@ -357,9 +386,7 @@ function useFollowScrollOffset(
     const next = followScrollOffset(cursor, offset, itemCount, windowRows);
     if (next !== offset) setOffset(next);
   }, [cursor, offset, itemCount, windowRows]);
-  // The state lags one render behind a cursor or budget change; clamp in the
-  // meantime so the slice never starts past the last full window.
-  return Math.max(0, Math.min(offset, Math.max(0, itemCount - windowRows)));
+  return resolveFollowScrollOffset(offset, cursor, itemCount, windowRows);
 }
 
 export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
@@ -419,6 +446,12 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
     regionHeight === undefined
       ? MCP_LIST_MAX_ROWS
       : Math.max(0, Math.min(MCP_LIST_MAX_ROWS, regionHeight - 9));
+  // ink windows only the tool and resource lists (VISIBLE_*_COUNT); the
+  // server list and the detail column are unwindowed there, so they pay out
+  // of the full region budget instead of the ten-row cap — a tall region
+  // paints every row it can pay for.
+  const bodyWindowRows =
+    regionHeight === undefined ? undefined : Math.max(0, regionHeight - 9);
   const { width } = useTerminalDimensions();
   const contentWidth = dialogContentWidth(width);
 
@@ -502,16 +535,17 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
       (row) => row.kind === 'server' && row.flatIndex === serverCursor,
     ),
   );
+  const serverWindowRows = bodyWindowRows ?? serverRows.length;
   const serverListOffset = useFollowScrollOffset(
     serverCursorRow,
     serverRows.length,
-    listWindowRows,
+    serverWindowRows,
   );
 
-  // The detail step is one flat column — info rows (each clipped to the one
-  // physical row the budget charges), the spacer, then the action rows — and
-  // the window follows the action cursor, so Enter always commits a painted
-  // action even when the info rows cost more than the window.
+  // The detail step is one flat column — the info rows, the spacer, then the
+  // action rows — and the window follows the action cursor in physical rows,
+  // so Enter always commits a painted action even when a wrapped info value
+  // costs more rows than one.
   const detailInfoRows: Array<{ label: string; value: string; red?: boolean }> =
     selectedServer
       ? [
@@ -543,18 +577,40 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
             : []),
         ]
       : [];
-  const detailRowCount =
+  // The info values paint unclipped — the Error row is the only diagnostic
+  // the dialog carries — so each is charged the rows it wraps into at its
+  // column; the spacer and the action rows are one row each. The window
+  // follows the action cursor in physical rows, so Enter always commits a
+  // painted action even when a wrapped value costs more rows than one.
+  const detailValueWidth = Math.max(1, contentWidth - 20);
+  const detailEntryRows: number[] =
     detailInfoRows.length === 0
-      ? 0
-      : detailInfoRows.length + 1 + detailActions.length;
-  const detailCursorRow = Math.min(
-    detailInfoRows.length + 1 + actionCursor,
-    Math.max(0, detailRowCount - 1),
-  );
+      ? []
+      : [
+          ...detailInfoRows.map((row) =>
+            wrappedRows(sanitizeTerminalLine(row.value), detailValueWidth),
+          ),
+          1,
+          ...detailActions.map(() => 1),
+        ];
+  const detailRowStarts: number[] = [];
+  let detailRowCount = 0;
+  for (const rows of detailEntryRows) {
+    detailRowStarts.push(detailRowCount);
+    detailRowCount += rows;
+  }
+  const detailCursorRow =
+    detailRowStarts[
+      Math.min(
+        detailInfoRows.length + 1 + actionCursor,
+        Math.max(0, detailEntryRows.length - 1),
+      )
+    ] ?? 0;
+  const detailWindowRows = bodyWindowRows ?? detailRowCount;
   const detailOffset = useFollowScrollOffset(
     detailCursorRow,
     detailRowCount,
-    listWindowRows,
+    detailWindowRows,
   );
 
   const toolScrollOffset = useFollowScrollOffset(
@@ -582,7 +638,7 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
       // row painted, the arrows would walk an invisible cursor and Enter
       // would open a server the user never saw highlighted. Escape stays live
       // above — it addresses the dialog, not a row.
-      if (listWindowRows < 1) return;
+      if (serverWindowRows < 1) return;
       if (keyMatchers[Command.SELECTION_UP](original)) {
         setServerCursor(
           clampNavIndex(serverCursorRef.current, flatServers.length, 'up'),
@@ -608,7 +664,7 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
     }
 
     if (currentStep === MCP_MANAGEMENT_STEPS.SERVER_DETAIL) {
-      if (listWindowRows < 1) return;
+      if (detailWindowRows < 1) return;
       if (keyMatchers[Command.SELECTION_UP](original)) {
         setActionCursor(
           findNextEnabledIndex(detailActions, actionCursorRef.current, 'up'),
@@ -797,7 +853,7 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
     }
     const visibleRows = serverRows.slice(
       serverListOffset,
-      serverListOffset + listWindowRows,
+      serverListOffset + serverWindowRows,
     );
     return (
       <box flexDirection="column">
@@ -883,8 +939,8 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
     if (!selectedServer) {
       return <text fg={C.red}>{t('No server selected')}</text>;
     }
-    // One flat column, windowed from the same budget as the lists: each info
-    // value clips to the one physical row the window charges it (the command
+    // One flat column, windowed from the region's budget: each info value
+    // wraps at its column and is charged the rows it wraps into (the command
     // comes from the settings file and can be far longer than the width),
     // and the window follows the action cursor so Enter always commits a
     // painted action.
@@ -919,10 +975,17 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
         index,
       })),
     ];
-    const visibleRows = flatRows.slice(
-      detailOffset,
-      detailOffset + listWindowRows,
-    );
+    // Entries paint whole and only when they fit inside the window: an info
+    // row taller than the remaining budget never paints a partial wrap the
+    // frame did not pay for, and the cursor's one-row action always fits the
+    // window the follow rule pins it into.
+    const visibleRows = flatRows.filter((_, index) => {
+      const start = detailRowStarts[index] ?? 0;
+      const rows = detailEntryRows[index] ?? 1;
+      return (
+        start >= detailOffset && start + rows <= detailOffset + detailWindowRows
+      );
+    });
     return (
       <box flexDirection="column">
         {visibleRows.map((row) => {
@@ -936,10 +999,7 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
                   <text fg={row.red ? C.red : C.text}>{row.label}</text>
                 </box>
                 <text fg={row.red ? C.red : C.text}>
-                  {clipToWidth(
-                    sanitizeTerminalLine(row.value),
-                    Math.max(0, contentWidth - 20),
-                  )}
+                  {sanitizeTerminalLine(row.value)}
                 </text>
               </box>
             );

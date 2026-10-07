@@ -2457,6 +2457,23 @@ its refusal to shrink, the misc dialog's tests pin the diff and subagents
 windowed heights at the boundary, and the frames test pins the skills
 scrollbox's windowed heights.
 
+The auth wizard took the same rule a round later, from the other direction. A
+short region measured one row taller than its main view, and the first repair
+made the wizard's frame shrinkable the way the static no-config summary's is —
+which lets the region shed a blank row there, but on the wizard the squeeze
+lands on the radio lists and takes rows out of the middle of them while the
+keys keep committing the rows that stopped painting: at the default 80×24 the
+nine-row provider sub-menu was measured painting its rows over each other and
+the border, with Enter live on them. The shrink opt-in is therefore split by
+body kind: the static bodies (the no-config summary, the trust dialog) keep it
+and shed blank rows the way ink's dialogs do, while the list-carrying wizard
+stays unshrinkable and windows every radio list from the region budget — the
+main menu, the provider sub-menus, and the protocol, wire-API and endpoint
+steps — charging two physical rows an item (label and description, each
+clipped to the columns the row owns) plus the margin between items, with the
+window following the cursor and the keys refusing a row nothing painted, the
+same refusal the other windowed dialogs make.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:

@@ -115,7 +115,7 @@ export function Shell({
 
 /** The Shell frame's rows above a sized body: border and padding 4, title 1,
  * the body's marginTop 1. */
-const SHELL_BODY_CHROME_ROWS = 6;
+export const SHELL_BODY_CHROME_ROWS = 6;
 const DIFF_BODY_ROWS = 14;
 const SUBAGENTS_BODY_ROWS = 12;
 

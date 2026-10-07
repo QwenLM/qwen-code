@@ -264,7 +264,11 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
     <DialogFrame>
       {mode === 'theme' ? (
         <box flexDirection="row">
-          <box flexDirection="column" width="45%" paddingRight={2}>
+          <box
+            flexDirection="column"
+            width={layout.showPreview ? '45%' : '100%'}
+            paddingRight={layout.showPreview ? 2 : 0}
+          >
             <box flexDirection="row" marginBottom={1}>
               <text fg={C.text} attributes={1}>
                 {'> '}

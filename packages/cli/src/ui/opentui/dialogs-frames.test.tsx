@@ -114,6 +114,7 @@ import {
   OpenTuiSkillsDialog,
   OpenTuiStatsDialog,
 } from './dialogs-stats-skills.js';
+import { OpenTuiThemeDialog } from './dialogs-theme.js';
 
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
 
@@ -214,6 +215,43 @@ describe('sibling dialog frames (region clips, frame does not shrink)', () => {
     expect(
       layoutOf(container.querySelector('[data-kind="scrollbox"]')),
     ).toMatchObject({ height: 12 });
+  });
+
+  it('theme list column reclaims the full width when the preview pane cannot paint', () => {
+    // Region 12 leaves the columns six rows — below the pane's two-row
+    // minimum — so the 55% preview column is skipped; the list column takes
+    // the whole frame instead of leaving the pane's share blank.
+    const themeSettings = {
+      merged: {},
+      user: { settings: {} },
+      workspace: { settings: {} },
+      forScope: () => ({ settings: {} }),
+    } as unknown as LoadedSettings;
+    const narrow = render(
+      <OpenTuiThemeDialog
+        onSelect={() => {}}
+        onHighlight={() => {}}
+        settings={themeSettings}
+        availableTerminalHeight={12}
+      />,
+    );
+    const listColumn =
+      narrow.container.firstElementChild?.firstElementChild?.firstElementChild;
+    expect(layoutOf(listColumn)).toMatchObject({ width: '100%' });
+    narrow.unmount();
+
+    // With the pane painted, the 45/55 split stays.
+    const tall = render(
+      <OpenTuiThemeDialog
+        onSelect={() => {}}
+        onHighlight={() => {}}
+        settings={themeSettings}
+        availableTerminalHeight={24}
+      />,
+    );
+    const splitColumn =
+      tall.container.firstElementChild?.firstElementChild?.firstElementChild;
+    expect(layoutOf(splitColumn)).toMatchObject({ width: '45%' });
   });
 
   it('windows the skills scrollbox to zero rows when the region cannot pay the chrome', () => {

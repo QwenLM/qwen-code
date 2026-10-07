@@ -96,6 +96,7 @@ vi.mock('@opentui/react', () => ({
     mocks.state.pasteHandlers.push(handler);
   },
   useRenderer: () => mocks.renderer,
+  useTerminalDimensions: () => ({ width: 100, height: 40 }),
 }));
 
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
@@ -249,21 +250,31 @@ function renderDialog(overrides?: {
   authType?: AuthType;
   initialError?: string;
   merged?: Record<string, unknown>;
+  availableTerminalHeight?: number;
 }) {
   const onClose = vi.fn();
   const notify = vi.fn();
   const config = createMockConfig(overrides?.authType);
   const settings = createMockSettings(overrides?.merged);
-  render(
+  const view = (availableTerminalHeight?: number) => (
     <OpenTuiAuthDialog
       config={config}
       settings={settings}
       onClose={onClose}
       notify={notify}
       initialError={overrides?.initialError}
-    />,
+      availableTerminalHeight={availableTerminalHeight}
+    />
   );
-  return { onClose, notify, config };
+  const rendered = render(view(overrides?.availableTerminalHeight));
+  return {
+    onClose,
+    notify,
+    config,
+    /** Re-render the same dialog against a new region height. */
+    rerenderAt: (availableTerminalHeight: number) =>
+      rendered.rerender(view(availableTerminalHeight)),
+  };
 }
 
 /** Drive main → Custom Provider → through the full seven-step wizard. */
@@ -1273,19 +1284,19 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
   });
 });
 
-describe('the wizard frame sheds rows like ink', () => {
+describe('the wizard frame keeps its natural height', () => {
   beforeEach(() => {
     mocks.state.inputHandlers.length = 0;
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.pasteHandlers.length = 0;
   });
 
-  it('stays shrinkable for the wizard, the way the static summary does', () => {
-    // /auth measured the difference at the default 80x24 (F5-1): unshrinkable,
-    // the frame is one row taller than the region and the clip takes the
-    // bottom border; shrinkable, it sheds a blank row like ink and closes
-    // cleanly. The wizard's radio lists do not window, so the frame keeps the
-    // same opt-in the static no-config body has.
+  it('stays unshrinkable for the list-carrying wizard while the static summary sheds rows', () => {
+    // The wizard's radio lists window from the region budget, so the frame
+    // fits the region by construction and never needs to shed rows (F5-1:
+    // the shrink opt-in is the static bodies'). The static no-config summary
+    // keeps `shrinkable` so a short region sheds its blank rows the way ink
+    // does.
     const wizard = render(
       <OpenTuiAuthDialog
         config={createMockConfig()}
@@ -1296,7 +1307,7 @@ describe('the wizard frame sheds rows like ink', () => {
     );
     expect(
       wizard.container.firstElementChild?.getAttribute('data-flex-shrink'),
-    ).toBe('1');
+    ).toBe('0');
     wizard.unmount();
 
     const summary = render(
@@ -1309,6 +1320,48 @@ describe('the wizard frame sheds rows like ink', () => {
     expect(
       summary.container.firstElementChild?.getAttribute('data-flex-shrink'),
     ).toBe('1');
+  });
+
+  it('windows the provider sub-menu from the region, so Enter only opens a painted provider', async () => {
+    // Region 13: the main view's chrome (shell 6, the clipped rule and the
+    // terms runs 5) leaves two rows, so one main row paints and the window
+    // follows the cursor; the sub-menu's chrome (shell 6, hint 2) leaves
+    // five rows, so two of the nine providers paint. Without the window all
+    // nine paint into a region that clips them, and Enter commits whichever
+    // row the cursor names.
+    renderDialog({ availableTerminalHeight: 13 });
+    await press('down'); // main: THIRD_PARTY_PROVIDERS
+    await press('return'); // → thirdparty-select
+    expect(screen.getByText('DeepSeek API Key')).toBeTruthy();
+    expect(screen.getByText('Grok (xAI) API Key')).toBeTruthy();
+    expect(screen.queryByText('MiniMax API Key')).toBeNull();
+
+    // The window follows the cursor: two downs put MiniMax's row on and
+    // DeepSeek's off, and Enter commits the painted MiniMax row.
+    await press('down');
+    await press('down');
+    expect(screen.getByText('MiniMax API Key')).toBeTruthy();
+    expect(screen.queryByText('DeepSeek API Key')).toBeNull();
+    await press('return');
+    expect(screen.getByText(/MiniMax API Key · Step 1\//)).toBeTruthy();
+  });
+
+  it('refuses the sub-menu keys when the region pays zero provider rows', async () => {
+    // Navigated at region 13 and then shrunk past the sub-menu's chrome:
+    // region 9 leaves one row — less than a provider row's three — so
+    // nothing paints, and the arrows and Enter address nothing.
+    const { rerenderAt } = renderDialog({ availableTerminalHeight: 13 });
+    await press('down');
+    await press('return'); // → thirdparty-select
+    expect(screen.getByText('DeepSeek API Key')).toBeTruthy();
+
+    rerenderAt(9);
+    expect(screen.queryByText('DeepSeek API Key')).toBeNull();
+    await press('down');
+    await press('return');
+    // Still on the sub-menu: no provider setup opened.
+    expect(screen.getByText('Third-party Providers · Provider')).toBeTruthy();
+    expect(screen.queryByText(/Step 1\//)).toBeNull();
   });
 });
 
