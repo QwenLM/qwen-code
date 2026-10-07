@@ -440,12 +440,18 @@ class HostedPublicWorkspaceIT {
         List<Path> roots = List.of(Files.createDirectory(temporary.resolve("workspace-a")),
                 Files.createDirectory(temporary.resolve("workspace-b")));
         for (Path root : roots) Files.createDirectory(root.resolve("child"));
-        port = freePort();
-        int harnessPort = freePort();
-        int brokerPort = freePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
+        int harnessPort;
+        int brokerPort;
+        try (ServerSocket springSocket = new ServerSocket(0);
+                ServerSocket harnessSocket = new ServerSocket(0);
+                ServerSocket brokerSocket = new ServerSocket(0)) {
+            port = springSocket.getLocalPort();
+            harnessPort = harnessSocket.getLocalPort();
+            brokerPort = brokerSocket.getLocalPort();
+        }
         startSpring(cli, roots, harnessPort, brokerPort);
         startHarness(cli, harnessPort, brokerPort);
         return roots;
@@ -845,9 +851,13 @@ class HostedPublicWorkspaceIT {
             if (!harness.isAlive()) {
                 throw new AssertionError("Hosted Harness exited: " + Files.readString(log));
             }
-            assertThat(http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort + "/capabilities"))
+            HttpResponse<String> response = http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort + "/capabilities"))
                     .timeout(Duration.ofSeconds(2)).header("Authorization", "Bearer " + TOKEN).build(),
-                    HttpResponse.BodyHandlers.discarding()).statusCode()).isEqualTo(200);
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(response.statusCode())
+                    .withFailMessage("Hosted Harness port %s returned %s: %s%n%s", harnessPort,
+                            response.statusCode(), response.body(), Files.readString(log))
+                    .isEqualTo(200);
         });
     }
 
@@ -929,10 +939,6 @@ class HostedPublicWorkspaceIT {
     // Every creation refusal here shares one declared code; the fixture, not the code, selects the branch.
     private static void assertUnavailable(JsonNode refusal) {
         assertThat(refusal.path("error").path("code").asText()).isEqualTo("workspace_unavailable");
-    }
-
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) { return socket.getLocalPort(); }
     }
 
     @AfterEach
