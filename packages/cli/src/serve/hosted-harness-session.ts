@@ -122,6 +122,7 @@ import {
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
   isRetryableWorkspaceAcquisition,
+  touchesWorkspaceContext,
   type HostedWorkspaceContextSlot,
   type HostedWorkspaceToolProfile,
   type HostedShellTurnOptions,
@@ -1754,6 +1755,9 @@ async function executeHostedTurn(
           read: () => session.workspaceContext,
           write: (context) => {
             session.workspaceContext = context;
+          },
+          invalidate: () => {
+            session.workspaceContext = undefined;
           },
         };
         toolTurn =
@@ -4019,6 +4023,9 @@ export function registerHostedHarnessSessionRoutes(
           write: (context) => {
             session.workspaceContext = context;
           },
+          invalidate: () => {
+            session.workspaceContext = undefined;
+          },
         };
         toolTurn = new HostedWorkspaceToolTurn(
           brokerOptions,
@@ -4587,6 +4594,10 @@ export function registerHostedHarnessSessionRoutes(
         action: 'rewind',
         promptId,
       });
+      // The rewind already changed the files: a restored instruction file
+      // makes the cached context stale (#13564).
+      if (touchesWorkspaceContext(result.filesChanged))
+        session.workspaceContext = undefined;
       if (result.filesFailed.length)
         throw new Error('Hosted file undo only partially completed.');
       const undo = {
