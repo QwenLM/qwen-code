@@ -1877,4 +1877,26 @@ describe('Managed Runtime tools', () => {
     expect(config.getManagedSessionBlock()).toBe(first);
     expect(deriveConfig(config).getManagedSessionBlock()).toBe(first);
   });
+
+  it('reports and clears an engine quarantine, also through a derived Config', () => {
+    const onManagedEngineQuarantine = vi.fn();
+    const config = managedConfig({ onManagedEngineQuarantine });
+    const reason = new Error('the stop could not be proven');
+    config.reportManagedEngineQuarantine(reason);
+    expect(onManagedEngineQuarantine).toHaveBeenNthCalledWith(1, true, reason);
+    deriveConfig(config).clearManagedEngineQuarantine(reason);
+    expect(onManagedEngineQuarantine).toHaveBeenNthCalledWith(2, false, reason);
+    expect(onManagedEngineQuarantine).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores a quarantine callback for an engine that is not managed', () => {
+    const onManagedEngineQuarantine = vi.fn();
+    const config = managedConfig({
+      sessionExecutionEngine: 'legacy',
+      onManagedEngineQuarantine,
+    });
+    config.reportManagedEngineQuarantine(new Error('irrelevant'));
+    config.clearManagedEngineQuarantine(new Error('irrelevant'));
+    expect(onManagedEngineQuarantine).not.toHaveBeenCalled();
+  });
 });

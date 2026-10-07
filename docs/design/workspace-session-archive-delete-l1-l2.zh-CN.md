@@ -182,10 +182,9 @@ tenant 已在主键内。71 字符的 `sha256:` 值适配 128 字符 key 列。
 指的是不重复产生效果；响应返回当前可见的 Session，与现有公开响应契约一致。
 不存储不可变的 Session 响应快照。如果另一个 key 再次归档会话，
 重放旧 unarchive key 返回当前 archived 视图和为 true 的 replay 响应头，
-不会再次取消归档。删除后返回 `404`，因为该响应是 Session 读取，
-不是 operation 读取；返回 unarchive 重放前要检查墓碑可见性。
-archive/delete 在墓碑上仍可重放 operation。
-两个入口的测试与 OpenAPI 必须明确这一区别。
+不会再次取消归档。删除后，已记录的 unarchive 仍以最后可见的 Session
+重放其 200 响应——与其他所有 mutation 路径一致，已记录的成功不得因之后的
+删除而变成 404。两个入口的测试与 OpenAPI 均已明确这一行为。
 
 ## 6. L2 实现设计
 
@@ -340,7 +339,7 @@ writer/投影完成、残留 writer 续租与 retirement 竞争，以及前置 s
 | 授权            | 创建者且可读时成功；不可读、跨 tenant 返回 404；可读非创建者返回 403；重放和 operation 读取重新检查权限                                                                                  |
 | 状态与证据      | 按约定拒绝 ACTIVE、CLOSING、DELETING 上的新元数据请求；手工构造且缺少 completed-close 证据的 CLOSED/ARCHIVED 被拒绝；未完成操作冲突                                                      |
 | 幂等            | 同 key 并发仅一次；跨入口同 key 仅一次；actor/Session/kind 隔离；大小写不同的有效 key 分离；空白、控制字符和超长 key 原样拒绝、不 trim；无重复事件；store 层验证 digest 冲突             |
-| Unarchive 重放  | 提交前崩溃、提交后应答丢失；再次归档后重放返回当前 ARCHIVED 且不改变它；墓碑后重放 404；无滞留 PENDING command                                                                           |
+| Unarchive 重放  | 提交前崩溃、提交后应答丢失；再次归档后重放返回当前 ARCHIVED 且不改变它；墓碑后重放以最后可见的 Session 返回已记录的结果；无滞留 PENDING command                                          |
 | 永久关闭        | archive/unarchive 后 input、新 writer、warm 仍被拒绝，原 close receipt/围栏保留；无 model、Hook、provider 或 Runtime 调用                                                                |
 | 数据保留        | 原历史、Artifact、publication 在 L1 全程可读；L2 按契约拒绝公开/私有读取，同时保留字节、备份与共享文件                                                                                   |
 | 删除原子性      | 每个 retirement/tombstone/operation/event 写入后注入失败，全部回滚；无 head/publication 的 Session 仍有永久屏障；残留 live writer 阻止完成；非 READY recovery 允许墓碑，同时保留回收保护 |

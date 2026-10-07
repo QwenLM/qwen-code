@@ -210,7 +210,7 @@ public class ManagedAgentService {
         Optional<Admission> recorded = store.findWorkspaceCreateReplay(
                 tenantId, actorId, idempotencyKey, requestDigest);
         if (recorded.isPresent()) {
-            dispatch(tenantId, recorded.get());
+            dispatch(tenantId, recorded.get(), true);
             return response(recorded.get());
         }
         if (!input.isEmpty() && !harness.isWorkspaceFilesAvailable()) {
@@ -228,7 +228,7 @@ public class ManagedAgentService {
             admission = store.replayWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest);
         }
-        dispatch(tenantId, admission);
+        dispatch(tenantId, admission, true);
         return response(admission);
     }
 
@@ -255,7 +255,7 @@ public class ManagedAgentService {
         Admission replay = replay(tenantId, SUBMIT, idempotencyKey,
                 requestDigest);
         if (replay != null) {
-            dispatch(tenantId, replay);
+            dispatch(tenantId, replay, session.workspace() != null);
             return response(replay);
         }
         if (!admissible) {
@@ -272,7 +272,7 @@ public class ManagedAgentService {
             admission = store.replayCommand(tenantId, SUBMIT,
                     idempotencyKey, requestDigest);
         }
-        dispatch(tenantId, admission);
+        dispatch(tenantId, admission, session.workspace() != null);
         return response(admission);
     }
 
@@ -293,7 +293,7 @@ public class ManagedAgentService {
         Admission replay = replay(tenantId, CANCEL, idempotencyKey,
                 requestDigest);
         if (replay != null) {
-            dispatch(tenantId, replay);
+            dispatch(tenantId, replay, session.workspace() != null);
             return response(replay);
         }
         if (!admissible) {
@@ -311,7 +311,7 @@ public class ManagedAgentService {
             coordinator.cancel(tenantId, admission.sessionId(),
                     admission.turnId());
         } else {
-            dispatch(tenantId, admission);
+            dispatch(tenantId, admission, session.workspace() != null);
         }
         return response(admission);
     }
@@ -666,6 +666,11 @@ public class ManagedAgentService {
         // 404. DELETING stays advertised: those routes still answer while
         // the delete drains.
         boolean visible = session.deletedAt() == null;
+        // The lifecycle affordances 404/409 on a tombstone exactly like the
+        // content routes, so they take the same gate — as a conjunction,
+        // never a replacement: a live Session keeps every flag it had.
+        boolean close = visible && supportsClose(session);
+        boolean keep = visible && retention;
         return new PublicSession(
                 session.sessionId(),
                 "agent.session",
@@ -685,9 +690,9 @@ public class ManagedAgentService {
                         visible,
                         hasArtifacts(session),
                         visible,
-                        session.workspace() == null,
+                        session.workspace() == null && visible,
                         visible,
-                        hasActions(session), supportsClose(session), retention, retention, retention),
+                        hasActions(session), close, keep, keep, keep),
                 publicWorkspace(session));
     }
 
@@ -741,6 +746,9 @@ public class ManagedAgentService {
     private WebShellSession webShellSession(SessionRecord session,
             TurnSummary latestTurn, EventRecord environmentEvent,
             boolean retention, boolean maySubmit) {
+        boolean visible = session.deletedAt() == null;
+        boolean close = visible && supportsClose(session);
+        boolean keep = visible && retention;
         return new WebShellSession(
                 session.sessionId(),
                 session.title(),
@@ -754,12 +762,12 @@ public class ManagedAgentService {
                 webShellWorkspace(session),
                 // Every Session serves its task list and detail; the tasks come from the
                 // Stage H records its Session store holds (H0c). The
-                // tombstone test matches publicSession: the tasks route
-                // 404s once deletedAt is set.
-                new WebShellSessionCapabilities(session.deletedAt() == null,
+                // tombstone gate matches publicSession: every route these
+                // capabilities gate 404s once deletedAt is set.
+                new WebShellSessionCapabilities(visible,
                         hasArtifacts(session),
-                        hasActions(session), maySubmit, supportsClose(session),
-                        retention, retention, retention));
+                        hasActions(session), maySubmit, close, keep, keep,
+                        keep));
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
@@ -887,16 +895,22 @@ public class ManagedAgentService {
     }
 
     private void dispatch(String tenantId, Admission admission) {
-        // A replay answers while the Harness is down, but the replay itself
-        // must not spend the Turn's pre-admission budget: re-dispatching
-        // here would let a client's own retries defer the Turn into a
-        // terminal hosted_harness_unavailable. The gate protects the
-        // Harness axis only — the production connector's isAvailable() is
-        // constant true, so during a Workspace-files outage replays and the
-        // sweep still re-offer the parked Turn, and there the outage hold
-        // keeps spending the budget: the sweep is the spender, not the
-        // rescuer.
-        if (admission.turnId() != null && harness.isAvailable()) {
+        dispatch(tenantId, admission, false);
+    }
+
+    private void dispatch(String tenantId, Admission admission,
+            boolean workspaceBound) {
+        // A replay answers while the Harness is down or the Workspace files
+        // are off, but the replay itself must not spend the Turn's
+        // pre-admission budget: re-dispatching here would let a client's
+        // own retries defer the Turn into a terminal failure. During a
+        // Harness outage nothing re-offers the parked Turn until
+        // availability returns — the sweep gates on isAvailable() too.
+        // During a Workspace-files outage the sweep still re-offers a bound
+        // Turn and the outage hold keeps spending the budget: there the
+        // sweep is the spender, not the rescuer.
+        if (admission.turnId() != null && harness.isAvailable()
+                && (!workspaceBound || harness.isWorkspaceFilesAvailable())) {
             coordinator.dispatch(tenantId, admission.sessionId(),
                     admission.turnId());
         }

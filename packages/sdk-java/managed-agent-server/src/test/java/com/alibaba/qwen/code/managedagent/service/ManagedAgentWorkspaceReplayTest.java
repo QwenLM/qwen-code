@@ -2,7 +2,10 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
@@ -35,6 +38,7 @@ class ManagedAgentWorkspaceReplayTest {
     private ManagedWorkspaceRegistry registry;
     private ManagedAgentStore store;
     private ManagedAgentProperties properties;
+    private HarnessCoordinator coordinator;
 
     private ManagedAgentService service(AtomicBoolean files) {
         UnavailableHarnessConnector harness =
@@ -60,8 +64,9 @@ class ManagedAgentWorkspaceReplayTest {
                             String title) {
                     }
                 };
+        coordinator = mock(HarnessCoordinator.class);
         return new ManagedAgentService(store, new RequestDigests(),
-                mock(HarnessCoordinator.class), harness, registry);
+                coordinator, harness, registry);
     }
 
     private String boundSession(String tenant) {
@@ -117,14 +122,22 @@ class ManagedAgentWorkspaceReplayTest {
         ManagedAgentService service = service(files);
         List<InputBlock> input = List.of(new InputBlock("text", "go"));
 
-        transaction.executeWithoutResult(status -> assertThat(
-                service.submitTurn(tenant, "actor-a", "submit", sessionId,
-                        input).replayed()).isFalse());
+        String turnId = transaction.execute(status -> {
+            var admission = service.submitTurn(tenant, "actor-a", "submit",
+                    sessionId, input);
+            assertThat(admission.replayed()).isFalse();
+            return admission.turnId();
+        });
 
         files.set(false);
+        clearInvocations(coordinator);
         transaction.executeWithoutResult(status -> assertThat(
                 service.submitTurn(tenant, "actor-a", "submit", sessionId,
                         input).replayed()).isTrue());
+        // The replay answers its recorded 202 but must not re-dispatch the
+        // Turn: a client's own retries would otherwise spend the
+        // pre-admission budget the files hold charges.
+        verify(coordinator, never()).dispatch(tenant, sessionId, turnId);
         // The outage changes nothing about who the recorded outcome answers
         // to...
         transaction.executeWithoutResult(status ->
@@ -173,11 +186,11 @@ class ManagedAgentWorkspaceReplayTest {
         });
 
         // The delete flow's durable footprint for a bound Session: the
-        // operation row records the last-visible status — CLOSED, the only
-        // pre-delete state a bound delete admits — and the Session row
-        // becomes a tombstone. The command-row fallback can never serve a
-        // bound delete: its only writer refused bound Sessions since the
-        // binding existed.
+        // operation row records the last-visible status — CLOSED or
+        // ARCHIVED, the two pre-delete states a bound delete admits — and
+        // the Session row becomes a tombstone. The command-row fallback can
+        // never serve a bound delete: its only writer refused bound
+        // Sessions since the binding existed.
         jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
                         + " session_id, operation_id, operation_kind,"
                         + " actor_digest, idempotency_key, request_digest,"
@@ -245,6 +258,54 @@ class ManagedAgentWorkspaceReplayTest {
                     sessionId, "new title");
             assertThat(replay.replayed()).isTrue();
             assertThat(replay.body().status()).isEqualTo("active");
+            // Every route the lifecycle flags gate answers 404 or 409 on
+            // the tombstone, so the replayed body must not advertise them.
+            assertThat(replay.body().capabilities().sessionLifecycle())
+                    .isFalse();
+            assertThat(replay.body().capabilities().sessionClose()).isFalse();
+            assertThat(replay.body().capabilities().sessionArchive())
+                    .isFalse();
+            assertThat(replay.body().capabilities().sessionUnarchive())
+                    .isFalse();
+            assertThat(replay.body().capabilities().sessionDelete()).isFalse();
+        });
+    }
+
+    // The other legal bound-delete footprint: an archived-then-deleted
+    // bound Session records ARCHIVED as its last-visible status, and the
+    // replay answers with it.
+    @Test
+    void aDeletedArchivedBoundSessionReplaysItsRenameAsArchived() {
+        freshDatabase();
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        ManagedAgentService service = service(new AtomicBoolean(true));
+
+        transaction.executeWithoutResult(status -> assertThat(
+                service.renameSession(tenant, "actor-a", "rename", sessionId,
+                        "new title").replayed()).isFalse());
+
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                        + " session_id, operation_id, operation_kind,"
+                        + " actor_digest, idempotency_key, request_digest,"
+                        + " state, admission_stage, delivery_state,"
+                        + " session_status_before, available_at, created_at,"
+                        + " updated_at, completed_at) VALUES (?, ?, 'op-del',"
+                        + " 'DELETE', '', 'delete', 'delete-digest',"
+                        + " 'COMPLETED', 'JAVA_DURABLE', 'CONFIRMED',"
+                        + " 'ARCHIVED', 0, 0, 0, 0)",
+                tenant, sessionId);
+        jdbc.update("UPDATE managed_agent_session SET status = 'DELETED',"
+                        + " deleted_at = 1, updated_at = 1, version ="
+                        + " version + 1 WHERE tenant_id = ? AND session_id"
+                        + " = ?",
+                tenant, sessionId);
+
+        transaction.executeWithoutResult(status -> {
+            var replay = service.renameSession(tenant, "actor-a", "rename",
+                    sessionId, "new title");
+            assertThat(replay.replayed()).isTrue();
+            assertThat(replay.body().status()).isEqualTo("archived");
         });
     }
 
@@ -268,9 +329,13 @@ class ManagedAgentWorkspaceReplayTest {
                         turnId).replayed()).isFalse());
 
         files.set(false);
+        clearInvocations(coordinator);
         transaction.executeWithoutResult(status -> assertThat(
                 service.cancelTurn(tenant, "actor-a", "cancel", sessionId,
                         turnId).replayed()).isTrue());
+        // Same rule as the submit twin: the recorded cancel answers, the
+        // Turn is not re-dispatched into the outage hold.
+        verify(coordinator, never()).dispatch(tenant, sessionId, turnId);
         // The outage changes nothing about who the recorded outcome answers
         // to...
         transaction.executeWithoutResult(status ->

@@ -170,17 +170,24 @@ class WorkspaceSessionRetentionTest {
         }
         archive(tenant, first, "Archive");
         web("unarchive", tenant, first, "owner", "Same").andExpect(status().isOk())
-                .andExpect(header().string("X-Qwen-Idempotent-Replay", "false"));
+                .andExpect(header().string("X-Qwen-Idempotent-Replay", "false"))
+                .andExpect(jsonPath("$.capabilities.tasks").value(true));
         String id = json(request(delete(PUBLIC + first), tenant, "owner", "delete")
                 .andExpect(status().isAccepted())).path("id").asText();
         await().untilAsserted(() -> assertThat(store.findOperation(tenant, first, id).orElseThrow().state())
                 .isEqualTo("COMPLETED"));
         // Replay-first, like every other mutation path: the recorded
         // success answers its body with the Session as last visible
-        // (closed), never a 404 for the later delete.
+        // (closed), never a 404 for the later delete — and the tombstone's
+        // capabilities stop advertising the routes that now 404.
         web("unarchive", tenant, first, "owner", "same").andExpect(status().isOk())
                 .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"))
-                .andExpect(jsonPath("$.status").value("closed"));
+                .andExpect(jsonPath("$.status").value("closed"))
+                .andExpect(jsonPath("$.capabilities.tasks").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionClose").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionArchive").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionUnarchive").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionDelete").value(false));
         assertThat(count(tenant, first, "session.unarchived")).isEqualTo(2);
     }
 

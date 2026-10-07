@@ -14,12 +14,13 @@ import java.util.regex.Pattern;
 
 import org.junit.jupiter.api.Test;
 
-// The ManagedAgentStore javadoc fixes the lock order that keeps InnoDB from
-// deadlocking concurrent Turn admissions (issue #11343): the session row FOR
-// UPDATE first, then the turn row, in one transaction, for every writer that
-// locks both rows. The order lives only in prose, so this source-level
-// canary pins it. Selection is fail-closed on the lock itself — a
-// requireSessionForUpdate call or a raw managed_agent_session FOR UPDATE —
+// recordAdmission's inline comment fixes the lock order that keeps InnoDB
+// from deadlocking concurrent Turn admissions: the session row FOR UPDATE
+// first, then the turn row, in one transaction, for every writer that locks
+// both rows. The order lives only in that prose, so this source-level
+// canary pins it. Comments carry no weight — only code counts. Selection is
+// fail-closed on the lock itself — a requireSessionForUpdate call or a raw
+// managed_agent_session FOR UPDATE, taken directly or one helper hop deep —
 // turn-row access resolves one hop through the same-file methods a writer
 // calls, and the locker set is asserted exactly, so a new locker fails here
 // instead of escaping the audit.
@@ -50,6 +51,7 @@ class SessionRowLockOrderTest {
         assertThat(locked).containsExactlyInAnyOrder("insertTurnCommand",
                 "insertCancelCommand", "beginSessionMutation",
                 "completeSessionMutation", "beginOperation",
+                "beginWorkspaceClose", "beginWorkspaceLifecycle",
                 "unarchiveWorkspaceSession", "beginCwdChangeOperation",
                 "completeCwdChangeOperation", "completeOperation",
                 "advanceReplayFloor", "materializeNextBatch", "bindHarness",
@@ -91,21 +93,82 @@ class SessionRowLockOrderTest {
                 .containsExactly("badWriter");
     }
 
+    // A comment that names the lock helper is prose, not a lock: the real
+    // lock call comes after the turn-row write, so the writer violates.
+    @Test
+    void aCommentMentioningTheLockHelperIsNotALock() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void proseWriter(String tenantId,
+                            String sessionId) {
+                        // ordering mirrors requireSessionForUpdate
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'");
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThat(auditLockOrder(synthetic, new ArrayList<>()))
+                .containsExactly("proseWriter");
+    }
+
+    // A lock taken one helper hop deep is still a lock: the writer lands in
+    // the exact locker set, and the helper call's position is what the
+    // ordering is checked against.
+    @Test
+    void theAuditCountsALockTakenThroughAPrivateHelper() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void helperLockWriter(String tenantId,
+                            String sessionId) {
+                        lockSession(tenantId, sessionId);
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'RUNNING'");
+                    }
+
+                    private void lockSession(String tenantId,
+                            String sessionId) {
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        List<String> locked = new ArrayList<>();
+        assertThat(auditLockOrder(synthetic, locked)).isEmpty();
+        assertThat(locked).containsExactly("helperLockWriter");
+    }
+
     // Returns the public writers that touch the turn row — directly or one
     // hop through a same-file method — before taking the session-row lock,
     // and collects every public lock-bearing member into locked.
     private static List<String> auditLockOrder(String source,
             List<String> locked) {
-        Map<String, List<String>> members = memberBodies(source);
+        String code = stripComments(source);
+        Map<String, List<String>> members = memberBodies(code);
         List<String> violations = new ArrayList<>();
-        Matcher declarations = DECLARATION.matcher(source);
+        Matcher declarations = DECLARATION.matcher(code);
         while (declarations.find()) {
             if (!declarations.group(0).startsWith("\n    public")) {
                 continue;
             }
             String name = declarations.group(1);
-            String body = methodBody(source, declarations.start());
-            int sessionLock = sessionLockIndex(body);
+            String body = methodBody(code, declarations.start());
+            int sessionLock = sessionLockIndex(body, name, members);
             if (sessionLock < 0) {
                 continue;
             }
@@ -121,10 +184,33 @@ class SessionRowLockOrderTest {
         return violations;
     }
 
-    // The index the session-row lock is taken at: the helper call, or the
-    // raw session-table FOR UPDATE statement — a member bearing neither
-    // spelling is not a locker and answers -1.
-    private static int sessionLockIndex(String body) {
+    // The index the session-row lock is taken at: the helper call or raw
+    // session-table FOR UPDATE in this body, or one hop through a same-file
+    // member whose own body bears either spelling — a member reaching the
+    // lock neither way is not a locker and answers -1. One hop matches the
+    // turn-row side; two-hop lock paths like insertSessionCommand's would
+    // need transitive resolution this canary deliberately does not attempt.
+    private static int sessionLockIndex(String body, String self,
+            Map<String, List<String>> members) {
+        int first = directLockIndex(body);
+        for (Map.Entry<String, List<String>> member : members.entrySet()) {
+            if (member.getKey().equals(self)) {
+                continue;
+            }
+            int call = body.indexOf(member.getKey() + "(");
+            if (call < 0) {
+                continue;
+            }
+            boolean calleeLocks = member.getValue().stream()
+                    .anyMatch(slice -> directLockIndex(slice) >= 0);
+            if (calleeLocks && (first < 0 || call < first)) {
+                first = call;
+            }
+        }
+        return first;
+    }
+
+    private static int directLockIndex(String body) {
         int helper = body.indexOf(LOCK_HELPER);
         if (helper >= 0) {
             return helper;
@@ -132,6 +218,42 @@ class SessionRowLockOrderTest {
         return body.contains(SESSION_TABLE) && body.contains(LOCK_MODE)
                 ? body.indexOf(SESSION_TABLE)
                 : -1;
+    }
+
+    // Comments are prose, not code: naming the lock helper in a comment must
+    // not count as taking the lock. String literals stay — the raw-SQL
+    // needles live inside them.
+    private static String stripComments(String text) {
+        StringBuilder out = new StringBuilder(text.length());
+        boolean inString = false;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (inString) {
+                out.append(c);
+                if (c == '\\' && i + 1 < text.length()) {
+                    out.append(text.charAt(++i));
+                } else if (c == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (c == '"') {
+                inString = true;
+                out.append(c);
+            } else if (c == '/' && i + 1 < text.length()
+                    && text.charAt(i + 1) == '/') {
+                while (i < text.length() && text.charAt(i) != '\n') {
+                    i++;
+                }
+            } else if (c == '/' && i + 1 < text.length()
+                    && text.charAt(i + 1) == '*') {
+                int end = text.indexOf("*/", i + 2);
+                i = end < 0 ? text.length() - 1 : end + 1;
+            } else {
+                out.append(c);
+            }
+        }
+        return out.toString();
     }
 
     // The earliest turn-row access: a direct needle, or a call to a

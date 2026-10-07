@@ -1800,13 +1800,13 @@ class ManagedAgentServerIntegrationTest {
         String leftover = ids.stream()
                 .filter(id -> !page1Ids.contains(id)).findFirst().orElseThrow();
 
-        // Move a row page 1 already served: the rename bumps its updated_at,
-        // so a cursor minted from the mutable timestamp would jump past
-        // every older row. The mint must follow the immutable created_at,
-        // or the not-yet-served row slides behind the cursor and never
-        // appears. The move has to precede the mint — nextCursor runs while
-        // page 1 is assembled — so page 1 is re-read for the cursor.
-        lifecycle(patch("/v1/agents/sessions/{id}", page1Ids.getLast())
+        // Move the row page 1 has not served: the rename bumps its
+        // updated_at ahead of every served row's, so a cursor minted from
+        // the mutable timestamp jumps past it and page 2 never serves it.
+        // The mint must follow the immutable created_at. The move has to
+        // precede the mint — nextCursor runs while page 1 is assembled — so
+        // page 1 is re-read for the cursor.
+        lifecycle(patch("/v1/agents/sessions/{id}", leftover)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"title\":\"paging-renamed\"}"), tenant,
                 "paging-rename")
@@ -1916,7 +1916,7 @@ class ManagedAgentServerIntegrationTest {
         // with the sweep dead.
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                 assertThat(store.findTurn(tenant, sessionId, turnId)
-                        .orElseThrow().status()).isNotEqualTo("ACCEPTED"));
+                        .orElseThrow().status()).isEqualTo("RUNNING"));
         harness.releaseHeldTurns();
     }
 
@@ -2072,6 +2072,40 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(header().string("X-Qwen-Idempotent-Replay",
                         "true"))
                 .andExpect(jsonPath("$.status").value("closed"));
+    }
+
+    @Test
+    void aCreateReplayAfterTheSessionWasDeletedAnswers404()
+            throws Exception {
+        String tenant = "tenant-create-replay-delete-" + UUID.randomUUID();
+        String sessionId = objectMapper.readTree(mvc.perform(
+                        post("/v1/agents/sessions")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .header("Idempotency-Key", "replay-create")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString()).get("id").asText();
+        String deleteId = objectMapper.readTree(lifecycle(
+                        delete("/v1/agents/sessions/{id}", sessionId), tenant,
+                        "replay-delete")
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString())
+                .get("id").asText();
+        awaitOperation(tenant, sessionId, deleteId);
+
+        // Unlike the rename and unarchive replays, the create route
+        // re-reads the Session before responding, so a create replay after
+        // delete answers 404 — the shared replay header scopes its
+        // last-visible promise to those two routes.
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "replay-create")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error.code")
+                        .value("session_not_found"));
     }
 
     @Test

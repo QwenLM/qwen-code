@@ -642,6 +642,8 @@ export interface components {
                 code: string;
                 message: string;
                 request_id: string;
+                /** @description Present on Runtime Broker refusals; true permits retry, false is a definite refusal. Other errors may omit this field. */
+                retryable?: boolean;
                 /** Format: int64 */
                 replay_floor_sequence?: number | null;
                 /** Format: int64 */
@@ -1099,7 +1101,7 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
-        /** @description State, idempotency, or recovery conflict. */
+        /** @description State, idempotency, or recovery conflict. New Workspace-scoped admissions return workspace_unavailable with retryable=false while an offline Workspace migration holds the storage fence; authorized durable replays retain their existing behavior. */
         Conflict: {
             headers: {
                 [name: string]: unknown;
@@ -1139,7 +1141,7 @@ export interface components {
     parameters: never;
     requestBodies: never;
     headers: {
-        /** @description True when an accepted command or operation was replayed for the same idempotency key and digest without repeating its mutation. Session mutation responses represent the recorded outcome on the Session as last visible — a replay after delete answers with the Session's pre-delete status rather than 404; operation responses represent the original operation at its current state. */
+        /** @description True when an accepted command or operation was replayed for the same idempotency key and digest without repeating its mutation. Session mutation responses represent the recorded outcome on the Session as last visible — a rename or unarchive replay after delete answers with the Session's pre-delete status rather than 404, while a create replay after delete answers 404 because the create route re-reads the Session before responding; operation responses represent the original operation at its current state. */
         IdempotentReplay: boolean;
         /** @description Trace-only correlation identifier; never an idempotency key. */
         RequestId: string;

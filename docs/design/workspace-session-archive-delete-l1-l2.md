@@ -205,11 +205,11 @@ original mutation result in the sense of no repeated effect, and returns the
 current visible Session, matching the existing public response contract. It
 does not store an immutable Session response snapshot. If another key archives
 the Session again, replaying the old unarchive key returns that archived view
-with the replay header true and does not unarchive again. After deletion it
-returns `404`, because this response is a Session read, not an operation read.
-Check tombstone visibility before returning an unarchive replay. Archive/delete
-continue to replay their operation on a tombstone. Tests and OpenAPI must make
-this distinction explicit on both surfaces.
+with the replay header true and does not unarchive again. After deletion the
+recorded unarchive still replays its 200 with the Session as last visible —
+like every other mutation path, a recorded success must not turn into a 404
+because a later delete intervened. Tests and OpenAPI make this explicit on
+both surfaces.
 
 ## 6. L2 implementation design
 
@@ -385,7 +385,7 @@ not input refusal alone, establishes the retained close fence.
 | Authorization          | Creator/read success; unreadable and cross-tenant 404; readable non-creator 403; permission checked again on replay and operation read                                                                                                                                     |
 | State and proof        | Reject ACTIVE, CLOSING and DELETING fresh metadata requests as specified; reject manually seeded CLOSED/ARCHIVED without completed-close evidence; unfinished operations conflict                                                                                          |
 | Idempotency            | Concurrent same key once; cross-surface same key once; distinct actor/Session/kind domains; case-distinct valid keys; whitespace/control/oversized keys rejected without trimming; no duplicate events; digest mismatch at store level                                     |
-| Unarchive replay       | Crash before commit and lost response after commit; replay after rearchive returns current ARCHIVED without changing it; replay after tombstone 404; no orphan PENDING command                                                                                             |
+| Unarchive replay       | Crash before commit and lost response after commit; replay after rearchive returns current ARCHIVED without changing it; replay after tombstone answers the recorded outcome with the Session as last visible; no orphan PENDING command                                   |
 | Permanent closure      | After archive/unarchive, input/new writer/warm remain refused and original close receipt/fence remain; no model, Hook, provider or Runtime calls                                                                                                                           |
 | Data retention         | Original history, Artifacts and publications remain readable through L1; L2 denies public/private reads as contracted while retaining bytes, backups and shared files                                                                                                      |
 | Delete atomicity       | Faults after each retirement/tombstone/operation/event write roll everything back; no-head/no-publication Sessions still get a permanent barrier; residual live writer prevents completion; non-READY recovery allows the tombstone while preserving collection protection |

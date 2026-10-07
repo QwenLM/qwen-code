@@ -108,6 +108,49 @@ class HarnessCoordinatorTest {
         }
     }
 
+    // The CANCELLING cell of the files gate: it sits above the cancel fast
+    // path, so a never-submitted bound Turn being cancelled parks like an
+    // ACCEPTED one — deferred, never cancelBeforeAdmission — and the cancel
+    // is honoured once the files return.
+    @Test
+    void defersABoundCancellationWhileWorkspaceFilesAreUnavailable() {
+        ContextBinding binding = new ContextBinding("tenant", "ws-a", 1,
+                "storage-a", ".", "config-a", 1);
+        SessionRecord session = new SessionRecord("tenant", "session",
+                "qwen-code", null, null, "ACTIVE", null, null, 0, 0, 0, 1, 1,
+                null, 1, binding, "yolo", "hosted-workspace-files/1");
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        TurnRecord claimed = turn("tenant", "session", "turn",
+                "11111111-1111-4111-8111-111111111111", null, 0, "CANCELLING",
+                false, 0);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(session);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(false);
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(),
+                new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+            verify(store).deferTurnRetry(eq("tenant"), eq("session"),
+                    eq("turn"), anyString(), anyLong());
+            verify(store, never()).cancelBeforeAdmission(anyString(),
+                    anyString(), anyString(), anyString());
+            verify(store, never()).failTurn(anyString(), anyString(),
+                    anyString(), anyString(), anyString(), anyString());
+
+            when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+        verify(store).cancelBeforeAdmission(eq("tenant"), eq("session"),
+                eq("turn"), anyString());
+    }
+
     // Before any submission a Workspace-files outage holds the Turn like a
     // Harness outage: a replay may already have answered 202 for it, and the
     // availability-gated sweep re-offers it once the files are back.
@@ -191,7 +234,8 @@ class HarnessCoordinatorTest {
     void failsOnWorkspaceAuthorizationRefusalBeforeSubmission(int retryCount) {
         RuntimeBrokerException refusal = WorkspaceExecutionStore.unavailable();
         AgentStateStore store = dispatchWithCreateOrLoadFailure(refusal,
-                false, retryCount);
+                false, retryCount,
+                boundSessionRecord());
         verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), eq("workspace_unavailable"),
                 eq(refusal.getMessage()));
@@ -200,18 +244,21 @@ class HarnessCoordinatorTest {
     }
 
     // An outage defers instead of terminally failing: a replay answered 202
-    // relies on this hold, and the recovery sweep picks the turn back up
-    // once the Harness returns (it is gated on availability). The deferral
-    // still spends the pre-admission budget — a permanent disable
-    // terminates rather than holding the Turn forever. The Session is
-    // unbound: the only HarnessDisabledException producer also answers
+    // relies on this hold. The Harness-disabled arm is not budget-bounded —
+    // the sweep and the replay dispatch both gate on isAvailable(), so the
+    // first defer parks the Turn with its retry count frozen until
+    // availability returns; failsAfterTheHarnessOutageBudgetIsExhausted
+    // reaches the budget branch only because it drives coordinator.dispatch
+    // directly, past both gates. The Session is unbound: the only
+    // HarnessDisabledException producer also answers
     // isWorkspaceFilesAvailable() false, so a bound Session meets the files
     // gate first (defersABoundTurnWhileWorkspaceFilesAreUnavailable) and
     // never reaches createOrLoad.
     @Test
     void defersWhileTheHarnessIsDisabled() {
-        AgentStateStore store = dispatchUnboundWithCreateOrLoadFailure(
-                disabledHarnessFailure(), false, 0);
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(
+                disabledHarnessFailure(), false, 0,
+                unboundSessionRecord());
         verify(store).deferTurnRetry(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), anyLong());
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
@@ -224,8 +271,9 @@ class HarnessCoordinatorTest {
     // actionable code instead of holding it ACCEPTED forever.
     @Test
     void failsAfterTheHarnessOutageBudgetIsExhausted() {
-        AgentStateStore store = dispatchUnboundWithCreateOrLoadFailure(
-                disabledHarnessFailure(), false, 5);
+        AgentStateStore store = dispatchWithCreateOrLoadFailure(
+                disabledHarnessFailure(), false, 5,
+                unboundSessionRecord());
         verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), eq("hosted_harness_unavailable"), anyString());
         verify(store, never()).deferTurnRetry(anyString(), anyString(),
@@ -254,7 +302,8 @@ class HarnessCoordinatorTest {
     @Test
     void retriesWorkspaceAuthorizationRefusalAfterARecordedSubmission() {
         AgentStateStore store = dispatchWithCreateOrLoadFailure(
-                WorkspaceExecutionStore.unavailable(), true, 5);
+                WorkspaceExecutionStore.unavailable(), true, 5,
+                boundSessionRecord());
         verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
                 eq("turn"), anyString(), anyLong());
         verify(store, never()).failTurn(anyString(), anyString(),
@@ -270,7 +319,8 @@ class HarnessCoordinatorTest {
         AgentStateStore store = dispatchWithCreateOrLoadFailure(
                 new RuntimeBrokerException(409, "defensive_retryable",
                         "Retryable refusal with no current producer.", true),
-                false, 0);
+                false, 0,
+                boundSessionRecord());
         verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
                 eq("turn"), anyString(), anyLong());
         verify(store, never()).failTurn(anyString(), anyString(),
@@ -287,7 +337,8 @@ class HarnessCoordinatorTest {
         DaemonHttpException conflict = mock(DaemonHttpException.class);
         when(conflict.getStatusCode()).thenReturn(409);
         AgentStateStore store = dispatchWithCreateOrLoadFailure(conflict,
-                false, 0);
+                false, 0,
+                boundSessionRecord());
         verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
                 eq("turn"), anyString(), anyLong());
         verify(store, never()).failTurn(anyString(), anyString(),
@@ -302,7 +353,8 @@ class HarnessCoordinatorTest {
         DaemonHttpException rejected = mock(DaemonHttpException.class);
         when(rejected.getStatusCode()).thenReturn(400);
         AgentStateStore store = dispatchWithCreateOrLoadFailure(rejected,
-                true, 5);
+                true, 5,
+                boundSessionRecord());
         verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), eq("hosted_harness_rejected"), anyString());
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
@@ -321,8 +373,9 @@ class HarnessCoordinatorTest {
         logged.start();
         coordinatorLog.addAppender(logged);
         try {
-            dispatchUnboundWithCreateOrLoadFailure(
-                    new HarnessDisabledException("disabled"), false, 5);
+            dispatchWithCreateOrLoadFailure(
+                    new HarnessDisabledException("disabled"), false, 5,
+                unboundSessionRecord());
         } finally {
             coordinatorLog.detachAppender(logged);
         }
@@ -341,7 +394,8 @@ class HarnessCoordinatorTest {
         DaemonHttpException unavailable = mock(DaemonHttpException.class);
         when(unavailable.getStatusCode()).thenReturn(503);
         AgentStateStore store = dispatchWithCreateOrLoadFailure(unavailable,
-                true, 5);
+                true, 5,
+                boundSessionRecord());
         verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
                 eq("turn"), anyString(), anyLong());
         verify(store, never()).failTurn(anyString(), anyString(),
@@ -392,7 +446,8 @@ class HarnessCoordinatorTest {
         when(conflict.getErrorCode())
                 .thenReturn("hosted_turn_recovery_required");
         AgentStateStore store = dispatchWithCreateOrLoadFailure(conflict,
-                false, 5);
+                false, 5,
+                boundSessionRecord());
         verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), eq("hosted_harness_unavailable"), anyString());
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
@@ -411,7 +466,8 @@ class HarnessCoordinatorTest {
                 HarnessSessionRefusedException.class);
         when(refusal.getCode()).thenReturn("managed_session_open_failed");
         AgentStateStore store = dispatchWithCreateOrLoadFailure(refusal,
-                false, 0);
+                false, 0,
+                boundSessionRecord());
         verify(store).scheduleTurnRetry(eq("tenant"), eq("session"),
                 eq("turn"), anyString(), anyLong());
         verify(store, never()).failTurn(anyString(), anyString(),
@@ -424,7 +480,8 @@ class HarnessCoordinatorTest {
                 HarnessSessionRefusedException.class);
         when(refusal.getCode()).thenReturn("managed_session_open_failed");
         AgentStateStore store = dispatchWithCreateOrLoadFailure(refusal,
-                false, 5);
+                false, 5,
+                boundSessionRecord());
         verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), eq("managed_session_open_failed"), anyString());
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
@@ -1602,40 +1659,27 @@ class HarnessCoordinatorTest {
                 anyString(), anyString(), anyString(), anyString());
     }
 
-    // The unbound companion of dispatchWithCreateOrLoadFailure: the one
-    // shape that can drive the isHarnessDisabled arm in production. No
-    // isWorkspaceFilesAvailable stub — the files gate short-circuits on
-    // workspace == null, so a stub would be dead code under strict stubs.
-    private AgentStateStore dispatchUnboundWithCreateOrLoadFailure(
-            RuntimeException failure, boolean submitted, int retryCount) {
-        AgentStateStore store = mock(AgentStateStore.class);
-        HarnessConnector harness = mock(HarnessConnector.class);
-        TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
-                null, 0, submitted, retryCount);
-        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
-                anyString(), any(Duration.class)))
-                .thenReturn(Optional.of(claimed));
-        when(store.requireSession("tenant", "session")).thenReturn(
-                new SessionRecord("tenant", "session", "qwen-code", null,
-                        "ACTIVE", null, null, 0, 0, 0, 0, null, 1));
-        when(harness.createOrLoad("tenant", "session", false))
-                .thenThrow(failure);
-        HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
-                new HarnessEventProjector(), mock(RuntimeWarmer.class),
-                directExecutor(), Clock.systemUTC(),
-                new ManagedAgentProperties());
-        try {
-            coordinator.dispatch("tenant", "session", "turn");
-        } finally {
-            coordinator.close();
-        }
-        verify(harness, never()).submit(anyString(), anyString(), anyString(),
-                any(), anyString());
-        return store;
+    // The bound and unbound shapes differ only in the SessionRecord: the
+    // unbound shape is the one that can drive the isHarnessDisabled arm in
+    // production.
+    private static SessionRecord boundSessionRecord() {
+        return new SessionRecord("tenant", "session", "qwen-code", null,
+                null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant", "ws-a", 1, "storage-a", ".",
+                        "config-a", 1), "yolo", "hosted-workspace-files/1");
     }
 
+    private static SessionRecord unboundSessionRecord() {
+        return new SessionRecord("tenant", "session", "qwen-code", null,
+                "ACTIVE", null, null, 0, 0, 0, 0, null, 1);
+    }
+
+    // The files-availability stub stays bound-only: the files gate
+    // short-circuits on workspace == null, so an unbound stub would be dead
+    // code under strict stubs.
     private AgentStateStore dispatchWithCreateOrLoadFailure(
-            RuntimeException failure, boolean submitted, int retryCount) {
+            RuntimeException failure, boolean submitted, int retryCount,
+            SessionRecord session) {
         AgentStateStore store = mock(AgentStateStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
@@ -1643,12 +1687,10 @@ class HarnessCoordinatorTest {
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
-        when(store.requireSession("tenant", "session")).thenReturn(
-                new SessionRecord("tenant", "session", "qwen-code", null,
-                        null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
-                        new ContextBinding("tenant", "ws-a", 1,
-                                "storage-a", ".", "config-a", 1), "yolo", "hosted-workspace-files/1"));
-        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(store.requireSession("tenant", "session")).thenReturn(session);
+        if (session.workspace() != null) {
+            when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        }
         when(harness.createOrLoad("tenant", "session", false))
                 .thenThrow(failure);
         HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
