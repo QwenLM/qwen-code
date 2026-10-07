@@ -542,6 +542,29 @@ class ManagedWorkspaceAdmissionTest {
                 Integer.class, tenant)).isZero();
     }
 
+    // The pre-V40 fallback: a bound Session whose owner and creator
+    // columns are both NULL (the state the V48 backfill leaves rows it
+    // cannot attribute) is owned through its create-command record alone.
+    @Test
+    void aPreV40BoundSessionFallsBackToTheCreateCommandOwner() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a");
+        grant(tenant, "ws-a", "actor-a", true);
+        grant(tenant, "ws-a", "actor-b", true);
+        String digest = "sha256:" + "a".repeat(64);
+        String sessionId = store.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create", digest, "qwen-code", null, null,
+                List.of(), null, new WorkspaceSelection("ws-a", "."))
+                .sessionId();
+        jdbc.update("UPDATE managed_agent_session SET owner_actor_key ="
+                + " NULL, creator_actor_key = NULL WHERE tenant_id = ?"
+                + " AND session_id = ?", tenant, sessionId);
+        assertThat(registry.isSessionOwner(tenant, "actor-a", sessionId))
+                .isTrue();
+        assertThat(registry.isSessionOwner(tenant, "actor-b", sessionId))
+                .isFalse();
+    }
+
     @Test
     void enabledStoreAdmitsALaterTurnForTheBoundSessionCreator() {
         String tenant = "tenant-" + UUID.randomUUID();

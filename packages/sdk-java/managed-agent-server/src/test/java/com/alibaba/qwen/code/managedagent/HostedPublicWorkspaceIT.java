@@ -86,6 +86,10 @@ class HostedPublicWorkspaceIT {
         approvals = true;
         runFiles();
         assertThat(answered).hasSize(8);
+        // Two sessions (one per mounted workspace) each had their first
+        // approval answered by the non-owner OPERATOR — pin the handoff,
+        // or the responder ternary can collapse to the owner unnoticed.
+        assertThat(operatorAnswered).hasSize(2);
     }
 
     @ParameterizedTest
@@ -522,9 +526,10 @@ class HostedPublicWorkspaceIT {
             assertThat(request("POST", route, changed, workspace, "actor", 409).path("error").path("code").asText())
                     .isEqualTo("idempotency_conflict");
             request("GET", "/v1/agents/sessions/" + session, null, null, "other", 404);
-            // A later Turn needs the OPERATOR role: a READER keeps the refusal,
-            // and the owner's second Turn runs the file tools again under the
-            // session owner admission.
+            // A later Turn needs the OPERATOR role while the Session's
+            // creator-keyed execution facts hold: a READER keeps the 403
+            // refusal, and the owner's second Turn runs the file tools
+            // again because the owner also holds OPERATOR.
             Map<String, Object> later = Map.of("type", "agent.session.input.message", "input",
                     List.of(Map.of("type", "input_text", "text", "G0_AGAIN")));
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
@@ -636,8 +641,77 @@ class HostedPublicWorkspaceIT {
             jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, ?, ?, 'OPERATOR')",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+
+            // The headline widening end to end: a Workspace OPERATOR who is
+            // not the Session creator submits a later Turn and it actually
+            // executes, then cancels and renames — while the creator keeps
+            // OPERATOR, so the creator-keyed execution facts hold.
+            int beforeOperator = modelRequests.size();
+            String operatorTurn = request("POST", "/v1/agents/sessions/" + session + "/events", later,
+                    "operator2-later-" + workspace, "operator2", 202).path("turn_id").asText();
+            assertThat(operatorTurn).isNotBlank();
+            await().atMost(Duration.ofSeconds(35)).failFast(() -> {
+                String status = jdbc.queryForObject("SELECT status FROM managed_agent_turn"
+                        + " WHERE session_id = ? AND turn_id = ?", String.class, session, operatorTurn);
+                if ("FAILED".equals(status)) {
+                    throw new AssertionError("Operator later Turn failed. Harness: "
+                            + Files.readString(temporary.resolve("harness.log")));
+                }
+            }).untilAsserted(() -> {
+                assertThat(modelFailure.get()).isNull();
+                assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_turn"
+                        + " WHERE session_id = ? AND turn_id = ?", String.class, session, operatorTurn))
+                        .isEqualTo("COMPLETED");
+            });
+            assertThat(modelRequests).hasSize(beforeOperator + 4);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+                    Long.class, session)).isEqualTo(executions * 3);
+
+            int beforeHold = modelRequests.size();
+            String heldByOperator = request("POST", "/v1/agents/sessions/" + session + "/events", hold,
+                    "operator2-hold-" + workspace, "operator2", 202).path("turn_id").asText();
+            await().atMost(Duration.ofSeconds(35)).until(() -> modelRequests.size() > beforeHold);
+            request("POST", "/v1/agents/sessions/" + session + "/events", cancel,
+                    "operator2-cancel-" + workspace, "operator2", 202);
+            await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                    "SELECT status FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
+                    String.class, session, heldByOperator)).isEqualTo("CANCELLED"));
+            heldReply.countDown();
+            heldReply = new CountDownLatch(1);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+                    Long.class, session)).isEqualTo(executions * 3);
+
+            assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename,
+                    "operator2-rename-" + workspace, "operator2", 200).path("metadata").path("title").asText())
+                    .isEqualTo("Renamed " + workspace);
+
+            // Admission also certifies the creator-keyed execution facts:
+            // demote only the creator, and the second OPERATOR's submit is
+            // refused synchronously with the family's domain 409 — no
+            // command row, no model request, no tool execution, instead of
+            // a 202 that could only fail asynchronously.
+            long pendingBefore = jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
+                    + " WHERE tenant_id = ? AND command_status = 'PENDING'", Long.class, tenant);
+            long execBefore = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution"
+                    + " WHERE harness_session_id = ?", Long.class, session);
+            int modelsBefore = modelRequests.size();
+            jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
+                    + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
+                    tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
+                    "operator2-blocked-" + workspace, "operator2", 409).path("error").path("code").asText())
+                    .isEqualTo("workspace_unavailable");
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
+                    + " WHERE tenant_id = ? AND command_status = 'PENDING'", Long.class, tenant))
+                    .isEqualTo(pendingBefore);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution WHERE harness_session_id = ?",
+                    Long.class, session)).isEqualTo(execBefore);
+            assertThat(modelRequests).hasSize(modelsBefore);
+            jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'"
+                    + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
+                    tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
         }
-        assertThat(modelRequests).hasSize(approvals ? 16 : 18);
+        assertThat(modelRequests).hasSize(approvals ? 16 : 28);
         assertThat(modelFailure.get()).isNull();
         Map<String, Object> denied = Map.of("agent_id", "qwen-code", "workspace", Map.of("workspace_id", "workspace-0"),
                 "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")));
@@ -670,7 +744,7 @@ class HostedPublicWorkspaceIT {
         assertUnavailable(request("POST", "/v1/agents/sessions", denied, "unsupported", "actor", 409));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(2);
-        assertThat(modelRequests).hasSize(approvals ? 16 : 18);
+        assertThat(modelRequests).hasSize(approvals ? 16 : 28);
     }
 
     private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) {
@@ -743,13 +817,13 @@ class HostedPublicWorkspaceIT {
         // approval-mode=default without colliding with the access table's primary key.
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
                         + " VALUES (?, ?, ?, 'READER')", tenant, workspace, "reader".getBytes(StandardCharsets.UTF_8));
-        if (approvals) {
-            // R1's second operator: a Workspace OPERATOR who is not the
-            // Session owner answers a pending approval.
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                            + " VALUES (?, ?, ?, 'OPERATOR')", tenant, workspace,
-                    "operator2".getBytes(StandardCharsets.UTF_8));
-        }
+        // R1's second operator, in both runs: in the approvals run they answer
+        // a pending approval; in the files run they drive a later Turn, a
+        // cancel and a rename, and their widened then re-blocked submits
+        // pin the creator-keyed execution facts.
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                        + " VALUES (?, ?, ?, 'OPERATOR')", tenant, workspace,
+                "operator2".getBytes(StandardCharsets.UTF_8));
     }
 
     private void answerActions(String session, boolean web) throws Exception {

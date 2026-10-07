@@ -303,7 +303,7 @@ describe('useManagedActions', () => {
     expect(hook.latest?.answerError).toBeUndefined();
   });
 
-  it('keeps the creator-only refusal for the Session after that Action leaves the list', async () => {
+  it('keeps the role-based refusal for the Session after that Action leaves the list', async () => {
     const next = { ...pending, actionId: 'tool_approval_2' };
     const respond = vi
       .fn()
@@ -347,7 +347,7 @@ describe('useManagedActions', () => {
     expect(hook.latest?.respondForbidden).toBe(true);
   });
 
-  it('latches a creator-only refusal that lands after the Action left the list', async () => {
+  it('latches a role-based refusal that lands after the Action left the list', async () => {
     let rejectAnswer!: (failure: Error) => void;
     const respond = vi.fn().mockImplementationOnce(
       () =>
@@ -390,6 +390,35 @@ describe('useManagedActions', () => {
     // The warning is still scoped to the Action that failed, and that Action is
     // gone, so the latch is what carries the reason from here on.
     expect(hook.latest?.answerError).toBeUndefined();
+  });
+
+  it('re-probes a role-based refusal on retry instead of latching for the mount', async () => {
+    const respond = vi
+      .fn()
+      .mockRejectedValue(
+        new JavaManagedAgentHttpError(403, 'action_forbidden', 'Forbidden'),
+      );
+    const listPending = vi.fn().mockResolvedValue([pending]);
+    const provider = {
+      actions: { listPending, respond },
+    } as unknown as ManagedAgentProvider;
+    const hook = mount(provider, { enabled: true, events: [] });
+    await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
+
+    await act(async () => {
+      await hook
+        .latest!.respond(pending.actionId, 'allow')
+        .catch(() => undefined);
+    });
+    expect(hook.latest?.respondForbidden).toBe(true);
+
+    // The refusal came from the viewer's Workspace role row, which an operator
+    // can raise while the page stays open — an explicit retry lets a lifted
+    // grant answer where a permanent latch would keep refusing.
+    await act(async () => {
+      hook.latest!.retry();
+    });
+    expect(hook.latest?.respondForbidden).toBe(false);
   });
 
   it('latches the Session the answer was aimed at, not the one now selected', async () => {

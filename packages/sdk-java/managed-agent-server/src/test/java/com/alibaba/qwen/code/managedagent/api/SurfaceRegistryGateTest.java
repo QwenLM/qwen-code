@@ -61,6 +61,16 @@ class SurfaceRegistryGateTest {
         assertThat(mounted).hasSameSizeAs(SurfaceRegistry.values());
     }
 
+    // The acceptance walk keys the dual-purpose events route off its
+    // first capability; that order is EnumSet's ordinal iteration, so the
+    // declaration order of Capability is load-bearing here.
+    @Test
+    void theDualPurposeEventsRouteLeadsWithTurnSubmit() {
+        assertThat(SurfaceRegistry.PUBLIC_TURN_EVENTS.capabilities()
+                .iterator().next())
+                .isEqualTo(SurfaceRegistry.Capability.TURN_SUBMIT);
+    }
+
     @Test
     void capabilityTwinsShareOneRuleClass() {
         Map<SurfaceRegistry.Capability, SurfaceRegistry.RuleClass> classes =
@@ -97,8 +107,17 @@ class SurfaceRegistryGateTest {
                     return;
                 }
                 for (String pattern : info.getPatternValues()) {
-                    for (RequestMethod method
-                            : info.getMethodsCondition().getMethods()) {
+                    Set<RequestMethod> methods =
+                            info.getMethodsCondition().getMethods();
+                    if (methods.isEmpty()) {
+                        // A mapping without a method attribute matches
+                        // every verb, and SurfaceRegistry has no
+                        // any-method entry to register it under: surface
+                        // it as "*" drift instead of dropping the route.
+                        routes.add("* " + pattern);
+                        continue;
+                    }
+                    for (RequestMethod method : methods) {
                         routes.add(method.name() + " " + pattern);
                     }
                 }

@@ -56,8 +56,8 @@ public class ManagedWorkspaceRegistry {
      * ({@code owner_actor_key}), falling back to the creator records for
      * Sessions written before V40.
      */
-    public boolean isSessionOwner(String tenantId, String sessionId,
-            String actorId) {
+    public boolean isSessionOwner(String tenantId, String actorId,
+            String sessionId) {
         if (actorId == null || actorId.isEmpty()) {
             return false;
         }
@@ -110,27 +110,10 @@ public class ManagedWorkspaceRegistry {
                 : WorkspaceAccess.valueOf(roles.getFirst());
     }
 
+    /** The read half of {@link #accessOf}: one grant read per decision. */
     public boolean canRead(String tenantId, String actorId,
             String workspaceId) {
-        if (actorId == null || actorId.isEmpty()) {
-            return false;
-        }
-        byte[] key;
-        try {
-            key = actorKey(tenantId, actorId);
-        } catch (IllegalArgumentException error) {
-            return false;
-        }
-        return !jdbc.queryForList("SELECT 1 FROM managed_workspace_access"
-                + " WHERE tenant_id = ? AND workspace_id = ?"
-                + " AND CAST(CONCAT(tenant_id, '!') AS BINARY(513))"
-                + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                + " AND CAST(CONCAT(workspace_id, '!') AS BINARY(513))"
-                + " = CAST(CONCAT(?, '!') AS BINARY(513))"
-                + " AND actor_id = ? AND role IN ('READER', 'OPERATOR',"
-                + " 'OWNER')",
-                Integer.class, tenantId, workspaceId, tenantId, workspaceId,
-                key).isEmpty();
+        return accessOf(tenantId, actorId, workspaceId).canRead();
     }
 
     public List<WorkspaceSummary> listReadable(String tenantId,

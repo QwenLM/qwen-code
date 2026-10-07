@@ -189,6 +189,23 @@ class ManagedCwdChangeOperationTest {
                 "digest-operator");
         assertThat(admitted.replayed()).isFalse();
         assertThat(admitted.operation().state()).isEqualTo("PENDING");
+        // Only the creator's row drops: the admitted operator still holds
+        // OPERATOR, so the refusal comes from the creator-keyed facts
+        // gate — the same conjunct the execution authority re-verifies.
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+                        + " 'READER' WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?", TENANT, WS,
+                ACTOR.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertThatThrownBy(() -> begin(fixture, sessionId, "key-2",
+                "digest-2", "services/c", 1, "operator-colleague",
+                "digest-operator"))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertRefusal(error, HttpStatus.CONFLICT,
+                                "workspace_unavailable"));
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+                        + " 'OPERATOR' WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?", TENANT, WS,
+                ACTOR.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         fixture.jdbc.update("UPDATE managed_workspace_access SET"
                         + " role = 'READER' WHERE tenant_id = ? AND"
                         + " workspace_id = ?", TENANT, WS);
@@ -218,6 +235,38 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
+    }
+
+    // The replay is actor-scoped, so a role revoked after admission still
+    // resolves a retry to the caller's own operation: the mutable role
+    // refusal follows the replay lookup, never precedes it.
+    @Test
+    void aDemotedOperatorStillReplaysTheirAdmittedChange() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        fixture.grant(TENANT, WS, "operator-colleague", "OPERATOR");
+        OperationAdmission admitted = begin(fixture, sessionId, "key",
+                "digest", "services/b", 1, "operator-colleague",
+                "digest-operator");
+        assertThat(admitted.replayed()).isFalse();
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+                        + " 'READER' WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?", TENANT, WS,
+                "operator-colleague".getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8));
+        OperationAdmission replay = begin(fixture, sessionId, "key",
+                "digest", "services/b", 1, "operator-colleague",
+                "digest-operator");
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.operation().operationId())
+                .isEqualTo(admitted.operation().operationId());
+        // A fresh key from the demoted actor still meets the role refusal.
+        assertThatThrownBy(() -> begin(fixture, sessionId, "key-2",
+                "digest-2", "services/c", 1, "operator-colleague",
+                "digest-operator"))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertRefusal(error, HttpStatus.FORBIDDEN,
+                                "session_operation_forbidden"));
     }
 
     // The idempotency contract outranks a later flag flip: a lost 202
@@ -455,6 +504,35 @@ class ManagedCwdChangeOperationTest {
                 revokedClaim.claimGeneration()).failureCode())
                 .isEqualTo("workspace_unavailable");
         assertFailed(fixture, revokedId, revokedOp, "workspace_unavailable");
+    }
+
+    // The settlement re-verifies the creator-keyed facts the admission
+    // certified, so an admitted operation is grandfathered past a demotion
+    // of only its initiator: the W2 revocation guard keys on the
+    // create-command actor, and the actor key of the initiator is not
+    // persisted on the operation (actor_digest only), so no initiator
+    // re-check exists to revoke into.
+    @Test
+    void settlementKeepsAnAdmittedChangeWhenOnlyTheInitiatorDropped() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        fixture.grant(TENANT, WS, "operator-colleague", "OPERATOR");
+        OperationAdmission admitted = begin(fixture, sessionId, "key",
+                "digest", "services/b", 1, "operator-colleague",
+                "digest-operator");
+        assertThat(admitted.replayed()).isFalse();
+        OperationRecord claimed = claim(fixture, sessionId,
+                admitted.operation().operationId(), "owner");
+        fixture.jdbc.update("UPDATE managed_workspace_access SET role ="
+                        + " 'READER' WHERE tenant_id = ? AND"
+                        + " workspace_id = ? AND actor_id = ?", TENANT, WS,
+                "operator-colleague".getBytes(
+                        java.nio.charset.StandardCharsets.UTF_8));
+        CwdChangeOutcome outcome = settle(fixture, sessionId,
+                claimed.operationId(), "owner", claimed.claimGeneration());
+        assertThat(outcome.completed()).isTrue();
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getCwdRelative()).isEqualTo("services/b");
     }
 
     @Test

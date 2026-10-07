@@ -5,7 +5,9 @@
 Issue: #13535 (R1 actor roles, R2 isolation acceptance). Parent: #12380 production
 enablement. Vocabulary source: #12867 section 10 (`reader`, `operator`, `owner`;
 `404` without read, `403` with read but without operate; idempotency domain
-includes the actor — the last part already landed with D4). This design answers
+includes the actor — landed with D4 for the operation ledger; the
+submitter-family command key stays `(tenant_id, operation, idempotency_key)`
+and its actor scoping is tracked as #13619). This design answers
 #12867's open question Q4 (where roles come from) and defines the surface
 registry plus its build gate.
 
@@ -46,11 +48,11 @@ can_create)` (V8) — the only per-actor grant table, read on every
 
 "Creator-only" is three mechanisms with three refusal vocabularies:
 
-| Family                                                     | Routes                                                                                                                             | Check                                                                                     | Readable non-creator gets                          |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | -------------------------------------------------- | ------------------------------------------------------------ | --------------------------------- |
-| Turn submit / cancel / rename                              | public `POST …/events` (submit and cancel), `PATCH …/{id}`; WebShell `turns/submit`, `turns/cancel` (rename has no WebShell route) | `requireSubmitter` → `maySubmitWorkspaceTurn` (create-command row + current `can_create`) | **409 `workspace_unavailable`**                    |
-| Lifecycle (close, archive, unarchive, delete) + cwd change | `POST …/close                                                                                                                      | archive                                                                                   | unarchive`, `DELETE`, `POST …/cwd`, WebShell twins | `requireWorkspaceCreator` (can_read then create-command row) | 403 `session_operation_forbidden` |
-| Action (approval) respond                                  | `POST …/actions/{id}/responses`, WebShell `actions/respond`                                                                        | `requireOwner` (creator_actor_key, create-command fallback)                               | 403 `action_forbidden`                             |
+| Family                                                     | Routes                                                                                                                             | Check                                                                                     | Readable non-creator gets         |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | --------------------------------- |
+| Turn submit / cancel / rename                              | public `POST …/events` (submit and cancel), `PATCH …/{id}`; WebShell `turns/submit`, `turns/cancel` (rename has no WebShell route) | `requireSubmitter` → `maySubmitWorkspaceTurn` (create-command row + current `can_create`) | **409 `workspace_unavailable`**   |
+| Lifecycle (close, archive, unarchive, delete) + cwd change | `POST …/close \| archive \| unarchive`, `DELETE`, `POST …/cwd`, WebShell twins                                                     | `requireWorkspaceCreator` (can_read then create-command row)                              | 403 `session_operation_forbidden` |
+| Action (approval) respond                                  | `POST …/actions/{id}/responses`, WebShell `actions/respond`                                                                        | `requireOwner` (creator_actor_key, create-command fallback)                               | 403 `action_forbidden`            |
 
 Other rule shapes as implemented: bound reads and all list/stream/catalog
 routes require `can_read` (404 otherwise); bound create requires actor +
@@ -148,18 +150,23 @@ deliberately separate:
   may do on Workspaces;
 - the **role** is the vocabulary the admission path consults — for
   Session-scoped checks, the Session's owner acts with OWNER rights on that
-  Session regardless of workspace grants, which preserves today's creator
-  behaviour exactly.
+  Session without holding an OPERATOR or OWNER workspace role, provided it
+  keeps a readable grant; an actor with no readable row is invisible (`404`),
+  which is exactly today's `can_read`-then-creator order.
 
 `managed_workspace_create_command` remains what it is — an idempotency-command
 record whose `actor_id` belongs to the idempotency domain, not to
-authorization. After V48 the authorization reads of it (the NULL-creator
-fallbacks in `requireOwner` / `requireWorkspaceCreator`) survive only for
-sessions created before V40; new sessions always carry creator and owner.
+authorization. After V48 its authorization reads (the NULL-creator fallbacks
+in `requireOwner` / `requireWorkspaceCreator`) do not cover only sessions
+created before V40: every actor-less legacy open-mode creation still writes
+NULL to both key columns, so the fallbacks stay live for the legacy arm, and
+the handover slice must decide what a NULL owner means instead of assuming it
+cannot occur.
 
 An owner update path (the handover command) is a follow-up slice on top of
-this column; this slice creates the vocabulary and the storage the handover
-needs, and re-points every creator check at the owner (section 7).
+this column, tracked as #13617; this slice creates the vocabulary and the
+storage the handover needs, and re-points every creator check at the owner
+(section 7).
 
 ### D4 — route reclassification
 
@@ -185,6 +192,20 @@ map to OPERATOR, creators map to owner):
 Live behaviour that re-reads grants (SSE read-grant recheck, mid-stream
 artifact revalidation, execution-time `authorizePassiveAttachment`) consults
 `role` with identical thresholds, so revocation keeps its current meaning.
+
+On the bound arm, the submitter family and the cwd change additionally
+certify the Session's creator-keyed execution facts — the Registry still
+backs the binding exactly and stays ACTIVE, and the actor recorded by the
+Workspace create command keeps OPERATOR or above, because the admitted work
+executes under that actor's grants (the execution authority re-verifies the
+same join). Their failure is the family's domain `409
+workspace_unavailable`, answered synchronously at admission rather than as
+an asynchronously failing Turn. A cwd operation's settlement re-verifies
+the recorded creator-keyed facts, never the initiating caller's grant, so
+an operation admitted before the initiator's own demotion commits (the
+operation row stores `actor_digest`, not the actor key, so no initiator
+re-check exists to revoke into); the W2 design's "grant revoked after
+admission still blocks the change" is scoped to the recorded actor.
 
 ### D5 — the versioned surface registry
 
@@ -225,13 +246,16 @@ so a public route and its WebShell twin cannot drift apart.
 
 ### D7 — WebShell capability advertisement follows roles
 
-The per-caller capability advertisement (`workspaceTurns` and friends in the
-create/get session views) is computed from the caller's role, not from
-creator identity: OPERATOR-or-above sees turn submission and cancel
-capabilities, the Session owner sees lifecycle capabilities. The UI's
-composer/cancel exposure stays a mirror of server admission — the parity
-assertion in D6 covers the rule; existing WebShell coverage covers the
-advertisement.
+The per-caller `workspaceTurns` flag in the session views mirrors the
+submitter family's server admission exactly: it is computed from the
+caller's OPERATOR-or-above role and the Session's creator-keyed execution
+facts, not from creator identity, so the composer's exposure stays a mirror
+of what submit would answer. The lifecycle capability flags stay
+Session-scoped and caller-blind in this slice — they describe whether the
+Session supports close/archive/delete at all, not whether the current
+caller may drive them; owner-scoped advertisement of the lifecycle flags is
+deferred with the handover (#13617). The parity assertion in D6 covers the
+rule; existing WebShell coverage covers the advertisement.
 
 ## 4. Delivery plan
 
@@ -247,7 +271,8 @@ file-scope disjointness, not topic:
 A ∥ B is safe: disjoint files (A adds; B edits store-side). C is serial after
 both merge because it rewrites both A's registry entries and B's helpers —
 this is the one genuine blocking dependency, and it is sequenced rather than
-raced. C closes #13535; A and B reference it.
+raced. C advances #13535 (the handover command and legacy hardening are
+tracked as #13617 and #13618 respectively); A and B reference it.
 
 ## 5. Migration and compatibility
 
@@ -259,9 +284,15 @@ raced. C closes #13535; A and B reference it.
   submitter and Action families, owner-based lifecycle, the submitter-family
   refusal change 409 `workspace_unavailable` → 403
   `session_operation_forbidden`, and role-based capability advertisement.
-- Refusal-code changes a client can observe: non-creator submitter on a bound
-  Session (409 → 403); Action respond now succeeds for OPERATORs that are not
-  the creator. Everything else is caller-preserving.
+- What a client can observe: a readable non-owner submitter (submit, cancel,
+  rename) keeps the same requests but its below-OPERATOR refusal normalizes
+  from 409 `workspace_unavailable` to 403 `session_operation_forbidden`,
+  while an OPERATOR past the role check still meets the family's domain 409
+  on shape or creator-fact failure; Action respond now succeeds for
+  OPERATORs that are not the creator; Turn submit, cancel, rename and cwd
+  change now succeed for OPERATORs that are not the creator, while the
+  Session's creator-keyed execution facts hold. Everything else is
+  caller-preserving.
 - Test fixtures writing `can_read`/`can_create` move to `role` in slice B;
   the generated-columns alternative was rejected to keep one source of truth
   and H2/MySQL parity simple.
@@ -271,12 +302,17 @@ raced. C closes #13535; A and B reference it.
 Same as the issue's, plus the explicit deferrals named there:
 
 - Legacy (unbound) Sessions stay tenant-wide this slice. Hardening them
-  (they already record a creator since V40) is a named follow-up; widening R1
-  to legacy would double this slice's blast radius without fixing a named
-  product block.
+  (they already record a creator since V40) is tracked as #13618; widening
+  R1 to legacy would double this slice's blast radius without fixing a
+  named product block.
 - No handover command: `owner_actor_key` and the role checks it trips land
   here; the transfer operation (idempotent command, owner-only admission,
-  audit event) is its own slice and issue.
+  audit event) is its own slice, tracked as #13617.
+- No actor term in the submitter-family command idempotency key: the
+  operation ledger is actor-scoped since D4, but `managed_agent_command`
+  keeps its `(tenant_id, operation, idempotency_key)` domain this slice —
+  scoping it by actor (without breaking the single-unique-index dedupe its
+  racing inserts rely on) is tracked as #13619.
 - No HTTP grant-management routes (`actor_manager` provisioning): workspace
   grants arrive through out-of-band provisioning today, and this slice
   extends that same channel with the `role` column. If deployments need
@@ -289,13 +325,17 @@ Same as the issue's, plus the explicit deferrals named there:
 
 ## 7. Validation plan
 
-- Slice A: the correspondence gate fails on a route unregistered (proven by
-  a temporary unregistered-route test during development, then removed);
-  probes pin today's statuses per rule class on public + WebShell.
+- Slice A: the correspondence gate's fail-closed arms are pinned by the
+  committed `SurfaceRegistryGateNegativeTest` (one mounted route the
+  registry does not register, and one registered route with no handler);
+  `SurfaceRegistryGateUnconstrainedTest` adds the method-agnostic-mapping
+  arm; probes pin today's statuses per rule class on public + WebShell.
 - Slice B: migration-shape test applying V48 over V47 fixtures asserts the
-  backfill (can_create → OPERATOR, can_read-only → READER, owner := creator);
-  the full existing suite stays green untouched except fixture INSERTs —
-  that is the behaviour-invisibility proof.
+  backfill (can_create → OPERATOR, can_read-only → READER, owner := creator).
+  Existing expectations change only where they name a renamed
+  `WorkspaceAccess` constant; the behaviour-invisibility proof is the
+  preserved `canRead()`/`canCreate()` truth table pinned by
+  `WorkspaceAccessTest`, not untouched files.
 - Slice C: updated probes and contract tests pin the new matrix; targeted
   tests: second-operator answers a pending approval on both surfaces,
   OPERATOR submits/cancels/renames/changes cwd, owner lifecycle unchanged,
@@ -340,10 +380,11 @@ Same as the issue's, plus the explicit deferrals named there:
 
 `api/SurfaceRegistry.java` at slice-A head carries 78 route constants: 32
 public + 24 WebShell + 22 internal handler methods of the ten controllers.
-(The D5 count of 21 internal is stale: #13088 added the `receipts/verify`
-handler to ToolPublicationController, so the controller has 13 routes and
-the mounted set is 22 internal, 78 in total; the gate derives everything
-from scanning, so the count is information, not an asserted constant.)
+(The 21-internal figure section 2 previously carried is stale: #13088 added
+the `receipts/verify` handler to ToolPublicationController, so the
+controller has 13 routes and the mounted set is 22 internal, 78 in total;
+the gate derives everything from scanning, so the count is information, not
+an asserted constant.)
 
 Rule classes name the implemented admission. After slice C (contract
 v1.34): `WORKSPACE_CREATE` (2), `READER` (24), `READER_ACTOR` (6),

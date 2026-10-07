@@ -358,8 +358,13 @@ public enum SurfaceRegistry {
         this.template = template;
         this.surface = surface;
         this.ruleClass = ruleClass;
-        // unmodifiableSet keeps the declaration order; Set.copyOf does not
-        // (the dual-purpose events route relies on TURN_SUBMIT first).
+        // An EnumSet iterates in ordinal order and unmodifiableSet
+        // preserves that backing order, so a multi-capability route's
+        // first capability is its lowest-ordinal one (the dual-purpose
+        // events route relies on TURN_SUBMIT first; the acceptance walk
+        // keys bodies and expected statuses off it, and
+        // SurfaceRegistryGateTest pins it). Set.copyOf has unspecified
+        // iteration order and must stay off this path.
         this.capabilities =
                 java.util.Collections.unmodifiableSet(capabilities);
     }
@@ -524,21 +529,28 @@ public enum SurfaceRegistry {
          */
         READER_ACTOR_POLICY,
         /**
-         * The OPERATOR families. Turn submit, Turn cancel, rename, cwd
-         * change and Action respond admit a caller holding OPERATOR or
-         * above on the bound Workspace — respond also admits the Session's
-         * recorded owner — under the unchanged shape gates (a live, ACTIVE,
+         * The OPERATOR families. Turn submit, Turn cancel, rename and cwd
+         * change admit a caller holding OPERATOR or above on the bound
+         * Workspace under the unchanged shape gates (a live, ACTIVE,
          * undeleted qwen-code Session on the frozen execution profile
-         * behind the deployment files opt-in). Below the read grant:
-         * {@code 404 session_not_found}; a readable actor below OPERATOR
-         * gets {@code 403 session_operation_forbidden} on the Session
-         * families and {@code 403 action_forbidden} on respond; an admitted
-         * OPERATOR blocked by the shape gates keeps the family's domain
-         * {@code 409 workspace_unavailable}. cwd additionally requires a
-         * trusted actor ({@code 401 actor_required}). The legacy arm of the
-         * submitter family is tenant-wide, respond stays owner-gated plus
-         * the tenant-wide ownerless fall-through, and cwd has no legacy
-         * arm ({@code 400 unsupported_feature}).
+         * behind the deployment files opt-in), and only while the
+         * Session's creator-keyed execution facts hold — the Registry
+         * still backs the binding exactly, it stays ACTIVE, and the
+         * create-command actor keeps OPERATOR or above (the passive-
+         * attachment subset the execution authority re-verifies). Action
+         * respond admits OPERATOR or above, or the Session's recorded
+         * owner, under no shape gate — only the read grant and a pending
+         * Action. Below the read grant: {@code 404 session_not_found}; a
+         * readable actor below OPERATOR gets {@code 403
+         * session_operation_forbidden} on the Session families and
+         * {@code 403 action_forbidden} on respond; an admitted OPERATOR
+         * blocked by the shape gates or the creator-keyed facts keeps the
+         * family's domain {@code 409 workspace_unavailable}. cwd
+         * additionally requires a trusted actor ({@code 401
+         * actor_required}). The legacy arm of the submitter family is
+         * tenant-wide, respond stays owner-gated plus the tenant-wide
+         * ownerless fall-through for unbound Sessions, and cwd has no
+         * legacy arm ({@code 400 unsupported_feature}).
          */
         OPERATOR,
         /**
@@ -565,11 +577,18 @@ public enum SurfaceRegistry {
         TENANT_SCOPED,
         /**
          * Internal Session-store and tool-publication routes: no actor at
-         * all; the writer HMAC credential issued for the Session scope
-         * answers a wrong token {@code 403
-         * writer_credential_invalid}, and on a dedicated internal
-         * listener the routing filter answers a public-connector caller
-         * {@code 404}.
+         * all. The nine Session-store routes plus the publication {@code
+         * grants}, {@code finished}, {@code admissions/prepare}, {@code
+         * receipts/verify}, {@code receipts/commit} and {@code range}
+         * routes gate on the Session-scoped writer HMAC and answer a
+         * wrong token {@code 403 writer_credential_invalid}; the seven
+         * publication data and operation routes gate on the publication
+         * token and operation id and never see the writer HMAC. On the
+         * grant and commit routes payload parsing and publication-scope
+         * validation run before the credential check, so a wrong token
+         * there lands as a {@code 400} ({@code 404} on the
+         * operation-status read). On a dedicated internal listener the
+         * routing filter answers a public-connector caller {@code 404}.
          */
         INTERNAL_WRITER
     }

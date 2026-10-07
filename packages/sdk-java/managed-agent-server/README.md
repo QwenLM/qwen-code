@@ -454,7 +454,8 @@ then trusted as the actor for the request's tenant. It is disabled by default;
 never enable it where untrusted clients can reach the server.
 
 `QWEN_MANAGED_AGENT_APPROVAL_MODE` defaults to `yolo`. In `default` and
-`auto-edit`, the Session creator can list, inspect and answer pending permission
+`auto-edit`, the Session's recorded owner or any Workspace operator can list,
+inspect and answer pending permission
 Actions through the public API or WebShell. Responses are durable, idempotent
 operations; their final result follows the committed Harness decision.
 `QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT` defaults to `10m` and accepts `1s` to `24h`.
@@ -472,14 +473,18 @@ creation with input, including replays, while empty bound creation remains
 available. The directory mounted for a Workspace is trusted deployment data,
 not a filesystem sandbox.
 
-Later Turns may be submitted by the Session's creator under the
-same opt-in while they can still read and create in the Workspace (the
-per-caller `workspaceTurns` capability flag reflects the caller's current
-grants and the Workspace registry's `ACTIVE` state), and the creator may cancel
-the Session's running Turns and rename the Session. Workspace close follows
-its separate close capability and lifecycle admission. Archive, delete and
-unarchive follow their separate retention capabilities after reliable Workspace
-close. Controlled cwd changes ship below (W2); broad Workspace capability
+Later Turns may be submitted by any caller holding OPERATOR on the bound
+Workspace under the same opt-in while the Session's creator-keyed execution
+facts hold (the Workspace registry still backs the binding and stays `ACTIVE`,
+and the actor recorded by the Workspace create command keeps OPERATOR or
+above; the per-caller `workspaceTurns` capability flag mirrors exactly that
+rule), and such a caller may cancel the Session's running Turns and rename
+the Session — a readable actor below OPERATOR gets `403
+session_operation_forbidden`, and an admitted OPERATOR blocked by the shape
+or fact gates gets `409 workspace_unavailable`. Workspace close follows its
+separate close capability and lifecycle admission. Archive, delete and
+unarchive follow their separate retention capabilities after reliable
+Workspace close. Controlled cwd changes ship below (W2); broad Workspace capability
 advertisement remains gated. Shell and in-flight recovery are separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
@@ -538,8 +543,9 @@ Design: [English](../../../docs/design/managed-agent-broker-auth.md)
 
 ### Controlled cwd change (W2)
 
-Under the same `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED` opt-in, the creator
-of a bound Session moves its relative directory within the same Workspace:
+Under the same `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED` opt-in, any caller
+holding OPERATOR on a bound Session's Workspace moves its relative directory
+within the same Workspace:
 
 ```bash
 curl -sS -X POST \
@@ -551,7 +557,11 @@ curl -sS -X POST \
 ```
 
 `202` admits a durable `cwd_change` operation; it does not activate the
-directory. The change is same-Workspace only and creator-only, requires an idle
+directory. The change is same-Workspace only and requires the caller's OPERATOR
+role plus the Session's creator-keyed execution facts (the registry still backs
+the binding and stays `ACTIVE`, and the recorded create actor keeps OPERATOR or
+above; the settlement re-verifies the recorded actor's grants, so an operation
+admitted before the initiator's own role dropped commits), an idle
 Session (`409 session_context_busy` while a Turn or another operation is open)
 and a matching `expected_context_revision` (`409 context_revision_conflict`
 otherwise); a retry with the same key returns the original operation even after
@@ -564,10 +574,11 @@ or await the event. A target the mount cannot verify fails the operation with
 never retry, while a mount fault the probe cannot reach (a stale export)
 retries internally up to an 8-attempt budget and then fails the same type,
 releasing the Session back to turns and lifecycle operations. Legacy Sessions answer `400 unsupported_feature`, an unreadable
-actor `404 session_not_found` and a readable non-creator `403
+actor `404 session_not_found` and a readable actor below OPERATOR `403
 session_operation_forbidden`, matching the sibling lifecycle refusals; a
 probe refusal the turn layer would share also uses `409
-workspace_unavailable`. The WebShell adapter offers the same flow as
+workspace_unavailable`, and so does an admitted OPERATOR once the
+creator-keyed facts moved. The WebShell adapter offers the same flow as
 `/api/agent/web-shell/v1/sessions/cwd/change` plus `/operations/query`.
 Subsequent turns acquire a fresh Runtime Session and install the new context
 before tools run, so an unverifiable change can never redirect tool execution.
@@ -725,14 +736,16 @@ Foreground Shell may create detached descendants. Use this only with trusted
 local workloads. The W0e recovery above handles trusted host reboot; it
 does not provide physical isolation or recovery after worker-only death.
 Public bound Turn admission is limited to the opt-in initial file Turn described
-in G0 above and to later Turns submitted by the Session's creator under the same
-opt-in while they can still read and create in the Workspace (the per-caller
-`workspaceTurns` capability flag reflects the caller's current grants and the
-registry's `ACTIVE` state); the creator may also cancel the Session's running
-Turns and rename the Session. Later Turns run
-under the creator's Workspace grants, so any other actor keeps the existing
-refusal: `workspace_unavailable` when the actor can read the Workspace,
-`session_not_found` when they cannot. Public close follows its separate close
+in G0 above and to later Turns submitted by any caller holding OPERATOR on the
+Workspace under the same opt-in while the Session's creator-keyed execution
+facts hold (the per-caller `workspaceTurns` capability flag mirrors that same
+rule); such a caller may also cancel the Session's running Turns and rename the
+Session. Later Turns run
+under the creator's Workspace grants, so an actor without a read grant keeps the
+existing `session_not_found` invisibility, a readable actor below OPERATOR is
+refused `session_operation_forbidden`, and an admitted OPERATOR whose Session
+lost the creator-keyed facts meets the family's domain `workspace_unavailable`.
+Public close follows its separate close
 capability and lifecycle admission. Archive, delete and unarchive follow their
 separate retention capabilities after reliable Workspace close;
 the private Shell profile is not enabled through public creation.

@@ -64,49 +64,74 @@ public class ManagedActionStore {
     // open-mode Session with neither an owner record nor a create command
     // stays tenant-owned, matching its read semantics.
     public void requireOwner(String tenantId, String sessionId, String actorId) {
-        byte[] key;
+        byte[] key = actorScopeKey(tenantId, actorId);
+        OwnerRow session = ownerRow(tenantId, sessionId);
+        if (ownerIdentityAdmits(tenantId, sessionId, session, key)) {
+            return;
+        }
+        // A bound Session without an owner record answers through the
+        // Workspace role arm alone.
+        if (workspaceOperatorAdmits(tenantId, session, key)) {
+            return;
+        }
+        throw forbidden();
+    }
+
+    // The caller's registry key, or null for an anonymous caller; an actor
+    // id the key cannot encode is a scope violation, not a refusal.
+    private static byte[] actorScopeKey(String tenantId, String actorId) {
         try {
-            key = actorId == null
+            return actorId == null
                     ? null : ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         } catch (IllegalArgumentException error) {
             throw new ApiException(HttpStatus.FORBIDDEN,
                     "actor_scope_mismatch", "Authenticated actor scope is invalid.");
         }
-        OwnerRow session = DataAccessUtils.nullableSingleResult(jdbc.query(
+    }
+
+    private OwnerRow ownerRow(String tenantId, String sessionId) {
+        return DataAccessUtils.nullableSingleResult(jdbc.query(
                 "SELECT owner_actor_key, creator_actor_key, workspace_id"
                         + " FROM managed_agent_session WHERE"
                         + " tenant_id = ? AND session_id = ?",
                 (result, row) -> new OwnerRow(result.getBytes(1),
                         result.getBytes(2), result.getString(3)),
                 tenantId, sessionId));
+    }
+
+    // The immutable half of the responder gate: the recorded owner, the
+    // create-command actor for Sessions written before the owner record,
+    // or the tenant-owned shape of an anonymous open-mode Session. Written
+    // once, so it runs before the idempotency replay.
+    private boolean ownerIdentityAdmits(String tenantId, String sessionId,
+            OwnerRow session, byte[] key) {
         byte[] recorded = session == null ? null
                 : session.owner() != null ? session.owner() : session.creator();
         if (recorded != null) {
-            if (key != null && Arrays.equals(recorded, key)) {
-                return;
-            }
-        } else {
-            int commands = jdbc.queryForObject(
-                    "SELECT COUNT(*) FROM managed_workspace_create_command WHERE"
-                            + " tenant_id = ? AND session_id = ?",
-                    Integer.class, tenantId, sessionId);
-            if (commands == 0) {
-                if (session == null || session.workspaceId() == null) {
-                    // No recorded owner: an anonymous open-mode Session is
-                    // tenant-owned, matching its read semantics.
-                    return;
-                }
-                // A bound Session without an owner record answers through
-                // the Workspace role arm alone.
-            } else if (key != null
-                    && jdbc.queryForObject(
-                            "SELECT COUNT(*) FROM managed_workspace_create_command WHERE"
-                                    + " tenant_id = ? AND session_id = ? AND actor_id = ?",
-                            Integer.class, tenantId, sessionId, key) == 1) {
-                return;
-            }
+            return key != null && Arrays.equals(recorded, key);
         }
-        if (session != null && session.workspaceId() != null && key != null
+        int commands = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM managed_workspace_create_command WHERE"
+                        + " tenant_id = ? AND session_id = ?",
+                Integer.class, tenantId, sessionId);
+        if (commands == 0) {
+            // No recorded owner: an anonymous open-mode Session is
+            // tenant-owned, matching its read semantics.
+            return session == null || session.workspaceId() == null;
+        }
+        return key != null
+                && jdbc.queryForObject(
+                        "SELECT COUNT(*) FROM managed_workspace_create_command WHERE"
+                                + " tenant_id = ? AND session_id = ? AND actor_id = ?",
+                        Integer.class, tenantId, sessionId, key) == 1;
+    }
+
+    // The mutable half: any actor holding OPERATOR on the Session's
+    // Workspace. Revocable out from under an admitted caller, so admit
+    // evaluates it after the actor-scoped replay.
+    private boolean workspaceOperatorAdmits(String tenantId,
+            OwnerRow session, byte[] key) {
+        return session != null && session.workspaceId() != null && key != null
                 && !jdbc.queryForList(
                         "SELECT 1 FROM managed_workspace_access WHERE"
                                 + " tenant_id = ? AND workspace_id = ?"
@@ -119,10 +144,7 @@ public class ManagedActionStore {
                                 + " AND actor_id = ? AND role IN ('OPERATOR',"
                                 + " 'OWNER')",
                         Integer.class, tenantId, session.workspaceId(),
-                        tenantId, session.workspaceId(), key).isEmpty()) {
-            return;
-        }
-        throw forbidden();
+                        tenantId, session.workspaceId(), key).isEmpty();
     }
 
     private record OwnerRow(byte[] owner, byte[] creator, String workspaceId) {
@@ -395,7 +417,13 @@ public class ManagedActionStore {
                 String.class,
                 tenantId,
                 sessionId);
-        requireOwner(tenantId, sessionId, actorId);
+        byte[] actorKey = actorScopeKey(tenantId, actorId);
+        OwnerRow ownerRow = ownerRow(tenantId, sessionId);
+        // The immutable owner arms answer before the replay; the mutable
+        // Workspace role arm follows it, so a role revoked after admission
+        // still resolves a retry to the caller's own operation.
+        boolean admitted = ownerIdentityAdmits(tenantId, sessionId, ownerRow,
+                actorKey);
         List<String> replay =
                 jdbc.query(
                         "SELECT operation_id FROM managed_agent_operation WHERE tenant_id = ? AND"
@@ -416,6 +444,10 @@ public class ManagedActionStore {
                         "The idempotency key was reused with different content.");
             }
             return new OperationAdmission(existing, true);
+        }
+        if (!admitted && !workspaceOperatorAdmits(tenantId, ownerRow,
+                actorKey)) {
+            throw forbidden();
         }
         String sessionStatus = jdbc.queryForObject("SELECT status FROM managed_agent_session"
                 + " WHERE tenant_id = ? AND session_id = ?", String.class, tenantId, sessionId);

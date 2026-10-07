@@ -808,10 +808,13 @@ class Issue13181QueryBudgetTest {
         System.out.println("[issue-13181] listWebShellSessions(7 mixed"
                 + " role rows): " + fixture.ledger.summary());
         // Page + latest turns + the close batch + the grant batch across
-        // both workspaces: constant, not per row.
-        assertThat(fixture.ledger.total()).isEqualTo(4);
+        // both workspaces + the execution-facts batch over the
+        // submit-shaped sessions: constant, not per row.
+        assertThat(fixture.ledger.total()).isEqualTo(5);
         assertThat(fixture.ledger.count("from managed_workspace_registry"))
                 .isEqualTo(1);
+        assertThat(fixture.ledger.count("from managed_agent_session s join"
+                + " managed_workspace_registry")).isEqualTo(1);
         // workspaceTurns holds exactly for ACTIVE sessions on a workspace
         // where the caller's role is OPERATOR or above, whatever the
         // Session's creator.
