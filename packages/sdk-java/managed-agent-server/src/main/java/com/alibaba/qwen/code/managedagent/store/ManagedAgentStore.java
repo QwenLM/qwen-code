@@ -1940,6 +1940,32 @@ public class ManagedAgentStore implements AgentStateStore {
         }
     }
 
+    /**
+     * G3: back out a submission mark whose attempt carries no event epoch,
+     * so a new Harness generation may bind and re-submit. A null epoch only
+     * proves the admission REPLY never landed: a settled old-generation
+     * admission replays idempotently on the journal's commandId when the
+     * Turn re-submits, while one still unsettled answers the resubmit with
+     * the coded duplicate-admission 409 — the caller adopts the attach's
+     * epoch and streams instead of withdrawing again (R10-4). Refuses
+     * under the same lease guards as the mark.
+     */
+    @Transactional
+    public boolean withdrawSubmissionAttempted(String tenantId,
+            String sessionId, String turnId, String owner) {
+        long now = clock.millis();
+        int updated = jdbc.update("UPDATE managed_agent_turn SET"
+                        + " submission_attempted = FALSE, updated_at = ?,"
+                        + " version = version + 1 WHERE tenant_id = ? AND"
+                        + " session_id = ? AND turn_id = ? AND"
+                        + " dispatch_owner = ? AND dispatch_lease_until"
+                        + " >= ? AND submission_attempted = TRUE AND"
+                        + " harness_event_epoch IS NULL AND status IN"
+                        + " ('ACCEPTED','RUNNING','CANCELLING')",
+                now, tenantId, sessionId, turnId, owner, now);
+        return updated == 1;
+    }
+
     @Transactional
     public void recordAdmission(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
@@ -1974,8 +2000,9 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Transactional
     public void recordRecoveryAdmission(String tenantId, String sessionId,
-            String turnId, String owner, String expectedEventEpoch,
-            String eventEpoch, long lastEventId) {
+            String turnId, String owner, String expectedTurnEventEpoch,
+            String expectedSessionEventEpoch, String eventEpoch,
+            long lastEventId) {
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         TurnRecord turn = requireTurnForUpdate(tenantId, sessionId, turnId);
         long now = clock.millis();
@@ -1991,9 +2018,9 @@ public class ManagedAgentStore implements AgentStateStore {
             return;
         }
         if (!turn.submissionAttempted()
-                || !Objects.equals(expectedEventEpoch,
+                || !Objects.equals(expectedTurnEventEpoch,
                         turn.harnessEventEpoch())
-                || !Objects.equals(expectedEventEpoch,
+                || !Objects.equals(expectedSessionEventEpoch,
                         session.harnessEventEpoch())) {
             throw new IllegalStateException(
                     "Hosted Harness recovery epoch changed");
@@ -2005,18 +2032,20 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
                         + " dispatch_owner = ? AND dispatch_lease_until"
-                        + " >= ? AND harness_event_epoch = ?",
+                        + " >= ? AND (harness_event_epoch = ? OR"
+                        + " (harness_event_epoch IS NULL AND ? IS NULL))",
                 eventEpoch, lastEventId, now, tenantId, sessionId, turnId,
-                owner, now, expectedEventEpoch);
+                owner, now, expectedTurnEventEpoch, expectedTurnEventEpoch);
         if (updated != 1) {
             throw new IllegalStateException("Turn dispatch lease was lost");
         }
         int sessionUpdated = jdbc.update("UPDATE managed_agent_session SET harness_event_epoch ="
                         + " ?, harness_last_event_id = ?, updated_at = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
-                        + " session_id = ? AND harness_event_epoch = ?",
+                        + " session_id = ? AND (harness_event_epoch = ? OR"
+                        + " (harness_event_epoch IS NULL AND ? IS NULL))",
                 eventEpoch, lastEventId, now, tenantId, sessionId,
-                expectedEventEpoch);
+                expectedSessionEventEpoch, expectedSessionEventEpoch);
         if (sessionUpdated != 1) {
             throw new IllegalStateException(
                     "Hosted Harness recovery epoch changed");

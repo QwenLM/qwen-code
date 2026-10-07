@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import { promises as fs } from 'node:fs';
 import { lstat, readlink, realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import {
@@ -13,6 +14,11 @@ import {
 } from './hosted-glob-pattern.js';
 import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
 import type { RawFileHistoryOperation } from './hosted-file-history-protocol.js';
+import {
+  MANAGED_WORKSPACE_CONTEXT_FILES,
+  MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
+  type ManagedWorkspaceContextFile,
+} from './managed-runtime-provider-protocol.js';
 import { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
@@ -108,6 +114,33 @@ function isolationRefusal(
     message: `${tool} requires a delegated Linux cgroup v2 directory: ${ISOLATION_REFUSAL_CLAUSES[reason]}.`,
     type: `managed_isolation_${reason}`,
   };
+}
+
+/**
+ * Byte budget for reading one project instruction file. The reply is capped in
+ * characters, but `fs.readFile` materialises the whole file first: a sparse
+ * 400 Mi `AGENTS.md` costs no disk and still allocates. Reading only the prefix
+ * that can yield that many UTF-16 code units bounds the allocation too; four
+ * bytes per unit keeps astral content at the full character cap.
+ */
+const MANAGED_WORKSPACE_CONTEXT_FILE_BYTES =
+  MANAGED_WORKSPACE_CONTEXT_FILE_CHARS * 4;
+
+/** Reads at most {@link MANAGED_WORKSPACE_CONTEXT_FILE_BYTES} bytes of a file. */
+async function readContextFilePrefix(file: string): Promise<string> {
+  const handle = await fs.open(file, 'r');
+  try {
+    const buffer = Buffer.allocUnsafe(MANAGED_WORKSPACE_CONTEXT_FILE_BYTES);
+    const { bytesRead } = await handle.read(
+      buffer,
+      0,
+      MANAGED_WORKSPACE_CONTEXT_FILE_BYTES,
+      0,
+    );
+    return buffer.toString('utf8', 0, bytesRead);
+  } finally {
+    await handle.close();
+  }
 }
 
 export interface ManagedToolReference {
@@ -519,6 +552,114 @@ export class ManagedToolExecutor {
     } finally {
       this.historyControls.delete(sessionId);
     }
+  }
+
+  /**
+   * Reads the Session's project instruction files outside the execution
+   * ledger: they are the harness's own context, not a model tool call, so
+   * they reserve no execution and leave nothing to recover. A missing,
+   * unreadable or out-of-Workspace file is simply absent from the result.
+   */
+  async readWorkspaceContext(
+    sessionId: string,
+  ): Promise<{ files: ManagedWorkspaceContextFile[] }> {
+    return this.trackStart(() => this.readWorkspaceContextAdmitted(sessionId));
+  }
+
+  private async readWorkspaceContextAdmitted(
+    sessionId: string,
+  ): Promise<{ files: ManagedWorkspaceContextFile[] }> {
+    // Not `assertLegacySession`: this control reserves nothing in the
+    // execution ledger, and the Harness issues it from inside `acquire()`, so
+    // the Session is already claimed by the time it arrives. Only a released
+    // Session refuses.
+    if (this.closedSessions.has(sessionId))
+      throw new ManagedToolUnavailableError(
+        'Workspace context is unavailable.',
+      );
+    const tools = await this.toolsFor({
+      sessionId,
+      promptId: sessionId,
+      callId: 'workspace-context',
+      argsDigest: '',
+    });
+    if (
+      !this.isAdmissionOpen ||
+      !tools?.directory ||
+      tools.isActive?.() === false
+    )
+      throw new ManagedToolUnavailableError(
+        'Workspace context is unavailable.',
+      );
+    // Confine to the Session directory, not the whole mount: a symlink to a
+    // sibling Session's instruction file stays inside the mount root but
+    // must not be promoted into this Session's system instruction. A
+    // directory that stops resolving answers the declared error: a raw
+    // ENOENT would carry the runtime host's absolute path to the Broker as a
+    // 409 provider failure.
+    let boundary: string;
+    try {
+      boundary = await fs.realpath(tools.directory);
+    } catch {
+      throw new ManagedToolUnavailableError(
+        'Workspace context is unavailable.',
+      );
+    }
+    const files: ManagedWorkspaceContextFile[] = [];
+    const seen = new Set<string>();
+    for (const name of MANAGED_WORKSPACE_CONTEXT_FILES) {
+      let text: string;
+      try {
+        // A symlink planted in the Workspace (git preserves them) must not
+        // promote a host file into the system instruction.
+        const real = await fs.realpath(path.join(tools.directory, name));
+        const rel = path.relative(boundary, real);
+        if (
+          rel === '..' ||
+          rel.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(rel)
+        )
+          continue;
+        // Staying inside the boundary is not ownership: a Session bound at the
+        // mount root (a Workspace selection without `cwd_relative`) has every
+        // sibling inside it, so the same arm the file tools consult judges this
+        // read too. Same three arguments as those call sites.
+        if (await this.ownsAnotherSessionDir?.(tools.sessionId, real, boundary))
+          continue;
+        // One physical file under both names (`AGENTS.md -> QWEN.md`) is
+        // injected once, as core's memory loader does (#9597).
+        if (seen.has(real)) continue;
+        seen.add(real);
+        // Gate on the type before opening: `fs.readFile` on a FIFO blocks in
+        // open(2) forever, pinning one libuv threadpool thread per attachment
+        // until unrelated reads in this worker stall, while every other
+        // unreadable candidate here is simply absent from the result.
+        const stat = await fs.stat(real);
+        if (!stat.isFile()) continue;
+        // The character cap bounds the reply, not the allocation: read only
+        // what can fill it.
+        text =
+          stat.size > MANAGED_WORKSPACE_CONTEXT_FILE_BYTES
+            ? await readContextFilePrefix(real)
+            : await fs.readFile(real, 'utf8');
+      } catch {
+        continue;
+      }
+      if (text.length > MANAGED_WORKSPACE_CONTEXT_FILE_CHARS) {
+        const note =
+          '\n[Truncated: the file exceeds the Hosted context limit.]';
+        text = text.slice(
+          0,
+          MANAGED_WORKSPACE_CONTEXT_FILE_CHARS - note.length,
+        );
+        // Cut on a code-point boundary: the Java Broker's writer sends a lone
+        // surrogate as '?'.
+        if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+        text += note;
+      }
+      files.push({ name, text });
+    }
+    return { files };
   }
 
   constructor(

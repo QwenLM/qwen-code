@@ -17,6 +17,7 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import {
   assertHostedFileHistoryCapacity,
   commitHostedFileHistory,
+  dropPendingHostedFileHistoryTurn,
   HostedFileHistoryRefusedError,
   HOSTED_UUID,
   readHostedFileHistory,
@@ -373,3 +374,19 @@ it.each([115, 125])(
     else expect(size).toBeGreaterThan(65536);
   },
 );
+
+it('drops a pending marker only for the Turn that owns it', async () => {
+  const record = history(1, true);
+  const owner = randomUUID();
+  await commitHostedFileHistory(session, { ...record, pendingTurn: owner });
+  // A caller naming another Turn must not drop this Turn's marker: the
+  // parked Turn still needs it to reconcile its resume.
+  await dropPendingHostedFileHistoryTurn(session, randomUUID());
+  expect((await readHostedFileHistory(session))?.pendingTurn).toBe(owner);
+  // The owning Turn's own drop lands — and only the markers move: the
+  // tracked-file backups the rewind route reads must survive the rebuild.
+  await dropPendingHostedFileHistoryTurn(session, owner);
+  const dropped = await readHostedFileHistory(session);
+  expect(dropped?.pendingTurn).toBeNull();
+  expect(dropped?.state).toEqual(record.state);
+});

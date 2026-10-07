@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { parseManagedRuntimeProviderResult } from './managed-runtime-provider-protocol.js';
+import {
+  parseManagedRuntimeProviderResult,
+  type ManagedWorkspaceContextFile,
+} from './managed-runtime-provider-protocol.js';
 import type {
   RawFileHistoryOperation,
   HostedFileHistoryState,
@@ -147,6 +150,19 @@ export class HostedWorkspaceBroker {
       ...this.identity,
       turnKind: 'bootstrap',
     });
+  }
+
+  /** The Session's project instruction files, read outside the execution ledger. */
+  async workspaceContext(): Promise<ManagedWorkspaceContextFile[]> {
+    const operation = { kind: 'workspace-context' } as const;
+    const response = await this.request(
+      `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}/control`,
+      { operation },
+    );
+    return parseManagedRuntimeProviderResult(operation, response['result'], {
+      ...this.identity,
+      turnKind: 'bootstrap',
+    }) as ManagedWorkspaceContextFile[];
   }
 
   async warm(): Promise<void> {
