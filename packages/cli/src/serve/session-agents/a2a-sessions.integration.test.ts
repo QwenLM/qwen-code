@@ -306,7 +306,7 @@ describe('A2A on session agents', () => {
     const snapshot = await orchestrator.snapshot(
       sent.body.result.task.contextId,
     );
-    expect(snapshot.map((frame) => frame.agentId)).toEqual(['ag_alice']);
+    expect(snapshot.map((frame) => frame.author.agentId)).toEqual(['ag_alice']);
   });
 
   it('reports a run waiting on approval as input required', async () => {
