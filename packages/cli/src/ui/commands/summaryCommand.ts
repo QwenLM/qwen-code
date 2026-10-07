@@ -12,6 +12,7 @@ import {
   type SlashCommandActionReturn,
 } from './types.js';
 import {
+  appendAutoMemoryContext,
   getProjectSummaryPrompt,
   isSubpath,
   resolvePath,
@@ -196,17 +197,23 @@ export const summaryCommand: SlashCommand = {
         skipOutputLanguagePreference: true,
         model: config.getModel(),
         systemInstruction: chatSystemInstruction,
-        contents: [
-          ...conversationContext,
-          {
-            role: 'user',
-            parts: [
-              {
-                text: getProjectSummaryPrompt(),
-              },
-            ],
-          },
-        ],
+        // The inherited system instruction carries the memory policy, which
+        // promises the catalog at the request tail. This side query bypasses
+        // LlmChat, so append the catalog here.
+        contents: appendAutoMemoryContext(
+          [
+            ...conversationContext,
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: getProjectSummaryPrompt(),
+                },
+              ],
+            },
+          ],
+          config.getAutoMemoryContext(),
+        ),
         abortSignal: abortSignal ?? new AbortController().signal,
       });
 
