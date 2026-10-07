@@ -304,12 +304,29 @@ public final class ManagedChannelRecords {
                     next.get("run"))) {
                 return false;
             }
+            // Leaving unknown takes proof: the partial revision must
+            // settle a segment the unknown one did not (decision 5).
+            if ("unknown".equals(previous.at("/run/delivery/state").textValue())
+                    && "partial".equals(next.at("/run/delivery/state").textValue())
+                    && settled(next) <= settled(previous)) {
+                return false;
+            }
             if (ManagedExtensionRecords.TERMINAL.contains(
                     previous.get("run").get("state").textValue())) {
                 return ManagedExtensionRecords.same(previous, next);
             }
             return true;
         });
+    }
+
+    private static int settled(JsonNode record) {
+        int count = 0;
+        for (JsonNode segment : record.get("segments")) {
+            if (!segment.get("receipt").isNull()) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private static String nullableId(JsonNode node, String label) {

@@ -61,13 +61,13 @@ Legacy channel（`packages/channels/*`）的适配器运行在 daemon 或 CLI �
 
 ## 记录正文（H5a）
 
-两个正文都原样嵌入 H0b 运行块，都以 `taskKind: null` 注册进 `MANAGED_EXTENSION_RECORD_BODIES`——Channel 的 route 与 delivery 不是 Session 任务——并继续缺席 `MANAGED_SESSION_ENABLED_DOMAINS`。字节级契约位于 `packages/core/src/managed-runtime/managed-channel-record.ts`，由 `packages/sdk-java/managed-agent-server` 的 `ManagedChannelRecords` 镜像，并由共用语料 `contracts/managed-channel-record-v1.fixtures.json`（84 个形态用例与 54 个后继用例）固定，TypeScript 与 Java 回放完全一致。
+两个正文都原样嵌入 H0b 运行块，都以 `taskKind: null` 注册进 `MANAGED_EXTENSION_RECORD_BODIES`——Channel 的 route 与 delivery 不是 Session 任务——并继续缺席 `MANAGED_SESSION_ENABLED_DOMAINS`。字节级契约位于 `packages/core/src/managed-runtime/managed-channel-record.ts`，由 `packages/sdk-java/managed-agent-server` 的 `ManagedChannelRecords` 镜像，并由共用语料 `contracts/managed-channel-record-v1.fixtures.json`（92 个形态用例与 57 个后继用例）固定，TypeScript 与 Java 回放完全一致。
 
 - `managed-channel_route`（链身份 `routeId`）：封闭键 `routeId`、`channelInstanceId`、`accountId`、`accountGeneration`、`routeRevision`、`rootSessionId`、`sessionId`、`scope`、`policyRef`、`run`。scope 按 kind 携带 Legacy 路由键实际派生的身份：`user` 以 chat 内的发送者为键（`senderId` 与 `chatId` 必填，`threadId` 为 null）；`thread` 以 thread 为键并回退到 chat（`threadId`/`chatId` 恰填其一，`senderId` 为 null）；`chat_thread` 以 chat 为键、仅可细化到其一个 thread（`chatId` 必填，`threadId` 可填，`senderId` 为 null）；`single` 仅以实例为键（三者全 null）。运行只钉 `effectId: routeId`：无 definition、execution、Runtime、dispatch 或 delivery——绑定的生命周期是唯一状态。
 - route 后继：身份（`routeId`、`channelInstanceId`、`accountId`、`scope`）不变。`routeRevision` 相同时重绑定集合——`accountGeneration`、`rootSessionId`、`sessionId`、`policyRef`——逐字节相同；重绑定或换代把 `routeRevision` 恰好加一，并且此时才能改动集合，但 `accountGeneration` 绝不后退（决策 6）。运行终态冻结整条记录。
 - `managed-channel_delivery`（链身份 `deliveryId`）：封闭键 `deliveryId`、`routeId`、`routeRevision`、`sourceTurnId`、`contentRef`、`segments`、`cancelRequested`、`run`。分段计划携带 1–64 个 `{segmentId, ordinal, contentRef, receipt}` 段，`segmentId` 互不相同，`ordinal` 从 0 连续；回执为 `{providerMessageId, acceptedAt, proofRef|null}`。运行把 `effectId`/`deliveryId` 钉为链身份，并携带 H0b 目标 `channel` 的交付状态线，其余为空。
 - delivery 一致性：交付状态线、运行状态线与已回执分段在每个修订上一致——`planned` 对应运行 `admitted` 且无回执；`sending`/`partial` 对应运行在途（`running`、`waiting` 或 `recovery_blocked`），其中 `partial` 至少已回执一段但仍至少差一段未齐；`delivered` 对应运行 `settled` 且回执全齐；`unknown` 恰对应运行无原因的 `waiting`（provider 可能已持有其余分段）；`rejected` 对应运行 `failed`；`cancelled` 对应运行 `cancelled` 且无回执。受阻运行只在交付可证为 `sending`/`partial` 时受阻；在运行的钉约束下，唯一能解析的恢复原因是 `handler_unavailable`。
-- delivery 后继：计划、产出回合与钉住的路由修订不变；每段回执只写一次、绝不改写；`cancelRequested` 绝不撤销。其余由 H0b 状态线步进约束：`unknown` 的交付绝不回到 `sending`（重发使用新 `deliveryId`，决策 5）；运行终态冻结整条记录，已送达的消息不能事后编辑，而解决 `unknown` 的迟到回执仍可提交。
+- delivery 后继：计划、产出回合与钉住的路由修订不变；每段回执只写一次、绝不改写；`cancelRequested` 绝不撤销。其余由 H0b 状态线步进约束：`unknown` 的交付绝不回到 `sending`（重发使用新 `deliveryId`，决策 5）；运行终态冻结整条记录，已送达的消息不能事后编辑，而解决 `unknown` 的迟到回执仍可提交。为挡住 `unknown → partial → sending` 的两步绕行，离开 `unknown` 进入 `partial` 本身即要求证据：`partial` 修订必须结清 `unknown` 时尚未结清的至少一个分段。
 - 决策 2 的入站去重四元组随准入的输入记录（`input.accepted` 的内容）；携带已提交四元组的重投以原 `inputId` 回答，不产生新回合——去重索引的确切存储形式是 H5b 的决策，随 email 切片固定。
 
 ## 切片计划

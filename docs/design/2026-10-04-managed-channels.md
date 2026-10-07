@@ -219,7 +219,7 @@ route or delivery is not a Session task — and both stay absent from
 `packages/core/src/managed-runtime/managed-channel-record.ts`, is mirrored
 by `ManagedChannelRecords` in `packages/sdk-java/managed-agent-server`, and
 is pinned by the shared corpus
-`contracts/managed-channel-record-v1.fixtures.json` (84 shape cases and 54
+`contracts/managed-channel-record-v1.fixtures.json` (92 shape cases and 57
 successor cases), which TypeScript and Java replay identically.
 
 - `managed-channel_route` (chain identity `routeId`): closed keys
@@ -266,7 +266,10 @@ successor cases), which TypeScript and Java replay identically.
   rule the rest: an `unknown` delivery never returns to `sending` (a
   resend is a new `deliveryId`, decision 5), and a terminal run freezes
   the record, so an already-delivered message cannot be edited after the
-  fact, while late receipts that resolve an `unknown` stay commitable.
+  fact, while late receipts that resolve an `unknown` stay commitable. To
+  keep that invariant against the two-step path `unknown → partial →
+sending`, leaving `unknown` for `partial` itself takes proof: the
+  `partial` revision must settle a segment the `unknown` one did not.
 - The ingress dedupe tuple of decision 2 is recorded with the admitted
   input (the `input.accepted` content), and a redelivery under a committed
   tuple answers with the original `inputId` without a new turn — the exact

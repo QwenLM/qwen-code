@@ -455,6 +455,18 @@ export function isChannelDeliverySuccessor(
     ) {
       return false;
     }
+    // Leaving unknown takes proof: a partial revision must settle a
+    // segment the unknown one did not, or the next sending revision could
+    // re-send a segment the provider may already hold (decision 5).
+    const settledOf = (record: ChannelDelivery) =>
+      record.segments.filter((segment) => segment.receipt !== null).length;
+    if (
+      before.run.delivery!.state === 'unknown' &&
+      after.run.delivery!.state === 'partial' &&
+      settledOf(after) <= settledOf(before)
+    ) {
+      return false;
+    }
     if (TERMINAL_RUN_STATES.includes(before.run.state)) {
       return same(before, after);
     }

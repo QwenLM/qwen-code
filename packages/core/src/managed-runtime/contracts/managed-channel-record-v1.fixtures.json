@@ -428,6 +428,48 @@
       "start": false
     },
     {
+      "id": "route-scope-single-with-chat",
+      "domain": "channel_route",
+      "patch": {
+        "scope": {
+          "kind": "single",
+          "senderId": null,
+          "chatId": "chat-1",
+          "threadId": null
+        }
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "route-scope-unknown-kind-all-null",
+      "domain": "channel_route",
+      "patch": {
+        "scope": {
+          "kind": "channel",
+          "senderId": null,
+          "chatId": null,
+          "threadId": null
+        }
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "route-scope-thread-with-sender",
+      "domain": "channel_route",
+      "patch": {
+        "scope": {
+          "kind": "thread",
+          "senderId": "sender-1",
+          "chatId": null,
+          "threadId": "thread-9"
+        }
+      },
+      "valid": false,
+      "start": false
+    },
+    {
       "id": "route-scope-extra-key",
       "domain": "channel_route",
       "patch": {
@@ -1358,6 +1400,7 @@
             "receipt": null
           }
         ],
+        "cancelRequested": true,
         "run": {
           "state": "cancelled",
           "reason": null,
@@ -2124,6 +2167,214 @@
       "domain": "channel_delivery",
       "patch": {
         "sourceTurnId": ""
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "delivery-cancel-request-non-boolean",
+      "domain": "channel_delivery",
+      "patch": {
+        "cancelRequested": "yes"
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "delivery-unknown-all-receipts",
+      "domain": "channel_delivery",
+      "patch": {
+        "segments": [
+          {
+            "segmentId": "seg-1",
+            "ordinal": 0,
+            "contentRef": {
+              "resourceId": "seg-1-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "receipt": {
+              "providerMessageId": "provider-msg-1",
+              "acceptedAt": 1750000000000,
+              "proofRef": null
+            }
+          },
+          {
+            "segmentId": "seg-2",
+            "ordinal": 1,
+            "contentRef": {
+              "resourceId": "seg-2-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            "receipt": {
+              "providerMessageId": "provider-msg-2",
+              "acceptedAt": 1750000060000,
+              "proofRef": null
+            }
+          }
+        ],
+        "run": {
+          "state": "waiting",
+          "reason": null,
+          "definition": null,
+          "executionCallId": null,
+          "effectId": "delivery-1",
+          "dispatchId": null,
+          "deliveryId": "delivery-1",
+          "execution": null,
+          "runtime": null,
+          "delivery": {
+            "target": "channel",
+            "state": "unknown"
+          }
+        }
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "delivery-rejected-all-receipts",
+      "domain": "channel_delivery",
+      "patch": {
+        "segments": [
+          {
+            "segmentId": "seg-1",
+            "ordinal": 0,
+            "contentRef": {
+              "resourceId": "seg-1-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "receipt": {
+              "providerMessageId": "provider-msg-1",
+              "acceptedAt": 1750000000000,
+              "proofRef": null
+            }
+          },
+          {
+            "segmentId": "seg-2",
+            "ordinal": 1,
+            "contentRef": {
+              "resourceId": "seg-2-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            "receipt": {
+              "providerMessageId": "provider-msg-2",
+              "acceptedAt": 1750000060000,
+              "proofRef": null
+            }
+          }
+        ],
+        "run": {
+          "state": "failed",
+          "reason": null,
+          "definition": null,
+          "executionCallId": null,
+          "effectId": "delivery-1",
+          "dispatchId": null,
+          "deliveryId": "delivery-1",
+          "execution": null,
+          "runtime": null,
+          "delivery": {
+            "target": "channel",
+            "state": "rejected"
+          }
+        }
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "delivery-proof-malformed",
+      "domain": "channel_delivery",
+      "patch": {
+        "segments": [
+          {
+            "segmentId": "seg-1",
+            "ordinal": 0,
+            "contentRef": {
+              "resourceId": "seg-1-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "receipt": {
+              "providerMessageId": "provider-msg-1",
+              "acceptedAt": 1750000000000,
+              "proofRef": {
+                "digest": "xyz"
+              }
+            }
+          },
+          {
+            "segmentId": "seg-2",
+            "ordinal": 1,
+            "contentRef": {
+              "resourceId": "seg-2-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            "receipt": null
+          }
+        ],
+        "run": {
+          "state": "running",
+          "reason": null,
+          "definition": null,
+          "executionCallId": null,
+          "effectId": "delivery-1",
+          "dispatchId": null,
+          "deliveryId": "delivery-1",
+          "execution": null,
+          "runtime": null,
+          "delivery": {
+            "target": "channel",
+            "state": "sending"
+          }
+        }
+      },
+      "valid": false,
+      "start": false
+    },
+    {
+      "id": "delivery-segment-ref-malformed",
+      "domain": "channel_delivery",
+      "patch": {
+        "segments": [
+          {
+            "segmentId": "seg-1",
+            "ordinal": 0,
+            "contentRef": {
+              "digest": "xyz"
+            },
+            "receipt": null
+          },
+          {
+            "segmentId": "seg-2",
+            "ordinal": 1,
+            "contentRef": {
+              "resourceId": "seg-2-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            "receipt": null
+          }
+        ]
       },
       "valid": false,
       "start": false
@@ -3977,6 +4228,15 @@
       "valid": false
     },
     {
+      "id": "route-account-id-drift",
+      "domain": "channel_route",
+      "before": {},
+      "after": {
+        "accountId": "account-2"
+      },
+      "valid": false
+    },
+    {
       "id": "delivery-dispatch",
       "domain": "channel_delivery",
       "before": {},
@@ -4663,6 +4923,18 @@
               "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
             },
             "receipt": null
+          },
+          {
+            "segmentId": "seg-3",
+            "ordinal": 2,
+            "contentRef": {
+              "resourceId": "seg-3-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            },
+            "receipt": null
           }
         ],
         "run": {
@@ -4708,6 +4980,22 @@
               "schemaVersion": 1,
               "byteLength": 2,
               "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            "receipt": {
+              "providerMessageId": "provider-msg-2",
+              "acceptedAt": 1750000060000,
+              "proofRef": null
+            }
+          },
+          {
+            "segmentId": "seg-3",
+            "ordinal": 2,
+            "contentRef": {
+              "resourceId": "seg-3-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
             },
             "receipt": null
           }
@@ -4830,6 +5118,105 @@
       "valid": false
     },
     {
+      "id": "delivery-unknown-partial-without-proof",
+      "domain": "channel_delivery",
+      "before": {
+        "segments": [
+          {
+            "segmentId": "seg-1",
+            "ordinal": 0,
+            "contentRef": {
+              "resourceId": "seg-1-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "receipt": {
+              "providerMessageId": "provider-msg-1",
+              "acceptedAt": 1750000000000,
+              "proofRef": null
+            }
+          },
+          {
+            "segmentId": "seg-2",
+            "ordinal": 1,
+            "contentRef": {
+              "resourceId": "seg-2-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            "receipt": null
+          }
+        ],
+        "run": {
+          "state": "waiting",
+          "reason": null,
+          "definition": null,
+          "executionCallId": null,
+          "effectId": "delivery-1",
+          "dispatchId": null,
+          "deliveryId": "delivery-1",
+          "execution": null,
+          "runtime": null,
+          "delivery": {
+            "target": "channel",
+            "state": "unknown"
+          }
+        }
+      },
+      "after": {
+        "segments": [
+          {
+            "segmentId": "seg-1",
+            "ordinal": 0,
+            "contentRef": {
+              "resourceId": "seg-1-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "receipt": {
+              "providerMessageId": "provider-msg-1",
+              "acceptedAt": 1750000000000,
+              "proofRef": null
+            }
+          },
+          {
+            "segmentId": "seg-2",
+            "ordinal": 1,
+            "contentRef": {
+              "resourceId": "seg-2-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            "receipt": null
+          }
+        ],
+        "run": {
+          "state": "waiting",
+          "reason": null,
+          "definition": null,
+          "executionCallId": null,
+          "effectId": "delivery-1",
+          "dispatchId": null,
+          "deliveryId": "delivery-1",
+          "execution": null,
+          "runtime": null,
+          "delivery": {
+            "target": "channel",
+            "state": "partial"
+          }
+        }
+      },
+      "valid": false
+    },
+    {
       "id": "delivery-unknown-to-rejected",
       "domain": "channel_delivery",
       "before": {
@@ -4927,6 +5314,106 @@
         }
       },
       "valid": true
+    },
+    {
+      "id": "delivery-route-id-drift",
+      "domain": "channel_delivery",
+      "before": {
+        "segments": [
+          {
+            "segmentId": "seg-1",
+            "ordinal": 0,
+            "contentRef": {
+              "resourceId": "seg-1-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "receipt": {
+              "providerMessageId": "provider-msg-1",
+              "acceptedAt": 1750000000000,
+              "proofRef": null
+            }
+          },
+          {
+            "segmentId": "seg-2",
+            "ordinal": 1,
+            "contentRef": {
+              "resourceId": "seg-2-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            "receipt": null
+          }
+        ],
+        "run": {
+          "state": "running",
+          "reason": null,
+          "definition": null,
+          "executionCallId": null,
+          "effectId": "delivery-1",
+          "dispatchId": null,
+          "deliveryId": "delivery-1",
+          "execution": null,
+          "runtime": null,
+          "delivery": {
+            "target": "channel",
+            "state": "sending"
+          }
+        }
+      },
+      "after": {
+        "routeId": "route-2",
+        "segments": [
+          {
+            "segmentId": "seg-1",
+            "ordinal": 0,
+            "contentRef": {
+              "resourceId": "seg-1-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            },
+            "receipt": {
+              "providerMessageId": "provider-msg-1",
+              "acceptedAt": 1750000000000,
+              "proofRef": null
+            }
+          },
+          {
+            "segmentId": "seg-2",
+            "ordinal": 1,
+            "contentRef": {
+              "resourceId": "seg-2-data",
+              "kind": "channel-delivery-segment",
+              "schemaVersion": 1,
+              "byteLength": 2,
+              "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+            },
+            "receipt": null
+          }
+        ],
+        "run": {
+          "state": "running",
+          "reason": null,
+          "definition": null,
+          "executionCallId": null,
+          "effectId": "delivery-1",
+          "dispatchId": null,
+          "deliveryId": "delivery-1",
+          "execution": null,
+          "runtime": null,
+          "delivery": {
+            "target": "channel",
+            "state": "sending"
+          }
+        }
+      },
+      "valid": false
     },
     {
       "id": "delivery-reject-before-ack",
