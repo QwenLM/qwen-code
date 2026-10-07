@@ -5,17 +5,19 @@
 Status: connected-composition design with the initial checkpoint gate locally
 implemented and independently verified on owned MySQL, updated 2026-10-08.
 Implementation baseline:
-`8e116d2071a8dcc136d6061160a70a66699e4e3a` in
+`1b752436309beed109b6f47959d8bb3ec2994ca8` in
 [Draft PR #13526](https://github.com/QwenLM/qwen-code/pull/13526). Original SQL
-execution continuation is implemented there; the normal file chain below is not.
+execution continuation and retained descriptor-backed file tools/history are
+implemented there; the production normal file chain below is not.
 This extends the [K2 completion design](2026-10-06-kubernetes-k2-retirement-handoff.md)
 and claims neither full A2 nor aggregate retirement nor new cloud acceptance.
 
 ## 1. Problem and scope
 
 At the implementation baseline, private `csi-files-retirement/1` CREATE and first
-activation pin exist, but the generic worker constructs Shell/MCP/Hook/monitor/
-provider components. The SQL reader accepts genesis/install/renew and one exact
+activation pin exist. Legacy entry guards refuse the reserved private digest
+before the generic worker can construct Shell/MCP/Hook/monitor/provider components.
+The retained three-tool composer exists but has no production worker caller. The SQL reader accepts genesis/install/renew and one exact
 empty initial checkpoint; it does not admit the connected file chain.
 Removing a control refusal or allowing
 arbitrary checkpoints would not connect those authorities safely.
@@ -35,7 +37,7 @@ repeated handoff and K2-D deployment qualification remain required later work.
 
 ## 2. Closed worker identity and construction
 
-The current slice adds only the legacy-entry refusal described below. Its
+The legacy-entry refusal described below remains in effect. Its
 independent baseline observed the reserved digest reaching the old generic
 factory and a local-process child before startup failure. The guard rejects
 stdin/container readers, direct old worker/factory construction, and local
@@ -43,8 +45,12 @@ request creation, registration, provisioning, adoption, confirmation and
 release before their side effects. Local operator registration/stop evidence
 also refuses this private request. Ordinary profile digests retain their
 existing path. The reusable managed-context data parser and CSI-v1 data schema
-are unchanged; they do not grant execution. Boot4/CSI2 construction, new routes
-and the connected file chain below remain planned.
+are unchanged; they do not grant execution. Boot4/CSI2 construction and four closed routes are implemented in the current
+construction change, with independent local construction verification. The connected file
+chain below remains planned. This
+[closed construction component](2026-10-08-k2-csi-file-worker-construction.md)
+keeps bind, prepare and mutation unavailable until original native admission
+is connected; construction is not full A2 acceptance.
 
 Reserve outer boot version `4`, `managed-csi/2` and CSI v2 attestation/drain
 routes. Wrap unchanged closed managed-context boot v2 and the registered storage
@@ -121,15 +127,16 @@ own closed contract and qualification.
 
 ## 3. File-history storage and admission
 
-Backups currently use `Storage.getGlobalQwenDir()/file-history/<owner>`; Pod
-`HOME=/tmp` makes this an emptyDir dependency. Pass an explicit backup root for
-the private composition, retaining the default for legacy callers. Use a
-reserved directory under the registered volume tied to the original Session.
-Pin its directory identity, reject symlinks/replaced roots and deny lexical and
-resolved file-tool access to that subtree. Do not redirect global `QWEN_HOME`.
-Keep backup bytes until original finalize; unavailable, interrupted or
-capacity-exhausted history blocks settlement. The later cut/finalize must cover
-retained backup bytes as well as native history resources.
+Legacy backups use `Storage.getGlobalQwenDir()/file-history/<owner>`; Pod
+`HOME=/tmp` makes that an emptyDir dependency. The implemented private backend
+instead retains a fixed original-Session directory on the registered volume;
+legacy callers keep their default. Its directory identity, no-follow paths,
+reserved aliases and backup-inode hardlinks are checked at descriptor use. It
+does not redirect global `QWEN_HOME`. The private composer injects that same
+backend into actual file tools and retained history; worker admission is still
+unconnected. Keep backup bytes until original finalize; unavailable,
+interrupted or capacity-exhausted history blocks settlement. The later
+cut/finalize must cover retained backup bytes and native history resources.
 Write/Edit must require bound, prepared history; the legacy executor fallback
 that executes a mutation without any history object is forbidden here.
 
@@ -143,7 +150,7 @@ time. Check named-directory identities and the original mount before/after I/O;
 an observed mismatch makes the backend permanently blocked for this lifetime.
 No replacement/adoption or non-Linux fallback is allowed. First empty bind may
 create the Session directory under current original admission; track that
-metadata I/O through drain. Existing nonempty/unknown directories are refused.
+metadata I/O through drain. Every pre-existing Session directory, including an empty one, is refused.
 
 The current CSI mount observer now retains a no-follow root directory fd and
 verifies both its identity and the named root before publishing each mount
@@ -151,8 +158,9 @@ receipt. Concurrent observations share the original open; an observed root
 replacement permanently fences that lifetime. Worker startup failure and
 shutdown close the owned descriptor, including shutdown when the executor
 fails. This is the root-lifetime foundation used by the existing observer;
-ordinary file tools, backup preparation and inventory are not yet routed
-through it. POSIX directory-fixture tests do not qualify Linux CSI/NVMe
+the component file tools, backup preparation and inventory now borrow
+that same root through the retained backend. Production worker admission and
+retirement inventory are still unconnected. POSIX directory-fixture tests do not qualify Linux CSI/NVMe
 execution, physical writer termination or NodeUnpublish.
 
 The current component adds a joined operation lifetime to the existing owner
@@ -167,9 +175,9 @@ runs the final identity inspection and releases its operation; the error alone
 is not evidence that the mount was replaced. Use the same lifetime around the
 real mount observer's second mountinfo read and receipt comparison, and join
 observations that began before the root fd was acquired. Close cannot return
-while one of those observations is still running. This component establishes
-owned observation lifetime only; fd-bound child paths, tool/history callbacks,
-helper joins and their retirement counters still require actual wiring and
+while one of those observations is still running. The retained backend now joins fd-bound tool/history callbacks and format
+helpers through the same owner. Native preparation authority, physical helper
+termination and aggregate retirement counters still require actual wiring and
 qualification before private worker admission.
 
 Copy raw preimage bytes from an opened ordinary-file descriptor into a unique
@@ -193,16 +201,21 @@ snapshot and inventory reads use this backend; rewind/restore and orphan cleanup
 refuse before destructive I/O. Wrappers borrow it; the original factory owns
 its joinable tail and descriptor lifetime.
 
-The ordinary tools also need descriptor-bound access. The existing injected
-`FileSystemService` covers text I/O, but `read_file` format classification/media
-reads, Write/Edit direct mkdir and atomic-write fallbacks also use pathnames.
-Inventory and close these actual I/O sites before enabling the private worker.
-A single realpath check or secure backup class does not protect a later tool
-read/write. Deny reserved-prefix aliases and backup-inode hardlinks at actual
-open/use boundaries. Preserve format/encoding semantics; keep any unqualified
-helper lifecycle as an explicit blocker. This protects the declared filesystem
-boundary, not a hostile actor that already controls the worker's memory, fd
-table or mount namespace.
+The retained component now connects descriptor-bound text and format reads,
+Write/Edit mutation and history fingerprint/diff/validation. It denies reserved
+prefix aliases and retained backup-inode hardlinks at actual open/use boundaries
+and preserves format/encoding semantics through the original source lifetime.
+Writes to existing ordinary files are in place; this is not an atomic replacement
+or concurrent-writer snapshot guarantee. Independent Darwin POSIX fixtures do
+not qualify Linux CSI or physical helper termination. This protects the declared
+filesystem boundary, not a hostile actor that already controls the worker's
+memory, fd table or mount namespace.
+
+Bind must defer the one original composer until original SQL/native READY
+admission and fixed context installation. Startup/attestation must not call it:
+backend open already creates exclusive history directories. The executor must
+receive the composer history object itself; legacy raw bind creates a second
+history and would separate preparation from actual Write/Edit tracking.
 
 Hosted currently calls prepare before committing `pendingTurn`/`pendingMessageId`;
 those fields are not preparation admission. For this profile, commit a versioned
@@ -244,7 +257,13 @@ Each invocation has exactly `executionCallId`, `callId`, `functionCallId`,
 `toolDefinitionRef`. Include every admitted read/write/edit entry of the batch,
 with unique identities and ascending original ordinal; verify part/function
 identity against the committed assistant message. Input/definition refs are
-unchanged closed durable refs. `requestDigest` hashes exact payload JSON UTF-8
+unchanged closed durable refs. The current assistant UUID is the preparation/tool.intent batch ID; the
+checkpoint retains its cumulative batch ID and carried earlier items. Intent
+ordinals are local accepted-request ordinals, including refusal gaps. Derive
+checkpoint global ordinals from the qualified previous maximum and current
+accepted order, verifying assistant/function/part/execution identity for every
+member. Do not equate both batch IDs or ordinal roles, omit accepted members,
+or add a second authoritative batch ledger. `requestDigest` hashes exact payload JSON UTF-8
 bytes, with `sha256:` prefix; inputRef.digest hashes the enclosing input resource
 and is a different value. Paths are the sorted deduplicated Write/Edit path
 union derived from those exact original input bytes. Use JS default sort/Java

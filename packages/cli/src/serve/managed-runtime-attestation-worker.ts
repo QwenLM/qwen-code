@@ -50,6 +50,15 @@ import {
 import { ManagedCsiMount } from './managed-csi-mount.js';
 import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
 import {
+  parseManagedCsiFileBoot,
+  parseManagedCsiFileJson,
+  type ManagedCsiFileBoot,
+} from './managed-csi-file-envelope.js';
+import {
+  startManagedCsiFileWorker,
+  type ManagedCsiFileWorkerHandle,
+} from './managed-csi-file-worker.js';
+import {
   MANAGED_CSI_ATTEST_ROUTE,
   MANAGED_CSI_DRAIN_ROUTE,
   MANAGED_CSI_ACK_ROUTE,
@@ -180,12 +189,43 @@ async function readBootDocument(input: Readable): Promise<Buffer> {
   }
 }
 
-export async function startManagedRuntimeAttestationWorker(
+export function startManagedRuntimeAttestationWorker(
+  bootDocument: ManagedCsiFileBoot,
+  capturePublisher?: ManagedShellCapturePublisher,
+  remotePublishers?: ManagedShellPublisherRegistry,
+  containerMode?: boolean,
+): Promise<ManagedCsiFileWorkerHandle>;
+export function startManagedRuntimeAttestationWorker(
   bootDocument: ManagedRuntimeWorkerBoot | ManagedContextBoot | ManagedCsiBoot,
   capturePublisher?: ManagedShellCapturePublisher,
   remotePublishers?: ManagedShellPublisherRegistry,
+  containerMode?: boolean,
+): Promise<ManagedRuntimeAttestationWorkerHandle>;
+export function startManagedRuntimeAttestationWorker(
+  bootDocument:
+    | ManagedRuntimeWorkerBoot
+    | ManagedContextBoot
+    | ManagedCsiBoot
+    | ManagedCsiFileBoot,
+  capturePublisher?: ManagedShellCapturePublisher,
+  remotePublishers?: ManagedShellPublisherRegistry,
+  containerMode?: boolean,
+): Promise<ManagedRuntimeAttestationWorkerHandle | ManagedCsiFileWorkerHandle>;
+export async function startManagedRuntimeAttestationWorker(
+  bootDocument:
+    | ManagedRuntimeWorkerBoot
+    | ManagedContextBoot
+    | ManagedCsiBoot
+    | ManagedCsiFileBoot,
+  capturePublisher?: ManagedShellCapturePublisher,
+  remotePublishers?: ManagedShellPublisherRegistry,
   containerMode = false,
-): Promise<ManagedRuntimeAttestationWorkerHandle> {
+): Promise<ManagedRuntimeAttestationWorkerHandle | ManagedCsiFileWorkerHandle> {
+  if (bootDocument.version === 4) {
+    if (!containerMode || capturePublisher || remotePublishers)
+      throw new Error(INVALID_BOOT_MESSAGE);
+    return startManagedCsiFileWorker(bootDocument);
+  }
   const resolved =
     bootDocument.version === 3
       ? parseManagedCsiBoot(bootDocument)
@@ -361,7 +401,7 @@ export async function startManagedRuntimeAttestationWorker(
 
 export async function readManagedRuntimeContainerBoot(
   bootPath: string,
-): Promise<ManagedRuntimeWorkerBoot | ManagedCsiBoot> {
+): Promise<ManagedRuntimeWorkerBoot | ManagedCsiBoot | ManagedCsiFileBoot> {
   if (!path.isAbsolute(bootPath)) throw new Error(INVALID_BOOT_MESSAGE);
   const input = createReadStream(bootPath);
   try {
@@ -369,6 +409,19 @@ export async function readManagedRuntimeContainerBoot(
     const parsed: unknown = JSON.parse(
       new TextDecoder('utf-8', { fatal: true }).decode(document),
     );
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      'version' in parsed &&
+      parsed.version === 4
+    ) {
+      return parseManagedCsiFileBoot(
+        parseManagedCsiFileJson(
+          document,
+          MANAGED_RUNTIME_WORKER_BOOT_LIMIT_BYTES,
+        ),
+      );
+    }
     if (
       parsed &&
       typeof parsed === 'object' &&
@@ -407,7 +460,11 @@ export async function runManagedRuntimeAttestationWorker(
       'Managed Runtime worker',
     );
   }
-  let boot: ManagedRuntimeWorkerBoot | ManagedContextBoot | ManagedCsiBoot;
+  let boot:
+    | ManagedRuntimeWorkerBoot
+    | ManagedContextBoot
+    | ManagedCsiBoot
+    | ManagedCsiFileBoot;
   try {
     boot =
       containerBootPath !== undefined
@@ -419,7 +476,8 @@ export async function runManagedRuntimeAttestationWorker(
     process.exitCode = 1;
     return;
   }
-  const contextBoot = boot.version === 3 ? boot.context : boot;
+  const contextBoot =
+    boot.version === 3 || boot.version === 4 ? boot.context : boot;
   const worker = await startManagedRuntimeAttestationWorker(
     boot,
     undefined,

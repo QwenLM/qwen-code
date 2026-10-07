@@ -5,15 +5,16 @@
 状态：完整文件组合设计；初始 checkpoint 门禁已在本地实现，并在自有 MySQL 上独立验证，
 更新于 2026-10-08。实现基线为
 [Draft PR #13526](https://github.com/QwenLM/qwen-code/pull/13526) 中的
-`8e116d2071a8dcc136d6061160a70a66699e4e3a`。该提交已实现原执行的 SQL
-continuation；以下正常文件链尚未实现。本文补充
+`1b752436309beed109b6f47959d8bb3ec2994ca8`。该提交已实现原执行的 SQL
+continuation 和保留原 descriptor 的文件工具/history；生产正常文件链尚未实现。本文补充
 [K2 补全设计](2026-10-06-kubernetes-k2-retirement-handoff.zh-CN.md)，不声明完整
 A2、聚合退役或新增云上验收完成。
 
 ## 1. 问题与范围
 
 实现基线中，私有 `csi-files-retirement/1` 的 CREATE 与首次 activation 固定点已存在，但
-通用 worker 构造 Shell/MCP/Hook/monitor/provider 组件。SQL reader 接受
+旧入口 guard 在通用 worker 构建 Shell/MCP/Hook/monitor/provider 前拒绝保留私有 digest。
+保留三工具 composer 已存在，但尚无生产 worker caller。SQL reader 接受
 genesis/install/renew 与一次准确的空初始 checkpoint，尚未准入连通的文件执行链。
 删除 control 拒绝或允许任意 checkpoint，不能安全连接这些权威。
 
@@ -31,13 +32,16 @@ stop/unpublish、K2-C release/多轮交接、K2-D 部署资格验证仍是后续
 
 ## 2. 封闭 worker 身份与构造
 
-本批仅增加下述 legacy 入口拒绝。独立基线观测到保留 digest 到达旧通用
+下述 legacy 入口拒绝保持生效。独立基线观测到保留 digest 到达旧通用
 factory，local-process 也在启动失败前创建子进程。Guard 在副作用前拒绝
 stdin/container reader、直接旧 worker/factory 构造，以及本地 request 创建、
 registration、provisioning、adoption、confirmation、release。Local operator
 registration/stop evidence 也拒绝该私有 request。普通 profile digest 保留既有
 路径。可复用 managed-context 数据 parser 与 CSI-v1 数据 schema 不变，它们
-不授予执行权。下述 boot4/CSI2 构造、新 route 和连通文件链仍是设计。
+不授予执行权。当前构建变更已实现 boot4/CSI2 构造与四个封闭 route，并通过独立本地构建验证。
+下述连通文件链仍是设计。该
+[闭合构建组件](2026-10-08-k2-csi-file-worker-construction.zh-CN.md) 在原生准入接通前
+保持 bind、prepare 与 mutation 不可用；构建不代表完整 A2 验收。
 
 预留外层 boot version `4`、`managed-csi/2` 与 CSI v2 attestation/drain route。
 包裹不变的封闭 managed-context boot v2 与已注册 storage tuple，增加只含
@@ -103,12 +107,13 @@ workspace；文件链不制造 publication/ACK。后续 session-scoped publicati
 
 ## 3. File-history 存储与准入
 
-当前备份使用 `Storage.getGlobalQwenDir()/file-history/<owner>`；Pod 的
-`HOME=/tmp` 使其成为 emptyDir 依赖。为私有组合显式传入 backup root，legacy
-caller 保持默认值。使用已注册卷内绑定原 Session 的保留目录，固定其目录身份，
-拒绝符号链接/root 替换，禁止文件工具按词法或真实路径访问该子树。不能重定向
-全局 `QWEN_HOME`。备份保留至原 finalize；不可用、中断或容量不足均阻断结算。
-后续 cut/finalize 必须覆盖所保留备份字节及原生 history resource。
+Legacy 备份使用 `Storage.getGlobalQwenDir()/file-history/<owner>`；Pod 的
+`HOME=/tmp` 使其依赖 emptyDir。已实现私有 backend 则在已注册卷内保留固定原
+Session 目录；legacy caller 保持默认值。descriptor 使用边界核对目录身份、
+no-follow path、保留 alias 和 backup-inode hardlink，不重定向全局 `QWEN_HOME`。
+私有 composer 为实际文件工具与保留 history 注入同一个 backend；worker 准入
+仍未连接。备份保留至原 finalize；不可用、中断或容量不足均阻断结算。后续
+cut/finalize 必须覆盖所保留备份字节及原生 history resource。
 Write/Edit 必须要求已绑定并 prepared 的 history；不能使用 legacy executor
 在没有 history 对象时仍执行 mutation 的 fallback。
 
@@ -119,13 +124,13 @@ Write/Edit 必须要求已绑定并 prepared 的 history；不能使用 legacy e
 追加一个已验证 component。I/O 前后验证目录名称仍对应原身份并核实原 mount；
 观测到不匹配后，本 lifetime 的 backend 永久 blocked，不替换/adopt，也不允许
 非 Linux fallback。首次空 bind 可以在当前原 admission 下创建 Session directory，
-该 metadata I/O 必须计入 drain；拒绝已有非空/未知目录。
+该 metadata I/O 必须计入 drain；拒绝任何已存在的 Session 目录，包括空目录。
 
 当前 CSI 挂载观察器已持续持有 no-follow 根目录 fd，并在发布每次挂载 receipt
 前验证 fd 身份和命名根路径。并发观察共享原始打开操作；观察到根替换后，该生命周期
 永久封锁。worker 启动失败和关闭都会关闭自有 fd，包括 executor 关闭失败的情况。
-这是已接入现有观察器的根目录生命周期基础；普通文件工具、备份准备和库存尚未通过它
-执行。POSIX 目录 fixture 测试不构成 Linux CSI/NVMe 执行、物理 writer 终止或
+这是已接入现有观察器的根目录生命周期基础；组件文件工具、备份准备和库存已通过
+保留 backend 借用同一原根。生产 worker 准入与退役库存仍未接通。POSIX 目录 fixture 测试不构成 Linux CSI/NVMe 执行、物理 writer 终止或
 NodeUnpublish 资格。
 
 本组件在将该根目录借给文件 I/O 之前，已为现有 owner 增加可 join 的 operation
@@ -136,9 +141,9 @@ lifetime。
 callback 也不能 await 自己 owner 的 close。callback 抛错仍执行最终身份检查并释放
 操作；该错误本身不证明挂载已替换。真实挂载观察器的第二次 mountinfo 读取和 receipt
 比较使用同一 lifetime，同时 join 在取得根 fd 之前就已开始的观察。仍有这些观察在运行
-时，close 不能返回。本组件只建立自有观察寿命；fd-bound 子路径、工具/history
-callback、helper join 及其 retirement counter 仍需真实接线和资格验证，之后才能准入
-私有 worker。
+时，close 不能返回。保留 backend 已通过同一 owner join fd-bound tool/history
+callback 与格式 helper。原生 preparation 权威、物理 helper 终止和聚合 retirement
+counter 仍需真实接线与资格验证，之后才能准入私有 worker。
 
 从已打开普通文件 descriptor 复制 raw preimage bytes，以
 `O_CREAT | O_EXCL | O_NOFOLLOW` 创建唯一 leaf。同一 descriptor 完成
@@ -158,13 +163,17 @@ fingerprint、validation、diff、snapshot、inventory 读取均使用此 backen
 rewind/restore 与 orphan cleanup 在破坏性 I/O 前拒绝。Wrapper 仅借用，原 factory
 拥有可 join 的 tail 与 descriptor lifetime。
 
-普通工具也需要 descriptor-bound access。注入的既有 `FileSystemService` 覆盖
-文本 I/O，但 `read_file` 格式分类/media 读取、Write/Edit 直接 mkdir、atomic-write
-fallback 仍使用 pathname。启用私有 worker 前，必须盘点并闭合这些真实 I/O
-接点。一次 realpath 检查或安全 backup class 不能保护稍后的工具读写。在实际
-open/use 边界拒绝保留 prefix alias 与 backup-inode hardlink。保留格式/编码
-语义，未验证的 helper lifecycle 仍明确作为 blocker。此设计保护声明的文件系统
-边界，不防御已经控制 worker memory、fd table、mount namespace 的 hostile actor。
+保留组件已连接 descriptor-bound text/format read、Write/Edit mutation 与 history
+fingerprint/diff/validation。在实际 open/use 边界拒绝保留 prefix alias 与 retained
+backup-inode hardlink，并通过原 source lifetime 保留格式/编码语义。已有普通文件
+采用原位写入，不保证原子替换或并发 writer snapshot。独立 Darwin POSIX fixture
+不能证明 Linux CSI 或物理 helper 终止。此设计保护声明的文件系统边界，不防御已
+控制 worker memory、fd table 或 mount namespace 的 hostile actor。
+
+bind 必须等原始 SQL/native READY 准入与固定 context 安装完成后，才延迟调用唯一
+原 composer。startup/attestation 不能调用它：backend open 已创建 exclusive
+history 目录。executor 必须直接接收 composer 的 history 对象；旧 raw bind 会
+创建第二个 history，将准备与实际 Write/Edit 跟踪分开。
 
 Hosted 当前先调用 prepare，再提交 `pendingTurn`/`pendingMessageId`；这些字段
 不是 preparation 准入。此 profile 必须在 worker I/O 前，向既有原生 file-history
@@ -202,6 +211,13 @@ snapshot backup 恰有一个原 pin，跨 revision 不能更改或删除 pin。N
 `partIndex`、`ordinal`、`requestDigest`、`inputRef`、`toolDefinitionRef`。纳入 batch
 全部已准入 read/write/edit，身份唯一并按原 ordinal 递增，对照已提交 assistant
 message 验证 part/function 身份。Input/definition ref 为不变的封闭 durable ref。
+
+当前 assistant UUID 是 preparation/tool.intent batch ID；checkpoint 保留其累积
+batch ID 和此前 items。intent ordinal 是当前已接受 request 的局部序号，含拒绝留下的
+空隙。从具备资格的前一 checkpoint 最大序号和当前 accepted 顺序推导全局 ordinal，
+逐成员校验 assistant/function/part/execution 身份。不能强制两种 batch ID 或 ordinal
+角色相等、省略 accepted 成员或增加第二个权威 batch ledger。
+
 `requestDigest` 是准确 payload JSON UTF-8 bytes 的 hash，带 `sha256:` prefix；
 inputRef.digest 是外层 input resource 的 hash，两者不同。Paths 从这些准确原
 input bytes 派生为排序去重的 Write/Edit path union，使用 JS 默认 sort/Java

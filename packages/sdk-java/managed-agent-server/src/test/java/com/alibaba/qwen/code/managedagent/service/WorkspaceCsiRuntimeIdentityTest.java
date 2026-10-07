@@ -5,17 +5,22 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRuntimeConstructionFixture;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.KubernetesRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.ManagedCsiProtocol;
+import com.alibaba.qwen.code.runtimebroker.ManagedCsiFilesProtocol;
+import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -97,11 +102,16 @@ class WorkspaceCsiRuntimeIdentityTest {
             RuntimeProvisionSeed seed = call.getArgument(2);
             Map<String, Object> tuple = call.getArgument(3);
             Map<String, Object> pod = call.getArgument(4);
-            var boot = ManagedCsiProtocol.boot(requested, seed, tuple);
-            var response = Map.of("protocolVersion", 1, "managedCsi", ManagedCsiProtocol.PROTOCOL,
+            var boot = WorkspaceCsiRuntimeIdentity.boot(requested, seed, tuple);
+            var response = new LinkedHashMap<String, Object>(Map.of("protocolVersion", 1, "managedCsi", ManagedCsiProtocol.PROTOCOL,
                     "context", WorkspaceCsiRuntimeIdentity.context(boot), "storage", tuple, "pod", pod,
                     "mount", Map.of("mountId", "9", "device", "259:1", "source", "/dev/nvme1n1", "diskSerial", "serial",
-                            "rootDevice", "66305", "rootInode", "2"));
+                            "rootDevice", "66305", "rootInode", "2")));
+            if (ManagedCsiFilesProtocol.selects(requested)) {
+                response.put("protocolVersion", 2);
+                response.put("managedCsi", ManagedCsiFilesProtocol.PROTOCOL);
+                response.put("identity", ManagedCsiFilesProtocol.identity(requested));
+            }
             afterAttestation.run();
             return CompletableFuture.completedFuture(response);
         });
@@ -139,6 +149,105 @@ class WorkspaceCsiRuntimeIdentityTest {
             join(restarted.release(reloaded.getRequest(), lease));
             assertThat(api.creates).isEqualTo(2);
         }
+    }
+
+    @Test
+    void privateConstructionPersistsHandle2AndRestoresOnlyItsOriginalBoot4Objects() {
+        privateRequest();
+        RuntimeResourceHandle handle;
+        RuntimeLease lease;
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(handle.getVersion()).isEqualTo(2);
+            assertThat(handle.getValue().get("profileIdentity")).isEqualTo(ManagedCsiFilesProtocol.identity(original.getRequest()));
+            assertThat(provider.supportsStartupRecovery(handle)).isTrue();
+            original = bindings.compareAndSet(original, original.withResourceHandle(handle, Instant.now()));
+            lease = join(provider.provision(original.getRequest(), original.getProvisionSeed()));
+            original = bindings.compareAndSet(original, original.withAttestation(lease, handle, Instant.now(), Instant.now()));
+            WorkspaceCsiRuntimeIdentity.verify(original);
+            var boot = WorkspaceCsiRuntimeIdentity.boot(original);
+            ManagedCsiFilesProtocol.validateBoot(boot);
+            assertThat(boot.get("version")).isEqualTo(4);
+            assertThat(nested(api.objects.get("secrets"), "data").get("boot.json"))
+                    .isEqualTo(Base64.getEncoder().encodeToString(WorkspaceCsiRuntimeIdentity.bytes(boot)));
+            assertThat(handle.getValue().get("bootDigest")).isEqualTo(WorkspaceCsiRuntimeIdentity.digest(boot));
+            assertThat(new String(WorkspaceCsiRuntimeIdentity.bytes(handle.getValue()), StandardCharsets.UTF_8))
+                    .doesNotContain(original.getProvisionSeed().getToken());
+        }
+        var reloaded = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])).findById(original.getBindingId());
+        WorkspaceCsiRuntimeIdentity.verify(reloaded);
+        try (var restarted = provider()) {
+            assertThat(join(restarted.ensureResource(reloaded.getRequest(), reloaded.getProvisionSeed(), reloaded.getResourceHandle())))
+                    .isEqualTo(handle);
+            assertThat(join(restarted.reconcile(reloaded.getRequest(), reloaded.getProvisionSeed(), reloaded.getResourceHandle(), lease)).getOutcome())
+                    .isEqualTo(RuntimeObservation.Outcome.READY);
+            assertThat(api.creates).isEqualTo(2);
+            nested(api.objects.get("secrets"), "data").put("boot.json", "e30=");
+            assertThat(join(restarted.reconcile(reloaded.getRequest(), reloaded.getProvisionSeed(), reloaded.getResourceHandle(), lease)).getOutcome())
+                    .isEqualTo(RuntimeObservation.Outcome.CONFLICT);
+            assertThat(api.creates).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void privateHandleCannotDowngradeOrChangeItsSavedProfileEvenWithARecomputedDigest() {
+        privateRequest();
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            var handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThatThrownBy(() -> WorkspaceCsiRuntimeIdentity.validate(original.getRequest(), original.getProvisionSeed(),
+                    new RuntimeResourceHandle("kubernetes-workspace", 1, handle.getValue())))
+                    .isInstanceOf(RuntimeBrokerException.class);
+            for (Consumer<Map<String, Object>> change : List.<Consumer<Map<String, Object>>>of(
+                    value -> nested(value, "profileIdentity").put("sessionId", UUID.randomUUID().toString()),
+                    value -> nested(value, "profileIdentity").put("profile", "foreign-profile"),
+                    value -> nested(value, "profileIdentity").put("extra", true),
+                    value -> value.remove("profileIdentity"),
+                    value -> value.put("bootDigest", "f".repeat(64)))) {
+                var value = copy(handle.getValue());
+                change.accept(value);
+                value.remove("identity");
+                value.put("identity", WorkspaceCsiRuntimeIdentity.digest(value));
+                assertThatThrownBy(() -> WorkspaceCsiRuntimeIdentity.validate(original.getRequest(), original.getProvisionSeed(),
+                        new RuntimeResourceHandle("kubernetes-workspace", 2, value))).isInstanceOf(RuntimeBrokerException.class);
+            }
+            var foreign = CsiFilesRetirementProfile.request(new ContextBinding("tenant", "workspace", 1, "storage", ".",
+                    CsiFilesRetirementProfile.CONTEXT_CONFIG_REF, 1), "/workspace", UUID.randomUUID().toString());
+            assertThatThrownBy(() -> WorkspaceCsiRuntimeIdentity.validate(foreign, original.getProvisionSeed(), handle))
+                    .isInstanceOf(RuntimeBrokerException.class);
+            assertThat(api.creates).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void privateConstructionRejectsForeignContextAndLegacyCsiReceipts() {
+        privateRequest();
+        doReturn(CompletableFuture.completedFuture(new RuntimeAttestation(
+                "foreign", original.getProvisionSeed().getGatewayIncarnation(), original.getProvisionSeed().getLeaseId(),
+                original.getProvisionSeed().getEpoch(), original.getRequest().getScope(), original.getProvisionSeed().getProvisionRequestId(), "storage")))
+                .when(transport).attest(any(), any(), any());
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(attestations).hasValue(0);
+            assertThat(bindings.findById(original.getBindingId()).getResourceHandle()).isNull();
+        }
+        setUp();
+        privateRequest();
+        doReturn(CompletableFuture.completedFuture(Map.of("protocolVersion", 1, "managedCsi", ManagedCsiProtocol.PROTOCOL)))
+                .when(transport).attestCsi(any(), any(), any(), any(), any());
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            refused(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(bindings.findById(original.getBindingId()).getResourceHandle()).isNull();
+        }
+    }
+
+    private void privateRequest() {
+        var request = WorkspaceCsiRuntimeConstructionFixture.create(source, registration);
+        var created = bindings.findOrCreate(request);
+        original = bindings.claimOperation(created.getBindingId(), "owner", Duration.ofMinutes(5));
     }
 
     @Test

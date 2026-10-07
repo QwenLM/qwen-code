@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.runtimebroker.ManagedCsiProtocol;
+import com.alibaba.qwen.code.runtimebroker.ManagedCsiFilesProtocol;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
@@ -24,9 +25,12 @@ import java.util.UUID;
 public final class WorkspaceCsiRuntimeIdentity {
     static final String KIND = "kubernetes-workspace";
     static final int VERSION = 1;
+    static final int FILES_VERSION = 2;
     private static final ObjectMapper JSON = new ObjectMapper().enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
     private static final Set<String> KEYS = Set.of("bindingId", "runtimeGeneration", "context", "storage",
             "placement", "protection", "artifacts", "bootDigest", "podSpecDigest", "mount", "identity");
+    private static final Set<String> FILES_KEYS = Set.of("bindingId", "runtimeGeneration", "context", "storage",
+            "placement", "protection", "artifacts", "bootDigest", "podSpecDigest", "mount", "identity", "profileIdentity");
     private static final Set<String> PLACEMENT_KEYS = Set.of("clusterDomain", "namespace", "namespaceUid",
             "podName", "podUid", "nodeName", "nodeUid", "containerName", "containerId", "image", "imageId",
             "podIp", "secretName", "secretUid");
@@ -46,8 +50,13 @@ public final class WorkspaceCsiRuntimeIdentity {
 
     public static Map<String, Object> boot(RuntimeBindingRecord binding) {
         verify(binding);
-        return ManagedCsiProtocol.boot(binding.getRequest(), binding.getProvisionSeed(),
+        return boot(binding.getRequest(), binding.getProvisionSeed(),
                 map(binding.getResourceHandle().getValue().get("storage")));
+    }
+
+    static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> storage) {
+        return ManagedCsiFilesProtocol.selects(request) ? ManagedCsiFilesProtocol.boot(request, seed, storage)
+                : ManagedCsiProtocol.boot(request, seed, storage);
     }
 
     public static Map<String, Object> expectedPod(RuntimeBindingRecord binding) {
@@ -57,14 +66,18 @@ public final class WorkspaceCsiRuntimeIdentity {
 
     static void validate(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, RuntimeResourceHandle handle) {
         try {
+            boolean files = ManagedCsiFilesProtocol.selects(request);
             require(request != null && seed != null && request.isManagedContext() && KIND.equals(request.getProvisionerKind())
-                    && "workspace".equals(request.getScope().getIsolationClass()) && request.getIsolationKey() == null
-                    && handle != null && KIND.equals(handle.getKind()) && handle.getVersion() == VERSION);
+                    && (files || "workspace".equals(request.getScope().getIsolationClass()) && request.getIsolationKey() == null)
+                    && handle != null && KIND.equals(handle.getKind()) && handle.getVersion() == (files ? FILES_VERSION : VERSION));
             var value = handle.getValue();
-            require(value.keySet().equals(KEYS));
+            require(value.keySet().equals(files ? FILES_KEYS : KEYS));
+            if (files) {
+                require(same(ManagedCsiFilesProtocol.identity(request), value.get("profileIdentity")));
+            }
             text(value, "bindingId", 512);
             decimal(value, "runtimeGeneration");
-            var originalBoot = ManagedCsiProtocol.boot(request, seed, map(value.get("storage")));
+            var originalBoot = boot(request, seed, map(value.get("storage")));
             require(digest(originalBoot).equals(value.get("bootDigest"))
                     && same(context(originalBoot), value.get("context")));
             var placement = map(value.get("placement"));
@@ -108,9 +121,16 @@ public final class WorkspaceCsiRuntimeIdentity {
                 require(text(artifact, "sha256", 64).matches("[0-9a-f]{64}"));
             }
             require(text(value, "podSpecDigest", 64).matches("[0-9a-f]{64}"));
-            ManagedCsiProtocol.verifyAttestation(Map.of("protocolVersion", 1, "managedCsi", ManagedCsiProtocol.PROTOCOL,
-                    "context", value.get("context"), "storage", storage, "pod", pod(placement), "mount", value.get("mount")),
-                    originalBoot, pod(placement));
+            var attestation = new LinkedHashMap<String, Object>(Map.of("protocolVersion", 1, "managedCsi", ManagedCsiProtocol.PROTOCOL,
+                    "context", value.get("context"), "storage", storage, "pod", pod(placement), "mount", value.get("mount")));
+            if (files) {
+                attestation.put("protocolVersion", 2);
+                attestation.put("managedCsi", ManagedCsiFilesProtocol.PROTOCOL);
+                attestation.put("identity", value.get("profileIdentity"));
+                ManagedCsiFilesProtocol.verifyAttestation(attestation, originalBoot, pod(placement));
+            } else {
+                ManagedCsiProtocol.verifyAttestation(attestation, originalBoot, pod(placement));
+            }
             var unsigned = new LinkedHashMap<>(value);
             unsigned.remove("identity");
             require(digest(unsigned).equals(value.get("identity")));

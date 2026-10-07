@@ -55,6 +55,7 @@ async function fixture(mapped: boolean) {
   const opened: Array<{
     handle: FileHandle;
     address: string;
+    rawAddress: string;
     close: ReturnType<typeof vi.spyOn>;
   }> = [];
   const backends: ManagedCsiFileBackend[] = [];
@@ -83,6 +84,7 @@ async function fixture(mapped: boolean) {
     opened.push({
       handle,
       address: String(resolved),
+      rawAddress: String(file),
       close: vi.spyOn(handle, 'close'),
     });
     onOpened?.(handle, String(file));
@@ -195,7 +197,18 @@ function cases(mapped: boolean) {
         directoryInode: expect.any(String),
       },
     });
-    expect(owned.opened.map((entry) => entry.address)).toEqual([
+    expect(owned.opened).toHaveLength(2);
+    expect(owned.opened[0].rawAddress).toMatch(
+      /^\/proc\/self\/fd\/\d+\/\.qwen-csi-file-history$/,
+    );
+    expect(owned.opened[1].rawAddress).toBe(
+      `/proc/self/fd/${owned.opened[0].handle.fd}/${owned.owner}`,
+    );
+    expect(
+      await Promise.all(
+        owned.opened.map((entry) => fs.realpath(entry.address)),
+      ),
+    ).toEqual([
       owned.file('.qwen-csi-file-history'),
       owned.file(`.qwen-csi-file-history/${owned.owner}`),
     ]);

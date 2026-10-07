@@ -184,6 +184,18 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/managed-csi-file-worker.ts',
+    {
+      reason:
+        'Private CSI construction captures the original Kubernetes Downward API Pod identity once for all four selected-runtime routes, before mount observation and listener startup.',
+      accesses: {
+        'key:QWEN_NODE_NAME': 1,
+        'key:QWEN_POD_NAMESPACE': 1,
+        'key:QWEN_POD_UID': 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/managed-csi-worker.ts',
     {
       reason:

@@ -7,6 +7,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import { StandardFileSystemService } from '../services/fileSystemService.js';
 import {
   getHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -353,6 +354,7 @@ describe('ManagedToolRuntime', () => {
       }) as unknown as ReturnType<Config['getToolRegistry']>;
     config.isLsToolEnabled = () => false;
     const childConfig = Object.assign(Object.create(config) as Config, {
+      getFileSystemService: () => new StandardFileSystemService(),
       getTargetDir: () => '/managed-child',
       getFileService: () => ({ shouldQwenIgnoreFile: () => false }),
       getWorkspaceContext: () => ({ isPathWithinWorkspace: () => true }),
