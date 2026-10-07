@@ -449,6 +449,11 @@ describe('AgentInteractive', () => {
       'warning',
     ],
     [AgentTerminateMode.ERROR, 'Agent stopped due to an error.', 'error'],
+    [
+      AgentTerminateMode.LOOP_DETECTED,
+      'Agent stopped: duplicate tool-call loop detected.',
+      'error',
+    ],
   ] as const)(
     'reports %s at its own severity',
     async (terminateMode, text, level) => {
