@@ -1361,6 +1361,34 @@ class QwenHostedHarnessConnectorTest {
                 mock(WorkspaceExecutionStore.class)))
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("base URL");
+
+        // Credentials, a query, and a fragment are rejected by the client
+        // builder as well, so each fails here instead of lazily inside
+        // client() as an endless transient retry.
+        ManagedAgentProperties credentialed = properties();
+        credentialed.getHarness()
+                .setBaseUrl("https://user:token@127.0.0.1:4170");
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(credentialed,
+                mock(AgentStateStore.class),
+                mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("base URL");
+
+        ManagedAgentProperties queried = properties();
+        queried.getHarness().setBaseUrl("http://127.0.0.1:4170/?v=1");
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(queried,
+                mock(AgentStateStore.class),
+                mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("base URL");
+
+        ManagedAgentProperties fragmented = properties();
+        fragmented.getHarness().setBaseUrl("http://127.0.0.1:4170/#frag");
+        assertThatThrownBy(() -> new QwenHostedHarnessConnector(fragmented,
+                mock(AgentStateStore.class),
+                mock(WorkspaceExecutionStore.class)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("base URL");
     }
 
     @Test

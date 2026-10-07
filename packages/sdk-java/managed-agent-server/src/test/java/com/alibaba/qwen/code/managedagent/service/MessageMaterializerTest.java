@@ -24,7 +24,7 @@ class MessageMaterializerTest {
     @Test
     void backsOffAndRotatesAFailingTarget() {
         AgentStateStore store = mock(AgentStateStore.class);
-        when(store.findMaterializationTargets(32))
+        when(store.findMaterializationTargets(33))
                 .thenReturn(List.of(POISON));
         when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
                 .thenThrow(new IllegalStateException("gap"));
@@ -50,7 +50,7 @@ class MessageMaterializerTest {
     @Test
     void warnsWithTheStackOnlyDuringTheExponentialPhase() {
         AgentStateStore store = mock(AgentStateStore.class);
-        when(store.findMaterializationTargets(32))
+        when(store.findMaterializationTargets(33))
                 .thenReturn(List.of(POISON));
         when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
                 .thenThrow(new IllegalStateException("gap"));
@@ -90,7 +90,7 @@ class MessageMaterializerTest {
     @Test
     void atTheCapRetriesOnceEveryMaxStreakPasses() {
         AgentStateStore store = mock(AgentStateStore.class);
-        when(store.findMaterializationTargets(32))
+        when(store.findMaterializationTargets(33))
                 .thenReturn(List.of(POISON));
         when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
                 .thenThrow(new IllegalStateException("gap"));
@@ -114,20 +114,29 @@ class MessageMaterializerTest {
         materializer.materialize();
         verify(store, times(9)).materializeNextBatch("tenant", "poison",
                 200);
+
+        // 192 is the first post-cap due streak that is not also a power of
+        // two, so it separates the modulo rule from unbounded doubling.
+        for (int pass = 0; pass < 64; pass++) {
+            materializer.materialize();
+        }
+        verify(store, times(10)).materializeNextBatch("tenant", "poison",
+                200);
     }
 
     @Test
     void aFailingDeferralDegradesOnlyItsOwnTarget() {
         AgentStateStore store = mock(AgentStateStore.class);
-        // A saturated window (TARGET_LIMIT rows) with the poisoned row at
-        // its head: only a full window rotates on the skip path, and the
-        // faulting first row is the one that must not abort the pass.
+        // A saturated window — a 33rd row behind the TARGET_LIMIT rows —
+        // with the poisoned row at its head: only then does the skip path
+        // rotate, and the faulting first row is the one that must not abort
+        // the pass.
         List<MaterializationTarget> targets = new ArrayList<>();
         targets.add(POISON);
-        for (int i = 1; i < 32; i++) {
+        for (int i = 1; i <= 32; i++) {
             targets.add(new MaterializationTarget("tenant", "healthy-" + i));
         }
-        when(store.findMaterializationTargets(32)).thenReturn(targets);
+        when(store.findMaterializationTargets(33)).thenReturn(targets);
         when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
                 .thenThrow(new IllegalStateException("gap"));
         doThrow(new DataAccessResourceFailureException("lock wait"))
@@ -193,9 +202,37 @@ class MessageMaterializerTest {
     }
 
     @Test
+    void anExactlyFullWindowDoesNotRotateOnTheSkipPath() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        // Exactly TARGET_LIMIT candidates: no row sits behind the window,
+        // so the skipped pass's rotation write would move a row that is
+        // selected again anyway. Only the failed attempts rotate.
+        List<MaterializationTarget> targets = new ArrayList<>();
+        targets.add(POISON);
+        for (int i = 1; i < 32; i++) {
+            targets.add(new MaterializationTarget("tenant", "healthy-" + i));
+        }
+        when(store.findMaterializationTargets(33)).thenReturn(targets);
+        when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
+                .thenThrow(new IllegalStateException("gap"));
+        MessageMaterializer materializer = new MessageMaterializer(store);
+
+        // Four passes: attempts land on streaks 0, 1 and 2, and pass four
+        // is the skipped one.
+        for (int pass = 0; pass < 4; pass++) {
+            materializer.materialize();
+        }
+
+        verify(store, times(3)).materializeNextBatch("tenant", "healthy-31",
+                200);
+        verify(store, times(3)).deferMaterializationTarget("tenant",
+                "healthy-31");
+    }
+
+    @Test
     void clearsTheStreakAfterASuccess() {
         AgentStateStore store = mock(AgentStateStore.class);
-        when(store.findMaterializationTargets(32))
+        when(store.findMaterializationTargets(33))
                 .thenReturn(List.of(POISON));
         when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
                 .thenThrow(new IllegalStateException("gap"))

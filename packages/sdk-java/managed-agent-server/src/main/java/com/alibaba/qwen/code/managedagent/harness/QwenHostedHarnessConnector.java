@@ -86,9 +86,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         if (scheme == null
                 || !(scheme.equalsIgnoreCase("http")
                         || scheme.equalsIgnoreCase("https"))
-                || baseUri.getHost() == null) {
-            // "localhost:4170" parses as an opaque URI and would only fail at
-            // the first RPC; reject it while the service is starting.
+                || baseUri.getHost() == null
+                || baseUri.getUserInfo() != null
+                || baseUri.getQuery() != null
+                || baseUri.getFragment() != null) {
+            // The credentials, query, and fragment clauses mirror the client
+            // builder's rules: "localhost:4170" parses as an opaque URI and
+            // the rest would only fail at the first RPC, so reject them
+            // while the service is starting.
             throw new IllegalStateException("Enabled Hosted Harness requires"
                     + " an absolute http(s) base URL");
         }
