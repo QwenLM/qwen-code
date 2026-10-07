@@ -77,21 +77,34 @@ class ManagedWorkspaceRolesMigrationTest {
         assertThat(jdbc.queryForObject("SELECT owner_actor_key FROM"
                 + " managed_agent_session WHERE session_id = 'anonymous'",
                 byte[].class)).isNull();
+        // Fresh actor keys per negative case: reusing a seeded key would
+        // let a primary-key clash (also a DataIntegrityViolationException)
+        // mask the constraint actually being probed.
         assertThatThrownBy(() -> jdbc.update("INSERT INTO"
                 + " managed_workspace_access (tenant_id, workspace_id,"
                 + " actor_id, role) VALUES ('tenant', 'workspace', ?,"
-                + " 'NONE')", OPERATOR))
+                + " 'NONE')", "none-actor".getBytes(StandardCharsets.UTF_8)))
                 .isInstanceOf(DataIntegrityViolationException.class);
         assertThatThrownBy(() -> jdbc.update("INSERT INTO"
                 + " managed_workspace_access (tenant_id, workspace_id,"
                 + " actor_id, role) VALUES ('tenant', 'workspace', ?,"
-                + " 'SPECTATOR')", OPERATOR))
+                + " 'SPECTATOR')",
+                "spectator-actor".getBytes(StandardCharsets.UTF_8)))
                 .isInstanceOf(DataIntegrityViolationException.class);
         // role carries no default: an INSERT omitting it must fail loudly,
         // as omitting a boolean did under the old NOT NULL columns.
         assertThatThrownBy(() -> jdbc.update("INSERT INTO"
                 + " managed_workspace_access (tenant_id, workspace_id,"
-                + " actor_id) VALUES ('tenant', 'workspace', ?)", OPERATOR))
+                + " actor_id) VALUES ('tenant', 'workspace', ?)",
+                "default-actor".getBytes(StandardCharsets.UTF_8)))
+                .isInstanceOf(DataIntegrityViolationException.class);
+        // PAD SPACE comparisons accept a padded value into an IN-list
+        // CHECK; the REGEXP constraint stores only byte-exact enum names.
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO"
+                + " managed_workspace_access (tenant_id, workspace_id,"
+                + " actor_id, role) VALUES ('tenant', 'workspace', ?,"
+                + " 'READER ')",
+                "padded-actor".getBytes(StandardCharsets.UTF_8)))
                 .isInstanceOf(DataIntegrityViolationException.class);
 
         // A creation written after V51 keeps owner = creator on the store

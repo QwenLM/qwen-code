@@ -126,8 +126,20 @@ ALTER TABLE managed_workspace_access DROP COLUMN can_read;
 ALTER TABLE managed_workspace_access DROP COLUMN can_create;
 ALTER TABLE managed_workspace_access
     ADD CONSTRAINT managed_workspace_access_role
-    CHECK (role IN ('READER', 'OPERATOR', 'OWNER'));
+    CHECK ((role = 'READER' AND CHAR_LENGTH(role) = 6)
+        OR (role = 'OPERATOR' AND CHAR_LENGTH(role) = 8)
+        OR (role = 'OWNER' AND CHAR_LENGTH(role) = 5));
 ```
+
+The equality-plus-length form replaces an `IN` list on purpose:
+utf8mb4 comparisons ignore trailing spaces (PAD SPACE), so an `IN` list
+would store `READER ` — a value the enum parser then rejects at read
+time, turning one out-of-band provisioning slip into 400s on that
+actor's discovery routes. An anchored REGEXP would solve that in
+isolation, but its backslash gets rewritten on the way in (MySQL string
+literals treat it as an escape, H2's do not), so the predicate carries
+none: per-name equality plus its exact length keeps the stored values
+byte-identical to the enum names.
 
 The compound shapes are split into per-action statements, matching the
 in-repo migration precedent (V7, V12, V24, V40); dropping unreadable rows

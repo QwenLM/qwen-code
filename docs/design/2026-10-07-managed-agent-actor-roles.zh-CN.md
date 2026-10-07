@@ -68,8 +68,12 @@ ALTER TABLE managed_workspace_access DROP COLUMN can_read;
 ALTER TABLE managed_workspace_access DROP COLUMN can_create;
 ALTER TABLE managed_workspace_access
     ADD CONSTRAINT managed_workspace_access_role
-    CHECK (role IN ('READER', 'OPERATOR', 'OWNER'));
+    CHECK ((role = 'READER' AND CHAR_LENGTH(role) = 6)
+        OR (role = 'OPERATOR' AND CHAR_LENGTH(role) = 8)
+        OR (role = 'OWNER' AND CHAR_LENGTH(role) = 5));
 ```
+
+约束刻意用「等值 + 精确长度」而不是 `IN` 列表：utf8mb4 比较忽略尾随空格（PAD SPACE），`IN` 列表会收下 `READER ` —— 读路径的枚举解析又拒绝它，于是一次带外置备笔误就会让该 actor 的发现路由全数返回 400。锚定 REGEXP 孤立地看也能做到，但它的反斜杠会在入库路上被改写（MySQL 字符串字面量把反斜杠当转义，H2 不当），所以谓词里干脆不放反斜杠：逐名等值加精确长度，让落库值与枚举名保持逐字节一致。
 
 复合语句按仓内迁移先例（V7、V12、V24、V40）拆成每动作一条；先删除无可读行再回填，才使这次改动对每一个可达授权行都只是改名。`role` 是唯一存储词表；不双写。`role` 也不带默认值：列先以 NULL 到来让回填覆盖全部存量行，随后 `MODIFY COLUMN` 收紧为 NOT NULL；此后省略它的 INSERT 违反 NOT NULL，与省略布尔列时相同，带外置备 SQL 因此响亮失败而不是静默授予 READER。`WorkspaceAccess` 枚举变为 `NONE / READER / OPERATOR / OWNER`（READ→READER、CREATE→OPERATOR）；`OWNER` 蕴含 `OPERATOR` 蕴含 `READER`。每个 store 读取点（`canRead`、`findReadable`、`listReadable`、`canCreateSession`、`resolveForCreation`、`authorizePassiveAttachment`、SSE 读授权复查、list 路由的 SQL 过滤）保持当前判定不变，布尔由 `role` 重新推导 —— 这是一次行为不可见的内部改动，由现有测试套件钉住。`NONE` 不可存储（CHECK 排除它）；它保留为「无行」的领域值。
 
