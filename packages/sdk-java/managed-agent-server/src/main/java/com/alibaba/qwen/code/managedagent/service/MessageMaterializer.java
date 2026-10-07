@@ -36,11 +36,11 @@ public class MessageMaterializer {
             String key = target.tenantId() + ":" + target.sessionId();
             int streak = failures.getOrDefault(key, 0);
             if (streak > 0) {
-                deferQuietly(target);
                 boolean due = streak < MAX_BACKOFF_STREAK
                         ? (streak & (streak - 1)) == 0
                         : streak % MAX_BACKOFF_STREAK == 0;
                 if (!due) {
+                    deferQuietly(target);
                     failures.put(key, streak + 1);
                     continue;
                 }

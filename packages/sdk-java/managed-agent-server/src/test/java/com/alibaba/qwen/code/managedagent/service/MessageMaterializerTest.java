@@ -94,10 +94,10 @@ class MessageMaterializerTest {
         logged.start();
         logger.addAppender(logged);
         try {
-            // Pass one poisons the target; pass two exercises the streaked
-            // pre-attempt deferral and the catch-path deferral, both
-            // throwing. Catching the escape keeps the verdict on the
-            // assertions below rather than on which call threw.
+            // Pass one poisons the target; pass two retries it (streak 1 is
+            // due) and exercises the catch-path deferral, both throwing.
+            // Catching the escape keeps the verdict on the assertions below
+            // rather than on which call threw.
             try {
                 materializer.materialize();
                 materializer.materialize();
@@ -138,10 +138,11 @@ class MessageMaterializerTest {
         materializer.materialize();
 
         // fail, retry-and-succeed, then a normal pass: full attempts, and
-        // the deferred rotation left the row alone once healthy.
+        // the only rotation is the first failure's catch-path deferral — a
+        // due retry does not write the progress row ahead of the attempt.
         verify(store, times(3)).materializeNextBatch("tenant", "poison",
                 200);
-        verify(store, times(2)).deferMaterializationTarget("tenant",
+        verify(store, times(1)).deferMaterializationTarget("tenant",
                 "poison");
     }
 }

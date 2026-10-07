@@ -370,7 +370,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         String harnessId = BrokerValues.requirePathSafe(
                 BrokerValues.requireId(harnessSessionId, "harnessSessionId"),
                 "harnessSessionId");
-        return resolveScope(harnessId)
+        return resolveScope(harnessId, true)
                 .thenCompose(scope -> ensureBinding(
                         provisionRequest(scope, harnessId)))
                 .thenApply(BindingContext::record);
@@ -4067,8 +4067,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private CompletionStage<RuntimeScope> resolveScope(
             String harnessSessionId) {
+        return resolveScope(harnessSessionId, false);
+    }
+
+    private CompletionStage<RuntimeScope> resolveScope(
+            String harnessSessionId, boolean admission) {
         return mapFailure(safeStage(
-                () -> sessionResolver.resolve(harnessSessionId)),
+                () -> admission
+                        ? sessionResolver.resolveAdmission(harnessSessionId)
+                        : sessionResolver.resolve(harnessSessionId)),
                 "runtime_scope_resolution_failed",
                 "Runtime scope resolution failed").thenApply(scope -> {
                     if (scope == null) {

@@ -11,4 +11,15 @@ import java.util.concurrent.CompletionStage;
  */
 public interface HarnessSessionResolver {
     CompletionStage<RuntimeScope> resolve(String harnessSessionId);
+
+    /**
+     * Resolves the scope for a route that admits new work (a warm). The
+     * default is a plain resolve; an implementation that fences a closed
+     * Session does so here, so teardown routes such as release and
+     * unknown-outcome reconciliation still resolve that Session's scope.
+     */
+    default CompletionStage<RuntimeScope> resolveAdmission(
+            String harnessSessionId) {
+        return resolve(harnessSessionId);
+    }
 }

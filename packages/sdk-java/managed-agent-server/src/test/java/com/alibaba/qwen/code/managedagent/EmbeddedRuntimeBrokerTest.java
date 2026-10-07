@@ -14,10 +14,18 @@ import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.InMemoryRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.InMemoryToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
+import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Map;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 
@@ -300,6 +308,86 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
+    void releaseStillSettlesAnUnboundClosedSession() throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        when(store.findSessionById(SESSION_ID)).thenReturn(
+                Optional.of(new SessionRecord("tenant-a", SESSION_ID,
+                        "qwen-code", null, "CLOSED", null, null, 0, 0, 1,
+                        1, null, 0)));
+        ManagedAgentProperties properties = properties();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        seedReleasedSession(sessions, properties);
+        try (EmbeddedRuntimeBroker broker = new EmbeddedRuntimeBroker(store,
+                properties, new InMemoryRuntimeBindingRepository(), sessions,
+                new InMemoryToolExecutionRepository())) {
+            // The admission fence refuses new work on a closed Session, but
+            // release is a teardown route: it must still resolve the
+            // Session's scope so a binding held across the close settles.
+            HttpURLConnection connection = (HttpURLConnection) broker
+                    .getBaseUri().resolve("/internal/runtime-broker/v1/"
+                            + "tool-sessions/" + RUNTIME_ID + ":release")
+                    .toURL().openConnection();
+            connection.setRequestMethod("POST");
+            connection.setRequestProperty("Authorization",
+                    "Bearer broker-token");
+            connection.setDoOutput(true);
+            connection.getOutputStream().write(("{\"protocolVersion\":1,"
+                    + "\"requestId\":\"req-release\","
+                    + "\"harnessSessionId\":\"" + SESSION_ID + "\"}")
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            assertThat(connection.getResponseCode()).isEqualTo(200);
+            assertThat(new String(connection.getInputStream().readAllBytes(),
+                    java.nio.charset.StandardCharsets.UTF_8))
+                    .contains("\"released\":true");
+            connection.disconnect();
+        }
+    }
+
+    @Test
+    void reconcileStillAnswersAnUnknownExecutionOfAClosedSession()
+            throws Exception {
+        ManagedAgentStore store = mock(ManagedAgentStore.class);
+        when(store.findSessionById(SESSION_ID)).thenReturn(
+                Optional.of(new SessionRecord("tenant-a", SESSION_ID,
+                        "qwen-code", null, "CLOSED", null, null, 0, 0, 1,
+                        1, null, 0)));
+        ManagedAgentProperties properties = properties();
+        InMemoryRuntimeSessionRepository sessions =
+                new InMemoryRuntimeSessionRepository();
+        seedReleasedSession(sessions, properties);
+        InMemoryToolExecutionRepository executions =
+                new InMemoryToolExecutionRepository();
+        String digest = "sha256:" + "b".repeat(64);
+        ToolExecutionRecord prepared = ToolExecutionRecord.prepared("call-1",
+                "idem-1", "binding-1", 1, SESSION_ID, RUNTIME_ID, "turn-1",
+                "tool-call-1", digest,
+                Map.of("sessionId", RUNTIME_ID, "promptId", "turn-1",
+                        "callId", "tool-call-1", "argsDigest", digest));
+        executions.findOrCreate(prepared);
+        ToolExecutionRecord claimed = executions.claimDispatch("call-1",
+                "owner-1", Duration.ofMinutes(5));
+        assertThat(executions.compareAndSet(claimed, claimed.withUnknown(),
+                "owner-1", claimed.getDispatchGeneration())).isNotNull();
+        try (EmbeddedRuntimeBroker broker = new EmbeddedRuntimeBroker(store,
+                properties, new InMemoryRuntimeBindingRepository(), sessions,
+                executions)) {
+            // The reconcile of an UNKNOWN outcome is evidence work after the
+            // close: the fence must not answer it, so the path reaches the
+            // binding check and reports the retired generation.
+            RuntimeBrokerService service = serviceOf(broker);
+            assertThatThrownBy(() -> service.reconcileExecution(SESSION_ID,
+                    RUNTIME_ID, "call-1").toCompletableFuture().join())
+                    .hasCauseInstanceOf(RuntimeBrokerException.class)
+                    .satisfies(error -> assertThat(
+                            ((RuntimeBrokerException) error.getCause())
+                                    .getCode())
+                            .isEqualTo(
+                                    "runtime_execution_evidence_unavailable"));
+        }
+    }
+
+    @Test
     void namesTheSupportedProvisionersInTheKubernetesRejection()
             throws Exception {
         ManagedAgentProperties properties = properties();
@@ -359,6 +447,37 @@ class EmbeddedRuntimeBrokerTest {
             assertThat(broker.getBaseUri()).isNotNull();
             assertThat(broker.getBaseUri().getScheme()).isEqualTo("http");
         }
+    }
+
+    private static final String RUNTIME_ID =
+            "550e8400-e29b-41d4-a716-446655440001";
+
+    private static void seedReleasedSession(
+            InMemoryRuntimeSessionRepository sessions,
+            ManagedAgentProperties properties) {
+        ManagedAgentProperties.RuntimeBroker broker =
+                properties.getRuntimeBroker();
+        RuntimeScope scope = new RuntimeScope("tenant-a",
+                broker.getWorkspaceId(), broker.getWorkspaceGeneration(),
+                broker.getWorkspaceCwd(),
+                properties.getHarness().getCapabilityDigest(),
+                broker.getIsolationClass());
+        RuntimeSessionRecord acquiring = new RuntimeSessionRecord(
+                new RuntimeSession(SESSION_ID, RUNTIME_ID, "bootstrap",
+                        scope),
+                "binding-1", 1, RuntimeSessionRecord.State.ACQUIRING, 0,
+                Instant.now());
+        sessions.findOrCreate(acquiring);
+        sessions.compareAndSet(acquiring, acquiring.withState(
+                RuntimeSessionRecord.State.RELEASED, Instant.now()));
+    }
+
+    private static RuntimeBrokerService serviceOf(EmbeddedRuntimeBroker broker)
+            throws Exception {
+        java.lang.reflect.Field field = EmbeddedRuntimeBroker.class
+                .getDeclaredField("service");
+        field.setAccessible(true);
+        return (RuntimeBrokerService) field.get(broker);
     }
 
     private static ManagedAgentProperties properties() throws Exception {
