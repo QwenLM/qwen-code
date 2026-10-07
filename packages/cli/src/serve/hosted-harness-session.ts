@@ -2395,13 +2395,10 @@ export function registerHostedHarnessSessionRoutes(
       // rides its route revision) the same way; the pump delivers it as an
       // ordinary text turn while the Session idles, queues in the journal
       // while a turn runs, and leaves the remainder accurately pending the
-      // moment anything is parked or blocked.
-      if (
-        (session.monitors &&
-          brokerOptions &&
-          (session.shell || session.backgroundLane)) ||
-        session.channels
-      ) {
+      // moment anything is parked or blocked. Every hosted Session owns a
+      // channel funnel, so the pump exists on this path regardless of any
+      // monitor capability.
+      if (session.channels) {
         const wakeBusy = () =>
           session.active !== undefined ||
           session.mcpBusy === true ||

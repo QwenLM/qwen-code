@@ -19,17 +19,17 @@ H5a 钉住了*可以提交什么*：以 `routeId` 为链身份、各修订携带
 
 ## 现状
 
-以下事实来自本切片的基线（H5a 分支头 `8b283d1c3f`，与 `main` 的 merge-base 为 `ac497aeed9`）。
+以下事实来自本切片变基时点：与 `main` 的 merge-base 为 `e92b60a282`（H5a，#13548），`main` 此后已合入 V48–V50 的 W1c 迁移（#13260），本变更接续扩展其升级集合预期。
 
 - **记录。** `managed-channel-record.ts` 定义了两个封闭记录体；authority 的 `verifyExtensionResources` 在 Session 自己的资源库上闭合路由的 `policyRef` 以及交付的 `contentRef`、分段 `contentRef` 与回执 `proofRef`；`MANAGED_EXTENSION_RECORD_BODIES` 以 `taskKind: null` 持有两者。Java 的 `ManagedChannelRecords` 回放同一语料。两个 domain 都不在 `MANAGED_SESSION_ENABLED_DOMAINS` 中，也没有把交付与路由绑定的跨记录检查。
 - **服务表（V47）。** `qwen_managed_channel_route` 每个四元 ingress 身份一行（`route_key = sha256(tenant|channel|generation|event|revision)`，NUL 连接），带 scope、目标 `session_id`、`state staged|admitted`、已准入的 `input_id` 与 `staged_attachment_refs_json`；`qwen_managed_channel_delivery` 每个 `delivery_id` 一行，携带一个 `segment_id`/`segment_ordinal`、取自共享 channel 交付线的状态与 `provider_receipt`。两者都有 JDBC 仓储（`findOrCreate`、`admit`、`transition`、最新优先分页），但无人调用。公开形状（`PublicChannel`、`PublicChannelRoute`、`PublicChannelDelivery` 及其列表）在契约 1.33.0 冻结为 `planned`；`PlannedChannelContractTest` 钉住其 planned 状态，API 契约测试要求每个非 planned 操作都被实际调用。
 - **Harness 侧。** `hosted-harness-session.ts` 已经承载按能力划分的漏斗（`HostedChildAgentSession`、`HostedMonitorSession`）和每能力一条控制面操作路由（`POST /session/:id/children/operations`）；H3 的内嵌 wake 调度器把待处理通知 input（`source` 为 `monitor`，H4b 加入 `child_agent`）作为文本轮运行，待处理集合从 journal 推导（`pendingSessionInputs`）。hosted prompt 只接受文本块。HTTP Session store 每个内联资源最多 64 KiB。
-- **控制面。** `HarnessConnector`/`HostedHarnessClient` 每能力一个操作动词（`runChildOperation`）；`ManagedAgentService.createWorkspaceSession` 在 actor 的 Workspace 授权下幂等地准入一个空的绑定 Session；`TenantContextFilter` 列出它解析租户的内部前缀；`@Scheduled` 工作者（`ChildResultRelay`、`SessionLifecycleCoordinator.recoverOperations`）只从已提交的行对账，绝不依赖内存。Flyway 在 `main` 上为 V47；开启中的分支已到 V50（W1c）与 V51（H4b）。
+- **控制面。** `HarnessConnector`/`HostedHarnessClient` 每能力一个操作动词（`runChildOperation`）；`ManagedAgentService.createWorkspaceSession` 在 actor 的 Workspace 授权下幂等地准入一个空的绑定 Session；`TenantContextFilter` 列出它解析租户的内部前缀；`@Scheduled` 工作者（`ChildResultRelay`、`SessionLifecycleCoordinator.recoverOperations`）只从已提交的行对账，绝不依赖内存。Flyway 在 `main` 上为 V50（W1c，#13260）；开启中的 H4b 分支持有 V51。
 - **Legacy email 适配器。** `packages/channels/email` 在一个加锁的 JSON 文件里保存 `uidValidity`、`lastUid`、在途 `pending` UID、`outboundPending` Message-ID、1,024 条去重窗口与回复路由；在途状态不确定时拒绝启动；用 `mailparser` 解析、`imapflow` 轮询、`nodemailer` 发送。其行为套件基于这三个模块的 fake 运行。
 
 ## 决策
 
-1. **三份索引，一个 authority。** Session journal 的 `channel_route` 与 `channel_delivery` 链是唯一的业务事实。控制面在旁边维护三份可重建索引，这是自动化设计"路由/任务 catalog"所允许的：V47 `qwen_managed_channel_route` 行是 ingress 出现记录——决策 2 的去重索引加准入结果；V47 `qwen_managed_channel_delivery` 行是派发器对一次交付的认领台账；V52 新增 `qwen_managed_channel_instance`（已注册连接：平台、账号、代数、状态、Workspace 选择、所属 actor、policy）与 `qwen_managed_channel_binding`（scope key → `routeId` → `sessionId`，新事件所需的查找）。它们都不保存 journal 事实的第二份副本；每一份都由 journal 提交派生或结算。
+1. **三份索引，一个 authority。** Session journal 的 `channel_route` 与 `channel_delivery` 链是唯一的业务事实。控制面在旁边维护三份可重建索引，这是自动化设计"路由/任务 catalog"所允许的：V47 `qwen_managed_channel_route` 行是 ingress 出现记录——决策 2 的去重索引加准入结果；V47 `qwen_managed_channel_delivery` 行是派发器对一次交付的认领台账；V52 新增 `qwen_managed_channel_instance`（已注册连接：平台、账号、代数、状态、Workspace 选择、所属 actor、policy）、`qwen_managed_channel_binding`（scope key → `routeId` → `sessionId`，新事件所需的查找），以及 `qwen_managed_channel_claim`（每个被领取的交付一行：其 `sessionId` 与租约所依据的 `claimed_at`；`receipt` 与 `resend` 经它路由到 Harness，且它永不删除，因此也是上一次谁欠派发器的审计痕）。它们都不保存 journal 事实的第二份副本；每一份都由 journal 提交派生或结算。
 2. **ingress 身份就是 V47 的 route key。** `inputId = chin-<routeKey>`，其中 `routeKey = sha256(tenant NUL channelId NUL accountGeneration NUL platformEventId NUL semanticRevision)`——Java 与 TypeScript 同一推导。provider 重投命中同一行与同一 `inputId`；Harness 按 `inputId`（journal 的命令幂等）回答已提交的准入，不产生第二个 input 或轮次。两条真实消息即使文本相同也有不同的平台事件 ID（email：`uidValidity:uid`），仍是两个 input。email 的语义修订固定为 1。
 3. **路由链以 scope 为键，而非代数。** `routeId = chrt-<sha256(channelId NUL accountId NUL scope.kind NUL senderId NUL chatId NUL threadId)>`。某个 scope 上的首个事件在与其 input 同一事务中开启该链（修订 1，`admitted`，`effectId = routeId`）；后续事件若账号代数比已提交的更新，则在与*它的* input 同一事务中开启换代修订（routeRevision + 1，新代数）；代数比已提交更旧的事件被拒绝（`channel_generation_stale`）——旧代数不再准入任何新内容（H5 设计决策 6）。同代数下已提交路由上的事件只提交 input（`submitInput`），并在 input 信封中钉住路由及其修订。
 4. **一个路由一个 Session；创建幂等且受 actor 授权。** 控制面以连接注册的所属 actor，通过既有 `createWorkspaceSession` 路径创建路由的 Session，`Idempotency-Key = chcr-<sha256(tenant NUL channelId NUL routeId)>`，使用实例的 Workspace 选择且无输入；绑定行在准入之后插入。创建应答丢失时按该键重放——绝不产生第二个 Session。v1 中路由的 root Session 即路由自己的 Session（`rootSessionId = sessionId`）。
@@ -64,15 +64,15 @@ H5a 钉住了*可以提交什么*：以 `routeId` 为链身份、各修订携带
 
 ## 配额
 
-| 界限                | 值                                                                                                                                  | 拒绝                                                                 |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| 入站文本            | ≤ 32,000 字符（email `maxTextLength` 默认值），信封 ≤ 64 KiB                                                                        | 适配器截断文本；超限信封以 `channel_input_too_large` 拒绝            |
-| 附件                | 每事件 ≤ 16 个；适配器上传上限 1,500,000 解码字节（线路的 2,000,000 字符 base64 上限）；每个内联暂存 ≤ 64 KiB，更大者列为 `omitted` | 超出上传上限：由适配器过滤（线路上不可准入）；其余：无（可见的省略） |
-| 回复分段            | ≤ 48 KiB，email 为一个分段                                                                                                          | 截断并附提示                                                         |
-| 每交付分段数        | 1–64（契约）                                                                                                                        | 规划拒绝                                                             |
-| 认领租约            | 10 分钟（`qwen.managed-agent.channels.claim-lease`）                                                                                | 对账器结算为 `unknown`                                               |
-| 认领批量            | 每次调用 ≤ 16 个交付                                                                                                                | —                                                                    |
-| 每 channel 在途入站 | ≤ 32 个待处理事件（适配器）                                                                                                         | 适配器停止准入直到有一个结算                                         |
+| 界限                | 值                                                                                                                                  | 拒绝                                                                                                                     |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| 入站文本            | ≤ 32,000 字符（线路 `maxTextChars` 与 Jakarta `@Size`；email 适配器的 `maxTextLength` 先按其设置截断），信封 ≤ 64 KiB               | 文本超出线路上限：400 `invalid_request`（bean validation）；信封超限：400 `invalid_channel_operation`（operations 路由） |
+| 附件                | 每事件 ≤ 16 个；适配器上传上限 1,500,000 解码字节（线路的 2,000,000 字符 base64 上限）；每个内联暂存 ≤ 64 KiB，更大者列为 `omitted` | 超出上传上限：由适配器过滤（线路上不可准入）；其余：无（可见的省略）                                                     |
+| 回复分段            | ≤ 48 KiB，email 为一个分段                                                                                                          | 截断并附提示                                                                                                             |
+| 每交付分段数        | 1–64（契约）                                                                                                                        | 规划拒绝                                                                                                                 |
+| 认领租约            | 10 分钟（`qwen.managed-agent.channels.claim-lease`）                                                                                | 对账器结算为 `unknown`                                                                                                   |
+| 认领批量            | 每次调用 ≤ 16 个交付                                                                                                                | —                                                                                                                        |
+| 每 channel 在途入站 | ≤ 32 个待处理事件（适配器）                                                                                                         | 适配器停止准入直到有一个结算                                                                                             |
 
 ## 非目标
 
