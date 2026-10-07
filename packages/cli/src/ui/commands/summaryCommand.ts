@@ -12,12 +12,12 @@ import {
   type SlashCommandActionReturn,
 } from './types.js';
 import {
-  appendAutoMemoryContext,
   getProjectSummaryPrompt,
   isSubpath,
   resolvePath,
   runSideQuery,
 } from '@qwen-code/qwen-code-core';
+import { appendAutoMemoryContext } from '@qwen-code/qwen-code-core/memory/request-context.js';
 import type { HistoryItemSummary } from '../types.js';
 import { t } from '../../i18n/index.js';
 

@@ -575,8 +575,6 @@ export * from './memory/remember.js';
 export * from './memory/refresh.js';
 export * from './memory/dream.js';
 export * from './memory/learn-skill-agent.js';
-// Request-only legacy catalog for consumers outside LlmChat (e.g. /summary).
-export * from './memory/request-context.js';
 // Issue : write helper for hierarchical context files,
 // re-exported so the `qwen serve` daemon can mutate workspace memory
 // via `POST /workspace/memory` without depending on internal paths.

@@ -1839,6 +1839,26 @@ describe('AnthropicContentConverter', () => {
       expect(blocks[1]).not.toHaveProperty('cache_control');
     });
 
+    it('anchors an earlier user message when the final user contains only the catalog', () => {
+      const contents = appendAutoMemoryContext(
+        [userText('q'), modelText('a')],
+        'current memory catalog',
+      );
+      const { messages } = convert(contents);
+      expect(messages).toEqual([
+        user(txt('q', EPH)),
+        assistant(txt('a')),
+        user(txt('current memory catalog')),
+      ]);
+    });
+
+    it('omits the message breakpoint when there is only the catalog', () => {
+      const { messages } = convert(
+        appendAutoMemoryContext([], 'current memory catalog'),
+      );
+      expect(messages).toEqual([user(txt('current memory catalog'))]);
+    });
+
     it('does not add cache_control to tools when disabled', async () => {
       const result = await noCacheConverter().convertLlmToolsToAnthropic(
         toolsOf(weather(weatherSchema())),

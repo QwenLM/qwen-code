@@ -1408,13 +1408,13 @@ export class AnthropicContentConverter {
           // Skip the trailing volatile blocks (reattached images, the
           // request-only auto-memory catalog): stored history never reproduces
           // them, so a breakpoint there writes an entry no later request can
-          // read back (issue #11627). Clamped, never dropped — a message that
-          // is entirely volatile still anchors on its first block, which is
-          // what happened before this skip existed.
-          const anchorIndex = Math.max(
-            content.length - 1 - volatileTailBlockCount,
-            0,
-          );
+          // read back (issue #11627). If the whole message is volatile, use
+          // an earlier user message; without one, omit the message breakpoint.
+          const anchorIndex = content.length - 1 - volatileTailBlockCount;
+          if (anchorIndex < 0) {
+            volatileTailBlockCount = 0;
+            continue;
+          }
           const lastContent = content[anchorIndex];
           if (typeof lastContent === 'object' && 'type' in lastContent) {
             const type = lastContent.type;
