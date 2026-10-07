@@ -428,23 +428,20 @@ function ManagedSessionsContent({
           {t('managed.refresh')}
         </Button>
       </div>
-      {detail.stoppedReason && (
-        <p role="alert" className="text-sm text-destructive">
-          {detail.stoppedReason}
-        </p>
-      )}
-      {detail.error && detail.error !== detail.stoppedReason && (
-        <p role="alert" className="text-sm text-destructive">
-          {detail.error}
-        </p>
-      )}
       {/* One server condition can surface through both channels; announce
-          each distinct message once. */}
-      {error && error !== detail.stoppedReason && error !== detail.error && (
-        <p role="alert" className="text-sm text-destructive">
-          {error}
+          each distinct message once, keyed by the message so a standing
+          alert keeps its node when a duplicate of it stops rendering. */}
+      {[
+        ...new Set(
+          [detail.stoppedReason, detail.error, error].filter(
+            (message): message is string => Boolean(message),
+          ),
+        ),
+      ].map((message) => (
+        <p key={message} role="alert" className="text-sm text-destructive">
+          {message}
         </p>
-      )}
+      ))}
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[minmax(180px,240px)_minmax(0,1fr)]">
         <nav
           ref={sessionsNavRef}

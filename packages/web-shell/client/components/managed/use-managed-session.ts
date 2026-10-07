@@ -138,6 +138,12 @@ export function useManagedSession(
         // A standing terminal verdict leaves only through retire(): a
         // weaker later failure on the same leg must not downgrade it.
         if (previous?.final && !final) return current;
+        // A stall warning leaves only through a terminal verdict, its own
+        // re-assertion, or an advancing stream (retire): a weaker transient
+        // would strip the stall flag, and the next clean pass would expire
+        // it without the stream ever advancing.
+        if (previous?.stall && !final && !(error instanceof StreamStallError))
+          return current;
         return {
           ...current,
           // Every recorded failure is also the end of any in-flight read;
@@ -211,6 +217,16 @@ export function useManagedSession(
         return { ...current, signals };
       });
     };
+    const expireTransient = (leg: SignalLeg) => {
+      if (abort.signal.aborted) return;
+      setState((current) => {
+        const entry = current.signals?.[leg];
+        if (!entry || entry.final || entry.stall) return current;
+        const signals = { ...current.signals };
+        delete signals[leg];
+        return { ...current, signals };
+      });
+    };
     const snapshot = async (preserveLoadedPages: boolean) => {
       // Settle both legs first, then classify the session leg's own answer
       // before the transcript leg's: whether the bootstrap terminates for a
@@ -225,8 +241,13 @@ export function useManagedSession(
         if (transcriptRead.status === 'fulfilled') retire('transcript');
         throw new SnapshotLegError('session', sessionRead.reason);
       }
-      if (transcriptRead.status === 'rejected')
+      if (transcriptRead.status === 'rejected') {
+        // Symmetric with the branch above: a fulfilled session read is that
+        // leg's own success evidence, so retire its stale verdict before
+        // the throw discards the read.
+        retire('session');
         throw new SnapshotLegError('transcript', transcriptRead.reason);
+      }
       const summary = sessionRead.value;
       const transcript = transcriptRead.value;
       if (abort.signal.aborted) return transcript.lastEventId;
@@ -367,18 +388,29 @@ export function useManagedSession(
         // the connection no matter how it later ends.
         const proofOfLife = setTimeout(() => {
           proofOfLifePassed = true;
+          // An attempt that answered nothing expires nothing, so it must
+          // arm nothing: captured here, the catch below would re-stamp a
+          // verdict that was never removed, and the fresh seq would
+          // suppress another leg's newer record.
+          if (!delivered && !alive) return;
           // Capture from the mirror synchronously: the state update runs
           // at React's flush, which an attempt failing right after the
           // expiry would beat to the catch. A heartbeat-certified attempt
           // keeps nothing armed: what it expires must never come back from
           // that connection's later failure.
           if (!alive) expiredVerdictMessage = streamVerdictMessageRef.current;
-          if (delivered || alive) expireAnswered('stream');
+          expireAnswered('stream');
         }, BASE_RETRY_DELAY_MS);
         try {
           for await (const event of provider.subscribeEvents(sessionId, {
             ...opts,
             lastEventId,
+            onEstablished: () => {
+              // Establishment certifies the connection, not the data path:
+              // it may release a transient failure, never a terminal
+              // verdict or a stall.
+              expireTransient('stream');
+            },
             // A heartbeat is the attempt answering when an idle Session
             // delivers no frame: it certifies the stream the same way, so
             // it lands the expiry the proof-of-life point was holding.
@@ -627,6 +659,9 @@ export function useManagedSession(
   const standing = (['stream', 'transcript', 'session'] as const)
     .map((leg) => entries.find((entry) => entry.final && entry.leg === leg))
     .find((entry) => entry !== undefined);
+  // Between live records the newest booking wins the field: the latest
+  // failure is the freshest evidence of what is broken, and a healed leg's
+  // record is deleted outright rather than merely outranked.
   const newest = entries.sort((a, b) => b.seq - a.seq)[0];
   return {
     ...visible,

@@ -1850,6 +1850,80 @@ describe('ManagedSessionsPage', () => {
       (el) => el.textContent,
     );
     expect(alerts).toEqual(['Not found']);
+    // When the poller's next read heals the session leg, the suppressed
+    // duplicate is not re-mounted as a brand-new assertive region: the
+    // message already on screen keeps its DOM node. The recovery read
+    // lands at one poll rung (at most 3000+5999ms) after the 404.
+    const standingAlert = container.querySelector('[role="alert"]');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6_000);
+      await flush();
+    });
+    const healed = [...container.querySelectorAll('[role="alert"]')].map(
+      (el) => el.textContent,
+    );
+    expect(healed).toEqual(['Not found']);
+    expect(container.querySelector('[role="alert"]')).toBe(standingAlert);
+  });
+
+  it('renders one alert when the failed older-page fetch repeats the standing verdict', async () => {
+    vi.useFakeTimers();
+    mocks.client.getSession
+      .mockResolvedValueOnce(summary('s1'))
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      )
+      .mockResolvedValue(summary('s1'));
+    mocks.client.getTranscript
+      .mockResolvedValueOnce({
+        events: [event(1, 'Persisted answer')],
+        olderCursor: '1',
+        lastEventId: 1,
+      })
+      .mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(404, 'session_not_found', 'Not found'),
+      );
+    await render('s1');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_500);
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Not found',
+    );
+    // The failed page fetch carries the same message the verdict already
+    // shows: it must not be announced twice.
+    await click('Older history');
+    const alerts = [...container.querySelectorAll('[role="alert"]')].map(
+      (el) => el.textContent,
+    );
+    expect(alerts).toEqual(['Not found']);
+  });
+
+  it('renders one alert when the action error repeats the standing stream failure', async () => {
+    vi.useFakeTimers();
+    mocks.client.subscribeEvents.mockImplementationOnce(async function* () {
+      yield event(3, 'still streaming');
+      throw new JavaManagedAgentHttpError(502, 'bad_gateway', 'Bad gateway');
+    });
+    await render('s1');
+    await act(async () => {
+      await flush();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(
+      'Bad gateway',
+    );
+    // The user's Send fails with the same message the stream leg already
+    // shows: it must not be announced twice.
+    mocks.client.submitPrompt.mockRejectedValueOnce(
+      new JavaManagedAgentHttpError(502, 'bad_gateway', 'Bad gateway'),
+    );
+    await input('Is anything there?');
+    await click('Send');
+    const alerts = [...container.querySelectorAll('[role="alert"]')].map(
+      (el) => el.textContent,
+    );
+    expect(alerts).toEqual(['Bad gateway']);
   });
 
   it('merges a gapped stream with a durable snapshot and keeps paged history', async () => {
