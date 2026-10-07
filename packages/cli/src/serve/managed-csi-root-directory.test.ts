@@ -63,6 +63,11 @@ describe.runIf(process.platform !== 'win32')('CSI root directory fd', () => {
     );
     expect(directory.rootDevice).toBe(owned.stats.dev.toString());
     expect(directory.rootInode).toBe(owned.stats.ino.toString());
+    expect(directory.isAvailable).toBe(true);
+    await directory.withVerifiedDirectory(async (borrowed) => {
+      expect(borrowed).toBe(handle);
+      expect((await borrowed.stat({ bigint: true })).ino).toBe(owned.stats.ino);
+    });
     await directory.verify();
     await directory.verify();
     expect(open).toHaveBeenCalledTimes(1);
@@ -71,6 +76,7 @@ describe.runIf(process.platform !== 'win32')('CSI root directory fd', () => {
     expect(close).toHaveBeenCalledTimes(1);
     await expect(handle!.stat()).rejects.toMatchObject({ code: 'EBADF' });
     await expect(directory.verify()).rejects.toThrow('unavailable');
+    expect(directory.isAvailable).toBe(false);
   });
 
   it('refuses another device before opening a descriptor', async () => {
@@ -340,4 +346,42 @@ describe.runIf(process.platform !== 'win32')('CSI root directory fd', () => {
     await closing;
     expect(directory.close()).toBe(closing);
   });
+
+  it.runIf(process.platform === 'linux')(
+    'lends a real Linux procfd root without reopening its pathname',
+    async () => {
+      const owned = await fixture();
+      await fs.mkdir(path.join(owned.root, 'child'));
+      await fs.writeFile(path.join(owned.root, 'child', 'marker'), 'original');
+      const directory = await owned.open();
+      await directory.withVerifiedDirectory(async (root) => {
+        const child = await fs.open(
+          `/proc/self/fd/${root.fd}/child`,
+          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+        );
+        try {
+          await fs.rename(
+            path.join(owned.root, 'child'),
+            path.join(owned.root, 'old-child'),
+          );
+          await fs.mkdir(path.join(owned.root, 'child'));
+          await fs.writeFile(
+            path.join(owned.root, 'child', 'marker'),
+            'replacement',
+          );
+          const marker = await fs.open(
+            `/proc/self/fd/${child.fd}/marker`,
+            constants.O_RDONLY | constants.O_NOFOLLOW,
+          );
+          try {
+            expect(await marker.readFile('utf8')).toBe('original');
+          } finally {
+            await marker.close();
+          }
+        } finally {
+          await child.close();
+        }
+      });
+    },
+  );
 });

@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { promises as fs } from 'node:fs';
+import { constants, promises as fs, type BigIntStats } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
+import path from 'node:path';
+import { normalizeWorkspaceRelativePath } from '@qwen-code/qwen-code-core/managed-runtime/managed-workspace-relative-path.js';
 import { ManagedContextMount } from './managed-context-worker.js';
 import { ManagedCsiRootDirectory } from './managed-csi-root-directory.js';
 import {
@@ -14,6 +17,12 @@ import {
 
 const UNAVAILABLE = 'Managed CSI mount is unavailable.';
 const MOUNTINFO_LIMIT = 1024 * 1024;
+
+interface BorrowedDirectory {
+  handle: FileHandle;
+  address: string;
+  stats: BigIntStats;
+}
 
 export interface ManagedCsiMountObservation {
   readonly mountId: string;
@@ -83,6 +92,7 @@ export class ManagedCsiMount extends ManagedContextMount {
   readonly #observations = new Set<Promise<void>>();
   #directory: Promise<ManagedCsiRootDirectory> | undefined;
   #closing: Promise<void> | undefined;
+  #closeFailure: AggregateError | undefined;
 
   constructor(mountRoot: string, trustedDiskSerial: string) {
     super(mountRoot);
@@ -101,8 +111,17 @@ export class ManagedCsiMount extends ManagedContextMount {
   }
 
   async observe(): Promise<ManagedCsiMountReceipt> {
+    return this.withVerifiedRoot(async (_handle, receipt) => receipt);
+  }
+
+  async withVerifiedRoot<T>(
+    operation: (
+      handle: FileHandle,
+      receipt: ManagedCsiMountReceipt,
+    ) => Promise<T>,
+  ): Promise<T> {
     if (this.#closed || process.platform !== 'linux') {
-      this.#closed = true;
+      void this.close().catch(() => {});
       throw new Error(UNAVAILABLE);
     }
     let complete!: () => void;
@@ -111,55 +130,31 @@ export class ManagedCsiMount extends ManagedContextMount {
     });
     this.#observations.add(pending);
     try {
-      const before = parseManagedCsiMount(
-        await readBounded('/proc/self/mountinfo', MOUNTINFO_LIMIT),
-        this.#mountRoot,
-      );
-      const serial = await readBounded(
-        `/sys/dev/block/${before.device}/device/serial`,
-        256,
-      );
-      if (serial.replace(/\n$/, '') !== this.#serial) {
+      const before = await this.kernelObservation();
+      let directory: ManagedCsiRootDirectory;
+      try {
+        this.#directory ??= ManagedCsiRootDirectory.open(
+          this.#mountRoot,
+          linuxDeviceNumber(before.device),
+        );
+        directory = await this.#directory;
+      } catch {
+        void this.close().catch(() => {});
         throw new Error(UNAVAILABLE);
       }
-      if (this.#closed) throw new Error(UNAVAILABLE);
-      this.#directory ??= ManagedCsiRootDirectory.open(
-        this.#mountRoot,
-        linuxDeviceNumber(before.device),
-      );
-      const directory = await this.#directory;
-      return await directory.withVerifiedDirectory(async () => {
-        const after = parseManagedCsiMount(
-          await readBounded('/proc/self/mountinfo', MOUNTINFO_LIMIT),
-          this.#mountRoot,
-        );
-        const identity = JSON.stringify([
-          before.mountId,
-          before.device,
-          before.source,
-          directory.rootDevice,
-          directory.rootInode,
-        ]);
-        if (
-          this.#closed ||
-          directory.rootDevice !== linuxDeviceNumber(before.device) ||
-          JSON.stringify(before) !== JSON.stringify(after) ||
-          (this.#pinned !== undefined && this.#pinned !== identity)
-        ) {
-          throw new Error(UNAVAILABLE);
-        }
-        this.#pinned = identity;
-        return Object.freeze({
-          ...before,
-          diskSerial: this.#serial,
-          rootDevice: directory.rootDevice,
-          rootInode: directory.rootInode,
+      try {
+        return await directory.withVerifiedDirectory(async (handle) => {
+          const receipt = await this.inspect(before, directory);
+          try {
+            return await operation(handle, receipt);
+          } finally {
+            await this.inspect(before, directory);
+          }
         });
-      });
-    } catch {
-      // Join happens after this observation leaves its own pending set.
-      void this.close().catch(() => {});
-      throw new Error(UNAVAILABLE);
+      } catch (error) {
+        if (!directory.isAvailable) void this.close().catch(() => {});
+        throw error;
+      }
     } finally {
       this.#observations.delete(pending);
       complete();
@@ -174,20 +169,168 @@ export class ManagedCsiMount extends ManagedContextMount {
         (directory) => directory.close(),
         () => {},
       );
+      if (this.#closeFailure) throw this.#closeFailure;
     })();
     return this.#closing;
   }
 
   override async resolve(cwdRelative: string): Promise<string | undefined> {
     try {
-      await this.observe();
-      const directory = await super.resolve(cwdRelative);
-      await this.observe();
-      return directory;
+      if (normalizeWorkspaceRelativePath(cwdRelative) !== cwdRelative)
+        return undefined;
+      return await this.withVerifiedRoot(async (root, receipt) => {
+        const children: BorrowedDirectory[] = [];
+        try {
+          let parent = root;
+          for (const component of cwdRelative === '.'
+            ? []
+            : cwdRelative.split('/')) {
+            const address = `/proc/self/fd/${parent.fd}/${component}`;
+            const before = await fs.lstat(address, { bigint: true });
+            const handle = await fs.open(
+              address,
+              constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+            );
+            const child = { handle, address, stats: before };
+            children.push(child);
+            if (
+              !sameDirectory(
+                before,
+                await handle.stat({ bigint: true }),
+                receipt.rootDevice,
+              )
+            )
+              throw new Error(UNAVAILABLE);
+            parent = handle;
+          }
+          await fs.access(
+            `/proc/self/fd/${parent.fd}`,
+            constants.R_OK | constants.X_OK,
+          );
+          return cwdRelative === '.'
+            ? this.#mountRoot
+            : path.join(this.#mountRoot, ...cwdRelative.split('/'));
+        } finally {
+          try {
+            await verifyChildren(children, receipt.rootDevice);
+          } finally {
+            await this.closeChildren(
+              children.map(({ handle }) => handle).reverse(),
+            );
+          }
+        }
+      });
     } catch {
       return undefined;
     }
   }
+
+  override async rootDirectory(): Promise<string | undefined> {
+    try {
+      return await this.withVerifiedRoot(async () => this.#mountRoot);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async closeChildren(handles: FileHandle[]): Promise<void> {
+    const results = await Promise.allSettled(
+      handles.map(async (handle) => handle.close()),
+    );
+    const errors = results.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : [],
+    );
+    if (errors.length > 0) {
+      this.#closeFailure ??= new AggregateError(errors, UNAVAILABLE);
+      // The current root borrow must leave before close can join it.
+      void this.close().catch(() => {});
+      throw this.#closeFailure;
+    }
+  }
+
+  private async kernelObservation(): Promise<ManagedCsiMountObservation> {
+    try {
+      const observation = parseManagedCsiMount(
+        await readBounded('/proc/self/mountinfo', MOUNTINFO_LIMIT),
+        this.#mountRoot,
+      );
+      const serial = await readBounded(
+        `/sys/dev/block/${observation.device}/device/serial`,
+        256,
+      );
+      if (this.#closed || serial.replace(/\n$/, '') !== this.#serial)
+        throw new Error(UNAVAILABLE);
+      return observation;
+    } catch {
+      void this.close().catch(() => {});
+      throw new Error(UNAVAILABLE);
+    }
+  }
+
+  private async inspect(
+    before: ManagedCsiMountObservation,
+    directory: ManagedCsiRootDirectory,
+  ): Promise<ManagedCsiMountReceipt> {
+    const after = await this.kernelObservation();
+    const identity = JSON.stringify([
+      before.mountId,
+      before.device,
+      before.source,
+      directory.rootDevice,
+      directory.rootInode,
+    ]);
+    if (
+      this.#closed ||
+      directory.rootDevice !== linuxDeviceNumber(before.device) ||
+      JSON.stringify(before) !== JSON.stringify(after) ||
+      (this.#pinned !== undefined && this.#pinned !== identity)
+    ) {
+      void this.close().catch(() => {});
+      throw new Error(UNAVAILABLE);
+    }
+    this.#pinned = identity;
+    return Object.freeze({
+      ...before,
+      diskSerial: this.#serial,
+      rootDevice: directory.rootDevice,
+      rootInode: directory.rootInode,
+    });
+  }
+}
+
+async function verifyChildren(
+  children: BorrowedDirectory[],
+  device: string,
+): Promise<void> {
+  for (const child of children) {
+    if (
+      !sameDirectory(
+        child.stats,
+        await child.handle.stat({ bigint: true }),
+        device,
+      ) ||
+      !sameDirectory(
+        child.stats,
+        await fs.lstat(child.address, { bigint: true }),
+        device,
+      )
+    )
+      throw new Error(UNAVAILABLE);
+  }
+}
+
+function sameDirectory(
+  left: BigIntStats,
+  right: BigIntStats,
+  device: string,
+): boolean {
+  return (
+    left.isDirectory() &&
+    right.isDirectory() &&
+    left.dev.toString() === device &&
+    right.dev === left.dev &&
+    right.ino === left.ino
+  );
 }
 
 function isMountRoot(value: string): boolean {

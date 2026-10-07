@@ -57,7 +57,13 @@ export class ManagedCsiRootDirectory {
     return this.withVerifiedDirectory(async () => {});
   }
 
-  async withVerifiedDirectory<T>(operation: () => Promise<T>): Promise<T> {
+  get isAvailable(): boolean {
+    return !this.fenced;
+  }
+
+  async withVerifiedDirectory<T>(
+    operation: (handle: FileHandle) => Promise<T>,
+  ): Promise<T> {
     if (this.fenced) throw new Error(UNAVAILABLE);
     let complete!: () => void;
     const pending = new Promise<void>((resolve) => {
@@ -67,7 +73,7 @@ export class ManagedCsiRootDirectory {
     try {
       await this.inspect();
       try {
-        return await operation();
+        return await operation(this.handle);
       } finally {
         await this.inspect();
       }
