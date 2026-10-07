@@ -378,6 +378,52 @@ parent fence. Name and test those writers, including direct repository
 persisting the cut, re-enumerate under the corresponding locks and compare the
 complete membership and revisions. A hash of an incomplete scan is not a fence.
 
+### 4.2.1 Original execution continuation (A2 SQL batch)
+
+The first activation batch still refuses execution continuation. Separate the
+live original proof from operation eligibility. New admission and authorization
+remain READY-only; an already-authorized original execution can renew, record
+cancellation intent, settle its returned result or become UNKNOWN while the
+original binding is DRAINING. Its Runtime Session remains READY, and its original
+activation and generation-1 writer must be live. The SQL order remains the
+original parent → native history → retirement identity → Runtime Session → execution. No parent lock
+is held across worker I/O.
+
+An absent first execution hint returns no operation. A later current locking
+read must not adopt a newly inserted execution that the original snapshot did
+not classify, including under warmed REPEATABLE READ.
+
+| Operation                              | Narrow qualification                                                                                                                                                                                                                                                                       |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Result/UNKNOWN CAS                     | Only authorized EXECUTING/CANCEL_REQUESTED to SETTLED/UNKNOWN; immutable identity, both authorization columns, original owner/generation/live dispatch lease/current version, cancellation intent and monotonic sequence are preserved.                                                    |
+| Dispatch renewal                       | Same live original claim; an unmarked DISPATCHING claim still needs READY admission. No replacement owner or generation.                                                                                                                                                                   |
+| Existing claim observation/lapse fence | Authorized EXECUTING/CANCEL_REQUESTED may return its original live claim or become UNKNOWN after actual database lease expiry under DRAINING. PREPARED/DISPATCHING grant or regrant still requires READY admission.                                                                        |
+| Cancellation                           | Revalidate even an existing intent. Never-authorized PREPARED/DISPATCHING can atomically record the original `{executionStatus: not_started, responseParts: []}` outcome; otherwise preserve the authorized original claim and request cancellation. An UNKNOWN result remains unresolved. |
+| Ordinary LOST recovery                 | Refuse this private profile before abandonment, ordinary release or destructive recovery I/O. Its generic cleanup is not CSI finalization.                                                                                                                                                 |
+
+Authorization must name the original dispatch generation and a binding version
+strictly positive, no later than the current original version, and predate the
+immutable DRAINING seal in the existing original retirement intent. Operation renewals can advance the current binding version; it cannot
+substitute for `sealedBindingVersion`. Read that intent with a current lock on
+the same original connection and reject missing, ambiguous, oversized or
+contradictory row/reservation identity and malformed or duplicate JSON. A
+generic CAS must never create or remove authorization, start an unmarked
+execution, change cancellation intent or substitute arbitrary PREPARED results.
+Unsupported provider/publication/background modes remain blocking. Private
+deferred payload dispatch permits only `read_file`, `write_file` and `edit`,
+before authorization or worker I/O. The timer's
+ordinary claim fallback is not evidence of a restart: it starts after EXECUTING.
+A deterministic CSI refusal must stop that renewal task; transient repository
+failures alone do not prove physical invocation termination.
+
+This batch implements SQL continuation; its verification evidence is reported
+separately and does not establish complete A2/K2 acceptance. Its
+SETTLED or not_started row still needs covering original native result/journal
+proof; it grants neither application settlement nor physical stop. Generic
+native tool/checkpoint/history, exact file-only worker boot, all remaining
+Managed Agent/retention writers, overall deadlines and K2-B through K2-D remain
+required subsequent work. The existing public selectors remain disabled.
+
 ## 5. Prove application settlement
 
 ### 5.1 Execution classification

@@ -34,6 +34,27 @@ public final class JdbcCsiActivationAdmission {
 
     static JdbcCsiFilesRetirementGuard.Original lockForExecution(Connection connection, String bindingId)
             throws SQLException {
+        var original = lockOriginal(connection, bindingId);
+        if (original != null) {
+            original.requireAdmission();
+            requireLive(connection, original);
+            JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
+        }
+        return original;
+    }
+
+    static JdbcCsiFilesRetirementGuard.Original lockForContinuation(Connection connection, String bindingId)
+            throws SQLException {
+        var original = lockOriginal(connection, bindingId);
+        if (original != null) {
+            original.requireContinuation();
+            requireLive(connection, original);
+        }
+        return original;
+    }
+
+    private static JdbcCsiFilesRetirementGuard.Original lockOriginal(Connection connection, String bindingId)
+            throws SQLException {
         String tenant;
         String session;
         try (PreparedStatement statement = statement(connection,
@@ -64,8 +85,6 @@ public final class JdbcCsiActivationAdmission {
         }
         var original = JdbcCsiFilesRetirementGuard.lockManagedSession(connection, tenant, session);
         require(original != null && bindingId.equals(original.bindingId()));
-        requireLive(connection, original);
-        JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
         return original;
     }
 
@@ -141,7 +160,6 @@ public final class JdbcCsiActivationAdmission {
 
     static void requireLive(Connection connection, JdbcCsiFilesRetirementGuard.Original original)
             throws SQLException {
-        original.requireAdmission();
         try (PreparedStatement statement = statement(connection,
                 "SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
             statement.setString(1, original.request().getScope().getTenantId());

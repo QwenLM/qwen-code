@@ -24,6 +24,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -38,6 +39,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /** Explicit SQL integration gate; requires built Node native producer modules. */
@@ -146,14 +148,14 @@ class WorkspaceCsiNativeActivationGate {
     }
 
     @Test
-    void selectedAdmissionAndDispatchConsumeOriginalLivePinWhileDirectMutationRefuses() throws Exception {
+    void selectedAdmissionDispatchAndContinuationConsumeOriginalLivePin() throws Exception {
         var runtime = bindings.admitSession(sessions, new RuntimeSessionRecord(
                 new RuntimeSession(sessionId, sessionId, "bootstrap", request.getScope()), binding.getBindingId(), 1,
                 RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
         sessions.compareAndSet(runtime, runtime.withState(RuntimeSessionRecord.State.READY, Instant.now()));
         var candidate = ToolExecutionRecord.prepared("original-call", "original-key", binding.getBindingId(), 1,
-                sessionId, sessionId, "file-turn", "file-call", "a".repeat(64), Map.of("tool", "read_file",
-                        "sessionId", sessionId, "promptId", "file-turn", "callId", "file-call", "argsDigest", "a".repeat(64)));
+                sessionId, sessionId, "file-turn", "file-call", "sha256:" + "a".repeat(64), Map.of("dispatchMode", "deferred",
+                        "sessionId", sessionId, "promptId", "file-turn", "callId", "file-call", "argsDigest", "sha256:" + "a".repeat(64)));
         rejected(() -> bindings.admitExecution(sessions, executions, candidate), "csi_original_activation_unavailable");
         rejected(() -> executions.findOrCreate(candidate), "csi_execution_writer_not_qualified");
         commit(0);
@@ -165,17 +167,18 @@ class WorkspaceCsiNativeActivationGate {
         var authorized = bindings.authorizeDispatch(sessions, executions, claimed, "owner", claimed.getDispatchGeneration());
         assertThat(authorized.getAuthorizedBindingVersion()).isEqualTo(binding.getVersion() + 1);
         rejected(() -> executions.compareAndSet(authorized, authorized, "owner", authorized.getDispatchGeneration()),
-                "csi_execution_writer_not_qualified");
-        rejected(() -> executions.renewDispatch(candidate.getExecutionCallId(), "owner", authorized.getDispatchGeneration(),
-                Duration.ofSeconds(120)), "csi_execution_writer_not_qualified");
-        rejected(() -> executions.requestCancel(candidate.getExecutionCallId(), authorized.getVersion()),
-                "csi_execution_writer_not_qualified");
+                "csi_execution_continuation_unavailable");
+        var renewed = executions.renewDispatch(candidate.getExecutionCallId(), "owner", authorized.getDispatchGeneration(),
+                Duration.ofSeconds(120));
+        assertThat(renewed.getAuthorizedBindingVersion()).isEqualTo(authorized.getAuthorizedBindingVersion());
+        var cancelled = executions.requestCancel(candidate.getExecutionCallId(), renewed.getVersion());
+        assertThat(cancelled.getState()).isEqualTo(ToolExecutionRecord.State.CANCEL_REQUESTED);
         reservations.beginRetirement(registration, bindings, bindings.findById(binding.getBindingId()),
                 reservation, UUID.randomUUID().toString());
-        rejected(() -> executions.claimDispatch(candidate.getExecutionCallId(), "owner", Duration.ofSeconds(120)),
-                "runtime_admission_closed");
+        assertThat(executions.claimDispatch(candidate.getExecutionCallId(), "owner", Duration.ofSeconds(120)).getVersion())
+                .isEqualTo(cancelled.getVersion());
         rejected(() -> bindings.admitExecution(sessions, executions, candidate), "runtime_admission_closed");
-        assertThat(executions.findByExecutionCallId(candidate.getExecutionCallId()).getVersion()).isEqualTo(authorized.getVersion());
+        assertThat(executions.findByExecutionCallId(candidate.getExecutionCallId()).getVersion()).isEqualTo(cancelled.getVersion());
     }
 
     @Test
@@ -184,8 +187,8 @@ class WorkspaceCsiNativeActivationGate {
         commit(1);
         jdbc.update("DELETE FROM qwen_managed_session_resource_ref WHERE journal_revision = 2");
         var candidate = ToolExecutionRecord.prepared("missing-ref-call", "missing-ref-key", binding.getBindingId(), 1,
-                sessionId, sessionId, "turn", "call", "b".repeat(64), Map.of("sessionId", sessionId,
-                        "promptId", "turn", "callId", "call", "argsDigest", "b".repeat(64)));
+                sessionId, sessionId, "turn", "call", "sha256:" + "b".repeat(64), Map.of("dispatchMode", "deferred", "sessionId", sessionId,
+                        "promptId", "turn", "callId", "call", "argsDigest", "sha256:" + "b".repeat(64)));
         rejected(() -> bindings.admitExecution(sessions, executions, candidate), "csi_original_activation_unavailable");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution", Integer.class)).isZero();
         assertThat(pin()).isEqualTo(2);
@@ -200,8 +203,8 @@ class WorkspaceCsiNativeActivationGate {
         commit(0);
         commit(1);
         var candidate = ToolExecutionRecord.prepared("failed-session-call", "failed-session-key", binding.getBindingId(), 1,
-                sessionId, sessionId, "turn", "call", "d".repeat(64), Map.of("sessionId", sessionId,
-                        "promptId", "turn", "callId", "call", "argsDigest", "d".repeat(64)));
+                sessionId, sessionId, "turn", "call", "sha256:" + "d".repeat(64), Map.of("dispatchMode", "deferred", "sessionId", sessionId,
+                        "promptId", "turn", "callId", "call", "argsDigest", "sha256:" + "d".repeat(64)));
         var admitted = bindings.admitExecution(sessions, executions, candidate);
         assertThat(sessions.compareAndSet(runtime, runtime.withState(RuntimeSessionRecord.State.FAILED, Instant.now()))).isNotNull();
         rejected(() -> executions.claimDispatch(candidate.getExecutionCallId(), "owner", Duration.ofSeconds(120)),
@@ -211,6 +214,240 @@ class WorkspaceCsiNativeActivationGate {
         assertThat(unchanged.getDispatchGeneration()).isZero();
         assertThat(unchanged.getVersion()).isEqualTo(admitted.getVersion());
         assertThat(unchanged.getAuthorizedDispatchGeneration()).isNull();
+    }
+
+    @Test
+    void drainingKeepsOriginalRenewCancelAndResultButClosesNewGrant() throws Exception {
+        ready();
+        var prepared = admit("started");
+        var pending = admit("pending");
+        var executing = authorize(prepared);
+        retire();
+        rejected(() -> executions.claimDispatch(pending.getExecutionCallId(), "owner", Duration.ofSeconds(120)),
+                "runtime_admission_closed");
+        assertThat(executions.renewDispatch(executing.getExecutionCallId(), "foreign", 1, Duration.ofSeconds(120))).isNull();
+        assertThat(executions.renewDispatch(executing.getExecutionCallId(), "owner", 2, Duration.ofSeconds(120))).isNull();
+        var renewed = executions.renewDispatch(executing.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120));
+        assertThat(renewed.getVersion()).isEqualTo(executing.getVersion() + 1);
+        assertThat(executions.compareAndSet(executing, executing.withUnknown(), "owner", 1)).isNull();
+        var cancel = executions.requestCancel(renewed.getExecutionCallId(), renewed.getVersion());
+        assertThat(cancel.getState()).isEqualTo(ToolExecutionRecord.State.CANCEL_REQUESTED);
+        assertThat(executions.requestCancel(cancel.getExecutionCallId(), cancel.getVersion()).getVersion()).isEqualTo(cancel.getVersion());
+        var settled = executions.compareAndSet(cancel,
+                cancel.withResult(Map.of("executionStatus", "success", "responseParts", List.of()), 4, Instant.now()), "owner", 1);
+        assertThat(settled.getState()).isEqualTo(ToolExecutionRecord.State.SETTLED);
+        assertThat(settled.getAuthorizedBindingVersion()).isEqualTo(executing.getAuthorizedBindingVersion());
+        assertThat(settled.getAuthorizedDispatchGeneration()).isEqualTo(1);
+        assertThat(settled.getDispatchOwner()).isEqualTo("owner");
+        assertThat(settled.isCancelRequested()).isTrue();
+        assertThat(settled.getLastSequence()).isEqualTo(4);
+        assertThat(executions.claimDispatch(settled.getExecutionCallId(), "owner", Duration.ofSeconds(120))).isNull();
+    }
+
+    @Test
+    void preAuthorizationCancelSettlesNotStartedWithoutMintingAuthorization() throws Exception {
+        ready();
+        var prepared = admit("prepared-cancel");
+        var dispatching = executions.claimDispatch(admit("dispatching-cancel").getExecutionCallId(), "owner", Duration.ofSeconds(120));
+        retire();
+        for (var original : List.of(prepared, dispatching)) {
+            var cancelled = executions.requestCancel(original.getExecutionCallId(), original.getVersion());
+            assertThat(cancelled.getState()).isEqualTo(ToolExecutionRecord.State.SETTLED);
+            assertThat(cancelled.getResult()).isEqualTo(Map.of("executionStatus", "not_started", "responseParts", List.of()));
+            assertThat(cancelled.getAuthorizedDispatchGeneration()).isNull();
+            assertThat(cancelled.getAuthorizedBindingVersion()).isNull();
+            assertThat(cancelled.getDispatchGeneration()).isEqualTo(original.getDispatchGeneration());
+            assertThat(cancelled.isCancelRequested()).isTrue();
+            assertThat(executions.claimDispatch(cancelled.getExecutionCallId(), "owner", Duration.ofSeconds(120))).isNull();
+        }
+    }
+
+    @Test
+    void expiredOriginalFencesUnknownWithoutRegrantOrReconciliation() throws Exception {
+        ready();
+        var executing = authorize(admit("expired"));
+        retire();
+        jdbc.update("UPDATE qwen_tool_execution SET dispatch_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
+        assertThat(executions.renewDispatch(executing.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120))).isNull();
+        assertThat(executions.claimDispatch(executing.getExecutionCallId(), "replacement", Duration.ofSeconds(120))).isNull();
+        var unknown = executions.findByExecutionCallId(executing.getExecutionCallId());
+        assertThat(unknown.getState()).isEqualTo(ToolExecutionRecord.State.UNKNOWN);
+        assertThat(unknown.getDispatchOwner()).isEqualTo("owner");
+        assertThat(unknown.getDispatchGeneration()).isEqualTo(1);
+        assertThat(unknown.getAuthorizedBindingVersion()).isEqualTo(executing.getAuthorizedBindingVersion());
+        var cancelled = executions.requestCancel(unknown.getExecutionCallId(), unknown.getVersion());
+        assertThat(cancelled.getState()).isEqualTo(ToolExecutionRecord.State.UNKNOWN);
+        assertThat(cancelled.getResult()).isNull();
+        rejected(() -> executions.resolveUnknown(cancelled, Map.of("executionStatus", "success"), Instant.now()),
+                "csi_execution_writer_not_qualified");
+    }
+
+    @Test
+    void immutableSealStillRejectsLateAuthorizationAfterBindingOperationVersionAdvances() throws Exception {
+        ready();
+        var executing = authorize(admit("sealed"));
+        var retirement = retire();
+        var operation = bindings.claimOperation(binding.getBindingId(), "operator", Duration.ofSeconds(120));
+        var advanced = bindings.renewOperation(binding.getBindingId(), "operator", operation.getOperationGeneration(), Duration.ofSeconds(120));
+        assertThat(advanced.getVersion()).isGreaterThan(retirement.sealedBindingVersion());
+        jdbc.update("UPDATE qwen_tool_execution SET authorized_binding_version = ?", retirement.sealedBindingVersion());
+        var before = executionRows();
+        rejected(() -> executions.renewDispatch(executing.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120)),
+                "csi_execution_continuation_unavailable");
+        assertThat(executionRows()).isEqualTo(before);
+        jdbc.update("UPDATE qwen_tool_execution SET authorized_binding_version = ?", executing.getAuthorizedBindingVersion());
+        assertThat(executions.renewDispatch(executing.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120))).isNotNull();
+    }
+
+    @Test
+    void corruptRetirementIdentityRefusesBeforeExecutionMutation() throws Exception {
+        ready();
+        var executing = authorize(admit("corrupt-intent"));
+        var retirement = retire();
+        String encoded = jdbc.queryForObject("SELECT identity_json FROM managed_workspace_csi_retirement", String.class);
+        for (String corrupt : List.of(encoded + " {}", encoded.replaceFirst("\\{", "{\"unexpected\":true,"),
+                encoded.replaceFirst("\\{", "{\"phase\":\"DRAINING\","),
+                encoded.replace("\"sealedBindingVersion\":" + retirement.sealedBindingVersion(), "\"sealedBindingVersion\":0"),
+                encoded.replace("\"revision\":1", "\"revision\":2"),
+                encoded.replace("\"sealedBindingVersion\":" + retirement.sealedBindingVersion(), "\"sealedBindingVersion\":3.1"),
+                encoded.replace("\"sealedBindingVersion\":" + retirement.sealedBindingVersion(), "\"sealedBindingVersion\":\"3\""),
+                encoded.replace(retirement.startedAt(), "invalid-time"), " ".repeat(256 * 1024 + 1))) {
+            jdbc.update("UPDATE managed_workspace_csi_retirement SET identity_json = ?", corrupt);
+            var before = executionRows();
+            rejected(() -> executions.requestCancel(executing.getExecutionCallId(), executing.getVersion()),
+                    "csi_retirement_identity_unavailable");
+            assertThat(executionRows()).isEqualTo(before);
+        }
+        jdbc.update("UPDATE managed_workspace_csi_retirement SET identity_json = ?", encoded);
+        jdbc.update("UPDATE managed_workspace_execution_lease SET csi_revision = 3");
+        rejected(() -> executions.renewDispatch(executing.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120)),
+                "csi_retirement_identity_unavailable");
+    }
+
+    @Test
+    void currentSessionAndNativeLeaseLossRefuseContinuationWithoutChangingExecution() throws Exception {
+        ready();
+        var executing = authorize(admit("proof-loss"));
+        var runtime = sessions.findById(request.getScope(), sessionId);
+        sessions.compareAndSet(runtime, runtime.withState(RuntimeSessionRecord.State.FAILED, Instant.now()));
+        var before = executionRows();
+        rejected(() -> executions.requestCancel(executing.getExecutionCallId(), executing.getVersion()), "runtime_admission_closed");
+        assertThat(executionRows()).isEqualTo(before);
+        jdbc.update("UPDATE qwen_runtime_session SET session_state = 'READY'");
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET writer_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
+        rejected(() -> executions.compareAndSet(executing, executing.withUnknown(), "owner", 1), "csi_original_activation_unavailable");
+        assertThat(executionRows()).isEqualTo(before);
+    }
+
+    @Test
+    void privateLostRecoveryCannotAbandonExecutionOrClearOriginalSlot() throws Exception {
+        ready();
+        authorize(admit("lost-original"));
+        jdbc.update("UPDATE qwen_runtime_binding SET binding_state = 'LOST'");
+        var lost = bindings.findById(binding.getBindingId());
+        var before = executionRows();
+        var runtimeBefore = jdbc.queryForList("SELECT * FROM qwen_runtime_session");
+        var slotBefore = jdbc.queryForList("SELECT * FROM qwen_runtime_binding_slot");
+        rejected(() -> bindings.recoverLost(sessions, executions, lost), "csi_finalize_required");
+        rejected(() -> bindings.finishLostRecovery(sessions, executions, lost), "csi_finalize_required");
+        assertThat(executionRows()).isEqualTo(before);
+        assertThat(jdbc.queryForList("SELECT * FROM qwen_runtime_session")).isEqualTo(runtimeBefore);
+        assertThat(jdbc.queryForList("SELECT * FROM qwen_runtime_binding_slot")).isEqualTo(slotBefore);
+        assertThat(bindings.findById(binding.getBindingId()).getVersion()).isEqualTo(lost.getVersion());
+    }
+
+    @Test
+    void missingZeroAndFutureAuthorizationCannotUseOriginalContinuation() throws Exception {
+        ready();
+        var executing = authorize(admit("unqualified-authorization"));
+        for (long version : List.of(0L, bindings.findById(binding.getBindingId()).getVersion() + 1)) {
+            jdbc.update("UPDATE qwen_tool_execution SET authorized_binding_version = ?", version);
+            var before = executionRows();
+            rejected(() -> executions.requestCancel(executing.getExecutionCallId(), executing.getVersion()),
+                    "csi_execution_continuation_unavailable");
+            assertThat(executionRows()).isEqualTo(before);
+        }
+        jdbc.update("UPDATE qwen_tool_execution SET authorized_binding_version = NULL, authorized_dispatch_generation = NULL");
+        var before = executionRows();
+        rejected(() -> executions.claimDispatch(executing.getExecutionCallId(), "owner", Duration.ofSeconds(120)),
+                "csi_execution_continuation_unavailable");
+        assertThat(executionRows()).isEqualTo(before);
+    }
+
+    @Test
+    void nonV2ReferenceCannotUsePrivateContinuation() throws Exception {
+        ready();
+        var executing = authorize(admit("non-file-mode"));
+        var reference = new java.util.LinkedHashMap<>(executing.getReference());
+        reference.put("runtimeProtocol", 3);
+        jdbc.update("UPDATE qwen_tool_execution SET reference_json = ?", JSON.writeValueAsString(reference));
+        var before = executionRows();
+        rejected(() -> executions.requestCancel(executing.getExecutionCallId(), executing.getVersion()),
+                "csi_execution_continuation_unavailable");
+        assertThat(executionRows()).isEqualTo(before);
+    }
+
+    @Test
+    void absentSnapshotCannotAdoptLaterOriginalExecution() throws Exception {
+        ready();
+        for (String action : List.of("claim", "renew", "cancel", "result")) {
+            jdbc.update("UPDATE qwen_runtime_session SET session_state = 'READY'");
+            try (var snapshot = jdbc.getDataSource().getConnection()) {
+                snapshot.setTransactionIsolation(Connection.TRANSACTION_REPEATABLE_READ);
+                snapshot.setAutoCommit(false);
+                try (var query = snapshot.prepareStatement("SELECT COUNT(*) FROM qwen_tool_execution WHERE execution_call_id = ?")) {
+                    query.setString(1, "late-" + action);
+                    try (var row = query.executeQuery()) {
+                        assertThat(row.next()).isTrue();
+                        assertThat(row.getInt(1)).isZero();
+                    }
+                }
+                var original = authorize(admit("late-" + action));
+                var runtime = sessions.findById(request.getScope(), sessionId);
+                assertThat(sessions.compareAndSet(runtime,
+                        runtime.withState(RuntimeSessionRecord.State.FAILED, Instant.now()))).isNotNull();
+                var before = executionRows();
+                var delayed = new JdbcToolExecutionRepository(new SingleConnectionDataSource(snapshot, false));
+                var result = switch (action) {
+                    case "claim" -> delayed.claimDispatch(original.getExecutionCallId(), "owner", Duration.ofSeconds(120));
+                    case "renew" -> delayed.renewDispatch(original.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120));
+                    case "cancel" -> delayed.requestCancel(original.getExecutionCallId(), original.getVersion());
+                    case "result" -> delayed.compareAndSet(original,
+                            original.withResult(Map.of("executionStatus", "success", "responseParts", List.of()), 4, Instant.now()), "owner", 1);
+                    default -> throw new IllegalStateException(action);
+                };
+                assertThat(result).isNull();
+                assertThat(executionRows()).isEqualTo(before);
+            }
+        }
+    }
+
+    private void ready() throws Exception {
+        var runtime = bindings.admitSession(sessions, new RuntimeSessionRecord(
+                new RuntimeSession(sessionId, sessionId, "bootstrap", request.getScope()), binding.getBindingId(), 1,
+                RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+        sessions.compareAndSet(runtime, runtime.withState(RuntimeSessionRecord.State.READY, Instant.now()));
+        commit(0);
+        commit(1);
+    }
+
+    private ToolExecutionRecord admit(String id) {
+        return bindings.admitExecution(sessions, executions, ToolExecutionRecord.prepared(id, id + "-key", binding.getBindingId(), 1,
+                sessionId, sessionId, id + "-turn", id + "-tool", "sha256:" + "a".repeat(64),
+                Map.of("dispatchMode", "deferred", "sessionId", sessionId, "promptId", id + "-turn", "callId", id + "-tool", "argsDigest", "sha256:" + "a".repeat(64))));
+    }
+
+    private ToolExecutionRecord authorize(ToolExecutionRecord prepared) {
+        var claimed = executions.claimDispatch(prepared.getExecutionCallId(), "owner", Duration.ofSeconds(120));
+        return bindings.authorizeDispatch(sessions, executions, claimed, "owner", claimed.getDispatchGeneration());
+    }
+
+    private WorkspaceCsiReservationStore.Retirement retire() {
+        return reservations.beginRetirement(registration, bindings, bindings.findById(binding.getBindingId()), reservation, UUID.randomUUID().toString());
+    }
+
+    private List<Map<String, Object>> executionRows() {
+        return jdbc.queryForList("SELECT * FROM qwen_tool_execution ORDER BY execution_call_id_hash");
     }
 
     private ManagedSessionStoreModels.CommitReceipt commit(int index) throws Exception {
@@ -237,8 +474,8 @@ class WorkspaceCsiNativeActivationGate {
     void priorTerminalAuthorizationRefusesFirstPinAndRollsBackInstallResource() throws Exception {
         commit(0);
         var historical = ToolExecutionRecord.prepared("prior-call", "prior-key", "owned-legacy-binding", 1,
-                sessionId, sessionId, "prior-turn", "prior-tool", "c".repeat(64), Map.of("sessionId", sessionId,
-                        "promptId", "prior-turn", "callId", "prior-tool", "argsDigest", "c".repeat(64)));
+                sessionId, sessionId, "prior-turn", "prior-tool", "sha256:" + "c".repeat(64), Map.of("dispatchMode", "deferred", "sessionId", sessionId,
+                        "promptId", "prior-turn", "callId", "prior-tool", "argsDigest", "sha256:" + "c".repeat(64)));
         executions.findOrCreate(historical);
         jdbc.update("UPDATE qwen_tool_execution SET binding_id = ?, execution_state = 'SETTLED',"
                 + " execution_status = 'success', dispatch_generation = 1, authorized_dispatch_generation = 1,"

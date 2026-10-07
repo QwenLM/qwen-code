@@ -159,6 +159,9 @@ public final class JdbcRuntimeBindingRepository
                     || !current.getBindingId().equals(slot.activeBindingId)) {
                 return null;
             }
+            if (JdbcCsiFilesRetirementGuard.isProfile(current.getRequest().getScope())) {
+                throw JdbcCsiFilesRetirementGuard.releaseUnavailable();
+            }
             if (current.getLossEvidence() == null) {
                 return current;
             }

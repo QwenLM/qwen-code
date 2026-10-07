@@ -2,7 +2,10 @@
 import http from 'node:http';
 import { readFile, writeFile } from 'node:fs/promises';
 import { createHash, randomUUID, randomBytes } from 'node:crypto';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, URL } from 'node:url';
+import { Buffer } from 'node:buffer';
+import console from 'node:console';
+import process from 'node:process';
 const root = process.cwd();
 const evidence = pathToFileURL(process.argv[3] + '/');
 const input = JSON.parse(await readFile(process.argv[2], 'utf8'));
@@ -293,7 +296,9 @@ try {
   if (stores)
     try {
       await stores.close();
-    } catch {}
+    } catch {
+      // Collector shutdown must still run when store cleanup fails.
+    }
   await new Promise((resolve) => server.close(resolve));
   server.closeAllConnections();
 }

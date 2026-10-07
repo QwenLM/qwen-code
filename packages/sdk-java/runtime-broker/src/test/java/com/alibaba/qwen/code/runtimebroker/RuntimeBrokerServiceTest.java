@@ -1996,6 +1996,28 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void privateCsiDispatchRejectsShellBeforeAuthorizationOrWorkerIo() throws Exception {
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                CsiFilesRetirementProfile.CAPABILITY_DIGEST, "session");
+        try (Fixture fixture = new Fixture(scope)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            String payload = "{\"toolName\":\"run_shell_command\",\"input\":{\"command\":\"echo blocked\"}}";
+            String digest = "sha256:" + java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+            var prepared = join(fixture.service.prepareExecution("harness", "runtime", "private-shell",
+                    Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call", "argsDigest", digest)));
+            assertEquals("runtime_payload_invalid", failure(fixture.service.startExecution(
+                    "harness", "runtime", prepared.getExecutionCallId(), payload)).getCode());
+            var current = fixture.executionRepository.findByExecutionCallId(prepared.getExecutionCallId());
+            assertEquals(ToolExecutionRecord.State.PREPARED, current.getState());
+            assertEquals(0, current.getDispatchGeneration());
+            assertNull(current.getAuthorizedDispatchGeneration());
+            assertEquals(0, fixture.transport.executeCalls.get());
+            assertEquals(0, fixture.transport.executeV3Calls.get());
+        }
+    }
+
+    @Test
     void privateCsiSessionNeverForwardsGenericRuntimeControl() {
         var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
                 CsiFilesRetirementProfile.CAPABILITY_DIGEST, "session");

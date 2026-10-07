@@ -606,6 +606,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                     && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
                         }
+                        if (JdbcCsiFilesRetirementGuard.isProfile(context.binding().getRequest().getScope())
+                                && (v3 || !Set.of("read_file", "write_file", "edit").contains(toolName))) {
+                            throw invalid("runtime_payload_invalid", "The private CSI profile requires a file Tool v2 payload");
+                        }
                         if (v3) {
                             if (!"run_shell_command".equals(payload.get("toolName"))
                                     && !"monitor".equals(payload.get("toolName"))) {
@@ -2798,6 +2802,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
 
     private CompletionStage<BindingContext> reclaimLostBindingNow(
             RuntimeBindingRecord record, RuntimeProvisionRequest request) {
+        if (JdbcCsiFilesRetirementGuard.isProfile(record.getRequest().getScope())) {
+            return failed(JdbcCsiFilesRetirementGuard.releaseUnavailable());
+        }
         RuntimeBindingRecord claimed = bindingRepository.claimOperation(
                 record.getBindingId(), brokerOwnerId, operationLeaseDuration);
         if (claimed == null || claimed.getState() != RuntimeBindingRecord.State.LOST) {
@@ -2818,6 +2825,9 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private CompletionStage<RuntimeBindingRecord> cleanupLost(RuntimeBindingRecord claimed) {
+        if (JdbcCsiFilesRetirementGuard.isProfile(claimed.getRequest().getScope())) {
+            return failed(JdbcCsiFilesRetirementGuard.releaseUnavailable());
+        }
         return safeStage(() -> {
             RuntimeBindingRecord recovered = recoverLostDrained(claimed,
                     false);
@@ -3355,18 +3365,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
         if (!provisioner.isUsable(context.lease())) {
             invalidateBinding(context.binding());
-            markUnknown(executing.getExecutionCallId(),
-                    executing.getDispatchGeneration());
+            markUnknown(executing);
             return CompletableFuture.completedFuture(null);
         }
-        DispatchRenewal renewal = new DispatchRenewal(
-                executing.getExecutionCallId(),
-                executing.getDispatchGeneration());
+        DispatchRenewal renewal = new DispatchRenewal(executing);
         try {
             renewal.start();
         } catch (RuntimeException | Error exception) {
-            markUnknown(executing.getExecutionCallId(),
-                    executing.getDispatchGeneration());
+            markUnknown(executing);
             throw exception;
         }
         invocations.add(executing.getExecutionCallId());
@@ -3401,18 +3407,15 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     // treat this finished invocation as still running.
                     invocations.remove(executing.getExecutionCallId());
                     if (error != null || result == null) {
-                        markUnknown(executing.getExecutionCallId(),
-                                executing.getDispatchGeneration());
+                        markUnknown(executing);
                         return null;
                     }
                     try {
-                        settleExecution(executing.getExecutionCallId(),
-                                executing.getDispatchGeneration(), result);
+                        settleExecution(executing, result);
                         settleUnstartedBackgroundSiblings(
                                 executing.getExecutionCallId(), result);
                     } catch (RuntimeException exception) {
-                        markUnknown(executing.getExecutionCallId(),
-                                executing.getDispatchGeneration());
+                        markUnknown(executing);
                     }
                     return null;
                 }).whenComplete((ignored, error) -> renewal.close());
@@ -3569,20 +3572,21 @@ public final class RuntimeBrokerService implements AutoCloseable {
             current = executionRepository.findByExecutionCallId(
                     claimed.getExecutionCallId());
         }
-        markUnknown(claimed.getExecutionCallId(),
-                claimed.getDispatchGeneration());
+        markUnknown(claimed);
         return null;
     }
 
-    private void settleExecution(String executionCallId,
-            long dispatchGeneration, Map<String, Object> result) {
+    private void settleExecution(ToolExecutionRecord original, Map<String, Object> result) {
+        String executionCallId = original.getExecutionCallId();
+        long dispatchGeneration = original.getDispatchGeneration();
         ToolExecutionRecord current = executionRepository
                 .findByExecutionCallId(executionCallId);
         for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
             if (current == null || current.isTerminal()
                     || current.getState()
                             == ToolExecutionRecord.State.UNKNOWN
-                    || !ownsDispatch(current, dispatchGeneration)) {
+                    || !ownsDispatch(current, dispatchGeneration)
+                    || !current.sameIdentity(original) || !current.sameAuthorization(original)) {
                 return;
             }
             ToolExecutionRecord replacement = current.withResult(result,
@@ -3600,15 +3604,17 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 "Runtime execution changed while settling");
     }
 
-    private void markUnknown(String executionCallId,
-            long dispatchGeneration) {
+    private void markUnknown(ToolExecutionRecord original) {
+        String executionCallId = original.getExecutionCallId();
+        long dispatchGeneration = original.getDispatchGeneration();
         ToolExecutionRecord current = executionRepository
                 .findByExecutionCallId(executionCallId);
         for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
             if (current == null || current.isTerminal()
                     || current.getState()
                             == ToolExecutionRecord.State.UNKNOWN
-                    || !ownsDispatch(current, dispatchGeneration)) {
+                    || !ownsDispatch(current, dispatchGeneration)
+                    || !current.sameIdentity(original) || !current.sameAuthorization(original)) {
                 return;
             }
             ToolExecutionRecord updated = executionRepository.compareAndSet(
@@ -3653,7 +3659,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
             ToolExecutionRecord initial) {
         ToolExecutionRecord current = initial;
         for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
-            if (current.isTerminal() || current.isCancelRequested()) {
+            if (current.isTerminal()) {
                 return current;
             }
             ToolExecutionRecord updated = executionRepository.requestCancel(
@@ -3686,8 +3692,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         Map<String, Object> result = runtimeMap(status.get("result"),
                 "cancellation result");
         try {
-            settleExecution(requested.getExecutionCallId(),
-                    requested.getDispatchGeneration(), result);
+            settleExecution(requested, result);
         } catch (IllegalArgumentException exception) {
             throw unavailable("runtime_execution_cancel_failed",
                     "Runtime cancellation returned an invalid result",
@@ -4589,14 +4594,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
         // Same virtual-thread rule as BindingRenewal: guarded repository
         // calls must not pin the caller's carrier while they block.
         private final ReentrantLock monitor = new ReentrantLock();
-        private final String executionCallId;
-        private final long dispatchGeneration;
+        private final ToolExecutionRecord original;
         private ScheduledFuture<?> task;
 
-        DispatchRenewal(String executionCallId,
-                long dispatchGeneration) {
-            this.executionCallId = executionCallId;
-            this.dispatchGeneration = dispatchGeneration;
+        DispatchRenewal(ToolExecutionRecord original) {
+            this.original = original;
         }
 
         void start() {
@@ -4620,15 +4622,22 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 try {
                     ToolExecutionRecord renewed =
                             executionRepository.renewDispatch(
-                                    executionCallId, brokerOwnerId,
-                                    dispatchGeneration,
-                                    dispatchLeaseDuration);
+                                    original.getExecutionCallId(), brokerOwnerId,
+                                    original.getDispatchGeneration(), dispatchLeaseDuration);
                     if (renewed == null) {
-                        executionRepository.claimDispatch(executionCallId,
+                        executionRepository.claimDispatch(original.getExecutionCallId(),
                                 brokerOwnerId, dispatchLeaseDuration);
+                        closeLocked();
+                    } else if (!renewed.sameIdentity(original) || !renewed.sameAuthorization(original)
+                            || !ownsDispatch(renewed, original)) {
                         closeLocked();
                     }
                 } catch (RuntimeException exception) {
+                    if (exception instanceof RuntimeBrokerException failure && !failure.isRetryable()
+                            && (failure.getCode().startsWith("csi_")
+                                    || "runtime_admission_closed".equals(failure.getCode()))) {
+                        closeLocked();
+                    }
                     // A transient repository failure does not prove claim loss.
                 }
             } finally {

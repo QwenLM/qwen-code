@@ -296,6 +296,39 @@ profile 合法的 writer 接管都不应被声称为 HTTP bypass。
 包括直接调用 repository `findOrCreate` 的路径，以及持久 Session/retention 变更路径。
 提交 cut 前，在对应锁下重新枚举，比较完整成员和 revision。不完整扫描的 hash 不是 fence。
 
+### 4.2.1 原执行 continuation（A2 SQL 批次）
+
+首次 activation 批次仍拒绝 execution continuation。将有效原 proof 与操作资格分离。
+新增准入与授权仍仅限 READY；已经授权的原执行可在原 binding 为 DRAINING 时续租、
+记录取消意图、结算返回结果或变为 UNKNOWN。原 Runtime Session 仍必须 READY，原
+activation 和 generation-1 writer 必须有效。SQL 锁顺序仍为原 parent → native history
+→ retirement identity → Runtime Session → execution；不在 worker I/O 期间持有 parent 锁。
+
+首次 execution hint 缺失时直接返回无操作；后续 current 锁读不能接纳原 snapshot 未分类的
+新插入执行，预热 REPEATABLE READ 下也相同。
+
+| 操作                       | 窄资格                                                                                                                                                                            |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Result/UNKNOWN CAS         | 仅已授权 EXECUTING/CANCEL_REQUESTED 到 SETTLED/UNKNOWN；保留不可变身份、两个授权列、原 owner/generation/有效 dispatch lease/当前 version、取消意图和单调 sequence。               |
+| Dispatch renewal           | 同一有效原 claim；未授权 DISPATCHING claim 仍要求 READY 准入，不替换 owner 或 generation。                                                                                        |
+| 既有 claim 观测/过期 fence | 已授权 EXECUTING/CANCEL_REQUESTED 可在 DRAINING 下返回原有效 claim，或在数据库判定 lease 真正过期后变为 UNKNOWN；PREPARED/DISPATCHING 新 grant 或 regrant 仍要求 READY 准入。     |
+| 取消                       | 即使已有意图也重验；从未授权 PREPARED/DISPATCHING 可原子记录原 `{executionStatus: not_started, responseParts: []}` outcome，否则保留原已授权 claim 并请求取消；UNKNOWN 仍未解决。 |
+| 普通 LOST recovery         | 在 abandonment、普通 release 或破坏性 recovery I/O 前拒绝此私有 profile；通用 cleanup 不是 CSI finalization。                                                                     |
+
+授权必须绑定原 dispatch generation 和严格为正、不晚于原当前 version 的 binding version，且早于
+原既有 retirement intent 中的不可变 DRAINING seal。Operation 续租可抬高当前
+binding version，不能拿它替代 `sealedBindingVersion`。在同原连接上 current 锁读该
+intent，拒绝缺失、歧义、超界、row/reservation 身份矛盾以及非法或重复 JSON。通用 CAS 不得新增或移除授权、启动未授权执行、改变取消意图或替换为
+任意 PREPARED result。未支持 provider/publication/background mode 保持 blocker。
+私有 deferred payload dispatch 在授权或 worker I/O 前仅允许 `read_file`、`write_file` 和 `edit`。
+普通 timer 的 claim fallback 并非重启证据：它在 EXECUTING 后才启动。确定性的 CSI
+拒绝应停止该续租 task；单纯暂时性 repository 错误不能证明物理 invocation 已停止。
+
+本批实现 SQL continuation；验证证据独立记录，不表示完整 A2/K2 验收。SETTLED/not_started 行仍
+需要原 native result/journal 覆盖证明，不授予应用结算或物理停止资格。通用 native
+tool/checkpoint/history、精确 file-only worker boot、其余全部 Managed Agent/retention
+writer、整体 deadline 和 K2-B 至 K2-D 仍是后续必做工作。既有公开 selector 仍禁用。
+
 ## 5. 证明应用结算
 
 ### 5.1 Execution 分类
