@@ -431,6 +431,13 @@ class ManagedActionsTest {
             request.put("recordDigest", ExtensionRecordJournal.sha256(changed));
             CommitTransactionRequest invalid =
                     json.treeToValue(request, CommitTransactionRequest.class);
+            // The journal itself now owns event-envelope validation, so an
+            // envelope that is not a well-formed event is refused before
+            // the Action store reads it.
+            String expected =
+                    "version".equals(field)
+                            ? "managed_session_extension_record_rejected"
+                            : "managed_session_action_rejected";
             assertThatThrownBy(
                             () ->
                                     journals.commit(
@@ -440,9 +447,7 @@ class ManagedActionsTest {
                                             invalid))
                     .isInstanceOfSatisfying(
                             ApiException.class,
-                            error ->
-                                    assertThat(error.getCode())
-                                            .isEqualTo("managed_session_action_rejected"));
+                            error -> assertThat(error.getCode()).isEqualTo(expected));
             assertThat(actions.find(tenant, session, action.id)).isEmpty();
         }
     }
