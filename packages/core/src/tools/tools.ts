@@ -630,6 +630,14 @@ export interface ToolResult {
   resultFilePaths?: string[];
 
   /**
+   * The full collected set a result's count is computed over, before any
+   * display slice: glob's header certifies the collected count, so a
+   * containment check that reads only `resultFilePaths` would certify hits
+   * it never inspected.
+   */
+  collectedFilePaths?: string[];
+
+  /**
    * Structured artifacts produced by this tool call. Daemon/session surfaces
    * consume this as metadata only; the producer remains responsible for the
    * underlying file, URL, or managed resource lifecycle.

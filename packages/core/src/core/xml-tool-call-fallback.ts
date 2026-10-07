@@ -234,6 +234,45 @@ function openTagEnd(block: string): number {
   return -1;
 }
 
+// Matches a parameter open or close tag. Quoted runs are admitted whole so a
+// `>` inside an attribute value does not end the tag early.
+const PARAMETER_TAG_PATTERN =
+  /<\/?parameter(?=[\s=>])(?:[^>"']|"[^"]*"|'[^']*')*>/g;
+
+/**
+ * Returns the spans of the parameter elements whose open tag is paired with a
+ * later close tag, matched by depth.
+ *
+ * PARAMETER_PATTERN is flat and lazy, so an element nested inside a value
+ * consumes that value's own terminator: over a content value quoting a whole
+ * call, the flat match stops at the quoted call's parameter close and reports
+ * the quoting value as unclosed. Pairing by depth gives the quoting value the
+ * span it actually owns, which is what separates "a call the truncated block
+ * swallowed" from "a call a value quotes" — the two have the same text shape
+ * and differ only in whether a value owns the region.
+ *
+ * An open tag that is never closed stays on the stack and owns nothing, so a
+ * value merely mentioning the tag shape does not make the region behind it
+ * unrescannable.
+ */
+function closedParameterSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+  const openStarts: number[] = [];
+  PARAMETER_TAG_PATTERN.lastIndex = 0;
+  let tagMatch: RegExpExecArray | null;
+  while ((tagMatch = PARAMETER_TAG_PATTERN.exec(text)) !== null) {
+    if (tagMatch[0].startsWith('</')) {
+      const start = openStarts.pop();
+      if (start !== undefined) {
+        spans.push([start, tagMatch.index + tagMatch[0].length]);
+      }
+    } else {
+      openStarts.push(tagMatch.index);
+    }
+  }
+  return spans;
+}
+
 /**
  * Extracts XML-style tool calls from plain text content.
  * Tool-call blocks inside fences or explicit example wrappers are skipped:
@@ -257,9 +296,22 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     ]);
   }
 
+  // Regions a closed parameter value owns. A call matched inside one is markup
+  // the value quotes rather than a call the model emitted, so it must not be
+  // dispatched: documentation would otherwise execute, and the block quoting
+  // it stays behind as prose. Skipping the match whole also keeps the
+  // rejected-block rescan below out of the value it belongs to. See #13492.
+  const valueSpans = closedParameterSpans(text);
+
   TOOL_CALL_PATTERN.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = TOOL_CALL_PATTERN.exec(text)) !== null) {
+    const matchStart = match.index;
+    if (
+      valueSpans.some(([start, end]) => matchStart >= start && matchStart < end)
+    ) {
+      continue;
+    }
     const toolName = match[1] ?? match[3];
     const paramsBlock = match[2] ?? match[4];
     // A rejected block may have swallowed a complete later block, so rescan
