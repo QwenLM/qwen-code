@@ -32,6 +32,58 @@ export interface JavaManagedAgentProviderOptions
   saveArtifact?: ManagedArtifactSave;
 }
 
+type JavaCommandOperation = Awaited<
+  ReturnType<JavaManagedAgentClient['respondAction']>
+>;
+
+// Waits between reads of an accepted approval answer's operation. The service
+// forwards the answer to the Harness right away and retries a failed delivery
+// with its own backoff, so a few reads over half a minute see it settle.
+const ACTION_RESPONSE_POLL_DELAYS_MS = [
+  250, 500, 1_000, 2_000, 2_000, 4_000, 4_000, 8_000, 8_000,
+];
+
+/**
+ * Follows an accepted approval answer to the end of its operation. `202` only
+ * means the answer was admitted: delivery can still fail, for example when the
+ * Workspace stops accepting it, and the operation stays `running` while the
+ * Session is blocked. Reading the same operation, rather than answering again,
+ * keeps the original attempt and its idempotency key (#12867 D6). An answer
+ * still unsettled after the polling budget is reported as unconfirmed; the
+ * same key replays this operation when the user answers again.
+ */
+async function settleActionResponse(
+  client: JavaManagedAgentClient,
+  sessionId: string,
+  operation: JavaCommandOperation,
+  signal: AbortSignal | undefined,
+): Promise<JavaCommandOperation> {
+  let current = operation;
+  for (const delay of ACTION_RESPONSE_POLL_DELAYS_MS) {
+    if (current.status !== 'pending' && current.status !== 'running') {
+      return current;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    signal?.throwIfAborted();
+    const read = await client.queryOperation(
+      { sessionId, operationId: current.operationId },
+      signal,
+    );
+    if (read.type !== 'action_response') {
+      throw new Error(
+        `Managed Agent operation ${read.operationId} is not an approval answer`,
+      );
+    }
+    current = read;
+  }
+  if (current.status !== 'pending' && current.status !== 'running') {
+    return current;
+  }
+  throw new Error(
+    `Managed Agent approval answer not confirmed yet (operation ${current.operationId} is ${current.status})`,
+  );
+}
+
 export function createJavaManagedAgentProvider(
   options: JavaManagedAgentProviderOptions,
 ): ManagedAgentProvider {
@@ -57,7 +109,7 @@ export function createJavaManagedAgentProvider(
         return page.data.flatMap(toPendingAction);
       },
       async respond(action, optionId, command) {
-        const result = await client.respondAction(
+        const accepted = await client.respondAction(
           {
             requestId: managedRequestId(),
             idempotencyKey: command.idempotencyKey,
@@ -70,6 +122,12 @@ export function createJavaManagedAgentProvider(
               optionId,
             },
           },
+          command.signal,
+        );
+        const result = await settleActionResponse(
+          client,
+          action.sessionId,
+          accepted,
           command.signal,
         );
         // A cancelled or recovery-blocked operation did not apply the answer,

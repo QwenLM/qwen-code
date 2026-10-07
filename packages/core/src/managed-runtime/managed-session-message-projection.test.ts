@@ -23,6 +23,7 @@ import { LocalManagedSessionResourceStore } from './managed-session-resources.js
 import { ManagedSessionRecordSink } from './managed-session-record-sink.js';
 import { managedSessionResourceRoot } from '../utils/sessionStorageUtils.js';
 import {
+  MANAGED_SESSION_LIMITS,
   managedSessionEventsDigest,
   parseManagedSessionEvent,
   type ManagedSessionDurableRef,
@@ -944,6 +945,45 @@ describe('managed session message projection', () => {
     const projected = await harness.projection.project();
     expect(projected).toEqual(records);
     await harness.close();
+  });
+
+  it('commits a record past the inline limit as chunks and projects it whole', async () => {
+    const harness = await createHarness();
+    const big: ChatRecord = {
+      ...records[1],
+      uuid: 'rec-assistant-big',
+      message: {
+        role: 'model',
+        parts: [{ text: '长回答'.repeat(40_000) }],
+      },
+    };
+    await harness.projection.commit(
+      command('commitMessage', 'cmd-msg-big'),
+      { record: big },
+      HOLDS,
+    );
+
+    const committed = harness.authority
+      .readEvents({
+        afterSequence: 0,
+        limit: MANAGED_SESSION_LIMITS.maxReadEvents,
+      })
+      .find((event) => event.kind === 'message.committed');
+    const contentRef = committed?.payload['contentRef'];
+    expect(contentRef).toMatchObject({ kind: 'managed-message-chunks' });
+
+    const projected = await harness.projection.project();
+    expect(projected).toEqual([big]);
+    await harness.close();
+
+    // The cold read path reassembles the same record from the chunks.
+    await expect(
+      readManagedSessionRecords({
+        transcriptPath: harness.transcriptPath,
+        runtimeBaseDir: harness.runtimeBaseDir,
+        sessionKey,
+      }),
+    ).resolves.toEqual([big]);
   });
 
   it('keeps no legacy copy of the projected records', async () => {

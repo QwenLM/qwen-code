@@ -951,6 +951,18 @@ requires one tool execution, one further continuation, only the replacement's
 answer in the public transcript, and one terminal event. Both modes run in the
 Hosted MySQL CI job.
 
+The `--big-output` long-answer mode is also Workspace-bound:
+
+```bash
+npm run test:e2e:managed-big-output
+```
+
+It streams a long answer, verifies the complete public text and stored record,
+deletes the original Harness and Runtime homes, and checks the complete answer
+in a cold replacement's model context. A short answer remains inline. This
+mode executes no tools and has no Runtime binding to reclaim, so it keeps
+`durable-local-process` disabled and does not require Linux.
+
 A zero-delay run checks the real-model path as shown above; a controlled
 cold-start delay additionally tests output before Runtime readiness:
 
