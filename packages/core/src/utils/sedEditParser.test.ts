@@ -321,8 +321,8 @@ describe('sedEditParser', () => {
   });
 
   it('declines the same bracket expressions under -E', () => {
-    // The -E path hands the pattern to RegExp untouched, so it diverges the
-    // same way and has to be declined separately.
+    // -E goes through the same bracket translation, so the same check
+    // declines these.
     expect(parseSedEditCommand("sed -E -i 's/[]a]/X/g' f.txt")).toBeNull();
     expect(parseSedEditCommand("sed -E -i 's/[^]]/X/g' f.txt")).toBeNull();
   });
@@ -334,5 +334,59 @@ describe('sedEditParser', () => {
     expect(applySed("sed -i 's/[abc]/X/g' f.txt", 'a]b')).toBe('X]X');
     expect(applySed("sed -i 's/[^abc]/X/g' f.txt", 'a]b')).toBe('aXb');
     expect(applySed("sed -i 's/a\\[b/X/g' f.txt", 'a[b]c')).toBe('X]c');
+  });
+
+  // A backslash inside a bracket expression is a literal member under -E
+  // too; JS read it as an escape. Expected values measured with GNU sed 4.9.
+  it('keeps backslashes literal inside bracket expressions under -E', () => {
+    // [\[\]] is the class {\, [} followed by a literal ]; sed leaves this
+    // input alone, the simulation deleted both brackets.
+    expect(applySed("sed -E -i 's/[\\[\\]]//g' f.txt", 'a[b]c')).toBe('a[b]c');
+    expect(applySed("sed -E -i 's/[\\+]/X/g' f.txt", 'a + \\ b')).toBe(
+      'a X X b',
+    );
+    expect(applySed("sed -E -i 's/[\\.]/X/g' f.txt", 'a.b\\c')).toBe('aXbXc');
+    expect(applySed("sed -E -i 's/[\\]]/X/g' f.txt", 'a\\]b]')).toBe('aXb]');
+    // \-c is a range from backslash to c, so it covers b as well.
+    expect(applySed("sed -E -i 's/[a\\-c]/X/g' f.txt", 'a-b\\c')).toBe('X-XXX');
+  });
+
+  // GNU sed expands \t, \n and friends inside a bracket expression, so
+  // [ \t] is a space or a TAB there; the BRE translation read it as a space,
+  // backslash or t. Other seds disagree with GNU, so these go to real sed.
+  it('declines character escapes inside bracket expressions', () => {
+    // On 'bat', sed writes 'bat'; the simulation wrote 'ba'.
+    expect(parseSedEditCommand("sed -i 's/[ \\t]*$//' f.txt")).toBeNull();
+  });
+
+  it.each(['n', 't', 'r', 'f', 'v', 'a', 'd065', 'o101', 'x41', 'cA'])(
+    'declines [\\%s] under BRE and -E',
+    (escape) => {
+      expect(
+        parseSedEditCommand(`sed -i 's/[\\${escape}]/X/g' f.txt`),
+      ).toBeNull();
+      expect(
+        parseSedEditCommand(`sed -E -i 's/[\\${escape}]/X/g' f.txt`),
+      ).toBeNull();
+    },
+  );
+
+  it('still simulates escapes outside brackets and escaped backslashes', () => {
+    // Guards over-correcting. GNU sed reads \t outside a bracket as a TAB,
+    // as the simulation does; the ] in [a]\t closes the bracket, so that \t
+    // is simulated (GNU sed 4.9 writes 'at Xb'); a \\ inside a bracket
+    // leaves the t after it literal; and under -E an escaped [ does not
+    // open a bracket expression.
+    expect(applySed("sed -i 's/a\\tb/X/g' f.txt", 'a\tb')).toBe('X');
+    expect(applySed("sed -i 's/[a]\\t/X/' f.txt", 'at a\tb')).toBe('at Xb');
+    expect(applySed("sed -E -i 's/[a]\\t/X/' f.txt", 'at a\tb')).toBe('at Xb');
+    expect(applySed("sed -i 's/[\\\\t]/X/g' f.txt", 'a\tb\\t')).toBe('a\tbXX');
+    expect(applySed("sed -E -i 's/[\\\\t]/X/g' f.txt", 'a\tb\\t')).toBe(
+      'a\tbXX',
+    );
+    expect(applySed("sed -E -i 's/a\\.b/X/g' f.txt", 'a.b axb')).toBe('X axb');
+    expect(applySed("sed -E -i 's/\\[a\\]/X/g' f.txt", '[a] a\\]')).toBe(
+      'X a\\]',
+    );
   });
 });
