@@ -15,7 +15,7 @@
 
 ## 2. 现状
 
-身份只有 `(tenantId, actorId)`，由受信过滤器提供（SIGNED 模式的 `SignatureAuthFilter`，OPEN 模式的替代 `TrustedActorHeaderFilter`）；`AuthenticatedActor` 契约不被本设计改变。
+身份只有 `(tenantId, actorId)`，由受信过滤器提供（SIGNED 模式的 `SignatureAuthFilter`，OPEN 模式的替代 `TrustedActorHeaderFilter`）；`AuthenticatedTenantActor` 契约不被本设计改变。
 
 今天的授权 = 授权表行 + 创建者记录：
 
@@ -27,7 +27,7 @@
 | 族 | 路由 | 校验 | 可读的非创建者得到 |
 | --- | --- | --- | --- |
 | Turn 提交 / 取消 / 改名 | 公开 `POST …/events`（提交与取消）、`PATCH …/{id}`；WebShell `turns/submit`、`turns/cancel`（改名没有 WebShell 路由） | `requireSubmitter` → `maySubmitWorkspaceTurn`（创建命令行 + 当前 `can_create`） | **409 `workspace_unavailable`** |
-| 生命周期（close、archive、unarchive、delete）+ cwd 变更 | `POST …/close|archive|unarchive`、`DELETE`、`POST …/cwd`，及 WebShell 孪生 | `requireWorkspaceCreator`（先 can_read 再创建命令行） | 403 `session_operation_forbidden` |
+| 生命周期（close、archive、unarchive、delete）+ cwd 变更 | `POST …/close` / `…/archive` / `…/unarchive`、`DELETE`、`POST …/cwd`，及 WebShell 孪生 | `requireWorkspaceCreator`（先 can_read 再创建命令行） | 403 `session_operation_forbidden` |
 | Action（审批）回答 | `POST …/actions/{id}/responses`、WebShell `actions/respond` | `requireOwner`（creator_actor_key，回退创建命令） | 403 `action_forbidden` |
 
 其余已实现的规则形态：绑定读取与全部 list/stream/catalog 路由要求 `can_read`（否则 404）；绑定创建要求 actor + `can_create` + `ACTIVE` Workspace（按失败点返回 401/404/403/409）；artifact 字节读取叠加部署策略门（`403 artifact_content_forbidden`）；Workspace 发现只列出 `can_read` 行（无 actor 返回 401）；legacy（未绑定）Session 与 agent 定义是**租户级**的 —— 租户内任何 actor 今天都可以改它们；内部 store/publication 路由准入 writer HMAC 凭据而非 actor。公开面是 `/v1/agents/**` 加 `/api/agent/web-shell/v1/**`（`PublicSurface`），由十个 Spring controller 实现 —— 第 10 节的矩阵枚举当前的 32 条公开 + 24 条 WebShell + 22 条内部路由（切片 A 门禁实计共 78 条；#13088 新增 `receipts/verify` 处理器之前，这里写的是 77/21）。

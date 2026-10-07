@@ -49,7 +49,7 @@ Authorization today is grant rows plus a creator record:
 | Family | Routes | Check | Readable non-creator gets |
 | --- | --- | --- | --- |
 | Turn submit / cancel / rename | public `POST …/events` (submit and cancel), `PATCH …/{id}`; WebShell `turns/submit`, `turns/cancel` (rename has no WebShell route) | `requireSubmitter` → `maySubmitWorkspaceTurn` (create-command row + current `can_create`) | **409 `workspace_unavailable`** |
-| Lifecycle (close, archive, unarchive, delete) + cwd change | `POST …/close|archive|unarchive`, `DELETE`, `POST …/cwd`, WebShell twins | `requireWorkspaceCreator` (can_read then create-command row) | 403 `session_operation_forbidden` |
+| Lifecycle (close, archive, unarchive, delete) + cwd change | `POST …/close` / `…/archive` / `…/unarchive`, `DELETE`, `POST …/cwd`, WebShell twins | `requireWorkspaceCreator` (can_read then create-command row) | 403 `session_operation_forbidden` |
 | Action (approval) respond | `POST …/actions/{id}/responses`, WebShell `actions/respond` | `requireOwner` (creator_actor_key, create-command fallback) | 403 `action_forbidden` |
 
 Other rule shapes as implemented: bound reads and all list/stream/catalog
