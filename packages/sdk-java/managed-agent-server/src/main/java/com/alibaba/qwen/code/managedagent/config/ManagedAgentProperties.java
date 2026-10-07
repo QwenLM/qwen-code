@@ -20,6 +20,7 @@ public class ManagedAgentProperties {
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
     private final Auth auth = new Auth();
     private final InternalServer internalServer = new InternalServer();
+    private final Automation automation = new Automation();
     private String agentRevision = "1";
     private String trustedActorHeader = "";
 
@@ -33,6 +34,10 @@ public class ManagedAgentProperties {
 
     public InternalServer getInternalServer() {
         return internalServer;
+    }
+
+    public Automation getAutomation() {
+        return automation;
     }
 
     public SessionStore getSessionStore() {
@@ -900,6 +905,73 @@ public class ManagedAgentProperties {
 
         public void setEnvironment(Map<String, String> environment) {
             this.environment = environment;
+        }
+    }
+
+    /** H6b/H6c: the automation scanner, its lease and the slot window. */
+    public static class Automation {
+        private boolean enabled;
+        private Duration scanDelay = Duration.ofSeconds(10);
+        private Duration lease = Duration.ofSeconds(60);
+        private Duration lateTolerance = Duration.ofMinutes(5);
+        private Duration lookback = Duration.ofHours(24);
+        private int maxSlotsPerTick = 1000;
+        private int concurrency = 4;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public Duration getScanDelay() {
+            return scanDelay;
+        }
+
+        public void setScanDelay(Duration scanDelay) {
+            this.scanDelay = scanDelay;
+        }
+
+        public Duration getLease() {
+            return lease;
+        }
+
+        public void setLease(Duration lease) {
+            this.lease = lease;
+        }
+
+        public Duration getLateTolerance() {
+            return lateTolerance;
+        }
+
+        public void setLateTolerance(Duration lateTolerance) {
+            this.lateTolerance = lateTolerance;
+        }
+
+        public Duration getLookback() {
+            return lookback;
+        }
+
+        public void setLookback(Duration lookback) {
+            this.lookback = lookback;
+        }
+
+        public int getMaxSlotsPerTick() {
+            return maxSlotsPerTick;
+        }
+
+        public void setMaxSlotsPerTick(int maxSlotsPerTick) {
+            this.maxSlotsPerTick = maxSlotsPerTick;
+        }
+
+        public int getConcurrency() {
+            return concurrency;
+        }
+
+        public void setConcurrency(int concurrency) {
+            this.concurrency = concurrency;
         }
     }
 }

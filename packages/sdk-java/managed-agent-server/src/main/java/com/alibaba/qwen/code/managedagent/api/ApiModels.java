@@ -332,6 +332,43 @@ public final class ApiModels {
             WebShellSessionCapabilities capabilities) {
     }
 
+    /** H6b: the definition fields a create or revise request carries. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record AutomationDefinitionRequest(
+            @JsonProperty("session_id") String sessionId, String goal,
+            String cron, String timezone, String prompt,
+            @JsonProperty("session_mode") String sessionMode, String overlap,
+            @JsonProperty("catch_up") String catchUp,
+            @JsonProperty("catch_up_limit") Long catchUpLimit,
+            Boolean enabled) {
+    }
+
+    /** H6b: one automation definition at its current revision. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicAutomation(String id, String object,
+            @JsonProperty("session_id") String sessionId,
+            @JsonProperty("definition_revision") long definitionRevision,
+            String digest, String goal, String cron, String timezone,
+            @JsonProperty("session_mode") String sessionMode, String overlap,
+            @JsonProperty("catch_up") String catchUp,
+            @JsonProperty("catch_up_limit") Long catchUpLimit,
+            boolean enabled, String state,
+            @JsonProperty("created_at") long createdAt,
+            @JsonProperty("updated_at") long updatedAt) {
+    }
+
+    /** H6b: one occurrence decision of an automation, with its run's state. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicAutomationRun(String id, String object,
+            @JsonProperty("automation_id") String automationId,
+            @JsonProperty("session_id") String sessionId,
+            @JsonProperty("occurrence_key") String occurrenceKey, String slot,
+            String trigger, String outcome, String reason,
+            @JsonProperty("definition_revision") long definitionRevision,
+            String state, @JsonProperty("created_at") long createdAt,
+            @JsonProperty("updated_at") long updatedAt) {
+    }
+
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record PublicTask(String id, String object,
             @JsonProperty("session_id") String sessionId, String kind,

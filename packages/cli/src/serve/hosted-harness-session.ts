@@ -26,6 +26,7 @@ import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-ru
 import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-runtime/managed-mcp-protocol.js';
 import {
   ManagedSessionAlreadyExistsError,
+  ManagedSessionConflictError,
   ManagedSessionNotFoundError,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
@@ -57,6 +58,7 @@ import type {
   ManagedSessionJsonValue,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
+  ManagedSessionRecordError,
   assertManagedSessionDurableRef,
   assertManagedSessionStableId,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -73,6 +75,20 @@ import {
 } from './hosted-hook-session.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { HostedMonitorSession } from './hosted-monitor-session.js';
+import {
+  AutomationNotFoundError,
+  AutomationQuotaError,
+  AutomationRetiredError,
+  AutomationRevisionStaleError,
+  HostedAutomationSession,
+  isAutomationScheduleId,
+  isAutomationTrigger,
+} from './hosted-automation-session.js';
+import { AUTOMATION_INPUT_SOURCE } from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-operations.js';
+import type {
+  AutomationRun,
+  Schedule,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-record.js';
 import {
   HostedMonitorWakeScheduler,
   settlePendingMonitorInputs,
@@ -195,6 +211,8 @@ interface HostedSession {
   hooks?: HostedHookSession;
   childRuns?: HostedChildRunSession;
   monitors?: HostedMonitorSession;
+  /** H6: the Session's automation definitions and runs, on every profile. */
+  automations?: HostedAutomationSession;
   hooksBusy?: boolean;
   mcpBusy?: boolean;
   mcpClosing?: boolean;
@@ -346,10 +364,13 @@ function acceptedInputSequence(
 
 // H3: a monitor notification input is never a parked Turn — the wake pump
 // owns its consumption, so reopen and takeover arithmetic skips it exactly
-// like the close path settles it model-free.
+// like the close path settles it model-free. H6: an automation input rides
+// the same pump and the same rules.
 function isMonitorInput(event: ManagedSessionEvent): boolean {
   return (
-    event.kind === 'input.accepted' && event.payload['source'] === 'monitor'
+    event.kind === 'input.accepted' &&
+    (event.payload['source'] === 'monitor' ||
+      event.payload['source'] === AUTOMATION_INPUT_SOURCE)
   );
 }
 
@@ -1080,6 +1101,9 @@ async function verifyWorkspaceRestore(
         // their own record parsers up front.
         'child_run',
         'monitor_run',
+        // H6: definitions and runs, parsed by their own bodies.
+        'schedule',
+        'automation_run',
       ].includes(event.payload['domain'] as string)
     )
       throw new Error('Hosted recovery domain is unsupported.');
@@ -2251,15 +2275,27 @@ export function registerHostedHarnessSessionRoutes(
           },
           session.managed.authority.sessionHeader.sessionKey,
         );
-      // H3: the embedded wake scheduler of a Monitor-capable Session. A
-      // notification rides its observation revision; the pump delivers it
-      // as an ordinary text turn while the Session idles, queues in the
-      // journal while a turn runs, and leaves the remainder accurately
-      // pending the moment anything is parked or blocked.
+      // H6b: every hosted Session owns its automation funnel — a run's
+      // input needs no Runtime, and its settle reads the turn alone.
+      session.automations = new HostedAutomationSession(
+        {
+          authority: managed.authority,
+          resources: managed.resources,
+          sink: managed.sink,
+        },
+        managed.authority.sessionHeader.sessionKey,
+      );
+      // H3: the embedded wake scheduler of a notification-capable Session.
+      // A notification rides its observation revision (H6: an automation
+      // input rides its run's dispatch revision) the same way; the pump
+      // delivers it as an ordinary text turn while the Session idles,
+      // queues in the journal while a turn runs, and leaves the remainder
+      // accurately pending the moment anything is parked or blocked.
       if (
-        session.monitors &&
-        brokerOptions &&
-        (session.shell || session.backgroundLane)
+        (session.monitors &&
+          brokerOptions &&
+          (session.shell || session.backgroundLane)) ||
+        session.automations
       ) {
         const wakeBusy = () =>
           session.active !== undefined ||
@@ -2280,7 +2316,11 @@ export function registerHostedHarnessSessionRoutes(
             const authority = session.managed.authority;
             const first = pendingSessionInputs(
               authority.eventsInSequenceRange(1, authority.committedSequence),
-            ).find((input) => input.source === 'monitor');
+            ).find(
+              (input) =>
+                input.source === 'monitor' ||
+                input.source === AUTOMATION_INPUT_SOURCE,
+            );
             if (first === undefined) return undefined;
             const ref = assertManagedSessionDurableRef(
               first.contentRef,
@@ -2295,28 +2335,64 @@ export function registerHostedHarnessSessionRoutes(
             );
             if (typeof body?.['text'] !== 'string')
               throw new Error('Monitor wake input has no text.');
-            return { turnId: first.turnId, text: body['text'] };
+            return {
+              turnId: first.turnId,
+              text: body['text'],
+              source: first.source,
+            };
           },
           state: () =>
             wakeBlocked() ? 'blocked' : wakeBusy() ? 'busy' : 'idle',
-          runTurn: createMonitorWakeRunTurn({
-            session,
-            sessionId,
-            cwd,
-            executeHostedTurn: (promptId, text, abort) =>
-              executeHostedTurn(
-                session,
-                sessionId,
-                cwd,
-                promptId,
-                text,
-                abort,
-                brokerOptions,
-              ),
-            busy: wakeBusy,
-            needsRecovery: monitorWakeNeedsRecovery,
-            writeStderr: writeStderrLineSafe,
-          }),
+          runTurn: (() => {
+            const runWakeTurn = createMonitorWakeRunTurn({
+              session,
+              sessionId,
+              cwd,
+              executeHostedTurn: (promptId, text, abort) =>
+                executeHostedTurn(
+                  session,
+                  sessionId,
+                  cwd,
+                  promptId,
+                  text,
+                  abort,
+                  brokerOptions,
+                ),
+              busy: wakeBusy,
+              needsRecovery: monitorWakeNeedsRecovery,
+              writeStderr: writeStderrLineSafe,
+            });
+            // H6c: the automation turn settled; its run settles from the
+            // committed result now, and again on the next open if this
+            // commit is lost — never twice, never from memory.
+            const settleAutomation = async (turnId: string) => {
+              try {
+                await session.automations?.settleRun(turnId);
+              } catch (cause) {
+                writeStderrLineSafe(
+                  `qwen serve: Hosted automation run of turn ${turnId} could not be settled: ${String(cause)}`,
+                );
+              }
+            };
+            return async (turn) => {
+              let outcome: 'settled' | 'busy';
+              try {
+                outcome = await runWakeTurn(turn);
+              } catch (cause) {
+                // The runner wrote the turn's error result before throwing:
+                // the run fails from it now rather than on the next open.
+                if (turn.source === AUTOMATION_INPUT_SOURCE)
+                  await settleAutomation(turn.turnId);
+                throw cause;
+              }
+              if (
+                outcome === 'settled' &&
+                turn.source === AUTOMATION_INPUT_SOURCE
+              )
+                await settleAutomation(turn.turnId);
+              return outcome;
+            };
+          })(),
           failed: (cause) => {
             session.blocked = true;
             writeStderrLineSafe(
@@ -2776,6 +2852,16 @@ export function registerHostedHarnessSessionRoutes(
           });
       }
       sessions.set(sessionId, session);
+      // H6c: a settle → settle-revision crash window closes here. It runs
+      // beside the pump's first turn: the funnel serializes its commits and
+      // a settle is idempotent, so the order between the two is immaterial.
+      void session.automations
+        ?.reconcileRuns()
+        .catch((cause: unknown) =>
+          writeStderrLineSafe(
+            `qwen serve: Hosted automation runs of session ${sessionId} could not be reconciled: ${String(cause)}`,
+          ),
+        );
       session.monitorWake?.kick();
       // The registered Session now carries the owed lease itself; the
       // refusal-time record is discharged.
@@ -4392,15 +4478,31 @@ export function registerHostedHarnessSessionRoutes(
       await session.shell?.publisher?.close();
       await session.backgroundLane?.publisher?.close();
       await session.mcp?.close();
-      // No monitor notification may park the Session: every pending one
-      // settles cancelled here, model-free, before the log closes.
-      if (session.monitors)
+      // No monitor or automation notification may park the Session: every
+      // pending one settles cancelled here, model-free, before the log
+      // closes; a run whose input settled that way ends cancelled with an
+      // execution proven not to have started.
+      if (session.monitors || session.automations) {
         await settlePendingMonitorInputs({
           authority: session.managed.authority,
           sink: session.managed.sink,
           sessionId: req.params['id'],
           cwd: session.cwd,
+          sources: [
+            ...(session.monitors ? ['monitor'] : []),
+            ...(session.automations ? [AUTOMATION_INPUT_SOURCE] : []),
+          ],
         });
+        // A refused settle revision never blocks the close: the next open
+        // reconciles it again from the same committed facts.
+        await session.automations
+          ?.reconcileRuns()
+          .catch((cause: unknown) =>
+            writeStderrLineSafe(
+              `qwen serve: Hosted automation runs of session ${req.params['id']} could not be settled on close: ${String(cause)}`,
+            ),
+          );
+      }
       await session.managed.close();
       for (const stop of session.streams) stop();
       sessions.delete(req.params['id']);
@@ -4415,6 +4517,146 @@ export function registerHostedHarnessSessionRoutes(
       session.mcpBusy = false;
     }
   };
+  /**
+   * H6b/H6c: the control plane's automation operations onto this Session's
+   * journal. Each verb maps to one funnel act; replay-safety rides the
+   * funnel's derived command ids, so a redriven scanner or route request
+   * never mints a second definition revision, run or input. A turn in
+   * flight is not a refusal: a run's input queues behind it in the journal.
+   */
+  app.post('/session/:id/automations/operations', async (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    if (!session.automations)
+      return error(res, 409, 'hosted_automations_unavailable');
+    if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
+    const body = object(req.body);
+    const operationId = body?.['operationId'];
+    const kind = body?.['kind'];
+    const scheduleId = body?.['scheduleId'];
+    if (
+      typeof operationId !== 'string' ||
+      !HOSTED_UUID.test(operationId) ||
+      !isAutomationScheduleId(scheduleId)
+    ) {
+      return error(res, 400, 'invalid_automation_operation');
+    }
+    const automations = session.automations;
+    const scheduleSummary = (schedule: Schedule, revision: number) => ({
+      scheduleId: schedule.scheduleId,
+      revision,
+      definitionRevision: schedule.definitionRevision,
+      definitionDigest: schedule.definitionDigest,
+      goal: schedule.goal,
+      cron: schedule.cron,
+      timezone: schedule.timezone,
+      sessionMode: schedule.sessionMode,
+      targetSessionId: schedule.targetSessionId,
+      overlap: schedule.overlap,
+      catchUp: schedule.catchUp,
+      catchUpLimit: schedule.catchUpLimit,
+      enabled: schedule.enabled,
+      state: schedule.run.state,
+    });
+    const runSummary = (run: AutomationRun) => ({
+      automationRunId: run.automationRunId,
+      scheduleId: run.scheduleId,
+      definitionRevision: run.definitionRevision,
+      occurrenceKey: run.occurrenceKey,
+      state: run.run.state,
+      execution: run.run.execution,
+    });
+    let result: Record<string, unknown>;
+    try {
+      switch (kind) {
+        case 'define_schedule': {
+          const definition = object(body?.['definition']);
+          if (definition === null)
+            return error(res, 400, 'invalid_automation_operation');
+          const defined = await automations.define({ scheduleId, definition });
+          result = {
+            schedule: scheduleSummary(defined.schedule, defined.revision),
+            replayed: defined.replayed,
+          };
+          break;
+        }
+        case 'retire_schedule': {
+          const retired = await automations.retire(scheduleId);
+          result = {
+            schedule: scheduleSummary(retired.schedule, retired.revision),
+            replayed: retired.replayed,
+          };
+          break;
+        }
+        case 'fire_run': {
+          const definitionRevision = body?.['definitionRevision'];
+          const occurrenceKey = body?.['occurrenceKey'];
+          const trigger = body?.['trigger'];
+          const firedAt = body?.['firedAt'];
+          if (
+            !Number.isSafeInteger(definitionRevision) ||
+            (definitionRevision as number) < 1 ||
+            typeof occurrenceKey !== 'string' ||
+            occurrenceKey.length < 1 ||
+            occurrenceKey.length > 512 ||
+            !isAutomationTrigger(trigger) ||
+            !Number.isSafeInteger(firedAt) ||
+            (firedAt as number) < 0
+          ) {
+            return error(res, 400, 'invalid_automation_operation');
+          }
+          const fired = await automations.fire({
+            scheduleId,
+            definitionRevision: definitionRevision as number,
+            occurrenceKey,
+            trigger,
+            firedAt: firedAt as number,
+          });
+          result = {
+            run: runSummary(fired.run),
+            inputId: fired.inputId,
+            replayed: fired.replayed,
+          };
+          break;
+        }
+        default:
+          return error(res, 400, 'invalid_automation_operation');
+      }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (cause instanceof AutomationRevisionStaleError)
+        return error(res, 409, 'automation_revision_stale', message);
+      if (cause instanceof AutomationRetiredError)
+        return error(res, 409, 'automation_retired', message);
+      if (cause instanceof AutomationNotFoundError)
+        return error(res, 404, 'automation_not_found', message);
+      if (cause instanceof AutomationQuotaError)
+        return error(res, 409, 'automation_count_limit', message);
+      if (message.includes('is not enabled for submission'))
+        return error(res, 409, 'automation_mode_disabled', message);
+      if (
+        cause instanceof ManagedSessionRecordError &&
+        !(cause instanceof ManagedSessionConflictError)
+      )
+        return error(res, 400, 'invalid_automation_operation', message);
+      if (
+        message.includes('cannot follow') ||
+        message.includes('already') ||
+        message.includes('must bind') ||
+        message.includes('must be derived') ||
+        message.includes('must be this Session')
+      ) {
+        return error(res, 409, 'automation_operation_conflict', message);
+      }
+      writeStderrLineSafe(
+        `qwen serve: Hosted automation operation ${String(kind)} of session ${req.params['id']} failed: ${message}`,
+      );
+      return error(res, 503, 'automation_operation_failed', message);
+    }
+    session.monitorWake?.kick();
+    res.status(202).json({ operationId, state: 'settled', ...result });
+  });
+
   app.post('/session/:id/detach', (req, res) => {
     void close(req, res);
   });

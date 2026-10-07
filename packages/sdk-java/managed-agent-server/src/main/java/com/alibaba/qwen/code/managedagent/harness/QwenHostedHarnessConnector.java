@@ -396,6 +396,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public Map<String, Object> runAutomationOperation(String tenantId,
+            String sessionId, Map<String, Object> body) {
+        try {
+            return client().runAutomationOperation(
+                    attachment(tenantId, sessionId, true), body);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
     public String closeSession(String tenantId, String sessionId) {
         try {
             return doCloseSession(tenantId, sessionId);

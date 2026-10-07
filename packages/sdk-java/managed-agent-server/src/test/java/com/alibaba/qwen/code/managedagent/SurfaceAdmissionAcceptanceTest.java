@@ -131,7 +131,8 @@ class SurfaceAdmissionAcceptanceTest {
             "actor_required", "actor_scope_mismatch", "session_not_found",
             "workspace_not_found", "workspace_forbidden",
             "workspace_unavailable", "session_operation_forbidden",
-            "action_forbidden", "artifact_content_forbidden");
+            "action_forbidden", "artifact_content_forbidden",
+            "automation_not_found");
 
     @Autowired
     private MockMvc mvc;
@@ -153,6 +154,7 @@ class SurfaceAdmissionAcceptanceTest {
     private String pendingActionLegacy;
     private String artifactId;
     private String artifactItemId;
+    private String automation;
 
     @BeforeAll
     void graph() throws Exception {
@@ -194,6 +196,7 @@ class SurfaceAdmissionAcceptanceTest {
         legacy = createSession(tenant, OWNER, false);
         pendingAction = insertAction(tenant, bound);
         pendingActionLegacy = insertAction(tenant, legacy);
+        automation = insertAutomation(tenant, bound);
     }
 
     static Stream<SurfaceRegistry> everyRoute() {
@@ -225,7 +228,22 @@ class SurfaceAdmissionAcceptanceTest {
                 expect(entry, READER, 403, "workspace_forbidden");
             }
             case READER -> {
-                if (entry.capabilities().contains(Capability.SESSION_LIST)) {
+                if (entry.capabilities().contains(
+                        Capability.AUTOMATION_LIST)) {
+                    // The definition list is a tenant-scoped set filtered
+                    // below the Workspace read grant, like the Session
+                    // lists: the reader's page holds the bound Session's
+                    // definition, a stranger's or anonymous page does not.
+                    expectAutomationListed(entry, STRANGER, false);
+                    expectAutomationListed(entry, null, false);
+                    expectAutomationListed(entry, READER, true);
+                } else if (automationEntry(entry)) {
+                    // A definition below the grant is invisible under its
+                    // own family's code; the reader is admitted.
+                    expect(entry, STRANGER, 404, "automation_not_found");
+                    expect(entry, null, 404, "automation_not_found");
+                    expectAdmitted(entry, READER);
+                } else if (entry.capabilities().contains(Capability.SESSION_LIST)) {
                     // The Session lists are tenant-scoped sets with the
                     // bound rows filtered below the grant; the reader is
                     // the control that proves the bound row is listable.
@@ -259,7 +277,12 @@ class SurfaceAdmissionAcceptanceTest {
                 expect(entry, OPERATOR, 409, "workspace_unavailable");
             }
             case OWNER -> {
-                expect(entry, STRANGER, 404, "session_not_found");
+                // A stranger sees neither the Session nor, for the routes
+                // addressed by a definition, the definition.
+                expect(entry, STRANGER, 404, automationEntry(entry)
+                        && !entry.capabilities().contains(
+                                Capability.AUTOMATION_CREATE)
+                        ? "automation_not_found" : "session_not_found");
                 String code = entry.capabilities().contains(
                         Capability.ACTION_RESPOND) ? "action_forbidden"
                         : "session_operation_forbidden";
@@ -734,6 +757,50 @@ class SurfaceAdmissionAcceptanceTest {
                 .isNotIn(ADMISSION_REFUSALS);
     }
 
+    private static boolean automationEntry(SurfaceRegistry entry) {
+        return entry.capabilities().stream()
+                .anyMatch(capability -> capability.name()
+                        .startsWith("AUTOMATION_"));
+    }
+
+    /** The definition list probe: the seeded definition is listed exactly
+     * for a holder of the bound Session's Workspace read grant. */
+    private void expectAutomationListed(SurfaceRegistry entry, String actor,
+            boolean listed) throws Exception {
+        String caller = actor == null ? "anonymous" : actor;
+        MvcResult result = mvc.perform(requestFor(entry, actor, tenant))
+                .andReturn();
+        assertThat(result.getResponse().getStatus())
+                .as("%s answered %d (%s)", entry.routeKey(),
+                        result.getResponse().getStatus(), caller)
+                .isEqualTo(200);
+        List<String> ids = new ArrayList<>();
+        JSON.readTree(result.getResponse().getContentAsString())
+                .path("data").forEach(each -> ids.add(each.path("id").asText()));
+        assertThat(ids.contains(automation))
+                .as("%s lists the bound definition for %s", entry.routeKey(),
+                        caller)
+                .isEqualTo(listed);
+    }
+
+    /** One live automation definition of a Session, as the control plane
+     * mirrors it after the Harness committed revision 1. */
+    private String insertAutomation(String tenant, String sessionId) {
+        String id = "asch_" + UUID.randomUUID().toString().replace("-", "");
+        long now = System.currentTimeMillis();
+        jdbc.update("INSERT INTO qwen_managed_automation_schedule (tenant_id,"
+                + " schedule_id, session_id, workspace_id, actor_id,"
+                + " record_revision, definition_revision, definition_digest,"
+                + " goal, cron, timezone, session_mode, overlap, catch_up,"
+                + " catch_up_limit, enabled, state, blocked_reason, armed_at,"
+                + " watermark_slot, lease_owner, lease_until, fence,"
+                + " created_at, updated_at) VALUES (?, ?, ?, 'ws', ?, 1, 1, ?,"
+                + " 'probe', '0 2 * * *', 'UTC', 'persistent', 'skip', 'none',"
+                + " NULL, TRUE, 'live', NULL, ?, NULL, NULL, NULL, 0, ?, ?)",
+                tenant, id, sessionId, OWNER, "0".repeat(64), now, now, now);
+        return id;
+    }
+
     private void expect(SurfaceRegistry entry, String actor, int status,
             String code) throws Exception {
         String headerTenant = entry.ruleClass() == RuleClass.READER_ACTOR
@@ -808,6 +875,7 @@ class SurfaceAdmissionAcceptanceTest {
         variables.put("actionId", pendingAction);
         variables.put("workspaceId", "ws");
         variables.put("agentId", "agent-missing");
+        variables.put("automationId", automation);
         variables.put("itemId", artifactItemId);
         variables.put("artifactId", artifactId);
         variables.put("resourceId", "resource-0000000000000000");
@@ -941,6 +1009,10 @@ class SurfaceAdmissionAcceptanceTest {
             case ARTIFACT_LIST -> "{\"sessionId\":\"" + session + "\"}";
             case WORKSPACE_LIST -> "{}";
             case WORKSPACE_GET -> "{\"workspaceId\":\"ws\"}";
+            case AUTOMATION_CREATE -> "{\"session_id\":\"" + session
+                    + "\",\"goal\":\"probe\",\"cron\":\"0 2 * * *\","
+                    + "\"timezone\":\"UTC\",\"prompt\":\"probe\"}";
+            case AUTOMATION_UPDATE -> "{\"goal\":\"probe\"}";
             case AGENT_DEFINITION_CREATE, AGENT_DEFINITION_UPDATE ->
                 "{\"model\":{\"id\":\"qwen3-coder-plus\"},\"instructions\":"
                         + "\"Review code.\",\"tools\":[],"

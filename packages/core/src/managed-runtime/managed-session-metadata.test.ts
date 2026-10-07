@@ -687,8 +687,10 @@ describe('managed session metadata', () => {
     await withAuthority(harness, async (authority) => {
       await expect(
         authority.commitDomainRecord(
-          renameCommand('cmd-schedule'),
-          { domain: 'schedule', content: {} },
+          renameCommand('cmd-child-acceptance'),
+          // child_acceptance is registered and still disabled (H4b enables
+          // it); schedule was the probe until H6b enabled it.
+          { domain: 'child_acceptance', content: {} },
           { class: 'trusted_entry' },
         ),
       ).rejects.toThrow(/registered but not enabled for submission/);

@@ -10,6 +10,7 @@ import { managedToolDigest } from '../tools/managed-tool-protocol.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import {
   isDefinitionPinConsistent,
+  isTerminalRunState,
   parseMonitorRun,
   parseOperationGrant,
   type ExtensionRun,
@@ -23,6 +24,11 @@ import {
   type ManagedExtensionRecordBody,
   type ManagedSessionTaskView,
 } from './managed-extension-projection.js';
+import {
+  parseAutomationRunRecord,
+  parseScheduleRecord,
+} from './managed-automation-record.js';
+import { automationRunId } from './managed-automation-operations.js';
 import {
   authorizeParsedHarnessCheckpoint,
   encodeHarnessCheckpointV1,
@@ -41,6 +47,7 @@ import {
   ManagedSessionRecordError,
   assertManagedSessionDigest,
   assertManagedSessionDomainEnabled,
+  assertManagedSessionScheduleSessionModeEnabled,
   assertManagedSessionEventActor,
   assertManagedSessionStableId,
   assertManagedSessionTransaction,
@@ -1727,6 +1734,51 @@ export class LocalManagedSessionAuthority {
     reject: (message: string) => never,
   ): void {
     const previous = this.extensionRecord(domain, parsed.recordId);
+    if (domain === 'schedule') {
+      // H6b: a definition lives in its target Session, and only the modes
+      // the mode gate names open a chain (decisions 1 and 13).
+      // Every revision passes the mode gate: the mode is not a fixed key of
+      // the chain, so a later revision could otherwise name a mode no
+      // first revision may open.
+      const schedule = parseScheduleRecord(parsed.record);
+      assertManagedSessionScheduleSessionModeEnabled(schedule.sessionMode);
+      if (
+        schedule.sessionMode === 'persistent' &&
+        schedule.targetSessionId !== this.sessionKey.sessionId
+      ) {
+        reject(
+          'Schedule targetSessionId must be this Session for a persistent definition.',
+        );
+      }
+    }
+    if (domain === 'automation_run' && previous === undefined) {
+      // H6b: a run binds to its live definition at the current revision,
+      // and its id is the derivation of its own occurrence, so a second
+      // claim of one occurrence meets the committed run (decisions 2, 3).
+      const run = parseAutomationRunRecord(parsed.record);
+      const target = this.extensionRecord('schedule', run.scheduleId);
+      const schedule =
+        target === undefined ? undefined : parseScheduleRecord(target.record);
+      if (
+        schedule === undefined ||
+        isTerminalRunState(schedule.run.state) ||
+        schedule.definitionRevision !== run.definitionRevision ||
+        schedule.sessionMode !== run.sessionMode ||
+        schedule.targetSessionId !== run.targetSessionId
+      ) {
+        reject(
+          'Automation run must bind to its live definition at the current revision.',
+        );
+      }
+      if (
+        run.automationRunId !==
+        automationRunId(run.scheduleId, run.occurrenceKey)
+      ) {
+        reject(
+          'Automation run id must be derived from its definition and occurrence.',
+        );
+      }
+    }
     if (domain === 'mcp_configuration') {
       for (const configuration of this.extensionRecordsInDomain(domain)) {
         if (
@@ -2089,6 +2141,8 @@ export class LocalManagedSessionAuthority {
     } else if (domain === 'child_acceptance') {
       const acceptance = parseChildAcceptance(record);
       refs = [acceptance.contentRef, acceptance.terminalReceiptRef];
+    } else if (domain === 'schedule') {
+      refs = [parseScheduleRecord(record).promptRef];
     } else if (domain === 'monitor_run') {
       const monitor = parseMonitorRun(record);
       refs = [

@@ -130,7 +130,41 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'mcp_operation',
     'hook_registration',
     'hook_execution',
+    'schedule',
+    'automation_run',
   ];
+
+/**
+ * The Schedule target modes a Session may actually commit today (H6b).
+ * `schedule` and `automation_run` are enabled as domains, but a definition
+ * names the mode its runs execute in, and the authority admits a first
+ * definition revision only for a mode listed here; runs bind to a committed
+ * definition, so they are gated with it. `per_run` joins when the H4 child
+ * Session pipeline carries it. The Java store validates both bodies since
+ * H6a and deploys before any writer, keeping the server-first order.
+ */
+export const MANAGED_SESSION_ENABLED_SCHEDULE_SESSION_MODES = Object.freeze([
+  'persistent',
+] as const);
+
+/**
+ * The Schedule mode gate. This stands beside {@link
+ * assertManagedSessionDomainEnabled} for the two automation domains:
+ * enablement is decided per target mode, and the definition names the mode.
+ */
+export function assertManagedSessionScheduleSessionModeEnabled(
+  sessionMode: string,
+): void {
+  if (
+    !(
+      MANAGED_SESSION_ENABLED_SCHEDULE_SESSION_MODES as readonly string[]
+    ).includes(sessionMode)
+  ) {
+    throw new ManagedSessionRecordError(
+      `schedule session mode ${sessionMode} is not enabled for submission.`,
+    );
+  }
+}
 
 /**
  * The enabled domains whose records commit through the envelope path

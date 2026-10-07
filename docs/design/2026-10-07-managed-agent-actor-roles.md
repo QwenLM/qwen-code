@@ -368,7 +368,9 @@ Same as the issue's, plus the explicit deferrals named there:
 `api/SurfaceRegistry.java` at slice-A head carries 78 route constants: 32
 public + 24 WebShell + 22 internal handler methods of the ten controllers.
 The gate derives everything from scanning, so the count is information, not
-an asserted constant.
+an asserted constant. The H6b automation runtime added the seven public
+`/v1/agent-automations` routes of an eleventh controller (three `READER`,
+four `OWNER`; the matrix below lists them), so the registry now carries 85.
 
 Rule classes name today's admission: `WORKSPACE_CREATE` (2), `READER` (24),
 `READER_ACTOR` (6), `READER_ACTOR_POLICY` (1), `OPERATOR` as today's
@@ -424,6 +426,13 @@ store route and a publication route.
 | `POST /v1/agents`                                                                                                                | PUBLIC   | AGENT_DEFINITION_CREATE   | TENANT_SCOPED       |
 | `GET /v1/agents/{agentId}`                                                                                                       | PUBLIC   | AGENT_DEFINITION_GET      | TENANT_SCOPED       |
 | `POST /v1/agents/{agentId}`                                                                                                      | PUBLIC   | AGENT_DEFINITION_UPDATE   | TENANT_SCOPED       |
+| `POST /v1/agent-automations`                                                                                                     | PUBLIC   | AUTOMATION_CREATE         | OWNER               |
+| `GET /v1/agent-automations`                                                                                                      | PUBLIC   | AUTOMATION_LIST           | READER              |
+| `GET /v1/agent-automations/{automationId}`                                                                                       | PUBLIC   | AUTOMATION_GET            | READER              |
+| `POST /v1/agent-automations/{automationId}`                                                                                      | PUBLIC   | AUTOMATION_UPDATE         | OWNER               |
+| `DELETE /v1/agent-automations/{automationId}`                                                                                    | PUBLIC   | AUTOMATION_RETIRE         | OWNER               |
+| `POST /v1/agent-automations/{automationId}/runs`                                                                                 | PUBLIC   | AUTOMATION_RUN            | OWNER               |
+| `GET /v1/agent-automations/{automationId}/runs`                                                                                  | PUBLIC   | AUTOMATION_RUN_LIST       | READER              |
 | `POST /api/agent/web-shell/v1/tasks/query`                                                                                       | WEBSHELL | TASK_LIST                 | READER              |
 | `POST /api/agent/web-shell/v1/tasks/get`                                                                                         | WEBSHELL | TASK_GET                  | READER              |
 | `POST /api/agent/web-shell/v1/tasks/events/query`                                                                                | WEBSHELL | TASK_EVENT_LIST           | READER              |

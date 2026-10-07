@@ -180,7 +180,7 @@ A ∥ B 是安全的：文件不相交（A 纯新增；B 改 store 侧）。C �
 ## 10. Surface 路由矩阵（切片 A 注册表，双语摘要）
 
 切片 A 头的 `api/SurfaceRegistry.java` 携带 78 条路由常量：十个
-controller 的 32 公开 + 24 WebShell + 22 internal handler 方法。门禁从扫描推导一切，计数只是信息，不是被断言的常量。
+controller 的 32 公开 + 24 WebShell + 22 internal handler 方法。门禁从扫描推导一切，计数只是信息，不是被断言的常量。H6b 自动化运行时为第十一个 controller 增加了七条公开 `/v1/agent-automations` 路由（三条 `READER`、四条 `OWNER`；见下方矩阵），注册表现为 85 条。
 
 规则类按今天的准入命名：`WORKSPACE_CREATE`（2）、`READER`（24）、
 `READER_ACTOR`（6）、`READER_ACTOR_POLICY`（1）、`OPERATOR` 作为今天的
@@ -229,6 +229,13 @@ submitter 族的拒绝码，并且只有在探针需要不同期望时才拆开 
 | `POST /v1/agents`                                                                                                                | PUBLIC   | AGENT_DEFINITION_CREATE   | TENANT_SCOPED       |
 | `GET /v1/agents/{agentId}`                                                                                                       | PUBLIC   | AGENT_DEFINITION_GET      | TENANT_SCOPED       |
 | `POST /v1/agents/{agentId}`                                                                                                      | PUBLIC   | AGENT_DEFINITION_UPDATE   | TENANT_SCOPED       |
+| `POST /v1/agent-automations`                                                                                                     | PUBLIC   | AUTOMATION_CREATE         | OWNER               |
+| `GET /v1/agent-automations`                                                                                                      | PUBLIC   | AUTOMATION_LIST           | READER              |
+| `GET /v1/agent-automations/{automationId}`                                                                                       | PUBLIC   | AUTOMATION_GET            | READER              |
+| `POST /v1/agent-automations/{automationId}`                                                                                      | PUBLIC   | AUTOMATION_UPDATE         | OWNER               |
+| `DELETE /v1/agent-automations/{automationId}`                                                                                    | PUBLIC   | AUTOMATION_RETIRE         | OWNER               |
+| `POST /v1/agent-automations/{automationId}/runs`                                                                                 | PUBLIC   | AUTOMATION_RUN            | OWNER               |
+| `GET /v1/agent-automations/{automationId}/runs`                                                                                  | PUBLIC   | AUTOMATION_RUN_LIST       | READER              |
 | `POST /api/agent/web-shell/v1/tasks/query`                                                                                       | WEBSHELL | TASK_LIST                 | READER              |
 | `POST /api/agent/web-shell/v1/tasks/get`                                                                                         | WEBSHELL | TASK_GET                  | READER              |
 | `POST /api/agent/web-shell/v1/tasks/events/query`                                                                                | WEBSHELL | TASK_EVENT_LIST           | READER              |

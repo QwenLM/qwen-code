@@ -1129,26 +1129,28 @@ describe('managed session authority Stage H records', () => {
   it('refuses a record of a disabled domain on the generic paths', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
+      // child_acceptance is registered with a body and still disabled (H4b
+      // enables it); schedule was the probe until H6b enabled it.
       const recordRef = await harness.store.publish(
-        'managed-schedule',
+        'managed-child_acceptance',
         Buffer.from('{}', 'utf8'),
       );
       const sequence = authority.committedSequence;
       await expect(
         authority.appendExecution(
-          command('raw-schedule'),
+          command('raw-child-acceptance'),
           [
             {
               v: 1,
               sequence: sequence + 1,
-              eventId: 'schedule-1',
+              eventId: 'child_acceptance-1',
               sessionKey,
               kind: 'domain.committed',
               occurredAt: harness.now,
               payload: {
-                domain: 'schedule',
+                domain: 'child_acceptance',
                 version: 1,
-                operationId: 'raw-schedule',
+                operationId: 'raw-child-acceptance',
                 recordRef,
               },
             },

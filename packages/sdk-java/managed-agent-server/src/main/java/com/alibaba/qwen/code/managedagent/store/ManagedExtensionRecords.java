@@ -1573,11 +1573,11 @@ public final class ManagedExtensionRecords {
                 .isEmpty(), label + " must be a non-empty string");
         String value = node.textValue();
         long loneSurrogates = 0;
+        boolean control = false;
         for (int index = 0; index < value.length(); index++) {
             char character = value.charAt(index);
-            require(character > 0x1f
-                    && (character < 0x7f || character > 0x9f),
-                    label + " must not contain control characters");
+            control |= character <= 0x1f
+                    || (character >= 0x7f && character <= 0x9f);
             if (Character.isHighSurrogate(character)) {
                 if (index + 1 < value.length()
                         && Character.isLowSurrogate(value.charAt(index + 1))) {
@@ -1589,9 +1589,12 @@ public final class ManagedExtensionRecords {
                 loneSurrogates++;
             }
         }
+        // The byte budget is checked before the control rule, the order
+        // boundedString applies, so an input breaking both reports one clause.
         require(value.getBytes(StandardCharsets.UTF_8).length
                 + 2L * loneSurrogates <= MAX_TEXT_BYTES,
                 label + " exceeds " + MAX_TEXT_BYTES + " UTF-8 bytes");
+        require(!control, label + " must not contain control characters");
         return value;
     }
 
