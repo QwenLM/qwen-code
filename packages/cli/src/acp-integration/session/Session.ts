@@ -113,6 +113,7 @@ import {
   ToolErrorType,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  describeBridgedArgumentError,
   resolveDeferredToolCall,
   CreateSubSessionTool,
   fireNotificationHook,
@@ -13830,6 +13831,7 @@ export class Session implements SessionContext {
     }
 
     let toolName = fc.name;
+    let bridgedThroughToolCall = false;
     if (
       !appExecution &&
       this.config.getToolMode?.() === ToolMode.CodeModeOnly &&
@@ -13904,6 +13906,7 @@ export class Session implements SessionContext {
       toolName = resolution.tool.name;
       args = resolution.arguments;
       tool = resolution.tool;
+      bridgedThroughToolCall = true;
     }
 
     if (!tool) {
@@ -13991,7 +13994,22 @@ export class Session implements SessionContext {
           isTrustedLiveSpeakToUserTool;
         const toolEnabled =
           pm && !isTrustedLiveTool
-            ? await pm.isToolEnabled(policyToolName)
+            ? await pm.isToolEnabled(
+                policyToolName,
+                // Mirror the scheduler's L1 gate: a legacy-spelled MCP deny
+                // can only name the registered tool through its advertised
+                // aliases (#10199), and the server boundary only comes from
+                // the producer's own identity (R4-2).
+                tool instanceof DiscoveredMCPTool
+                  ? tool.permissionAliases
+                  : undefined,
+                tool instanceof DiscoveredMCPTool
+                  ? {
+                      serverName: tool.serverName,
+                      serverToolName: tool.serverToolName,
+                    }
+                  : undefined,
+              )
             : true;
         const enablementCancellation = cancelBeforeExecutionIfAborted(toolName);
         if (enablementCancellation) return enablementCancellation;
@@ -14218,6 +14236,7 @@ export class Session implements SessionContext {
                     toolParams,
                     this.config.getTargetDir(),
                     invocation.permissionAliases,
+                    invocation.mcpIdentity,
                   ),
                   requiresUserInteraction: false,
                   denyMessage: undefined,
@@ -16136,7 +16155,15 @@ export class Session implements SessionContext {
         } catch (e) {
           // No failure to report: see the outer catch.
           if (e instanceof ManagedRuntimeOutcomeUnknownError) throw e;
-          const error = e instanceof Error ? e : new Error(String(e));
+          const caught = e instanceof Error ? e : new Error(String(e));
+          // Same labelling as the scheduler: a target reached through
+          // tool_call names itself when its own build() rejects the arguments.
+          const error =
+            bridgedThroughToolCall && !toolBuildSucceeded
+              ? new Error(
+                  describeBridgedArgumentError(toolName, caught.message),
+                )
+              : caught;
           const hooksEnabledForError = !this.config.getDisableAllHooks?.();
           const messageBusForError = this.config.getMessageBus?.();
           const executionTimeoutException =

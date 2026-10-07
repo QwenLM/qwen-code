@@ -331,6 +331,252 @@ describe('trimModelsDevCatalog', () => {
     expect(models).not.toHaveProperty('claude-sonnet-4@default');
     expect(models).not.toHaveProperty('auto');
   });
+
+  it('keys a version under its dotted as well as its dashed spelling', () => {
+    // #13209: alibaba publishes the dashed spelling only, so the dotted one
+    // the vendor and every proxy in front of it also accept missed the
+    // catalog and fell through to the `/^qwen/` family rows.
+    const models = trimModelsDevCatalog(
+      {
+        alibaba: {
+          models: {
+            'qwen2-5-72b-instruct': chat('qwen2-5-72b-instruct', {
+              context: 131072,
+              output: 8192,
+            }),
+            'qwen2-5-vl-72b-instruct': chat(
+              'qwen2-5-vl-72b-instruct',
+              { context: 131072, output: 8192 },
+              ['text', 'image'],
+            ),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(models['qwen2.5-72b-instruct']).toEqual(
+      models['qwen2-5-72b-instruct'],
+    );
+    expect(models['qwen2.5-72b-instruct']).toEqual({
+      context: 131072,
+      output: 8192,
+      modalities: {},
+    });
+    expect(models['qwen2.5-vl-72b-instruct']).toEqual({
+      context: 131072,
+      output: 8192,
+      modalities: { image: true },
+    });
+  });
+
+  it('keys a dashed spelling next to the dotted one it committed', () => {
+    // zai publishes `glm-5.3-flash`; the reverse direction has to work too
+    // or a proxy exposing the dashed spelling misses the same entry.
+    const models = trimModelsDevCatalog(
+      {
+        zai: {
+          models: {
+            'glm-5.3-flash': chat('glm-5.3-flash', {
+              context: 1000000,
+              output: 131072,
+            }),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(models['glm-5-3-flash']).toEqual(models['glm-5.3-flash']);
+  });
+
+  it('never aliases over a key the projection committed itself', () => {
+    // Both spellings are real keys with different endpoint limits here, so
+    // each keeps its own numbers instead of one aliasing over the other.
+    const models = trimModelsDevCatalog(
+      {
+        zai: {
+          models: {
+            'glm-5.3-flash': chat('glm-5.3-flash', {
+              context: 1000000,
+              output: 131072,
+            }),
+          },
+        },
+        volcengine: {
+          models: {
+            'glm-5-3-flash-260828': chat('glm-5-3-flash-260828', {
+              context: 200000,
+              output: 16384,
+            }),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(models['glm-5.3-flash']).toEqual({
+      context: 1000000,
+      output: 131072,
+      modalities: {},
+    });
+    expect(models['glm-5-3-flash']).toEqual({
+      context: 200000,
+      output: 16384,
+      modalities: {},
+    });
+  });
+
+  it('never aliases onto a key the projection vetoed for disagreement', () => {
+    // zai and alibaba disagree on glm-5.2's output limit, so the veto above
+    // drops its limits and, the model being text-only, drops the key outright.
+    // The key stays reserved all the same: volcengine's dated twin normalizes
+    // to `glm-5-2` and respells onto `glm-5.2`, and writing there would assert
+    // the very numbers the disagreement rule refused to state.
+    const models = trimModelsDevCatalog(
+      {
+        zai: {
+          models: {
+            'glm-5.2': chat('glm-5.2', { context: 1000000, output: 131072 }),
+          },
+        },
+        alibaba: {
+          models: {
+            'glm-5.2': chat('glm-5.2', { context: 1000000, output: 128000 }),
+          },
+        },
+        volcengine: {
+          models: {
+            'glm-5-2-260617': chat('glm-5-2-260617', {
+              context: 1000000,
+              output: 131072,
+            }),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(models['glm-5-2']).toEqual({
+      context: 1000000,
+      output: 131072,
+      modalities: {},
+    });
+    expect(models).not.toHaveProperty('glm-5.2');
+  });
+
+  it('drops an alias two spellings claim with different numbers', () => {
+    // versionSpellingAlias() is not injective once an id carries two version
+    // boundaries: both of these respell onto `1.1-x1.1`. Committing either
+    // would let provider iteration order choose the context window a user
+    // gets, so the alias goes unwritten and each source keeps its own numbers.
+    const models = trimModelsDevCatalog(
+      {
+        zai: {
+          models: {
+            '1.1-x1-1': chat('1.1-x1-1', { context: 111000, output: 1000 }),
+          },
+        },
+        alibaba: {
+          models: {
+            '1-1-x1.1': chat('1-1-x1.1', { context: 222000, output: 2000 }),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(models).not.toHaveProperty('1.1-x1.1');
+    expect(models['1.1-x1-1']).toEqual({
+      context: 111000,
+      output: 1000,
+      modalities: {},
+    });
+    expect(models['1-1-x1.1']).toEqual({
+      context: 222000,
+      output: 2000,
+      modalities: {},
+    });
+  });
+
+  it('keeps an alias two spellings claim with the same facts from different providers', () => {
+    // The twins agree on limits and on the modality set, but that set arrives
+    // from different providers in a different order: `1.1-x1-1` gets pdf from
+    // zai then image from alibaba, `1-1-x1.1` gets image from alibaba then pdf
+    // from volcengine. Merging in provider order would let sameEntry read the
+    // two as a disagreement and drop the alias — the #13209 regex fallback this
+    // pass exists to remove, with nothing actually disagreeing.
+    const models = trimModelsDevCatalog(
+      {
+        zai: {
+          models: {
+            '1.1-x1-1': chat('1.1-x1-1', { context: 111000, output: 1000 }, [
+              'text',
+              'pdf',
+            ]),
+          },
+        },
+        alibaba: {
+          models: {
+            '1.1-x1-1': chat('1.1-x1-1', { context: 111000, output: 1000 }, [
+              'text',
+              'image',
+            ]),
+            '1-1-x1.1': chat('1-1-x1.1', { context: 111000, output: 1000 }, [
+              'text',
+              'image',
+            ]),
+          },
+        },
+        volcengine: {
+          models: {
+            '1-1-x1.1': chat('1-1-x1.1', { context: 111000, output: 1000 }, [
+              'text',
+              'pdf',
+            ]),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(models['1.1-x1.1']).toEqual({
+      context: 111000,
+      output: 1000,
+      modalities: { image: true, pdf: true },
+    });
+  });
+
+  it('adds no alias for a spelling normalize() already folds', () => {
+    // Claude's dotted minor is rewritten to dashes by normalize(), so the
+    // dotted key is unreachable by its own spelling and isModelCatalogKey
+    // rejects it — committing it would resurrect the dead-key class the
+    // fixed-point filter exists for.
+    const models = trimModelsDevCatalog(
+      {
+        anthropic: {
+          models: {
+            'claude-opus-4.8': chat('claude-opus-4.8', {
+              context: 1000000,
+              output: 128000,
+            }),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(Object.keys(models)).toEqual(['claude-opus-4-8']);
+  });
+
+  it('does not respell a size suffix into a minor version', () => {
+    const models = trimModelsDevCatalog(
+      {
+        google: {
+          models: {
+            'gemma-4-26b-a4b-it': chat('gemma-4-26b-a4b-it', {
+              context: 131072,
+            }),
+          },
+        },
+      },
+      NOW,
+    ).models;
+    expect(Object.keys(models)).toEqual(['gemma-4-26b-a4b-it']);
+  });
 });
 
 describe('refreshModelCatalog', () => {
@@ -596,8 +842,13 @@ describe('refreshModelCatalog', () => {
     expect(Date.parse(cache.fetchedAt)).toBeGreaterThan(Date.parse(LONG_AGO));
   });
 
-  it.each([undefined, 0, 2])(
-    'does not revalidate an older projection on 304 (%s)',
+  it.each([
+    undefined,
+    0,
+    MODEL_CATALOG_PROJECTION_VERSION - 1,
+    MODEL_CATALOG_PROJECTION_VERSION + 1,
+  ])(
+    'does not revalidate a mismatched projection on 304 (%s)',
     async (projection) => {
       writeJson(getModelCatalogCachePath(), {
         source: MODELS_DEV_URL,
