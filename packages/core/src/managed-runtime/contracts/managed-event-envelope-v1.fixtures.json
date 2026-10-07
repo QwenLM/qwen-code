@@ -506,6 +506,7 @@
         "v": 1,
         "sessionId": "session-1",
         "tenantId": "tenant-1",
+        "stream": "authoritative_journal",
         "sequence": 42,
         "eventId": "evt-000042",
         "kind": "domain.committed",
@@ -599,6 +600,24 @@
         "eventId": "evt-000042",
         "kind": "domain.committed",
         "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "sequence-at-max",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 9007199254740990,
+        "eventId": "evt-000001",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000101,
         "payloadRef": {
           "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
         }
@@ -776,6 +795,24 @@
         "eventId": "evt-000042",
         "kind": "domain.committed",
         "occurredAt": 8640000000000001,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "occurred-at-exactly-max",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 1,
+        "eventId": "evt-000001",
+        "kind": "domain.committed",
+        "occurredAt": 8640000000000000,
         "payloadRef": {
           "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
         }
@@ -1164,6 +1201,24 @@
       }
     },
     {
+      "id": "session-id-exactly-512-chars",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 1,
+        "eventId": "evt-000001",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000101,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
       "id": "workspace-and-digest-vary",
       "valid": true,
       "envelope": {
@@ -1308,6 +1363,24 @@
       }
     },
     {
+      "id": "tenant-id-control-character",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-\u0007",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
       "id": "workspace-id-empty",
       "valid": false,
       "envelope": {
@@ -1380,6 +1453,24 @@
       }
     },
     {
+      "id": "workspace-id-control-character",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-\u0007",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
       "id": "envelope-null",
       "valid": false,
       "envelope": null
@@ -1442,7 +1533,7 @@
       "valid": false,
       "envelope": {
         "v": 1,
-        "sessionId": "session-\u0085",
+        "sessionId": "session-1",
         "tenantId": "tenant-1",
         "workspaceId": "workspace-1",
         "stream": "authoritative_journal",
@@ -1460,6 +1551,7 @@
     {
       "id": "same-key",
       "same": true,
+      "parseable": [true, true],
       "first": {
         "v": 1,
         "sessionId": "session-1",
@@ -1492,6 +1584,7 @@
     {
       "id": "same-key-different-surroundings",
       "same": true,
+      "parseable": [true, true],
       "first": {
         "v": 1,
         "sessionId": "session-1",
@@ -1524,6 +1617,7 @@
     {
       "id": "different-tenant-same-key",
       "same": false,
+      "parseable": [true, true],
       "first": {
         "v": 1,
         "sessionId": "session-1",
@@ -1556,6 +1650,7 @@
     {
       "id": "different-sequence",
       "same": false,
+      "parseable": [true, true],
       "first": {
         "v": 1,
         "sessionId": "session-1",
@@ -1588,6 +1683,7 @@
     {
       "id": "different-session-id",
       "same": false,
+      "parseable": [true, true],
       "first": {
         "v": 1,
         "sessionId": "session-1",
@@ -1620,6 +1716,7 @@
     {
       "id": "unparseable-compares-false",
       "same": false,
+      "parseable": [true, false],
       "first": {
         "v": 1,
         "sessionId": "session-1",
@@ -1641,38 +1738,6 @@
         "workspaceId": "workspace-1",
         "stream": "authoritative_journal",
         "sequence": 42,
-        "kind": "domain.committed",
-        "occurredAt": 1760000000000,
-        "payloadRef": {
-          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
-        }
-      }
-    },
-    {
-      "id": "public-event-same-key-never-redelivers",
-      "same": false,
-      "first": {
-        "v": 1,
-        "sessionId": "session-1",
-        "tenantId": "tenant-1",
-        "workspaceId": "workspace-1",
-        "stream": "authoritative_journal",
-        "sequence": 42,
-        "eventId": "evt-000042",
-        "kind": "domain.committed",
-        "occurredAt": 1760000000000,
-        "payloadRef": {
-          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
-        }
-      },
-      "second": {
-        "v": 1,
-        "sessionId": "session-1",
-        "tenantId": "tenant-1",
-        "workspaceId": "workspace-1",
-        "stream": "public_event",
-        "sequence": 42,
-        "eventId": "evt-000042",
         "kind": "domain.committed",
         "occurredAt": 1760000000000,
         "payloadRef": {
@@ -1683,6 +1748,7 @@
     {
       "id": "both-unparseable-compare-false",
       "same": false,
+      "parseable": [false, false],
       "first": {
         "v": 1,
         "sessionId": "session-\u0085",

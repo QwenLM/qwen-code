@@ -96,13 +96,21 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["first", "id", "same", "second"],
+        "required": ["first", "id", "parseable", "same", "second"],
         "properties": {
           "id": {
             "$ref": "#/$defs/caseId"
           },
           "same": {
             "type": "boolean"
+          },
+          "parseable": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "boolean"
+            }
           },
           "first": {
             "type": "object"
