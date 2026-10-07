@@ -12135,7 +12135,7 @@ describe('Session', () => {
           first,
           second,
         ]);
-        expect(firstResult).toEqual({
+        expect(firstResult).toMatchObject({
           status: 'fulfilled',
           value: { stopReason: 'cancelled' },
         });
@@ -48701,7 +48701,7 @@ describe('Session', () => {
       session.dispose();
       aborting.abort('Error');
 
-      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
       const internals = session as unknown as {
         todoStopGuard: {
           isHardSuspended: boolean;
@@ -52468,7 +52468,7 @@ describe('Session', () => {
       releaseSecondSend();
 
       const [firstResult] = await Promise.all([firstPrompt, secondPrompt]);
-      expect(firstResult).toEqual({ stopReason: 'cancelled' });
+      expect(firstResult).toMatchObject({ stopReason: 'cancelled' });
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(5);
     });
 

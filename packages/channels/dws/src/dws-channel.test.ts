@@ -5899,7 +5899,9 @@ describe('DwsChannel', () => {
     );
     await task;
 
-    expect(cancelSession).toHaveBeenCalledWith('session-1');
+    expect(cancelSession).toHaveBeenCalledWith('session-1', {
+      cancelReason: 'interrupted',
+    });
     await vi.waitFor(() => {
       expect(client.removeImReaction).toHaveBeenCalledWith(
         'cid-1',
