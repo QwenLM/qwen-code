@@ -596,6 +596,59 @@ describe('extractShellOperationsAcrossCommand', () => {
     expect(across(command)).toEqual([write('/repo/settings.json')]);
   });
 
+  it('attributes the write to the real cwd when quoting hides the async operator (#12246)', () => {
+    // The `;` between the two quote fragments only exists under the
+    // escape-everywhere reading; bash reads `\'...'` as literal backslash
+    // plus a re-opened quote, so the second `cd` runs in a background
+    // subshell and the write lands in the first cd's target.
+    expect(
+      across(`cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json`),
+    ).toEqual([write(REPO_SETTINGS)]);
+  });
+
+  // Quoted shell metacharacters are legal in real directory names
+  // (`mkdir 'foo;bar'` is valid POSIX). tokenize strips the quotes before the
+  // cd target is classified, so the metacharacter escalation must only fire
+  // for a segment only one quote reading produces; when both readings segment
+  // the command identically a quoted `;`/`&` is a name, not a split artifact.
+  it.each([
+    ["cd 'foo;bar' && echo {} > settings.json", '/repo/foo;bar/settings.json'],
+    ["cd 'a&b' && echo {} > settings.json", '/repo/a&b/settings.json'],
+    ['cd "foo;bar" && echo {} > settings.json', '/repo/foo;bar/settings.json'],
+    // An unrelated backslash elsewhere in the command must not de-resolve a
+    // genuinely quoted metacharacter directory.
+    [
+      "cd 'foo;bar' && echo {} > settings.json && printf 'a\\n'",
+      '/repo/foo;bar/settings.json',
+    ],
+    // A quoted name holding both a backslash and a metacharacter is real
+    // syntax both readings segment identically, not an artifact (#R7-1).
+    [
+      "cd 'D:\\R&D\\build' && npm test > results.txt",
+      'D:/R&D/build/results.txt',
+    ],
+    [
+      "cd 'C:\\Users\\me\\R&D' && echo {} > settings.json",
+      'C:/Users/me/R&D/settings.json',
+    ],
+    [
+      "cd 'R&D\\shared' && echo {} > settings.json",
+      '/repo/R&D/shared/settings.json',
+    ],
+    ["cd 'r&d\\x' && printf p > .env", '/repo/r&d/x/.env'],
+    // The closing quote right after a backslash does not make the directory a
+    // quoting artifact either; bash really enters it (#R7-1).
+    [
+      "cd 'C:\\Users\\me\\R&D\\' && echo {} > settings.json",
+      'C:/Users/me/R&D/settings.json',
+    ],
+  ])(
+    'resolves the quoted metacharacter directory in %s without escalating',
+    (command, expectedPath) => {
+      expect(across(command)).toEqual([write(expectedPath)]);
+    },
+  );
+
   it.each(['pushd', 'pushd +2', 'pushd -2', 'pushd -n /tmp'])(
     'marks writes after `%s` as cwd-unknown',
     (command) => {
@@ -620,5 +673,219 @@ describe('extractShellOperationsAcrossCommand', () => {
     // matter, only that the call returns without throwing or hanging.
     const deep = 'bash -lc "bash -lc \\"bash -lc \'bash -lc echo > x.txt\'\\""';
     expect(() => across(deep)).not.toThrow();
+  });
+});
+
+describe('dual quote readings for backslash payloads (#12246 review)', () => {
+  it("pins the ANSI-C escape regime: $'…' spans process escapes (#R1-2)", () => {
+    // bash reads $'a\' ; rm -rf src/keepme' as ONE printf argument (the \'
+    // is an escaped quote in ANSI-C); the bash-accurate reading must not
+    // split at that `;`. Neither reading may publish the phantom rm op.
+    expect(across(`printf $'a\\' ; rm -rf src/keepme'`)).toEqual([]);
+  });
+
+  it('escalates quoting-artifact cd targets to cwdUnknown instead of a phantom cwd (#R1-3)', () => {
+    // The bash reading re-segments correctly but the cd target `x\;cd /etc`
+    // is a quoting artifact no real directory has; it must not become a
+    // concrete cwd writes are attributed to.
+    const ops = across(`cd 'x\\'';cd /etc' ; echo hi > .qwen/settings.json`);
+    expect(ops).toHaveLength(1);
+    expect(ops[0]).toMatchObject({
+      virtualTool: 'write_file',
+      filePath: REPO_SETTINGS,
+      cwdUnknown: true,
+      pathMayDependOnCwd: true,
+    });
+  });
+
+  it('threads the reading through a bash -lc wrapper (#R1-5)', () => {
+    const unwrapped = across(
+      `cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json`,
+    );
+    const wrapped = across(
+      `bash -lc "cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json'"`,
+    );
+    expect(wrapped).toEqual(unwrapped);
+  });
+
+  it.each([
+    [`echo 'a\\' # trailing && touch /tmp/x`],
+    [`echo 'a\\' # trailing | touch /tmp/x`],
+  ])('pins the union op set for the comment-shape row %s (#R1-6)', (cmd) => {
+    // bash runs only the echo (the `#` opens a comment); neither quote
+    // reading models comments, so the bash reading splits at the `&&`/`|`
+    // and emits a phantom touch op. The phantom is pre-existing (the union
+    // walk at the merge base produced the same op), and comment modeling
+    // belongs to the #11882 umbrella.
+    expect(across(cmd)).toEqual([write('/tmp/x')]);
+  });
+
+  it('keeps a hard deny for a command that is unbalanced under the bash reading (#R1-11)', () => {
+    // bash rejects `cd '.qwen\'; echo x > settings.json'` with an
+    // unterminated quote — nothing executes. The bash reading splits at the
+    // `;` and reports the write (the escape-everywhere reading keeps one
+    // quoted segment and reports nothing), so the conservative deny stands
+    // exactly as it did before the dual reading.
+    expect(across(`cd '.qwen\\'; echo x > settings.json'`)).toEqual([
+      write(REPO_SETTINGS),
+    ]);
+  });
+
+  it('pins an escape-everywhere-only write the bash reading quotes away (#R3-2)', () => {
+    // bash keeps the second line inside the quote opened at the end of the
+    // first, so the bash reading emits nothing; only the escape-everywhere
+    // reading splits at the newline and sees the write. Dropping that walk
+    // turns this red.
+    const ops = across(
+      "echo done # note 'a\\''\necho {} > .qwen/settings.json",
+    );
+    expect(ops).toEqual([write(REPO_SETTINGS)]);
+  });
+
+  it('ignores a backslash that only exists inside a heredoc body', () => {
+    // The walks split stripHeredocBodies(command), so a heredoc-only
+    // backslash never reaches a splitter; both readings see the same
+    // `cat > f <<EOF` and the gate must not change the result.
+    expect(across('cat > f <<EOF\necho a\\b\nEOF')).toEqual([write('/repo/f')]);
+  });
+
+  it('does not trust the first operand of a multi-operand cd (#R7-2)', () => {
+    // bash rejects `cd /evil 'a\'' ; cd /repo '` with `too many arguments`,
+    // so the cwd never moves; the write must stay attributed to the pre-cd
+    // cwd with the cwd-unknown flags, not published as a phantom /evil path
+    // a deny rule could cite.
+    expect(
+      across(`cd /evil 'a\\'' ; cd /repo ' ; echo {} > .qwen/settings.json`),
+    ).toEqual([uncertainWrite(REPO_SETTINGS)]);
+    expect(
+      across(`cd .qwen 'a\\'' ; cd src ' ; echo {} > settings.json`),
+    ).toEqual([uncertainWrite('/repo/settings.json')]);
+  });
+
+  it('drops a coarser escape-everywhere walk whose quoted span swallows real operators (#R7-3)', () => {
+    // The escape-everywhere reading keeps `; cd .qwen ; echo {} >
+    // settings.json` inside what it treats as an unterminated quote, then
+    // mines the redirect out of that quoted text against the stale cwd.
+    // bash sees four segments here, so only the bash walk survives the merge.
+    expect(
+      across(`cd sub ; echo 'a\\' ; cd .qwen ; echo {} > settings.json`),
+    ).toEqual([write('/repo/sub/.qwen/settings.json')]);
+  });
+});
+
+describe('R8 review round: operand counting, directional artifacts, bash-authoritative merge', () => {
+  // Comment words, redirect residue and process-substitution fragments are
+  // not `cd` operands: bash still performs the cd in every one of these, so
+  // the write must resolve against the cd target with no cwd-unknown flags
+  // (#12280 R7-2).
+  it.each([
+    ['cd .qwen # note\necho {} > settings.json', REPO_SETTINGS],
+    ['cd .qwen > "$LOG" ; echo {} > settings.json', REPO_SETTINGS],
+    [
+      'cd sub >& 2 ; cd .qwen ; echo {} > settings.json',
+      '/repo/sub/.qwen/settings.json',
+    ],
+    [
+      'cd sub > >(tee log) ; cd .qwen ; echo {} > settings.json',
+      '/repo/sub/.qwen/settings.json',
+    ],
+    [
+      'cd sub <> l ; cd .qwen ; echo {} > settings.json',
+      '/repo/sub/.qwen/settings.json',
+    ],
+    [
+      'cd sub 4>log ; cd .qwen ; echo {} > settings.json',
+      '/repo/sub/.qwen/settings.json',
+    ],
+    ['cd .qwen {fd}>log ; echo {} > settings.json', REPO_SETTINGS],
+  ])(
+    'counts only real cd operands in `%s` (#R7-2)',
+    (command, expectedPath) => {
+      expect(across(command)).toEqual([write(expectedPath)]);
+    },
+  );
+
+  // An unrelated quote divergence elsewhere in the command must not mark a
+  // genuine backslash-bearing directory as a split artifact (#12280 R7-1).
+  it('resolves a genuine directory despite an unrelated divergence (#R7-1)', () => {
+    expect(
+      across(`printf 'a\\' ; cd 'x>y\\z' && echo {} > settings.json`),
+    ).toEqual([write('/repo/x>y/z/settings.json')]);
+  });
+
+  // When the two readings tie, the bash walk sees nothing (its last segment
+  // is one quoted blob) and the escape walk is the only one that surfaces the
+  // write bash really performs (#12280 R7-3 tie).
+  it('recovers the write a comment-sabotaged bash reading quotes away (#R7-3 tie)', () => {
+    expect(
+      across(`cd .qwen ; echo # note 'a\\' ; echo '\necho {} > settings.json`),
+    ).toEqual([write(REPO_SETTINGS)]);
+  });
+
+  // When the readings cross, the escape walk's inverted quote parity hides
+  // the `cd sub` and mines a phantom against the stale cwd; the bash walk is
+  // authoritative, so only the real path is published (#12280 R7-3 crossing).
+  it('does not publish the phantom a crossing escape reading mines (#R7-3 crossing)', () => {
+    expect(
+      across(
+        `echo 'a\\' 'x;y' 'p;q' 'r;s' ; cd sub ; echo 'b\\' ; cd .qwen ; echo {} > settings.json`,
+      ),
+    ).toEqual([write('/repo/sub/.qwen/settings.json')]);
+  });
+
+  // The `#` comment's quote opens an unterminated quoted blob under bash's
+  // reading, so the bash walk only surfaces one.txt; the escape reading
+  // closes the quote differently and still sees the settings write, which
+  // must be merged in rather than dropped with the early return (#12280 R7-3
+  // open-quote).
+  it('merges the write a comment-opened quote hides from the bash reading (#R7-3 open-quote)', () => {
+    expect(
+      across(
+        `cd .qwen ; echo real > one.txt # note 'a\\''\necho {} > settings.json`,
+      ),
+    ).toEqual([write('/repo/.qwen/one.txt'), write(REPO_SETTINGS)]);
+    expect(
+      across(
+        `echo real > one.txt ; cd .qwen ; echo done # note 'a\\''\necho {} > settings.json`,
+      ),
+    ).toEqual([write('/repo/one.txt'), write(REPO_SETTINGS)]);
+  });
+
+  // The bash walk finds no operation here (its last segment is one quoted
+  // blob), so the fallback runs. It must keep the boundaries bash's reading
+  // already found: re-walking under the escape-everywhere reading alone
+  // loses the `cd sub` and attributes the write to the pre-cd directory, and
+  // for a dynamic cd it drops the cwd-unknown flags (#12280 R9-2).
+  it('fallback keeps the bash-found boundaries and the cwd they establish (#R9-2)', () => {
+    expect(
+      across(`echo 'a\\' ; cd sub ; echo # note '\necho {} > settings.json`),
+    ).toEqual([write('/repo/sub/settings.json')]);
+    expect(
+      across(`echo 'a\\' ; cd $D ; echo # note '\necho {} > settings.json`),
+    ).toEqual([uncertainWrite('/repo/settings.json')]);
+  });
+
+  // The reading decision re-runs on the unwrapped payload, so wrapping the
+  // #R3-2 shape in a login shell cannot hide the write (#12280 R8-1).
+  it('re-runs the reading decision inside a shell wrapper (#R8-1)', () => {
+    const unwrapped = across(
+      `echo done # note 'a\\''\necho {} > .qwen/settings.json`,
+    );
+    const wrapped = across(
+      `bash -lc "echo done # note 'a\\''\necho {} > .qwen/settings.json"`,
+    );
+    expect(wrapped).toEqual([write(REPO_SETTINGS)]);
+    expect(wrapped).toEqual(unwrapped);
+  });
+
+  // When the outer command already produces an operation, no outer-level
+  // fallback runs, so the wrapper payload is the only place the write can
+  // surface; threading the outer reading into the recursion loses it.
+  it('re-decides the wrapped payload when outer segments also write (#R8-1)', () => {
+    expect(
+      across(
+        `echo real > one.txt && bash -lc "echo done # note 'a\\''\necho {} > .qwen/settings.json"`,
+      ),
+    ).toEqual([write('/repo/one.txt'), write(REPO_SETTINGS)]);
   });
 });
