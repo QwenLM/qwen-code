@@ -58,10 +58,13 @@ import { clampDialogHeight } from '../utils/layoutUtils.js';
 import {
   clipToWidth,
   getCachedStringWidth,
-  toCodePoints,
   truncateToWidth,
 } from '../utils/textUtils.js';
-import { regionListWindow, type DialogListItem } from './dialogs-core.js';
+import {
+  regionListWindow,
+  wrappedRows,
+  type DialogListItem,
+} from './dialogs-core.js';
 import { C } from './theme.js';
 import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
 
@@ -202,65 +205,32 @@ const WORKSPACE_PRIORITY_WARNING_ROWS = 3;
 const MODE_LIST_CHROME_ROWS = 5;
 const FOOTER_HINT_ROWS = 2;
 
-/**
- * Rows a run paints once the terminal word-wraps it at `width` columns. The
- * warning and the trust-gate refusal both stay wrapped (ink wraps the warning
- * too), so the budget has to pay for the rows they actually occupy: the
- * refusal had no term in it at all, and the warning's flat count only covers a
- * terminal wide enough for the text to fit inside it.
- *
- * Two renderer rules the count has to share: a newline always starts a new
- * row, and a word wider than the row is broken by cell width without splitting
- * a double-width glyph — so a spaceless CJK run packs nine characters into a
- * nineteen-column row, not the ten a whole-width division predicts.
- */
-export function wrappedRows(text: string, width: number): number {
-  if (width <= 0) {
-    return 1;
-  }
-  let rows = 0;
-  for (const line of text.split('\n')) {
-    let lineRows = 1;
-    let used = 0;
-    for (const word of line.split(' ')) {
-      const wordWidth = renderWidth(word);
-      if (used > 0) {
-        if (used + 1 + wordWidth > width) {
-          lineRows += 1;
-          used = 0;
-        } else {
-          used += 1;
-        }
-      }
-      if (wordWidth <= width - used) {
-        used += wordWidth;
-        continue;
-      }
-      // A word wider than the space left to it is broken across rows, cell by
-      // cell; a two-cell glyph that would straddle the boundary moves whole.
-      for (const char of toCodePoints(word)) {
-        const charWidth = renderWidth(char);
-        if (used > 0 && used + charWidth > width) {
-          lineRows += 1;
-          used = 0;
-        }
-        used += charWidth;
-      }
-    }
-    rows += lineRows;
-  }
-  return rows;
-}
-
-// The renderer's own width table paints the warning sign in one column where
-// string-width counts two, so the row charge is measured with it painted as
-// one — otherwise the shipped warning is overcharged a row at narrow widths.
-const renderWidth = (text: string): number =>
-  getCachedStringWidth(text.replaceAll('\u26A0', ' '));
-
 /** One margin row plus the wrapped text rows of a notice below the list. */
 function noticeRows(text: string | null, contentWidth: number): number {
   return text ? 1 + wrappedRows(text, contentWidth) : 0;
+}
+
+/**
+ * The rows a non-truncating DialogTitle paints: the subtitle is an adjacent
+ * run that wraps within the columns the title leaves, and the row box is as
+ * tall as the taller of the two — so the budget pays the measured maximum,
+ * not a flat row.
+ */
+function dialogTitleRows(
+  title: string,
+  subtitle: string | undefined,
+  contentWidth: number,
+): number {
+  const titleRun = `> ${title} `;
+  const titleRowCount = wrappedRows(titleRun, contentWidth);
+  if (!subtitle) return titleRowCount;
+  return Math.max(
+    titleRowCount,
+    wrappedRows(
+      subtitle,
+      Math.max(1, contentWidth - getCachedStringWidth(titleRun)),
+    ),
+  );
 }
 
 /**
@@ -648,13 +618,21 @@ export function OpenTuiEffortDialog(props: {
     value: tier,
     label: `${tier} — ${t(EFFORT_DESCRIPTIONS[tier])}`,
   }));
-  // The frame (4), the title row and its margin (2), the footer hint (2) and
-  // the unconfigured-model note (2) come off the region first; the tier list
-  // windows from what is left instead of the flat ten-row default.
+  // The frame (4), the title and its margin (measured — the subtitle wraps
+  // on narrow terminals), the footer hint (2) and the unconfigured-model
+  // note (2) come off the region first; the tier list windows from what is
+  // left instead of the flat ten-row default.
   const regionHeight = clampDialogHeight(props.availableTerminalHeight);
+  const { width } = useTerminalDimensions();
+  const effortTitleRows =
+    dialogTitleRows(
+      t('Reasoning Effort'),
+      t('(applied across all providers; clamped per model)'),
+      dialogContentWidth(width),
+    ) + 1;
   const tierWindow = regionListWindow(
     regionHeight,
-    configuredIndex === -1 ? 10 : 8,
+    7 + effortTitleRows + (configuredIndex === -1 ? 2 : 0),
     items.length,
     DEFAULT_MAX_ITEMS_TO_SHOW,
   );
@@ -809,12 +787,20 @@ export function OpenTuiOutputStyleDialog(props: {
   // (default), so pre-selecting index 0 in that case tells the truth. The name
   // is matched case-insensitively, like every other style lookup.
   const wanted = currentStyle?.name.toLowerCase();
-  // The frame (4), the title row and its margin (2) and the footer hint (2)
-  // come off the region first; the catalog windows from what is left instead
-  // of the flat ten-row default.
+  // The frame (4), the title and its margin (measured — the subtitle wraps
+  // on narrow terminals) and the footer hint (2) come off the region first;
+  // the catalog windows from what is left instead of the flat ten-row
+  // default.
+  const { width } = useTerminalDimensions();
+  const styleTitleRows =
+    dialogTitleRows(
+      t('Output Style'),
+      t('(applies now and persists to settings)'),
+      dialogContentWidth(width),
+    ) + 1;
   const styleWindow = regionListWindow(
     clampDialogHeight(props.availableTerminalHeight),
-    8,
+    7 + styleTitleRows,
     items.length,
     DEFAULT_MAX_ITEMS_TO_SHOW,
   );

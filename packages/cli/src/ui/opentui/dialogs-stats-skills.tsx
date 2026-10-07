@@ -403,7 +403,8 @@ export function OpenTuiStatsDialog(props: {
   );
 }
 
-/** ink's fixed skills body height. */
+/** The port's own body cap; ink windows its list at
+ * Math.min(15, Math.max(1, residual)) (SkillsManagerDialog). */
 const SKILLS_BODY_ROWS = 12;
 
 /** The skills frame's rows outside the scrollbox: border 2, padding 2, title 1, body margin 1. */
@@ -427,7 +428,7 @@ export function OpenTuiSkillsDialog(props: {
   // The frame is unshrinkable and the region's clip cannot cut the border,
   // so the body's explicit height windows itself from what the region leaves
   // after the frame's chrome: border and padding 4, the title row 1, the
-  // body's margin row 1. Without a budget the body keeps ink's twelve rows.
+  // body's margin row 1. Without a budget the body keeps its twelve rows.
   const regionHeight = clampDialogHeight(props.availableTerminalHeight);
   const bodyRows =
     regionHeight === undefined

@@ -635,10 +635,17 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
     >
       <box flexDirection="row" paddingLeft={1} paddingRight={1}>
         <text fg={C.text} attributes={1}>
-          {headerTitle}
+          {truncateToWidth(headerTitle, Math.max(0, boxWidth - 2))}
           {headerSuffix ? ' ' : ''}
         </text>
-        {headerSuffix ? <text fg={C.dim}>{headerSuffix}</text> : null}
+        {headerSuffix ? (
+          <text fg={C.dim}>
+            {truncateToWidth(
+              headerSuffix,
+              Math.max(0, boxWidth - 2 - headerTitle.length - 1),
+            )}
+          </text>
+        ) : null}
       </box>
 
       {/* Two states share this row at constant height so the visible-item
@@ -647,13 +654,23 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
         {isSearchActive ? (
           <text fg={C.dim}>
             {t('Search: ')}
-            <span fg={C.text}>{searchQuery}</span>
+            <span fg={C.text}>
+              {truncateToWidth(
+                searchQuery,
+                Math.max(0, boxWidth - 2 - t('Search: ').length - 1),
+              )}
+            </span>
             <span fg={C.dim}>{'▌'}</span>
           </text>
         ) : searchQuery !== '' ? (
           <text fg={C.dim}>
             {t('Filter: ')}
-            <span fg={C.text}>{searchQuery}</span>
+            <span fg={C.text}>
+              {truncateToWidth(
+                searchQuery,
+                Math.max(0, boxWidth - 2 - t('Filter: ').length),
+              )}
+            </span>
           </text>
         ) : (
           <text fg={C.dim}>{t('Press / to search')}</text>

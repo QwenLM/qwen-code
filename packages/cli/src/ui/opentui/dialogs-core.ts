@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getCachedStringWidth, toCodePoints } from '../utils/textUtils.js';
+
 /**
  * Pure dialog machinery for the OpenTUI dialog family (PR1 slice 3).
  *
@@ -82,6 +84,61 @@ export function followScrollOffset(
   }
   return scrollOffset;
 }
+
+/**
+ * Rows a run paints once the terminal word-wraps it at `width` columns. A
+ * budget that charges a wrapped run a flat row under-pays, so every chrome
+ * text run is measured here instead of hand-counted: the budget pays for the
+ * rows the run actually occupies.
+ *
+ * Two renderer rules the count has to share: a newline always starts a new
+ * row, and a word wider than the row is broken by cell width without splitting
+ * a double-width glyph — so a spaceless CJK run packs nine characters into a
+ * nineteen-column row, not the ten a whole-width division predicts.
+ */
+export function wrappedRows(text: string, width: number): number {
+  if (width <= 0) {
+    return 1;
+  }
+  let rows = 0;
+  for (const line of text.split('\n')) {
+    let lineRows = 1;
+    let used = 0;
+    for (const word of line.split(' ')) {
+      const wordWidth = renderWidth(word);
+      if (used > 0) {
+        if (used + 1 + wordWidth > width) {
+          lineRows += 1;
+          used = 0;
+        } else {
+          used += 1;
+        }
+      }
+      if (wordWidth <= width - used) {
+        used += wordWidth;
+        continue;
+      }
+      // A word wider than the space left to it is broken across rows, cell by
+      // cell; a two-cell glyph that would straddle the boundary moves whole.
+      for (const char of toCodePoints(word)) {
+        const charWidth = renderWidth(char);
+        if (used > 0 && used + charWidth > width) {
+          lineRows += 1;
+          used = 0;
+        }
+        used += charWidth;
+      }
+    }
+    rows += lineRows;
+  }
+  return rows;
+}
+
+// The renderer's own width table paints the warning sign in one column where
+// string-width counts two, so the row charge is measured with it painted as
+// one — otherwise the shipped warning is overcharged a row at narrow widths.
+const renderWidth = (text: string): number =>
+  getCachedStringWidth(text.replaceAll('\u26A0', ' '));
 
 export interface SelectionWindow {
   start: number;

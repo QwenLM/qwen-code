@@ -46,12 +46,13 @@ import {
   useDialogSelect,
   type DialogListItem,
 } from './dialogs-shared.js';
-import { regionListWindow } from './dialogs-core.js';
-import { wrappedRows } from './dialogs-modes.js';
+import { regionListWindow, wrappedRows } from './dialogs-core.js';
+
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 import {
   clipToWidth,
   getCachedStringWidth,
+  sanitizeTerminalLine,
   truncateToWidth,
 } from '../utils/textUtils.js';
 import { readHooksEnabled } from './dialogs-misc.js';
@@ -344,21 +345,46 @@ export function OpenTuiHooksDialog({
     ),
     contentWidth,
   );
+  // Every chrome text run is measured at the content width instead of
+  // charged a flat row: the header's count, the step titles and — in the
+  // handlers step — the user-supplied matcher all wrap on narrow terminals,
+  // and a flat constant pays for one row where two paint.
+  const total = listing.rows.length;
+  const countText =
+    total === 1
+      ? t('{{count}} hook configured', { count: String(total) })
+      : t('{{count}} hooks configured', { count: String(total) });
+  const headerRows = wrappedRows(`${t('Hooks')} · ${countText}`, contentWidth);
+  const matchersHeaderRows =
+    matcherEvent === undefined
+      ? 1
+      : wrappedRows(`${matcherEvent} - ${t('Matchers')}`, contentWidth);
+  const handlersHeaderRows =
+    handlerEvent === undefined
+      ? 2
+      : wrappedRows(
+          handlerMatcher === undefined
+            ? handlerEvent
+            : `${handlerEvent} - ${t('Matcher:')} ${sanitizeTerminalLine(handlerMatcher)}`,
+          contentWidth,
+        ) + wrappedRows(getHookShortDescription(handlerEvent), contentWidth);
+  // The fixed chrome: frame (4), the header, the body's margin row (1), the
+  // list's margin row (1) and the footer hint (2).
   const eventsWindow = regionListWindow(
     regionHeight,
-    9 + noticeRows + bannerRows + eventsNoteRows,
+    8 + headerRows + noticeRows + bannerRows + eventsNoteRows,
     eventItems.length,
     MAX_ROWS,
   );
   const matchersWindow = regionListWindow(
     regionHeight,
-    11 + noticeRows + bannerRows,
+    8 + headerRows + matchersHeaderRows + noticeRows + bannerRows,
     matcherItems.length,
     MAX_ROWS,
   );
   const handlersWindow = regionListWindow(
     regionHeight,
-    12 + noticeRows + bannerRows,
+    8 + headerRows + handlersHeaderRows + noticeRows + bannerRows,
     handlerItems.length,
     MAX_ROWS,
   );
@@ -411,11 +437,6 @@ export function OpenTuiHooksDialog({
     }
   });
 
-  const total = listing.rows.length;
-  const countText =
-    total === 1
-      ? t('{{count}} hook configured', { count: String(total) })
-      : t('{{count}} hooks configured', { count: String(total) });
   const wheel =
     (
       select: {
@@ -519,7 +540,10 @@ export function OpenTuiHooksDialog({
                 (entry) => entry.matcher === item.value,
               );
               const budget = labelBudget(matcherItems.length);
-              const nameRun = clipToWidth(item.value, budget);
+              const nameRun = clipToWidth(
+                sanitizeTerminalLine(item.value),
+                budget,
+              );
               const countRun = truncateToWidth(
                 `  · ${hookCountLabel(group?.count ?? 0)}`,
                 Math.max(0, budget - getCachedStringWidth(nameRun)),
@@ -542,7 +566,7 @@ export function OpenTuiHooksDialog({
       <text fg={C.text}>
         {matcher === undefined
           ? event
-          : `${event} - ${t('Matcher:')} ${matcher}`}
+          : `${event} - ${t('Matcher:')} ${sanitizeTerminalLine(matcher)}`}
       </text>
       <text fg={C.dim}>{getHookShortDescription(event)}</text>
       <box marginTop={1} flexDirection="column">
@@ -571,7 +595,7 @@ export function OpenTuiHooksDialog({
                 : row.hookType;
               const budget = labelBudget(handlerItems.length);
               const mainRun = clipToWidth(
-                `[${type}] ${row.displayText}`,
+                sanitizeTerminalLine(`[${type}] ${row.displayText}`),
                 budget,
               );
               const sourceRun = clipToWidth(

@@ -1273,18 +1273,19 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
   });
 });
 
-describe('the wizard frame keeps its natural height', () => {
+describe('the wizard frame sheds rows like ink', () => {
   beforeEach(() => {
     mocks.state.inputHandlers.length = 0;
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.pasteHandlers.length = 0;
   });
 
-  it('stays unshrinkable for the list-carrying wizard while the static summary sheds rows', () => {
-    // The wizard's radio lists do not window: a shrinkable frame would let a
-    // short region squeeze a list mid-rows while its keys stay live. The
-    // static no-config body keeps `shrinkable` so a short region sheds its
-    // blank rows the way ink does (F5-1).
+  it('stays shrinkable for the wizard, the way the static summary does', () => {
+    // /auth measured the difference at the default 80x24 (F5-1): unshrinkable,
+    // the frame is one row taller than the region and the clip takes the
+    // bottom border; shrinkable, it sheds a blank row like ink and closes
+    // cleanly. The wizard's radio lists do not window, so the frame keeps the
+    // same opt-in the static no-config body has.
     const wizard = render(
       <OpenTuiAuthDialog
         config={createMockConfig()}
@@ -1295,7 +1296,7 @@ describe('the wizard frame keeps its natural height', () => {
     );
     expect(
       wizard.container.firstElementChild?.getAttribute('data-flex-shrink'),
-    ).toBe('0');
+    ).toBe('1');
     wizard.unmount();
 
     const summary = render(

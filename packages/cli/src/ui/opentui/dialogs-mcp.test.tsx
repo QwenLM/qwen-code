@@ -150,6 +150,10 @@ const twelveResources: McpResourceInfo[] = Array.from(
   (_, i) => ({ uri: `res://resource_${i}` }),
 );
 
+const twelveServers: McpServerInfo[] = Array.from({ length: 12 }, (_, i) =>
+  serverWith({ name: `srv_${i}` }),
+);
+
 describe('OpenTuiMcpDialog list windows', () => {
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
@@ -225,5 +229,177 @@ describe('OpenTuiMcpDialog list windows', () => {
     expect(
       screen.getAllByText('res://resource_3').length,
     ).toBeGreaterThanOrEqual(1);
+  });
+
+  it('windows the server list, so Enter only opens a painted server', async () => {
+    // Twelve servers in one group paint thirteen rows (the group header plus
+    // one per server); the region-12 window pays three of them, and the
+    // window follows the cursor.
+    render(
+      <OpenTuiMcpDialog
+        servers={twelveServers}
+        availableTerminalHeight={12}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.queryByText('srv_11')).toBeNull();
+    for (let i = 0; i < 10; i++) await press('down');
+    // The cursor's row is painted; the rows scrolled past are not.
+    expect(screen.getByText('srv_10')).toBeTruthy();
+    expect(screen.queryByText('srv_0')).toBeNull();
+
+    await press('return');
+    // Enter opened the painted row's server: the detail header carries its
+    // name.
+    expect(screen.getByText('srv_10')).toBeTruthy();
+  });
+
+  it('refuses the arrows and Enter on a zero-row server window', async () => {
+    // Region 8 leaves the window max(0, min(10, 8 - 9)) = 0 rows.
+    render(
+      <OpenTuiMcpDialog
+        servers={twelveServers}
+        availableTerminalHeight={8}
+        onClose={() => {}}
+      />,
+    );
+
+    await press('down');
+    await press('return');
+    // The detail step never opens: the footer still belongs to the server
+    // list. (A 'Status:' tell would be blind here — the detail step's own
+    // window is zero rows at this region too.)
+    expect(screen.getByText(/Esc to close/)).toBeTruthy();
+    expect(screen.queryByText(/Esc to go back/)).toBeNull();
+  });
+
+  it('settles instead of ping-ponging when the tool window has zero rows', async () => {
+    // Region 12 mounts the tool list with a three-row window; shrinking to
+    // region 9 leaves zero rows, and the follow-scroll effect must hold the
+    // offset rather than alternate between the cursor and the list end
+    // forever.
+    const { rerender } = render(
+      <OpenTuiMcpDialog
+        servers={[serverWith({ toolCount: 12 })]}
+        getServerTools={() => twelveTools}
+        availableTerminalHeight={12}
+        onClose={() => {}}
+      />,
+    );
+    await press('return'); // server list → server detail
+    await press('return'); // detail → View tools → tool list
+    expect(screen.getByText('tool_0')).toBeTruthy();
+
+    rerender(
+      <OpenTuiMcpDialog
+        servers={[serverWith({ toolCount: 12 })]}
+        getServerTools={() => twelveTools}
+        availableTerminalHeight={9}
+        onClose={() => {}}
+      />,
+    );
+    // The render settles with nothing painted and no update-depth blowup.
+    expect(screen.queryByText('tool_0')).toBeNull();
+  });
+
+  it('clips the tool row’s trailing invalid-reason run to the columns the name leaves', async () => {
+    // The row is charged one physical row: the name column owns 42 columns
+    // (40 + the marker's 2), so the server-supplied reason clips at the
+    // remaining 50 instead of wrapping onto a row nobody paid for.
+    render(
+      <OpenTuiMcpDialog
+        servers={[serverWith({ toolCount: 1 })]}
+        getServerTools={() => [
+          { name: 'tool_0', isValid: false, invalidReason: 'x'.repeat(200) },
+        ]}
+        availableTerminalHeight={20}
+        onClose={() => {}}
+      />,
+    );
+    await press('return'); // server list → detail
+    await press('return'); // detail → View tools → tool list
+    expect(screen.getByText(`invalid: ${'x'.repeat(41)}`)).toBeTruthy();
+    expect(screen.queryByText('x'.repeat(42))).toBeNull();
+  });
+
+  it('clips both runs of a resource row to the one row it is charged', async () => {
+    // The friendly run was painted raw while the URI's budget subtracted its
+    // UTF-16 length. A double-width title makes the two disagree: fifty 界
+    // are 51 units but 101 columns, so a .length budget leaves the URI 39
+    // columns the row does not have; the column measurement leaves it none.
+    render(
+      <OpenTuiMcpDialog
+        servers={[serverWith({ resourceCount: 1 })]}
+        getServerResources={() => [
+          {
+            uri: 'res://' + 'u'.repeat(60),
+            title: '界'.repeat(50),
+          },
+        ]}
+        availableTerminalHeight={20}
+        onClose={() => {}}
+      />,
+    );
+    await press('return'); // server list → detail
+    await press('return'); // detail → View resources → resource list
+    const text = document.body.textContent ?? '';
+    expect(text.includes('u'.repeat(10))).toBe(false);
+    expect(text.includes(' ' + '界'.repeat(44))).toBe(true);
+    expect(text.includes('界'.repeat(45))).toBe(false);
+  });
+
+  it('refuses the resource list keys at a zero-row window', async () => {
+    const { rerender } = render(
+      <OpenTuiMcpDialog
+        servers={[serverWith({ resourceCount: 12 })]}
+        getServerResources={() => twelveResources}
+        availableTerminalHeight={12}
+        onClose={() => {}}
+      />,
+    );
+    await press('return'); // server list → server detail
+    await press('return'); // detail → View resources → resource list
+
+    rerender(
+      <OpenTuiMcpDialog
+        servers={[serverWith({ resourceCount: 12 })]}
+        getServerResources={() => twelveResources}
+        availableTerminalHeight={9}
+        onClose={() => {}}
+      />,
+    );
+    await press('down');
+    await press('return');
+    // No resource detail opens: the committed resource's URI would paint in
+    // the header, and it never does.
+    expect(screen.queryByText('res://resource_0')).toBeNull();
+  });
+
+  it('refuses the tool list keys at a zero-row window', async () => {
+    const { rerender } = render(
+      <OpenTuiMcpDialog
+        servers={[serverWith({ toolCount: 12 })]}
+        getServerTools={() => twelveTools}
+        availableTerminalHeight={12}
+        onClose={() => {}}
+      />,
+    );
+    await press('return'); // server list → server detail
+    await press('return'); // detail → tool list
+
+    rerender(
+      <OpenTuiMcpDialog
+        servers={[serverWith({ toolCount: 12 })]}
+        getServerTools={() => twelveTools}
+        availableTerminalHeight={9}
+        onClose={() => {}}
+      />,
+    );
+    await press('down');
+    await press('return');
+    // No tool detail opens: the tool body ('(no description)') never mounts.
+    expect(screen.queryByText('(no description)')).toBeNull();
+    expect(screen.queryByText('tool_0')).toBeNull();
   });
 });

@@ -67,10 +67,10 @@ import {
   FooterHint,
   useDialogSelect,
 } from './dialogs-shared.js';
-import { wrappedRows } from './dialogs-modes.js';
+
 import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
 import { OpenTuiStatsDialog } from './dialogs-stats-skills.js';
-import { followScrollOffset } from './dialogs-core.js';
+import { followScrollOffset, wrappedRows } from './dialogs-core.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 export type SettingsTab = 'settings' | 'status' | 'stats';

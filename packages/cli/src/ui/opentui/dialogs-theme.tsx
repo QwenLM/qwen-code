@@ -106,41 +106,63 @@ export interface ThemePreviewLayout {
   includePadding: boolean;
   codeBlockHeight: number;
   diffHeight: number;
+  /**
+   * False when the region cannot pay even the pane's one-row-per-pane
+   * minimum; the caller then skips the preview column entirely, mirroring
+   * the mode dialog's not-painted-at-all cap.
+   */
+  showPreview: boolean;
 }
 
 /**
- * Parity of ThemeDialog's preview height budget: the left column's height
- * sets the pane, padding is dropped when it does not fit, and the remaining
- * rows split 60/40 between the code block and the diff.
+ * The preview column's region-paid budget. ink floors the pane at the left
+ * column's height, but the port's left column is windowed from the region,
+ * so the pane derives from what the region leaves the columns — the frame's
+ * border and padding (4) and the footer hint (2) — not from the full item
+ * count, whose floor would grow the unshrinkable frame past the region.
+ * Rows shed in ink's order — padding, then the 60/40 split shrinks — and
+ * when even the pane's one-row-per-pane minimum does not fit, the pane does
+ * not paint at all.
  */
 export function computeThemePreviewLayout(
-  availableTerminalHeight: number | undefined,
-  themeItemCount: number,
+  regionHeight: number | undefined,
 ): ThemePreviewLayout {
-  const DIALOG_PADDING = 2;
-  const TAB_TO_SELECT_HEIGHT = 2;
-  const PREVIEW_PANE_FIXED_VERTICAL_SPACE = 8;
-
-  let budget = availableTerminalHeight ?? Number.MAX_SAFE_INTEGER;
-  budget -= 2; // Top and bottom borders.
-  budget -= TAB_TO_SELECT_HEIGHT;
-
-  let totalLeftHandSideHeight = DIALOG_PADDING + themeItemCount + 1;
-  let includePadding = true;
-  if (totalLeftHandSideHeight > budget) {
-    includePadding = false;
-    totalLeftHandSideHeight -= DIALOG_PADDING;
+  if (regionHeight === undefined) {
+    // No region: the samples paint whole.
+    return {
+      includePadding: true,
+      codeBlockHeight: 6,
+      diffHeight: 5,
+      showPreview: true,
+    };
   }
-
-  budget = Math.max(budget, totalLeftHandSideHeight);
-  const availableForCodeBlock =
-    budget - PREVIEW_PANE_FIXED_VERTICAL_SPACE - (includePadding ? 2 : 0) * 2;
-  const availableHeightForPanes = Math.max(0, availableForCodeBlock - 1);
-
+  const columnBudget = Math.max(0, regionHeight - 6);
+  // The pane's own chrome: the Preview title (1), the pane box's marginTop
+  // (1) and border (2), and the diff's marginTop (1).
+  const paneChromeRows = 5;
+  let includePadding = true;
+  let paneRows = columnBudget - paneChromeRows - 2; // paddingY costs 2
+  if (paneRows < 2) {
+    includePadding = false;
+    paneRows = columnBudget - paneChromeRows;
+  }
+  if (paneRows < 2) {
+    return {
+      includePadding: false,
+      codeBlockHeight: 0,
+      diffHeight: 0,
+      showPreview: false,
+    };
+  }
+  const codeBlockHeight = Math.min(
+    paneRows - 1,
+    Math.max(1, Math.ceil(paneRows * 0.6)),
+  );
   return {
     includePadding,
-    codeBlockHeight: Math.max(1, Math.ceil(availableHeightForPanes * 0.6)),
-    diffHeight: Math.max(1, Math.floor(availableHeightForPanes * 0.4)),
+    codeBlockHeight,
+    diffHeight: paneRows - codeBlockHeight,
+    showPreview: true,
   };
 }
 
@@ -233,10 +255,10 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
     selectedScope,
     settings,
   );
-  const layout = computeThemePreviewLayout(
-    availableTerminalHeight,
-    themeItems.length,
-  );
+  // The pane windows from the same region the list does; ink's floor at the
+  // left column's height is inert here because the windowed column never
+  // exceeds the budget the region leaves.
+  const layout = computeThemePreviewLayout(regionHeight);
 
   return (
     <DialogFrame>
@@ -275,37 +297,39 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
             />
           </box>
 
-          <box flexDirection="column" width="55%" paddingLeft={2}>
-            <text fg={C.text} attributes={1}>
-              {t('Preview')}
-            </text>
-            <box
-              flexDirection="column"
-              borderStyle="single"
-              borderColor={C.dim}
-              paddingX={1}
-              paddingY={layout.includePadding ? 1 : 0}
-              marginTop={1}
-            >
-              <code
-                content={THEME_PREVIEW_CODE}
-                filetype="python"
-                syntaxStyle={SYNTAX}
-                fg={C.text}
-                height={layout.codeBlockHeight}
-              />
-              <box marginTop={1}>
-                <diff
-                  diff={THEME_PREVIEW_DIFF}
-                  view="unified"
+          {layout.showPreview && (
+            <box flexDirection="column" width="55%" paddingLeft={2}>
+              <text fg={C.text} attributes={1}>
+                {t('Preview')}
+              </text>
+              <box
+                flexDirection="column"
+                borderStyle="single"
+                borderColor={C.dim}
+                paddingX={1}
+                paddingY={layout.includePadding ? 1 : 0}
+                marginTop={1}
+              >
+                <code
+                  content={THEME_PREVIEW_CODE}
                   filetype="python"
                   syntaxStyle={SYNTAX}
                   fg={C.text}
-                  height={layout.diffHeight}
+                  height={layout.codeBlockHeight}
                 />
+                <box marginTop={1}>
+                  <diff
+                    diff={THEME_PREVIEW_DIFF}
+                    view="unified"
+                    filetype="python"
+                    syntaxStyle={SYNTAX}
+                    fg={C.text}
+                    height={layout.diffHeight}
+                  />
+                </box>
               </box>
             </box>
-          </box>
+          )}
         </box>
       ) : (
         <box flexDirection="column">

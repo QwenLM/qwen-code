@@ -1696,6 +1696,31 @@ describe('OpenTuiInputPrompt completion dropdown (F-19)', () => {
     expect(text).not.toContain('[Skil');
   });
 
+  it('measures the label column in display columns of the sanitized text', async () => {
+    // The ANSI pair costs nine raw characters and zero painted columns: the
+    // column must size from the text as it paints (5 + 1 + 20 = 26), not as it
+    // is stored (5 + 1 + 29 = 35), so the description keeps 80 - 8 - 26 = 46
+    // columns instead of 37.
+    const text = await dropdownText({
+      name: 'stuck',
+      description: 'x'.repeat(120),
+      argumentHint: `\u001b[31m${'h'.repeat(20)}\u001b[0m`,
+    });
+    expect(text).toContain(`${'x'.repeat(45)}…`);
+    expect(text).not.toContain('\u001b');
+  });
+
+  it('flattens a newline inside an extension-owned label into one row', async () => {
+    // The label is the row's fourth untrusted run: a surviving \n paints a
+    // second physical row the dropdown's budget never charged.
+    const text = await dropdownText({
+      name: 'stuck\n> fake',
+      description: 'Diagnose a hung session',
+    });
+    expect(text).toContain('stuck > fake');
+    expect(text).not.toContain('stuck\n');
+  });
+
   it("does not charge a row's escape bytes against its column budget", async () => {
     // ink measures the whole run with `string-width`, which reads an ANSI
     // sequence as zero-width, and its terminal then paints the colour. This

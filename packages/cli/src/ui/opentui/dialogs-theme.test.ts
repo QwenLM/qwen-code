@@ -25,6 +25,8 @@ import {
   THEME_PREVIEW_CODE,
   THEME_PREVIEW_DIFF,
 } from './dialogs-theme.js';
+import { regionListWindow } from './dialogs-core.js';
+import { clampDialogHeight } from '../utils/layoutUtils.js';
 
 describe('capitalizeThemeType', () => {
   it('capitalizes the first character only', () => {
@@ -107,20 +109,56 @@ describe('preview pane content parity', () => {
 });
 
 describe('computeThemePreviewLayout', () => {
-  it('keeps padding when the left column fits', () => {
-    const layout = computeThemePreviewLayout(40, 5);
+  it('keeps padding when the region pays for it', () => {
+    const layout = computeThemePreviewLayout(40);
     expect(layout.includePadding).toBe(true);
     expect(layout.codeBlockHeight).toBeGreaterThan(0);
     expect(layout.diffHeight).toBeGreaterThan(0);
   });
 
-  it('drops padding when the theme list no longer fits', () => {
-    const layout = computeThemePreviewLayout(10, 20);
+  it('drops padding when the region cannot pay for it', () => {
+    const layout = computeThemePreviewLayout(14);
     expect(layout.includePadding).toBe(false);
+    expect(layout.showPreview).toBe(true);
   });
 
   it('splits the remaining space 60/40 between code and diff', () => {
-    const layout = computeThemePreviewLayout(60, 5);
+    const layout = computeThemePreviewLayout(60);
     expect(layout.codeBlockHeight).toBeGreaterThanOrEqual(layout.diffHeight);
+  });
+
+  it('stops painting the pane when even its one-row-per-pane minimum does not fit', () => {
+    // Region 12 leaves the columns 6 rows; the pane chrome pays 5, so one
+    // row is left — less than the code+diff minimum of two.
+    const layout = computeThemePreviewLayout(12);
+    expect(layout.showPreview).toBe(false);
+  });
+
+  it('keeps the frame no taller than the region at every budget', () => {
+    // The windowed left column plus the preview column share the frame: the
+    // frame (4) and the footer hint (2) come off the region, and whichever
+    // column is taller must fit what is left. With 16 theme items (15
+    // built-in + Auto) this is red at every region of 18 rows or fewer when
+    // the pane sizes from the unwindowed item count instead of the region.
+    const ITEM_COUNT = 16;
+    for (let height = 10; height <= 24; height++) {
+      const region = clampDialogHeight(height)!;
+      const window = regionListWindow(
+        region,
+        8,
+        ITEM_COUNT,
+        THEME_DIALOG_MAX_ITEMS_TO_SHOW,
+      );
+      const leftRows =
+        2 + window.maxItemsToShow + (window.showScrollArrows ? 2 : 0);
+      const layout = computeThemePreviewLayout(region);
+      const previewRows = layout.showPreview
+        ? 5 +
+          (layout.includePadding ? 2 : 0) +
+          layout.codeBlockHeight +
+          layout.diffHeight
+        : 0;
+      expect(6 + Math.max(leftRows, previewRows)).toBeLessThanOrEqual(region);
+    }
   });
 });

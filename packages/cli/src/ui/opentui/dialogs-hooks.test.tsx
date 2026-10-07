@@ -475,6 +475,12 @@ describe('OpenTuiHooksDialog', () => {
     // The read-only note only renders on the events step; its absence is the
     // navigation tell.
     expect(screen.queryByText(/This menu is read-only/)).toBeNull();
+    // And the opened step is the painted row's: the matchers header carries
+    // the third event's name, so an Enter that committed the wrong row (say
+    // items[0] instead of the cursor's) shows up here.
+    expect(
+      screen.getByText(new RegExp(`${DISPLAY_HOOK_EVENTS[2]!} - `)),
+    ).toBeTruthy();
   });
 
   it('clips a wrapping handler label to the one row the window charges for it', async () => {
@@ -505,6 +511,37 @@ describe('OpenTuiHooksDialog', () => {
 
     expect(screen.queryByText(`[command] ${'x'.repeat(200)}`)).toBeNull();
     expect(screen.getByText(`[command] ${'x'.repeat(77)}`)).toBeTruthy();
+  });
+
+  it('charges the handlers header the rows it wraps into', async () => {
+    // The header interpolates the user-supplied matcher: at this width the
+    // 200-column matcher wraps the header to four rows and the description
+    // adds one, so the chrome is 8 + 1 + 5 = 14 and the region-16 window pays
+    // two rows — not the four a flat two-row header charge would paint.
+    const entries: Array<{
+      eventName: HookEventName;
+      matcher: string;
+      config: HookConfig;
+    }> = ['./a.sh', './b.sh', './c.sh'].map((command) => ({
+      eventName: HookEventName.PreToolUse,
+      matcher: 'm'.repeat(200),
+      config: { type: HookType.Command, command },
+    }));
+    render(
+      <OpenTuiHooksDialog
+        config={configWith({ entries })}
+        settings={settingsWith()}
+        onClose={vi.fn()}
+        availableTerminalHeight={16}
+      />,
+    );
+
+    await press('return'); // PreToolUse (first event) → matchers step
+    await press('return'); // the single matcher → handlers step
+
+    expect(screen.getByText('[command] ./a.sh')).toBeTruthy();
+    expect(screen.getByText('[command] ./b.sh')).toBeTruthy();
+    expect(screen.queryByText('[command] ./c.sh')).toBeNull();
   });
 
   it('clips a wrapping matcher name to the one row the window charges for it', async () => {

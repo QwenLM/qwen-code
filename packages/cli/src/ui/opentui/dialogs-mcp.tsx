@@ -31,7 +31,12 @@ import {
 } from './dialogs-shared.js';
 import { findNextEnabledIndex, followScrollOffset } from './dialogs-core.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
-import { truncateToWidth } from '../utils/textUtils.js';
+import {
+  clipToWidth,
+  getCachedStringWidth,
+  sanitizeTerminalLine,
+  truncateToWidth,
+} from '../utils/textUtils.js';
 
 export const MCP_MANAGEMENT_STEPS = {
   SERVER_LIST: 'server-list',
@@ -403,11 +408,12 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
   } = useBatchSafeCursor();
 
   // The frame (4), the two-row step header, the body's margin row (1) and
-  // the footer hint (2) come off the region first; the tool and resource
-  // lists window from what is left instead of mapping every row into the
-  // clipped frame — where the cursor kept walking rows nothing painted and
-  // Enter opened them. A zero-row window refuses the arrows and Enter the
-  // way the shared list hook does.
+  // the footer hint (2) come off the region first; all four cursor-driven
+  // bodies — the server list, the detail's action column, and the tool and
+  // resource lists — window from what is left instead of mapping every row
+  // into the clipped frame, where the cursor kept walking rows nothing
+  // painted and Enter opened them. A zero-row window refuses the arrows and
+  // Enter the way the shared list hook does.
   const regionHeight = clampDialogHeight(props.availableTerminalHeight);
   const listWindowRows =
     regionHeight === undefined
@@ -442,6 +448,115 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
       })
     : [];
 
+  // The server list's rows are not 1:1 with the servers: each group paints a
+  // header row, and groups after the first pay the group box's marginBottom.
+  // The window charges those rows by windowing over the flat row list, with
+  // the cursor's position mapped to its row.
+  type ServerRow =
+    | { kind: 'gap'; key: string }
+    | { kind: 'hint'; key: string }
+    | { kind: 'header'; key: string; displayName: string; configPath?: string }
+    | {
+        kind: 'server';
+        key: string;
+        server: McpServerInfo;
+        flatIndex: number;
+      };
+  const serverRows: ServerRow[] = [];
+  {
+    let flatIndex = 0;
+    groupedServers.forEach((group, groupIndex) => {
+      if (groupIndex > 0) {
+        serverRows.push({ kind: 'gap', key: `gap-${group.source}` });
+      }
+      serverRows.push({
+        kind: 'header',
+        key: `header-${group.source}`,
+        displayName: group.displayName,
+        configPath: group.servers[0]?.configPath,
+      });
+      for (const server of group.servers) {
+        serverRows.push({
+          kind: 'server',
+          key: server.name,
+          server,
+          flatIndex,
+        });
+        flatIndex += 1;
+      }
+    });
+    // The debug hint's margin and text rows window with the list.
+    if (
+      serverRows.length > 0 &&
+      servers.some(
+        (s) => s.status === 'disconnected' && !s.isDisabled && !s.approvalState,
+      )
+    ) {
+      serverRows.push({ kind: 'gap', key: 'debug-gap' });
+      serverRows.push({ kind: 'hint', key: 'debug-hint' });
+    }
+  }
+  const serverCursorRow = Math.max(
+    0,
+    serverRows.findIndex(
+      (row) => row.kind === 'server' && row.flatIndex === serverCursor,
+    ),
+  );
+  const serverListOffset = useFollowScrollOffset(
+    serverCursorRow,
+    serverRows.length,
+    listWindowRows,
+  );
+
+  // The detail step is one flat column — info rows (each clipped to the one
+  // physical row the budget charges), the spacer, then the action rows — and
+  // the window follows the action cursor, so Enter always commits a painted
+  // action even when the info rows cost more than the window.
+  const detailInfoRows: Array<{ label: string; value: string; red?: boolean }> =
+    selectedServer
+      ? [
+          {
+            label: t('Status:'),
+            value: mcpServerStatusText(selectedServer),
+          },
+          {
+            label: t('Source:'),
+            value: mcpSourceDisplayName(selectedServer.source),
+          },
+          ...(selectedServer.command
+            ? [{ label: t('Command:'), value: selectedServer.command }]
+            : []),
+          {
+            label: t('Tools:'),
+            value: `${selectedServer.toolCount} ${selectedServer.toolCount === 1 ? t('tool') : t('tools')}`,
+          },
+          {
+            label: t('Prompts:'),
+            value: String(selectedServer.promptCount),
+          },
+          {
+            label: t('Resources:'),
+            value: String(selectedServer.resourceCount),
+          },
+          ...(selectedServer.error
+            ? [{ label: t('Error:'), value: selectedServer.error, red: true }]
+            : []),
+        ]
+      : [];
+  const detailRowCount =
+    detailInfoRows.length === 0
+      ? 0
+      : detailInfoRows.length + 1 + detailActions.length;
+  const detailCursorRow = Math.min(
+    detailInfoRows.length + 1 + actionCursor,
+    Math.max(0, detailRowCount - 1),
+  );
+  const detailOffset = useFollowScrollOffset(
+    detailCursorRow,
+    detailRowCount,
+    listWindowRows,
+  );
+
   const toolScrollOffset = useFollowScrollOffset(
     toolCursor,
     serverTools.length,
@@ -462,6 +577,12 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
         onClose();
         return;
       }
+
+      // The same zero-row refusal the tool and resource lists have: with no
+      // row painted, the arrows would walk an invisible cursor and Enter
+      // would open a server the user never saw highlighted. Escape stays live
+      // above — it addresses the dialog, not a row.
+      if (listWindowRows < 1) return;
       if (keyMatchers[Command.SELECTION_UP](original)) {
         setServerCursor(
           clampNavIndex(serverCursorRef.current, flatServers.length, 'up'),
@@ -487,6 +608,7 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
     }
 
     if (currentStep === MCP_MANAGEMENT_STEPS.SERVER_DETAIL) {
+      if (listWindowRows < 1) return;
       if (keyMatchers[Command.SELECTION_UP](original)) {
         setActionCursor(
           findNextEnabledIndex(detailActions, actionCursorRef.current, 'up'),
@@ -673,81 +795,86 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
         </box>
       );
     }
-    let flatIndex = 0;
+    const visibleRows = serverRows.slice(
+      serverListOffset,
+      serverListOffset + listWindowRows,
+    );
     return (
       <box flexDirection="column">
-        {groupedServers.map((group, groupIndex) => {
-          const startIndex = flatIndex;
-          flatIndex += group.servers.length;
-          return (
-            <box
-              key={group.source}
-              flexDirection="column"
-              marginBottom={groupIndex === groupedServers.length - 1 ? 0 : 1}
-            >
-              <box flexDirection="row">
-                <text fg={C.text} attributes={1}>
-                  {`  ${group.displayName}`}
+        {visibleRows.map((row) => {
+          if (row.kind === 'gap') {
+            return <box key={row.key} height={1} />;
+          }
+          if (row.kind === 'hint') {
+            return (
+              <box key={row.key} flexDirection="row">
+                <text fg={C.yellow}>
+                  {ICON.REFERENCE} {t('Run qwen --debug to see error logs')}
                 </text>
-                {group.servers[0]?.configPath ? (
-                  <text fg={C.dim}>{` (${group.servers[0].configPath})`}</text>
+              </box>
+            );
+          }
+          if (row.kind === 'header') {
+            // Every row the window paints is charged one physical row, so
+            // the config path — a real filesystem path — clips to what the
+            // group name leaves instead of wrapping onto a second row.
+            const nameRun = `  ${row.displayName}`;
+            return (
+              <box key={row.key} flexDirection="row">
+                <text fg={C.text} attributes={1}>
+                  {clipToWidth(sanitizeTerminalLine(nameRun), contentWidth)}
+                </text>
+                {row.configPath ? (
+                  <text fg={C.dim}>
+                    {clipToWidth(
+                      sanitizeTerminalLine(` (${row.configPath})`),
+                      Math.max(0, contentWidth - getCachedStringWidth(nameRun)),
+                    )}
+                  </text>
                 ) : null}
               </box>
-              {group.servers.map((server, itemIndex) => {
-                const globalIndex = startIndex + itemIndex;
-                const isSelected = globalIndex === serverCursor;
-                const color = mcpServerRowColor(server);
-                return (
-                  <box
-                    key={server.name}
-                    flexDirection="row"
-                    onMouseOver={() => setServerCursor(globalIndex)}
-                    onMouseUp={() => {
-                      setServerCursor(globalIndex);
-                      setSelectedServerName(server.name);
-                      setActionCursor(0);
-                      navigateToStep(MCP_MANAGEMENT_STEPS.SERVER_DETAIL);
-                    }}
-                  >
-                    <box width={2} flexShrink={0}>
-                      <text fg={isSelected ? C.accent : C.text}>
-                        {isSelected ? '❯' : ' '}
-                      </text>
-                    </box>
-                    <box width={30} flexShrink={0}>
-                      <text fg={isSelected ? C.accent : C.text}>
-                        {server.name}
-                      </text>
-                    </box>
-                    <text fg={C.dim}> · </text>
-                    <text fg={statusTextColor(color)}>
-                      {mcpStatusIcon(server.status)}{' '}
-                      {mcpServerStatusText(server)}
-                    </text>
-                    {server.invalidToolCount > 0 && (
-                      <text fg={C.yellow}>
-                        {' '}
-                        {t('{{count}} invalid tools', {
-                          count: String(server.invalidToolCount),
-                        })}
-                      </text>
-                    )}
-                  </box>
-                );
-              })}
+            );
+          }
+          const server = row.server;
+          const isSelected = row.flatIndex === serverCursor;
+          const color = mcpServerRowColor(server);
+          return (
+            <box
+              key={row.key}
+              flexDirection="row"
+              onMouseOver={() => setServerCursor(row.flatIndex)}
+              onMouseUp={() => {
+                setServerCursor(row.flatIndex);
+                setSelectedServerName(server.name);
+                setActionCursor(0);
+                navigateToStep(MCP_MANAGEMENT_STEPS.SERVER_DETAIL);
+              }}
+            >
+              <box width={2} flexShrink={0}>
+                <text fg={isSelected ? C.accent : C.text}>
+                  {isSelected ? '❯' : ' '}
+                </text>
+              </box>
+              <box width={30} flexShrink={0}>
+                <text fg={isSelected ? C.accent : C.text}>
+                  {truncateToWidth(sanitizeTerminalLine(server.name), 30)}
+                </text>
+              </box>
+              <text fg={C.dim}> · </text>
+              <text fg={statusTextColor(color)}>
+                {mcpStatusIcon(server.status)} {mcpServerStatusText(server)}
+              </text>
+              {server.invalidToolCount > 0 && (
+                <text fg={C.yellow}>
+                  {' '}
+                  {t('{{count}} invalid tools', {
+                    count: String(server.invalidToolCount),
+                  })}
+                </text>
+              )}
             </box>
           );
         })}
-        {servers.some(
-          (s) =>
-            s.status === 'disconnected' && !s.isDisabled && !s.approvalState,
-        ) && (
-          <box marginTop={1}>
-            <text fg={C.yellow}>
-              {ICON.REFERENCE} {t('Run qwen --debug to see error logs')}
-            </text>
-          </box>
-        )}
       </box>
     );
   };
@@ -756,59 +883,76 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
     if (!selectedServer) {
       return <text fg={C.red}>{t('No server selected')}</text>;
     }
-    const rows: Array<{ label: string; value: string }> = [
-      { label: t('Status:'), value: mcpServerStatusText(selectedServer) },
-      {
-        label: t('Source:'),
-        value: mcpSourceDisplayName(selectedServer.source),
-      },
-      {
-        label: t('Tools:'),
-        value: `${selectedServer.toolCount} ${selectedServer.toolCount === 1 ? t('tool') : t('tools')}`,
-      },
-      {
-        label: t('Prompts:'),
-        value: String(selectedServer.promptCount),
-      },
-      {
-        label: t('Resources:'),
-        value: String(selectedServer.resourceCount),
-      },
+    // One flat column, windowed from the same budget as the lists: each info
+    // value clips to the one physical row the window charges it (the command
+    // comes from the settings file and can be far longer than the width),
+    // and the window follows the action cursor so Enter always commits a
+    // painted action.
+    const flatRows: Array<
+      | {
+          kind: 'info';
+          key: string;
+          label: string;
+          value: string;
+          red: boolean;
+        }
+      | { kind: 'spacer'; key: string }
+      | {
+          kind: 'action';
+          key: string;
+          action: (typeof detailActions)[number];
+          index: number;
+        }
+    > = [
+      ...detailInfoRows.map((row) => ({
+        kind: 'info' as const,
+        key: row.label,
+        label: row.label,
+        value: row.value,
+        red: row.red ?? false,
+      })),
+      { kind: 'spacer' as const, key: 'spacer' },
+      ...detailActions.map((action, index) => ({
+        kind: 'action' as const,
+        key: action.key,
+        action,
+        index,
+      })),
     ];
-    if (selectedServer.command) {
-      rows.splice(2, 0, {
-        label: t('Command:'),
-        value: selectedServer.command,
-      });
-    }
+    const visibleRows = flatRows.slice(
+      detailOffset,
+      detailOffset + listWindowRows,
+    );
     return (
       <box flexDirection="column">
-        {rows.map((row) => (
-          <box key={row.label} flexDirection="row">
-            <box width={20} flexShrink={0}>
-              <text fg={C.text}>{row.label}</text>
-            </box>
-            <text fg={C.text}>{row.value}</text>
-          </box>
-        ))}
-        {selectedServer.error && (
-          <box flexDirection="row">
-            <box width={20} flexShrink={0}>
-              <text fg={C.red}>{t('Error:')}</text>
-            </box>
-            <text fg={C.red}>{selectedServer.error}</text>
-          </box>
-        )}
-        <box height={1} />
-        {detailActions.map((action, index) => {
-          const isSelected = index === actionCursor;
+        {visibleRows.map((row) => {
+          if (row.kind === 'spacer') {
+            return <box key={row.key} height={1} />;
+          }
+          if (row.kind === 'info') {
+            return (
+              <box key={row.key} flexDirection="row">
+                <box width={20} flexShrink={0}>
+                  <text fg={row.red ? C.red : C.text}>{row.label}</text>
+                </box>
+                <text fg={row.red ? C.red : C.text}>
+                  {clipToWidth(
+                    sanitizeTerminalLine(row.value),
+                    Math.max(0, contentWidth - 20),
+                  )}
+                </text>
+              </box>
+            );
+          }
+          const action = row.action;
+          const isSelected = row.index === actionCursor;
           return (
             <box
-              key={action.key}
+              key={row.key}
               flexDirection="row"
-              onMouseOver={() => setActionCursor(index)}
+              onMouseOver={() => setActionCursor(row.index)}
               onMouseUp={() => {
-                setActionCursor(index);
+                setActionCursor(row.index);
                 if (!selectedServer) return;
                 switch (action.action) {
                   case 'view-tools':
@@ -829,7 +973,12 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
                   {isSelected ? '›' : ' '}
                 </text>
               </box>
-              <text fg={isSelected ? C.green : C.text}>{action.label}</text>
+              <text fg={isSelected ? C.green : C.text}>
+                {clipToWidth(
+                  sanitizeTerminalLine(action.label),
+                  Math.max(0, contentWidth - 2),
+                )}
+              </text>
             </box>
           );
         })}
@@ -872,17 +1021,27 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
               </box>
               <box width={40} flexShrink={0}>
                 <text fg={isSelected ? C.accent : C.text}>
-                  {truncateToWidth(tool.name, 40)}
+                  {truncateToWidth(sanitizeTerminalLine(tool.name), 40)}
                 </text>
               </box>
               {!tool.isValid ? (
                 <text fg={C.yellow}>
-                  {t('invalid: {{reason}}', {
-                    reason: tool.invalidReason || t('unknown'),
-                  })}
+                  {clipToWidth(
+                    sanitizeTerminalLine(
+                      t('invalid: {{reason}}', {
+                        reason: tool.invalidReason || t('unknown'),
+                      }),
+                    ),
+                    Math.max(0, contentWidth - 42),
+                  )}
                 </text>
               ) : hints.length > 0 ? (
-                <text fg={C.dim}>{hints.join(', ')}</text>
+                <text fg={C.dim}>
+                  {clipToWidth(
+                    sanitizeTerminalLine(hints.join(', ')),
+                    Math.max(0, contentWidth - 42),
+                  )}
+                </text>
               ) : null}
             </box>
           );
@@ -917,12 +1076,19 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
         {visibleResources.map((resource, visibleIndex) => {
           const index = offset + visibleIndex;
           const isSelected = index === resourceCursor;
-          const friendly =
+          const friendly = sanitizeTerminalLine(
             resource.title && resource.title !== resource.uri
               ? resource.title
               : resource.name && resource.name !== resource.uri
                 ? resource.name
-                : '';
+                : '',
+          );
+          const friendlyRun = friendly ? ` ${friendly}` : '';
+          const friendlyWidth = getCachedStringWidth(friendlyRun);
+          const uriRun = truncateToWidth(
+            sanitizeTerminalLine(resource.uri),
+            Math.max(0, contentWidth - 2 - friendlyWidth),
+          );
           return (
             <box
               key={resource.uri}
@@ -939,16 +1105,18 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
                   {isSelected ? '❯' : ' '}
                 </text>
               </box>
-              <text fg={isSelected ? C.accent : C.text}>
-                {truncateToWidth(
-                  resource.uri,
-                  Math.max(
-                    0,
-                    contentWidth - 2 - (friendly ? friendly.length + 1 : 0),
-                  ),
-                )}
-              </text>
-              {friendly ? <text fg={C.dim}> {friendly}</text> : null}
+              <text fg={isSelected ? C.accent : C.text}>{uriRun}</text>
+              {friendlyRun ? (
+                <text fg={C.dim}>
+                  {clipToWidth(
+                    friendlyRun,
+                    Math.max(
+                      0,
+                      contentWidth - 2 - getCachedStringWidth(uriRun),
+                    ),
+                  )}
+                </text>
+              ) : null}
             </box>
           );
         })}

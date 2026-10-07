@@ -116,8 +116,8 @@ import {
   OpenTuiApprovalModeDialog,
   OpenTuiEffortDialog,
   OpenTuiOutputStyleDialog,
-  wrappedRows,
 } from './dialogs-modes.js';
+import { wrappedRows } from './dialogs-core.js';
 import {
   buildSettingsListItems,
   filterSettingsItems,
@@ -1050,6 +1050,27 @@ describe('OpenTuiOutputStyleDialog', () => {
 
   afterEach(() => {
     vi.unstubAllEnvs();
+  });
+
+  it('charges the title the rows it wraps into at narrow widths', async () => {
+    // At width 40 the title's subtitle wraps to three rows, so the chrome is
+    // 7 + 4 = 11 and the region-14 window pays the catalog one row plus the
+    // arrows. A flat one-row title charge would paint all six styles and grow
+    // the unshrinkable frame four rows past the region.
+    mocks.state.width = 40;
+    const harness = createHarness();
+    render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+        availableTerminalHeight={14}
+      />,
+    );
+
+    await waitFor(() => expect(queryRow('default — ')).not.toBeNull());
+    expect(queryRow('Concise — ')).toBeNull();
   });
 
   it('clips ten-row catalog labels to the columns a two-digit number column leaves', async () => {

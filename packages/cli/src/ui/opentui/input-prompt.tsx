@@ -1206,10 +1206,18 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // column it was sized for. completionModeRef only ever changes inside
   // refreshCompletion, alongside the setRawSuggestions that re-renders this
   // block.
+  // The column is sized from the text as it will paint: sanitized (the rows
+  // below sanitize the hint and badge) and measured in display columns — a
+  // raw `.length` charges ANSI escape bytes as columns and under-counts CJK,
+  // so the two halves of the row would disagree.
   const fullLabelWidth = (s: Suggestion) =>
-    [s.label ?? s.value, s.argumentHint, s.sourceBadge]
-      .filter(Boolean)
-      .join(' ').length;
+    getCachedStringWidth(
+      sanitizeTerminalLine(
+        [s.label ?? s.value, s.argumentHint, s.sourceBadge]
+          .filter(Boolean)
+          .join(' '),
+      ),
+    );
   const slashColumn = completionModeRef.current === CompletionMode.SLASH;
   // The half-width cap applies to ink's `contentWidth` — the row after the
   // 2-column active marker — not to the terminal width.
@@ -1307,7 +1315,11 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
             const originalIndex = startIndex + index;
             const isActive = originalIndex === activeIndex;
             const color = isActive ? C.accent : C.dim;
-            const label = suggestion.label ?? suggestion.value;
+            // The row's one-physical-row charge covers the label too: like
+            // the hint and badge, its bytes come from extensions/servers.
+            const label = sanitizeTerminalLine(
+              suggestion.label ?? suggestion.value,
+            );
             const sharedColumn = slashColumn || !!suggestion.description;
             // ink truncates the hint and the badge (`wrap="truncate-end"`) in
             // the columns the label column leaves after the label. @opentui has

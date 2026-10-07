@@ -41,8 +41,15 @@ import { toOriginalKey } from './key-map.js';
 import {
   findNextEnabledIndex,
   getSelectionScrollOffset,
+  wrappedRows,
 } from './dialogs-core.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
+import { dialogAreaWidth } from './dialogs-shared.js';
+import {
+  getCachedStringWidth,
+  sanitizeTerminalLine,
+  truncateToWidth,
+} from '../utils/textUtils.js';
 import { C } from './theme.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 
@@ -182,10 +189,18 @@ function ArenaStart({
   // from what is left. A zero-row window refuses the cursor keys and Space —
   // they address a row — while Enter stays live for the checks already made.
   const regionHeight = clampDialogHeight(propsRegionHeight);
+  const { width } = useTerminalDimensions();
+  // Each model row is charged one physical row, so the label — model labels
+  // come from the config — is clipped to what the row owns: the frame's
+  // content columns (region width minus border and padding) less the four
+  // columns of the `[x] ` checkbox.
+  const modelLabelWidth = Math.max(1, dialogAreaWidth(width) - 6 - 4);
   const guidanceRows =
     hasDisabledQwenOauth || needsMoreModels
       ? 1 + (hasDisabledQwenOauth ? 1 : 0) + (needsMoreModels ? 3 : 0)
       : 0;
+  // The empty branch paints a text row where the list would paint its first
+  // model row, so it pays the same one row the list would.
   const modelWindowRows =
     regionHeight === undefined
       ? modelItems.length
@@ -193,6 +208,7 @@ function ArenaStart({
           0,
           regionHeight -
             8 -
+            (modelItems.length === 0 ? 1 : 0) -
             (error ? 2 : 0) -
             guidanceRows -
             (showMoreModelsHint ? 3 : 0),
@@ -259,7 +275,10 @@ function ArenaStart({
                     fg={m.disabled ? C.dim : i === cursor ? C.text : C.dim}
                     attributes={!m.disabled && i === cursor ? 1 : 0}
                   >
-                    {m.label}
+                    {truncateToWidth(
+                      sanitizeTerminalLine(m.label),
+                      modelLabelWidth,
+                    )}
                   </text>
                 </box>
               );
@@ -616,6 +635,49 @@ function formatFileList(files: string[]): string {
   return `${visible.join(', ')}${suffix}`;
 }
 
+/**
+ * The rows AgentPreview paints: its margin and title, then each content run
+ * measured at the width the run's box actually gets — the pane is indented
+ * two columns and each value starts after its label, so a value wraps within
+ * what the label leaves.
+ */
+function measureAgentPreviewRows(
+  result: ArenaAgentResult,
+  frameContentWidth: number,
+): number {
+  const runWidth = Math.max(1, frameContentWidth - 2);
+  const approach = result.approachSummary ?? 'No approach summary available.';
+  const files = formatFileList(
+    (result.diffSummary?.files ?? []).map((f) => f.path),
+  );
+  const metrics = `${result.stats.outputTokens.toLocaleString()} tokens · ${formatDuration(result.stats.durationMs)} · ${result.stats.toolCalls} tools`;
+  const run = (label: string, value: string) =>
+    wrappedRows(value, Math.max(1, runWidth - getCachedStringWidth(label)));
+  return (
+    wrappedRows(`Quick Preview · ${result.model.modelId}`, frameContentWidth) +
+    1 + // the pane's marginTop
+    run('Approach: ', approach) +
+    run('Major files: ', files) +
+    run('Metrics: ', metrics)
+  );
+}
+
+/**
+ * The diff lines a region-capped pane paints: whole lines only, with the
+ * last painted row yielded to a truncation marker when the cap cuts.
+ */
+function cappedDiffLines(
+  lines: string[],
+  maxLines: number | undefined,
+): string[] {
+  if (maxLines === undefined || lines.length <= maxLines) return lines;
+  if (maxLines < 1) return [];
+  return [
+    ...lines.slice(0, maxLines - 1),
+    `… ${lines.length - (maxLines - 1)} more rows than the region leaves`,
+  ];
+}
+
 function AgentPreview({ result }: { result: ArenaAgentResult }) {
   const files = result.diffSummary?.files ?? [];
   return (
@@ -643,17 +705,26 @@ function AgentPreview({ result }: { result: ArenaAgentResult }) {
   );
 }
 
-function AgentDetailedDiff({ result }: { result: ArenaAgentResult }) {
-  const lines = visibleDiffLines(result.diff);
+function AgentDetailedDiff({
+  result,
+  maxLines,
+}: {
+  result: ArenaAgentResult;
+  /** Region-paid cap on painted body rows; undefined when there is no region. */
+  maxLines?: number;
+}) {
+  const lines = cappedDiffLines(visibleDiffLines(result.diff), maxLines);
   return (
     <box marginTop={1} flexDirection="column">
       <text fg={C.text} attributes={1}>
         {`Detailed Diff · ${result.model.modelId}`}
       </text>
       {lines.length === 0 ? (
-        <box marginLeft={2}>
-          <text fg={C.dim}>{'No diff available.'}</text>
-        </box>
+        maxLines === 0 ? null : (
+          <box marginLeft={2}>
+            <text fg={C.dim}>{'No diff available.'}</text>
+          </box>
+        )
       ) : (
         <box marginLeft={2} flexDirection="column">
           {lines.map((line, index) => (
@@ -687,8 +758,22 @@ function ArenaSelect({
       agents.findIndex((a) => isSuccessStatus(a.status)),
     ),
   );
-  const [showPreview, setShowPreview] = useState(false);
-  const [showDetailedDiff, setShowDetailedDiff] = useState(false);
+  // The pane toggles decide direction from the flag the current key burst
+  // sees: two `p` presses in one stdin read share one render closure, so a
+  // useState read there toggles twice off the same stale value and ends with
+  // the pane open at a zero-row window — the state the guard below exists to
+  // prevent. The ref half of the mirror is written synchronously with the
+  // state half, so the second press reads the first's write.
+  const {
+    value: showPreview,
+    ref: showPreviewRef,
+    setValue: setShowPreview,
+  } = useBatchSafeState(false);
+  const {
+    value: showDetailedDiff,
+    ref: showDetailedDiffRef,
+    setValue: setShowDetailedDiff,
+  } = useBatchSafeState(false);
 
   const rows = useMemo(
     () =>
@@ -792,10 +877,45 @@ function ArenaSelect({
   // panes — everything that addresses a row — refuse, while x and Esc stay
   // live (they address the session, not a row).
   const regionHeight = clampDialogHeight(availableTerminalHeight);
-  const agentWindowRows =
-    regionHeight === undefined
-      ? rows.length
-      : Math.max(0, Math.floor((regionHeight - 12) / 2));
+  const { width } = useTerminalDimensions();
+  // The frame pays a border column and two padding columns per side.
+  const frameContentWidth = Math.max(1, dialogAreaWidth(width) - 6);
+  // An open pane's rows come out of the list's window: the frame is
+  // unshrinkable inside the clipped region, so a pane added on top of a full
+  // window grows the frame past the region and the clip takes the pane the
+  // user opened it to read. The preview's runs are measured at the width
+  // they paint in (they word-wrap); the detailed diff gets a line cap from
+  // what the list's zero-row floor leaves, because its 181-line ceiling can
+  // never fit a region.
+  const previewRows =
+    showPreview && selectedResult
+      ? measureAgentPreviewRows(selectedResult, frameContentWidth)
+      : 0;
+  const diffOpen = Boolean(showDetailedDiff && selectedResult);
+  const diffLines = diffOpen ? visibleDiffLines(selectedResult?.diff) : [];
+  let agentWindowRows: number;
+  let diffLineCap: number | undefined;
+  if (regionHeight === undefined) {
+    agentWindowRows = rows.length;
+  } else {
+    const afterPanes = regionHeight - 12 - previewRows;
+    if (diffOpen) {
+      // The pane pays its margin and title rows, then as many diff lines as
+      // fit (one row for the empty diff's notice — which a zero-line budget
+      // does not paint); the list windows from the rest.
+      const lineBudget = Math.max(0, afterPanes - 2);
+      diffLineCap = lineBudget;
+      const painted =
+        diffLines.length === 0
+          ? lineBudget === 0
+            ? 0
+            : 1
+          : Math.min(diffLines.length, lineBudget);
+      agentWindowRows = Math.max(0, Math.floor((afterPanes - 2 - painted) / 2));
+    } else {
+      agentWindowRows = Math.max(0, Math.floor(afterPanes / 2));
+    }
+  }
   const agentOffset = getSelectionScrollOffset(
     sel,
     rows.length,
@@ -817,13 +937,14 @@ function ArenaSelect({
       if (o.name === 'p' || o.name === 'd') {
         // A zero-row window refuses to OPEN a pane — its rows come out of the
         // list — but never refuses to CLOSE one: the open pane is what eats
-        // the rows the list needs.
+        // the rows the list needs. Direction is read from the burst-live ref,
+        // not this render's closure.
         if (o.name === 'p') {
-          if (agentWindowRows < 1 && !showPreview) return;
-          setShowPreview((v) => !v);
+          if (agentWindowRows < 1 && !showPreviewRef.current) return;
+          setShowPreview(!showPreviewRef.current);
         } else {
-          if (agentWindowRows < 1 && !showDetailedDiff) return;
-          setShowDetailedDiff((v) => !v);
+          if (agentWindowRows < 1 && !showDetailedDiffRef.current) return;
+          setShowDetailedDiff(!showDetailedDiffRef.current);
         }
       } else if (o.name === 'x') void discardAll();
     }
@@ -871,7 +992,10 @@ function ArenaSelect({
                   <text
                     fg={row.disabled ? C.dim : i === sel ? C.green : C.text}
                   >
-                    {row.label}
+                    {truncateToWidth(
+                      sanitizeTerminalLine(row.label),
+                      Math.max(1, frameContentWidth - 2),
+                    )}
                   </text>
                   <box flexDirection="row">
                     <text fg={row.status.color}>{row.status.text}</text>
@@ -900,7 +1024,7 @@ function ArenaSelect({
         <AgentPreview result={selectedResult} />
       )}
       {showDetailedDiff && selectedResult && (
-        <AgentDetailedDiff result={selectedResult} />
+        <AgentDetailedDiff result={selectedResult} maxLines={diffLineCap} />
       )}
     </ArenaFrame>
   );

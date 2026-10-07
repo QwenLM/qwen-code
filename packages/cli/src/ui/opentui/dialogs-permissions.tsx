@@ -29,7 +29,11 @@ import { parseRule } from '@qwen-code/qwen-code-core/permissions/rule-parser.js'
 import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceContext.js';
 import { toOriginalKey } from './key-map.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
-import { matchesSearchQuery, regionListWindow } from './dialogs-core.js';
+import {
+  matchesSearchQuery,
+  regionListWindow,
+  wrappedRows,
+} from './dialogs-core.js';
 import {
   DialogFrame,
   DialogSelect,
@@ -39,8 +43,13 @@ import {
   useDialogSelect,
 } from './dialogs-shared.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
-import { wrappedRows } from './dialogs-modes.js';
-import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
+
+import {
+  clipToWidth,
+  getCachedStringWidth,
+  sanitizeTerminalLine,
+  truncateToWidth,
+} from '../utils/textUtils.js';
 
 export type PermissionsTabId = 'allow' | 'ask' | 'deny' | 'workspace';
 
@@ -360,8 +369,21 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
   const rowLabelWidth = (itemCount: number) =>
     Math.max(0, areaWidth - 2 - (String(itemCount).length + 2));
   // The scope step's chrome: frame (4), title (1), spacer (1), the rule block
-  // (2), spacer (1), the question (1) and the footer below the frame (2).
-  const scopeWindow = regionListWindow(regionHeight, 12, scopeItems.length, 10);
+  // (measured — the rule text is whatever was typed, so a flat count
+  // under-pays the moment it wraps), spacer (1), the question (1) and the
+  // footer below the frame (2). The block paints two columns in.
+  const scopeRuleBlockRows =
+    wrappedRows(sanitizeTerminalLine(pendingRuleText), areaWidth - 6) +
+    wrappedRows(
+      sanitizeTerminalLine(describePermissionRule(pendingRuleText)),
+      areaWidth - 6,
+    );
+  const scopeWindow = regionListWindow(
+    regionHeight,
+    10 + scopeRuleBlockRows,
+    scopeItems.length,
+    10,
+  );
   const scopeList = useDialogSelect({
     items: scopeItems,
     focused: view === 'add-rule-scope',
@@ -626,7 +648,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
               <text fg={C.dim}>{'- '}</text>
               <text fg={C.text}>
                 {truncateToWidth(
-                  dir,
+                  sanitizeTerminalLine(dir),
                   Math.max(0, areaWidth - 4 - getCachedStringWidth(suffix)),
                 )}
               </text>
@@ -645,7 +667,10 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
           onSelectIndex={dirList.selectIndex}
           renderLabel={(item, { titleColor }) => (
             <text fg={titleColor}>
-              {truncateToWidth(item.label, rowLabelWidth(dirListItems.length))}
+              {truncateToWidth(
+                sanitizeTerminalLine(item.label),
+                rowLabelWidth(dirListItems.length),
+              )}
             </text>
           )}
         />
@@ -706,9 +731,11 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
           <box height={1} />
           <box marginLeft={2} flexDirection="column">
             <text fg={C.text} attributes={1}>
-              {pendingRuleText}
+              {sanitizeTerminalLine(pendingRuleText)}
             </text>
-            <text fg={C.dim}>{describePermissionRule(pendingRuleText)}</text>
+            <text fg={C.dim}>
+              {sanitizeTerminalLine(describePermissionRule(pendingRuleText))}
+            </text>
           </box>
           <box height={1} />
           <text fg={C.text}>{t('Where should this rule be saved?')}</text>
@@ -723,9 +750,12 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
             onHover={scopeList.setActiveIndex}
             onSelectIndex={scopeList.selectIndex}
             renderLabel={(item, { titleColor }) => (
-              <text
-                fg={titleColor}
-              >{`${item.label}    ${item.description}`}</text>
+              <text fg={titleColor}>
+                {clipToWidth(
+                  `${item.label}    ${item.description}`,
+                  rowLabelWidth(scopeItems.length),
+                )}
+              </text>
             )}
           />
         </DialogFrame>
@@ -830,7 +860,10 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
         onSelectIndex={ruleList.selectIndex}
         renderLabel={(item, { titleColor }) => (
           <text fg={titleColor}>
-            {truncateToWidth(item.label, rowLabelWidth(ruleListItems.length))}
+            {truncateToWidth(
+              sanitizeTerminalLine(item.label),
+              rowLabelWidth(ruleListItems.length),
+            )}
           </text>
         )}
       />

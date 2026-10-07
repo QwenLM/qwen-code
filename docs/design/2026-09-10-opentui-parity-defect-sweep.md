@@ -2435,7 +2435,7 @@ them on a forty-row terminal — and at a region of fourteen rows or below the
 overlay still cannot fit, which Follow-ups records.
 
 The same pass also reaches the frames beside it — the shared chrome the auth,
-trust, branch, rewind, diff and subagents dialogs mount through, and the four
+trust, branch, rewind, diff and subagents dialogs mount through, and the five
 sibling frames (memory, statusline, stats, skills, arena) — which each opened
 one row below the region's top, so their bottom borders were measured painting
 past it. They now open flush with it, and they all stay unshrinkable: the
@@ -2448,10 +2448,10 @@ ink's stats dialog clips. One measured correction stands against the first
 phrasing of this rule: the region's clip cuts a child's text rows but not the
 frame's own border strokes, so a frame whose natural height exceeds the region
 still paints its bottom border past it, over whatever mounts below. That is why
-the three sized bodies that can produce such a height — the diff dialog's
-fourteen-row scroll region, the subagents dialog's twelve-row one and the
-skills dialog's twelve-row one — now window themselves from the region
-budget, leaving the unshrinkable frame's natural height no taller than the
+the sized bodies that can produce such a height — the diff dialog's
+fourteen-row scroll region, the subagents dialog's twelve-row one, the
+skills dialog's twelve-row one and the theme dialog's preview pane — now
+window themselves from the region budget, leaving the unshrinkable frame's natural height no taller than the
 region at every budget. A structural test pins each frame's flush opening and
 its refusal to shrink, the misc dialog's tests pin the diff and subagents
 windowed heights at the boundary, and the frames test pins the skills

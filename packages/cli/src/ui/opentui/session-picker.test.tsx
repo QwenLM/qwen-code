@@ -413,6 +413,25 @@ describe('OpenTuiSessionPicker', () => {
     expect(screen.getByText('(branch: feature)')).toBeTruthy();
     expect(titles()).toEqual(['Session 02']);
   });
+
+  it('clips the header title to the one physical row the budget charges', () => {
+    // RESERVED_LINES pays the header one row; an unclipped title wraps onto a
+    // second row the list's window thinks it owns. The box is 96 columns wide
+    // at this mocked width, and its padding takes one column per side.
+    renderPicker([session(1)], { title: 'T'.repeat(120) });
+    expect(screen.queryByText('T'.repeat(120))).toBeNull();
+    expect(screen.getByText(`${'T'.repeat(93)}…`)).toBeTruthy();
+  });
+
+  it('clips the search row to its one charged row', () => {
+    // The query is user-typed and unbounded; the row is charged one physical
+    // row, so it clips at 96 - 2 (padding) - 8 ('Search: ') - 1 (the cursor
+    // block) = 85 columns.
+    renderPicker([session(1)]);
+    for (let i = 0; i < 200; i++) typeChar('q');
+    expect(screen.queryByText('q'.repeat(200))).toBeNull();
+    expect(screen.getByText(`${'q'.repeat(84)}…`)).toBeTruthy();
+  });
 });
 
 describe('OpenTuiSessionPicker Space-to-preview', () => {
