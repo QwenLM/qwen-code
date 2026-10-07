@@ -1315,6 +1315,43 @@ describe('useMessageQueue', () => {
       });
     });
 
+    it('stops the idle barrier at the first waiting envelope, not the last', () => {
+      // With two envelopes waiting and user text between them, the whole
+      // content of the barrier is that the batch stops at the first. A
+      // `findLastIndex` scan batches `typed later` across both envelopes and
+      // delivers it ahead of the one accepted first — while a suite that only
+      // ever queues one envelope cannot tell the two scans apart.
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('typed first');
+        result.current.addPeerMessage('<envelope one>', 'Session A: one');
+        result.current.addMessage('typed between');
+        result.current.addPeerMessage('<envelope two>', 'Session A: two');
+      });
+
+      const submissions: Array<
+        ReturnType<typeof result.current.popNextSubmission>
+      > = [];
+      act(() => {
+        for (let i = 0; i < 4; i++) {
+          submissions.push(result.current.popNextSubmission());
+        }
+      });
+
+      // Arrival order, each envelope ahead of the text queued after it.
+      expect(submissions.map((submission) => submission?.kind)).toEqual([
+        'user',
+        'peer',
+        'user',
+        'peer',
+      ]);
+      expect(submissions[0]).toMatchObject({ modelText: 'typed first' });
+      expect(submissions[1]).toMatchObject({ modelText: '<envelope one>' });
+      expect(submissions[2]).toMatchObject({ modelText: 'typed between' });
+      expect(submissions[3]).toMatchObject({ modelText: '<envelope two>' });
+    });
+
     it('restores a failed peer admission ahead of the queue, still peer', () => {
       const { result } = renderHook(() => useMessageQueue());
 
@@ -1413,6 +1450,171 @@ describe('useMessageQueue', () => {
       });
       expect(drained).toEqual([]);
       expect(result.current.messageQueue).toEqual(['<envelope one>']);
+    });
+
+    it('drains user text queued behind an envelope this boundary cannot deliver', () => {
+      // The barrier's whole job is to stop text overtaking an envelope the
+      // boundary is about to submit. With no mid-turn delivery on offer nothing
+      // is taken here, so the envelope waits for Idle and the user's own input
+      // behind it must not be held for the rest of the turn with it.
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addPeerMessage('<envelope one>', 'Session A: one');
+        result.current.addMessage('typed text');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue(false, false, false);
+      });
+      expect(drained).toEqual(['typed text']);
+      expect(result.current.messageQueue).toEqual(['<envelope one>']);
+    });
+
+    it('ignores a "next" envelope as a barrier even with mid-turn delivery on', () => {
+      // Gating the barrier on the setting alone is not enough: `drainPeerEntries`
+      // skips a "next" by design, so this boundary takes nothing and the input
+      // queued behind that envelope still has to flow.
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addPeerMessage('<envelope next>', 'Session A: next', {
+          msgId: 'm1',
+          from: '/tmp/peer.sock',
+          toSessionId: 's1',
+          priority: 'next',
+        });
+        result.current.addMessage('typed text');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue(false, false, true);
+      });
+      expect(drained).toEqual(['typed text']);
+      expect(result.current.messageQueue).toEqual(['<envelope next>']);
+    });
+
+    it('holds user text behind the envelope this boundary is taking', () => {
+      // The other half of the rule: when the boundary is about to deliver an
+      // envelope, text queued behind it waits — the steer parts are pushed
+      // ahead of the peer parts, so draining it here would hand the model the
+      // later input before the envelope accepted first.
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addPeerMessage('<envelope one>', 'Session A: one', {
+          msgId: 'm1',
+          from: '/tmp/peer.sock',
+          toSessionId: 's1',
+          priority: 'now',
+        });
+        result.current.addMessage('typed text');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue(false, false, true);
+      });
+      expect(drained).toEqual([]);
+      expect(result.current.messageQueue).toEqual([
+        '<envelope one>',
+        'typed text',
+      ]);
+    });
+
+    it('keeps an entry the barrier left behind in the queue', () => {
+      // `rest` is identity-based, not predicate-based. Whatever `scan` excluded
+      // must stay queued whether or not it would have been drainable: reverting
+      // `rest` to `current.filter(!shouldDrain)` deletes `typed later` — it
+      // never entered `drained`, yet the predicate would drop it from the queue
+      // without steering, popping, projecting or reporting it. Reachable while
+      // the drain may take deferred entries, which is the whole `rest` contract.
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addPeerMessage('<envelope next>', 'Session A: next', {
+          msgId: 'm1',
+          from: '/tmp/peer.sock',
+          toSessionId: 's1',
+          priority: 'next',
+        });
+        result.current.addPeerMessage('<envelope now>', 'Session A: now', {
+          msgId: 'm2',
+          from: '/tmp/peer.sock',
+          toSessionId: 's1',
+          priority: 'now',
+        });
+        result.current.addMessage('typed later');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue(true, false, true);
+      });
+      // The scan stops at the envelope this boundary takes, so only the
+      // skipped "next" ahead of it is a candidate here.
+      expect(drained).toEqual(['<envelope next>']);
+      expect(result.current.messageQueue).toEqual([
+        '<envelope now>',
+        'typed later',
+      ]);
+    });
+
+    it('names as a barrier only the envelope the boundary drain can take', () => {
+      // The barrier and the pop consult one predicate; this pins them to each
+      // other so changing either side alone turns this red instead of letting
+      // the two disagree about what is waiting.
+      const now = (msgId: string) => ({
+        msgId,
+        from: '/tmp/peer.sock',
+        toSessionId: 's1',
+        priority: 'now' as const,
+      });
+      const next = (msgId: string) => ({
+        msgId,
+        from: '/tmp/peer.sock',
+        toSessionId: 's1',
+        priority: 'next' as const,
+      });
+
+      const { result } = renderHook(() => useMessageQueue());
+      act(() => {
+        result.current.addMessage('typed text');
+        result.current.addPeerMessage(
+          '<envelope now>',
+          'Session A: now',
+          now('m1'),
+        );
+      });
+      // The leading run ends at the typed entry, so the pop takes nothing and
+      // the envelope is no barrier.
+      expect(result.current.hasMidTurnTakeablePeer()).toBe(false);
+      expect(result.current.drainPeerEntries(1)).toEqual([]);
+
+      act(() => {
+        result.current.clearQueue();
+        result.current.addPeerMessage(
+          '<envelope next>',
+          'Session A: next',
+          next('m2'),
+        );
+      });
+      expect(result.current.hasMidTurnTakeablePeer()).toBe(false);
+      expect(result.current.drainPeerEntries(1)).toEqual([]);
+
+      act(() => {
+        result.current.addPeerMessage(
+          '<envelope now>',
+          'Session A: now',
+          now('m3'),
+        );
+      });
+      expect(result.current.hasMidTurnTakeablePeer()).toBe(true);
+      expect(
+        result.current.drainPeerEntries(1).map(({ modelText }) => modelText),
+      ).toEqual(['<envelope now>']);
     });
 
     it('drains leading peer envelopes with projection and delivery pin', () => {
@@ -1618,13 +1820,14 @@ describe('useMessageQueue', () => {
 
       // The raw-text steer channel may take typed input, but it must not take
       // the restored envelope: it carries neither attribution nor delivery pin,
-      // and peer-authored text must never reach user preprocessing. And with
-      // the envelope queued at the head, the barrier `popNextSubmission`
-      // enforces here holds there too: nothing behind it overtakes it into a
-      // submission, so the model reads the envelope before the typed text.
+      // and peer-authored text must never reach user preprocessing. And the
+      // restored envelope is a leading `"now"` — exactly what this boundary
+      // takes — so the barrier `popNextSubmission` enforces holds here too:
+      // nothing behind it overtakes it into a submission, and the model reads
+      // the envelope before the typed text.
       let drained: string[] = [];
       act(() => {
-        drained = result.current.drainQueue();
+        drained = result.current.drainQueue(false, false, true);
       });
       expect(drained).toEqual([]);
       expect(result.current.messageQueue).toEqual([

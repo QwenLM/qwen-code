@@ -138,6 +138,7 @@ import {
   GOAL_COMMAND_RE,
   type DirectUserAdmission,
   type QueuedGoalTurn,
+  type UseMessageQueueReturn,
 } from './useMessageQueue.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
@@ -228,6 +229,18 @@ export interface PeerMidTurnBatch {
   entries: Array<{ modelText: string; displayText: string }>;
   /** Requeues the batch, still tagged peer, without re-rendering it. */
   restore: () => void;
+}
+
+/**
+ * The boundary's peer drain, as AppContainer builds it. `eligible` answers what
+ * the drain is about to do — pay from the window and take a leading `"now"`
+ * envelope — so the steer drain holds user text behind an envelope only while
+ * that envelope is really going into this submission. Optional because a test
+ * double may be a bare function.
+ */
+export interface PeerMidTurnDrain {
+  (): PeerMidTurnBatch | null;
+  eligible?: () => boolean;
 }
 
 interface GoalTurnBinding {
@@ -588,9 +601,7 @@ export const useLlmStream = (
   setShellInputFocused: (value: boolean) => void,
   terminalWidth: number,
   terminalHeight: number,
-  midTurnDrainRef?: React.RefObject<
-    ((includeDeferred?: boolean, goalTurnActive?: boolean) => string[]) | null
-  >,
+  midTurnDrainRef?: React.RefObject<UseMessageQueueReturn['drainQueue'] | null>,
   logger?: Logger | null,
   // Live content-area height (terminal minus composer/header). Used to bound the
   // pending item's rendered height so it commits to <Static> before it can grow
@@ -613,10 +624,10 @@ export const useLlmStream = (
   } | null>,
   // Mid-turn cross-session delivery, supplied by AppContainer, which owns the
   // peer inbox. Null when the setting is off or the session takes no peer
-  // messages, so the hook never reads the setting itself.
-  midTurnPeerDrainRef?: React.RefObject<
-    ((limit: number) => PeerMidTurnBatch | null) | null
-  >,
+  // messages, so the hook never reads the setting itself. Its `eligible` probe
+  // is what tells the steer drain whether an envelope is really about to be
+  // delivered, and therefore whether the barrier may hold user text behind it.
+  midTurnPeerDrainRef?: React.RefObject<PeerMidTurnDrain | null>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -3558,17 +3569,26 @@ export const useLlmStream = (
     [midTurnRestoreRef, onDebugMessage, resolveSteeredMessages],
   );
 
+  // One answer for both boundary paths: is a peer envelope actually going to be
+  // delivered at this boundary? Only then may the barrier hold user text behind
+  // it. Asked in one place so the two paths cannot diverge about it.
+  const peerMidTurnWillDeliver = useCallback(
+    () => midTurnPeerDrainRef?.current?.eligible?.() ?? false,
+    [midTurnPeerDrainRef],
+  );
+
   const drainSteerAtBoundary = useCallback(
     async (signal: AbortSignal): Promise<SteerInput | undefined> => {
       const messages =
         midTurnDrainRef?.current?.(
           false,
           Boolean(activeGoalAdmissionRef.current),
+          peerMidTurnWillDeliver(),
         ) ?? [];
       if (messages.length === 0) return undefined;
       return resolveDrainedSteerMessages(messages, signal);
     },
-    [midTurnDrainRef, resolveDrainedSteerMessages],
+    [midTurnDrainRef, peerMidTurnWillDeliver, resolveDrainedSteerMessages],
   );
 
   const submitQuery = useCallback(
@@ -5835,6 +5855,7 @@ export const useLlmStream = (
           : (midTurnDrainRef?.current?.(
               false,
               Boolean(activeGoalAdmissionRef.current),
+              peerMidTurnWillDeliver(),
             ) ?? []);
       let drainedSteer: SteerInput | undefined;
       if (drained.length > 0) {
@@ -5895,7 +5916,9 @@ export const useLlmStream = (
         !continuationWasCancelled() &&
         !activeGoalAdmissionRef.current
       ) {
-        const batch = drainPeers(1);
+        // No limit: one envelope per boundary is the drain's own rule, not a
+        // number this caller gets to choose.
+        const batch = drainPeers();
         if (batch && batch.entries.length > 0) {
           drainedPeers = batch;
           debugLogger.debug(
@@ -6135,6 +6158,7 @@ export const useLlmStream = (
       config,
       midTurnDrainRef,
       midTurnPeerDrainRef,
+      peerMidTurnWillDeliver,
       addItem,
       dualOutput,
       resolveDrainedSteerMessages,

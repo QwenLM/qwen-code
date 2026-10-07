@@ -3784,7 +3784,10 @@ describe('useLlmStream', () => {
       expect(mockSendMessageStream.mock.calls[0][0]).toEqual(
         boundaryEntryParts,
       );
-      expect(peerDrain).toHaveBeenCalledWith(1);
+      // Once per boundary, and the mock returns a batch so a second call is
+      // not silently absorbed: its entries are already dequeued, and a return
+      // value nobody submits and never restores is a lost peer message.
+      expect(peerDrain).toHaveBeenCalledTimes(1);
       expect(peerRestore).not.toHaveBeenCalled();
       expect(recordNotification).toHaveBeenCalledTimes(2);
       // The accept-time capture read the history above rather than falling
@@ -7183,9 +7186,19 @@ describe('useLlmStream', () => {
     ];
 
     // The raw steer channel stays empty here: a peer envelope must reach the
-    // model through its own structured path, never as steered user text.
+    // model through its own structured path, never as steered user text. Its
+    // third argument is what the queue's barrier waits on, so the mock carries
+    // the full signature and the call below is type-checked.
     const midTurnDrainRef = {
-      current: vi.fn<() => string[]>().mockReturnValue([]),
+      current: vi
+        .fn<
+          (
+            includeDeferred: boolean,
+            goalTurnActive: boolean,
+            peerMidTurnActive: boolean,
+          ) => string[]
+        >()
+        .mockReturnValue([]),
     };
     const restore = vi.fn();
     const peerDrain = vi
@@ -7200,6 +7213,9 @@ describe('useLlmStream', () => {
         restore,
       })
       .mockReturnValue(null);
+    // The drain answers for its own eligibility, and the boundary asks it
+    // before the steer drain may hold typed text behind this envelope.
+    Object.assign(peerDrain, { eligible: () => true });
 
     let capturedOnComplete:
       | ((completedTools: TrackedToolCall[]) => Promise<void>)
@@ -7248,8 +7264,14 @@ describe('useLlmStream', () => {
 
     await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(1));
 
-    // One envelope per boundary.
-    expect(peerDrain).toHaveBeenCalledWith(1);
+    // One envelope per boundary: the count is what notices a boundary that
+    // drains twice, whose second batch is already out of the queue and would
+    // reach nobody — neither submitted nor restored.
+    expect(peerDrain).toHaveBeenCalledTimes(1);
+    // The barrier was armed on the strength of the drain's own answer: the
+    // queue may hold user text behind an envelope only while this boundary is
+    // delivering one.
+    expect(midTurnDrainRef.current).toHaveBeenCalledWith(false, false, true);
     // The full envelope — attribution and authority notice intact — follows
     // the tool responses in the same submission.
     expect(mockSendMessageStream).toHaveBeenCalledWith(

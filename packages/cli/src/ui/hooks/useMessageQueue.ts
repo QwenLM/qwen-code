@@ -116,9 +116,20 @@ export interface UseMessageQueueReturn {
    * the idle drain remains its route.
    */
   drainPeerEntries: (limit: number) => QueuedPeerSteer[];
+  /**
+   * Whether the tool-round boundary has an envelope it could really take: a
+   * `"now"` inside the leading run of peer entries. The boundary's barrier and
+   * the pause notice both ask this one question, so neither can hold user text
+   * behind an envelope the other would never deliver.
+   */
+  hasMidTurnTakeablePeer: () => boolean;
   /** Puts a mid-turn batch back, still peer, at the head of the queue. */
   restorePeerEntries: (entries: QueuedPeerSteer[]) => void;
-  drainQueue: (includeDeferred?: boolean, goalTurnActive?: boolean) => string[];
+  drainQueue: (
+    includeDeferred?: boolean,
+    goalTurnActive?: boolean,
+    peerMidTurnActive?: boolean,
+  ) => string[];
 }
 
 interface QueuedMessage {
@@ -168,6 +179,25 @@ function aggregateUserMessages(
       ? {}
       : { shellMode: messages[0].shellMode }),
   };
+}
+
+/**
+ * The single mid-turn eligibility rule: which queued envelope, if any, a
+ * tool-round boundary could actually deliver. `drainPeerEntries` scans only the
+ * leading run of peer entries and takes those the sender marked "now", so an
+ * envelope outside that run — or a "next" inside it — waits for the idle drain
+ * and must not hold anything back. The boundary's barrier asks the same
+ * question so the two cannot disagree about what is really waiting.
+ */
+function firstMidTurnTakeablePeerIndex(
+  queue: readonly QueuedMessage[],
+): number {
+  for (let index = 0; index < queue.length; index++) {
+    const entry = queue[index];
+    if (!entry.peer) break;
+    if (entry.delivery?.priority === 'now') return index;
+  }
+  return -1;
 }
 
 export function useMessageQueue(): UseMessageQueueReturn {
@@ -516,8 +546,17 @@ export function useMessageQueue(): UseMessageQueueReturn {
     );
   }, []);
 
+  const hasMidTurnTakeablePeer = useCallback(
+    () => firstMidTurnTakeablePeerIndex(queueRef.current) !== -1,
+    [],
+  );
+
   const drainQueue = useCallback(
-    (includeDeferred = false, goalTurnActive = false): string[] => {
+    (
+      includeDeferred = false,
+      goalTurnActive = false,
+      peerMidTurnActive = false,
+    ): string[] => {
       const current = queueRef.current;
       if (current.length === 0) return [];
       const shouldDrain = (message: QueuedMessage) =>
@@ -525,15 +564,22 @@ export function useMessageQueue(): UseMessageQueueReturn {
           ? GOAL_COMMAND_RE.test(message.text)
           : !isSlashCommand(message.text)) &&
         (includeDeferred || !message.deferUntilIdle);
-      // Same barrier as `popNextSubmission`'s idle path: text queued behind
-      // a waiting envelope never overtakes it into a submission, and the
-      // envelope's raw text never enters this raw-string channel. Goal
-      // commands keep their barrier-free priority, as they do there.
-      const firstPeerIndex = current.findIndex(({ peer }) => Boolean(peer));
+      // Same barrier as `popNextSubmission`'s idle path, narrowed to the
+      // envelope this boundary is about to deliver: text queued behind it
+      // never overtakes it into a submission. An envelope the boundary cannot
+      // take — the opt-in is off, the sender asked for "next", the window is
+      // spent — is not a barrier, because holding the user's own input for the
+      // rest of the turn to keep the place of a delivery that will not happen
+      // is the freeze this narrowing exists to prevent. Peer text still stays
+      // out of this raw-string channel by `deferUntilIdle`, as it always has.
+      // Goal commands keep their barrier-free priority, as they do there.
+      const barrierIndex = peerMidTurnActive
+        ? firstMidTurnTakeablePeerIndex(current)
+        : -1;
       const scan =
-        goalTurnActive || firstPeerIndex === -1
+        goalTurnActive || barrierIndex === -1
           ? current
-          : current.slice(0, firstPeerIndex);
+          : current.slice(0, barrierIndex);
       const drained = scan.filter(shouldDrain);
       if (drained.length === 0) return [];
       // Identity-based, not predicate-based: drainable entries left behind
@@ -567,6 +613,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
     restoreMessages,
     restorePeerMessage,
     drainPeerEntries,
+    hasMidTurnTakeablePeer,
     restorePeerEntries,
     drainQueue,
   };

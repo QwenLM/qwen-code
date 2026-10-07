@@ -60,11 +60,15 @@ lead the user content. Four gates exclude it — null drain (off, or no inbox),
 Goal turn owning the session, detached continuation, cancelled continuation —
 and every exclusion leaves the envelope queued, never dropped.
 
-Ordering is governed by one barrier rule, mirrored on both paths: user text
-queued behind a waiting envelope never overtakes it. On the idle path
-`popNextSubmission` implements it as a first-peer prefix scan; the boundary
-`drainQueue` uses the same scan, and the mid-turn peer drain stops at the
-first non-peer entry. Peer text never enters the raw-string steer channel: it
+Ordering is governed by one barrier rule — user text queued behind a waiting
+envelope never overtakes it — applied at each path's own strength. On the idle
+path, where every waiting envelope drains, `popNextSubmission` stops at the
+first peer entry. At the boundary, `drainQueue` stops only at the envelope the
+mid-turn drain could take right here: the first `"now"` inside the leading run
+of peers, with an allowance left to pay for it. An envelope this boundary
+cannot deliver is not a barrier, because the alternative would hold the user's
+own input for the rest of the turn to preserve the place of a delivery that is
+not going to happen. Peer text never enters the raw-string steer channel: it
 would lose attribution and reach user preprocessing.
 
 Delivery is journaled like the idle path — `recordNotification` with the
