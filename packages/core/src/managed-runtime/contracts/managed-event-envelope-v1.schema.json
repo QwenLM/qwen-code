@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://qwenlm.github.io/qwen-code/contracts/managed-event-envelope-v1.schema.json",
+  "title": "Managed event envelope v1 (managed-event-envelope/1) conformance fixtures",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "contractVersion",
+    "dedupeCases",
+    "envelope",
+    "envelopeCases",
+    "forbiddenFields",
+    "formatVersion",
+    "fromEventCases",
+    "kinds",
+    "limits",
+    "streams"
+  ],
+  "properties": {
+    "contract": {
+      "const": "managed-event-envelope/1"
+    },
+    "contractVersion": {
+      "const": 1
+    },
+    "formatVersion": {
+      "const": 1
+    },
+    "kinds": {
+      "const": [
+        "input.accepted",
+        "wake.requested",
+        "activation.changed",
+        "model.attempt",
+        "message.committed",
+        "tool.intent",
+        "action.changed",
+        "tool.receipt",
+        "checkpoint.committed",
+        "context.compacted",
+        "cancel.requested",
+        "turn.settled",
+        "config.bound",
+        "lifecycle.changed",
+        "domain.committed",
+        "message.delta",
+        "message.retracted"
+      ]
+    },
+    "streams": {
+      "const": ["authoritative_journal"]
+    },
+    "forbiddenFields": {
+      "const": [
+        "absolutePath",
+        "localPath",
+        "pid",
+        "pod",
+        "runtimeBindingId",
+        "runtimeEndpoint",
+        "secretHandle",
+        "sidecar"
+      ]
+    },
+    "limits": {
+      "const": {
+        "maxIdBytes": 512,
+        "maxTimeMs": 8640000000000000
+      }
+    },
+    "envelope": {
+      "$ref": "#/$defs/envelope"
+    },
+    "envelopeCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["envelope", "id", "valid"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "valid": {
+            "type": "boolean"
+          },
+          "envelope": true
+        }
+      }
+    },
+    "dedupeCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["first", "id", "parseable", "same", "second"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "same": {
+            "type": "boolean"
+          },
+          "parseable": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "boolean"
+            }
+          },
+          "first": {
+            "type": "object"
+          },
+          "second": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    "fromEventCases": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["envelope", "event", "id"],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/caseId"
+          },
+          "event": {
+            "type": "object"
+          },
+          "envelope": {
+            "$ref": "#/$defs/envelope"
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "caseId": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "stableId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f]+$"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "payloadRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest"],
+      "properties": {
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eventId",
+        "kind",
+        "occurredAt",
+        "payloadRef",
+        "sequence",
+        "sessionId",
+        "stream",
+        "tenantId",
+        "v",
+        "workspaceId"
+      ],
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "sessionId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "tenantId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "workspaceId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "stream": {
+          "enum": ["authoritative_journal"]
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740990
+        },
+        "eventId": {
+          "$ref": "#/$defs/stableId"
+        },
+        "kind": {
+          "enum": [
+            "input.accepted",
+            "wake.requested",
+            "activation.changed",
+            "model.attempt",
+            "message.committed",
+            "tool.intent",
+            "action.changed",
+            "tool.receipt",
+            "checkpoint.committed",
+            "context.compacted",
+            "cancel.requested",
+            "turn.settled",
+            "config.bound",
+            "lifecycle.changed",
+            "domain.committed",
+            "message.delta",
+            "message.retracted"
+          ]
+        },
+        "occurredAt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 8640000000000000
+        },
+        "payloadRef": {
+          "$ref": "#/$defs/payloadRef"
+        }
+      }
+    }
+  }
+}

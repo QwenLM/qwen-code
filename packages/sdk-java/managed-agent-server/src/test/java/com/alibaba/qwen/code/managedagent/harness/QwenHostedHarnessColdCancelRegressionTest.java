@@ -5,12 +5,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
+import com.alibaba.qwen.code.daemon.HarnessRuntimeRecovery;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
@@ -96,6 +99,9 @@ class QwenHostedHarnessColdCancelRegressionTest {
         when(client.loadSession(any())).thenReturn(attached);
         when(attached.getHarnessBootId()).thenReturn(boot);
         when(attached.getApprovalMode()).thenReturn("yolo");
+        HarnessRuntimeRecovery recovery = mock(HarnessRuntimeRecovery.class);
+        when(recovery.getCheckpointId()).thenReturn("checkpoint-of-T1");
+        when(attached.getRuntimeRecovery()).thenReturn(recovery);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         when(actions.approvalMode(tenant, session)).thenReturn("yolo");
         WorkspaceExecutionStore execution = new WorkspaceExecutionStore(jdbc, transactionManager);
@@ -132,7 +138,18 @@ class QwenHostedHarnessColdCancelRegressionTest {
             clearInvocations(client);
             ((Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments")).clear();
 
+            doThrow(new IllegalStateException("temporary cancel failure"))
+                    .when(client).cancelTurn(attached);
+            assertThatThrownBy(() -> connector.cancel(tenant, session))
+                    .isInstanceOf(IllegalStateException.class);
+            assertThat(connector.recoverManagedRuntime(tenant, session, true).runtimeRecovery())
+                    .isSameAs(recovery);
+            clearInvocations(client);
+            doNothing().when(client).cancelTurn(attached);
             coordinator.cancel(tenant, session, turn);
+            jdbc.update("UPDATE managed_workspace_access SET can_create = TRUE WHERE tenant_id = ?", tenant);
+            assertThat(connector.recoverManagedRuntime(tenant, session, false).runtimeRecovery()).isNull();
+            jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE WHERE tenant_id = ?", tenant);
 
             assertThat(store.findTurn(tenant, session, turn).orElseThrow().status()).isEqualTo("CANCELLING");
             verify(client).cancelTurn(attached);

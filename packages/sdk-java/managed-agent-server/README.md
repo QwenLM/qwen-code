@@ -33,6 +33,10 @@ compares the mapped routes, the `ApiModels` records and real responses with it;
 `src/test/resources/openapi/contract-known-gaps.txt` lists the differences that
 a later slice still has to close; none remain after D4. The WebShell client types are generated from the
 same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
+The test-tree `SurfaceRegistry` names every mounted route, internal ones
+included, with its admission rule class; `SurfaceRegistryGateTest` fails any
+mounted route the registry lacks, so a new public or WebShell route needs both
+a spec operation and a registry entry ([actor-roles design](../../../docs/design/2026-10-07-managed-agent-actor-roles.md), D5).
 Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
 `1`) when they are created. `POST /v1/agents`, `GET /v1/agents/{id}` and
 `POST /v1/agents/{id}` store tenant-scoped, immutable AgentDefinition
@@ -210,8 +214,22 @@ until no Harness holds its journal writer under an unexpired lease (the
 holding Harness seals it when closing), drains the Runtime binding (currently
 only an in-process retirement flag) and completes the operation; a failed
 attempt is retried with the dispatch backoff until it succeeds, so a `202`
-never means that tools stopped. After the Hosted Harness restarts, its calls fail with a
-generation error until Java restarts too, as Turns do, and the operation waits. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
+never means that tools stopped (a Harness whose capability digest no longer
+matches retries the same way, logged with the permanent reason — nothing
+may complete honestly before an operator realigns the versions, because a
+confirmation requires the Harness's own acknowledgement). When the Hosted
+Harness restarts, a live
+control plane adopts the new process generation: the connector renegotiates
+once instead of failing every bound Session, pending Turns re-attach through
+the takeover load as their retries come due, and the Session's bound boot ID
+moves to the new generation without a Java restart. A takeover load that can
+never continue (its parked state is not one a replacement can drive) ends the
+Turn as `managed_runtime_recovery_blocked` with a typed reason instead of
+retrying forever — in this slice that includes a Turn parked mid model round,
+whose safe reissue is the named Step 3 follow-up. The Session row and its
+generation binding survive that decline, but the declined Turn's input stays
+unsettled in the journal, so the Session cannot admit a further Turn until
+the Step 3 reissue lands — close it and start a new Session. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
 needs no Harness. Archive accepts only a closed Session and completes at once;
 unarchive restores it to closed. Rename waits for the Harness to durably commit
 `session_metadata`. When a rename failure is recorded, its `PENDING` command becomes `FAILED`
