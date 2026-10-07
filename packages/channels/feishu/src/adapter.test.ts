@@ -33,6 +33,7 @@ vi.mock('node:os', async (importOriginal) => {
 });
 
 import { FeishuChannel } from './FeishuAdapter.js';
+import * as media from './media.js';
 import { PairingStore } from '@qwen-code/channel-base';
 import type {
   ChannelAgentBridge,
@@ -47,6 +48,9 @@ import type {
   SessionTarget,
   UserInputSettlementReason,
 } from '@qwen-code/channel-base';
+
+const authUrl =
+  'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal';
 
 function createMockBridge(): ChannelAgentBridge {
   return {
@@ -857,8 +861,6 @@ describe('FeishuChannel', () => {
         message_type: 'image',
         content: JSON.stringify({ image_key: 'img_1' }),
       });
-      const authUrl =
-        'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal';
       const resourceUrl =
         'https://open.feishu.cn/open-apis/im/v1/messages/failed-image/resources/img_1?type=image';
       const stderrSpy = vi
@@ -1029,6 +1031,40 @@ describe('FeishuChannel', () => {
       expect(existsSync(join(directory, 'channel-files'))).toBe(false);
     });
 
+    it.each([
+      { failure: 'HTTP 401', status: 401 },
+      { failure: 'HTTP 500', status: 500 },
+      { failure: 'network error', status: undefined },
+    ])(
+      'dispatches the file text fallback when authentication fails with $failure',
+      async ({ status }) => {
+        const downloadSpy = vi.spyOn(media, 'downloadMedia');
+        Object.assign(channel, { tokenCache: undefined });
+        fetchSpy.mockImplementation(async (input) => {
+          if (String(input) !== authUrl) {
+            throw new Error(`Unexpected request: ${String(input)}`);
+          }
+          if (status === undefined) {
+            throw new TypeError('Synthetic network failure');
+          }
+          return jsonResponse('Authentication unavailable', status);
+        });
+        receive('report.txt');
+        await vi.advanceTimersByTimeAsync(0);
+        expect(dispatch).toHaveBeenCalledTimes(1);
+        const envelope = dispatch.mock.calls[0]![0];
+        expect(envelope.text).toBe('(file: report.txt)');
+        expect(envelope.attachments).toBeUndefined();
+        expect(envelope.syntheticText).toBe(true);
+        expect(downloadSpy).not.toHaveBeenCalled();
+        expect(fetchSpy).toHaveBeenCalledExactlyOnceWith(
+          authUrl,
+          expect.objectContaining({ method: 'POST' }),
+        );
+        expect(existsSync(join(directory, 'channel-files'))).toBe(false);
+      },
+    );
+
     it('dispatches the text fallback when the event omits file_name', async () => {
       receive(undefined);
       await vi.advanceTimersByTimeAsync(0);
@@ -1069,7 +1105,7 @@ describe('FeishuChannel', () => {
       expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
     });
 
-    it('starts the 60-second cleanup countdown only after dispatch settles', async () => {
+    it('starts the 60-second cleanup countdown only after the mocked dispatch settles', async () => {
       const pending = deferred<void>();
       dispatch.mockReturnValue(pending.promise);
       receive('report.txt');
