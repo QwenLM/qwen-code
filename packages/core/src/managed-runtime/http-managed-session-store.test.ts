@@ -801,6 +801,151 @@ describe('HTTP Managed Session store', () => {
     await restored.close();
   });
 
+  it('commits Action input before a checkpoint without uploading unrelated staged input', async () => {
+    const server = new FakeManagedSessionStore();
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-action-input-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    const definitionRef = await stores.resourceStore.publish(
+      'managed-session-definition',
+      Buffer.from('{}'),
+    );
+    const rootSnapshotRef = await stores.resourceStore.publish(
+      'managed-session-root-snapshot',
+      Buffer.from('{}'),
+    );
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId: SESSION_KEY.sessionId,
+      transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'harness-a',
+      activationLeaseDurationMs: 60_000,
+      journalStore: stores.journalStore,
+      resourceStore: stores.resourceStore,
+      create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
+    });
+    try {
+      const inputRef = await session.resources.publish(
+        'managed-tool-input',
+        Buffer.from('{"input":"approved"}'),
+      );
+      const unrelated = await session.resources.publish(
+        'managed-tool-input',
+        Buffer.from('{"input":"unrelated"}'),
+      );
+      const optionsRef = await session.resources.publish(
+        'managed-action-options',
+        Buffer.from(JSON.stringify({ v: 2, inputRef })),
+      );
+      await session.authority.requestToolAction(
+        {
+          operation: 'requestToolAction',
+          commandId: 'approval-first',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        {
+          requestId: 'approval-first',
+          kind: 'permission',
+          inputRevision: 1,
+          optionsRef,
+        },
+        { class: 'harness', activation: session.activation },
+      );
+      expect(session.authority.latestCheckpoint).toBeUndefined();
+      const resources = server.commits.at(-1)!['resources'] as Array<{
+        resourceId: string;
+        bytesBase64?: string;
+      }>;
+      expect(resources.map(({ resourceId }) => resourceId).sort()).toEqual(
+        [optionsRef.resourceId, inputRef.resourceId].sort(),
+      );
+      expect(
+        resources.find(({ resourceId }) => resourceId === inputRef.resourceId)
+          ?.bytesBase64,
+      ).toBe(Buffer.from('{"input":"approved"}').toString('base64'));
+      expect(
+        resources.some(({ resourceId }) => resourceId === unrelated.resourceId),
+      ).toBe(false);
+
+      // The read-only snapshot inspector walks the same options -> input edge.
+      // Without it the committed input is enumerated but never referenced, so
+      // restoring a Session that raised a native approval would fail closed.
+      const snapshotResources = new Map<
+        string,
+        {
+          ref: ManagedSessionDurableRef;
+          bytesBase64: string;
+          referencedRevisions: number[];
+        }
+      >();
+      for (const [index, commit] of server.commits.entries()) {
+        for (const raw of commit['resources'] as ManagedSessionDurableRef[]) {
+          const ref = {
+            resourceId: raw.resourceId,
+            kind: raw.kind,
+            schemaVersion: raw.schemaVersion,
+            byteLength: raw.byteLength,
+            digest: raw.digest,
+          };
+          const resource = snapshotResources.get(ref.resourceId) ?? {
+            ref,
+            bytesBase64: (await session.resources.read(ref)).toString('base64'),
+            referencedRevisions: [],
+          };
+          resource.referencedRevisions.push(index + 1);
+          snapshotResources.set(ref.resourceId, resource);
+        }
+      }
+      const transactions = server.commits.map((commit, index) => ({
+        ...commit,
+        journalRevision: index + 1,
+        recordEncoding: 'identity',
+        byteLength: Buffer.from(String(commit['recordBytesBase64']), 'base64')
+          .length,
+      }));
+      const snapshot = readOnlyManagedSessionSnapshot({
+        format: 'qwen-csi-receipt-checkpoint-snapshot/1',
+        sessionKey: SESSION_KEY,
+        head: {
+          state: 'ACTIVE',
+          storageVersion: 1,
+          writerGeneration: 1,
+          journalRevision: transactions.length,
+          committedSequence: session.authority.committedSequence,
+          lastCommitDigest: session.authority.commitProof.committedPrefixHash,
+          activationEpoch: session.activation.epoch,
+          latestCheckpointResourceId: null,
+          compactedThroughRevision: 0,
+          recoveryStatus: 'READY',
+          recoveryDetailCode: null,
+        },
+        transactions,
+        resources: [...snapshotResources.values()],
+      });
+      await expect(snapshot.resources.read(inputRef)).resolves.toEqual(
+        Buffer.from('{"input":"approved"}'),
+      );
+      await expect(snapshot.resources.read(unrelated)).rejects.toThrow(
+        'Managed Session Store: snapshot resource is missing.',
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
   it('commits only checkpoint resources and their dependencies for a cold owner', async () => {
     const server = new FakeManagedSessionStore();
     const runtimeBaseDir = await mkdtemp(
