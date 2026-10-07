@@ -1611,6 +1611,10 @@ export function createDaemonSessionActions({
           discardAttachments,
           options?.signal,
         );
+        if (options?.signal?.aborted) {
+          await removeUploadedAttachments(session, uploaded.references);
+          options.signal.throwIfAborted();
+        }
       } catch (error) {
         if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
           store.appendLocalUserMessage(
