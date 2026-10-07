@@ -340,6 +340,38 @@ function hasNonThoughtCandidateParts(
 }
 
 /**
+ * Releases whatever the trailing-tag filter is still withholding. The
+ * normal-end flush and the error-path flush both come through here so one
+ * guard cannot drift from the other: a cancellation is not a stream failure to
+ * recover from, and a turn whose reasoning channel carried thinking tags is a
+ * cross-channel leak whose withheld tail must not be handed over as clean
+ * prose. Spelled exactly as the PROTOCOL_TAG_LEAK branch in the catch below
+ * spells it, so one catch does not hold two notions of "aborted".
+ */
+function flushTrailingThinkingTag(
+  abortSignal: AbortSignal | undefined,
+  context: RequestContext,
+): GenerateContentResponse | undefined {
+  if (abortSignal?.aborted === true || context.hasThinkingTagInReasoning) {
+    return undefined;
+  }
+  const trailingText = context.trailingThinkingTagFilter?.parse(
+    '',
+    true,
+    false,
+  );
+  if (!trailingText) return undefined;
+  const response = new GenerateContentResponse();
+  response.candidates = [
+    {
+      content: { parts: [{ text: trailingText }], role: 'model' },
+      index: 0,
+    },
+  ];
+  return response;
+}
+
+/**
  * Thrown when the HTTP 200 response to a streaming request has a content-type
  * incompatible with SSE (e.g. `text/html` from a gateway block page). Carries
  * bounded diagnostic metadata so the user/maintainer can distinguish "model
@@ -803,21 +835,13 @@ export class ContentGenerationPipeline {
         }
       }
 
-      const trailingText = context.trailingThinkingTagFilter?.parse(
-        '',
-        true,
-        false,
+      const flushedTail = flushTrailingThinkingTag(
+        request.config?.abortSignal,
+        context,
       );
-      if (trailingText) {
-        const response = new GenerateContentResponse();
-        response.candidates = [
-          {
-            content: { parts: [{ text: trailingText }], role: 'model' },
-            index: 0,
-          },
-        ];
-        contentYielded = true;
-        yield response;
+      if (flushedTail) {
+        contentYielded ||= hasNonThoughtCandidateParts(flushedTail);
+        yield flushedTail;
       }
 
       if (
@@ -882,26 +906,13 @@ export class ContentGenerationPipeline {
         throw error;
       }
 
-      if (
-        request.config?.abortSignal?.aborted !== true &&
-        !context.hasThinkingTagInReasoning
-      ) {
-        const trailingText = context.trailingThinkingTagFilter?.parse(
-          '',
-          true,
-          false,
-        );
-        if (trailingText) {
-          const response = new GenerateContentResponse();
-          response.candidates = [
-            {
-              content: { parts: [{ text: trailingText }], role: 'model' },
-              index: 0,
-            },
-          ];
-          contentYielded = true;
-          yield response;
-        }
+      const flushedTail = flushTrailingThinkingTag(
+        request.config?.abortSignal,
+        context,
+      );
+      if (flushedTail) {
+        contentYielded ||= hasNonThoughtCandidateParts(flushedTail);
+        yield flushedTail;
       }
 
       // A finish chunk parked for the usage merge must not be lost when the

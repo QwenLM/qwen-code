@@ -397,6 +397,9 @@ describe('OpenAIContentConverter', () => {
       '~~~xml\n</thinking>\n~~~\n</thinking>',
       'Example:\n<think>literal\n</think>',
       'Explanation:\n</think>\nMore text.',
+      'Pattern to strip:\n\n    </thinking>',
+      'Do this:\n\n\t</thinking>',
+      'First the closer:\n</thinking>\nthen again:\n</thinking>',
     ])('preserves ambiguous or nonterminal literal text: %s', (text) => {
       const stream = contentOnlyStream();
       const parts = [...text].flatMap(
@@ -404,6 +407,31 @@ describe('OpenAIContentConverter', () => {
       );
       parts.push(...(partsOf(finishStream(stream, 'stop')) ?? []));
       expect(parts.map((part) => part.text ?? '').join('')).toBe(text);
+    });
+
+    it('suppresses a trailing orphan tag on a tool-call finish', () => {
+      const stream = contentOnlyStream();
+      send(stream, {
+        content: 'I need to verify the branch state.\n    </thinking>',
+      });
+      send(stream, openCall('call_1', 'run_shell_command', '{}'));
+      const last = finishStream(stream, 'tool_calls');
+      expect(partsOf(last)?.some((part) => part.functionCall)).toBe(true);
+      expect(
+        partsOf(last)
+          ?.map((part) => part.text ?? '')
+          .join(''),
+      ).toBe('');
+    });
+
+    it('also filters a nonstreaming suffix with no finish reason', () => {
+      const response = converter.convertOpenAIResponseToLlm(
+        {
+          choices: [choice({ content: 'Answer.\n</thinking>' }, null)],
+        } as OpenAI.Chat.ChatCompletion,
+        contentOnlyStream(),
+      );
+      expect(partsOf(response)).toEqual([{ text: 'Answer.' }]);
     });
 
     it('preserves a closing tag when the provider reports truncation', () => {

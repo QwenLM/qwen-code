@@ -2698,6 +2698,37 @@ describe('ContentGenerationPipeline', () => {
       },
     );
 
+    it('withholds the pending suffix when reasoning carried a thinking tag', async () => {
+      const actual =
+        await vi.importActual<typeof import('./converter.js')>(
+          './converter.js',
+        );
+      vi.mocked(
+        OpenAIContentConverter.convertOpenAIChunkToLlm,
+      ).mockImplementation(
+        actual.OpenAIContentConverter.convertOpenAIChunkToLlm,
+      );
+      mockProvider.getResponseParsingOptions = vi.fn().mockReturnValue({
+        contentOnlyThinkingTagLeaks: true,
+      });
+      const { items, error: observedError } = await settle(
+        await streamFrom(
+          streamOf(
+            chunkOf({ content: 'Answer.\n</thinking>' }),
+            chunkOf({ reasoning_content: 'Let me check<think>' }),
+          ),
+        ),
+      );
+      expect(observedError).toBeUndefined();
+      expect(
+        items
+          .flatMap((item) => item.candidates?.[0]?.content?.parts ?? [])
+          .filter((part) => !part.thought)
+          .map((part) => part.text ?? '')
+          .join(''),
+      ).toBe('Answer.');
+    });
+
     it('should redact proxy credentials from stream creation errors', async () => {
       const request = userRequest();
       const testError = new Error('407 via http://user:pass@proxy.local');

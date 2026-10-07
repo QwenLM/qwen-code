@@ -1277,6 +1277,24 @@ const STANDALONE_OPENING_THINKING_TAG_PATTERN =
   /^\s*<(think|thinking)\s*>\s*$/i;
 const MAX_THINKING_TAG_CANDIDATE_LENGTH = 128;
 
+/**
+ * "Finished normally" for the trailing-tag filter, spelled with the same
+ * finish-reason mapper that stamps the candidate: `tool_calls`,
+ * `function_call`, an absent reason, and any casing a gateway uses all report
+ * `FinishReason.STOP` downstream, so all of them must suppress a trailing
+ * orphan tag. Truncation, safety and unknown reasons stay incomplete and
+ * release the tail verbatim instead.
+ */
+function completedNormally(
+  finishReason: string | null | undefined,
+  reasoningText: string | null | undefined,
+): boolean {
+  return (
+    mapOpenAIFinishReasonToLlm(finishReason || 'stop') === FinishReason.STOP &&
+    !THINKING_TAG_PATTERN.test(reasoningText ?? '')
+  );
+}
+
 function canBeStandaloneThinkingTagPrefix(text: string): boolean {
   const candidate = text.trimStart().toLowerCase();
   if (!candidate) return true;
@@ -1381,8 +1399,7 @@ export function convertOpenAIResponseToLlm(
           choice.message.content,
           requestContext,
           true,
-          choice.finish_reason === 'stop' &&
-            !THINKING_TAG_PATTERN.test(reasoningText ?? ''),
+          completedNormally(choice.finish_reason, reasoningText),
         )
       : [];
 
@@ -1586,8 +1603,7 @@ export function convertOpenAIChunkToLlm(
           normalizedContent,
           requestContext,
           Boolean(choice.finish_reason),
-          choice.finish_reason === 'stop' &&
-            !THINKING_TAG_PATTERN.test(reasoningText ?? ''),
+          completedNormally(choice.finish_reason, reasoningText),
         );
       }
     } else if (choice.finish_reason) {
@@ -1596,8 +1612,7 @@ export function convertOpenAIChunkToLlm(
         '',
         requestContext,
         true,
-        choice.finish_reason === 'stop' &&
-          !THINKING_TAG_PATTERN.test(reasoningText ?? ''),
+        completedNormally(choice.finish_reason, reasoningText),
       );
     }
 
