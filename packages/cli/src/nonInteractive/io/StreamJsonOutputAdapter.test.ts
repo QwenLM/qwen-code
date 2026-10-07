@@ -200,8 +200,11 @@ describe('StreamJsonOutputAdapter', () => {
           type: LlmEventType.Content,
           value: 'orphaned payload',
         });
-        adapter.processEvent({
-          type: LlmEventType.Retry,
+        adapter.restartAttempt(false, []);
+        adapter.emitSystemMessage('retry', {
+          reason: 'retry',
+          discardedToolCalls: 0,
+          preserveText: false,
         });
         adapter.processEvent({
           type: LlmEventType.Content,
@@ -216,7 +219,11 @@ describe('StreamJsonOutputAdapter', () => {
           expect.objectContaining({
             type: 'system',
             subtype: 'retry',
-            data: { is_continuation: false, retry_info: null },
+            data: {
+              reason: 'retry',
+              discardedToolCalls: 0,
+              preserveText: false,
+            },
           }),
         );
         expect(
@@ -269,9 +276,11 @@ describe('StreamJsonOutputAdapter', () => {
           type: LlmEventType.Content,
           value: 'partial',
         });
-        adapter.processEvent({
-          type: LlmEventType.Retry,
-          isContinuation: true,
+        adapter.restartAttempt(true, []);
+        adapter.emitSystemMessage('retry', {
+          reason: 'retry',
+          discardedToolCalls: 0,
+          preserveText: true,
         });
         adapter.processEvent({
           type: LlmEventType.Content,
@@ -285,7 +294,11 @@ describe('StreamJsonOutputAdapter', () => {
           expect.objectContaining({
             type: 'system',
             subtype: 'retry',
-            data: { is_continuation: true, retry_info: null },
+            data: {
+              reason: 'retry',
+              discardedToolCalls: 0,
+              preserveText: true,
+            },
           }),
         );
         expect(

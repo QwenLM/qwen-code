@@ -9819,9 +9819,7 @@ describe('LlmChat', async () => {
         await send('test', 'prompt-10700-regression'),
       );
       expectStreamCalls(2);
-      expect(events.some((event) => event.type === StreamEventType.RETRY)).toBe(
-        true,
-      );
+      expect(eventsOfType(events, StreamEventType.RETRY)).toHaveLength(1);
       expect(chat.getLastModelMessageText()).toBe('Clean answer');
     } finally {
       vi.useRealTimers();

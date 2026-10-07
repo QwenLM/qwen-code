@@ -880,14 +880,12 @@ describe('BaseJsonOutputAdapter', () => {
       });
     });
 
-    it('should reset main assistant state on a non-continuation Retry event', () => {
+    it('resets main assistant state when restarting an attempt', () => {
       adapter.processEvent({
         type: LlmEventType.Content,
         value: 'orphaned payload',
       });
-      adapter.processEvent({
-        type: LlmEventType.Retry,
-      });
+      adapter.restartAttempt(false, []);
       adapter.processEvent({
         type: LlmEventType.Content,
         value: 'clean response',
@@ -898,13 +896,6 @@ describe('BaseJsonOutputAdapter', () => {
       expect(message.message.content).toEqual([
         { type: 'text', text: 'clean response' },
       ]);
-      expect(adapter.emittedMessages).toContainEqual(
-        expect.objectContaining({
-          type: 'system',
-          subtype: 'retry',
-          data: { is_continuation: false, retry_info: null },
-        }),
-      );
     });
 
     it('does not reuse an abandoned attempt as the final result', () => {
@@ -915,9 +906,7 @@ describe('BaseJsonOutputAdapter', () => {
       const abandoned = adapter.finalizeAssistantMessage();
       adapter['lastAssistantMessage'] = abandoned;
 
-      adapter.processEvent({
-        type: LlmEventType.Retry,
-      });
+      adapter.restartAttempt(false, []);
       adapter.emitResult({
         isError: false,
         durationMs: 1,
@@ -931,15 +920,12 @@ describe('BaseJsonOutputAdapter', () => {
       });
     });
 
-    it('should keep main assistant state on a continuation Retry event', () => {
+    it('keeps main assistant state when restarting a continuation', () => {
       adapter.processEvent({
         type: LlmEventType.Content,
         value: 'partial',
       });
-      adapter.processEvent({
-        type: LlmEventType.Retry,
-        isContinuation: true,
-      });
+      adapter.restartAttempt(true, []);
       adapter.processEvent({
         type: LlmEventType.Content,
         value: ' continuation',
@@ -950,13 +936,6 @@ describe('BaseJsonOutputAdapter', () => {
       expect(message.message.content).toEqual([
         { type: 'text', text: 'partial continuation' },
       ]);
-      expect(adapter.emittedMessages).toContainEqual(
-        expect.objectContaining({
-          type: 'system',
-          subtype: 'retry',
-          data: { is_continuation: true, retry_info: null },
-        }),
-      );
     });
 
     it('should ignore events after finalization', () => {

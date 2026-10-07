@@ -1166,6 +1166,12 @@ describe('runNonInteractive', () => {
         'Retrying provider attempt (0 buffered tool call(s) discarded).',
       );
       expect(stderr).not.toContain('undefined');
+      expect(
+        messages.filter(
+          (message: { type?: string; subtype?: string }) =>
+            message.type === 'system' && message.subtype === 'retry',
+        ),
+      ).toHaveLength(1);
     },
   );
 

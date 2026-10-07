@@ -3951,8 +3951,8 @@ export class LlmChat {
               transportContinuationCount > 0
             ) {
               // A fresh-restart retry reaching this point means a branch that
-              // does not set `suppressNextRetryEvent` (rate limit, invalid
-              // stream) chose to re-send the original request.
+              // does not set `suppressNextRetryEvent` chose to re-send the
+              // original request.
               resetTransportContinuation();
               yield { type: StreamEventType.RETRY };
             }
@@ -4764,6 +4764,8 @@ export class LlmChat {
                   model,
                 ),
               );
+              resetTransportContinuation();
+              suppressNextRetryEvent = true;
               yield { type: StreamEventType.RETRY };
               await delay(delayMs, params.config?.abortSignal).promise;
               continue;
