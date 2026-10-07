@@ -860,6 +860,21 @@ type ManagedConversationActivation = {
   error?: unknown;
 };
 
+/** Whether an activation failure is the liftable engine-quarantine refusal. */
+function isManagedEngineQuarantineRefusal(error: unknown): boolean {
+  // typeof null === 'object': a peer that serializes an absent `data` as
+  // null must read as no refusal at all, never throw inside the catch.
+  const data =
+    typeof error === 'object' && error !== null
+      ? (error as { data?: unknown }).data
+      : undefined;
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    (data as { errorKind?: unknown }).errorKind === 'managed_engine_quarantined'
+  );
+}
+
 function sameManagedConversationExpectation(
   left: BridgeConversationDirectoryExpectation,
   right: BridgeConversationDirectoryExpectation,
@@ -4168,8 +4183,18 @@ export class Session implements SessionContext {
         activation.state = 'ready';
       })
       .catch((error: unknown) => {
-        activation.state = 'poisoned';
-        activation.error = error;
+        // A quarantined-engine refusal lifts once the stop is proven:
+        // poisoning the activation would outlive it, so the next commit
+        // retries. Any terminal refusal (the host is shutting down, the
+        // binding is broken) stays poisoned.
+        if (isManagedEngineQuarantineRefusal(error)) {
+          activation.state = 'pending';
+          activation.error = undefined;
+          activation.promise = undefined;
+        } else {
+          activation.state = 'poisoned';
+          activation.error = error;
+        }
         throw error;
       });
     activation.promise = promise;
