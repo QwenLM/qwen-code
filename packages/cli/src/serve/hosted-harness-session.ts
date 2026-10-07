@@ -564,6 +564,21 @@ async function settleCancelledHarnessTurn(
   // caller's own catch answers the baseline retriable refusal, and the
   // store's retry ladder owns the retry.
   const settleAuthorization = await managed.authority.harnessRunAuthorization();
+  // Fault-shaped authorizations are not "nothing to close" either
+  // (R9-5'): the authority converts a retry-exhausted TransportError
+  // into a blocked verdict in place, never as a throw, so the
+  // propagation above still settles past it. `missing_state`,
+  // `opaque_state` and `invalid_state` all mean this park cannot be
+  // proven safe to settle; `missing_checkpoint` stays payable — it is
+  // the Arm B park's honest form (a no-tool Session with history
+  // provably has no checkpoint), and that arm settles unconditionally.
+  if (
+    settleAuthorization.status === 'blocked' &&
+    settleAuthorization.reason !== 'missing_checkpoint'
+  )
+    throw new Error(
+      `Cancelled settle cannot verify the park (authorization blocked/${settleAuthorization.reason}).`,
+    );
   if (
     settleAuthorization?.status === 'runnable' &&
     settleAuthorization.checkpoint.identity.turnId === promptId &&
