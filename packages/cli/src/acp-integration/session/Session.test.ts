@@ -6011,32 +6011,115 @@ describe('Session', () => {
       });
     });
 
-    it('records retry ownership when the retry is cancelled before its first send', async () => {
+    it('records retry ownership before a pre-loop interruption settles', async () => {
       const original: Content = { role: 'user', parts: [{ text: 'retry me' }] };
       markApiHistoryPrompt(original, 'client-1');
-      // Cancel from inside the prompt-assembly path, so the abort lands before
-      // the send loop's entry check rather than during the model request.
-      vi.mocked(mockChat.getHistoryShallow).mockImplementation(() => {
-        void session.cancelPendingPrompt().catch(() => {});
-        return [original];
-      });
-      const request = {
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text' as const, text: 'retry me' }],
-        retry: true,
-      };
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([original]);
+      mockConfig.assertCanStartTurn = vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockImplementationOnce(async () => {
+          await session.cancelPendingPrompt('qwen:prompt-interrupted');
+        });
       await expect(
-        session.prompt(request, {
-          version: 1,
-          sessionId: 'test-session-id',
-          promptId: 'daemon-2',
-        }),
+        session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'retry me' }],
+            retry: true,
+          } as Parameters<typeof session.prompt>[0],
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-2',
+          },
+        ),
       ).resolves.toMatchObject({ stopReason: 'cancelled' });
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
       expect(mockChatRecordingService.recordTurnAttempt).toHaveBeenCalledWith(
         'client-1',
         'daemon-2',
       );
+      const result = mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+      expect(result).toMatchObject({
+        promptId: 'daemon-2',
+        state: 'cancelled',
+      });
+      expect(result).not.toHaveProperty('cancelledAt');
+      expect(
+        mockChatRecordingService.recordTurnAttempt.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        mockChatRecordingService.recordTurnResult.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('marks a user entry appended after cancellation before the first send', async () => {
+      mockChat.getUserContentPushCount = vi.fn().mockReturnValue(0);
+      mockFileHistoryService.makeSnapshot.mockImplementationOnce(async () => {
+        await session.cancelPendingPrompt();
+      });
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'cancel before send' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'cancelled' });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockChat.addHistory).toHaveBeenCalledWith(
+        expect.objectContaining({ role: 'user' }),
+      );
+      expect(mockChat.markLastTurnCancelled).toHaveBeenCalledOnce();
+    });
+
+    it('binds user cancellation to the chat created by compression', async () => {
+      mockChat.getUserContentPushCount = vi.fn().mockReturnValue(0);
+      const replacementChat = Object.create(mockChat) as LlmChat;
+      let pushed = 0;
+      replacementChat.getUserContentPushCount = vi.fn(() => pushed);
+      replacementChat.markLastTurnCancelled = vi.fn(() => {
+        replacementChat.isLastTurnCancelled = vi.fn().mockReturnValue(true);
+      });
+      mockLlmClient.tryCompressChat.mockImplementationOnce(async () => {
+        mockLlmClient.getChat.mockReturnValue(replacementChat);
+        return {
+          originalTokenCount: 10,
+          newTokenCount: 5,
+          compressionStatus: core.CompressionStatus.COMPRESSED,
+        };
+      });
+      let consumed!: () => void;
+      const started = new Promise<void>((resolve) => {
+        consumed = resolve;
+      });
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      replacementChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          pushed++;
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: { text: 'partial' },
+          } as const;
+          consumed();
+          await gate;
+        })(),
+      );
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+      await started;
+      await session.cancelPendingPrompt();
+      release();
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
+      expect(replacementChat.markLastTurnCancelled).toHaveBeenCalledOnce();
+      expect(mockChat.markLastTurnCancelled).not.toHaveBeenCalled();
+      expect(session.getRecoveryStatus()).toEqual({
+        kind: 'clean',
+        canContinue: false,
+      });
     });
 
     it('does not send a retry when its durable attempt write fails', async () => {
@@ -11676,7 +11759,12 @@ describe('Session', () => {
             trustedContext,
             cancellation.signal,
           ),
-        ).resolves.toEqual({ stopReason: 'cancelled' });
+        ).resolves.toMatchObject({
+          stopReason: 'cancelled',
+          _meta: {
+            'qwen.promptCancelled': { cancelledAt: expect.any(Number) },
+          },
+        });
         const payload =
           mockChatRecordingService.recordTurnResult.mock.calls[0][0];
         expect(payload.state).toBe('cancelled');
@@ -11804,45 +11892,50 @@ describe('Session', () => {
         );
       });
 
-      it('waits for the cancellation record to flush before returning', async () => {
-        let releaseFlush!: () => void;
-        const flushed = new Promise<void>((resolve) => {
-          releaseFlush = resolve;
-        });
-        mockChatRecordingService.flush.mockReturnValue(flushed);
-        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
-          createFailingStream('Request was aborted.', () => {
-            void session.cancelPendingPrompt();
-          }),
-        );
-        let settled = false;
-        const prompt = session
-          .prompt(
-            {
-              sessionId: 'test-session-id',
-              prompt: [{ type: 'text', text: 'cancel me' }],
-            },
-            trustedContext,
-          )
-          .then((response) => {
-            settled = true;
-            return response;
+      it.each(['qwen:user-cancel', 'qwen:prompt-interrupted'])(
+        'waits for %s to flush before returning',
+        async (reason) => {
+          let releaseFlush!: () => void;
+          const flushed = new Promise<void>((resolve) => {
+            releaseFlush = resolve;
           });
-        await vi.waitFor(() =>
-          expect(mockChatRecordingService.flush).toHaveBeenCalled(),
-        );
-        expect(mockChatRecordingService.recordTurnResult).toHaveBeenCalledWith(
-          expect.objectContaining({ state: 'cancelled' }),
-        );
-        expect(settled).toBe(false);
-        releaseFlush();
-        await expect(prompt).resolves.toMatchObject({
-          stopReason: 'cancelled',
-          _meta: {
-            'qwen.promptCancelled': { cancelledAt: expect.any(Number) },
-          },
-        });
-      });
+          mockChatRecordingService.flush.mockReturnValue(flushed);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createFailingStream('Request was aborted.', () => {
+              void session.cancelPendingPrompt(reason);
+            }),
+          );
+          let settled = false;
+          const prompt = session
+            .prompt(
+              {
+                sessionId: 'test-session-id',
+                prompt: [{ type: 'text', text: 'cancel me' }],
+              },
+              trustedContext,
+            )
+            .then((response) => {
+              settled = true;
+              return response;
+            });
+          await vi.waitFor(() =>
+            expect(mockChatRecordingService.flush).toHaveBeenCalled(),
+          );
+          expect(
+            mockChatRecordingService.recordTurnResult,
+          ).toHaveBeenCalledWith(
+            expect.objectContaining({ state: 'cancelled' }),
+          );
+          expect(settled).toBe(false);
+          releaseFlush();
+          await expect(prompt).resolves.toMatchObject({
+            stopReason: 'cancelled',
+            _meta: {
+              'qwen.promptCancelled': { cancelledAt: expect.any(Number) },
+            },
+          });
+        },
+      );
 
       it('records a cancelled turn when user cancel races a plain stream error', async () => {
         mockChat.sendMessageStream = vi.fn().mockResolvedValue(

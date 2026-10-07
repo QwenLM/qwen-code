@@ -2558,6 +2558,26 @@ describe('DaemonSessionClient', () => {
     await eventPump;
   });
 
+  it('forwards cancellation options to the daemon client', async () => {
+    const { fetch } = recordingFetch(() => new Response(null, { status: 204 }));
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const cancel = vi.spyOn(client, 'cancel');
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+    });
+
+    await session.cancel({ cancelReason: 'interrupted' });
+
+    expect(cancel).toHaveBeenCalledWith('s-1', undefined, {
+      cancelReason: 'interrupted',
+    });
+  });
+
   it('releases a subscription prompt slot after a non-202 result', async () => {
     let eventsController:
       | ReadableStreamDefaultController<Uint8Array>

@@ -5241,6 +5241,22 @@ export class Session implements SessionContext {
     }
     await this.assertCanStartTurn();
     if (
+      invocationContext?.promptId &&
+      ((params as { retry?: boolean }).retry === true ||
+        params._meta?.[DAEMON_RETRY_META_KEY] === true ||
+        params._meta?.[DAEMON_CONTINUE_META_KEY] === true ||
+        (params._meta?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] === true &&
+          this.config.getRestoreAskUserQuestion?.() === true &&
+          !!findRestorableAskUserQuestion(
+            this.#getCurrentChat().peekLastHistoryEntry(),
+          )))
+    ) {
+      await turnRecording?.recordingService?.recordTurnAttempt(
+        getLastApiHistoryPromptId(this.#getCurrentChat().getHistoryShallow()),
+        invocationContext.promptId,
+      );
+    }
+    if (
       this.liveScreenContextTool ||
       this.liveTaskTools.length > 0 ||
       this.liveSpeakToUserTool
@@ -5504,6 +5520,9 @@ export class Session implements SessionContext {
       const recoveryUserPushCount = recoveryChat.getUserContentPushCount?.();
       let cancelledHistoryBound = false;
       bindCancelledHistory = () => {
+        const currentChat = this.#getCurrentChat();
+        const baselinePushCount =
+          currentChat === recoveryChat ? recoveryUserPushCount : 0;
         // Cancellation clears pendingPrompt; its completion still owns the history.
         if (
           !cancelledHistoryBound &&
@@ -5511,12 +5530,11 @@ export class Session implements SessionContext {
           pendingSend.signal.reason === USER_CANCEL_ABORT_REASON &&
           !this.config.getManagedSessionBlock?.() &&
           recoverySessionId === this.config.getSessionId() &&
-          recoveryChat === this.#getCurrentChat() &&
-          recoveryUserPushCount !== undefined &&
-          recoveryChat.getUserContentPushCount() > recoveryUserPushCount
+          baselinePushCount !== undefined &&
+          currentChat.getUserContentPushCount() > baselinePushCount
         ) {
           cancelledHistoryBound = true;
-          recoveryChat.markLastTurnCancelled?.();
+          currentChat.markLastTurnCancelled?.();
         }
       };
       const reasoningMeta = (params as { _meta?: Record<string, unknown> })
@@ -6229,7 +6247,6 @@ export class Session implements SessionContext {
                   this.#getCurrentChat().getHistoryShallow(),
                 )
               : undefined;
-            let reattemptRecorded = false;
             if (
               isRestoreAskUserQuestion &&
               !findRestorableAskUserQuestion(
@@ -6908,25 +6925,13 @@ export class Session implements SessionContext {
 
               while (nextMessage !== null) {
                 turnCount++;
-                // The ownership link has to be as unconditional as the
-                // terminal it owns: `#settleTurnRecording` writes a
-                // `turn_result` for this lap whether or not the model is ever
-                // called, so a lap aborted below would otherwise leave the
-                // terminal owner-less and the next restore would read the
-                // ORIGINAL attempt's outcome instead of this cancellation.
-                if (
-                  continuesCurrentWorkChain &&
-                  daemonPromptId &&
-                  !reattemptRecorded
-                ) {
-                  await this.config
-                    .getChatRecordingService()
-                    ?.recordTurnAttempt(continuedPromptId, daemonPromptId);
-                  reattemptRecorded = true;
-                }
                 if (pendingSend.signal.aborted) {
                   this.todoStopGuard.suspend();
-                  this.#getCurrentChat().addHistory(nextMessage);
+                  const chat = this.#getCurrentChat();
+                  chat.addHistory(nextMessage);
+                  if (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON) {
+                    chat.markLastTurnCancelled?.();
+                  }
                   if (restorePostAnswerNoticesAttached) {
                     this.#clearPendingRestoreNotices();
                   }
@@ -8747,15 +8752,14 @@ export class Session implements SessionContext {
     if (recording === null) return;
     const cancelledAt =
       state === 'cancelled' ? recording.cancelledAt : undefined;
-    if (cancelledAt !== undefined && response) {
+    const noticeAt =
+      state === 'cancelled' ? (cancelledAt ?? Date.now()) : undefined;
+    if (noticeAt !== undefined && response) {
       response._meta = {
         ...response._meta,
         'qwen.promptCancelled': {
-          cancelledAt,
-          elapsedMs: Math.max(
-            0,
-            cancelledAt - (recording.startedAt ?? cancelledAt),
-          ),
+          cancelledAt: noticeAt,
+          elapsedMs: Math.max(0, noticeAt - (recording.startedAt ?? noticeAt)),
         },
       };
     }
@@ -8787,7 +8791,7 @@ export class Session implements SessionContext {
     };
     try {
       recording.recordingService?.recordTurnResult(payload);
-      if (cancelledAt !== undefined) {
+      if (state === 'cancelled') {
         await recording.recordingService?.flush();
       }
     } catch (recordError) {

@@ -6344,7 +6344,10 @@ export class DaemonClient {
         err instanceof DOMException &&
         err.name === 'AbortError'
       ) {
-        this.cancel(sessionId, clientId).catch(() => {});
+        this.cancel(sessionId, clientId, {
+          cancelReason:
+            signal.reason === 'qwen:user-cancel' ? 'user' : 'interrupted',
+        }).catch(() => {});
         throw err;
       }
       throw err;
@@ -6381,13 +6384,21 @@ export class DaemonClient {
     );
   }
 
-  async cancel(sessionId: string, clientId?: string): Promise<void> {
+  async cancel(
+    sessionId: string,
+    clientId?: string,
+    options?: { cancelReason?: 'user' | 'interrupted' },
+  ): Promise<void> {
     await this.fetchWithTimeout(
       `${this.baseUrl}/session/${urlEncode(sessionId)}/cancel`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
-        body: '{}',
+        body: JSON.stringify(
+          options?.cancelReason
+            ? { _meta: { 'qwen.cancelReason': options.cancelReason } }
+            : {},
+        ),
       },
       async (res) => {
         if (!res.ok && res.status !== 204) {

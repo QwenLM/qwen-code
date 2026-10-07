@@ -69,7 +69,7 @@ export interface DaemonChannelSessionClient {
     resume?: boolean;
   }): AsyncGenerator<DaemonChannelEvent>;
   detach?(): Promise<void>;
-  cancel(): Promise<void>;
+  cancel(options?: { cancelReason?: 'user' | 'interrupted' }): Promise<void>;
   setModel(modelId: string): Promise<Record<string, unknown>>;
   respondToPermission(
     requestId: string,
@@ -839,12 +839,19 @@ export class DaemonChannelBridge
     return session.shellCommand(command, signal);
   }
 
-  async cancelSession(sessionId: string): Promise<void> {
+  async cancelSession(
+    sessionId: string,
+    options?: { cancelReason?: 'user' | 'interrupted' },
+  ): Promise<void> {
     const session = this.ensureSession(sessionId);
     this.resolveTurnBarrier(sessionId);
     this.abortActivePrompts(sessionId);
     this.activePrompts.delete(sessionId);
-    await session.cancel();
+    if (options) {
+      await session.cancel(options);
+    } else {
+      await session.cancel();
+    }
   }
 
   async discardSession(
@@ -873,7 +880,7 @@ export class DaemonChannelBridge
         // Fall back to cancellation for clients that cannot detach cleanly.
       }
     }
-    await session.cancel();
+    await session.cancel({ cancelReason: 'interrupted' });
   }
 
   async setSessionModel(
@@ -922,9 +929,11 @@ export class DaemonChannelBridge
     for (const sessionId of Array.from(this.sessions.keys())) {
       const session = this.sessions.get(sessionId);
       if (session) {
-        void session.cancel().catch((error: unknown) => {
-          this.lastError = error;
-        });
+        void session
+          .cancel({ cancelReason: 'interrupted' })
+          .catch((error: unknown) => {
+            this.lastError = error;
+          });
       }
       this.dropSession(sessionId, 'bridge_stopped', false);
     }

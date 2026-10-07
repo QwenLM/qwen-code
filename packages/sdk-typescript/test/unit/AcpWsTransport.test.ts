@@ -227,6 +227,97 @@ describe('AcpWsTransport', () => {
     });
   });
 
+  describe('request cancellation', () => {
+    it.each([
+      [undefined, 'interrupted'],
+      ['qwen:user-cancel', 'user'],
+    ] as const)(
+      'forwards an abort as %s cancellation',
+      async (reason, expected) => {
+        const originalWebSocket = Object.getOwnPropertyDescriptor(
+          globalThis,
+          'WebSocket',
+        );
+        const messages: Array<Record<string, unknown>> = [];
+        class FakeWebSocket {
+          static readonly OPEN = 1;
+          readonly readyState = FakeWebSocket.OPEN;
+          onopen: (() => void) | null = null;
+          onmessage: ((event: { data: string }) => void) | null = null;
+          onclose: ((event: { code: number; reason: string }) => void) | null =
+            null;
+          onerror: (() => void) | null = null;
+
+          constructor() {
+            queueMicrotask(() => this.onopen?.());
+          }
+
+          send(payload: string) {
+            const message = JSON.parse(payload) as Record<string, unknown>;
+            messages.push(message);
+            if (message['method'] === 'initialize') {
+              queueMicrotask(() =>
+                this.onmessage?.({
+                  data: JSON.stringify({
+                    jsonrpc: '2.0',
+                    id: message['id'],
+                    result: { protocolVersion: 1, agentCapabilities: {} },
+                  }),
+                }),
+              );
+            }
+          }
+
+          close() {
+            this.onclose?.({ code: 1000, reason: 'closed' });
+          }
+        }
+
+        Object.defineProperty(globalThis, 'WebSocket', {
+          configurable: true,
+          value: FakeWebSocket,
+        });
+        const transport = new AcpWsTransport('ws://daemon/acp');
+        const controller = new AbortController();
+        const request = transport.fetch('http://daemon/session/s1/prompt', {
+          method: 'POST',
+          body: '{}',
+          signal: controller.signal,
+        });
+
+        try {
+          await vi.waitFor(() => {
+            expect(
+              messages.some(
+                (message) => message['method'] === 'session/prompt',
+              ),
+            ).toBe(true);
+          });
+          if (reason === undefined) controller.abort();
+          else controller.abort(reason);
+
+          await expect(request).rejects.toMatchObject({ name: 'AbortError' });
+          expect(messages).toContainEqual(
+            expect.objectContaining({
+              method: 'session/cancel',
+              params: {
+                sessionId: 's1',
+                _meta: { 'qwen.cancelReason': expected },
+              },
+            }),
+          );
+        } finally {
+          transport.dispose();
+          if (originalWebSocket) {
+            Object.defineProperty(globalThis, 'WebSocket', originalWebSocket);
+          } else {
+            Reflect.deleteProperty(globalThis, 'WebSocket');
+          }
+        }
+      },
+    );
+  });
+
   // ---- dispose() --------------------------------------------------------
 
   describe('dispose()', () => {

@@ -860,9 +860,14 @@ export class DaemonSessionClient {
     }
   }
 
-  async cancel(): Promise<void> {
+  async cancel(options?: {
+    cancelReason?: 'user' | 'interrupted';
+  }): Promise<void> {
     const cancelling =
-      this.cancelling ?? this.client.cancel(this.sessionId, this.clientId);
+      this.cancelling ??
+      (options
+        ? this.client.cancel(this.sessionId, this.clientId, options)
+        : this.client.cancel(this.sessionId, this.clientId));
     this.cancelling = cancelling;
     try {
       await cancelling;

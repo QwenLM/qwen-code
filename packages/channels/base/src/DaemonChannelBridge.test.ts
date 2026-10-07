@@ -4503,7 +4503,9 @@ describe('DaemonChannelBridge', () => {
 
     bridge.stop();
     await expect(promptPromise).rejects.toThrow('aborted');
-    expect(session.cancel).toHaveBeenCalledOnce();
+    expect(session.cancel).toHaveBeenCalledWith({
+      cancelReason: 'interrupted',
+    });
     expect(sessionDied).toHaveBeenCalledWith({
       sessionId: 'session-1',
       reason: 'bridge_stopped',
@@ -4789,7 +4791,9 @@ describe('DaemonChannelBridge', () => {
     await expect(bridge.loadSession('existing-session', '/repo')).resolves.toBe(
       'existing-session',
     );
-    await bridge.cancelSession('existing-session');
+    await bridge.cancelSession('existing-session', {
+      cancelReason: 'interrupted',
+    });
     await bridge.setSessionModel('existing-session', 'qwen3-coder-plus');
 
     expect(factory).toHaveBeenCalledWith({

@@ -5393,6 +5393,22 @@ describe('DaemonClient', () => {
       await client.cancel('s-1');
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/cancel');
       expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.body).toBe('{}');
+    });
+
+    it('encodes an interrupted cancellation reason in the request body', async () => {
+      const { fetch, calls } = recordingFetch(
+        () => new Response(null, { status: 204 }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.cancel('s-1', undefined, {
+        cancelReason: 'interrupted',
+      });
+
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        _meta: { 'qwen.cancelReason': 'interrupted' },
+      });
     });
 
     it('sends client identity header on cancel', async () => {
