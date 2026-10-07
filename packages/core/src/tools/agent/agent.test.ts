@@ -398,6 +398,7 @@ describe('AgentTool', () => {
       loadSubagent: vi.fn(),
       createAgentHeadless: vi.fn(),
       resolveModelGrade: vi.fn().mockReturnValue(undefined),
+      resolveSubagentModelRoute: vi.fn().mockReturnValue(undefined),
       getAvailableModelGrades: vi.fn().mockReturnValue(new Map()),
       addChangeListener: vi.fn((listener: () => void) => {
         changeListeners.push(listener);
@@ -4694,6 +4695,10 @@ describe('AgentTool', () => {
       vi.mocked(mockSubagentManager.resolveModelGrade).mockReturnValue(
         'mapped-model',
       );
+      vi.mocked(mockSubagentManager.resolveSubagentModelRoute).mockReturnValue({
+        modelId: 'mapped-model',
+        authType: 'openai',
+      });
       await launch({ model: 'high' });
       expect(mockSubagentManager.resolveModelGrade).toHaveBeenCalledWith(
         'high',

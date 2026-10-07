@@ -142,7 +142,6 @@ import type {
   ResidentBackgroundAgent,
 } from '../../agents/background-tasks.js';
 import { FOREGROUND_MODEL_SLOT_WAIT_CANCELLED } from '../../agents/background-tasks.js';
-import { buildModelIdContext, resolveModelId } from '../../utils/modelId.js';
 import type { AuthOverrides } from '../../models/content-generator-config.js';
 import {
   ExecutionCleanupError,
@@ -1527,12 +1526,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
   /**
    * Resolve a sub-agent's model selector (omitted / "inherit" / "fast" /
-   * modelId / authType:modelId) against the current config. Shared by the
-   * background and foreground reservation paths so the resolution and its
-   * `buildModelIdContext` wiring live in exactly one place.
+   * modelId / authType:modelId / providerId:modelId) the way the spawn
+   * paths do. Both reservation paths (background and foreground) resolve
+   * through the subagent manager's shared route resolver so the pinned
+   * model always matches the one the run is spawned with.
    */
-  private resolveSubagentModel(modelSelector?: string) {
-    return resolveModelId(modelSelector, buildModelIdContext(this.config));
+  private resolveSubagentModel(subagentConfig: SubagentConfig) {
+    return this.subagentManager.resolveSubagentModelRoute(subagentConfig);
   }
 
   /**
@@ -3041,19 +3041,18 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         if (subagentConfig.executor === undefined) {
           // Resolve the concrete model the sub-agent (or fork) will run with so the
           // registry can apply a per-model cap. `subagentConfig.model` is a
-          // selector (omitted/"inherit"/"fast"/modelId/authType:modelId);
-          // resolveSubagentModel maps it to the actual model ID, falling back to
-          // the parent's current model when the sub-agent inherits (forks always
-          // inherit, since FORK_AGENT has no model selector).
-          const resolvedSubagentModel = this.resolveSubagentModel(
-            subagentConfig.model,
-          );
-          subagentModelId = resolvedSubagentModel?.modelId;
+          // selector (omitted/"inherit"/"fast"/modelId/authType:modelId/
+          // providerId:modelId); the shared route resolver maps it to the
+          // actual model ID, falling back to the parent's current model when
+          // the sub-agent inherits (forks always inherit, since FORK_AGENT
+          // has no model selector).
+          const subagentModelRoute = this.resolveSubagentModel(subagentConfig);
+          subagentModelId = subagentModelRoute?.modelId;
           subagentModelId ??= this.config.getModel();
           const parentContentGeneratorConfig =
             this.config.getContentGeneratorConfig();
           const authType =
-            resolvedSubagentModel?.authType ??
+            subagentModelRoute?.authType ??
             parentContentGeneratorConfig.authType;
           subagentRuntimeAuthOverrides = authType
             ? {
@@ -3115,7 +3114,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // their detached body returns a placeholder with no release site on
         // this path, so capping them would leak the slot.
         subagentModelId =
-          this.resolveSubagentModel(subagentConfig.model)?.modelId ??
+          this.resolveSubagentModel(subagentConfig)?.modelId ??
           this.config.getModel();
         const fgRegistry = this.config.getBackgroundTaskRegistry();
         const perModelCap = fgRegistry.resolvePerModelCap(subagentModelId);
