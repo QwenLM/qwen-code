@@ -563,6 +563,12 @@ export class ManagedToolExecutor {
   async readWorkspaceContext(
     sessionId: string,
   ): Promise<{ files: ManagedWorkspaceContextFile[] }> {
+    return this.trackStart(() => this.readWorkspaceContextAdmitted(sessionId));
+  }
+
+  private async readWorkspaceContextAdmitted(
+    sessionId: string,
+  ): Promise<{ files: ManagedWorkspaceContextFile[] }> {
     this.assertLegacySession(sessionId);
     const tools = await this.toolsFor({
       sessionId,
@@ -570,14 +576,28 @@ export class ManagedToolExecutor {
       callId: 'workspace-context',
       argsDigest: '',
     });
-    if (!tools?.directory || tools.isActive?.() === false)
+    if (
+      !this.isAdmissionOpen ||
+      !tools?.directory ||
+      tools.isActive?.() === false
+    )
       throw new ManagedToolUnavailableError(
         'Workspace context is unavailable.',
       );
     // Confine to the Session directory, not the whole mount: a symlink to a
     // sibling Session's instruction file stays inside the mount root but
-    // must not be promoted into this Session's system instruction.
-    const boundary = await fs.realpath(tools.directory);
+    // must not be promoted into this Session's system instruction. A
+    // directory that stops resolving answers the declared error: a raw
+    // ENOENT would carry the runtime host's absolute path to the Broker as a
+    // 409 provider failure.
+    let boundary: string;
+    try {
+      boundary = await fs.realpath(tools.directory);
+    } catch {
+      throw new ManagedToolUnavailableError(
+        'Workspace context is unavailable.',
+      );
+    }
     const files: ManagedWorkspaceContextFile[] = [];
     const seen = new Set<string>();
     for (const name of MANAGED_WORKSPACE_CONTEXT_FILES) {

@@ -1680,6 +1680,119 @@ describe('readWorkspaceContext', () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it('refuses a Session directory that no longer resolves', async () => {
+    // The realpath that establishes the boundary runs outside the per-file
+    // try. A directory removed after the tool set was built must answer the
+    // declared error: a raw ENOENT reaches the worker's catch-all, which
+    // forwards `error.message` — the runtime host's absolute path — to the
+    // Broker as a 409 provider failure.
+    const mount = await mkdtemp(path.join(os.tmpdir(), 'ctx-gone-'));
+    const directory = path.join(mount, 'session-1');
+    try {
+      await mkdir(directory);
+      await writeFile(path.join(directory, 'QWEN.md'), 'own text');
+      await rm(directory, { recursive: true, force: true });
+
+      const toolSet: ManagedToolSet = {
+        sessionId: 'session-1',
+        directory,
+        workspaceRoot: mount,
+        tools: new Map(),
+        admitsDirectory: () => true,
+      };
+      const executor = new ManagedToolExecutor(async () => toolSet);
+      const pending = executor.readWorkspaceContext('session-1');
+
+      await expect(pending).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+      await expect(pending).rejects.toThrow(
+        'Workspace context is unavailable.',
+      );
+    } finally {
+      await rm(mount, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses the read once admission is sealed', async () => {
+    // A worker that has begun retiring starts no new filesystem work; its
+    // sibling control op refuses in the same state.
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ctx-sealed-'));
+    try {
+      await writeFile(path.join(directory, 'QWEN.md'), 'own text');
+
+      const toolSet: ManagedToolSet = {
+        sessionId: 'session-1',
+        directory,
+        workspaceRoot: directory,
+        tools: new Map(),
+        admitsDirectory: () => true,
+      };
+      const executor = new ManagedToolExecutor(async () => toolSet);
+      executor.sealAdmission(retirementId);
+
+      await expect(
+        executor.readWorkspaceContext('session-1'),
+      ).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a tool set that has retired', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ctx-retired-'));
+    try {
+      await writeFile(path.join(directory, 'QWEN.md'), 'own text');
+
+      const toolSet: ManagedToolSet = {
+        sessionId: 'session-1',
+        directory,
+        workspaceRoot: directory,
+        tools: new Map(),
+        admitsDirectory: () => true,
+        isActive: () => false,
+      };
+      const executor = new ManagedToolExecutor(async () => toolSet);
+
+      await expect(
+        executor.readWorkspaceContext('session-1'),
+      ).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('counts an in-flight read as pending drain work', async () => {
+    // The drain must not complete underneath a read this worker started.
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ctx-drain-'));
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      await writeFile(path.join(directory, 'QWEN.md'), 'own text');
+
+      const toolSet: ManagedToolSet = {
+        sessionId: 'session-1',
+        directory,
+        workspaceRoot: directory,
+        tools: new Map(),
+        admitsDirectory: () => true,
+      };
+      const executor = new ManagedToolExecutor(async () => {
+        await gate;
+        return toolSet;
+      });
+
+      const pending = executor.readWorkspaceContext('session-1');
+      executor.sealAdmission(retirementId);
+      expect(executor.getDrainObservation(retirementId).pendingStarts).toBe(1);
+
+      release();
+      await expect(pending).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('ManagedToolExecutor acknowledgement', () => {
