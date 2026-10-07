@@ -59,6 +59,10 @@ class HostedCommittedEventLineReplayIT {
                         .checkpointPayload("checkpoint-1"), sessionKey, 1));
         events.add(TurnEventLines.inputAcceptedEvent("tenant-store",
                 "workspace-store", "session-store"));
+        // The byte-budget test's dense delta, at the reader's text cap.
+        events.add(TurnEventLines.messageDeltaEvent("tenant-store",
+                "workspace-store", "budget-session", 1, "a".repeat(
+                        TurnEventLines.MAX_DELTA_TEXT_BYTES)));
         Path root = Files.createTempDirectory("event-line-replay");
         Path input = root.resolve("events.json");
         Files.writeString(input, events.toString(), StandardCharsets.UTF_8);
