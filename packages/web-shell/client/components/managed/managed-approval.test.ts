@@ -69,6 +69,41 @@ describe('Managed approval presentation', () => {
     ]);
   });
 
+  it('renders matched transcript arguments without invisible format characters', () => {
+    // The tool.args branch wins whenever the Harness supplied input, so it is
+    // the text an approver normally reads. JSON.stringify escapes only C0, the
+    // quote and the backslash, so U+202E RIGHT-TO-LEFT OVERRIDE and U+2066
+    // LEFT-TO-RIGHT ISOLATE would otherwise reach the card verbatim and
+    // visually reorder the command being approved.
+    const args = { command: 'ls\u202egpj\u2066' };
+    const messages = [
+      {
+        id: 'managed:s1:turn-2:1',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'turn-2:call-1',
+            toolName: 'run_shell_command',
+            status: 'pending',
+            args,
+          },
+        ],
+      } as Message,
+    ];
+    const request = toManagedPermissionRequest(
+      { ...action, toolName: 'run_shell_command' },
+      messages,
+    );
+    const block = request.content[0];
+    expect(block?.type).toBe('text');
+    const text = block?.text ?? '';
+    expect(text).toBe('{\n  "command": "ls\\u202egpj\\u2066"\n}');
+    expect(text).not.toMatch(/[\u007f-\u009f\u2028\u2029\p{Cf}]/u);
+    // rawInput is data for the tool call rather than display text, so it keeps
+    // the identical unescaped object the approver authorized.
+    expect(request.rawInput).toBe(args);
+  });
+
   it('prefers matched transcript arguments over the Action preview', () => {
     const request = toManagedPermissionRequest(
       {
