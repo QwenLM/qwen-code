@@ -273,6 +273,23 @@ function closedParameterSpans(text: string): Array<[number, number]> {
   return spans;
 }
 
+function hasBalancedQuotedCalls(value: string): boolean {
+  const tags =
+    /<invoke\s+name=["'][^"']+["']>|<function=[^\s<>]+>|<\/(invoke|function)>/g;
+  const stack: string[] = [];
+  let hasCall = false;
+  let tag: RegExpExecArray | null;
+  while ((tag = tags.exec(value)) !== null) {
+    if (tag[1]) {
+      if (stack.pop() !== tag[1]) return false;
+      hasCall = true;
+    } else {
+      stack.push(tag[0].startsWith('<invoke') ? 'invoke' : 'function');
+    }
+  }
+  return hasCall && stack.length === 0;
+}
+
 /**
  * Extracts XML-style tool calls from plain text content.
  * Tool-call blocks inside fences or explicit example wrappers are skipped:
@@ -301,7 +318,37 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
   // dispatched: documentation would otherwise execute, and the block quoting
   // it stays behind as prose. Skipping the match whole also keeps the
   // rejected-block rescan below out of the value it belongs to. See #13492.
-  const valueSpans = closedParameterSpans(text);
+  const valueSpans = closedParameterSpans(text).sort(
+    ([startA, endA], [startB, endB]) => startA - startB || endB - endA,
+  );
+  const quotedValueRanges: Array<[number, number]> = [];
+  let outerEnd = 0;
+  for (const [start, end] of valueSpans) {
+    if (start < outerEnd) continue;
+    outerEnd = end;
+    const element = text.slice(start, end);
+    const valueStart = openTagEnd(element);
+    if (
+      valueStart !== -1 &&
+      element.endsWith('</parameter>') &&
+      hasBalancedQuotedCalls(element.slice(valueStart, -'</parameter>'.length))
+    ) {
+      quotedValueRanges.push([start, end]);
+    }
+  }
+  parameterRanges.push(...quotedValueRanges);
+  parameterRanges.sort(([startA], [startB]) => startA - startB);
+  let rangeCount = 0;
+  for (let index = 0; index < parameterRanges.length; index++) {
+    const current = parameterRanges[index];
+    const previous = parameterRanges[rangeCount - 1];
+    if (previous && current[0] <= previous[1]) {
+      previous[1] = Math.max(previous[1], current[1]);
+    } else {
+      parameterRanges[rangeCount++] = current;
+    }
+  }
+  parameterRanges.length = rangeCount;
 
   TOOL_CALL_PATTERN.lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -313,7 +360,6 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       continue;
     }
     const toolName = match[1] ?? match[3];
-    const paramsBlock = match[2] ?? match[4];
     // A rejected block may have swallowed a complete later block, so rescan
     // from just after this block's open tag instead of its borrowed close.
     // When the tag end is not derivable, skip the whole block: rescanning
@@ -321,8 +367,65 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     const tagEnd = openTagEnd(match[0]);
     const resumeAt =
       tagEnd === -1 ? match.index + match[0].length : match.index + tagEnd;
+    const closeTag = match[1] !== undefined ? '</invoke>' : '</function>';
+    let closeStart = match.index + match[0].length - closeTag.length;
+    let quotedValue: [number, number] | undefined;
+    while (
+      (quotedValue = quotedValueRanges.find(
+        ([start, end]) => closeStart >= start && closeStart < end,
+      ))
+    ) {
+      closeStart = text.indexOf(closeTag, quotedValue[1]);
+      if (closeStart === -1) break;
+    }
+    if (tagEnd === -1 || closeStart === -1) {
+      TOOL_CALL_PATTERN.lastIndex = resumeAt;
+      continue;
+    }
+    const paramsStart = match.index + tagEnd;
+    const paramsBlock = text.slice(paramsStart, closeStart);
+    const blockEnd = closeStart + closeTag.length;
+    TOOL_CALL_PATTERN.lastIndex = blockEnd;
+
+    const args: Record<string, unknown> = Object.create(null) as Record<
+      string,
+      unknown
+    >;
+    let outsideParameters = '';
+    let cursor = 0;
     PARAMETER_PATTERN.lastIndex = 0;
-    const outsideParameters = paramsBlock.replace(PARAMETER_PATTERN, '');
+    let paramMatch: RegExpExecArray | null;
+    while ((paramMatch = PARAMETER_PATTERN.exec(paramsBlock)) !== null) {
+      const parameterStart = paramsStart + paramMatch.index;
+      const ownedRange = quotedValueRanges.find(
+        ([start, end]) => start === parameterStart && end <= closeStart,
+      );
+      let value = paramMatch[3];
+      let parameterEnd = paramMatch.index + paramMatch[0].length;
+      if (ownedRange) {
+        parameterEnd = ownedRange[1] - paramsStart;
+        value = paramsBlock.slice(
+          paramMatch.index + openTagEnd(paramMatch[0]),
+          parameterEnd - '</parameter>'.length,
+        );
+        PARAMETER_PATTERN.lastIndex = parameterEnd;
+      }
+      outsideParameters += paramsBlock.slice(cursor, paramMatch.index);
+      cursor = parameterEnd;
+      const paramName = paramMatch[1] ?? paramMatch[2];
+      args[paramName] = parseParameterValue(
+        decodeXmlEntities(stripDelimitingNewlines(value)),
+      );
+    }
+    outsideParameters += paramsBlock.slice(cursor);
+    let unquotedParameters = '';
+    cursor = paramsStart;
+    for (const [start, end] of quotedValueRanges) {
+      if (start < paramsStart || end > closeStart) continue;
+      unquotedParameters += text.slice(cursor, start);
+      cursor = end;
+    }
+    unquotedParameters += text.slice(cursor, closeStart);
     // A missing close must not borrow a later block's parameters or recover
     // only the arguments preceding a prematurely matched function close, so
     // reject a call opener the parameters did not consume. A closer is only
@@ -331,7 +434,7 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     // this syntax literally — and counting it as unclosed rejected the intact
     // call, which then never ran and left its raw markup visible.
     if (
-      /<(?:function|invoke)(?:[\s=>]|$)/.test(paramsBlock) ||
+      /<(?:function|invoke)(?:[\s=>]|$)/.test(unquotedParameters) ||
       /<\/?(?:function|invoke|parameter)(?:[\s=>]|$)/.test(outsideParameters) ||
       /^ {0,3}(?:`{3,}|~{3,})/m.test(outsideParameters)
     ) {
@@ -339,26 +442,12 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       continue;
     }
 
-    const args: Record<string, unknown> = Object.create(null) as Record<
-      string,
-      unknown
-    >;
-    PARAMETER_PATTERN.lastIndex = 0;
-    let paramMatch: RegExpExecArray | null;
-    while ((paramMatch = PARAMETER_PATTERN.exec(paramsBlock)) !== null) {
-      const paramName = paramMatch[1] ?? paramMatch[2];
-      const paramValue = decodeXmlEntities(
-        stripDelimitingNewlines(paramMatch[3]),
-      );
-      args[paramName] = parseParameterValue(paramValue);
-    }
-
     if (toolName && Object.keys(args).length > 0) {
       blocks.push({
         name: toolName,
         args,
         start: match.index,
-        end: match.index + match[0].length,
+        end: blockEnd,
       });
     }
   }
@@ -401,19 +490,6 @@ export function tryRecoverXmlToolCalls(text: string): {
     return { recovered: false, functionCallParts: [], remainingText: text };
   }
 
-  // Intent guard: only recover when XML blocks dominate the content.
-  // Substantial surrounding prose suggests the model is documenting or
-  // echoing the format, not emitting a tool call. Measure against all
-  // tool-call blocks (including parameterless ones the extraction skips).
-  TOOL_CALL_PATTERN.lastIndex = 0;
-  const proseOnly = text
-    .replace(TOOL_CALL_PATTERN, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-  if (text.length > 0 && proseOnly.length / text.length > 0.8) {
-    return { recovered: false, functionCallParts: [], remainingText: text };
-  }
-
   const removedRanges = extracted.map(
     ({ start, end }) => [start, end] as const,
   );
@@ -424,6 +500,16 @@ export function tryRecoverXmlToolCalls(text: string): {
     cursor = end;
   }
   withoutRecoveredCalls += text.slice(cursor);
+  // Use the same complete boundaries as argument extraction, while still
+  // counting parameterless blocks as XML rather than surrounding prose.
+  TOOL_CALL_PATTERN.lastIndex = 0;
+  const proseOnly = withoutRecoveredCalls
+    .replace(TOOL_CALL_PATTERN, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (text.length > 0 && proseOnly.length / text.length > 0.8) {
+    return { recovered: false, functionCallParts: [], remainingText: text };
+  }
   const remainingText = withoutRecoveredCalls
     .replace(
       /<tool_call>\s*<\/tool_call>|<function_calls>\s*<\/function_calls>/g,

@@ -1002,12 +1002,8 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
   });
 
   it('does not dispatch a call quoted inside a parameter value', () => {
-    // A write_file whose content documents this dialect with an unfenced
-    // example call. The outer block is rejected by its own guard — the lazy
-    // body ends at the quoted block's closer — and the rescan then matched
-    // that quoted call on its own merits and ran it, while the write the user
-    // asked for stayed behind as prose. Markup a value quotes is that value's
-    // own text, so it must stay data. See #13492.
+    // The quoted call stays data, and the outer call receives the complete
+    // content instead of ending at the quoted call's closer. See #13492.
     const quoted = invoke(
       'run_shell_command',
       param('command', 'rm -rf /tmp/x'),
@@ -1016,12 +1012,17 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
       'write_file',
       param('file_path', 'doc.md') + param('content', `Usage:\n${quoted}\n`),
     );
-    expect(extractXmlToolCalls(text)).toEqual([]);
-    expect(tryRecoverXmlToolCalls(text)).toEqual({
-      recovered: false,
-      functionCallParts: [],
-      remainingText: text,
-    });
+    const expected = {
+      name: 'write_file',
+      args: { file_path: 'doc.md', content: `Usage:\n${quoted}` },
+    };
+    expect(extractXmlToolCalls(text)).toEqual([expected]);
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(true);
+    expect(result.functionCallParts.map((part) => part.functionCall)).toEqual([
+      expect.objectContaining(expected),
+    ]);
+    expect(result.remainingText).toBe('');
   });
 
   it('still dispatches a real call that follows a value quoting one', () => {
@@ -1037,7 +1038,26 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     );
     const text = documented + '\n' + invoke('read_file', param('p', 'b.ts'));
     expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'write_file', args: { content: `Usage:\n${quoted}` } },
       { name: 'read_file', args: { p: 'b.ts' } },
     ]);
+  });
+
+  it('keeps a long quoted function value out of the prose and example guards', () => {
+    const quoted =
+      '<function=read_file><parameter=file_path>example.txt</parameter></function>';
+    const content = `${quoted}\n<example>\n\`\`\`xml\n${'data '.repeat(1000)}`;
+    const text =
+      '<function=write_file><parameter=file_path>doc.md</parameter>' +
+      `<parameter=content>${content}</parameter></function>`;
+    const result = tryRecoverXmlToolCalls(text);
+    expect(result.recovered).toBe(true);
+    expect(result.functionCallParts.map((part) => part.functionCall)).toEqual([
+      expect.objectContaining({
+        name: 'write_file',
+        args: { file_path: 'doc.md', content },
+      }),
+    ]);
+    expect(result.remainingText).toBe('');
   });
 });
