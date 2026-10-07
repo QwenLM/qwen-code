@@ -11636,7 +11636,8 @@ export function createSessionControlPlane(
                       sessionId,
                       _meta: {
                         [PROMPT_CANCEL_REASON_META_KEY]:
-                          abortSignal.reason === USER_CANCEL_ABORT_REASON
+                          abortSignal.reason === USER_CANCEL_ABORT_REASON ||
+                          pendingEntry.userCancelRequested
                             ? 'user'
                             : 'interrupted',
                       },
@@ -11860,6 +11861,14 @@ export function createSessionControlPlane(
             // into forwarded cancel metadata, so a cancel that lands before
             // dispatch (gate false, no direct forward) must still carry the
             // caller-declared provenance instead of being re-labelled 'user'.
+            // A user cancel after an earlier interruption cannot rewrite that
+            // immutable reason, so it is latched on the entry for `onAbort`.
+            if (
+              getPromptCancelAbortReason(notif._meta) ===
+              USER_CANCEL_ABORT_REASON
+            ) {
+              runningPrompt.userCancelRequested = true;
+            }
             runningPrompt.abortController.abort(
               getPromptCancelAbortReason(notif._meta),
             );

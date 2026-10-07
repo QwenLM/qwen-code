@@ -6103,6 +6103,36 @@ describe('Session', () => {
       expect(mockChat.markLastTurnCancelled).toHaveBeenCalledOnce();
     });
 
+    it.each([false, true])(
+      'marks a pre-send admission cancel only with user intent (upgraded=%s)',
+      async (upgraded) => {
+        mockChat.getUserContentPushCount = vi.fn().mockReturnValue(0);
+        const cancellation = new AbortController();
+        mockFileHistoryService.makeSnapshot.mockImplementationOnce(async () => {
+          cancellation.abort('qwen:prompt-interrupted');
+          // The admission signal is already aborted, so the upgrade can only
+          // record intent; the turn signal keeps the interruption reason.
+          if (upgraded) {
+            session.cancelPromptAdmission(cancellation, 'qwen:user-cancel');
+          }
+        });
+        await expect(
+          session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'cancel before send' }],
+            },
+            undefined,
+            cancellation.signal,
+          ),
+        ).resolves.toMatchObject({ stopReason: 'cancelled' });
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(mockChat.markLastTurnCancelled).toHaveBeenCalledTimes(
+          upgraded ? 1 : 0,
+        );
+      },
+    );
+
     it('binds user cancellation to the chat created by compression', async () => {
       mockChat.getUserContentPushCount = vi.fn().mockReturnValue(0);
       const replacementChat = Object.create(mockChat) as LlmChat;
@@ -7049,6 +7079,34 @@ describe('Session', () => {
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
       // No phantom file-history snapshot for a turn that never ran.
       expect(mockConfig.getFileHistoryService).not.toHaveBeenCalled();
+    });
+
+    it('writes no turn attempt when history stops being restorable before the bail', async () => {
+      let history = danglingAuqHistory();
+      mockChat.getHistory = vi.fn(() => history);
+      mockConfig.assertCanStartTurn = vi
+        .fn()
+        .mockResolvedValueOnce(undefined)
+        .mockImplementation(async () => {
+          // The question is answered while the restore prompt is admitted.
+          history = [
+            { role: 'user', parts: [{ text: 'pick one' }] },
+            { role: 'model', parts: [{ text: 'done already' }] },
+          ];
+        });
+
+      const result = await session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        } as unknown as Parameters<typeof session.prompt>[0],
+        { version: 1, sessionId: 'test-session-id', promptId: 'daemon-9' },
+      );
+
+      expect(result).toEqual({ stopReason: 'end_turn' });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.recordTurnAttempt).not.toHaveBeenCalled();
     });
 
     it('carries a pending worktree notice on the post-answer model message', async () => {

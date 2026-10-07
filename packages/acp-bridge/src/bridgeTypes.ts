@@ -1615,6 +1615,12 @@ export interface PendingPromptEntry {
   /** Cancellation handshake; duplicate callers await rather than resend it. */
   cancelForwardInitial?: Promise<void>;
   cancelForwardReason?: 'user' | 'interrupted';
+  /**
+   * Set when an explicit user cancel lands on an already-aborted prompt
+   * before dispatch; the immutable abort reason then still names the first
+   * cancel, so the post-dispatch forward reads this instead.
+   */
+  userCancelRequested?: true;
   /** Full cancellation handshake, used to fence the next FIFO dispatch. */
   cancelForwardDrain?: Promise<void>;
   /** Releases the cancellation fence when the prompt deadline expires. */

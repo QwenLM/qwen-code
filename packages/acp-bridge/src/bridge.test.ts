@@ -23352,6 +23352,67 @@ describe('createAcpSessionBridge', () => {
         await bridge.shutdown();
       }
     });
+
+    it('upgrades a pre-dispatch interruption when the user cancels before dispatch', async () => {
+      const prompt = deferred<PromptResponse>();
+      const handle = makeChannel({ promptImpl: () => prompt.promise });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const resolveSpy = vi.spyOn(
+        SessionAttachmentStore.prototype,
+        'resolveContent',
+      );
+      const gate =
+        deferred<
+          Awaited<ReturnType<SessionAttachmentStore['resolveContent']>>
+        >();
+      resolveSpy.mockReturnValueOnce(gate.promise);
+      try {
+        const running = bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'work' }],
+          },
+          undefined,
+          { promptId: 'infra-then-user-1' },
+        );
+        void running.catch(() => {});
+        await vi.waitFor(() =>
+          expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1),
+        );
+        await bridge.cancelSession(session.sessionId, {
+          sessionId: session.sessionId,
+          _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+        });
+        // The signal is already aborted, so this abort cannot replace its
+        // reason; the explicit Stop must still reach the child as 'user'.
+        await bridge.cancelSession(session.sessionId, {
+          sessionId: session.sessionId,
+          _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'user' },
+        });
+        gate.resolve([{ type: 'text', text: 'work' }]);
+        await vi.waitFor(() =>
+          expect(
+            handle.agent.extMethodCalls.filter(
+              ({ method }) => method === PROMPT_CANCEL_METHOD,
+            ),
+          ).toEqual([
+            {
+              method: PROMPT_CANCEL_METHOD,
+              params: {
+                sessionId: session.sessionId,
+                _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'user' },
+              },
+            },
+          ]),
+        );
+      } finally {
+        resolveSpy.mockRestore();
+        prompt.resolve({ stopReason: 'cancelled' });
+        await bridge.shutdown();
+      }
+    });
   });
 
   describe('permission flow', () => {

@@ -1668,6 +1668,11 @@ interface AgentResponseCapture {
   turnResult?: {
     finalText: string;
   };
+  /**
+   * Persists a restore prompt's turn attempt once the restore no-op bail has
+   * re-checked history, so a restore that runs nothing writes no attempt.
+   */
+  restoreTurnAttempt?: () => Promise<void>;
   agentOutput: AgentOutputMessageCapture;
 }
 
@@ -2151,6 +2156,11 @@ export class Session implements SessionContext {
   private readonly mcpAppCalls = new Map<string, AbortController>();
   private pendingPrompt: AbortController | null = null;
   private readonly userPromptCancellations = new WeakMap<AbortSignal, number>();
+  /** Turn signal -> the admission signal whose abort it copied. */
+  private readonly promptCancellationSources = new WeakMap<
+    AbortSignal,
+    AbortSignal
+  >();
   private activeGoalProposalTurn?: AgentResponseCapture['goalProposalTurn'];
   /**
    * Tracks the completion of the current prompt so that the next prompt
@@ -4893,10 +4903,17 @@ export class Session implements SessionContext {
   }
 
   #isUserPromptCancellation(signal?: AbortSignal): boolean {
-    return (
-      signal?.reason === USER_CANCEL_ABORT_REASON ||
-      (signal !== undefined && this.userPromptCancellations.has(signal))
-    );
+    if (signal === undefined) return false;
+    if (
+      signal.reason === USER_CANCEL_ABORT_REASON ||
+      this.userPromptCancellations.has(signal)
+    ) {
+      return true;
+    }
+    // A user cancel that upgrades an already-aborted admission lands only on
+    // the admission signal; the turn signal copied its first reason.
+    const source = this.promptCancellationSources.get(signal);
+    return source !== undefined && this.#isUserPromptCancellation(source);
   }
 
   async cancelPendingPrompt(
@@ -5248,17 +5265,11 @@ export class Session implements SessionContext {
       );
     }
     await this.assertCanStartTurn();
-    if (
-      invocationContext?.promptId &&
-      ((params as { retry?: boolean }).retry === true ||
-        params._meta?.[DAEMON_RETRY_META_KEY] === true ||
-        params._meta?.[DAEMON_CONTINUE_META_KEY] === true ||
-        (params._meta?.[DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY] === true &&
-          this.config.getRestoreAskUserQuestion?.() === true &&
-          !!findRestorableAskUserQuestion(
-            this.#getCurrentChat().peekLastHistoryEntry(),
-          )))
-    ) {
+    const recordsRetryAttempt =
+      (params as { retry?: boolean }).retry === true ||
+      params._meta?.[DAEMON_RETRY_META_KEY] === true ||
+      params._meta?.[DAEMON_CONTINUE_META_KEY] === true;
+    if (invocationContext?.promptId && recordsRetryAttempt) {
       await turnRecording?.recordingService?.recordTurnAttempt(
         getLastApiHistoryPromptId(this.#getCurrentChat().getHistoryShallow()),
         invocationContext.promptId,
@@ -5341,8 +5352,15 @@ export class Session implements SessionContext {
     pendingSend.signal.addEventListener('abort', recordCancellation, {
       once: true,
     });
-    const cancelPendingSend = () =>
+    const cancelPendingSend = () => {
+      if (admissionCancellation && !pendingSend.signal.aborted) {
+        this.promptCancellationSources.set(
+          pendingSend.signal,
+          admissionCancellation,
+        );
+      }
       pendingSend.abort(admissionCancellation?.reason);
+    };
     if (admissionCancellation) {
       admissionCancellation.addEventListener('abort', cancelPendingSend, {
         once: true,
@@ -5500,6 +5518,22 @@ export class Session implements SessionContext {
       ...(turnRecording ? { turnResult: turnRecording.finalAnswer } : {}),
       agentOutput: new AgentOutputMessageCapture(this.config),
     };
+    const restoreAttemptPromptId = invocationContext?.promptId;
+    const restoreAttemptRecorder = turnRecording?.recordingService;
+    if (
+      restoreAttemptPromptId &&
+      restoreAttemptRecorder &&
+      !recordsRetryAttempt
+    ) {
+      // Written after #executePromptInner's restore no-op bail, which is
+      // where the restorable-question check is no longer racing history.
+      responseCapture.restoreTurnAttempt = async () => {
+        await restoreAttemptRecorder.recordTurnAttempt(
+          getLastApiHistoryPromptId(this.#getCurrentChat().getHistoryShallow()),
+          restoreAttemptPromptId,
+        );
+      };
+    }
     // One server-side channel classification, consumed by both the
     // rejection gate below and the guard-mode selection in
     // #executePromptInner. Only the authenticated channel-prompt marker
@@ -6270,6 +6304,11 @@ export class Session implements SessionContext {
               // restore doesn't persist phantom records.
               return { stopReason: 'end_turn' };
             }
+            if (isRestoreAskUserQuestion) {
+              // A resumed attempt must supersede an old cancellation before
+              // model execution; a failed write rejects the prompt.
+              await responseCapture.restoreTurnAttempt?.();
+            }
             if (
               !isRetry &&
               !isContinue &&
@@ -6938,7 +6977,7 @@ export class Session implements SessionContext {
                   this.todoStopGuard.suspend();
                   const chat = this.#getCurrentChat();
                   chat.addHistory(nextMessage);
-                  if (pendingSend.signal.reason === USER_CANCEL_ABORT_REASON) {
+                  if (this.#isUserPromptCancellation(pendingSend.signal)) {
                     chat.markLastTurnCancelled?.();
                   }
                   if (restorePostAnswerNoticesAttached) {
