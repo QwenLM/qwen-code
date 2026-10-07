@@ -44,12 +44,18 @@ WORKDIR /app
 COPY --from=build /tmp/qwen-managed-agent-server.jar \
   /app/qwen-managed-agent-server.jar
 
-# The image keeps the application.yml loopback defaults: the API has no
-# HTTP authentication — tenancy is whatever X-Qwen-Tenant-Id says — so a
-# plain `docker run -p 8080:8080` must not publish it. Publishing is an
-# explicit operator opt-in (see the README's container section):
+# The image keeps the application.yml loopback defaults: under the shipped
+# `auto` auth mode the server refuses a non-loopback bind, so a plain
+# `docker run -p 8080:8080` must not — and cannot — publish it. Publishing
+# is an explicit operator opt-in that names an authentication posture (see
+# the README's container section):
 #   docker run -p 8080:8080 \
-#     -e QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0 <image>
+#     -e QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0 \
+#     -e QWEN_MANAGED_AGENT_AUTH_MODE=signed \
+#     -e QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY=<at-least-32-bytes> \
+#     <image>
+# or the deliberately unauthenticated
+# QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND=true override.
 
 EXPOSE 8080 4182
 USER 10001

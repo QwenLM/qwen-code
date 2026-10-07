@@ -833,29 +833,40 @@ artifacts, before enabling the local-process provisioner in a container.
 The image keeps the application's `127.0.0.1` defaults, so a plain
 `docker run -p 8080:8080` publishes nothing: `-p` DNATs to the container's
 bridge IP, and a loopback listener is unreachable through it. Publishing is
-an explicit opt-in:
+an explicit opt-in, and the server refuses a non-loopback bind under the
+shipped `auto` auth mode, so the command must name an authentication
+posture — signed mode, as the introduction recommends (see "Broker
+authentication and writer credentials" above):
 
 ```bash
 docker run -p 8080:8080 \
   -e QWEN_MANAGED_AGENT_SERVER_ADDRESS=0.0.0.0 \
+  -e QWEN_MANAGED_AGENT_AUTH_MODE=signed \
+  -e QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY="$KEY_AT_LEAST_32_BYTES" \
   <image>
 ```
+
+or the deliberately unauthenticated
+`-e QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND=true` override.
 
 Publishing the API needs no Runtime Broker face: the broker ships disabled
 by default, and a non-loopback broker bind is a separate opt-in — the broker
 refuses one unless `QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK=true`
 is also set (see Broker deployment above).
 
-The opt-in makes the authentication consequence load-bearing: there is no
-HTTP authentication — tenancy is whatever `X-Qwen-Tenant-Id` says — so the
-tenant-scoped API is exposed to anything that can route to the listener.
-That exposure does not depend on publishing a port: on the default bridge
-network the API also answers on the container's own bridge address, so
-every process on the Docker host and every peer container on that bridge
-can reach it with no `-p` at all. Run a published deployment behind an
-ingress that authenticates the tenant before setting `X-Qwen-Tenant-Id`,
-map ports only inside your own network policy, and attach the container
-only to networks whose peers you trust.
+The opt-in makes the authentication consequence load-bearing. Under the
+shipped default — `auto` resolving to `open` — there is no HTTP
+authentication: tenancy is whatever `X-Qwen-Tenant-Id` says. Signed mode
+HMAC-authenticates every request's tenant and actor headers; the
+insecure-bind override publishes with request authentication off. Either way the tenant-scoped API is
+exposed to anything that can route to the listener. That exposure does
+not depend on publishing a port: on the default bridge network the API
+also answers on the container's own bridge address, so every process on
+the Docker host and every peer container on that bridge can reach it
+with no `-p` at all. Run a published deployment behind an ingress that
+authenticates the tenant before setting `X-Qwen-Tenant-Id`, map ports
+only inside your own network policy, and attach the container only to
+networks whose peers you trust.
 
 ## Managed Session Store verification
 

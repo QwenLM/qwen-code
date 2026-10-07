@@ -14,6 +14,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { inspect } from 'node:util';
 import {
   createSourceFile,
   isArrayLiteralExpression,
@@ -24,6 +25,9 @@ import {
   transpileModule,
 } from 'typescript';
 import { describe, expect, it } from 'vitest';
+import { QWEN_SERVER_TOKEN_ENV } from '../../packages/cli/src/serve/channel-worker-env.js';
+import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from '../../packages/cli/src/serve/hosted-harness-contract.js';
+import { validateHostedHarnessProfile } from '../../packages/cli/src/serve/hosted-harness-profile.js';
 
 const read = (file) =>
   readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8');
@@ -38,6 +42,13 @@ const namedScripts = (text) => [
     ),
   ),
 ];
+
+// Fenced shell blocks of a markdown text, bodies only; language-less fences
+// are invisible to this scan.
+const fencedShellBlocks = (text) =>
+  [
+    ...text.matchAll(/```[ \t]*(?:bash|sh|shell|console|zsh)\n([\s\S]*?)```/g),
+  ].map((match) => match[1]);
 
 describe('managed-agent-server e2e runner', () => {
   const extracted = (names) => {
@@ -73,12 +84,24 @@ describe('managed-agent-server e2e runner', () => {
   const WAIT_UNTIL_DEPS = ['waitUntil', 'receivedSignal', 'childExited'];
   const load = (names, returns, ...params) =>
     new Function(...params, `${extracted(names)}\nreturn { ${returns} };`);
-  const loadWaitUntil = () => load(WAIT_UNTIL_DEPS, 'waitUntil')();
+  const loadWaitUntil = () =>
+    load(WAIT_UNTIL_DEPS, 'waitUntil', 'inspect')(inspect);
 
-  // Source-level MySQL invocation sites, so client protections can be
-  // asserted per call site: a whole-file count detects a removed safeguard
-  // but stays green when a fifth invocation without one is added.
+  // Source-level MySQL launch sites, selected on the launched binary
+  // rather than the callee or a hand-listed identifier: a launch through
+  // any spawner, with the binary spelled as a bare identifier or any quoted
+  // literal, is inventoried the same way. The binary names come from the
+  // runner's own command() resolutions, so a future mysql* binary joins the
+  // inventory with its declaration.
   const mysqlCalls = (sourceText) => {
+    const binaries = new Set();
+    for (const match of sourceText.matchAll(
+      /const (\w+) = command\('([^']+)'\)/g,
+    )) {
+      if (match[2].startsWith('mysql')) {
+        binaries.add(match[1]).add(match[2]);
+      }
+    }
     const ast = createSourceFile(
       'runner.ts',
       sourceText,
@@ -88,32 +111,31 @@ describe('managed-agent-server e2e runner', () => {
     const calls = [];
     const visit = (node) => {
       if (isCallExpression(node) && node.arguments.length > 0) {
-        // The long-lived mysqld server launches through start(), which
-        // spawns internally: scanning spawnSync alone inventories 3 of the
-        // 4 MySQL process launches.
-        const callee = node.expression.getText(ast);
-        if (
-          callee === 'spawnSync' ||
-          callee === 'spawn' ||
-          callee === 'start'
-        ) {
-          const binary = node.arguments[0].getText(ast);
-          if (['mysql', 'mysqladmin', 'mysqld'].includes(binary)) {
-            const args = node.arguments[1];
-            const firstArg =
-              args !== undefined &&
-              isArrayLiteralExpression(args) &&
-              args.elements.length > 0
-                ? args.elements[0].getText(ast)
-                : undefined;
-            calls.push({ binary, text: node.getText(ast), firstArg });
-          }
+        // command('mysql…') resolves a binary path; it is not a launch.
+        if (node.expression.getText(ast) === 'command') {
+          node.forEachChild(visit);
+          return;
+        }
+        // getText returns a string literal with its quotes, so compare the
+        // unquoted spelling: the quote style must not hide a launch.
+        const binary = node.arguments[0]
+          .getText(ast)
+          .replace(/^['"]|['"]$/g, '');
+        if (binaries.has(binary)) {
+          const args = node.arguments[1];
+          const firstArg =
+            args !== undefined &&
+            isArrayLiteralExpression(args) &&
+            args.elements.length > 0
+              ? args.elements[0].getText(ast)
+              : undefined;
+          calls.push({ binary, text: node.getText(ast), firstArg });
         }
       }
       node.forEachChild(visit);
     };
     visit(ast);
-    return calls;
+    return { calls, binaries };
   };
 
   it('keeps service and proxy ports distinct when an ephemeral port repeats', async () => {
@@ -308,6 +330,217 @@ describe('managed-agent-server e2e runner', () => {
     expect(namedScripts('packages/foo/scripts/nope.ts')).toEqual([]);
   });
 
+  it('pins the fenced hosted-harness launch block in the server README to a startable form', () => {
+    // The oracle is the profile validator itself, not a copy of its rules:
+    // the documented launch must supply everything
+    // validateHostedHarnessProfile rejects for missing, or the launch fails
+    // at startup while this pin stays green. The block is matched exactly —
+    // a grammar that parses the fence into argv/env fails open on every
+    // shell spelling it does not model. The CLI-side credential names come
+    // from the production constants so renaming one reddens this pin instead
+    // of stranding the README's spelling.
+    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    const fencedBlocks = fencedShellBlocks(readme);
+    const command =
+      'qwen serve --profile hosted-harness --port 4171 --hostname 127.0.0.1 --no-web';
+    const launchBlocks = fencedBlocks.filter((block) =>
+      block.includes(command),
+    );
+    expect(
+      launchBlocks,
+      'the README must fence exactly one hosted-harness launch block',
+    ).toHaveLength(1);
+    expect(launchBlocks[0]).toBe(
+      [
+        `${QWEN_SERVER_TOKEN_ENV}="$QWEN_MANAGED_AGENT_HARNESS_TOKEN" \\`,
+        `${HOSTED_HARNESS_CAPABILITY_DIGEST_ENV}="$QWEN_MANAGED_AGENT_CAPABILITY_DIGEST" \\`,
+        command,
+      ].join('\n') + '\n',
+    );
+    // A `$VAR` reference defers to a name the reader was told to export in
+    // the Prerequisites section; a renamed or dropped export there expands
+    // to empty in the reader's shell and the launch dies at startup, so
+    // every name the launch block references must be assigned inside that
+    // section — an assignment in a fence anywhere else in the README never
+    // reaches the reader's shell.
+    const prereqStart = readme.indexOf('## Prerequisites');
+    const prereqEnd = readme.indexOf('## Public Session lifecycle');
+    expect(prereqStart).toBeGreaterThan(-1);
+    expect(prereqEnd).toBeGreaterThan(prereqStart);
+    const assigned = new Set();
+    for (const fenced of fencedShellBlocks(
+      readme.slice(prereqStart, prereqEnd),
+    )) {
+      for (const match of fenced.matchAll(
+        /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=/gm,
+      )) {
+        assigned.add(match[1]);
+      }
+    }
+    for (const match of launchBlocks[0].matchAll(
+      /\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g,
+    )) {
+      expect(
+        assigned.has(match[1]),
+        `the launch block references $${match[1]}, which the Prerequisites section does not assign`,
+      ).toBe(true);
+    }
+    // The validator's input is parsed from the pinned block so the fixture
+    // cannot drift from the documented launch: an edit that drops --no-web
+    // or widens --hostname must redden this oracle, not only the exact-text
+    // pin above. mode stays the constant serve.ts hardcodes — the launch
+    // carries no flag for it — and the deferred `$VAR` credentials stand in
+    // as conforming values so the validator judges the launch's shape rather
+    // than the placeholder spelling.
+    expect(() =>
+      validateHostedHarnessProfile({
+        profile: 'hosted-harness',
+        hostname: /--hostname\s+(\S+)/.exec(launchBlocks[0])[1],
+        port: Number(/--port\s+(\d+)/.exec(launchBlocks[0])[1]),
+        mode: 'http-bridge',
+        token: 'documented-value',
+        serveWebShell: !launchBlocks[0].includes('--no-web'),
+        hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+      }),
+    ).not.toThrow();
+  });
+
+  it('pairs the 4171 base-url export with a startup-order note in the dual-path entry', () => {
+    // The base URL is read once at JVM startup, so the section that moves
+    // Spring to 4171 must say the value applies before (or via a restart
+    // of) `mvn spring-boot:run`, or the reader's running server stays on
+    // the 4170 value exported in Prerequisites.
+    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    const start = readme.indexOf(
+      '## Full WebShell dual-path development entry',
+    );
+    const end = readme.indexOf('## Embedded Runtime Broker');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const slice = readme.slice(start, end);
+    // The export must point at the port the documented launch binds, not at
+    // a second copy of the number: a launch-block port bump mirrored into
+    // the launch pin above would otherwise leave this assertion green while
+    // Spring keeps calling the old port and every Managed Turn fails.
+    const launchBlocks = fencedShellBlocks(readme).filter((fenced) =>
+      fenced.includes('qwen serve --profile hosted-harness'),
+    );
+    expect(
+      launchBlocks,
+      'the README must fence exactly one hosted-harness launch block',
+    ).toHaveLength(1);
+    const port = /--port\s+(\d+)/.exec(launchBlocks[0])[1];
+    expect(
+      slice,
+      'the Spring base URL must point at the port the launch block binds',
+    ).toContain(
+      `QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:${port}'`,
+    );
+    // The caveat sentence is hard-wrapped in the README, so match across the
+    // line break; the fallback is the restart clause, not the bare word
+    // `restart` that any unrelated sentence in the slice could supply.
+    expect(slice.replace(/\s+/g, ' ')).toMatch(
+      /read once at JVM startup|restart it with the override/i,
+    );
+    // The by-hand recipe re-anchors Spring to the Prerequisites environment,
+    // which never names the Session Store, and application.yml defaults the
+    // store off — a reader who follows that path wires Spring without a
+    // store descriptor and the Harness answers every attach with
+    // 400 invalid_managed_session_store, so the slice must name the switch.
+    expect(slice).toContain('QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED');
+    // The store switch is read once at JVM startup exactly like the base
+    // URL: exported below the restart cue it never reaches the reader's
+    // JVM, and every attach fails with 400 invalid_managed_session_store
+    // while the recipe reads complete — so the exports must land before the
+    // single restart. The cue is hard-wrapped, so compare on the collapsed
+    // slice; a missing cue fails closed through the -1.
+    const flat = slice.replace(/\s+/g, ' ');
+    expect(
+      flat.indexOf('QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED'),
+      'the Session Store exports must precede the Spring restart cue',
+    ).toBeLessThan(flat.indexOf('restart it with the override'));
+  });
+
+  it('keeps the review-corrections merge gates behind the CI-gated Hosted proofs', () => {
+    // The hosted-harness-mysql CI job runs HostedWorkspaceToolTurnIT (a real
+    // file-tool Turn through the packaged worker) and the three
+    // owner-failover E2E modes against the production HTTP durable-store
+    // adapter, all fail-closed via the failsafe includes and
+    // check-failsafe-reports.js. While both oracles stand, the
+    // review-corrections gates must not re-assert those capabilities as
+    // unproven — the foundation-boundary banner names that document the
+    // current authority, so the false claim reaches integrators in either
+    // language.
+    const toolTurnIt =
+      'packages/sdk-java/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java';
+    expect(
+      existsSync(new URL(`../../${toolTurnIt}`, import.meta.url)) &&
+        read('.github/workflows/sdk-java.yml').includes(
+          'test:e2e:managed-session-failover',
+        ),
+      'the Hosted tool-turn IT and the failover E2E lane must both exist for this oracle to mean anything',
+    ).toBe(true);
+    for (const [file, heading, claim] of [
+      [
+        'docs/design/2026-09-25-managed-agent-review-corrections.md',
+        '## Remaining integration gates',
+        /what remains unproven is[^.]*\./gi,
+      ],
+      [
+        'docs/design/2026-09-25-managed-agent-review-corrections.zh-CN.md',
+        '## 剩余集成门禁',
+        /仍未证明[^。]*。/g,
+      ],
+    ]) {
+      const doc = read(file);
+      expect(doc, `${file} must keep its merge-gates section`).toContain(
+        heading,
+      );
+      const gates = doc.slice(doc.indexOf(heading));
+      for (const [sentence] of gates.matchAll(claim)) {
+        expect(
+          sentence,
+          `${file} lists CI-gated Hosted capabilities as unproven`,
+        ).not.toMatch(
+          /tool turns|durable-store adapter|worker bundle|工具 Turn/i,
+        );
+      }
+    }
+  });
+
+  it('pins the attach-time generation fence in the Harness attachment contract', () => {
+    // The attachment paragraph publishes which identities an attach does NOT
+    // compare. The Harness keys its in-memory Session by sessionId alone and
+    // compares no tenant on attach, so the paragraph must say exactly that —
+    // an integrator who reads a tenant-keyed coalescing claim leaves tenant
+    // scoping out of their own gateway on the recovery redrive, which is not
+    // fenced. The Harness writer generation is the one identity that IS
+    // enforced — the contract middleware answers a stale boot id with 409
+    // hosted_harness_generation_mismatch and the attach handler rejects a
+    // store descriptor whose writerId differs before any coalescing — so the
+    // paragraph must name that rejection: an integrator reading "not
+    // rejected" for the generation omits the 409 path and every attach fails
+    // after a Harness restart with no documented way out. Each fence pin
+    // below matches a polarity phrase, not the bare name: the name alone
+    // stays green when the paragraph says the generation is not rejected or
+    // the store fence is shipped behavior.
+    const readme = read('packages/sdk-java/managed-agent-server/README.md');
+    const anchor = readme.indexOf('The Java connector caches an attachment');
+    expect(anchor).toBeGreaterThan(-1);
+    const end = readme.indexOf('\n\n', anchor);
+    expect(end).toBeGreaterThan(anchor);
+    const paragraph = readme.slice(anchor, end).replace(/\s+/g, ' ');
+    expect(paragraph).toContain(
+      'keys its in-memory Session by `sessionId` alone',
+    );
+    expect(paragraph).toContain(
+      'fails closed with `409 hosted_harness_generation_mismatch`',
+    );
+    expect(paragraph).toContain(
+      '`managed_session_store_conflict` fence is target design',
+    );
+  });
+
   it('waitUntil surfaces the last predicate error', async () => {
     const { waitUntil } = loadWaitUntil();
     await expect(
@@ -316,6 +549,15 @@ describe('managed-agent-server e2e runner', () => {
         () => Promise.reject(new Error('HTTP 503 wedged')),
         300,
       ),
+    ).rejects.toThrow(/wedged/);
+  });
+
+  // A non-Error rejection is recorded on every poll; rendering only Error
+  // instances would drop the one diagnostic the budget produced.
+  it('waitUntil surfaces a non-Error predicate rejection', async () => {
+    const { waitUntil } = loadWaitUntil();
+    await expect(
+      waitUntil('probe', () => Promise.reject('wedged'), 300),
     ).rejects.toThrow(/wedged/);
   });
 
@@ -415,18 +657,27 @@ describe('managed-agent-server e2e runner', () => {
     );
   });
 
+  // The success document must not reach stdout for a run the operator
+  // stopped: every payload is assembled inside the try and printed only
+  // after both post-finally throws, so the guard decides before the record
+  // exists. A print inside the try would leave the finally's teardown —
+  // seconds of stopChild awaits with the handlers still attached —
+  // unguarded.
   it('checks the received signal at the success exit too', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
-    expect(source).toMatch(
-      /if \(failure\) throw failure;[\s\S]{0,300}receivedSignal\) throw new Error/,
+    expect(source).not.toContain('console.log(JSON.stringify(');
+    const failureThrow = source.indexOf('if (failure) throw failure;');
+    const signalThrow = source.indexOf(
+      'if (receivedSignal) throw new Error',
+      failureThrow,
     );
-  });
-
-  it('passes --no-defaults to every MySQL client invocation', () => {
-    const source = read('scripts/run-managed-agent-server-e2e.ts');
-    // mysqld twice, the mysql client once, mysqladmin once; the
-    // isolated-home comment above the lookup must not fake a fifth hit.
-    expect(source.match(/--no-defaults/g)).toHaveLength(4);
+    const print = source.indexOf('console.log(resultJson)');
+    expect(failureThrow).toBeGreaterThan(-1);
+    expect(signalThrow).toBeGreaterThan(failureThrow);
+    expect(
+      print,
+      'the success payload must print only after both exit guards',
+    ).toBeGreaterThan(signalThrow);
   });
 
   // A timed-out spawn sets error and leaves status null with empty stderr,
@@ -439,7 +690,7 @@ describe('managed-agent-server e2e runner', () => {
       'runMysql',
       'spawnSync',
       'mysql',
-      'mysqlClientHome',
+      'mysqlClientEnv',
     )(
       (...args) => {
         spawns.push(args);
@@ -451,7 +702,7 @@ describe('managed-agent-server e2e runner', () => {
         };
       },
       'mysql',
-      '/tmp/mysql-client-home',
+      { HOME: '/tmp/mysql-client-home' },
     );
     expect(() => runMysql(3306, 'SELECT 1')).toThrow(/ETIMEDOUT/);
     // A final waitUntil poll can hand runMysql a remaining budget below one
@@ -467,19 +718,29 @@ describe('managed-agent-server e2e runner', () => {
   // mysql_config_editor credential would still auth-connect to the scratch
   // empty-password server. Both client invocations — the mysql client in
   // runMysql and the mysqladmin readiness probe — run against an isolated
-  // empty HOME under the runner's one scratch root, so the finally reclaims
-  // it; the two mysqld server launches deliberately keep the real HOME.
+  // environment: an empty HOME under the runner's one scratch root (so the
+  // finally reclaims it) with MYSQL_PWD and MYSQL_TEST_LOGIN_FILE stripped;
+  // the two mysqld server launches deliberately keep the real HOME.
   it('isolates the MySQL client HOME under the runner scratch root', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     expect(source).toContain("path.join(temporary, 'mysql-client-home')");
+    // --no-defaults and the isolated HOME leave two credential sources
+    // open: MYSQL_PWD is read as the password, and MYSQL_TEST_LOGIN_FILE
+    // relocates .mylogin.cnf ahead of $HOME and past --no-defaults. The
+    // shared client environment must strip both, or an exported developer
+    // credential reaches the scratch empty-password server.
+    expect(source).toContain("delete mysqlClientEnv['MYSQL_PWD'];");
+    expect(source).toContain("delete mysqlClientEnv['MYSQL_TEST_LOGIN_FILE'];");
     // Per call site, not a whole-file count: a count detects a removed
     // override but stays green when a fifth client invocation without one is
     // added. The mysqld server launches deliberately keep the real HOME, so
     // the isolated override is required on the mysql/mysqladmin clients.
-    const calls = mysqlCalls(source);
-    // The exact inventory, not a lower bound: a scan that silently stops
-    // seeing a call site — or a fifth launch added without the protections —
-    // must fail here, not pass against a collapsed population.
+    const { calls, binaries } = mysqlCalls(source);
+    // The exact inventory, not a lower bound — and the scan's binary set is
+    // the runner's own command() resolutions, pinned exactly — so a scan
+    // that silently stops seeing a call site or a declaration fails here
+    // instead of passing against a collapsed population.
+    expect([...binaries].sort()).toEqual(['mysql', 'mysqladmin', 'mysqld']);
     expect(calls).toHaveLength(4);
     for (const call of calls) {
       // MySQL honors --no-defaults only as the first option, so pin the
@@ -491,8 +752,8 @@ describe('managed-agent-server e2e runner', () => {
       if (call.binary === 'mysqld') continue;
       expect(
         call.text,
-        `${call.binary} must run with the isolated mysqlClientHome`,
-      ).toContain('HOME: mysqlClientHome');
+        `${call.binary} must run with the isolated mysqlClientEnv`,
+      ).toContain('env: mysqlClientEnv');
     }
   });
 
@@ -504,8 +765,11 @@ describe('managed-agent-server e2e runner', () => {
   it('bounds every synchronous MySQL probe by the poll budget', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     expect(source).toMatch(/spawnSync\(\s*mysqladmin,[\s\S]*?timeout: 10_000/);
+    // Pin the forwarded argument, not the parameter list: an arrow that
+    // takes remainingMs but never passes it on falls back to the 10 s
+    // default inside a budget that may be smaller.
     expect(
-      source.match(/\(remainingMs\) =>\s*runMysql\(/g),
+      source.match(/\(remainingMs\) =>\s*runMysql\([\s\S]*?remainingMs,/g),
       'both lease polls must derive the probe timeout from the waitUntil budget',
     ).toHaveLength(2);
   });
@@ -559,6 +823,18 @@ describe('managed-agent-server e2e runner', () => {
     // The descriptive throw stays part of the lookup: a pom whose version
     // the regex cannot read must fail there, not at the jar existsSync.
     expect(script).toContain('Could not read the project <version>');
+    // Whitespace inside the element (a formatter wrapping the value) must
+    // not flow into the jar path: the lifted pattern's capture is
+    // whitespace-tolerant, and an empty element still matches nothing, so
+    // the runner's descriptive guard fires.
+    const wrapped =
+      '<artifactId>qwen-managed-agent-server</artifactId>\n  <version>\n    9.9.9\n  </version>';
+    expect(wrapped.match(pattern)?.[1]).toBe('9.9.9');
+    expect(
+      '<artifactId>qwen-managed-agent-server</artifactId><version></version>'.match(
+        pattern,
+      ),
+    ).toBeNull();
   });
 
   it('keeps the image on the loopback default and the jar guard loud', () => {
@@ -622,6 +898,34 @@ describe('managed-agent-server e2e runner', () => {
       ).toMatch(
         /QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK='?true'?/,
       );
+    }
+    // BrokerSecurity refuses a non-loopback server.address under the
+    // shipped auto / allow-insecure-bind=false defaults, so a documented
+    // wildcard opt-in whose command names neither override crash-loops the
+    // container: every block setting SERVER_ADDRESS=0.0.0.0 must pass
+    // signed mode with its signing key or the explicit insecure override as
+    // -e flags — an override mentioned only in prose is not in the command
+    // an operator copies.
+    for (const document of [dockerfile, readme]) {
+      for (const occurrence of document.matchAll(
+        /QWEN_MANAGED_AGENT_SERVER_ADDRESS=0\.0\.0\.0/g,
+      )) {
+        const before = document.lastIndexOf('\n\n', occurrence.index);
+        const after = document.indexOf('\n\n', occurrence.index);
+        const block = document.slice(
+          before === -1 ? 0 : before,
+          after === -1 ? undefined : after,
+        );
+        const signed =
+          /-e QWEN_MANAGED_AGENT_AUTH_MODE='?signed'?/.test(block) &&
+          block.includes('-e QWEN_MANAGED_AGENT_AUTH_SIGNING_KEY=');
+        const insecure =
+          /-e QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND='?true'?/.test(block);
+        expect(
+          signed || insecure,
+          'a documented server wildcard bind must pass -e AUTH_MODE=signed with a signing key or -e AUTH_ALLOW_INSECURE_BIND=true',
+        ).toBe(true);
+      }
     }
   });
 

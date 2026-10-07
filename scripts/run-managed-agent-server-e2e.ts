@@ -12,6 +12,7 @@ import {
 import { createServer, type Server } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
+import { inspect } from 'node:util';
 import {
   fakeToolCall,
   startFakeOpenAIServer,
@@ -91,10 +92,12 @@ const springTarget = path.join(springModule, 'target');
 // over target/ matches three artifacts. Read the project version from the
 // pom and name the unclassified jar exactly — version-independent without
 // assuming it is the only packaged artifact. The <version> immediately
-// following the module's own <artifactId> (not the <parent> block's).
+// following the module's own <artifactId> (not the <parent> block's). The
+// capture itself is whitespace-tolerant, so a formatter wrapping or
+// re-indenting the element cannot flow newlines into the jar path.
 const pomXml = readFileSync(path.join(springModule, 'pom.xml'), 'utf8');
 const pomVersion = pomXml.match(
-  /<artifactId>qwen-managed-agent-server<\/artifactId>\s*<version>([^<]+)<\/version>/,
+  /<artifactId>qwen-managed-agent-server<\/artifactId>\s*<version>\s*([^<]*?\S)\s*<\/version>/,
 )?.[1];
 if (!pomVersion) {
   throw new Error(
@@ -592,7 +595,19 @@ async function waitUntil(
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  const cause = lastError instanceof Error ? `: ${lastError.message}` : '';
+  // A non-Error rejection (a status string, a library object) is still
+  // the last thing the predicate said: inspect it so the content survives —
+  // String() renders a plain object as "[object Object]".
+  let cause = '';
+  if (lastError instanceof Error) {
+    cause = `: ${lastError.message}`;
+  } else if (lastError !== undefined) {
+    try {
+      cause = `: ${inspect(lastError)}`;
+    } catch {
+      cause = `: ${String(lastError)}`;
+    }
+  }
   throw new Error(
     `${name} did not become ready${cause}\n${child?.log() ?? ''}`,
   );
@@ -600,13 +615,21 @@ async function waitUntil(
 
 // MySQL reads $HOME/.mylogin.cnf even when option files are disabled,
 // so a mysql_config_editor credential on a developer's machine would
-// silently auth-connect to the scratch empty-password server. Client
-// invocations run against an isolated empty HOME instead of inheriting
-// the real one. The directory hangs off the runner's one scratch root, so
-// the finally reclaims it and QWEN_MANAGED_E2E_KEEP_TMP=1 keeps it for
-// inspection.
+// silently auth-connect to the scratch empty-password server — and an
+// exported MYSQL_PWD (read as the password) or MYSQL_TEST_LOGIN_FILE
+// (relocates .mylogin.cnf ahead of $HOME, past --no-defaults) does the
+// same. Client invocations run against an isolated environment instead of
+// inheriting the real one: an empty HOME under the runner's one scratch
+// root, so the finally reclaims it and QWEN_MANAGED_E2E_KEEP_TMP=1 keeps
+// it for inspection, with both credential variables stripped.
 const mysqlClientHome = path.join(temporary, 'mysql-client-home');
 mkdirSync(mysqlClientHome, { recursive: true });
+const mysqlClientEnv: NodeJS.ProcessEnv = {
+  ...process.env,
+  HOME: mysqlClientHome,
+};
+delete mysqlClientEnv['MYSQL_PWD'];
+delete mysqlClientEnv['MYSQL_TEST_LOGIN_FILE'];
 
 function runMysql(port: number, sql: string, timeoutMs = 10_000): string {
   const result = spawnSync(
@@ -626,7 +649,7 @@ function runMysql(port: number, sql: string, timeoutMs = 10_000): string {
     ],
     {
       encoding: 'utf8',
-      env: { ...process.env, HOME: mysqlClientHome },
+      env: mysqlClientEnv,
       // waitUntil hands the lease polls its remaining budget, and the final
       // iteration can shrink it below one client round trip; floor the probe
       // timeout so the last poll is never handed less than it can cost. The
@@ -746,6 +769,10 @@ let heldStartProxy: HeldExecutionStartProxy | undefined;
 let replacementBrokerProxy: HeldExecutionStartProxy | undefined;
 let failure: unknown;
 let dumpPort: number | undefined;
+// The success JSON, assembled inside the try and printed only after
+// the post-finally throws, so an interrupt can never put a clean pass
+// on stdout for a run the operator explicitly stopped.
+let resultJson: string | undefined;
 try {
   const harnessToken = randomBytes(24).toString('base64url');
   const brokerToken = randomBytes(24).toString('base64url');
@@ -881,7 +908,7 @@ try {
         ],
         {
           stdio: 'ignore',
-          env: { ...process.env, HOME: mysqlClientHome },
+          env: mysqlClientEnv,
           timeout: 10_000,
         },
       ).status === 0,
@@ -1470,26 +1497,24 @@ try {
         );
       }
 
-      console.log(
-        JSON.stringify(
-          {
-            sessionId: session.id,
-            executionCallId: originalExecutionCallId,
-            executionState: recoveredExecution[1],
-            dispatchGeneration: Number(recoveredExecution[2]),
-            firstHarnessBootId: firstBootId,
-            replacementHarnessBootId: replacementBootId,
-            writerGeneration: `${firstHead[0]} -> ${replacementHead[0]}`,
-            journalRevision: `${firstHead[1]} -> ${replacementHead[1]}`,
-            committedSequence: `${firstHead[2]} -> ${replacementHead[2]}`,
-            promptReplayed: false,
-            physicalToolExecutions: 1,
-            terminalTurns: terminalCount,
-            oldHarnessDiskDeleted: !existsSync(harnessHome),
-          },
-          null,
-          2,
-        ),
+      resultJson = JSON.stringify(
+        {
+          sessionId: session.id,
+          executionCallId: originalExecutionCallId,
+          executionState: recoveredExecution[1],
+          dispatchGeneration: Number(recoveredExecution[2]),
+          firstHarnessBootId: firstBootId,
+          replacementHarnessBootId: replacementBootId,
+          writerGeneration: `${firstHead[0]} -> ${replacementHead[0]}`,
+          journalRevision: `${firstHead[1]} -> ${replacementHead[1]}`,
+          committedSequence: `${firstHead[2]} -> ${replacementHead[2]}`,
+          promptReplayed: false,
+          physicalToolExecutions: 1,
+          terminalTurns: terminalCount,
+          oldHarnessDiskDeleted: !existsSync(harnessHome),
+        },
+        null,
+        2,
       );
     } else if (continuationFailover) {
       await waitForTerminal(
@@ -1565,23 +1590,21 @@ try {
           `Continuation failover audit failed: terminal=${recoveredTerminal?.type ?? 'missing'} text=${JSON.stringify(visibleText)} deltas=${JSON.stringify(textDeltas)} execution=${recoveredExecution.join(',')} rows=${executionCount} boot=${firstBootId}->${replacementBootId} terminals=${terminalCount} model=${initialModelRequests.length}+${continuationRequests.length} sideEffect=${JSON.stringify(sideEffectBytes)}`,
         );
       }
-      console.log(
-        JSON.stringify(
-          {
-            sessionId: session.id,
-            executionCallId: originalExecutionCallId,
-            firstHarnessBootId: firstBootId,
-            replacementHarnessBootId: replacementBootId,
-            promptReplayed: initialModelRequests.length !== 1,
-            physicalToolExecutions: executionCount,
-            continuationModelRequests: continuationRequests.length,
-            visibleText,
-            terminalTurns: terminalCount,
-            oldHarnessDiskDeleted: !existsSync(harnessHome),
-          },
-          null,
-          2,
-        ),
+      resultJson = JSON.stringify(
+        {
+          sessionId: session.id,
+          executionCallId: originalExecutionCallId,
+          firstHarnessBootId: firstBootId,
+          replacementHarnessBootId: replacementBootId,
+          promptReplayed: initialModelRequests.length !== 1,
+          physicalToolExecutions: executionCount,
+          continuationModelRequests: continuationRequests.length,
+          visibleText,
+          terminalTurns: terminalCount,
+          oldHarnessDiskDeleted: !existsSync(harnessHome),
+        },
+        null,
+        2,
       );
     } else {
       const secondResponse = await fetch(
@@ -1671,22 +1694,20 @@ try {
         );
       }
 
-      console.log(
-        JSON.stringify(
-          {
-            sessionId: session.id,
-            firstHarnessBootId: firstBootId,
-            replacementHarnessBootId: secondBootId,
-            writerGeneration: `${firstHead[0]} -> ${secondHead[0]}`,
-            journalRevision: `${firstHead[1]} -> ${secondHead[1]}`,
-            committedSequence: `${firstHead[2]} -> ${secondHead[2]}`,
-            terminalTurns: terminalCount,
-            restoredFirstTurnContext: true,
-            oldHarnessDiskDeleted: !existsSync(harnessHome),
-          },
-          null,
-          2,
-        ),
+      resultJson = JSON.stringify(
+        {
+          sessionId: session.id,
+          firstHarnessBootId: firstBootId,
+          replacementHarnessBootId: secondBootId,
+          writerGeneration: `${firstHead[0]} -> ${secondHead[0]}`,
+          journalRevision: `${firstHead[1]} -> ${secondHead[1]}`,
+          committedSequence: `${firstHead[2]} -> ${secondHead[2]}`,
+          terminalTurns: terminalCount,
+          restoredFirstTurnContext: true,
+          oldHarnessDiskDeleted: !existsSync(harnessHome),
+        },
+        null,
+        2,
       );
     }
   } else {
@@ -1845,25 +1866,23 @@ try {
       throw new Error(`Durable event audit failed: ${durable.join(',')}`);
     }
 
-    console.log(
-      JSON.stringify(
-        {
-          model,
-          sessionId: session.id,
-          createAdmissionMs: createdAt - requestStartedAt,
-          firstModelEventMs: firstModel.observedAt - requestStartedAt,
-          runtimeReadyMs: runtimeReady.observedAt - requestStartedAt,
-          terminalMs: terminal.observedAt - requestStartedAt,
-          modelBeforeRuntimeReady:
-            firstModel.event.sequence < runtimeReady.event.sequence,
-          toolSideEffect: true,
-          idempotentReplay: true,
-          crossTenantStatus: crossTenant.status,
-          durableEventCount: Number(durable[0]),
-        },
-        null,
-        2,
-      ),
+    resultJson = JSON.stringify(
+      {
+        model,
+        sessionId: session.id,
+        createAdmissionMs: createdAt - requestStartedAt,
+        firstModelEventMs: firstModel.observedAt - requestStartedAt,
+        runtimeReadyMs: runtimeReady.observedAt - requestStartedAt,
+        terminalMs: terminal.observedAt - requestStartedAt,
+        modelBeforeRuntimeReady:
+          firstModel.event.sequence < runtimeReady.event.sequence,
+        toolSideEffect: true,
+        idempotentReplay: true,
+        crossTenantStatus: crossTenant.status,
+        durableEventCount: Number(durable[0]),
+      },
+      null,
+      2,
     );
   }
 } catch (error) {
@@ -1909,7 +1928,10 @@ try {
 }
 
 if (failure) throw failure;
-// An interrupt after the last poll must not print the success JSON and
-// exit 0 — a supervising script would record a clean pass for a run the
-// operator explicitly stopped.
+// An interrupt after the last poll — or during the finally's teardown —
+// must not print the success JSON and exit 0: a supervising script would
+// record a clean pass for a run the operator explicitly stopped. The
+// payload stays a variable until both guards have run, so the decision
+// precedes the record.
 if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
+if (resultJson !== undefined) console.log(resultJson);
