@@ -381,6 +381,10 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
           approvalMode={agentApprovalMode}
           promptTokenCount={lastPromptTokenCount}
           contextWindowSize={
+            // An agent on its own model has its own window; the main
+            // session's config only applies when the agent inherits it.
+            interactiveAgent?.getCore().runtimeView?.contentGeneratorConfig
+              .contextWindowSize ??
             config.getContentGeneratorConfig()?.contextWindowSize
           }
           terminalWidth={terminalWidth}

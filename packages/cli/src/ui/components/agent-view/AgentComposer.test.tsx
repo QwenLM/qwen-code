@@ -55,7 +55,15 @@ vi.mock('../LoadingIndicator.js', () => ({ LoadingIndicator: () => null }));
 vi.mock('../QueuedMessageDisplay.js', () => ({
   QueuedMessageDisplay: () => null,
 }));
-vi.mock('./AgentFooter.js', () => ({ AgentFooter: () => null }));
+const { agentFooterProps } = vi.hoisted(() => ({
+  agentFooterProps: {} as { contextWindowSize?: number },
+}));
+vi.mock('./AgentFooter.js', () => ({
+  AgentFooter: (props: { contextWindowSize?: number }) => {
+    agentFooterProps.contextWindowSize = props.contextWindowSize;
+    return null;
+  },
+}));
 
 type KeypressHandler = (key: Key) => void;
 
@@ -85,10 +93,15 @@ describe('AgentComposer', () => {
   const setAgentApprovalMode = vi.fn();
   let capturedKeypressHandlers: KeypressHandler[];
   let capturedKeypressOptions: Array<{ isActive: boolean }>;
+  let agentRuntimeView:
+    | { contentGeneratorConfig: { contextWindowSize?: number } }
+    | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
     menuApi = null;
+    agentRuntimeView = undefined;
+    agentFooterProps.contextWindowSize = undefined;
     capturedKeypressHandlers = [];
     capturedKeypressOptions = [];
 
@@ -105,6 +118,7 @@ describe('AgentComposer', () => {
               enqueueMessage: vi.fn(),
               getError: vi.fn(),
               getLastRoundError: vi.fn(),
+              getCore: () => ({ runtimeView: agentRuntimeView }),
             },
           },
         ],
@@ -156,6 +170,29 @@ describe('AgentComposer', () => {
     unmount();
 
     expect(setAgentInputBufferText).not.toHaveBeenCalled();
+  });
+
+  it("sizes the footer context against the agent's own model window", () => {
+    vi.mocked(useConfig).mockReturnValue({
+      getContentGeneratorConfig: () => ({ contextWindowSize: 1_000_000 }),
+    } as never);
+    agentRuntimeView = {
+      contentGeneratorConfig: { contextWindowSize: 128_000 },
+    };
+
+    render(<AgentComposer agentId="agent-1" />);
+
+    expect(agentFooterProps.contextWindowSize).toBe(128_000);
+  });
+
+  it('falls back to the session window when the agent inherits the model', () => {
+    vi.mocked(useConfig).mockReturnValue({
+      getContentGeneratorConfig: () => ({ contextWindowSize: 1_000_000 }),
+    } as never);
+
+    render(<AgentComposer agentId="agent-1" />);
+
+    expect(agentFooterProps.contextWindowSize).toBe(1_000_000);
   });
 
   it('syncs the footer layout key and updates it when the agent completes', () => {
