@@ -11,8 +11,8 @@ import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
+  generateLegacyMcpToolName,
   normalizeMcpToolName,
-  sanitizeToolNameForProvider,
 } from '../utils/tool-name-utils.js';
 import { isNodeError } from '../utils/errors.js';
 
@@ -126,6 +126,10 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ReadMcpResource: 'read_mcp_resource',
   ReadMcpResourceTool: 'read_mcp_resource',
 
+  // Advisor tool
+  advisor: 'advisor',
+  Advisor: 'advisor',
+
   // Agent (subagent) tool
   agent: 'agent',
   Agent: 'agent',
@@ -181,6 +185,14 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   save_memory: 'save_memory',
   SaveMemory: 'save_memory',
   SaveMemoryTool: 'save_memory',
+
+  // Managed memory tools
+  manage_memory: 'manage_memory',
+  ManageMemory: 'manage_memory',
+  ManageMemoryTool: 'manage_memory',
+  search_memory: 'search_memory',
+  SearchMemory: 'search_memory',
+  SearchMemoryTool: 'search_memory',
 
   // Ask User Question tool
   ask_user_question: 'ask_user_question',
@@ -305,6 +317,19 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   // Display image tool
   display_image: 'display_image',
   DisplayImage: 'display_image',
+
+  thread_post: 'thread_post',
+  ThreadPost: 'thread_post',
+  thread_wait: 'thread_wait',
+  ThreadWait: 'thread_wait',
+  thread_block: 'thread_block',
+  ThreadBlock: 'thread_block',
+  thread_review: 'thread_review',
+  ThreadReview: 'thread_review',
+  thread_create: 'thread_create',
+  ThreadCreate: 'thread_create',
+  thread_read: 'thread_read',
+  ThreadRead: 'thread_read',
 
   // Legacy edit tool name
   replace: 'edit',
@@ -973,31 +998,100 @@ export interface CompoundCommandSegment {
  *
  * See {@link splitCompoundCommand} for the string-only form and for examples;
  * this is the same split, and that function is a projection of this one.
+ *
+ * Scanned twice and split wherever either scan finds an operator: comments,
+ * backtick bodies and heredocs are not modelled, and quotes inside them can
+ * fool bash's backslash reading where the pre-fix reading still splits.
  */
 export function splitCompoundCommandSegments(
   command: string,
 ): CompoundCommandSegment[] {
+  // The two readings differ only at a backslash, so one scan is enough without.
+  const boundaries = command.includes('\\')
+    ? [
+        ...findOperatorBoundaries(command, 'bash'),
+        ...findOperatorBoundaries(command, 'escape-everywhere'),
+      ].sort((a, b) => a.start - b.start)
+    : findOperatorBoundaries(command, 'bash');
+
   const segments: CompoundCommandSegment[] = [];
+  let lastSplit = 0;
+  for (const { start, end, operator } of boundaries) {
+    if (start < lastSplit) {
+      continue;
+    }
+    // bash reads a CRLF's `\r` as part of the last word, but it is dropped here
+    // as a line ending unless it is the whole redirection target of the line.
+    // A lone `\r` is a bash word character and stays.
+    const raw = command.substring(lastSplit, start);
+    const dropsLineEndingCR =
+      operator === '\n' && !CR_IS_WHOLE_REDIRECT_TARGET.test(raw);
+    const segment = trimBashWordSeparators(
+      dropsLineEndingCR ? raw.replace(/\r$/, '') : raw,
+    );
+    if (segment) {
+      segments.push({ command: segment, terminator: operator });
+    }
+    lastSplit = end;
+  }
+
+  // Add the last segment
+  const lastSegment = trimBashWordSeparators(command.substring(lastSplit));
+  if (lastSegment) {
+    segments.push({ command: lastSegment, terminator: '' });
+  }
+
+  return segments;
+}
+
+interface OperatorBoundary {
+  start: number;
+  end: number;
+  operator: string;
+}
+
+type BackslashReading = 'bash' | 'escape-everywhere';
+
+function findOperatorBoundaries(
+  command: string,
+  reading: BackslashReading,
+): OperatorBoundary[] {
+  const boundaries: OperatorBoundary[] = [];
   let inSingle = false;
   let inDouble = false;
+  let inAnsiC = false;
+  let dollarPending = false;
   let escaped = false;
-  let lastSplit = 0;
   // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
   // bitwise AND, not the async operator, so `$(( FLAGS & MASK ))` is one word.
   let arithmeticDepth = 0;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
+    const ansiCIntroducer: boolean = dollarPending;
+    dollarPending = false;
 
     if (escaped) {
       escaped = false;
       continue;
     }
-    if (ch === '\\') {
+    // In bash a backslash is literal inside a plain `'…'` (so `'a\'` closes)
+    // but escapes inside ANSI-C `$'…'` (so `$'a\''` closes at the third quote).
+    if (
+      ch === '\\' &&
+      (reading === 'escape-everywhere' || !(inSingle && !inAnsiC))
+    ) {
+      // `$\⏎'…'` is still ANSI-C, so the pending `$` survives a continuation.
+      if (command[i + 1] === '\n') {
+        dollarPending = ansiCIntroducer;
+        i++;
+        continue;
+      }
       escaped = true;
       continue;
     }
     if (ch === "'" && !inDouble) {
+      inAnsiC = inSingle ? false : ansiCIntroducer;
       inSingle = !inSingle;
       continue;
     }
@@ -1006,6 +1100,11 @@ export function splitCompoundCommandSegments(
       continue;
     }
     if (inSingle || inDouble) {
+      continue;
+    }
+    if (ch === '$') {
+      // The second `$` of `$$` (the PID) cannot open `$'…'`.
+      dollarPending = !ansiCIntroducer;
       continue;
     }
 
@@ -1031,31 +1130,13 @@ export function splitCompoundCommandSegments(
       if (op === '&' && (arithmeticDepth > 0 || !isAsyncOperator(command, i))) {
         continue;
       }
-      // A CRLF pair ends a line, so the `\r` in front of a `\n` terminator is
-      // dropped with it; a lone `\r` is a bash word character and stays. The
-      // exception is a `\r` that *is* the whole redirection target of the line.
-      const raw = command.substring(lastSplit, i);
-      const dropsLineEndingCR =
-        op === '\n' && !CR_IS_WHOLE_REDIRECT_TARGET.test(raw);
-      const segment = trimBashWordSeparators(
-        dropsLineEndingCR ? raw.replace(/\r$/, '') : raw,
-      );
-      if (segment) {
-        segments.push({ command: segment, terminator: op });
-      }
-      lastSplit = i + op.length;
-      i = lastSplit - 1; // -1 because the loop will i++
+      boundaries.push({ start: i, end: i + op.length, operator: op });
+      i += op.length - 1; // -1 because the loop will i++
       break;
     }
   }
 
-  // Add the last segment
-  const lastSegment = trimBashWordSeparators(command.substring(lastSplit));
-  if (lastSegment) {
-    segments.push({ command: lastSegment, terminator: '' });
-  }
-
-  return segments;
+  return boundaries;
 }
 
 /**
@@ -1567,6 +1648,21 @@ export function matchesDomainPattern(
 // MCP tool wildcard matching
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Preserve producer boundaries that flattened underscore spellings lose. */
+export interface McpToolIdentity {
+  serverName: string;
+  serverToolName: string;
+}
+
+/** Raw, provider-safe and legacy character spellings of a producer segment. */
+function mcpSegmentSpellings(serverName: string): string[] {
+  return [
+    serverName,
+    serverName.replace(/[^A-Za-z0-9_-]/g, '_'),
+    serverName.replace(/[^A-Za-z0-9_.-]/g, '_'),
+  ];
+}
+
 /**
  * Match an MCP tool name against a pattern that may contain wildcards.
  *
@@ -1574,45 +1670,275 @@ export function matchesDomainPattern(
  *   "mcp__puppeteer" matches any tool provided by the puppeteer server
  *   "mcp__puppeteer__*" wildcard syntax, also matches all tools from the server
  *   "mcp__puppeteer__puppeteer_navigate" matches only that exact tool
+ *
+ * Compare registered/raw spellings literally; do not normalize the rule.
+ * Published legacy spellings preserve saved restrictions. Grants also require
+ * the live registry ambiguity guard; producer identity pins server boundaries.
  */
-export function matchesMcpPattern(pattern: string, toolName: string): boolean {
+export function matchesMcpPattern(
+  pattern: string,
+  toolName: string,
+  rawToolName?: string,
+  toolAliases?: readonly string[],
+  mcpIdentity?: McpToolIdentity,
+): boolean {
   if (pattern === toolName) {
     return true;
   }
 
-  // Exact rules persisted before provider-safe MCP names were introduced
-  // should continue matching their deterministic normalized registration.
+  // Raw exact identities retain pre-normalization rules.
   if (
     !pattern.endsWith('*') &&
     pattern.split('__').length >= 3 &&
-    normalizeMcpToolName(pattern) === normalizeMcpToolName(toolName)
+    rawToolName !== undefined &&
+    pattern === rawToolName
   ) {
     return true;
   }
+
+  // Keep raw and published legacy spellings for saved-rule compatibility.
+  const spellings =
+    rawToolName === undefined || rawToolName === toolName
+      ? [toolName]
+      : [toolName, rawToolName];
+  const legacySpelling = resolveLegacyMcpSpelling(rawToolName, toolAliases);
+  if (legacySpelling !== undefined && !spellings.includes(legacySpelling)) {
+    spellings.push(legacySpelling);
+  }
+  // The untruncated legacy rendering already contains the faithful head of
+  // a truncated alias, without treating its injected `___` as a separator.
+  const prefixSpellings =
+    legacySpelling === undefined || rawToolName === undefined
+      ? spellings
+      : [toolName, rawToolName, rawToolName.replace(/[^A-Za-z0-9_.-]/g, '_')];
+  const matchesPrefixLiterally = (prefix: string): boolean =>
+    prefixSpellings.some((spelling) => spelling.startsWith(prefix));
 
   // Wildcard: patterns ending with "*" match by prefix.
   // e.g. "mcp__server__*" matches all tools from that server,
   //      "mcp__chrome__use_*" matches all "use_*" tools from chrome.
   if (pattern.endsWith('*')) {
-    const prefix = sanitizeToolNameForProvider(pattern.slice(0, -1));
-    return sanitizeToolNameForProvider(toolName).startsWith(prefix);
+    const prefix = pattern.slice(0, -1);
+    // An empty prefix must not turn a bare `*` into an MCP grant.
+    if (prefix === '') {
+      return false;
+    }
+    if (mcpIdentity !== undefined) {
+      // Leading tool underscores can imitate a sibling server separator.
+      // Read boundaries from the producer rather than splitting the tool name.
+      const serverSpellings = mcpSegmentSpellings(mcpIdentity.serverName);
+      const boundary = serverSpellings
+        .map((spelling) => `mcp__${spelling}__`)
+        .find((serverPrefix) => prefix.startsWith(serverPrefix));
+      if (boundary === undefined) {
+        // Coarse prefixes may stop inside this key; an overrun names a sibling.
+        const namesThisKey = serverSpellings.some((spelling) =>
+          `mcp__${spelling}`.startsWith(prefix),
+        );
+        return namesThisKey ? matchesPrefixLiterally(prefix) : false;
+      }
+      const toolPrefix = prefix.slice(boundary.length);
+      // Use the registered server boundary to retain hash/truncation suffixes.
+      const registeredBoundary = `mcp__${mcpIdentity.serverName.replace(/[^A-Za-z0-9_-]/g, '_')}__`;
+      const registeredToolSegment = toolName.startsWith(registeredBoundary)
+        ? toolName.slice(registeredBoundary.length)
+        : toolName.startsWith(boundary)
+          ? toolName.slice(boundary.length)
+          : undefined;
+      return (
+        toolPrefix === '' ||
+        (registeredToolSegment !== undefined &&
+          registeredToolSegment.startsWith(toolPrefix)) ||
+        mcpSegmentSpellings(mcpIdentity.serverToolName).some((spelling) =>
+          spelling.startsWith(toolPrefix),
+        )
+      );
+    }
+    return matchesPrefixLiterally(prefix);
   }
 
   // Server-level match: "mcp__puppeteer" matches "mcp__puppeteer__anything"
-  // Only when the pattern has exactly 2 parts (mcp + server) and the tool has 3+
+  if (mcpIdentity !== undefined) {
+    return mcpSegmentSpellings(mcpIdentity.serverName).some(
+      (server) => pattern === `mcp__${server}`,
+    );
+  }
+  // Without producer identity, only MCP names may use the split fallback.
   const patternParts = pattern.split('__');
-  const toolParts = toolName.split('__');
-  if (
-    patternParts.length === 2 &&
-    toolParts.length >= 3 &&
-    patternParts[0] === toolParts[0] &&
-    sanitizeToolNameForProvider(patternParts[1]) ===
-      sanitizeToolNameForProvider(toolParts[1])
-  ) {
-    return true;
+  if (patternParts.length === 2 && patternParts[0] === 'mcp') {
+    return spellings.some((spelling) => {
+      const spellingParts = spelling.split('__');
+      return (
+        spellingParts.length >= 3 &&
+        spellingParts[0] === 'mcp' &&
+        spellingParts[1] === patternParts[1]
+      );
+    });
   }
 
   return false;
+}
+
+/** A lossy spelling may restrict every claimant, but must not grant to them. */
+export function hasAmbiguousMcpGrant(
+  pattern: string,
+  identity: McpToolIdentity,
+  registeredIdentities: readonly McpToolIdentity[],
+): boolean {
+  const rawName = `mcp__${identity.serverName}__${identity.serverToolName}`;
+  const registeredName = normalizeMcpToolName(rawName);
+  const others = registeredIdentities.filter(
+    (other) =>
+      other.serverName !== identity.serverName ||
+      other.serverToolName !== identity.serverToolName,
+  );
+  const spellings = (other: McpToolIdentity): string[] => {
+    const raw = `mcp__${other.serverName}__${other.serverToolName}`;
+    return [raw, normalizeMcpToolName(raw), generateLegacyMcpToolName(raw)];
+  };
+  // Exact registered and raw names retain their own authority.
+  if (pattern === registeredName) {
+    return others.some((other) => spellings(other)[1] === pattern);
+  }
+  if (pattern === rawName) return false;
+  if (pattern === `mcp__${identity.serverName}`) {
+    return others.some((other) => spellings(other).includes(pattern));
+  }
+  if (!pattern.endsWith('*')) {
+    return others.some(
+      (other) =>
+        spellings(other).includes(pattern) ||
+        (other.serverName !== identity.serverName &&
+          mcpSegmentSpellings(other.serverName).some(
+            (server) => pattern === `mcp__${server}`,
+          )),
+    );
+  }
+
+  const prefix = pattern.slice(0, -1);
+  const claims = registeredIdentities.flatMap((other) =>
+    mcpSegmentSpellings(other.serverName)
+      .map((server) => `mcp__${server}__`)
+      .filter((boundary) => prefix.startsWith(boundary))
+      .map((boundary) => ({ serverName: other.serverName, boundary })),
+  );
+  const wholeServer = registeredIdentities.find(
+    (other) => prefix === `mcp__${other.serverName}__`,
+  );
+  if (wholeServer !== undefined) {
+    return wholeServer.serverName !== identity.serverName;
+  }
+  // Offsets within one underscore run share a separator; distinct runs
+  // leave the rule ambiguous between a server key and a tool-name prefix.
+  if (
+    new Set(claims.map(({ boundary }) => boundary.replace(/_+$/, ''))).size > 1
+  ) {
+    return true;
+  }
+  const rawOwner = claims.find(
+    ({ serverName }) => serverName === prefix.split('__')[1],
+  );
+  if (
+    rawOwner !== undefined
+      ? rawOwner.serverName !== identity.serverName
+      : claims.some(({ serverName }) => serverName !== identity.serverName)
+  ) {
+    return true;
+  }
+  // Deliberate coarse raw prefixes remain broad. A cut or lossy head must
+  // instead have a unique live claimant, including App-only registrations.
+  if (rawName.startsWith(prefix)) return false;
+  const ownSpellings = spellings(identity);
+  return others.some((other) =>
+    spellings(other).some(
+      (spelling) =>
+        spelling.startsWith(prefix) &&
+        (other.serverName !== identity.serverName ||
+          claims.length === 0 ||
+          ownSpellings.includes(spelling)),
+    ),
+  );
+}
+
+/**
+ * Raw aliases must normalize to the registered name. A truncated or foreign
+ * legacy spelling cannot supply the producer identity.
+ */
+function resolveRawMcpIdentity(
+  canonicalCtxToolName: string,
+  toolAliases: readonly string[] | undefined,
+): string | undefined {
+  return toolAliases?.find(
+    (alias) => normalizeMcpToolName(alias) === canonicalCtxToolName,
+  );
+}
+
+/**
+ * Read only the producer's published legacy spelling: a flattened reduction
+ * cannot establish its own server boundary. Grants also need the registry guard.
+ */
+function resolveLegacyMcpSpelling(
+  rawToolName: string | undefined,
+  toolAliases: readonly string[] | undefined,
+): string | undefined {
+  if (rawToolName === undefined || !rawToolName.startsWith('mcp__')) {
+    return undefined;
+  }
+  const legacy = generateLegacyMcpToolName(rawToolName);
+  if (legacy === rawToolName) {
+    return undefined;
+  }
+  return toolAliases?.includes(legacy) ? legacy : undefined;
+}
+
+/** Match published spellings; restrictive-only fallback stays at the caller. */
+function matchesMcpName(
+  pattern: string,
+  toolName: string,
+  toolAliases: readonly string[] | undefined,
+  identity: McpToolIdentity | undefined,
+): boolean {
+  const rawName = resolveRawMcpIdentity(toolName, toolAliases);
+  return (
+    matchesMcpPattern(pattern, toolName, rawName, toolAliases, identity) ||
+    (!pattern.endsWith('*') &&
+      pattern.split('__').length >= 3 &&
+      pattern === resolveLegacyMcpSpelling(rawName, toolAliases))
+  );
+}
+
+// Producer-owned legacy spellings and registered cuts retain restrictions.
+// This fallback belongs only to deny/ask/blocklist matching, never grants.
+function matchesRestrictiveMcpName(
+  pattern: string,
+  toolName: string,
+  identity: McpToolIdentity | undefined,
+): boolean {
+  if (identity === undefined) return false;
+  const rawName = `mcp__${identity.serverName}__${identity.serverToolName}`;
+  if (
+    matchesMcpName(
+      pattern,
+      toolName,
+      [rawName, generateLegacyMcpToolName(rawName)],
+      identity,
+    )
+  ) {
+    return true;
+  }
+  if (!pattern.startsWith('mcp__') || !pattern.endsWith('*')) return false;
+  const prefix = pattern.slice(0, -1);
+  const registeredServerPrefix = `mcp__${identity.serverName.replace(/[^A-Za-z0-9_-]/g, '_')}__`;
+  return (
+    (toolName.startsWith(prefix) &&
+      (!toolName.startsWith(registeredServerPrefix) ||
+        prefix.startsWith(registeredServerPrefix))) ||
+    // A prefix that stops at or inside this key's own separator names the
+    // key in that spelling, whatever the tool segment starts with.
+    mcpSegmentSpellings(identity.serverName).some((server) =>
+      `mcp__${server}__`.startsWith(prefix),
+    )
+  );
 }
 
 /**
@@ -1621,11 +1947,29 @@ export function matchesMcpPattern(pattern: string, toolName: string): boolean {
  * {@link matchesMcpPattern}); every other tool matches only its exact name.
  * One predicate for every place that applies a deny list to a tool pool, so the
  * declaration filter and the callers that predict it cannot disagree.
+ *
+ * `toolAliases` is the tool's own advertised `permissionAliases`; deny lists
+ * are fail-open on a lost match, so every enforcement gate resolves them from
+ * the registry rather than matching on the registered name alone. The one
+ * caller that cannot is `narrowAgentTools`: it is synchronous and receives
+ * only already-resolved name lists, so a legacy-spelled entry it cannot match
+ * loses the up-front "every requested tool is denied" message, not
+ * enforcement — the declaration filter, the invocation re-check and the
+ * scheduler's enablement gate all thread the channel.
  */
-export function matchesToolPattern(pattern: string, toolName: string): boolean {
-  return toolName.startsWith('mcp__')
-    ? matchesMcpPattern(pattern, toolName)
-    : pattern === toolName;
+export function matchesToolPattern(
+  pattern: string,
+  toolName: string,
+  toolAliases?: readonly string[],
+  mcpIdentity?: McpToolIdentity,
+): boolean {
+  if (!toolName.startsWith('mcp__')) {
+    return pattern === toolName;
+  }
+  return (
+    matchesMcpName(pattern, toolName, toolAliases, mcpIdentity) ||
+    matchesRestrictiveMcpName(pattern, toolName, mcpIdentity)
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1680,6 +2024,8 @@ export function matchesRule(
   toolParams?: Record<string, unknown>,
   toolAliases?: readonly string[],
   pathMatchMode: 'lexical' | 'canonical' = 'lexical',
+  mcpIdentity?: McpToolIdentity,
+  restrictive = false,
 ): boolean {
   const canonicalCtxToolName = resolveToolName(toolName);
 
@@ -1693,16 +2039,21 @@ export function matchesRule(
     rule.toolName.startsWith('mcp__') ||
     canonicalCtxToolName.startsWith('mcp__')
   ) {
-    const matchesLegacyExactName =
-      !rule.toolName.endsWith('*') &&
-      rule.toolName.split('__').length >= 3 &&
-      (toolAliases ?? []).some(
-        (alias) => rule.toolName === resolveToolName(alias),
-      );
-    const matchesMcpName =
-      matchesMcpPattern(rule.toolName, canonicalCtxToolName) ||
-      matchesLegacyExactName;
-    if (!matchesMcpName) {
+    const matchedMcpName =
+      restrictive && canonicalCtxToolName.startsWith('mcp__')
+        ? matchesToolPattern(
+            rule.toolName,
+            canonicalCtxToolName,
+            toolAliases,
+            mcpIdentity,
+          )
+        : matchesMcpName(
+            rule.toolName,
+            canonicalCtxToolName,
+            toolAliases,
+            mcpIdentity,
+          );
+    if (!matchedMcpName) {
       return false;
     }
 

@@ -27,7 +27,7 @@ export type RestartReason = 'NONE' | 'CONNECTION_CHANGE' | 'TRUST_CHANGE';
  * It provides the current trust status from the IDE and a reason if a restart
  * is needed because the trust state has changed.
  */
-export function useIdeTrustListener() {
+export function useIdeTrustListener(enabled = true) {
   const settings = useSettings();
   const [connectionStatus, setConnectionStatus] = useState<IDEConnectionStatus>(
     IDEConnectionStatus.Disconnected,
@@ -36,33 +36,37 @@ export function useIdeTrustListener() {
   const [restartReason, setRestartReason] = useState<RestartReason>('NONE');
   const [needsRestart, setNeedsRestart] = useState(false);
 
-  const subscribe = useCallback((onStoreChange: () => void) => {
-    const handleStatusChange = (state: IDEConnectionState) => {
-      setConnectionStatus(state.status);
-      setRestartReason('CONNECTION_CHANGE');
-      // Also notify useSyncExternalStore that the data has changed
-      onStoreChange();
-    };
+  const subscribe = useCallback(
+    (onStoreChange: () => void) => {
+      if (!enabled) return () => {};
+      const handleStatusChange = (state: IDEConnectionState) => {
+        setConnectionStatus(state.status);
+        setRestartReason('CONNECTION_CHANGE');
+        // Also notify useSyncExternalStore that the data has changed
+        onStoreChange();
+      };
 
-    const handleTrustChange = () => {
-      setRestartReason('TRUST_CHANGE');
-      onStoreChange();
-    };
+      const handleTrustChange = () => {
+        setRestartReason('TRUST_CHANGE');
+        onStoreChange();
+      };
 
-    (async () => {
-      const ideClient = await IdeClient.getInstance();
-      ideClient.addTrustChangeListener(handleTrustChange);
-      ideClient.addStatusChangeListener(handleStatusChange);
-      setConnectionStatus(ideClient.getConnectionStatus().status);
-    })();
-    return () => {
       (async () => {
         const ideClient = await IdeClient.getInstance();
-        ideClient.removeTrustChangeListener(handleTrustChange);
-        ideClient.removeStatusChangeListener(handleStatusChange);
+        ideClient.addTrustChangeListener(handleTrustChange);
+        ideClient.addStatusChangeListener(handleStatusChange);
+        setConnectionStatus(ideClient.getConnectionStatus().status);
       })();
-    };
-  }, []);
+      return () => {
+        (async () => {
+          const ideClient = await IdeClient.getInstance();
+          ideClient.removeTrustChangeListener(handleTrustChange);
+          ideClient.removeStatusChangeListener(handleStatusChange);
+        })();
+      };
+    },
+    [enabled],
+  );
 
   const getSnapshot = () => {
     if (connectionStatus !== IDEConnectionStatus.Connected) {

@@ -1510,11 +1510,25 @@ function TaskDetail({
     task.status === 'running';
   const canResume = task.kind === 'workflow' && task.status === 'paused';
   // A run restored from history restarts like a live one, as long as the
-  // daemon takes those actions for history and its snapshot kept the args it
-  // was launched with.
+  // daemon takes those actions for history and its history has the args to
+  // start it with -- which covers a run whose args were too large to keep and
+  // one recorded before they were kept at all.
+  //
+  // `argsOmitted` is still read beside it: a daemon older than
+  // `argsUnavailable` sends only that one, and dropping it would put back a
+  // Retry this client had learned to hide.
   const canRestart =
     task.kind === 'workflow' &&
-    (!task.isHistorical || (retryHistorical && !task.argsOmitted));
+    (!task.isHistorical ||
+      (retryHistorical && !task.argsUnavailable && !task.argsOmitted));
+  // Withholding the buttons takes away the only place the daemon's reason
+  // used to appear: it arrived by pressing Retry and being refused. Say it
+  // without the failed round trip.
+  const restartWithheld =
+    task.kind === 'workflow' &&
+    task.isHistorical === true &&
+    retryHistorical === true &&
+    (task.argsUnavailable === true || task.argsOmitted === true);
   const canRetry = canRestart && task.status === 'failed';
   const canRerun =
     canRestart &&
@@ -1604,6 +1618,7 @@ function TaskDetail({
   const actionControls =
     !documentMode &&
     ((canCancel && onCancel) ||
+      restartWithheld ||
       ((canPause || canResume || canRetry || canRerun) && onWorkflowAction)) ? (
       <div className={styles.actionBar} data-plan-interactive>
         {showCancelConfirm ? (
@@ -1640,6 +1655,11 @@ function TaskDetail({
                   ? t('workflow.action.pause')
                   : t('workflow.action.resume')}
               </button>
+            )}
+            {restartWithheld && (
+              <span className={styles.actionHint}>
+                {t('workflow.action.argsUnavailable')}
+              </span>
             )}
             {canRetry && onWorkflowAction && (
               <button

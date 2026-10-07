@@ -5,11 +5,17 @@
  */
 
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { normalizeContent } from '../utils/textUtils.js';
+import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
+import {
+  INDEX_TRUNCATION_NOTICE,
+  MAX_INDEX_LINES as MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
+  MAX_INDEX_CHARS,
+  MAX_INDEX_LINE_CHARS,
+  trimIndexToBudget,
+} from './index-budget.js';
 
 const debugLogger = createDebugLogger('AUTO_MEMORY_PROMPT');
-
-const MAX_MANAGED_AUTO_MEMORY_INDEX_LINES = 200;
-const MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES = 25_000;
 
 const DIR_EXISTS_GUIDANCE =
   'This directory already exists — write to it directly with the write_file tool (do not run mkdir or check for its existence).';
@@ -17,16 +23,32 @@ const DIR_EXISTS_GUIDANCE =
 // Spell out the tier count so a future 4th tier never silently reads "two".
 const NUMBER_WORDS = ['zero', 'one', 'two', 'three', 'four'] as const;
 
+export const MEMORY_METADATA_ITEM_BOUNDS =
+  'Keep each keyword and usage_scenario at most 64 characters, and keywords unique case-insensitively; double-quote every keyword and usage_scenario value, so YAML never misparses it.';
+
 export const MEMORY_FRONTMATTER_EXAMPLE: readonly string[] = [
   '```markdown',
   '---',
   'name: {{memory name}}',
-  'description: {{one-line description — used to decide relevance in future conversations, so be specific}}',
+  'description: {{one-line description of what this memory says — used to decide relevance in future conversations, so be specific}}',
   'type: {{user, feedback, project, reference}}',
+  'category: {{one fixed memory category}}',
+  'keywords:',
+  '  - {{2-6 discriminative retrieval terms or short phrases, each at most 64 characters and unique case-insensitively; prefer domain-qualified phrases over generic single words; put at most 2 exact identifiers last; double-quote every value}}',
+  'usage_scenarios:',
+  '  - {{1-3 future tasks where this memory would help, each at most 64 characters — do not repeat the description; double-quote every value}}',
   '---',
   '',
   '{{memory content — for feedback/project types, structure as: rule/fact, then **Why:** and **How to apply:** lines}}',
   '```',
+];
+
+export const MEMORY_CATEGORY_SECTION: readonly string[] = [
+  '## Memory categories',
+  '',
+  '`type` controls storage and maintenance. `category` controls the two-level memory overview tree. Choose exactly one category from this fixed list; do not invent nested categories:',
+  '',
+  AUTO_MEMORY_TREE_CATEGORIES.join(', '),
 ];
 
 /** Verbose memory-type guidance. See also: {@link CONDENSED_TYPES_SECTION} for the condensed version used in the empty-index prompt path. */
@@ -191,40 +213,31 @@ export const TRUSTING_RECALL_SECTION: readonly string[] = [
 ];
 
 function truncateManagedAutoMemoryIndex(indexContent: string): string {
-  const trimmed = indexContent.trim();
+  const trimmed = normalizeContent(indexContent).trim();
   const lines = trimmed.split('\n');
   const lineCount = lines.length;
-  const byteCount = trimmed.length;
+  const charCount = trimmed.length;
   const wasLineTruncated = lineCount > MAX_MANAGED_AUTO_MEMORY_INDEX_LINES;
-  const wasByteTruncated = byteCount > MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES;
+  const wasCharTruncated = charCount > MAX_INDEX_CHARS;
 
-  if (!wasLineTruncated && !wasByteTruncated) {
+  if (!wasLineTruncated && !wasCharTruncated) {
     return trimmed;
   }
 
-  let truncated = wasLineTruncated
-    ? lines.slice(0, MAX_MANAGED_AUTO_MEMORY_INDEX_LINES).join('\n')
-    : trimmed;
-
-  if (truncated.length > MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES) {
-    const cutAt = truncated.lastIndexOf(
-      '\n',
-      MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES,
-    );
-    truncated = truncated.slice(
-      0,
-      cutAt > 0 ? cutAt : MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES,
-    );
-  }
+  // The writer's trailing notice must not compete with its retained entries.
+  const entries = trimmed.endsWith(INDEX_TRUNCATION_NOTICE)
+    ? trimmed.slice(0, -INDEX_TRUNCATION_NOTICE.length).split('\n')
+    : lines;
+  const truncated = trimIndexToBudget(entries);
 
   const reason =
-    wasByteTruncated && !wasLineTruncated
-      ? `${(byteCount / 1024).toFixed(1)} KB (limit: ${(MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES / 1024).toFixed(1)} KB) — index entries are too long`
-      : wasLineTruncated && !wasByteTruncated
+    wasCharTruncated && !wasLineTruncated
+      ? `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — index entries are too long`
+      : wasLineTruncated && !wasCharTruncated
         ? `${lineCount} lines (limit: ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES})`
-        : `${lineCount} lines and ${(byteCount / 1024).toFixed(1)} KB`;
+        : `${lineCount} lines and ${charCount} UTF-16 code units`;
 
-  return `${truncated}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded. Keep index entries to one line under ~200 chars; move detail into topic files.`;
+  return `${truncated}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded. Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files.`;
 }
 
 /**
@@ -320,6 +333,25 @@ function buildIndexSections(
 
 export interface BuildMemoryPromptOptions {
   forceFullProtocol?: boolean;
+  keywordVocabularySnapshot?: string;
+}
+
+export function buildStructuredAutoMemoryPrompt(
+  memoryDir: string,
+  userMemoryDir: string,
+  teamMemoryDir?: string,
+): string {
+  const scopes = [
+    `PROJECT: \`${memoryDir}\``,
+    `USER: \`${userMemoryDir}\``,
+    ...(teamMemoryDir ? [`TEAM: \`${teamMemoryDir}\``] : []),
+  ].join('; ');
+  return [
+    '# auto memory',
+    '',
+    `Managed memory scopes: ${scopes}.`,
+    'Use the complete tree and focused metadata for routing. Use search_memory only when a task needs body details not already present in metadata or conversation history. Use manage_memory only when the user explicitly asks to remember, update, or forget something. Never use read_file, grep_search, list_directory, glob, or shell commands to access managed-memory paths directly.',
+  ].join('\n');
 }
 
 function allIndexesEmpty(
@@ -358,6 +390,10 @@ export function buildManagedAutoMemoryPrompt(
     );
   }
   const multiTier = tierLines.length > 1;
+  const keywordVocabularySnapshot = options?.keywordVocabularySnapshot?.trim();
+  const keywordVocabularySection = keywordVocabularySnapshot
+    ? ['', keywordVocabularySnapshot]
+    : [];
 
   if (
     allIndexesEmpty(indexContent, userSection, teamSection) &&
@@ -380,10 +416,14 @@ export function buildManagedAutoMemoryPrompt(
 
     const condensedMaintenanceBullets = [
       '',
-      '- Keep the name, description, and type fields in memory files up-to-date with the content.',
+      '- Keep the name, description, type, category, keywords, and usage_scenarios fields in memory files up-to-date with the complete content.',
+      '- Use one fixed category and 1-3 usage_scenarios for every memory.',
+      '- Use 2-6 discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words, with at most 2 exact identifiers last.',
+      '- Keep one independently retrievable fact or rule per file.',
+      '- Keep each memory body near or below 1,200 characters.',
       '- Organize memories semantically by topic, not chronologically.',
       '- Update or remove memories that turn out to be wrong or outdated.',
-      `- Every \`MEMORY.md\` index is always loaded into your conversation context \u2014 lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise.`,
+      `- Every \`MEMORY.md\` index is available to memory maintenance agents \u2014 lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise.`,
     ];
 
     const condensedSave = multiTier
@@ -439,6 +479,10 @@ export function buildManagedAutoMemoryPrompt(
       '',
       ...CONDENSED_WHEN_TO_ACCESS_SECTION,
       '',
+      ...MEMORY_CATEGORY_SECTION,
+      '',
+      ...keywordVocabularySection,
+      '',
       ...condensedSave,
       '',
       '- Use plans and tasks for in-conversation work; reserve memory for durable cross-conversation knowledge.',
@@ -478,8 +522,12 @@ export function buildManagedAutoMemoryPrompt(
         '',
         '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to (each directory has its own index — never cross-reference). Each entry should be one line, under ~150 characters: `- [Title](file.md) — one-line hook`. It has no frontmatter. Never write memory content directly into `MEMORY.md`.',
         '',
-        `- Every \`MEMORY.md\` index is always loaded into your conversation context — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise`,
-        '- Keep the name, description, and type fields in memory files up-to-date with the content',
+        `- Every \`MEMORY.md\` index is available to memory maintenance agents — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise`,
+        '- Keep the name, description, type, category, keywords, and usage_scenarios fields in memory files up-to-date with the complete content',
+        '- Use one fixed category and 1-3 usage_scenarios for every memory.',
+        '- Use 2-6 discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words, with at most 2 exact identifiers last.',
+        '- Keep one independently retrievable fact or rule per file.',
+        '- Keep each memory body near or below 1,200 characters.',
         '- Organize memory semantically by topic, not chronologically.',
         '- Update or remove memories that turn out to be wrong or outdated.',
         '- Do not write duplicate memories. First check if there is an existing memory in any of your memory directories you can update before writing a new one.',
@@ -495,8 +543,12 @@ export function buildManagedAutoMemoryPrompt(
         '',
         `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\` (the full absolute path). This index file is an index, not a memory — each entry should be one line, under ~150 characters: \`- [Title](file.md) — one-line hook\`. It has no frontmatter. Never write memory content directly into \`${memoryDir}/MEMORY.md\`.`,
         '',
-        `- \`${memoryDir}/MEMORY.md\` is always loaded into your conversation context — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep the index concise`,
-        '- Keep the name, description, and type fields in memory files up-to-date with the content',
+        `- \`${memoryDir}/MEMORY.md\` is available to memory maintenance agents — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep the index concise`,
+        '- Keep the name, description, type, category, keywords, and usage_scenarios fields in memory files up-to-date with the complete content',
+        '- Use one fixed category and 1-3 usage_scenarios for every memory.',
+        '- Use 2-6 discriminative retrieval terms or short phrases; prefer domain-qualified phrases over generic single words, with at most 2 exact identifiers last.',
+        '- Keep one independently retrievable fact or rule per file.',
+        '- Keep each memory body near or below 1,200 characters.',
         '- Organize memory semantically by topic, not chronologically.',
         '- Update or remove memories that turn out to be wrong or outdated.',
         '- Do not write duplicate memories. First check if there is an existing memory you can update before writing a new one.',
@@ -519,10 +571,15 @@ export function buildManagedAutoMemoryPrompt(
     'If the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.',
     '',
     ...TYPES_SECTION_INDIVIDUAL,
+    '',
+    ...MEMORY_CATEGORY_SECTION,
+    '',
     ...(teamSection !== undefined ? buildTeamScopeSection() : []),
     ...WHAT_NOT_TO_SAVE_SECTION,
     '',
     ...howToSave,
+    '',
+    ...keywordVocabularySection,
     '',
     ...WHEN_TO_ACCESS_SECTION,
     '',

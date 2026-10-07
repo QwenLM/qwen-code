@@ -24,6 +24,7 @@ import { parse, stringify } from 'yaml';
 
 import { hooks as pnpmHooks, workspacePackageNames } from '../../.pnpmfile.mjs';
 import { getPinnedPnpmPackage } from '../pnpm-package.js';
+import { INDEPENDENT_PACKAGES } from '../release-packages.mjs';
 
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
@@ -47,6 +48,99 @@ function readWorkflow(relativePath) {
 const releaseStepScript = readWorkflow('.github/scripts/run-release-step.sh');
 
 describe('package scripts', () => {
+  it('keeps documented CI variable defaults in sync with workflows', () => {
+    const guide = readWorkflow('docs/developers/development/ci-variables.md');
+    const docRows = new Map(
+      [
+        ...guide.matchAll(
+          /^\|\s*`(QWEN_\w+)`\s*\|\s*`([^`]+)`\s*\|\s*([^|]+)\s*\|/gm,
+        ),
+      ].map(([, name, value, usedIn]) => [
+        name,
+        {
+          defaultVal: value,
+          files: [...usedIn.matchAll(/`([^`]+\.yml)`/g)].map(([, f]) => f),
+        },
+      ]),
+    );
+
+    // These variables are documented below the test-execution table.
+    const excludedNonTestVariables = new Set([
+      'QWEN_RELEASE_STATIC_TIMEOUT_MINUTES',
+      'QWEN_RELEASE_BUILD_TIMEOUT_MINUTES',
+    ]);
+    const relatedRows = new Map(
+      [...guide.matchAll(/`(QWEN_RELEASE_\w+)` \(default `([^`]+)`/g)].map(
+        ([, name, value]) => [name, value],
+      ),
+    );
+
+    const workflowFiles = ['ci.yml', 'release.yml'];
+    const workflowVars = new Map();
+
+    for (const file of workflowFiles) {
+      const workflow = readWorkflow(`.github/workflows/${file}`);
+      for (const [, name] of workflow.matchAll(/vars\.(QWEN_\w+)/g)) {
+        if (!workflowVars.has(name)) {
+          workflowVars.set(name, { fallbacks: new Set(), files: new Set() });
+        }
+        const entry = workflowVars.get(name);
+        entry.files.add(file);
+      }
+      for (const [, name, fallback] of workflow.matchAll(
+        /vars\.(QWEN_\w+)\s*\|\|\s*'([^']+)'/g,
+      )) {
+        workflowVars.get(name).fallbacks.add(fallback);
+      }
+    }
+
+    // Every workflow variable must have a known fallback and a matching doc.
+    for (const [name, info] of workflowVars.entries()) {
+      expect(info.fallbacks.size, `No fallback found for ${name}`).toBe(1);
+      const [fallback] = info.fallbacks;
+      if (excludedNonTestVariables.has(name)) {
+        expect(info.files, `Unexpected workflow for ${name}`).toEqual(
+          new Set(['release.yml']),
+        );
+        expect(relatedRows.get(name), `Related variable ${name} drifted`).toBe(
+          fallback,
+        );
+        expect(docRows.has(name), `${name} is outside the test table`).toBe(
+          false,
+        );
+        continue;
+      }
+      const docEntry = docRows.get(name);
+      expect(
+        docEntry,
+        `Workflow variable ${name} missing from docs`,
+      ).toBeDefined();
+      expect(docEntry.defaultVal, `Default mismatch for ${name}`).toBe(
+        fallback,
+      );
+      expect(new Set(docEntry.files), `Used-in mismatch for ${name}`).toEqual(
+        info.files,
+      );
+    }
+
+    // A deleted workflow variable must not linger in the documentation.
+    for (const [name, docEntry] of docRows.entries()) {
+      expect(
+        workflowVars.has(name),
+        `Documented variable ${name} not found in test workflows`,
+      ).toBe(true);
+      expect(
+        docEntry.files.length,
+        `No workflow listed for ${name}`,
+      ).toBeGreaterThan(0);
+    }
+    for (const name of excludedNonTestVariables) {
+      expect(workflowVars.has(name), `Missing related variable ${name}`).toBe(
+        true,
+      );
+    }
+  });
+
   it('accepts only an exact pnpm package-manager version', () => {
     expect(getPinnedPnpmPackage({ packageManager: 'pnpm@11.24.0' })).toBe(
       'pnpm@11.24.0',
@@ -842,14 +936,8 @@ describe('package scripts', () => {
       'utf8',
     );
 
-    expect(versionScript).toContain(
-      'const workspacesToExclude = [\n' +
-        "  '@qwen-code/sdk',\n" +
-        "  '@qwen-code/mobile-mcp',\n" +
-        "  '@qwen-code/node-repl-mcp',\n" +
-        "  '@qwen-code/qwen-live',\n" +
-        '];',
-    );
+    expect(versionScript).toContain('INDEPENDENT_PACKAGES.map((name)');
+    expect(INDEPENDENT_PACKAGES).toContain('@qwen-code/node-repl-mcp');
   });
 
   it('smoke-tests the real worktree bootstrap on every supported host', () => {
@@ -928,7 +1016,7 @@ describe('package scripts', () => {
       '.pnpmfile.mjs',
       'package.json',
       'packages/*/package.json',
-      '!packages/desktop-shell/package.json',
+      '!packages/desktop/package.json',
       '!packages/live-host/package.json',
       '!packages/mobile-shell/package.json',
       'packages/channels/*/package.json',
@@ -949,22 +1037,46 @@ describe('package scripts', () => {
     expect(workflow.on.push.paths).toEqual(expectedPaths);
   });
 
-  it('builds the standalone qwen-live daemon in the root build order', () => {
+  it('includes the standalone qwen-live daemon in recursive root builds', () => {
     const buildScript = readFileSync(
       path.join(root, 'scripts/build.js'),
       'utf8',
     );
 
-    // The qwen-live e2e harness spawns packages/qwen-live/dist/index.js and
-    // the workspace unit tests run from src, so this pin is what catches the
-    // root build silently dropping the package.
-    const startIndex = buildScript.indexOf('const buildOrder = [');
-    expect(startIndex).toBeGreaterThan(-1);
-    const buildOrder = buildScript.slice(
-      startIndex,
-      buildScript.indexOf('];', startIndex),
+    expect(buildScript).toContain('corepack pnpm -r');
+    expect(buildScript).not.toContain('!@qwen-code/qwen-live');
+    expect(readPackageJson().workspaces).toContain('packages/*');
+  });
+
+  it('selects the CLI dependency closure without selecting the same-named root', () => {
+    const buildScript = readFileSync(
+      path.join(root, 'scripts/build.js'),
+      'utf8',
     );
-    expect(buildOrder).toContain("'packages/qwen-live',");
+    const selector = buildScript.match(/\? '--filter "([^"]+)"/)?.[1];
+    expect(selector).toBeDefined();
+    const result = spawnSync(
+      'corepack',
+      ['pnpm', '--filter', selector, 'list', '--depth', '-1', '--json'],
+      { cwd: root, encoding: 'utf8', shell: process.platform === 'win32' },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const paths = JSON.parse(result.stdout).map((pkg) =>
+      path.relative(root, pkg.path).replaceAll('\\', '/'),
+    );
+    expect(paths).toEqual(
+      expect.arrayContaining([
+        'packages/cli',
+        'packages/core',
+        'packages/browser-use',
+        'packages/sdk-typescript',
+        'packages/web-shell',
+        'packages/web-templates',
+      ]),
+    );
+    expect(paths).not.toContain('');
+    expect(paths).not.toContain('packages/mobile-mcp');
+    expect(paths).not.toContain('packages/vscode-ide-companion');
   });
 
   it('keeps the Mem0 Extension manifest aligned with release versions', () => {
@@ -1469,12 +1581,14 @@ describe('package scripts', () => {
     // The validation jobs reuse the anchored install step; only the anchor
     // definition plus prepare and publish appear as full textual copies.
     expect(installSteps.length).toBe(3);
+    for (const installStep of installSteps.slice(0, 2)) {
+      expect(installStep).toContain('npm run generate');
+    }
     for (const installStep of installSteps) {
       expect(installStep).toContain(
         'corepack pnpm install --frozen-lockfile --ignore-scripts --prefer-offline --reporter=append-only',
       );
       expect(installStep).toContain('npm run postinstall');
-      expect(installStep).toContain('npm run generate');
       expect(installStep).not.toContain('QWEN_SKIP_PREPARE');
       expect(installStep).not.toContain('CI_BOT_PAT');
     }
@@ -1486,6 +1600,9 @@ describe('package scripts', () => {
     }
 
     const publishJob = getWorkflowJob(workflow, 'publish');
+    expect(getWorkflowStep(publishJob, 'Install Dependencies')).not.toContain(
+      'npm run generate',
+    );
     expect(publishJob.slice(0, publishJob.indexOf('steps:'))).not.toContain(
       'CI_BOT_PAT',
     );
@@ -1542,10 +1659,10 @@ describe('package scripts', () => {
     expect(releaseStepScript).toContain('already published; skipping');
     expect(releaseStepScript).toContain('exit 0');
     expect(releaseStepScript).toContain(
-      'npm publish --provenance "${publish_args[@]}"',
+      'corepack pnpm publish --no-git-checks --provenance "${publish_args[@]}"',
     );
     expect(releaseStepScript).toContain(
-      'Every channel package was already published; nothing shipped',
+      'corepack pnpm -r publish "${publish_args[@]}"',
     );
   });
 

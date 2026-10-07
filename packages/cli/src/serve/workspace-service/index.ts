@@ -43,12 +43,21 @@ import {
   McpServerNotFoundError,
   McpServerRestartFailedError,
   SessionNotFoundError,
+  WorkspaceChangePartiallyAppliedError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 
 import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeouts';
 
 import { loadSettings } from '../../config/settings.js';
-import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
+import {
+  evaluateDaemonWorkspaceTrust,
+  readDaemonTrustPolicySnapshot,
+} from '../../config/daemon-trust-policy.js';
+import {
+  getWorkspaceTrustStatus,
+  loadTrustedFolders,
+  TrustLevel,
+} from '../../config/trustedFolders.js';
 import { buildPermissionSettings } from '../../config/permission-settings.js';
 import {
   buildWorkspaceVoiceSettingsWrites,
@@ -72,6 +81,7 @@ import {
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSkillNotFoundError,
   WorkspaceSettingsPartialPersistError,
+  WorkspaceTrustGrantIneffectiveError,
 } from './types.js';
 import type {
   DaemonWorkspaceService,
@@ -694,6 +704,36 @@ export function createDaemonWorkspaceService(
       };
     },
 
+    async grantWorkspaceTrust(_ctx: WorkspaceRequestContext) {
+      assertActiveGeneration();
+      loadTrustedFolders().setValue(
+        boundWorkspace,
+        TrustLevel.TRUST_FOLDER,
+        true,
+      );
+      // Workspace settings cannot establish bootstrap trust. Check the
+      // reconciler's host policy before checking the status we report.
+      const snapshot = await readDaemonTrustPolicySnapshot();
+      const decision = evaluateDaemonWorkspaceTrust(snapshot, boundWorkspace);
+      if (!decision.targetTrusted) {
+        throw new WorkspaceTrustGrantIneffectiveError(
+          decision.state,
+          decision.source,
+        );
+      }
+      const status = getWorkspaceTrustStatus(
+        loadBoundSettings(true).merged,
+        boundWorkspace,
+      );
+      if (status.effective.state !== 'trusted') {
+        throw new WorkspaceTrustGrantIneffectiveError(
+          status.effective.state,
+          status.effective.source,
+        );
+      }
+      return status;
+    },
+
     async setWorkspacePermissionRules(
       ctx: WorkspaceRequestContext,
       request: WorkspacePermissionRulesUpdate,
@@ -718,6 +758,19 @@ export function createDaemonWorkspaceService(
         });
         return result as ReturnType<typeof buildPermissionSettings>;
       } catch (err) {
+        if (
+          err instanceof WorkspaceChangePartiallyAppliedError &&
+          err.result !== undefined
+        ) {
+          // Saved but not applied everywhere: observers still need the change.
+          assertActiveGeneration();
+          publishWorkspaceEvent({
+            type: 'settings_changed',
+            data: { key, value: request.rules, scope: request.scope },
+            originatorClientId: ctx.originatorClientId,
+          });
+          throw err;
+        }
         if (!(err instanceof SessionNotFoundError)) {
           throw err;
         }
@@ -1432,23 +1485,34 @@ export function createDaemonWorkspaceService(
       let sessionsRefreshed: string[] | undefined;
       let sessionsSkipped: string[] | undefined;
       let childError: string | undefined;
-      try {
-        const childResult = await invokeWorkspaceCommand<{
-          env: { updatedKeys: string[]; removedKeys: string[] };
-          changedKeys: string[];
-          sessionsRefreshed: string[];
-          sessionsSkipped: string[];
-        }>(
-          SERVE_CONTROL_EXT_METHODS.workspaceReload,
-          { cwd: boundWorkspace },
-          { timeoutMs: 30_000 },
-        );
+      type ChildReloadResult = {
+        env: { updatedKeys: string[]; removedKeys: string[] };
+        changedKeys: string[];
+        sessionsRefreshed: string[];
+        sessionsSkipped: string[];
+      };
+      const applyChildResult = (childResult: ChildReloadResult) => {
         childReloaded = true;
         env = childResult.env;
         changedKeys = childResult.changedKeys;
         sessionsRefreshed = childResult.sessionsRefreshed;
         sessionsSkipped = childResult.sessionsSkipped;
+      };
+      try {
+        applyChildResult(
+          await invokeWorkspaceCommand<ChildReloadResult>(
+            SERVE_CONTROL_EXT_METHODS.workspaceReload,
+            { cwd: boundWorkspace },
+            { timeoutMs: 30_000 },
+          ),
+        );
       } catch (err) {
+        if (
+          err instanceof WorkspaceChangePartiallyAppliedError &&
+          err.result !== undefined
+        ) {
+          applyChildResult(err.result as ChildReloadResult);
+        }
         if (err instanceof SessionNotFoundError) {
           childError = 'ACP child not running';
         } else {

@@ -11,6 +11,7 @@ import {
   summarizeAnthropicWireRequest,
   summarizeOpenAIWireRequest,
 } from './runtimeDiagnostics.js';
+import { content, fnResponse, userText } from '../test-utils/model-fixtures.js';
 
 describe('RuntimeDiagnosticsCollector', () => {
   it('summarizes generate-content requests without retaining prompt text or tool args', () => {
@@ -21,22 +22,11 @@ describe('RuntimeDiagnosticsCollector', () => {
     const request = {
       model: 'diagnostic-model',
       contents: [
-        {
-          role: 'user',
-          parts: [{ text: 'secret user prompt' }],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'tool-1',
-                name: 'read_file',
-                response: { output: 'secret tool output' },
-              },
-            },
-          ],
-        },
+        userText('secret user prompt'),
+        content(
+          'user',
+          fnResponse('read_file', { output: 'secret tool output' }, 'tool-1'),
+        ),
       ],
       config: {
         systemInstruction: { parts: [{ text: 'secret system prompt' }] },

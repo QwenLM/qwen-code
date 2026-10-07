@@ -35,13 +35,7 @@ export type StreamEvent =
   | { type: 'tool-end'; id: string; success: boolean; summary: string }
   | { type: 'task-start'; id: string; name: string; description: string }
   | { type: 'task-progress'; id: string; line: string }
-  | {
-      type: 'task-end';
-      id: string;
-      tools: number;
-      seconds: number;
-      tokens: string;
-    }
+  | { type: 'task-end'; id: string }
   | { type: 'done' };
 
 export type HistoryItem =
@@ -70,8 +64,6 @@ export type HistoryItem =
       name: string;
       description: string;
       progress: string[];
-      done: boolean;
-      stats?: string;
     };
 
 /**
@@ -216,7 +208,6 @@ export function reduceStreamEvent(
         name: event.name,
         description: event.description,
         progress: [],
-        done: false,
       };
       // Replayed-start reset; see the tool-start case for the reasoning.
       const index = findItemIndex(items, 'task', event.id);
@@ -243,14 +234,7 @@ export function reduceStreamEvent(
     }
     case 'task-end': {
       const index = findItemIndex(items, 'task', event.id);
-      if (index >= 0) {
-        const task = items[index] as Extract<HistoryItem, { kind: 'task' }>;
-        items[index] = {
-          ...task,
-          done: true,
-          stats: `${event.tools} tools · ${event.seconds}s · ${event.tokens} tokens`,
-        };
-      }
+      if (index >= 0) items.splice(index, 1);
       break;
     }
     case 'done': {

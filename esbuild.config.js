@@ -156,6 +156,7 @@ const external = [
   'node-pty',
   '@lydell/node-pty-darwin-arm64',
   '@lydell/node-pty-darwin-x64',
+  '@lydell/node-pty-linux-arm64',
   '@lydell/node-pty-linux-x64',
   '@lydell/node-pty-win32-arm64',
   '@lydell/node-pty-win32-x64',
@@ -251,25 +252,24 @@ const mainBuild = esbuild.build({
   metafile: true,
   write: true,
   keepNames: true,
+  minifyWhitespace: true,
 });
 
-// fzf index worker — runs in its own worker_threads worker that
-// `fzfWorkerHandle.ts` spawns via `new Worker(new URL('./fzfWorker.js', ...))`.
-// Must exist as a standalone file next to `dist/cli.js` so the URL resolves
-// at runtime; we bundle it self-contained (no chunk splitting) so fzf is
-// inlined and the worker doesn't need to walk back into node_modules from
-// the published tarball. `prepare-package.js` whitelists `fzfWorker.js` in
-// the dist `files` array.
+// Worker entries must be self-contained files beside cli.js, included in
+// both package layouts, because worker_threads cannot reuse the main chunks.
 const workerBuild = esbuild.build({
-  entryPoints: ['packages/core/src/utils/filesearch/fzfWorker.ts'],
+  entryPoints: {
+    fzfWorker: 'packages/core/src/utils/filesearch/fzfWorker.ts',
+    'glob-search-worker': 'packages/core/src/tools/glob-search-worker.ts',
+  },
   bundle: true,
-  outfile: 'dist/fzfWorker.js',
+  outdir: 'dist',
   platform: 'node',
   format: 'esm',
   target: 'node22',
   external,
   packages: 'bundle',
-  // fzf is CJS — needs the same require()-shim the main bundle uses for
+  // Bundled CJS dependencies need the same require()-shim the main bundle uses for
   // CJS interop in ESM output.
   inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
   banner: {
@@ -296,6 +296,7 @@ const codeModeHostBuild = esbuild.build({
 const sandboxWorkersBuild = esbuild.build({
   entryPoints: {
     sandboxBwrapRelay: 'packages/core/src/sandbox/bwrap-relay.ts',
+    sandboxLandlockRelay: 'packages/core/src/sandbox/landlock-relay.ts',
     sandboxFileWorker: 'packages/core/src/sandbox/file-worker.ts',
   },
   bundle: true,
@@ -305,7 +306,29 @@ const sandboxWorkersBuild = esbuild.build({
   target: 'node22',
 });
 
-Promise.all([mainBuild, workerBuild, codeModeHostBuild, sandboxWorkersBuild])
+const mem0Build = esbuild.build({
+  entryPoints: {
+    main: 'integrations/external-context/src/bundled-mem0.ts',
+    'write-confirmation':
+      'integrations/external-context/src/write-confirmation.ts',
+  },
+  bundle: true,
+  outdir: 'dist/mem0',
+  platform: 'node',
+  format: 'esm',
+  target: 'node22',
+  banner: {
+    js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);",
+  },
+});
+
+Promise.all([
+  mainBuild,
+  workerBuild,
+  codeModeHostBuild,
+  sandboxWorkersBuild,
+  mem0Build,
+])
   .then(([{ metafile }]) => {
     if (process.env.DEV === 'true') {
       writeFileSync('./dist/esbuild.json', JSON.stringify(metafile, null, 2));

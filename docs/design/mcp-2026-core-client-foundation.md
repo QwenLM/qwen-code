@@ -1,5 +1,7 @@
 # MCP 2026 core client foundation
 
+[English](mcp-2026-core-client-foundation.md) | [简体中文](mcp-2026-core-client-foundation.zh-CN.md)
+
 ## Context
 
 Qwen Code's configured MCP sessions currently use the v1 TypeScript SDK. A
@@ -31,7 +33,7 @@ The following remain separate follow-ups:
 - modern-only remote (HTTP / SSE / TCP) protocol negotiation;
 - interactive MRTR elicitation and approval across TUI, WebShell, headless, and
   ACP;
-- MCP App initiated tool calls, links, downloads, messages, model-context
+- links, downloads, messages, model-context
   updates, and fullscreen display;
 - migration of Qwen Code's internal IDE, Computer Use, and embedded MCP server
   integrations, which are not configured external MCP sessions.
@@ -77,20 +79,89 @@ with `Warning: MCP App '<uri>' from '<server>' could not be displayed:
 <reason>` ahead of the normal tool text; the model-visible result stays the
 plain tool text.
 
-The daemon serves a static sandbox proxy before bearer authentication. It
-contains no session data or credentials. WebShell loads that proxy in an
-outer iframe that omits `allow-same-origin`, so even a same-URL `localhost`
-load is an opaque origin and cannot read WebShell `sessionStorage`. When the
-daemon is already on `127.0.0.1` or `[::1]`, the host also swaps onto
-`localhost` for a second loopback origin. AppBridge and postMessage deliver
-the validated HTML, tool input, and tool result to an inner sandboxed iframe.
-The proxy validates parent and child origins, applies resource CSP as an HTTP
-response header, and forwards AppBridge postMessage traffic between the two
-frames. The host AppBridge schema-validates inbound messages; the proxy itself
-does not filter payload shape. The inner App iframe also omits
-`allow-same-origin`, giving untrusted HTML an opaque origin that cannot call
-the daemon's loopback API as a same-origin client. The first host slice does
-not advertise privileged App capabilities.
+For larger or slower Apps such as Amplitude (#11945), a server can set
+`appResourceMaxBytes` and `appResourceTimeoutMs` in `mcpServers`. The HTML
+limit defaults to 1 MiB and is clamped to 1 byte–4 MiB. The resource deadline
+defaults to the smaller of the general MCP timeout and 10 seconds; an explicit
+App timeout replaces that deadline and is clamped to 100–120,000 ms. Finite
+values are rounded down; nonnumeric or nonfinite values use the defaults.
+The SDK request and abort signal use the same deadline, and caller cancellation
+still aborts the read. Limit failures identify the relevant setting in the
+existing display warning without changing the successful tool result.
+
+SDK initialization and daemon settings read/write preserve both resource-limit
+fields, including finite values that the core later rounds and clamps.
+These settings travel with discovered tools through metadata enrichment,
+qualified names, per-session projections, and reconnect retries. They are part
+of the pool fingerprint so sessions with different resource policies cannot
+reuse the first session's limits. Existing settings reconciliation detects the
+changed configuration. The resource-limit settings themselves add no daemon
+route or sandbox capability.
+
+The 4 MiB ceiling provides headroom for bundled applications while leaving room
+under the existing 32 MiB transcript/replay limit even with JSON escaping (up to
+six bytes per HTML byte). The 120-second ceiling limits optional UI latency.
+These are host policy choices, not protocol limits or a guarantee of Amplitude
+compatibility. The SDK materializes the response before the size check, so the
+limit bounds accepted/retained HTML, not network transfer or peak memory.
+
+A retained App document crosses several budgets tighter than that envelope, in
+different units: the WebShell historical-page budget (16 MiB, estimated as
+UTF-16 code units times two — a page holding two ceiling-size documents no
+longer fits); the daemon's 4 MiB compacted replay window, which one
+ceiling-size document fills by construction; the 2 MiB EventBus per-subscriber
+live-frame budget; and the 32 MiB restore-page limit measured on the
+JSON-serialized stream. Historical-page admission therefore degrades per
+document rather than failing per page: when a materialized page exceeds its
+budget, the page table drops each MCP App display's `html` whole (replay
+mounts the iframe only for non-empty `html` and never re-fetches the resource)
+and the turn stays navigable on `fallbackText`; only a page with nothing left
+to degrade fails closed. Larger accepted documents increase transcript and
+replay payloads. Streaming transfer limits remain outside this change. App-initiated server
+tool calls are specified in [MCP App server tool calls](mcp-app-server-tools.md).
+
+For live delivery, an empty subscriber queue admits the original App under the
+existing oversized-first-frame rule. Only a nonempty backlog that would overflow
+the byte budget retries with whole HTML removed, and only when nonempty text
+fallback is available. Direct delivery and the replay ring retain the original
+App; the degraded queued copy keeps the same event ID. Successful degradation
+does not evict the subscriber or request resync. If fallback cannot fit, normal
+eviction applies; frame count limits and forced replay delivery are unchanged.
+
+Compacted replay first removes HTML from older App segments, then evicts older
+segments. It removes the newest App's HTML only if the retained replay still
+exceeds its budget, preserving that App when evicting old text is sufficient.
+
+For HTTP loopback hosts, the daemon's unauthenticated `/mcp-app-sandbox` route uses an uncached
+redirect to a dedicated static-only listener bound to `127.0.0.1` on a random
+port. Each render receives a fresh `<uuid>.localhost` origin. The listener
+serves only the registered Host, GET method and resource path, deletes the
+registration before its sole successful response, and provides no daemon API
+or WebSocket endpoint. The registration pins the validated host origin and
+resource CSP; query parameters cannot replace that policy.
+
+On the dedicated listener, both iframe layers grant `allow-same-origin`. The App and its proxy share the
+per-render origin and can access each other's DOM and origin-scoped storage;
+they are one trust boundary. They share no origin with WebShell, the daemon or
+another App, so they cannot read WebShell `sessionStorage` or call daemon APIs
+as same-origin clients. `Origin-Agent-Cluster: ?1` prevents `document.domain`
+from relaxing the per-render origin boundary. The HTTP response enforces `sandbox allow-scripts allow-forms allow-same-origin`
+in CSP, so editing iframe attributes cannot remove restrictions on top
+navigation, popups and other ungranted capabilities. Remote/HTTPS hosts use a
+static proxy on the existing daemon connection; an unreachable local isolated
+origin switches to that path after 10 seconds. Its response retains
+`sandbox allow-scripts allow-forms allow-same-origin` in CSP, while the inner
+App stays opaque because its document is a `data:` URL. The trusted proxy
+retains the daemon origin; App isolation relies on the data origin and existing
+API checks. See the linked App design.
+
+AppBridge and postMessage deliver HTML, tool input and tool results to the
+inner iframe. The proxy validates parent and child origins, applies resource
+CSP as an HTTP response header, and forwards messages. The host AppBridge
+schema-validates inbound messages; the proxy does not filter payload shape.
+A bound daemon session advertises scoped App server-tool calls under the
+existing permission policy. See [MCP App server tool calls](mcp-app-server-tools.md)
+for the origin lifecycle, capability boundary and validation limits.
 
 ## Compatibility and safety
 
@@ -101,17 +172,20 @@ not advertise privileged App capabilities.
 - Authorization and Qwen Code's MCP permission boundary are unchanged.
 - The modern cache is private per client instance; no result is shared across
   workspaces or authorization principals.
-- MCP App HTML is limited to 1 MiB and never enters model context.
-- App HTML runs in a double-iframe sandbox. Both frames omit
-  `allow-same-origin`, and the outer frame additionally uses a different
-  loopback origin when one is available. Server-declared CSP is enforced by
-  the daemon response.
-- If the isolation origin is unavailable, WebShell displays the ordinary tool
-  text rather than rendering the App.
+- MCP App HTML defaults to a 1 MiB limit, can be configured up to 4 MiB per
+  server, and never enters model context.
+- App HTML runs in a double-iframe sandbox with `allow-same-origin` on both
+  frames. HTTP loopback hosts first use a fresh per-render origin on a dedicated
+  static-only listener, one-use registration and `Origin-Agent-Cluster: ?1`.
+  Remote/HTTPS hosts use an opaque data document through the daemon connection.
+  Both paths enforce server-declared resource CSP.
+- If the local isolation origin is unavailable, WebShell retries once through
+  the data path. A failed 10-second data handshake or 30-second App
+  initialization falls back to tool text or an explicit failure explanation.
 - Compaction splits by purpose. Terminal (interactive) history keeps
   `type: 'mcp_app'` with empty `html` and the original `fallbackText`, and the
   TUI renders that text instead of mounting an empty sandbox. A recorded
-  transcript keeps the App `html` within its 1 MiB resource limit so WebShell
+  transcript keeps the App `html` within its configured resource limit so WebShell
   replay can mount the app, and keeps `toolResult` only while its serialized
   form fits the retained-display budget (32 KiB); above it the field is dropped
   rather than truncated. Retained `html` reaches replay `rawOutput` and the
@@ -122,6 +196,18 @@ not advertise privileged App capabilities.
   unloading the sandbox iframe.
 
 ## Verification
+
+- A 1,048,577-byte valid App must fail under defaults and render with an explicit
+  2 MiB allowance, including text and base64 resource encodings.
+- An 11-second resource read must fail under defaults and succeed with a
+  30-second App deadline; a longer general MCP timeout alone retains the old
+  10-second ceiling. Caller cancellation must remain effective.
+- Configured limits must accept their exact boundary, reject excess HTML, clamp
+  out-of-range numbers, and fall back for nonfinite values. Different policies
+  must not share pooled tool snapshots.
+- Verify local rendering and recorded replay with a deterministic fixture.
+  Real Amplitude validation additionally requires OAuth and an accessible chart;
+  fixture success alone does not establish real-service compatibility.
 
 - A modern-only control transport must connect through `server/discover`, list
   and call a tool without `initialize`, and carry the modern request metadata.

@@ -7,12 +7,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   existsSync,
+  linkSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -853,6 +855,36 @@ describe('saveReviewArtifact', () => {
       expect(readFileSync(inputPath, 'utf8')).toBe(original);
     },
   );
+
+  // Issue #12578: realpathSync never resolves hard links — two names of one
+  // inode are different path strings, so a string-identity guard admits the
+  // alias and the write goes through to the input. The three labels in the
+  // guard loop (findings, composed, report) share one isSameFile call shape,
+  // so a witness on the findings input pins dev/ino sight for all three.
+  // Since #12568, isSameFile stats with { bigint: true }, so 64-bit ids
+  // above 2^53 arrive exact; the only skip left is an unusable inode, the
+  // same narrow gate the findings.test.ts / repo-context.test.ts witnesses
+  // use.
+  it('refuses to overwrite the findings input when the output is hardlinked to it (#12578)', (ctx) => {
+    const paths = fixture();
+    const alias = join(root, '.qwen/reviews', 'out-findings-alias');
+    linkSync(paths.findings, alias);
+    const inode = statSync(paths.findings).ino;
+    if (inode <= 0) {
+      ctx.skip();
+      return;
+    }
+    const original = readFileSync(paths.findings, 'utf8');
+    expect(() =>
+      saveReviewArtifact({
+        ...paths,
+        out: alias,
+        target: 'local',
+        effort: 'medium',
+      }),
+    ).toThrow(/must not overwrite the findings input/);
+    expect(readFileSync(paths.findings, 'utf8')).toBe(original);
+  });
 
   it('refuses an absent output spelled through a symlink onto an absent input', () => {
     // The hardened absent-side semantics: neither file is on disk yet, but
