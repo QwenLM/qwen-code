@@ -1715,6 +1715,84 @@ describe('ChatCompressionService.compress cache sharing', () => {
     );
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
   });
+
+  // #13432 — a server whose real ceiling sits below the window inferred from
+  // the model id (llama.cpp `-c 262144` serving an id that resolves to the
+  // 1_000_000 catalog row) rejects the request and reports its own limit in
+  // the overflow message. Reactive recovery must size against that reported
+  // ceiling: sized against the inferred window instead, `sharedRequestFits`
+  // stays true, `canShareCache` holds, and the UNSLIMMED oversize history is
+  // re-posted to the server that just rejected it.
+  const INFERRED_WINDOW = 1_000_000;
+  const OBSERVED_CEILING = 262_144;
+  const SERVER_REPORTED_ACTUAL = 279_935;
+
+  it('keeps reactive overflow recovery off the shared request when the server reports a lower ceiling (#13432)', async () => {
+    // Every other canShareCache conjunct holds in this fixture: main model,
+    // cache control enabled, provider-reported anchor, and ample headroom
+    // against the INFERRED window. Only the server-reported ceiling makes
+    // the shared request not fit. Removing the clamp makes generateText
+    // reappear (red).
+    const { config } = await expectCold(
+      {
+        contextWindowSize: INFERRED_WINDOW,
+        lastPromptTokenCount: SERVER_REPORTED_ACTUAL,
+      },
+      {
+        originalTokenCount: SERVER_REPORTED_ACTUAL,
+        precomputedEffectiveTokens: SERVER_REPORTED_ACTUAL,
+        observedServerCeiling: OBSERVED_CEILING,
+      },
+    );
+    expectCacheLog(config, false, false);
+  });
+
+  it('clamps the cold output budget to the server-reported ceiling (#13432)', async () => {
+    // The cold side-query must keep `prompt + max_tokens` inside the ceiling
+    // the server actually enforces. The history is sized so the slimmed input
+    // estimate lands above `OBSERVED_CEILING - COMPACT_MAX_OUTPUT_TOKENS`;
+    // without the clamp `budgetWindow` stays at the inferred window and the
+    // unclamped 20_000 reserve overflows the real ceiling.
+    const chunk = 'x'.repeat(4_000);
+    const history = Array.from({ length: 245 }, (_, i) =>
+      i % 2
+        ? modelText(`chunk-${i} ${chunk}`)
+        : userText(`chunk-${i} ${chunk}`),
+    );
+    const { coldSpy } = await expectCold(
+      {
+        history,
+        contextWindowSize: INFERRED_WINDOW,
+        // An estimate-derived anchor keeps this run on the cold path for a
+        // reason independent of the ceiling clamp, so this case isolates the
+        // `budgetWindow` half of the fix.
+        lastPromptTokenCountIsEstimated: true,
+      },
+      {
+        originalTokenCount: SERVER_REPORTED_ACTUAL,
+        precomputedEffectiveTokens: SERVER_REPORTED_ACTUAL,
+        observedServerCeiling: OBSERVED_CEILING,
+      },
+    );
+    const request = coldSpy.mock.calls[0]![1] as {
+      contents: Content[];
+      systemInstruction?: string;
+      config?: { maxOutputTokens?: number };
+    };
+    // Same estimator the service feeds `computeCompactionOutputBudget`:
+    // slimmed contents (history + directive turn) plus the system prompt.
+    const coldInputEstimate =
+      estimateContentTokens(request.contents) +
+      Math.ceil((request.systemInstruction ?? '').length / 4);
+    // Fixture guard: the estimate has to sit in the regime where the clamp
+    // binds, otherwise the assertion below could pass vacuously.
+    expect(coldInputEstimate).toBeGreaterThan(
+      OBSERVED_CEILING - COMPACT_MAX_OUTPUT_TOKENS,
+    );
+    expect(
+      coldInputEstimate + (request.config?.maxOutputTokens ?? 0),
+    ).toBeLessThanOrEqual(OBSERVED_CEILING);
+  });
 });
 
 describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () => {
