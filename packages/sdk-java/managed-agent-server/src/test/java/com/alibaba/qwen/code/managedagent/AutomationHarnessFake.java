@@ -56,12 +56,13 @@ public final class AutomationHarnessFake {
                 String mutationKey = sessionId + "|define|"
                         + body.get("operationId");
                 Map<String, Object> prior = mutations.get(mutationKey);
+                Map<?, ?> definition = (Map<?, ?>) body.get("definition");
                 if (prior != null) {
+                    replayCheck(prior, scheduleId, definition);
                     result.put("schedule", new LinkedHashMap<>(prior));
                     result.put("replayed", true);
                     break;
                 }
-                Map<?, ?> definition = (Map<?, ?>) body.get("definition");
                 Map<String, Object> schedule = schedules.get(key);
                 boolean replayed = false;
                 if (schedule == null) {
@@ -117,6 +118,7 @@ public final class AutomationHarnessFake {
                         + body.get("operationId");
                 Map<String, Object> prior = mutations.get(mutationKey);
                 if (prior != null) {
+                    replayCheck(prior, scheduleId, null);
                     result.put("schedule", new LinkedHashMap<>(prior));
                     result.put("replayed", true);
                     break;
@@ -215,6 +217,34 @@ public final class AutomationHarnessFake {
                 Object value = definition.get(field);
                 schedule.put(field, value instanceof Integer integer
                         ? integer.longValue() : value);
+            }
+        }
+    }
+
+    /**
+     * The replay check the funnel applies: the operation's target, and for
+     * a define every field the request names, must be the ones the
+     * operation committed — a retry under one id naming another is a
+     * conflict, never another request's result.
+     */
+    private static void replayCheck(Map<String, Object> prior,
+            String scheduleId, Map<?, ?> definition) {
+        if (!scheduleId.equals(prior.get("scheduleId"))) {
+            throw refusal(409, "automation_operation_conflict");
+        }
+        if (definition == null) {
+            return;
+        }
+        for (String field : List.of("goal", "cron", "timezone", "sessionMode",
+                "overlap", "catchUp", "catchUpLimit", "enabled", "prompt")) {
+            if (definition.containsKey(field)) {
+                Object value = definition.get(field);
+                Object committed = prior.get(field);
+                Object normalized = value instanceof Integer integer
+                        ? integer.longValue() : value;
+                if (!java.util.Objects.equals(normalized, committed)) {
+                    throw refusal(409, "automation_operation_conflict");
+                }
             }
         }
     }

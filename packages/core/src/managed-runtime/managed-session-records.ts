@@ -68,6 +68,7 @@ export const MANAGED_SESSION_EVENT_KINDS = [
   'domain.committed',
   'message.delta',
   'message.retracted',
+  'operation.replayed',
 ] as const;
 
 export type ManagedSessionEventKind =
@@ -887,6 +888,14 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         recordRef: 'ref',
       },
     },
+    'operation.replayed': {
+      fields: {
+        domain: 'text',
+        recordId: 'id',
+        revision: 'sequence',
+        recordRef: 'ref',
+      },
+    },
   };
 
 /**
@@ -913,6 +922,7 @@ const EVENT_ACTORS: Readonly<
   'config.bound': ['trusted_entry'],
   'lifecycle.changed': ['trusted_entry'],
   'domain.committed': ['trusted_entry'],
+  'operation.replayed': ['trusted_entry'],
 };
 
 const ACTIVATION_SUBJECT_KINDS: Readonly<
@@ -935,6 +945,7 @@ const ACTIVATION_SUBJECT_KINDS: Readonly<
   'config.bound': false,
   'lifecycle.changed': false,
   'domain.committed': false,
+  'operation.replayed': false,
 };
 
 function assertField(
@@ -1191,6 +1202,10 @@ function assertPayloadRules(
           `${at}.recordRef.schemaVersion must be ${MANAGED_SESSION_DOMAIN_RECORD_VERSION}.`,
         );
       }
+      return;
+    }
+    case 'operation.replayed': {
+      assertEnum(payload['domain'], MANAGED_SESSION_DOMAINS, `${at}.domain`);
       return;
     }
     case 'input.accepted':

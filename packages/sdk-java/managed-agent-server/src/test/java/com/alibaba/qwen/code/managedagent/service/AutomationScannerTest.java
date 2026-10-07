@@ -876,6 +876,87 @@ class AutomationScannerTest {
     }
 
     @Test
+    void aNoOpMutationsRetryAfterALostAnswerAnswersTheHonoredResult() {
+        AutomationDefinitionRequest requestA = new AutomationDefinitionRequest(
+                sessionId, "Goal", "0 2 * * *", "UTC", "Run it.", null, null,
+                null, null, null);
+        var created = service.create(tenant, ACTOR, "key-" + UUID.randomUUID(),
+                requestA);
+        String automationId = created.body().id();
+        // A new key carrying identical content is honored without a
+        // revision; its answer is lost after the honor committed.
+        String keyU = "lost-" + UUID.randomUUID();
+        AutomationDefinitionRequest requestU = new AutomationDefinitionRequest(
+                null, null, "0 2 * * *", null, null, null, null, null, null,
+                null);
+        fake.failAfterNextDefineCommit = new DaemonException("connection lost");
+        assertThatThrownBy(
+                () -> service.update(tenant, ACTOR, automationId, keyU,
+                        requestU))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode())
+                                .isEqualTo("automation_operation_unknown"));
+        assertThat(ledger.findCommand(tenant, keyU)).isEmpty();
+        // Another request moves the definition to revision 2; the retry of
+        // the no-op honor answers the revision-1 result it committed.
+        AutomationDefinitionRequest requestB = new AutomationDefinitionRequest(
+                null, null, "30 3 * * *", null, null, null, null, null, null,
+                null);
+        var revised = service.update(tenant, ACTOR, automationId,
+                "key-" + UUID.randomUUID(), requestB);
+        assertThat(revised.body().definitionRevision()).isEqualTo(2);
+        var retried = service.update(tenant, ACTOR, automationId, keyU,
+                requestU);
+        assertThat(retried.replayed()).isTrue();
+        assertThat(retried.body().definitionRevision()).isEqualTo(1);
+        assertThat(retried.body().cron()).isEqualTo("0 2 * * *");
+        ScheduleRow mirror = ledger.findSchedule(tenant, automationId)
+                .orElseThrow();
+        assertThat(mirror.definitionRevision()).isEqualTo(2);
+        assertThat(mirror.definitionDigest())
+                .isEqualTo(revised.body().digest());
+        // The remembered row replays without another relay.
+        int relays = fake.operations.size();
+        var replayed = service.update(tenant, ACTOR, automationId, keyU,
+                requestU);
+        assertThat(replayed.replayed()).isTrue();
+        assertThat(replayed.body().definitionRevision()).isEqualTo(1);
+        assertThat(fake.operations).hasSize(relays);
+    }
+
+    @Test
+    void aRetireUnderAnotherTargetsKeyConflictsAndTouchesNothing() {
+        PublicAutomation first = define("0 2 * * *", "skip", "none", null,
+                true);
+        PublicAutomation second = define("15 3 * * *", "skip", "none", null,
+                true);
+        String key = "lost-" + UUID.randomUUID();
+        fake.failAfterNextRetireCommit = new DaemonException("connection lost");
+        assertThatThrownBy(
+                () -> service.retire(tenant, ACTOR, first.id(), key))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode())
+                                .isEqualTo("automation_operation_unknown"));
+        // The same key against another target conflicts at the Harness and
+        // the ledger never retires that definition's mirror.
+        assertThatThrownBy(
+                () -> service.retire(tenant, ACTOR, second.id(), key))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("automation_operation_conflict");
+                });
+        assertThat(ledger.findSchedule(tenant, second.id()).orElseThrow()
+                .state()).isEqualTo(AutomationLedgerStore.STATE_LIVE);
+        assertThat(fake.scheduleOf(sessionId, second.id()).get("state"))
+                .isEqualTo("admitted");
+        // The honest retry still answers the first one's cancel.
+        var retried = service.retire(tenant, ACTOR, first.id(), key);
+        assertThat(retried.replayed()).isTrue();
+        assertThat(retried.body().state()).isEqualTo("retired");
+    }
+
+    @Test
     void listsOnlyTheDefinitionsTheActorMayReadWithoutLeakingACursor() {
         // A second Workspace the reader has no grant in, holding the three
         // newest definitions.

@@ -28,6 +28,7 @@ import { pendingSessionInputs } from './hosted-wake-intake.js';
 import { settlePendingMonitorInputs } from './hosted-monitor-wake.js';
 import {
   AutomationNotFoundError,
+  AutomationOperationConflictError,
   AutomationQuotaError,
   AutomationRetiredError,
   AutomationRevisionStaleError,
@@ -518,6 +519,137 @@ describe('hosted automation definitions', () => {
       });
       const fired = await automations.fire(fireParams());
       expect(fired.run.run.execution).toBe('dispatch_started');
+    });
+  });
+
+  it('commits a no-op honor, and answers its retry after the chain moved', async () => {
+    const harness = await createHarness();
+    const noopOp = randomUUID();
+    await withSession(harness, async (automations, authority) => {
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: randomUUID(),
+        definition,
+      });
+      // A new key asking exactly what is committed appends nothing, but
+      // the honor itself is committed: its retry answers it, whatever the
+      // chain does since.
+      const before = authority.committedSequence;
+      const honored = await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: noopOp,
+        definition,
+      });
+      expect(honored.replayed).toBe(true);
+      expect(honored.revision).toBe(1);
+      expect(
+        authority
+          .eventsInSequenceRange(before + 1, authority.committedSequence)
+          .map((event) => event.kind),
+      ).toEqual(['operation.replayed']);
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: randomUUID(),
+        definition: { cron: '10 5 * * *' },
+      });
+      const retried = await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: noopOp,
+        definition,
+      });
+      expect(retried.replayed).toBe(true);
+      expect(retried.revision).toBe(1);
+      expect(retried.schedule.definitionRevision).toBe(1);
+      expect(retried.schedule.cron).toBe(definition.cron);
+      expect(automations.schedule(SCHEDULE_ID)?.definitionRevision).toBe(2);
+      expect(automations.schedule(SCHEDULE_ID)?.cron).toBe('10 5 * * *');
+      // The marker and the moved chain are all that committed since.
+      expect(authority.committedSequence).toBe(before + 2);
+      // A no-op retire on a frozen chain honors the same way.
+      const beforeRetire = authority.committedSequence;
+      const retired = await automations.retire(SCHEDULE_ID, randomUUID());
+      expect(retired.replayed).toBe(false);
+      const again = await automations.retire(SCHEDULE_ID, randomUUID());
+      expect(again.replayed).toBe(true);
+      expect(
+        authority
+          .eventsInSequenceRange(beforeRetire + 1, authority.committedSequence)
+          .map((event) => event.kind),
+      ).toEqual(['domain.committed', 'operation.replayed']);
+    });
+    // The honored replay survives a reopen, over the moved chain.
+    await withSession(
+      harness,
+      async (automations) => {
+        const retried = await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: noopOp,
+          definition,
+        });
+        expect(retried.replayed).toBe(true);
+        expect(retried.schedule.cron).toBe(definition.cron);
+        expect(automations.schedule(SCHEDULE_ID)?.run.state).toBe('cancelled');
+      },
+      { create: false },
+    );
+  });
+
+  it('refuses a replay naming another target or another content', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (automations, authority) => {
+      const otherId = `asch_${'f'.repeat(32)}`;
+      const retireOp = randomUUID();
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: randomUUID(),
+        definition,
+      });
+      await automations.define({
+        scheduleId: otherId,
+        operationId: randomUUID(),
+        definition,
+      });
+      await automations.retire(SCHEDULE_ID, retireOp);
+      // The same operation identity against another definition is a
+      // conflict: it cannot be answered with the first one's cancel.
+      await expect(automations.retire(otherId, retireOp)).rejects.toThrow(
+        AutomationOperationConflictError,
+      );
+      expect(automations.schedule(otherId)?.run.state).toBe('admitted');
+      // A define under one identity commits; the same identity with
+      // another body conflicts, the chain untouched.
+      const defineOp = randomUUID();
+      const committed = await automations.define({
+        scheduleId: otherId,
+        operationId: defineOp,
+        definition: { goal: 'Pinned goal' },
+      });
+      expect(committed.replayed).toBe(false);
+      const before = authority.committedSequence;
+      await expect(
+        automations.define({
+          scheduleId: otherId,
+          operationId: defineOp,
+          definition: { cron: '20 6 * * *' },
+        }),
+      ).rejects.toThrow(AutomationOperationConflictError);
+      expect(authority.committedSequence).toBe(before);
+      expect(automations.schedule(otherId)?.definitionRevision).toBe(2);
+      await expect(
+        automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: defineOp,
+          definition,
+        }),
+      ).rejects.toThrow(AutomationOperationConflictError);
+      // The honest retry of the pinned goal answers its revision.
+      const honest = await automations.define({
+        scheduleId: otherId,
+        operationId: defineOp,
+        definition: { goal: 'Pinned goal' },
+      });
+      expect(honest.replayed).toBe(true);
+      expect(honest.schedule.goal).toBe('Pinned goal');
     });
   });
 });

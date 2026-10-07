@@ -38,9 +38,9 @@ import {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-operations.js';
 import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import type {
+  CommittedExtensionOperation,
   ManagedSessionActor,
   ManagedSessionCommand,
-  ManagedSessionExtensionReceipt,
   ManagedSessionInputRequest,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
@@ -71,7 +71,13 @@ export interface HostedAutomationStore {
     extensionRecord(
       domain: ManagedSessionDomain,
       recordId: string,
-    ): { readonly record: unknown; readonly revision: number } | undefined;
+    ):
+      | {
+          readonly record: unknown;
+          readonly revision: number;
+          readonly recordRef: ManagedSessionDurableRef;
+        }
+      | undefined;
     extensionRecordsInDomain(
       domain: ManagedSessionDomain,
     ): ReadonlyArray<{ readonly record: unknown }>;
@@ -84,10 +90,20 @@ export interface HostedAutomationStore {
       },
       actor: ManagedSessionActor,
     ): Promise<unknown>;
+    commitOperationReplayed(
+      command: ManagedSessionCommand,
+      request: {
+        readonly domain: ManagedSessionDomain;
+        readonly recordId: string;
+        readonly revision: number;
+        readonly recordRef: ManagedSessionDurableRef;
+      },
+      actor: ManagedSessionActor,
+    ): Promise<unknown>;
     committedExtensionOperation(
       operation: string,
       commandId: string,
-    ): ManagedSessionExtensionReceipt | undefined;
+    ): CommittedExtensionOperation | undefined;
   };
   readonly resources: {
     publish(kind: string, bytes: Buffer): Promise<ManagedSessionDurableRef>;
@@ -161,6 +177,17 @@ export class AutomationQuotaError extends Error {
   }
 }
 
+/**
+ * A replayed operation names another target or another content than the
+ * operation committed: the retry must be refused, never answered with a
+ * different request's result.
+ */
+export class AutomationOperationConflictError extends Error {
+  constructor(operationId: string, reason: string) {
+    super(`Automation operation ${operationId} conflicts: ${reason}.`);
+  }
+}
+
 const TRUSTED: ManagedSessionActor = { class: 'trusted_entry' };
 const SCHEDULE_ID = /^asch_[0-9a-f]{32}$/;
 
@@ -230,17 +257,13 @@ export class HostedAutomationSession {
    */
   define(params: AutomationDefineParams): Promise<AutomationDefineResult> {
     return this.serial(async () => {
-      const prior = this.store.authority.committedExtensionOperation(
+      const prior = await this.mutationReplay(
         'defineSchedule',
         params.operationId,
+        params.scheduleId,
+        params.definition,
       );
-      if (prior !== undefined) {
-        return {
-          schedule: await this.scheduleOf(prior),
-          revision: prior.revision,
-          replayed: true,
-        };
-      }
+      if (prior !== undefined) return prior;
       const existing = this.schedule(params.scheduleId);
       if (existing !== undefined && isTerminalRunState(existing.run.state)) {
         throw new AutomationRetiredError(params.scheduleId);
@@ -268,12 +291,31 @@ export class HostedAutomationSession {
         existing !== undefined &&
         existing.definitionDigest === definitionDigest
       ) {
+        // Honored without a revision: the decision is committed as a
+        // marker, or its lost-answer retry would replay nothing after the
+        // chain moved and re-apply this content over it.
+        const committed = this.store.authority.extensionRecord(
+          'schedule',
+          params.scheduleId,
+        )!;
+        await this.store.authority.commitOperationReplayed(
+          {
+            operation: 'defineSchedule',
+            commandId: params.operationId,
+            sessionKey: this.key,
+            contentDigest: digest(existing),
+          },
+          {
+            domain: 'schedule',
+            recordId: params.scheduleId,
+            revision: committed.revision,
+            recordRef: committed.recordRef,
+          },
+          TRUSTED,
+        );
         return {
           schedule: existing,
-          revision: this.store.authority.extensionRecord(
-            'schedule',
-            params.scheduleId,
-          )!.revision,
+          revision: committed.revision,
           replayed: true,
         };
       }
@@ -326,22 +368,37 @@ export class HostedAutomationSession {
     operationId: string,
   ): Promise<AutomationDefineResult> {
     return this.serial(async () => {
-      const prior = this.store.authority.committedExtensionOperation(
+      const prior = await this.mutationReplay(
         'retireSchedule',
         operationId,
+        scheduleId,
+        null,
       );
-      if (prior !== undefined) {
-        return {
-          schedule: await this.scheduleOf(prior),
-          revision: prior.revision,
-          replayed: true,
-        };
-      }
+      if (prior !== undefined) return prior;
       const existing = this.schedule(scheduleId);
       if (existing === undefined) throw new AutomationNotFoundError(scheduleId);
       const revisionOf = () =>
         this.store.authority.extensionRecord('schedule', scheduleId)!.revision;
       if (isTerminalRunState(existing.run.state)) {
+        const committed = this.store.authority.extensionRecord(
+          'schedule',
+          scheduleId,
+        )!;
+        await this.store.authority.commitOperationReplayed(
+          {
+            operation: 'retireSchedule',
+            commandId: operationId,
+            sessionKey: this.key,
+            contentDigest: digest(existing),
+          },
+          {
+            domain: 'schedule',
+            recordId: scheduleId,
+            revision: committed.revision,
+            recordRef: committed.recordRef,
+          },
+          TRUSTED,
+        );
         return { schedule: existing, revision: revisionOf(), replayed: true };
       }
       const record = scheduleRetireBody(existing);
@@ -548,11 +605,86 @@ export class HostedAutomationSession {
     );
   }
 
+  /**
+   * The result a mutation's operation identity already landed, if any: the
+   * committed revision, or the honored no-op marker. The replay verifies
+   * the operation's target and, for defines, its content — another request
+   * under the same identity is a conflict, never an answer.
+   */
+  private async mutationReplay(
+    operation: 'defineSchedule' | 'retireSchedule',
+    operationId: string,
+    scheduleId: string,
+    definition: unknown | null,
+  ): Promise<AutomationDefineResult | undefined> {
+    const prior = this.store.authority.committedExtensionOperation(
+      operation,
+      operationId,
+    );
+    if (prior === undefined) return undefined;
+    const conflict = (reason: string): never => {
+      throw new AutomationOperationConflictError(operationId, reason);
+    };
+    if (prior.kind === 'record') {
+      if (prior.result.recordId !== scheduleId)
+        conflict(`it answers for ${prior.result.recordId}, not ${scheduleId}`);
+      const record = await this.scheduleOf(prior.result.recordRef);
+      await this.assertReplayContent(operationId, definition, record, conflict);
+      return {
+        schedule: record,
+        revision: prior.result.revision,
+        replayed: true,
+      };
+    }
+    if (prior.recordId !== scheduleId)
+      conflict(`it answers for ${prior.recordId}, not ${scheduleId}`);
+    const record = await this.scheduleOf(prior.recordRef);
+    await this.assertReplayContent(operationId, definition, record, conflict);
+    return {
+      schedule: record,
+      revision: prior.revision,
+      replayed: true,
+    };
+  }
+
+  /**
+   * The replayed define must ask for what the operation committed, and
+   * nothing else: the requested fields merged over the committed
+   * definition must digest as that definition.
+   */
+  private async assertReplayContent(
+    operationId: string,
+    definition: unknown | null,
+    recorded: Schedule,
+    conflict: (reason: string) => never,
+  ): Promise<void> {
+    if (definition === null) return;
+    let merged: AutomationDefinition;
+    try {
+      merged = assertAutomationDefinition(definition, {
+        goal: recorded.goal,
+        cron: recorded.cron,
+        timezone: recorded.timezone,
+        prompt: await this.promptOf(recorded),
+        sessionMode: recorded.sessionMode,
+        overlap: recorded.overlap,
+        catchUp: recorded.catchUp,
+        catchUpLimit: recorded.catchUpLimit,
+        enabled: recorded.enabled,
+      });
+    } catch (error) {
+      conflict(`its definition does not stand (${(error as Error).message})`);
+    }
+    if (automationDefinitionDigest(merged!) !== recorded.definitionDigest) {
+      conflict('its definition is not the one the operation committed');
+    }
+  }
+
   /** The record body a committed operation carries, read from its ref. */
   private async scheduleOf(
-    committed: ManagedSessionExtensionReceipt,
+    recordRef: ManagedSessionDurableRef,
   ): Promise<Schedule> {
-    const bytes = await this.store.resources.read(committed.recordRef);
+    const bytes = await this.store.resources.read(recordRef);
     return parseScheduleRecord(
       parseManagedSessionRecordJson(
         bytes.toString('utf8'),

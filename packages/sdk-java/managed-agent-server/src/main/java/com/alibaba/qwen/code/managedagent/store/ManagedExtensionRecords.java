@@ -42,7 +42,7 @@ public final class ManagedExtensionRecords {
             "tool.receipt", "checkpoint.committed", "context.compacted",
             "cancel.requested", "turn.settled", "config.bound",
             "lifecycle.changed", "domain.committed", "message.delta",
-            "message.retracted");
+            "message.retracted", "operation.replayed");
     public static final int MAX_ID_BYTES = 512;
     public static final int MAX_TEXT_BYTES = 4096;
     public static final int MAX_GRANT_PHASES = 16;

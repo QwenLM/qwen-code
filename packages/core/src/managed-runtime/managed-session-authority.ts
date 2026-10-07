@@ -270,6 +270,25 @@ export interface ManagedSessionExtensionReceipt {
   readonly recordRef: ManagedSessionDurableRef;
 }
 
+/**
+ * What an operation/command identity already landed: an extension record
+ * revision, or the marker of an operation honored without one (decision
+ * replay — the honored revision is named, nothing was revised).
+ */
+export type CommittedExtensionOperation =
+  | {
+      readonly kind: 'record';
+      readonly result: ManagedSessionExtensionReceipt;
+    }
+  | {
+      readonly kind: 'replayed';
+      readonly receipt: ManagedSessionCommitReceipt;
+      readonly domain: ManagedSessionDomain;
+      readonly recordId: string;
+      readonly revision: number;
+      readonly recordRef: ManagedSessionDurableRef;
+    };
+
 export interface ManagedSessionInputRequest {
   readonly inputId: string;
   readonly turnId: string;
@@ -1555,16 +1574,17 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
-   * The extension commit an earlier `commitExtensionRecord` landed under
-   * this operation/command identity, without the content comparison the
-   * commit path applies: a caller answering a relayed operation's retry
-   * with its original result must never rebuild the revision first (the
-   * rebuilt body would not digest-match the committed one).
+   * The extension commit an earlier `commitExtensionRecord` or
+   * `commitOperationReplayed` landed under this operation/command identity,
+   * without the content comparison the commit path applies: a caller
+   * answering a relayed operation's retry with its original result must
+   * never rebuild the revision first (the rebuilt body would not
+   * digest-match the committed one).
    */
   committedExtensionOperation(
     operation: string,
     commandId: string,
-  ): ManagedSessionExtensionReceipt | undefined {
+  ): CommittedExtensionOperation | undefined {
     const previous = this.transactions.get(
       managedSessionCommandKey(operation, commandId),
     );
@@ -1579,16 +1599,104 @@ export class LocalManagedSessionAuthority {
       const committed = this.extensionEvents.get(sequence);
       if (committed !== undefined) {
         return {
+          kind: 'record',
+          result: {
+            receipt: {
+              ...previous.receipt,
+              committedSequence: this.committed,
+              replayed: true,
+            },
+            ...committed,
+          },
+        };
+      }
+      const event = this.events[sequence - 1];
+      if (event?.kind === 'operation.replayed') {
+        return {
+          kind: 'replayed',
           receipt: {
             ...previous.receipt,
             committedSequence: this.committed,
             replayed: true,
           },
-          ...committed,
+          domain: event.payload['domain'] as ManagedSessionDomain,
+          recordId: event.payload['recordId'] as string,
+          revision: event.payload['revision'] as number,
+          recordRef: event.payload[
+            'recordRef'
+          ] as unknown as ManagedSessionDurableRef,
         };
       }
     }
     return undefined;
+  }
+
+  /**
+   * Commits the decision to honor one extension-record operation without a
+   * revision: an unchanged mutation's outcome must survive the caller's
+   * answer the way a revision would, or its retry — after a lost answer —
+   * would apply its content over a revision another request committed
+   * meanwhile. The marker names the extension record revision it honored;
+   * it revises nothing itself.
+   */
+  async commitOperationReplayed(
+    command: ManagedSessionCommand,
+    request: {
+      readonly domain: ManagedSessionDomain;
+      readonly recordId: string;
+      readonly revision: number;
+      readonly recordRef: ManagedSessionDurableRef;
+    },
+    actor: ManagedSessionActor,
+  ): Promise<ManagedSessionCommitReceipt> {
+    return this.runSerial(async () => {
+      const replayed = this.committedExtensionOperation(
+        command.operation,
+        command.commandId,
+      );
+      if (replayed !== undefined) {
+        return replayed.kind === 'record'
+          ? replayed.result.receipt
+          : replayed.receipt;
+      }
+      assertExtensionActor(actor.class);
+      assertCommandIdentity(command);
+      const record = this.extensionRecord(request.domain, request.recordId);
+      if (
+        record === undefined ||
+        record.revision !== request.revision ||
+        record.recordRef.resourceId !== request.recordRef.resourceId ||
+        record.recordRef.digest !== request.recordRef.digest
+      ) {
+        throw new ManagedSessionConflictError(
+          `operation replay of ${request.domain}/${request.recordId} at revision ${request.revision} names no committed revision.`,
+        );
+      }
+      // Refused before publishing, so a retry loop leaves no body behind.
+      this.assertCommandWritable(command);
+      this.assertExpectedSequence(command);
+      const receipt = await this.commit(
+        command,
+        [
+          {
+            v: MANAGED_SESSION_FORMAT_VERSION,
+            sequence: this.committed + 1,
+            eventId: `operation.replayed:${command.commandId}`,
+            sessionKey: command.sessionKey,
+            kind: 'operation.replayed',
+            occurredAt: this.now(),
+            payload: {
+              domain: request.domain,
+              recordId: request.recordId,
+              revision: request.revision,
+              recordRef: request.recordRef,
+            },
+          },
+        ],
+        [actor],
+      );
+      return receipt;
+    });
   }
 
   /**

@@ -77,6 +77,7 @@ import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { HostedMonitorSession } from './hosted-monitor-session.js';
 import {
   AutomationNotFoundError,
+  AutomationOperationConflictError,
   AutomationQuotaError,
   AutomationRetiredError,
   AutomationRevisionStaleError,
@@ -4630,6 +4631,8 @@ export function registerHostedHarnessSessionRoutes(
       const message = cause instanceof Error ? cause.message : String(cause);
       if (cause instanceof AutomationRevisionStaleError)
         return error(res, 409, 'automation_revision_stale', message);
+      if (cause instanceof AutomationOperationConflictError)
+        return error(res, 409, 'automation_operation_conflict', message);
       if (cause instanceof AutomationRetiredError)
         return error(res, 409, 'automation_retired', message);
       if (cause instanceof AutomationNotFoundError)
