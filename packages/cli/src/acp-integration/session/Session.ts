@@ -482,6 +482,11 @@ import {
   type RepeatedToolFailureGuardDecision,
   type RepeatedToolFailureGuardState,
 } from './repeated-tool-failure-guard.js';
+import {
+  getToolExplorationKind,
+  TOOL_EXPLORATION_REMINDER,
+  ToolExplorationBudget,
+} from '@qwen-code/qwen-code-core/services/tool-exploration-budget.js';
 
 const debugLogger = createDebugLogger('SESSION');
 const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
@@ -825,6 +830,7 @@ export type DaemonToolLoopState = {
   loopType?: LoopType;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
   repeatedToolFailureState: RepeatedToolFailureGuardState;
+  explorationBudget?: ToolExplorationBudget;
 };
 
 const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
@@ -891,6 +897,7 @@ function createDaemonToolLoopState(
     loopDetected: false,
     repeatedToolFailureMode,
     repeatedToolFailureState: createRepeatedToolFailureGuardState(),
+    explorationBudget: new ToolExplorationBudget(),
   };
 }
 
@@ -1052,6 +1059,13 @@ function recordDaemonToolCalls(
     return loopState?.loopDetected ?? false;
   loopState.totalToolCalls += calls.length;
   for (const call of calls) {
+    loopState.explorationBudget?.record(
+      getToolExplorationKind(
+        config.getToolRegistry(),
+        call.name ?? '',
+        call.args ?? {},
+      ),
+    );
     const key = getToolCallRepeatKey(call.name ?? '', call.args ?? {});
     const count = (loopState.toolCallKeyCounts.get(key) ?? 0) + 1;
     loopState.toolCallKeyCounts.set(key, count);
@@ -9297,6 +9311,11 @@ export class Session implements SessionContext {
     const parts = [
       ...toolRun.parts,
       ...(activeTodoReminder ? [{ text: activeTodoReminder }] : []),
+      ...(toolLoopState.explorationBudget?.takeReminder(
+        this.config.getMaxToolCallsPerTurn(),
+      )
+        ? [{ text: TOOL_EXPLORATION_REMINDER }]
+        : []),
       ...(repeatedToolFailureDecision.kind === 'warn'
         ? [{ text: REPEATED_TOOL_FAILURE_REMINDER }]
         : []),

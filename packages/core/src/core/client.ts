@@ -98,6 +98,10 @@ import type { UserPromptRecordPayload } from '../services/chatRecordingService.j
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
 import {
+  getToolExplorationKind,
+  ToolExplorationBudget,
+} from '../services/tool-exploration-budget.js';
+import {
   renderAutoMemoryFocusedSubtree,
   toAutoMemoryRef,
 } from '../memory/tree.js';
@@ -496,6 +500,7 @@ export class LlmClient {
   private readonly interactionStartTypes = new Map<string, SendMessageType>();
 
   private readonly loopDetector: LoopDetectionService;
+  private readonly toolExplorationBudget = new ToolExplorationBudget();
   private lastPromptId: string | undefined = undefined;
   private activeTodoWorkChainPromptId: string | undefined;
   private readonly activeAutomaticTodoWorkChainPromptIds = new Set<string>();
@@ -3798,6 +3803,7 @@ export class LlmClient {
         : undefined;
     if (startsInteraction) {
       this.loopDetector.reset(prompt_id);
+      this.toolExplorationBudget.reset();
       this.lastPromptId = prompt_id;
       // A side question asked while a turn is running is not a new turn: it
       // must not move the running turn's starting point or drop its target.
@@ -4139,6 +4145,7 @@ export class LlmClient {
     }
     if (messageType === SendMessageType.Goal) {
       this.loopDetector.reset(prompt_id);
+      this.toolExplorationBudget.reset();
       this.lastPromptId = prompt_id;
     }
     if (startsInteraction) {
@@ -4790,6 +4797,13 @@ export class LlmClient {
         const activeTodoReminder = carriesAgentToolResult
           ? this.config.takeActiveTodoReminder(prompt_id, true)
           : this.config.takeActiveTodoReminder(prompt_id);
+        const explorationReminder = this.loopDetector.isDisabledForSession()
+          ? undefined
+          : this.toolExplorationBudget.takeReminder(
+              this.config.getMaxToolCallsPerTurn(),
+            );
+        if (explorationReminder)
+          requestToSend.push({ text: explorationReminder });
         if (activeTodoReminder) {
           const insertAt = requestToSend.findIndex(
             (part) =>
@@ -4953,6 +4967,22 @@ export class LlmClient {
           // shell inspection stagnation, and per-turn tool-call cap). These fire
           // before the skipLoopDetection gate so they cannot be bypassed by
           // configuration.
+          if (
+            event.type === LlmEventType.ToolCallRequest &&
+            !duplicateLoopGuardRequest
+          ) {
+            this.toolExplorationBudget.record(
+              getToolExplorationKind(
+                this.config.getToolRegistry(),
+                event.value.name,
+                event.value.args,
+              ),
+            );
+          } else if (event.type === LlmEventType.Finished) {
+            this.toolExplorationBudget.commit();
+          } else if (event.type === LlmEventType.Retry) {
+            this.toolExplorationBudget.rollback();
+          }
           const alwaysOnLoop =
             !duplicateLoopGuardRequest &&
             this.loopDetector.checkAlwaysOnSafeties(event);
@@ -5281,6 +5311,7 @@ export class LlmClient {
             };
 
             this.loopDetector.reset(prompt_id);
+            this.toolExplorationBudget.reset();
             const hookTurnBudget = boundedTurns - 1;
             const pendingSteer = await takeSteerInput(hookTurnBudget);
             for (const goalEvent of takePendingGoalEvents()) {
@@ -5389,6 +5420,7 @@ export class LlmClient {
           // protection is preserved: the cap still bounds each iteration, and
           // the chain itself is bounded by stopHookBlockingCap.
           this.loopDetector.reset(prompt_id);
+          this.toolExplorationBudget.reset();
 
           const hookTurnBudget = boundedTurns - 1;
           const pendingSteer = await takeSteerInput(hookTurnBudget);

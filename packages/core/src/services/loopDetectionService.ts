@@ -452,6 +452,10 @@ export class LoopDetectionService {
     );
   }
 
+  isDisabledForSession(): boolean {
+    return this.disabledForSession;
+  }
+
   /**
    * Records the executed result of a tool call so the guards can treat
    * stateful read tools (see STATEFUL_READ_TOOLS) result-aware: identical
