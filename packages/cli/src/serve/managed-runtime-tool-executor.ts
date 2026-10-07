@@ -116,6 +116,33 @@ function isolationRefusal(
   };
 }
 
+/**
+ * Byte budget for reading one project instruction file. The reply is capped in
+ * characters, but `fs.readFile` materialises the whole file first: a sparse
+ * 400 Mi `AGENTS.md` costs no disk and still allocates. Reading only the prefix
+ * that can yield that many UTF-16 code units bounds the allocation too; four
+ * bytes per unit keeps astral content at the full character cap.
+ */
+const MANAGED_WORKSPACE_CONTEXT_FILE_BYTES =
+  MANAGED_WORKSPACE_CONTEXT_FILE_CHARS * 4;
+
+/** Reads at most {@link MANAGED_WORKSPACE_CONTEXT_FILE_BYTES} bytes of a file. */
+async function readContextFilePrefix(file: string): Promise<string> {
+  const handle = await fs.open(file, 'r');
+  try {
+    const buffer = Buffer.allocUnsafe(MANAGED_WORKSPACE_CONTEXT_FILE_BYTES);
+    const { bytesRead } = await handle.read(
+      buffer,
+      0,
+      MANAGED_WORKSPACE_CONTEXT_FILE_BYTES,
+      0,
+    );
+    return buffer.toString('utf8', 0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
 export interface ManagedToolReference {
   readonly sessionId: string;
   readonly promptId: string;
@@ -566,11 +593,28 @@ export class ManagedToolExecutor {
           path.isAbsolute(rel)
         )
           continue;
+        // Staying inside the boundary is not ownership: a Session bound at the
+        // mount root (a Workspace selection without `cwd_relative`) has every
+        // sibling inside it, so the same arm the file tools consult judges this
+        // read too. Same three arguments as those call sites.
+        if (await this.ownsAnotherSessionDir?.(tools.sessionId, real, boundary))
+          continue;
         // One physical file under both names (`AGENTS.md -> QWEN.md`) is
         // injected once, as core's memory loader does (#9597).
         if (seen.has(real)) continue;
         seen.add(real);
-        text = await fs.readFile(real, 'utf8');
+        // Gate on the type before opening: `fs.readFile` on a FIFO blocks in
+        // open(2) forever, pinning one libuv threadpool thread per attachment
+        // until unrelated reads in this worker stall, while every other
+        // unreadable candidate here is simply absent from the result.
+        const stat = await fs.stat(real);
+        if (!stat.isFile()) continue;
+        // The character cap bounds the reply, not the allocation: read only
+        // what can fill it.
+        text =
+          stat.size > MANAGED_WORKSPACE_CONTEXT_FILE_BYTES
+            ? await readContextFilePrefix(real)
+            : await fs.readFile(real, 'utf8');
       } catch {
         continue;
       }

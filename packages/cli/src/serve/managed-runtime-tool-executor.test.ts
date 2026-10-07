@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import fs, { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   mkdir,
@@ -48,6 +49,17 @@ import {
 import { ManagedMcpRuntime } from './managed-mcp-runtime.js';
 import { ManagedHookRuntime } from './managed-hook-runtime.js';
 import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
+import { MANAGED_WORKSPACE_CONTEXT_FILE_CHARS } from './managed-runtime-provider-protocol.js';
+
+/** A FIFO is the only non-regular file that blocks a read instead of failing. */
+const hasMkfifo = (() => {
+  try {
+    execFileSync('mkfifo', ['--version'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+})();
 
 function deferred() {
   let resolve!: () => void;
@@ -1499,6 +1511,173 @@ describe('readWorkspaceContext', () => {
       );
     } finally {
       await rm(mount, { recursive: true, force: true });
+    }
+  });
+
+  it('does not promote a sibling Session file when the caller is bound at the mount root', async () => {
+    // The ordinary Workspace selection omits `cwd_relative`, so the Session
+    // directory IS the mount and the realpath escape test confines nothing:
+    // `<root>/AGENTS.md -> b/AGENTS.md` stays inside the boundary. Only the
+    // ownership arm the file tools already consult refuses it, and `read_file`
+    // of the very same path does refuse it.
+    const mount = await mkdtemp(path.join(os.tmpdir(), 'ctx-root-'));
+    try {
+      const sibling = path.join(mount, 'b');
+      await mkdir(sibling);
+      await writeFile(path.join(sibling, 'AGENTS.md'), 'sibling private rules');
+      await writeFile(path.join(mount, 'QWEN.md'), 'own text');
+      await symlink(
+        path.join(sibling, 'AGENTS.md'),
+        path.join(mount, 'AGENTS.md'),
+      );
+
+      const toolSet: ManagedToolSet = {
+        sessionId: 'session-root',
+        directory: mount,
+        workspaceRoot: mount,
+        tools: new Map(),
+        admitsDirectory: () => true,
+      };
+      // Mirrors the supplier in managed-context-worker.ts: a binding at the
+      // mount root owns nothing, a caller bound there has no private estate.
+      const installations = new Map([['session-b', sibling]]);
+      const contains = (directory: string, target: string): boolean => {
+        const relative = path.relative(directory, target);
+        return (
+          relative !== '..' &&
+          !relative.startsWith(`..${path.sep}`) &&
+          !path.isAbsolute(relative)
+        );
+      };
+      const ownsAnotherSessionDir = async (
+        sessionId: string,
+        realPath: string,
+        ownDirectory: string,
+      ): Promise<boolean> => {
+        const ownEstate =
+          contains(ownDirectory, realPath) && ownDirectory !== mount;
+        for (const [otherId, directory] of installations) {
+          if (otherId === sessionId || directory === mount) continue;
+          if (!contains(directory, realPath)) continue;
+          if (
+            !ownEstate ||
+            (directory !== ownDirectory && contains(ownDirectory, directory))
+          )
+            return true;
+        }
+        return false;
+      };
+      const executor = new ManagedToolExecutor(
+        async () => toolSet,
+        undefined,
+        undefined,
+        undefined,
+        ownsAnotherSessionDir,
+      );
+
+      const { files } = await executor.readWorkspaceContext('session-root');
+
+      expect(files.map((file) => file.name)).toEqual(['QWEN.md']);
+      expect(files.some((file) => file.text.includes('sibling private'))).toBe(
+        false,
+      );
+    } finally {
+      await rm(mount, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!hasMkfifo)(
+    'skips a FIFO at an instruction name instead of blocking on it',
+    async () => {
+      // `fs.readFile` on a FIFO blocks in open(2) forever: the control never
+      // answers, and each later attachment pins another threadpool thread.
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'ctx-fifo-'));
+      const fifo = path.join(directory, 'AGENTS.md');
+      let unblock: number | undefined;
+      try {
+        await writeFile(path.join(directory, 'QWEN.md'), 'own text');
+        execFileSync('mkfifo', [fifo]);
+
+        const toolSet: ManagedToolSet = {
+          sessionId: 'session-1',
+          directory,
+          workspaceRoot: directory,
+          tools: new Map(),
+          admitsDirectory: () => true,
+        };
+        const executor = new ManagedToolExecutor(async () => toolSet);
+
+        // Raced so that a regression fails the case instead of hanging the
+        // suite; a stuck reader is released before the assertion throws.
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const blocked = new Promise<'blocked'>((resolve) => {
+          timer = setTimeout(() => resolve('blocked'), 5000);
+        });
+        const outcome = await Promise.race([
+          executor.readWorkspaceContext('session-1'),
+          blocked,
+        ]);
+        clearTimeout(timer);
+        if (outcome === 'blocked') {
+          unblock = fs.openSync(fifo, 'w');
+          throw new Error(
+            'readWorkspaceContext blocked on a FIFO instead of skipping it',
+          );
+        }
+
+        expect(outcome.files.map((file) => file.name)).toEqual(['QWEN.md']);
+      } finally {
+        if (unblock !== undefined) fs.closeSync(unblock);
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('reads only the prefix that can fill the character cap', async () => {
+    // The cap bounds the reply, not the allocation: a sparse 400 Mi file costs
+    // no disk and still materialised in full, in the worker every Session on
+    // that runtime shares.
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'ctx-cap-'));
+    const budget = MANAGED_WORKSPACE_CONTEXT_FILE_CHARS * 4;
+    const overBudget = path.join(directory, 'AGENTS.md');
+    const readFileSpy = vi.spyOn(fs.promises, 'readFile');
+    const openSpy = vi.spyOn(fs.promises, 'open');
+    try {
+      await writeFile(path.join(directory, 'QWEN.md'), 'own text');
+      await writeFile(overBudget, 'a'.repeat(budget + 4096));
+
+      const toolSet: ManagedToolSet = {
+        sessionId: 'session-1',
+        directory,
+        workspaceRoot: directory,
+        tools: new Map(),
+        admitsDirectory: () => true,
+      };
+      const executor = new ManagedToolExecutor(async () => toolSet);
+      const { files } = await executor.readWorkspaceContext('session-1');
+
+      // The reply is unchanged: same names, same capped length, same note.
+      expect(files.map((file) => file.name)).toEqual(['QWEN.md', 'AGENTS.md']);
+      expect(files[1]?.text).toHaveLength(MANAGED_WORKSPACE_CONTEXT_FILE_CHARS);
+      expect(files[1]?.text).toContain('[Truncated');
+      expect(files[0]?.text).toBe('own text');
+      // An over-budget file is never handed to a whole-file read; a small one
+      // still is, so the prefix path stays size-conditional.
+      expect(
+        readFileSpy.mock.calls.filter(([target]) => target === overBudget),
+      ).toEqual([]);
+      expect(
+        readFileSpy.mock.calls.filter(([target]) =>
+          String(target).endsWith('QWEN.md'),
+        ),
+      ).toHaveLength(1);
+      expect(
+        openSpy.mock.calls.filter(([target]) => target === overBudget),
+      ).toHaveLength(1);
+    } finally {
+      readFileSpy.mockRestore();
+      openSpy.mockRestore();
+      await rm(directory, { recursive: true, force: true });
     }
   });
 });

@@ -1272,6 +1272,29 @@ function turnWithContext(
   );
 }
 
+it('assembles two instruction files as two sections, separated and in order', async () => {
+  // Both files non-blank is the ordinary Workspace shape, and the only one
+  // where the section separator and the prompt order are observable at all:
+  // a single section makes `.join()` a no-op.
+  const slot = contextSlot();
+  broker.workspaceContext.mockResolvedValue([
+    { name: 'QWEN.md', text: '# Project Rules\n' },
+    { name: 'AGENTS.md', text: 'never touch prod' },
+  ]);
+  turn = turnWithContext(slot);
+  await turn.execute(
+    [calls[0]],
+    [parts[0]],
+    'model',
+    new AbortController().signal,
+  );
+  expect(slot.value).toBe(
+    '--- Context from: QWEN.md ---\n# Project Rules\n--- End of Context from: QWEN.md ---\n\n--- Context from: AGENTS.md ---\nnever touch prod\n--- End of Context from: AGENTS.md ---',
+  );
+  await turn.consumeResults();
+  await turn.finish();
+});
+
 it('reads Workspace instructions once, outside the execution ledger', async () => {
   const slot = contextSlot();
   broker.workspaceContext.mockResolvedValue([
