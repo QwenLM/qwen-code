@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
 // Unset NO_COLOR environment variable to ensure consistent theme behavior between local and CI test runs
 if (process.env['NO_COLOR'] !== undefined) {
   delete process.env['NO_COLOR'];
@@ -48,6 +52,22 @@ delete process.env['QWEN_RUNTIME_DIR'];
 // one. Deleting rather than pinning, so tests that want a capacity still pass
 // one explicitly.
 delete process.env['QWEN_SERVE_MAX_WORKSPACES'];
+
+// QWEN_HOME is the OPERATOR's settings home, and this suite must not read it:
+// the verification gate runs with the host's real HOME on a machine shared
+// with other jobs, and a malformed $HOME/.qwen/settings.json there fails
+// every operator-settings reader at once — readOperatorSettingsScopes fails
+// closed by design (one polluted file failed 408 tests across 15 files in a
+// measured gate run). Pin a private empty home per test-file process when the
+// environment did not select one; tests that exercise QWEN_HOME set, stub, or
+// delete it themselves.
+if (process.env['QWEN_HOME'] === undefined) {
+  const qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-cli-test-'));
+  process.env['QWEN_HOME'] = qwenHome;
+  process.once('exit', () => {
+    fs.rmSync(qwenHome, { recursive: true, force: true });
+  });
+}
 
 import { configure } from '@testing-library/react';
 

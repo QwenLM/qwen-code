@@ -98,7 +98,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 // Resolve the (mocked) user-settings path once at module load. Tests mock
 // `os.homedir`, so the value is stable across the suite. Production callers
 // must keep going through `getUserSettingsPath()` to pick up `QWEN_HOME`
-// resolved from `~/.env` after module load.
+// resolved from `~/.env` after module load. An ambient QWEN_HOME would divert
+// every user-settings and .env path away from the mocked home, so this file
+// cannot run with one set (the suite setup pins a private home when the
+// environment provides none).
+delete process.env['QWEN_HOME'];
 const USER_SETTINGS_PATH = getUserSettingsPath();
 
 const MOCK_WORKSPACE_DIR = '/mock/workspace';
