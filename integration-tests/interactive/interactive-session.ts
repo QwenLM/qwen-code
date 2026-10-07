@@ -31,6 +31,7 @@ import {
   pickE2eRenderer,
   resolveE2eCliCommand,
 } from '../renderer-matrix.js';
+import { readyPromptBudgetMs } from '../ready-prompt-budget.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -159,14 +160,33 @@ export class InteractiveSession {
     });
 
     const session = new InteractiveSession(ptyProcess, terminal);
-    // The sandbox:docker e2e leg boots a fresh container per attempt, and
-    // shared self-hosted ECS hosts have stalled that boot past 30s — #13552
-    // died here on all three retries, before the CLI printed its prompt.
-    // Self-hosted runners get the /about loop's 90s stall budget; elsewhere
-    // the tight 30s keeps a genuinely broken boot failing fast.
-    const startupTimeoutMs =
-      process.env['RUNNER_ENVIRONMENT'] === 'self-hosted' ? 90_000 : 30_000;
-    await session.waitFor('Type your message', startupTimeoutMs);
+    // A child that dies before printing its prompt fails fast with its exit
+    // code instead of waiting the budget out; only a live-but-slow boot
+    // (#13552) pays the full readyPromptBudgetMs window.
+    const exited = new Promise<never>((_, reject) => {
+      ptyProcess.onExit(({ exitCode, signal }) =>
+        reject(
+          new Error(
+            `CLI exited before the ready prompt (code ${exitCode}, signal ${signal})`,
+          ),
+        ),
+      );
+    });
+    try {
+      await Promise.race([
+        session.waitFor('Type your message', readyPromptBudgetMs(process.env)),
+        exited,
+      ]);
+    } catch (err) {
+      // start() must not orphan the child, pty, and terminal it refuses to
+      // hand out.
+      try {
+        await session.close();
+      } catch {
+        // Cleanup must not mask the startup failure.
+      }
+      throw err;
+    }
     return session;
   }
 
