@@ -14,6 +14,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
+import com.alibaba.qwen.code.daemon.HostedHarnessCapabilityMismatchException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
@@ -1060,6 +1061,50 @@ class OperationRetryTerminalStateTest {
                 anyLong());
         verify(sessions, never()).retryOperation(anyString(), anyString(),
                 anyString(), anyString(), anyLong(), anyLong(), anyBoolean());
+    }
+
+    // A capability digest mismatch is a refusal to serve, not the Harness
+    // acknowledging the response: the delivery completes terminally with the
+    // mismatch code and stays java_durable (harnessConfirmed = false),
+    // rather than returning to the outbox to retry a negotiation that will
+    // mismatch again. The catch sits ahead of RuntimeException, so the
+    // answered/projection machinery below never sees it.
+    @Test
+    void aCapabilityMismatchCompletesTerminallyWithoutHarnessConfirmation()
+            throws Exception {
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        OperationRecord claimed = actionOperation(1);
+        JsonNode body = actionBody();
+        when(sessions.claimOperation(eq("tenant"), eq("session"),
+                eq("op-action"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(actions.response("tenant", "session", "op-action")).thenReturn(
+                new ManagedActionStore.Response("action-1", body, null,
+                        null));
+        when(actions.find("tenant", "session", "action-1")).thenReturn(
+                Optional.of(new ManagedActionStore.Action("action-1",
+                        "requested", body, null, null)));
+        HostedHarnessCapabilityMismatchException mismatch =
+                mock(HostedHarnessCapabilityMismatchException.class);
+        when(mismatch.getCode()).thenReturn("managed_capability_mismatch");
+        doThrow(mismatch).when(harness).resolveAction("tenant", "session",
+                "action-1", body);
+
+        ActionResponseCoordinator coordinator = new ActionResponseCoordinator(
+                sessions, actions, harness,
+                CoordinatorTestSupport.directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties());
+        coordinator.dispatch("tenant", "session", "op-action");
+
+        verify(actions).complete(eq(claimed), anyString(),
+                eq("managed_capability_mismatch"), isNull(), eq(false),
+                anyLong());
+        verify(sessions, never()).retryOperation(anyString(), anyString(),
+                anyString(), anyString(), anyLong(), anyLong(), anyBoolean());
+        verify(sessions, never()).retryOperation(anyString(), anyString(),
+                anyString(), anyString(), anyLong(), anyLong());
     }
 
     @ParameterizedTest(name = "attemptCount = {0}")

@@ -118,6 +118,7 @@ public class ManagedAgentProperties {
 
         private Duration connectTimeout = Duration.ofSeconds(5);
         private Duration requestTimeout = Duration.ofSeconds(30);
+        private Duration loadTimeout = Duration.ofSeconds(120);
         private Duration heartbeatInterval = Duration.ofSeconds(30);
         /**
          * Turn-level deadline passed to the Harness at prompt admission. An
@@ -169,6 +170,14 @@ public class ManagedAgentProperties {
 
         public String getApprovalMode() {
             return approvalMode;
+        }
+
+        public Duration getLoadTimeout() {
+            return loadTimeout;
+        }
+
+        public void setLoadTimeout(Duration value) {
+            loadTimeout = value;
         }
 
         public void setApprovalMode(String approvalMode) {

@@ -168,6 +168,11 @@ public class SessionLifecycleCoordinator {
                         tenantId, sessionId, operationId);
             }
         } catch (RuntimeException error) {
+            // A capability digest mismatch lands here too: nothing may be
+            // completed honestly (completing unconfirmed would flip the
+            // session while skipping the drain and record a clean row),
+            // so the reason-loud retry below is deliberately the end of
+            // the line until an operator realigns the versions.
             long delay = HarnessCoordinator.retryDelay(retryInitialDelay,
                     retryMaxDelay, claimed.attemptCount());
             Throwable cause = error;
@@ -188,20 +193,22 @@ public class SessionLifecycleCoordinator {
                     blocked = "workspace_close_identity_unverified";
                 }
             }
-            // Two settle outcomes wait on a condition only time, an
-            // operator, or a restart can change, so the budget must not
+            // Two settle outcomes wait on a condition the retry itself or
+            // an operator can still change, so the budget must not
             // terminate them and their attempts must not consume it: a live
             // journal writer while the failure is still retryable (the
             // close can still succeed once the writer stops — a permanent
             // refusal thrown before the Harness was asked to stop would
             // otherwise wait on its own writer lease forever), and a
             // generation error from Java's stale view of a restarted
-            // Harness (the close can still succeed once this replica
-            // refreshes). Both reschedule through the budget-exempt
-            // baseline, and past the budget both are published as
-            // recovery_blocked with their own code: an unbounded wait has
-            // to stay visible, because neither row is otherwise
-            // distinguishable from a healthy pending retry.
+            // Harness — the connector adopts the new generation on that
+            // signal (G3), so the next attempt renegotiates and the close
+            // can still succeed; only a Harness that restarts between every
+            // attempt keeps the wait alive. Both reschedule through the
+            // budget-exempt baseline, and past the budget both are
+            // published as recovery_blocked with their own code: an
+            // unbounded wait has to stay visible, because neither row is
+            // otherwise distinguishable from a healthy pending retry.
             // A cwd change never reaches settle(): the close-specific
             // waits (live writer, stale boot) and the terminal budget arm
             // are not its semantics — its rethrown probe refusal takes the
@@ -310,11 +317,13 @@ public class SessionLifecycleCoordinator {
                         Math.addExact(clock.millis(), delay), true);
             } else if (valid.get() && !cwdChange && staleBoot
                     && claimed.attemptCount() >= maxOperationRetries) {
-                // The stale-view wait is unbounded like the writer wait —
-                // only a Java restart clears it — so past the budget it is
-                // published the same way rather than reading as a healthy
-                // pending retry. The recovery scan still re-drives it, so
-                // the wait itself stays unbounded.
+                // The stale-view wait outlasts the budget only while the
+                // Harness keeps restarting between attempts — each
+                // generation error makes the connector adopt the live
+                // generation, so a single restart costs one attempt — so
+                // past the budget it is published the same way rather than
+                // reading as a healthy pending retry. The recovery scan
+                // still re-drives it, so the wait itself stays unbounded.
                 store.blockLifecycleOperation(tenantId, sessionId,
                         operationId, owner, claimed.claimGeneration(),
                         "hosted_harness_generation_mismatch",

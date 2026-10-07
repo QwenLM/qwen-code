@@ -208,10 +208,11 @@ active Session whose settle waits for the writer, or a delete of a closed
 Session whose retention retirement refuses while a residual writer holds the
 journal — stops being an obstacle once that writer stops or its lease lapses.
 Java's own stale view of a restarted Harness is the other: after the Hosted
-Harness restarts the connector keeps the previous boot, so its calls fail
-with a generation error until Java restarts too, as Turn dispatch does, and
-the close can still succeed once this replica refreshes; the operation waits
-meanwhile, and then until the old process's writer lease expires. Neither
+Harness restarts, the connector's first call fails with a generation error
+and the connector adopts the new generation on that signal (G3), so the next
+attempt renegotiates and the close can still succeed; only a Harness that
+restarts between every attempt keeps the operation waiting, and then until
+the old process's writer lease expires. Neither
 wait keys on the journal alone — the writer wait also requires the failure to
 still be retryable, so a permanent refusal thrown before the Harness was ever
 asked to stop reaches the terminal arm instead of waiting on its own writer
@@ -236,8 +237,8 @@ database was unavailable, the Harness refuses every further commit for that
 Session, and its close first records that its activation ended, so it answers
 every attempt with `503`. Its writer lease can stay live, because the writer's
 own renewal keeps running, so no other server can complete the close; the
-operation stays `running` until that Harness restarts, and Java with it as
-above, or until that lease lapses — the budget does not terminate an
+operation stays `running` until that Harness restarts (the connector adopts
+the new boot, as above), or until that lease lapses — the budget does not terminate an
 operation whose writer is still live. Only when that lease lapses too can
 another server's Harness complete it (step 2). D4 does not complete such a
 close without the Harness while the budget lasts: section 10 of
@@ -444,8 +445,6 @@ workflow on every pull request and push (#12940).
   Session's content, and a `recovery_blocked` outcome for an operation that
   cannot proceed.
 - D7 adding its input and cancel operations to the same table and route.
-- Reconnecting to a restarted Hosted Harness without restarting Java, which
-  Turn dispatch needs as well.
 - Letting a Harness whose journal writes stopped after a failure still seal its
   writer and release the Session, so that a close can settle it (4.5).
 - Leases on database time with renewal, as section 1 of the contract closure
