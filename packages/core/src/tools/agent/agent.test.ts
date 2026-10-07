@@ -5540,6 +5540,21 @@ describe('AgentTool', () => {
         ['terminate mode: TIMEOUT', 'max_time_minutes', 'halfway through'],
         ['Subagent execution failed.'],
       ],
+      // The fall-through's own comment names these two as incomplete runs as
+      // well; without rows for them a later change could route them to the
+      // unfixed GOAL return and the suite would stay green (#13597).
+      [
+        AgentTerminateMode.LOOP_DETECTED,
+        'failed',
+        ['terminate mode: LOOP_DETECTED', 'halfway through'],
+        ['Subagent execution failed.'],
+      ],
+      [
+        AgentTerminateMode.SHUTDOWN,
+        'failed',
+        ['terminate mode: SHUTDOWN', 'halfway through'],
+        ['Subagent execution failed.'],
+      ],
     ] as const)(
       'foreground %s terminate mode patches meta as %s and tells the parent why',
       async (mode, expectedStatus, has, lacks) => {
@@ -5564,6 +5579,28 @@ describe('AgentTool', () => {
         patchMetaSpy.mockRestore();
       },
     );
+
+    it('foreground MAX_TURNS on an external executor names no knob the launch would reject', async () => {
+      // subagent-manager refuses to start an external agent whose definition
+      // sets `maxTurns` / `runConfig.max_turns`, and on ACP the peer owns the
+      // turn cap, so the built-in advice would turn a recoverable short run
+      // into an agent that cannot start at all (#13597). 'External executor'
+      // proves the definition really was external, not silently downgraded.
+      loadAs({
+        name: 'file-search',
+        background: undefined,
+        executor: { kind: 'codex', command: 'codex' },
+      });
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('halfway through');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.MAX_TURNS,
+      );
+      expectText(
+        textOf(await invoke(fg()).execute()),
+        ['terminate mode: MAX_TURNS', 'halfway through', 'External executor'],
+        ['max_turns', 'Subagent execution failed.'],
+      );
+    });
 
     it('foreground ERROR with no retained message still names the mode', async () => {
       // getLastError() is optional on SubagentExecutor (external executors do

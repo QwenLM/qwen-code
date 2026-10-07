@@ -1432,17 +1432,25 @@ type SubagentOutcomeSink = (metadata: SubagentSpanMetadata) => void;
  * verbatim — for TIMEOUT and MAX_TURNS the only fix is a bigger budget, so the
  * line names the knob to raise (#13597). Wording follows `terminalDispatchError`
  * in agents/runtime/workflow-orchestrator.ts.
+ *
+ * `externalExecutor` suppresses the MAX_TURNS knob. An external agent's turn
+ * cap belongs to the peer, and `subagent-manager.ts` refuses to launch one
+ * whose definition sets `maxTurns` or `runConfig.max_turns` at all — so naming
+ * that knob would turn a recoverable short run into an agent that cannot start.
  */
 function subagentTerminalReason(
   terminateMode: AgentTerminateMode,
   lastError?: string,
+  externalExecutor?: boolean,
 ): string {
   const head = `Subagent did not complete (terminate mode: ${terminateMode}).`;
   switch (terminateMode) {
     case AgentTerminateMode.TIMEOUT:
       return `${head} It ran out of time, so re-running the same call will time out again; raise the agent's \`max_time_minutes\` instead.`;
     case AgentTerminateMode.MAX_TURNS:
-      return `${head} It ran out of turns, so re-running the same call will stop at the same point; raise the agent's \`max_turns\` instead.`;
+      return externalExecutor
+        ? `${head} It ran out of turns, so re-running the same call will stop at the same point; the peer owns that budget, so narrow the task instead.`
+        : `${head} It ran out of turns, so re-running the same call will stop at the same point; raise the agent's \`max_turns\` instead.`;
     default:
       return lastError ? `${head} ${lastError}` : head;
   }
@@ -4794,10 +4802,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // SHUTDOWN) is an incomplete run. The parent used to receive the
         // partial text alone and could not tell it apart from a finished
         // answer, so it retried the same call (#13597).
+        const reason = subagentTerminalReason(
+          terminateMode,
+          undefined,
+          subagentConfig.executor !== undefined,
+        );
         return {
           llmContent: [
             {
-              text: `${subagentTerminalReason(terminateMode)}\n\nPartial result follows:\n\n${visibleFinalText}${wtSuffix}`,
+              text: `${reason}\n\nPartial result follows:\n\n${visibleFinalText}${wtSuffix}`,
             },
           ],
           returnDisplay: this.currentDisplay!,
