@@ -2,10 +2,8 @@ package com.alibaba.qwen.code.managedagent.service;
 
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -132,6 +130,7 @@ public class ChildResultRelay {
                 case "watching" -> watch(row, pending, now);
                 case "delivering" -> deliver(row, now);
                 default -> {
+                    return;
                 }
             }
         } catch (RuntimeException error) {

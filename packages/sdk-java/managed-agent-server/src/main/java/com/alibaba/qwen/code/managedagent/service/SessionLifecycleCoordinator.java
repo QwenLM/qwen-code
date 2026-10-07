@@ -331,7 +331,7 @@ public class SessionLifecycleCoordinator {
      * its children — and its terminal revision commits. A run whose body
      * never learned the child Session id consults the relay ledger, so a
      * child created but not yet attached is still found. The physical
-     * effect never waits on the parent's journal: a reachable child 
+     * effect never waits on the parent's journal: a reachable child
      * closes even while its stop-request and terminal revisions falter.
      * Nothing here rewrites an unproven end as cancelled: a child the
      * Harness cannot reach has no settled evidence to record, so the whole
