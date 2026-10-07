@@ -20,6 +20,11 @@ import {
   RESTORE_LOAD_REQUEST_FIELDS,
   RESTORE_RESUME_REQUEST_FIELDS,
 } from './routes/restore-request-fields.js';
+import {
+  MAX_BATCH_WORKSPACES,
+  MAX_MEMBER_BYTES,
+  MAX_SELECTOR_CHARS,
+} from './workspace-route-runtime.js';
 
 const REPO_ROOT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -963,6 +968,16 @@ describe('REST integration documentation contract', () => {
       (parameter) => parameter.in === 'query' && parameter.name === 'limit',
     );
     expect(transcriptLimit?.schema?.maximum).toBe(SESSION_TRANSCRIPT_MAX_LIMIT);
+  });
+
+  it('publishes the runtime-owned batch bounds in the protocol prose', () => {
+    const protocol = readFileSync(PROTOCOL, 'utf8');
+    expect(protocol).toContain(
+      `1–${MAX_BATCH_WORKSPACES} explicitly selected registered workspaces`,
+    );
+    expect(protocol).toContain(`more than ${MAX_BATCH_WORKSPACES} selectors`);
+    expect(protocol).toContain(`longer than ${MAX_SELECTOR_CHARS} characters`);
+    expect(protocol).toContain(`exceeding ${MAX_MEMBER_BYTES / 1024} KiB`);
   });
 
   it('still sees the bulk of the route surface', () => {

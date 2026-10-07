@@ -7576,6 +7576,27 @@ describe('batch workspace session live-state route', () => {
     expect(primaryBridge.listCalls).toEqual([]);
   });
 
+  it('accepts the documented maxima', async () => {
+    const { app } = makeHarness();
+    const res = await batch(
+      app,
+      Array.from({ length: 20 }, () => 'primary-id'),
+    ).expect(200);
+    expect(res.body.workspaces).toHaveLength(20);
+
+    const longest = await batch(app, ['/' + 'a'.repeat(4095)]).expect(200);
+    expect(longest.body.workspaces).toEqual([
+      {
+        workspace: '/' + 'a'.repeat(4095),
+        error: {
+          status: 404,
+          code: 'workspace_not_found',
+          message: expect.any(String),
+        },
+      },
+    ]);
+  });
+
   it('bounds an oversized successful member without discarding another member', async () => {
     const { app } = makeHarness({
       secondarySummaries: [makeSummary('s'.repeat(600 * 1024), SECONDARY_CWD)],

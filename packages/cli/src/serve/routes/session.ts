@@ -9769,7 +9769,7 @@ export function registerSessionRoutes(
             entry,
             413,
             'live_state_response_too_large',
-            'Live-state snapshot exceeds 512 KiB.',
+            `Live-state snapshot exceeds ${MAX_MEMBER_BYTES / 1024} KiB.`,
           );
         }
         return member;
