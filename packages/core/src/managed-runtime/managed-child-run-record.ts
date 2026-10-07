@@ -528,6 +528,9 @@ function parseChildAgentRun(value: unknown): ChildAgentRun {
   // A dispatch that never started (not_started_proven) may carry no
   // binding; the dispatch itself may never lack one — the shared successor
   // rules forbid adding it later, and the chain would never reach attach.
+  // The same holds of a recoverable unknown dispatch: without the binding
+  // it claimed, the re-attach and the original-result paths are both
+  // unreachable, so the unknown could never be recovered as H0b frames it.
   if (run.execution === 'dispatch_started' && run.runtime === null) {
     fail('Child run dispatch needs a Runtime binding.');
   }

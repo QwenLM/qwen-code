@@ -889,8 +889,12 @@ public final class ManagedExtensionRecords {
         // A dispatch that never started (not_started_proven) may carry no
         // binding; the dispatch itself may never lack one — the shared
         // successor rules forbid adding it later, and the chain would
-        // never reach attach.
-        require(!"dispatch_started".equals(execution)
+        // never reach attach. The same holds of a recoverable unknown
+        // dispatch: without the binding it claimed, the re-attach and the
+        // original-result paths are both unreachable, so the unknown could
+        // never be recovered as H0b frames it.
+        require((!"dispatch_started".equals(execution)
+                        && !"outcome_unknown".equals(execution))
                 || !run.get("runtime").isNull(),
                 "Child run dispatch needs a Runtime binding");
         JsonNode predecessor = child.get("predecessorChildRunId");
