@@ -184,17 +184,19 @@ export function AgentCreatePage({
   const [maxConcurrentRuns, setMaxConcurrentRuns] = useState('1');
   // What this computer can run; Qwen Code when the daemon reported nothing.
   const localRuntimePrograms = runtimePrograms({ programs: localPrograms });
-  const [executionProvider, setExecutionProvider] = useState<AgentProgramView>(
-    () => {
-      const initialHost = executionHosts.find(
-        (host) => host.id === initialHostId,
-      );
-      const offered = initialHost
-        ? runtimePrograms(initialHost)
-        : localRuntimePrograms;
-      return offered[0] ?? 'qwen';
-    },
-  );
+  // Undefined when the chosen runtime offers no program at all: nothing is
+  // selected and Save stays disabled, rather than asserting Qwen Code.
+  const [executionProvider, setExecutionProvider] = useState<
+    AgentProgramView | undefined
+  >(() => {
+    const initialHost = executionHosts.find(
+      (host) => host.id === initialHostId,
+    );
+    const offered = initialHost
+      ? runtimePrograms(initialHost)
+      : localRuntimePrograms;
+    return offered[0];
+  });
   const [executionHostIds, setExecutionHostIds] = useState(
     () => new Set<string>(initialHostId ? [initialHostId] : []),
   );
@@ -264,7 +266,9 @@ export function AgentCreatePage({
   // A workspace Agent needs only a name: a role or the defaults cover the rest.
   const canSave = Boolean(
     name.trim() &&
-      (workspaceAgentMode || (description.trim() && systemPrompt.trim())),
+      (workspaceAgentMode || (description.trim() && systemPrompt.trim())) &&
+      // A runtime that offers no program cannot run the agent.
+      (!workspaceAgentMode || executionProvider !== undefined),
   );
 
   useEffect(
@@ -552,10 +556,10 @@ export function AgentCreatePage({
                 execution: {
                   mode: 'managed-host' as const,
                   hostIds: [...executionHostIds],
-                  provider: executionProvider,
+                  ...(executionProvider ? { provider: executionProvider } : {}),
                 },
               }
-            : executionProvider !== 'qwen'
+            : executionProvider && executionProvider !== 'qwen'
               ? {
                   // Claude Code or Codex on this computer.
                   execution: {
@@ -828,9 +832,7 @@ export function AgentCreatePage({
                         checked={executionHostIds.size === 0}
                         onChange={() => {
                           setExecutionHostIds(new Set());
-                          setExecutionProvider(
-                            localRuntimePrograms[0] ?? 'qwen',
-                          );
+                          setExecutionProvider(localRuntimePrograms[0]);
                         }}
                       />
                       <span>
@@ -854,9 +856,7 @@ export function AgentCreatePage({
                             // The first program this runtime runs; a runtime
                             // that offers only Claude Code or Codex has no
                             // Qwen Code to fall back to.
-                            setExecutionProvider(
-                              runtimePrograms(host)[0] ?? 'qwen',
-                            );
+                            setExecutionProvider(runtimePrograms(host)[0]);
                             setRole('');
                             setModel('');
                           }}

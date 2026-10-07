@@ -115,8 +115,13 @@ export function AgentsRoute({
       const [next, squadList] = await Promise.all([
         client.listAgents(),
         // An older daemon has no squad routes: the Squads view shows empty.
+        // A failed poll is not "no squads": keep the list (and an open form)
+        // already on screen until a poll succeeds.
         client.listSquads
-          ? client.listSquads().catch(() => undefined)
+          ? client.listSquads().then(
+              (list) => ({ list }),
+              () => ({ failed: true as const }),
+            )
           : Promise.resolve(undefined),
       ]);
       if (activeClient.current !== client || sequence < appliedRefresh.current)
@@ -124,7 +129,8 @@ export function AgentsRoute({
       appliedRefresh.current = sequence;
       setAgents(next.agents);
       setRuntimes(next.runtimes ?? (next.runtime ? [next.runtime] : []));
-      setSquads(squadList?.squads);
+      if (!squadList) setSquads(undefined);
+      else if ('list' in squadList) setSquads(squadList.list?.squads);
       setRefreshError(undefined);
     } catch (cause) {
       if (activeClient.current !== client || sequence < appliedRefresh.current)
@@ -145,13 +151,31 @@ export function AgentsRoute({
     return () => clearInterval(poll);
   }, [client]);
 
+  // A 2xx body can carry `dispatchError`: the record was saved but its runs
+  // did not start. Surface it after the refetch, so the saved state shows.
+  const reportDispatch = useCallback(
+    (result: unknown) => {
+      const dispatchError =
+        result !== null && typeof result === 'object'
+          ? (result as { dispatchError?: unknown }).dispatchError
+          : undefined;
+      if (typeof dispatchError === 'string') {
+        setActionError(
+          t('collab.error.dispatchAfterSave', { error: dispatchError }),
+        );
+      }
+    },
+    [t],
+  );
+
   const mutate = useCallback(
     async (action: () => Promise<unknown>) => {
       setPending(true);
       setActionError(undefined);
       try {
-        await action();
+        const result = await action();
         await refresh();
+        reportDispatch(result);
       } catch (cause) {
         setActionError(cause instanceof Error ? cause.message : String(cause));
         return false;
@@ -160,7 +184,7 @@ export function AgentsRoute({
       }
       return true;
     },
-    [refresh],
+    [refresh, reportDispatch],
   );
 
   if (!client) {
@@ -186,8 +210,9 @@ export function AgentsRoute({
         onCancel={() => setCreatingAgent(undefined)}
         onCreated={() => setCreatingAgent(undefined)}
         onSaveWorkspaceAgent={async (input) => {
-          await client.createAgent(input);
+          const result = await client.createAgent(input);
           await refresh();
+          reportDispatch(result);
         }}
       />
     );

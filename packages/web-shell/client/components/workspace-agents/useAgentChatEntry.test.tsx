@@ -450,6 +450,44 @@ it('reports a rejected mention through onError and keeps the draft', async () =>
   expect(latestEntry.pending).toBe(false);
 });
 
+it('retries a failed mention with the same clientMessageId', async () => {
+  createThreadsHttpApi.mockReturnValue({
+    listAgents: vi.fn().mockResolvedValue({ agents: [agent('reviewer')] }),
+  });
+  const api = sessionApi();
+  api.mention.mockRejectedValueOnce(new Error('502 Bad Gateway'));
+  mount({
+    onSubmit: vi.fn(),
+    onError: vi.fn(),
+    ensureSession: vi.fn().mockResolvedValue('session-1'),
+    api,
+  });
+  await settle();
+
+  act(() => {
+    latestEntry.submit('@reviewer go', undefined, undefined, vi.fn());
+  });
+  await settle();
+  act(() => {
+    latestEntry.submit('@reviewer go', undefined, undefined, vi.fn());
+  });
+  await settle();
+  act(() => {
+    latestEntry.submit('@reviewer next', undefined, undefined, vi.fn());
+  });
+  await settle();
+
+  const ids = api.mention.mock.calls.map(
+    (call: unknown[]) =>
+      (call[1] as { clientMessageId: string }).clientMessageId,
+  );
+  expect(ids).toHaveLength(3);
+  // The retry replays the post whose outcome was unknown...
+  expect(ids[1]).toBe(ids[0]);
+  // ...and a different message after a success gets its own id.
+  expect(ids[2]).not.toBe(ids[1]);
+});
+
 describe('squads', () => {
   const squad = (name: string, over: Record<string, unknown> = {}) =>
     ({
