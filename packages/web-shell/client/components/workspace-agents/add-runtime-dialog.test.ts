@@ -122,13 +122,14 @@ describe('joinCoordinatorCommand', () => {
 });
 
 describe('runtimePrograms', () => {
-  it('lists what a runtime reported, in display order, else Qwen Code', () => {
+  it('lists reported programs and defaults only an omitted field to Qwen', () => {
     expect(runtimePrograms({ programs: ['codex', 'qwen', 'other'] })).toEqual([
       'qwen',
       'codex',
     ]);
     expect(runtimePrograms({ programs: ['claude'] })).toEqual(['claude']);
     expect(runtimePrograms({})).toEqual(['qwen']);
-    expect(runtimePrograms({ programs: [] })).toEqual(['qwen']);
+    expect(runtimePrograms({ programs: [] })).toEqual([]);
+    expect(runtimePrograms({ programs: ['other'] })).toEqual([]);
   });
 });

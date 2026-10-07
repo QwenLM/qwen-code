@@ -2,7 +2,7 @@
 
 [English](2026-10-04-managed-automation.md) | [简体中文](2026-10-04-managed-automation.zh-CN.md)
 
-状态：设计提案；本文描述的任何能力均未实现，文中提到的 domain 均未开放提交。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 H6 切片设计，属于 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段。它建立在 H0a 的任务契约（[设计](2026-09-27-managed-agent-task-contract.zh-CN.md)）、H0b 的记录契约（[设计](2026-09-27-managed-extension-record-contract.zh-CN.md)）和 H0c 的 authority（[设计](2026-09-27-managed-extension-authority.zh-CN.md)）之上。下文的“参考设计”指该提案[扩展运行时设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-extension-runtime.md)的第 1、3、7、11、12、13、14 节；其序言把 Schedule 资源的字段级契约留给[自动化设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-automation.md)，均以 #12827 固定的提交为准。
+状态：设计提案；其 H6a 记录契约已实现，见[记录正文](#记录正文h6a-契约)所列——两个正文、验证器、occurrence 身份与迁移见证、TypeScript 与 Java 双语回放的共享 fixture、`MANAGED_EXTENSION_RECORD_BODIES` 注册项与 Java 镜像。文中提到的 domain 均未开放提交：`schedule` 与 `automation_run` 不在 `MANAGED_SESSION_ENABLED_DOMAINS` 内，`commitExtensionRecord` 仍然拒绝。H6b、H6c 仍是提案。本文是 [#12827](https://github.com/QwenLM/qwen-code/issues/12827) 的 H6 切片设计，属于 Managed Agent 提案 [#12380](https://github.com/QwenLM/qwen-code/issues/12380) 的 H 阶段。它建立在 H0a 的任务契约（[设计](2026-09-27-managed-agent-task-contract.zh-CN.md)）、H0b 的记录契约（[设计](2026-09-27-managed-extension-record-contract.zh-CN.md)）和 H0c 的 authority（[设计](2026-09-27-managed-extension-authority.zh-CN.md)）之上。下文的“参考设计”指该提案[扩展运行时设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-extension-runtime.md)的第 1、3、7、11、12、13、14 节；其序言把 Schedule 资源的字段级契约留给[自动化设计](https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-automation.md)，均以 #12827 固定的提交为准。
 
 ## 问题
 
@@ -10,9 +10,9 @@
 
 ## 现状
 
-以下事实基于 `main` 的 `5ddfacc9d4`。
+以下事实基于 `main` 的 `5ddfacc9d4`；H6a 落地后改动的条目会注明。
 
-- **Domain 索引。** `schedule` 与 `automation_run` 已在 `packages/core/src/managed-runtime/managed-session-records.ts` 的封闭 v1 domain 索引中注册。注册不等于开放：两者在 `MANAGED_EXTENSION_RECORD_BODIES`（`managed-extension-projection.ts`）中没有记录正文，也不在 `MANAGED_SESSION_ENABLED_DOMAINS` 中，`commitExtensionRecord` 会拒绝它们。
+- **Domain 索引。** `schedule` 与 `automation_run` 已在 `packages/core/src/managed-runtime/managed-session-records.ts` 的封闭 v1 domain 索引中注册。注册不等于开放：两者不在 `MANAGED_SESSION_ENABLED_DOMAINS` 中，`commitExtensionRecord` 会拒绝它们。H6a 契约落地后，两者在 `MANAGED_EXTENSION_RECORD_BODIES`（`managed-extension-projection.ts`）中都有了记录正文，各自的正文共享 `managed-automation-record/1` 契约。
 - **任务投影。** 任务种类 `automation_run` 已声明（`MANAGED_TASK_KINDS`）并冻结在公开的 `TaskKind` 枚举中；H0b 运行块带有 `AutomationRun` 所需的运行、执行与交付三条状态线。
 - **公开契约。** H0a 在 v1.16 把自动化资源（`GET /v1/agent-automations`、`GET /v1/agent-automations/{automationId}/runs`）以 `planned` 命名，并把它们的形状划给 H6：定义 CRUD、手动 run 与 run 查询，定义与历史 run 分开分页（参考设计第 11 节）。变更使用 `Idempotency-Key` 并返回 `202 + operationId`。
 - **Legacy 计划任务。** `packages/cli/src/runtime/scheduled-task-run.ts` 按任务标签加触发时间为每次点火构造 child Session 名，`packages/cli/src/serve/scheduled-task-*.ts` 保存 daemon 路由与 keepalive。其中没有已提交的计划台账；没有任何内容能以可对账的事实在节点替换后存活。
@@ -24,7 +24,7 @@
 ## 目标
 
 - 在 H0b 运行块之上定义 `schedule`（定义）与 `automation_run` 记录正文。
-- 固定 occurrence 身份：定时触发为 `scheduleId + revision + slot`，手动运行为 command ID，webhook 触发为已验证 event ID。
+- 固定 occurrence 身份：定时触发为 `schedule:<slot>`——slot 是扫描者从定义推出的规范 UTC 时刻，点火的 scheduleId 与定义修订冻结在 run 记录上；手动运行为 command ID，webhook 触发为已验证 event ID。
 - 增加扫描者：发现到期 occurrence，并在 workspace 租约/代数 token 下 claim 每个 run，使多个 Java 节点恰有一个 claim 成功。
 - 固定重叠策略（默认 `skip`、`queue_one`、`allow`）与补跑策略（默认 `none`、`latest`、有界次数），禁止无限补跑。
 - run 的执行目标为 `persistent` 目标 Session 输入或 `per_run` child Session，目标在 run 的 intent 修订中冻结。
@@ -41,8 +41,8 @@
 
 ## 决策
 
-1. **定义与 run 是两种记录。** `schedule`（链身份 `scheduleId`）保存定义修订：cron 表达式与时区、prompt 资源修订、目标 Session 模式、交付 policy、错过/补跑 policy、并发与预算 policy——只增修订并带内容摘要，与 AgentDefinition 契约（D8a）一致。`automation_run`（链身份 `runId`）保存一次 occurrence：`occurrenceKey`、钉住的定义修订、冻结的目标、运行/执行/交付三条状态线，以及任务种类 `automation_run`，使每个 run 出现在被绑定 Session 的 `SessionTaskView` 中。
-2. **occurrence 先标识后 claim。** 定时触发的 `occurrenceKey` 是规范化三元组：`scheduleId`、定义 `revision` 与 `slot`——定义时区下的计划时刻，由 H6a 契约规范化，使 DST 折叠与跳跃恰有一种读法。手动 run 使用其准入命令 ID（`Idempotency-Key`）。webhook run 使用已验证 event ID。同一 `occurrenceKey` 的两次 claim 归结为一个 run；第二个 claim 者读取已提交的 run，而不是再创建一个。**定义修订绝不重新武装已覆盖的 slot。** 运行台账跨全部修订维护每个 schedule 的水位 `latestAdmittedSlot`——已提交过 `automation_run` 的最大计划时刻（`scheduleId` 不限 revision）。claim 与补跑判定查水位、绝不只查 revision 键:`slot` 不高于水位即已覆盖；补跑（`latest` 或 bounded)只提议严格在水位之上的 slot,以及水位与当前之间错过的 slot,无论已提交者出自哪个 revision。因此一次只改 prompt 的修订更新无法重放旧修订已执行的 slot——`catch_up: latest` 下,r2 重新铸出的 `slot 09:00` 被水位判为已覆盖,而不是再点一次火(参考设计第 7 节:定义更新只影响之后的 occurrence,绝不重放已提交的 slot)。
+1. **定义与 run 是两种记录。** `schedule`（链身份 `scheduleId`）保存定义修订：cron 表达式与时区、prompt 资源修订、目标 Session 模式、交付 policy、错过/补跑 policy、并发与预算 policy——只增修订并带内容摘要，与 AgentDefinition 契约（D8a）一致。`automation_run`（链身份 `automationRunId`）保存一次 occurrence：`occurrenceKey`、钉住的定义修订、冻结的目标、运行/执行/交付三条状态线，以及任务种类 `automation_run`，使每个 run 出现在被绑定 Session 的 `SessionTaskView` 中。
+2. **occurrence 先标识后 claim。** 定时触发的 run 的 `occurrenceKey` 是 `schedule:<slot>`——slot 是扫描者从定义的 cron 与时区推出的规范 UTC 时刻、精确到秒，使 DST 折叠与跳跃恰有一种读法；点火的 `scheduleId` 与定义 `revision` 冻结在同一份 run 记录上。手动 run 使用其准入命令 ID（`Idempotency-Key`）。webhook run 使用已验证 event ID。同一 `occurrenceKey` 的两次 claim 归结为一个 run；第二个 claim 者读取已提交的 run，而不是再创建一个。**定义修订绝不重新武装已覆盖的 slot。** 运行台账跨全部修订维护每个 schedule 的水位 `latestAdmittedSlot`——已提交过 `automation_run` 的最大计划时刻（`scheduleId` 不限 revision）。claim 与补跑判定查水位、绝不只查 revision 键:`slot` 不高于水位即已覆盖；补跑（`latest` 或 bounded)只提议严格在水位之上的 slot,以及水位与当前之间错过的 slot,无论已提交者出自哪个 revision。因此一次只改 prompt 的修订更新无法重放旧修订已执行的 slot——`catch_up: latest` 下,r2 从定义推出的同一时刻被水位判为已覆盖,而不是再点一次火(参考设计第 7 节:定义更新只影响之后的 occurrence,绝不重放已提交的 slot)。
 3. **恰有一个扫描者 claim。** 扫描者运行在 Java 节点上，按与 Runtime Broker 对 binding 相同的纪律，在带代数的租约下竞争 workspace 作用域的 claim：租约携带 fencing token，失去代数的运行者可以查询与对账，但不能创建副作用。每轮扫描计算到期的 occurrence，各自一个事务地提交 `automation_run` 起始修订，然后才派发。派发路径的超时、404 或不完整回答证明不了目标是否收到 intent——扫描者按原 `occurrenceKey` 与 `runId` 对账，绝不盲目重新点火（参考设计第 1、7 节）。
 4. **重叠是定义的显式选择。** `skip`（默认）：前一个 run 未到终态时，到期 occurrence 被丢弃，并在 run 台账上记录为被跳过的 occurrence，而不是一个 run。`queue_one`：至多一个 occurrence 排队；一个在运行、一个在等待时的第三次点火按同样记录跳过。`allow`：允许重叠，受并发配额约束，超出时以 H0b 的 `count_limit` 拒绝。
 5. **补跑有界或没有。** `none`（默认）：错过的窗口记录为错过，绝不点火。`latest`：至多最新的一个错过 occurrence 点火一次。`bounded: N`：至多最新的 N 个错过 occurrence 点火，从最旧的开始。无限补跑在定义准入时拒绝。
@@ -50,27 +50,27 @@
 7. **送达绝不重跑模型。** run 结算时，其已提交的交付 policy 创建 `channel_delivery` outbox 条目（H5 的契约）。发送失败、`partial` 或 `unknown` 交付按 H5 的规则对账；仅因交付未结而重试 run 的模型工作被禁止（参考设计第 7 节与第 14 节第 6 条）。
 8. **历史与保留跟随 run 台账。** 定义与历史 run 在公开 API 上分开分页（参考设计第 11 节）。run 记录的结果 Artifact 按 O4 的 Session 根保留钉住，因此无论送达与否，run 的证据都在事件过期后存活——与参考设计第 14 节第 8 条对高频 Monitor 输出提出的有界聚合原则一致。
 
-## 记录正文（H6a 契约方向）
+## 记录正文（H6a 契约）
 
-两个正文都原样嵌入 H0b 运行块。封闭的字段集、验证器与迁移规则由 H6a 变更在共用 schema 与 fixture 文件中固定，TypeScript 与 Java 双方回放。本节确定方向，不固定字节级 schema。
+两个正文都原样嵌入 H0b 运行块。下列封闭字段集、验证器与迁移规则就是已交付的 H6a 契约，由 `managed-automation-record-v1.fixtures.json` 钉死、TypeScript 与 Java 双方回放——每个锚定时区都经过验证器回放。凡方向文本点名而版本 1 未携带的部分（交付 policy 快照的形状、并发与预算 policy 字段、`per_run` child intent 及其跨 Session 目标），本版本有意收窄：交付 policy 的形状随其 H5/H6 生产者落地，child intent 随 H4 落地，`allow` 重叠保持为 policy 名，其并发配额由 H6b 执行、拒绝时携带共享的 `count_limit` reason。本节即字节级事实。
 
-- `managed-schedule`（链身份 `scheduleId`）：租户/Workspace 作用域、定义修订与摘要、cron 与时区、prompt 资源引用、`sessionMode`（`persistent` | `per_run`）及其冻结目标、交付 policy、重叠 policy、补跑 policy、并发与预算 policy、启用/停用标志。定义修订只增；第一条修订以契约默认值 `overlap: "skip"` 与 `catch_up: "none"` 开启。
-- `managed-automation_run`（链身份 `runId`）：`scheduleId` 与钉住的定义修订、`occurrenceKey` 及其触发种类（`timer` | `manual` | `webhook`）、定时触发的 slot、冻结的目标（被绑定 Session 引用或 child Session intent）、交付 policy 快照，以及任务种类为 `automation_run` 的 H0b 运行块。其执行线跟踪目标派发；其交付线（policy 需要送达时为目标 `channel`）跟踪 H5 交付。
-- 跨修订不变的字段遵循 H0b 的规则：occurrence 身份、定义钉与冻结目标在链建立后绝不改变。
+- `managed-schedule` 版本 1（链身份 `scheduleId`）：`ownerScopeId`、`goal`（有界文本）、五段式 `cron`（分钟、小时、日、月、星期的数字/区间原子，取值不越字段边界、步长为正且有界、区间不回绕）、IANA `timezone` 名仅按形式接受——各宿主对哪些名可解析意见不一，解析归属 H6b 准入，七个锚定时区在每台宿主上经验证器回放、定义的 `definitionRevision` 与 `definitionDigest`、`promptRef` 资源引用、`sessionMode`（`persistent` | `per_run`）——`targetSessionId` 恰为 `persistent` 而设、`overlap` policy（`skip` | `queue_one` | `allow`）、`catchUp` policy（`none` | `latest` | `bounded`）——`catchUpLimit`（不小于 1）恰为 `bounded` 而设，以及 `enabled` 标志。定义修订只增：每条后继修订携带 `definitionRevision + 1`；运行块为纯逻辑生命周期（无执行、交付、dispatch 或定义钉）；运行到达终态后定义永久冻结，后继修订不再存在（`schedule-frozen-when-terminal` fixture 在双端钉死）。
+- `managed-automation_run` 版本 1（链身份 `automationRunId`）：`scheduleId` 与钉住的 `definitionRevision`、封闭的 `occurrenceKey` 并集——`schedule:<slot>`（slot 为规范 UTC 时刻、精确到秒，使 DST 折叠与跳跃恰有一种读法；未决问题 1 已答复）或 `manual:<commandId>`，`webhook:<eventId>` 保留注册并在 webhook 入口切片落地前拒绝——`sessionMode` 与冻结的 `targetSessionId`（`persistent` 时设定，`per_run` 时为 null，等 H4 给 child intent 安放处）,以及任务种类 `automation_run` 的 H0b 运行块。其运行自首个修订起承载持久 `dispatchId`，不承载 `executionCallId` 或定义钉；执行线跟踪目标派发；交付线（H5 路径上目标为 `channel`）只在运行结束后越过 `planned`，因此送达与否绝不重跑模型。运行块不携带自身的定义钉，因此 `automation_run` 任务行的 `definitionRevision` 恒为 null；权威修订在记录本身上。
+- 跨修订不变的字段遵循 H0b 的规则：schedule 侧为身份（`kind`、`scheduleId`、`ownerScopeId`）;run 侧为运行块之外的全部——occurrence 身份、钉住的定义修订与冻结目标在链建立后绝不改变，只有运行推进。
 
 ## 切片计划
 
-| 切片 | 范围                                                                                                                                                                                      | 通过门槛                                                                                                                                                                                                                                                                                                   |
-| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| H6a  | 记录契约：两个正文、验证器、occurrence 身份规范化（含 DST 见证），加入共用 schema 与 `managed-extension-record-v1` fixture；`MANAGED_EXTENSION_RECORD_BODIES` 条目；Java 回放。           | TypeScript 与 Java 对 fixture（含 DST 用例）给出并拒绝完全相同的链。两个 domain 继续缺席 `MANAGED_SESSION_ENABLED_DOMAINS`；`commitExtensionRecord` 仍然拒绝它们。Java 存储先于任何写入者提交，携带这两个正文（H0c 未决问题 7）。没有生产调用方构造任一正文。                                              |
-| H6b  | planned 公开路由下的定义 CRUD（转为 `partial`）、经 command ID 的手动 run、带 workspace 租约/代数与单一 claim 的扫描者、带跳过/排队记录的 run 台账、重叠/补跑执行。两个 domain 开放提交。 | 两个扫描者实例对每个 occurrence 恰 claim 一个 run（参考设计第 14 节第 6 条）：失败的一方读取已提交的 run。`none` 下错过的窗口被记录且绝不点火；`latest` 下至多补跑一次；`bounded: N` 下至多 N 次。手动 run 重放其 `Idempotency-Key`。定义与 run 分开分页；每个变更返回 `202 + operationId`。               |
-| H6c  | 执行目标与送达：`persistent` 带唤醒的输入准入、经 H4 的 `per_run` child Session、交付 policy 到 H5 `channel_delivery` 条目的投影。                                                        | `persistent` run 的输入与其唤醒在一个事务中提交，claim 与准入之间的扫描者崩溃按 `runId` 对账。答案未知的 `per_run` 派发绝不因同一 `occurrenceKey` 产生第二个 child。已结算 run 恰好创建其已提交的交付；Channel 发送失败、`partial` 或 `unknown` 对账而不触碰该 run 的模型工作（参考设计第 14 节第 6 条）。 |
+| 切片 | 范围                                                                                                                                                                                         | 通过门槛                                                                                                                                                                                                                                                                                                   |
+| ---- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| H6a  | 记录契约：两个正文、验证器、occurrence 身份规范化（规范 UTC slot、时区锚点），收于共享的 `managed-automation-record-v1` fixture；`MANAGED_EXTENSION_RECORD_BODIES` 条目；Java 回放。已落地。 | TypeScript 与 Java 对 fixture 给出并拒绝完全相同的链（已达成）。两个 domain 继续缺席 `MANAGED_SESSION_ENABLED_DOMAINS`；`commitExtensionRecord` 仍然拒绝它们（已达成）。Java 存储先于任何写入者提交，携带这两个正文（已达成——H0c 未决问题 7）。没有生产调用方构造任一正文（已达成）。                      |
+| H6b  | planned 公开路由下的定义 CRUD（转为 `partial`）、经 command ID 的手动 run、带 workspace 租约/代数与单一 claim 的扫描者、带跳过/排队记录的 run 台账、重叠/补跑执行。两个 domain 开放提交。    | 两个扫描者实例对每个 occurrence 恰 claim 一个 run（参考设计第 14 节第 6 条）：失败的一方读取已提交的 run。`none` 下错过的窗口被记录且绝不点火；`latest` 下至多补跑一次；`bounded: N` 下至多 N 次。手动 run 重放其 `Idempotency-Key`。定义与 run 分开分页；每个变更返回 `202 + operationId`。               |
+| H6c  | 执行目标与送达：`persistent` 带唤醒的输入准入、经 H4 的 `per_run` child Session、交付 policy 到 H5 `channel_delivery` 条目的投影。                                                           | `persistent` run 的输入与其唤醒在一个事务中提交，claim 与准入之间的扫描者崩溃按 `runId` 对账。答案未知的 `per_run` 派发绝不因同一 `occurrenceKey` 产生第二个 child。已结算 run 恰好创建其已提交的交付；Channel 发送失败、`partial` 或 `unknown` 对账而不触碰该 run 的模型工作（参考设计第 14 节第 6 条）。 |
 
 后续 H6 切片（本文不排期）：带已验证 event ID 的 webhook 触发；Goal/Live/channel loop 迁移到台账；新的预算种类。
 
 ## 验证计划
 
-- 两个正文的 fixture 一致性，TypeScript 与 Java 双方回放，包括 occurrence 规范化表（时区偏移、DST 折叠与跳跃见证）。
+- 两个正文的 fixture 一致性，TypeScript 与 Java 双方回放——七个宿主 tz 锚点均在每台宿主上经验证器回放。occurrence 规范化表（时区偏移、DST 折叠与跳跃见证）归于推出 slot 的 H6b 扫描者；记录契约只钉规范 UTC slot 形式。
 - 扫描者竞争测试：两个 claim 者、派发中途失去代数、对账期间租约过期、claim 提交与派发之间重启扫描者。
 - 策略矩阵自动化：每个（重叠 × 补跑）组合对脚本化错过与重叠窗口，断言精确的 run 总体与跳过/错过记录。
 - Java 存储物化（main 的 V34 之后的一个 Flyway 迁移），覆盖拒绝回滚，并为会送达的 run 覆盖 outbox 列。
@@ -86,7 +86,7 @@
 
 ## 未决问题
 
-1. **slot 的表示。** H6a 契约固定 slot 的规范形式（时刻加定义时区，或本地钟面时间）；fixture 让该选择可观察。
+1. **slot 的表示。** 已由已交付的 H6a 契约答复：slot 为规范 UTC 时刻、精确到秒（`schedule:<instant>`），使 DST 折叠与跳跃恰有一种读法；定义的时区保持为定义自身的属性。
 2. **补跑窗口上界。** `bounded: N` 是否还需要最大年龄，还是由定义的启用窗口界定，是 H6b 的决策。
 3. **租约尺寸。** 扫描者租约时长与扫描周期作为部署配置提供；按参考设计第 12 节容量表（活动 run、每窗口触发、模型/工具预算）的要求，以实测值为准再开放。
 4. **手动 run 的准入范围。** 手动 run 要求定义的 owner 还是只需目标上的 Session 写入者，随 H6b 公开路由的授权映射一起决定。
