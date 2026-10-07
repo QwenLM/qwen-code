@@ -146,7 +146,16 @@ const TERMINAL_RUN_STATES: readonly ExtensionRunState[] = [
   'failed',
   'cancelled',
 ];
-const CRON_FIELD = /^[0-9*,/-]{1,64}$/;
+/** The digit atoms each cron field accepts, with their value bounds. */
+const CRON_BOUNDS = [
+  { name: 'minute', min: 0, max: 59 },
+  { name: 'hour', min: 0, max: 23 },
+  { name: 'day-of-month', min: 1, max: 31 },
+  { name: 'month', min: 1, max: 12 },
+  { name: 'day-of-week', min: 0, max: 7 },
+] as const;
+const CRON_PART = /^[0-9*,/-]{1,64}$/;
+const CRON_DIGITS = /^[0-9]{1,10}$/;
 const TIMEZONE = /^[A-Za-z][A-Za-z0-9_+-]{0,63}(\/[A-Za-z0-9_+-]{1,64}){0,2}$/;
 const SLOT = /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/;
 const MAX_COUNT = 9007199254740990;
@@ -238,25 +247,77 @@ function same(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+// One cron field: comma-separated atoms, each `*`, `*/n`, a digit value or
+// a range `a-b`, any of them carrying a `/n` step. Values stay inside the
+// field's bounds, steps are positive and a range never wraps — the same
+// lexical checks both validators run, so no tz database is consulted here.
+function cronField(
+  field: string,
+  name: string,
+  min: number,
+  max: number,
+): void {
+  for (const atom of field.split(',')) {
+    const [base, stepText, ...rest] = atom.split('/');
+    if (
+      rest.length > 0 ||
+      base === undefined ||
+      base === '' ||
+      !CRON_PART.test(atom)
+    ) {
+      fail(`cron ${name} field must use digit, range, list or step atoms.`);
+    }
+    if (stepText !== undefined) {
+      if (!CRON_DIGITS.test(stepText)) {
+        fail(`cron ${name} field must use digit, range, list or step atoms.`);
+      }
+      const step = Number(stepText);
+      if (step < 1 || step > max) {
+        fail(`cron ${name} field steps must stay within 1-${max}.`);
+      }
+    }
+    if (base === '*') {
+      continue;
+    }
+    const range = base.split('-');
+    if (range.length > 2 || range.some((end) => !CRON_DIGITS.test(end))) {
+      fail(`cron ${name} field must use digit, range, list or step atoms.`);
+    }
+    const [from, to] = range.map(Number);
+    if (from === undefined || from < min || from > max) {
+      fail(`cron ${name} field values must stay within ${min}-${max}.`);
+    }
+    if (to !== undefined) {
+      if (to < min || to > max) {
+        fail(`cron ${name} field values must stay within ${min}-${max}.`);
+      }
+      if (from >= to) {
+        fail(`cron ${name} field ranges must not wrap.`);
+      }
+    }
+  }
+}
+
 function cron(value: ManagedSessionJsonValue): string {
   const expression = text(value, 'cron');
   const fields = expression.split(' ');
-  if (
-    expression !== fields.join(' ') ||
-    fields.length !== 5 ||
-    fields.some((field) => !CRON_FIELD.test(field))
-  ) {
-    fail(
-      'cron must be five fields of minutes, hours, days, months and weekdays.',
-    );
+  if (expression !== fields.join(' ') || fields.length !== 5) {
+    fail('cron must have exactly five fields.');
   }
+  CRON_BOUNDS.forEach(({ name, min, max }, index) =>
+    cronField(fields[index]!, name, min, max),
+  );
   return expression;
 }
 
+// A timezone name is shape-checked only: host tz databases disagree about
+// which names resolve, so resolving here would let the same bytes commit
+// on one host and refuse on another. Resolution happens when the H6b
+// admission and scanner evaluate the definition on a pinned database.
 function timezone(value: ManagedSessionJsonValue): string {
   const name = text(value, 'timezone');
   if (!TIMEZONE.test(name)) {
-    fail('timezone must be an IANA timezone name.');
+    fail('timezone must have the IANA timezone name form.');
   }
   return name;
 }

@@ -196,12 +196,20 @@ public final class ManagedExtensionRecords {
 
     private static final Pattern EXIT_SIGNAL = Pattern.compile(
             "[A-Z][A-Z0-9]{0,15}");
-    private static final Pattern CRON_FIELD = Pattern.compile(
+    private static final Pattern CRON_PART = Pattern.compile(
             "[0-9*,/\\-]{1,64}");
+    private static final Pattern CRON_DIGITS = Pattern.compile(
+            "[0-9]{1,10}");
     private static final Pattern TIMEZONE = Pattern.compile(
             "[A-Za-z][A-Za-z0-9_+\\-]{0,63}(/[A-Za-z0-9_+\\-]{1,64}){0,2}");
     private static final Pattern SLOT = Pattern.compile(
             "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z");
+    /** The value bounds each cron field's digit atoms live in, by index. */
+    private static final List<int[]> CRON_BOUNDS = List.of(
+            new int[]{0, 59}, new int[]{0, 23}, new int[]{1, 31},
+            new int[]{1, 12}, new int[]{0, 7});
+    private static final List<String> CRON_NAMES = List.of("minute",
+            "hour", "day-of-month", "month", "day-of-week");
 
     /** A record that breaks the contract. */
     public static final class InvalidRecordException
@@ -830,6 +838,50 @@ public final class ManagedExtensionRecords {
         return true;
     }
 
+    // One cron field: comma-separated atoms, each `*`, `*/n`, a digit value
+    // or a range `a-b`, any of them carrying a `/n` step. Values stay inside
+    // the field's bounds, steps are positive and a range never wraps — the
+    // same lexical checks both validators run, so no tz database is
+    // consulted here.
+    private static void cronField(String field, String name, int min,
+            int max) {
+        for (String atom : field.split(",", -1)) {
+            String[] stepped = atom.split("/", -1);
+            require(stepped.length <= 2 && !stepped[0].isEmpty()
+                    && CRON_PART.matcher(atom).matches(),
+                    "cron " + name
+                            + " field must use digit, range, list or step atoms");
+            if (stepped.length == 2) {
+                require(CRON_DIGITS.matcher(stepped[1]).matches(),
+                        "cron " + name
+                                + " field must use digit, range, list or step atoms");
+                long step = Long.parseLong(stepped[1]);
+                require(step >= 1 && step <= max, "cron " + name
+                        + " field steps must stay within 1-" + max);
+            }
+            if ("*".equals(stepped[0])) {
+                continue;
+            }
+            String[] range = stepped[0].split("-", -1);
+            boolean digits = range.length <= 2;
+            for (String end : range) {
+                digits = digits && CRON_DIGITS.matcher(end).matches();
+            }
+            require(digits, "cron " + name
+                    + " field must use digit, range, list or step atoms");
+            long from = Long.parseLong(range[0]);
+            require(from >= min && from <= max, "cron " + name
+                    + " field values must stay within " + min + "-" + max);
+            if (range.length == 2) {
+                long to = Long.parseLong(range[1]);
+                require(to >= min && to <= max, "cron " + name
+                        + " field values must stay within " + min + "-" + max);
+                require(from < to,
+                        "cron " + name + " field ranges must not wrap");
+            }
+        }
+    }
+
     /**
      * A purely logical lifecycle: no execution, delivery or physical
      * identity — the shape a Schedule definition's run keeps.
@@ -875,25 +927,26 @@ public final class ManagedExtensionRecords {
         String catchUp = oneOf(schedule.get("catchUp"),
                 SCHEDULE_CATCH_UP_POLICIES, "schedule.catchUp");
         JsonNode catchUpLimit = schedule.get("catchUpLimit");
-        require("bounded".equals(catchUp) == !catchUpLimit.isNull(),
-                "schedule.catchUpLimit is set exactly for bounded catch-up");
         if (!catchUpLimit.isNull()) {
             count(catchUpLimit, 1, MAX_COUNT, "schedule.catchUpLimit");
         }
+        require("bounded".equals(catchUp) == !catchUpLimit.isNull(),
+                "schedule.catchUpLimit is set exactly for bounded catch-up");
         id(schedule.get("scheduleId"), "schedule.scheduleId");
         id(schedule.get("ownerScopeId"), "schedule.ownerScopeId");
         boundedText(schedule.get("goal"), "schedule.goal");
         String cron = boundedText(schedule.get("cron"), "schedule.cron");
         String[] fields = cron.split(" ", -1);
-        require(fields.length == 5
-                && cron.equals(String.join(" ", fields))
-                && List.of(fields).stream().allMatch(field -> CRON_FIELD
-                        .matcher(field).matches()),
-                "schedule.cron must be five fields of minutes, hours, days, "
-                        + "months and weekdays");
+        require(fields.length == 5 && cron.equals(String.join(" ", fields)),
+                "schedule.cron must have exactly five fields");
+        for (int index = 0; index < CRON_BOUNDS.size(); index++) {
+            int[] bounds = CRON_BOUNDS.get(index);
+            cronField(fields[index], CRON_NAMES.get(index), bounds[0],
+                    bounds[1]);
+        }
         require(TIMEZONE.matcher(boundedText(schedule.get("timezone"),
                 "schedule.timezone")).matches(),
-                "schedule.timezone must be an IANA timezone name");
+                "schedule.timezone must have the IANA timezone name form");
         count(schedule.get("definitionRevision"), 1, MAX_COUNT,
                 "schedule.definitionRevision");
         digest(schedule.get("definitionDigest"), "schedule.definitionDigest");
@@ -1125,20 +1178,34 @@ public final class ManagedExtensionRecords {
     /**
      * A bounded free-text field, the same rule boundedString applies in
      * packages/core: a non-empty string of at most MAX_TEXT_BYTES UTF-8
-     * bytes with no control content (an ANSI escape holds one).
+     * bytes with no control content (an ANSI escape holds one). An
+     * unpaired surrogate is charged the three bytes of the U+FFFD both
+     * encoders write for it — Java's default encoder folds it to one
+     * byte on its own, so it is counted explicitly.
      */
     static String boundedText(JsonNode node, String label) {
         require(node != null && node.isTextual() && !node.textValue()
                 .isEmpty(), label + " must be a non-empty string");
         String value = node.textValue();
+        long loneSurrogates = 0;
         for (int index = 0; index < value.length(); index++) {
             char character = value.charAt(index);
             require(character > 0x1f
                     && (character < 0x7f || character > 0x9f),
                     label + " must not contain control characters");
+            if (Character.isHighSurrogate(character)) {
+                if (index + 1 < value.length()
+                        && Character.isLowSurrogate(value.charAt(index + 1))) {
+                    index++;
+                } else {
+                    loneSurrogates++;
+                }
+            } else if (Character.isLowSurrogate(character)) {
+                loneSurrogates++;
+            }
         }
         require(value.getBytes(StandardCharsets.UTF_8).length
-                <= MAX_TEXT_BYTES,
+                + 2L * loneSurrogates <= MAX_TEXT_BYTES,
                 label + " exceeds " + MAX_TEXT_BYTES + " UTF-8 bytes");
         return value;
     }

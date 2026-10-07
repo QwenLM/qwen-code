@@ -50,6 +50,12 @@ class ManagedAutomationRecordContractTest {
         assertEquals("automation_run", automation.taskKind());
         JsonNode run = fixtures.get("templates").get("automation_run");
         assertEquals("run-1", automation.recordId().apply(run));
+        // The run block holds no definition pin of its own, so an
+        // automation_run task row always reads definitionRevision: null;
+        // the authoritative revision lives on the record itself.
+        assertEquals(null, ManagedExtensionProjection
+                .project(null, run.get("run"), 1_000).definitionRevision());
+        assertEquals(3, run.get("definitionRevision").intValue());
         assertTrue(fixtures.required("domains").required("schedule")
                 .required("taskKind").isNull());
         assertEquals("automation_run", fixtures.required("domains")

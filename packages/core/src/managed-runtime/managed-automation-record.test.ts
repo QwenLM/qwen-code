@@ -9,7 +9,14 @@ import { describe, expect, it } from 'vitest';
 import {
   MANAGED_EXTENSION_RECORD_BODIES,
   MANAGED_TASK_KINDS,
+  projectManagedTask,
 } from './managed-extension-projection.js';
+import {
+  SCHEDULE_CATCH_UP_POLICIES,
+  SCHEDULE_OVERLAP_POLICIES,
+  SCHEDULE_SESSION_MODES,
+  type AutomationRun,
+} from './managed-automation-record.js';
 import {
   assertManagedSessionDomainEnabled,
   MANAGED_SESSION_ENABLED_DOMAINS,
@@ -88,6 +95,13 @@ describe('managed-automation-record/1 shared contract', () => {
       fixtures.templates.automation_run,
     );
     expect(parsed.recordId).toBe('run-1');
+    // The run block holds no definition pin of its own, so an
+    // automation_run task row always reads definitionRevision: null; the
+    // authoritative revision lives on the record itself.
+    expect(
+      projectManagedTask(null, parsed.run, 1_000).definitionRevision,
+    ).toBeNull();
+    expect((parsed.record as AutomationRun).definitionRevision).toBe(3);
     for (const domain of ['schedule', 'automation_run'] as const) {
       expect(MANAGED_SESSION_ENABLED_DOMAINS).not.toContain(domain);
       expect(() => assertManagedSessionDomainEnabled(domain)).toThrow(
@@ -143,9 +157,9 @@ describe('managed-automation-record/1 shared contract', () => {
         'targetSessionId',
       ].sort(),
     );
-    expect(fixtures.overlapPolicies).toEqual(['skip', 'queue_one', 'allow']);
-    expect(fixtures.catchUpPolicies).toEqual(['none', 'latest', 'bounded']);
-    expect(fixtures.sessionModes).toEqual(['persistent', 'per_run']);
+    expect(fixtures.overlapPolicies).toEqual([...SCHEDULE_OVERLAP_POLICIES]);
+    expect(fixtures.catchUpPolicies).toEqual([...SCHEDULE_CATCH_UP_POLICIES]);
+    expect(fixtures.sessionModes).toEqual([...SCHEDULE_SESSION_MODES]);
   });
 
   it('anchors every fixture timezone in the host tz database', () => {

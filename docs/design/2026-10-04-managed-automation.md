@@ -44,7 +44,8 @@ its delivery without ever re-running the model.
 
 ## Current state
 
-The facts below are from `main` at `5ddfacc9d4`.
+The facts below are from `main` at `5ddfacc9d4`; a bullet that H6a changed
+when it landed says so.
 
 - **Domain index.** `schedule` and `automation_run` are registered in the
   closed v1 domain index of
@@ -53,7 +54,7 @@ The facts below are from `main` at `5ddfacc9d4`.
   `MANAGED_SESSION_ENABLED_DOMAINS`, and `commitExtensionRecord` refuses
   them. Since the H6a contract landed, both have record bodies in
   `MANAGED_EXTENSION_RECORD_BODIES` (`managed-extension-projection.ts`),
-  each committed as `managed-automation-record/1`.
+  each body under the shared `managed-automation-record/1` contract.
 - **Task projection.** The task kind `automation_run` is declared
   (`MANAGED_TASK_KINDS`) and frozen in the public `TaskKind` enum, and the
   H0b run block carries the run, execution and delivery lines an
@@ -91,8 +92,10 @@ The facts below are from `main` at `5ddfacc9d4`.
 - Define the `schedule` (definition) and `automation_run` record bodies on
   top of the H0b run block.
 - Pin occurrence identity: for a timer trigger, `occurrenceKey` is
-  `scheduleId + revision + slot`; a manual run uses its command ID and a
-  webhook trigger its verified event ID.
+  `schedule:<slot>` with the slot the canonical UTC instant the scanner
+  derives from the definition, and the scheduleId and revision it fired
+  with freeze beside it on the run; a manual run uses its command ID and
+  a webhook trigger its verified event ID.
 - Add a scanner that discovers due occurrences and claims each run under a
   workspace lease/fencing token, so several Java nodes yield exactly one
   claimant.
@@ -134,18 +137,20 @@ The facts below are from `main` at `5ddfacc9d4`.
    policy, missed/catch-up policy, concurrency and budget policy —
    append-only revisions with a content digest, as the
    AgentDefinition contract (D8a) does. `automation_run` (chain identity
-   `runId`) holds one occurrence: its `occurrenceKey`, the pinned
-   definition revision, the frozen target, its run/execution/delivery
-   lines, and the task kind `automation_run`, so every run is visible in
-   the bound Session's `SessionTaskView`.
+   `automationRunId`) holds one occurrence: its `occurrenceKey`, the
+   pinned definition revision, the frozen target, its
+   run/execution/delivery lines, and the task kind `automation_run`, so
+   every run is visible in the bound Session's `SessionTaskView`.
 2. **The occurrence is identified before it is claimed.** For a timer
-   trigger, `occurrenceKey` is the canonical triple `scheduleId`,
-   definition `revision`, and `slot` — the scheduled instant in the
-   definition's timezone, canonicalized in the H6a contract so DST folds
-   and gaps have exactly one reading. A manual run uses its admission
-   command ID (the `Idempotency-Key`). A webhook run uses the verified
-   event ID. Two claims of the same `occurrenceKey` resolve to one run;
-   the second claimant reads the committed run instead of creating one.
+   trigger, the run's `occurrenceKey` is `schedule:<slot>` — the slot the
+   canonical UTC instant to the second that the scanner derives from the
+   definition's cron and timezone, so DST folds and gaps have exactly one
+   reading; the `scheduleId` and the definition `revision` it fired with
+   freeze beside it on the same run record. A manual run uses its
+   admission command ID (the `Idempotency-Key`). A webhook run uses the
+   verified event ID. Two claims of the same `occurrenceKey` resolve to
+   one run; the second claimant reads the committed run instead of
+   creating one.
    **A definition revision never re-arms a covered slot.** The run ledger
    keeps a per-schedule watermark `latestAdmittedSlot` across all
    revisions: the greatest scheduled instant (`scheduleId`, whatever
@@ -156,10 +161,10 @@ The facts below are from `main` at `5ddfacc9d4`.
    strictly above the watermark, plus the missed ones between the
    watermark and now — whatever revision wrote the committed ones. A
    prompt-only update that bumps the revision therefore cannot replay a
-   slot the old revision already ran, and an `r2` that re-mints `slot
-09:00` under `catch_up: latest` sees it covered rather than fired
-   again (reference section 7: a definition update affects only later
-   occurrences and never replays a committed slot).
+   slot the old revision already ran, and an `r2` that re-derives the
+   same instant under `catch_up: latest` sees it covered rather than
+   fired again (reference section 7: a definition update affects only
+   later occurrences and never replays a committed slot).
 3. **Exactly one scanner claims.** Scanners run on Java nodes and contend a
    workspace-scoped claim under a lease with fencing, the same discipline
    the Runtime Broker applies to bindings: the lease carries a fencing
@@ -209,39 +214,51 @@ The facts below are from `main` at `5ddfacc9d4`.
 Both bodies embed the H0b run block unchanged. The closed field sets,
 validators and transition rules below are the shipped H6a contract, pinned
 by `managed-automation-record-v1.fixtures.json`, which TypeScript and Java
-both replay — including the timezone anchors every host tz database must
-know. Where the direction above named more (the delivery-policy snapshot
-shape, the concurrency and budget policy fields), version 1 deliberately
+both replay — including each anchored timezone replayed through the
+validator. Where the direction above named more (the delivery-policy
+snapshot shape, the concurrency and budget policy fields, the `per_run`
+child intent with its cross-Session target), version 1 deliberately
 carries less: the delivery policy's shape lands with its H5/H6 producers,
-and `allow` overlaps are already bounded by the shared `count_limit`
-quota. This section is the byte-level truth.
+the child intent lands with H4, and `allow` overlaps stay a policy name
+whose concurrency quota H6b enforces, with refusals carrying the shared
+`count_limit` reason. This section is the byte-level truth.
 
 - `managed-schedule` version 1 (chain identity `scheduleId`): the
   `ownerScopeId`, `goal` (bounded text), a five-field `cron` of minute,
-  hour, day-of-month, month and day-of-week digit/range atoms, an IANA
-  `timezone` name (host-validated in the fixture anchors), the definition
-  `definitionRevision` and `definitionDigest`, the `promptRef` resource
-  reference, `sessionMode` (`persistent` | `per_run`) with
-  `targetSessionId` set exactly for `persistent`, the `overlap` policy
-  (`skip` | `queue_one` | `allow`), the `catchUp` policy (`none` |
-  `latest` | `bounded`) with `catchUpLimit` of at least 1 set exactly for
-  `bounded`, and an `enabled` flag. Definition revisions are append-only:
-  every successor revision carries `definitionRevision + 1`, and the run
-  block is a purely logical lifecycle (no execution, delivery, dispatch or
-  definition pin).
+  hour, day-of-month, month and day-of-week digit/range atoms whose
+  values stay inside the field's bounds with positive, bounded steps and
+  no wrapping range, an IANA `timezone` name accepted on form alone —
+  the hosts disagree about which names resolve, so the resolution is an
+  H6b admission concern and the seven fixture anchors replay through the
+  validator on each host — the definition `definitionRevision` and
+  `definitionDigest`, the `promptRef` resource reference, `sessionMode`
+  (`persistent` | `per_run`) with `targetSessionId` set exactly for
+  `persistent`, the `overlap` policy (`skip` | `queue_one` | `allow`),
+  the `catchUp` policy (`none` | `latest` | `bounded`) with
+  `catchUpLimit` of at least 1 set exactly for `bounded`, and an
+  `enabled` flag. Definition revisions are append-only: every successor
+  revision carries `definitionRevision + 1`, and the run block is a
+  purely logical lifecycle (no execution, delivery, dispatch or
+  definition pin); once the run is terminal the definition freezes for
+  good — a later revision can no longer exist (the
+  `schedule-frozen-when-terminal` fixture pins it on both hosts).
 - `managed-automation_run` version 1 (chain identity `automationRunId`):
   the `scheduleId` and pinned `definitionRevision`, the closed
   `occurrenceKey` union — `schedule:<slot>` (the slot a canonical UTC
   instant to the second, so DST folds and gaps have exactly one reading;
   open question 1 answered) or `manual:<commandId>`, with
   `webhook:<eventId>` registered and refused until the webhook ingress
-  slice lands — `sessionMode` and the frozen `targetSessionId`, and the
-  H0b run block with task kind `automation_run`. Its run names its durable
-  `dispatchId` from the first revision and no `executionCallId` or
-  definition pin; its execution line tracks the target dispatch; its
-  delivery line (target `channel`, when the policy delivers) may move past
-  `planned` only once the run ended, so a delivered-or-not run never
-  re-runs the model.
+  slice lands — `sessionMode` and the frozen `targetSessionId` (set for
+  `persistent`, null for `per_run` until H4 gives the child intent a
+  place), and the H0b run block with task kind `automation_run`. Its run
+  names its durable `dispatchId` from the first revision and no
+  `executionCallId` or definition pin; its execution line tracks the
+  target dispatch; its delivery line (on the H5 path its target is
+  `channel`) may move past `planned` only once the run ended, so a
+  delivered-or-not run never re-runs the model. The run block holds no
+  definition pin of its own, so an `automation_run` task row always
+  reads `definitionRevision: null`; the authoritative revision lives on
+  the record itself.
 - Fixed-across-revisions fields follow H0b's rule: the schedule's identity
   (`kind`, `scheduleId`, `ownerScopeId`) and, for the run, everything but
   the run block itself — the occurrence identity, the pinned definition
@@ -261,9 +278,11 @@ IDs; Goal/Live/channel-loop migration onto the ledger; new budget kinds.
 
 ## Validation plan
 
-- Fixture parity for both bodies, replayed by TypeScript and by Java,
-  including the occurrence canonicalization tables (timezone offsets, DST
-  fold and gap witnesses).
+- Fixture parity for both bodies, replayed by TypeScript and by Java —
+  the seven host-tz anchors replayed through the validator on each
+  host. The occurrence canonicalization tables (timezone offsets, DST
+  fold and gap witnesses) belong to the H6b scanner that derives the
+  slots; the record contract pins only the canonical UTC slot form.
 - Scanner contention tests: two claimants, fence loss mid-dispatch,
   lease expiry during reconciliation, and scanner restart between claim
   commit and dispatch.
