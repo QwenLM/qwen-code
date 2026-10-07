@@ -1266,7 +1266,11 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       const payload = isObjectRecord(record.systemPayload)
         ? record.systemPayload
         : undefined;
-      const cancelledAt = finiteNumber(payload?.['cancelledAt']);
+      const cancelledAt = finiteNumber(
+        payload?.['cancelledAt'] === undefined
+          ? payload?.['endedAt']
+          : payload?.['cancelledAt'],
+      );
       const startedAt = finiteNumber(payload?.['startedAt']);
       const promptId = payload?.['promptId'];
       if (
