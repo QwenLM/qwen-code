@@ -12,6 +12,10 @@
 
 只有下面的真实数据库、真实 OSS 及完整 Hosted 前台 Shell 门禁在目标部署 revision 上全部通过后，才能启用物理回收。不可用或跳过的门禁不算通过。本文不授权开启生产 GC。
 
+## 流式捕获回收覆盖
+
+流式捕获回收把同一个 `gc-enabled` 开关与删除宽限扩展到 Shell 流式捕获家族（后台 Shell 与前台遗留输出，#13534 P1）：对永久退役的 Session，合格的 `PUBLISHED` `MYSQL_INLINE` 行（`managed-tool-result-{content,page,manifest}` 三个 kind、不携带 journal 引用）会在一个按 Session 的 claim 账本（`qwen_managed_session_resource_collection`，V48）下被丢弃字节。Session 的读写面与发布物一样，继续以 `tool_output_session_retired` 拦截；工作区恢复读取在物理触达已回收字节副本时，以命名检查 `resource_collected` 失败。第一台升级的 broker 在 `gc-enabled` 已为 true 时立刻开始本通道；低于 V48 的 broker 会把合法回收的行误报为 `resource_layout_unsupported`，因此升级期间仍可能回滚工作负载的集群应保持该开关关闭，直到全部 broker 跑上 V48。账本创建扫描按每实例 60 秒的节律遍历退役历史，因此一个新退役的 Session 在其宽限结束后约一分钟内进入可回收状态。该扫描每次至多接纳 32 个候选（`retired_at` 最老优先）：在批量退役之后，或在退役历史很深的集群上首次开启时，积压以每实例约每分钟 32 个 Session 的速度进入回收。启用回收仍只能由上述门禁与决策授权；本段不单独构成启用依据。
+
 ## 可复现门禁入口
 
 SDK Java workflow 对以 main 为目标的 PR 执行，并提供按分支手动触发入口。Linux MySQL 8.4 job 先保留完整 Hosted 报告，再单独运行 clean O4 文件系统 profile 与源码导出的完整性检查。O4 fixture 不能替代失败或跳过的 Hosted 家族、真实 OSS 或下面的完整前台 Shell 验收。测试 workflow 不开启部署 GC。

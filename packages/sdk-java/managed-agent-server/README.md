@@ -246,7 +246,18 @@ while its operations stay readable. Completed deletion permanently marks an exis
 private journal `DELETED`, clears its writer and recovery references, and fences
 new writes and recovery. Close and archive keep output pinned. Deletion does
 not physically erase the journal, events or resources; output collection stays
-disabled by default and requires the retention deployment gates.
+disabled by default and requires the retention deployment gates. With
+`qwen.managed-agent.tool-publication.gc-enabled`, collection also frees
+stream-capture bytes (background Shell and foreground leftovers): eligible
+`PUBLISHED` `MYSQL_INLINE` rows of the `managed-tool-result-{content,page,manifest}`
+kinds with no journal reference on a permanently retired Session are
+byte-dropped after the same deletion grace under a per-Session claim ledger
+(`qwen_managed_session_resource_collection`), keeping their identities with
+state `COLLECTED`. Reads of the retired Session stay fenced with
+`tool_output_session_retired` exactly as before; a workspace-recovery read
+that physically reaches a collected byte copy fails the named check
+`resource_collected` instead of the generic `resource_layout_unsupported`
+verdict a pre-V48 broker produces.
 
 The Phase 1 schema has not been released. A development database created by an
 older revision with `harness_session_id` must be recreated before running this

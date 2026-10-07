@@ -680,7 +680,7 @@ public class ManagedSessionStore {
                 request.byteLength(), request.digest());
     }
 
-    private static int toolResultLimit(String kind) {
+    static int toolResultLimit(String kind) {
         if (kind == null) {
             return 0;
         }

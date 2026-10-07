@@ -66,6 +66,7 @@ final class WorkspaceRecoveryReader {
             check(text(ref, "kind").equals(row.get("kind")) && ref.path("schemaVersion").asInt() == number(row, "schema_version")
                     && ref.path("byteLength").asLong() == number(row, "byte_length")
                     && text(ref, "digest").equals(row.get("sha256")), "resource_reference_conflict");
+            check(!"COLLECTED".equals(row.get("state")), "resource_collected");
             if ("MYSQL_INLINE".equals(row.get("storage_kind"))) {
                 boolean published = "PUBLISHED".equals(row.get("state"))
                         && Set.of("managed-tool-result-content", "managed-tool-result-manifest", "managed-tool-result-page").contains(text(ref, "kind"));
