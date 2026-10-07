@@ -3791,7 +3791,7 @@ const SETTINGS_SCHEMA = {
         default: PEER_MID_TURN_BUDGET_DEFAULT,
         minimum: 0,
         description:
-          'How many accepted cross-session messages may be steered into a running turn within a five-minute window before delivery falls back to turn boundaries. A peer costs this session real model work even when it is handled well, so without a ceiling a chatty peer can keep a busy session answering it indefinitely. Messages still arrive once the turn ends, and senders see no difference. Only applies while agents.crossSessionMidTurn is on; 0 keeps mid-turn delivery off without changing that setting. A value that is not a non-negative number is unreadable and falls back to the default — which does not turn mid-turn delivery off; use 0 for that.',
+          'How many accepted cross-session messages may be steered into a running turn within a five-minute window before delivery falls back to turn boundaries. A peer costs this session real model work even when it is handled well, so without a ceiling a chatty peer can keep a busy session answering it indefinitely. Messages still arrive once the turn ends, and senders see no difference. Only applies while agents.crossSessionMidTurn is on; 0 keeps mid-turn delivery off without changing that setting. A value that is not a finite number is unreadable and falls back to the default, which does not turn mid-turn delivery off; a negative number is read as 0, which does. Neither means unlimited.',
         showInDialog: false,
       },
       crossSessionHeldExpiry: {

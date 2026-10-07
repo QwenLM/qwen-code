@@ -440,6 +440,16 @@ describe('SettingsSchema', () => {
         requiresRestart: false,
         showInDialog: false,
       });
+      // Three copies of this sentence exist — this description, the
+      // `settings.md` row, and the generated JSON schema mirror — and the
+      // shipped reader is the authority: `peerMidTurnBudgetOf` clamps a
+      // negative to 0, which means mid-turn off, while only an unreadable
+      // value takes the default. Pin the clause so a copy edited against that
+      // behaviour fails here instead of promising a user the opposite.
+      expect(
+        getSettingsSchema().agents.properties.crossSessionMidTurnBudget
+          .description,
+      ).toContain('a negative number is read as 0');
     });
 
     it('should offer exactly the hold lifetimes core knows how to parse', () => {
