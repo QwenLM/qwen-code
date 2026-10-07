@@ -5005,6 +5005,35 @@ describe('loadCliConfig with --mcp-config', () => {
     });
   });
 
+  it('should parse a config file that starts with a UTF-8 BOM', async () => {
+    // `fs` is mocked in this file, so use the untouched `fs.promises` to write
+    // a real file and widen `existsSync` for just this path.
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'mcp-bom-'));
+    const file = path.join(dir, 'mcp.json');
+    await fs.promises.writeFile(
+      file,
+      '\uFEFF' +
+        JSON.stringify({ mcpServers: { 'bom-server': { command: 'node' } } }),
+    );
+    const originalExists = vi.mocked(fs.existsSync).getMockImplementation();
+    vi.mocked(fs.existsSync).mockImplementation(
+      (p) => p === file || Boolean(originalExists?.(p)),
+    );
+    try {
+      process.argv = ['node', 'script.js', '--mcp-config', file];
+      const argv = await parseArguments();
+      const config = await loadCliConfig({}, argv);
+      expect(config.getMcpServers()).toEqual({
+        'bom-server': { command: 'node' },
+      });
+    } finally {
+      if (originalExists) {
+        vi.mocked(fs.existsSync).mockImplementation(originalExists);
+      }
+      await fs.promises.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('should override settings file servers with same name', async () => {
     const mcpConfig = JSON.stringify({
       'settings-server': { url: 'http://localhost:8888' }, // Override
