@@ -126,7 +126,14 @@ public final class JdbcCsiActivationAdmission {
         }
         var parsed = CsiNativeActivationProof.transaction(records, metadata, original.request(), history.lastUuid());
         boolean first = history.activation() == null;
-        require(CsiNativeActivationProof.hasActivation(parsed));
+        if (!CsiNativeActivationProof.hasActivation(parsed)) {
+            original.requireAdmission();
+            require(!first && history.checkpointResourceId() == null && history.activation().expiresAt() > now);
+            CsiNativeActivationProof.initialCheckpoint(parsed, metadata, original.request(), writerId,
+                    history.genesis(), history.activation(), previousSequence,
+                    ref -> resource(connection, original, ref, previousRevision + 1));
+            return;
+        }
         if (first) {
             original.requireAdmission();
             require(previousRevision == 1 && previousSequence == 0
@@ -135,7 +142,8 @@ public final class JdbcCsiActivationAdmission {
             noEarlierAuthorization(connection, original);
         }
         var activation = CsiNativeActivationProof.activation(parsed, metadata, original.request(), writerId,
-                history.definitionDigest(), history.activation(), ref -> resource(connection, original, ref, previousRevision + 1));
+                history.genesis().definitionDigest(), history.activation(),
+                ref -> resource(connection, original, ref, previousRevision + 1));
         require(activation.expiresAt() > now);
         if (first) {
             require(original.version() < 9_007_199_254_740_990L);
@@ -167,7 +175,7 @@ public final class JdbcCsiActivationAdmission {
             try (ResultSet head = statement.executeQuery()) {
                 require(head.next() && original.request().getScope().getWorkspaceId().equals(head.getString("workspace_id"))
                         && "ACTIVE".equals(head.getString("state")) && head.getLong("writer_generation") == 1
-                        && head.getInt("storage_version") == 1 && head.getString("latest_checkpoint_resource_id") == null
+                        && head.getInt("storage_version") == 1
                         && head.getLong("compacted_through_revision") == 0
                         && "READY".equals(head.getString("recovery_status")));
                 long now = JdbcRepositorySupport.databaseNowPrecise(connection).toEpochMilli();
@@ -190,7 +198,8 @@ public final class JdbcCsiActivationAdmission {
         long byteCount = 0;
         String digest = null;
         String lastUuid = null;
-        String definition = null;
+        CsiNativeActivationProof.Genesis genesis = null;
+        String checkpointResourceId = null;
         CsiNativeActivationProof.Activation activation = null;
         while (true) {
             int count = 0;
@@ -216,21 +225,27 @@ public final class JdbcCsiActivationAdmission {
                         var parsed = CsiNativeActivationProof.records(bytes);
                         if (revision == 0) {
                             genesisMetadata(metadata, original.request(), CsiNativeActivationProof.sha256(bytes));
-                            var genesis = CsiNativeActivationProof.genesis(parsed, original.request(),
+                            genesis = CsiNativeActivationProof.genesis(parsed, original.request(),
                                     ref -> resource(connection, original, ref, rowRevision));
-                            definition = genesis.definitionDigest();
                             lastUuid = genesis.lastRecordUuid();
                         } else {
                             require(rows.getLong("first_sequence") == sequence + 1
                                     && Objects.equals(digest, rows.getString("previous_commit_digest")));
                             var transaction = CsiNativeActivationProof.transaction(parsed, metadata,
                                     original.request(), lastUuid);
-                            require(CsiNativeActivationProof.hasActivation(transaction));
-                            if (activation == null) {
-                                require(revision == 1 && Objects.equals(original.firstActivationJournalRevision(), 2L));
+                            if (CsiNativeActivationProof.hasActivation(transaction)) {
+                                if (activation == null) {
+                                    require(revision == 1 && Objects.equals(original.firstActivationJournalRevision(), 2L));
+                                }
+                                activation = CsiNativeActivationProof.activation(transaction, metadata, original.request(),
+                                        writerId, genesis.definitionDigest(), activation,
+                                        ref -> resource(connection, original, ref, rowRevision));
+                            } else {
+                                require(activation != null && checkpointResourceId == null);
+                                checkpointResourceId = CsiNativeActivationProof.initialCheckpoint(transaction, metadata,
+                                        original.request(), writerId, genesis, activation, sequence,
+                                        ref -> resource(connection, original, ref, rowRevision));
                             }
-                            activation = CsiNativeActivationProof.activation(transaction, metadata, original.request(),
-                                    writerId, definition, activation, ref -> resource(connection, original, ref, rowRevision));
                             lastUuid = transaction.lastRecordUuid();
                         }
                         sequence = rows.getLong("last_sequence");
@@ -247,7 +262,16 @@ public final class JdbcCsiActivationAdmission {
         require(revision == expectedRevision && sequence == expectedSequence && Objects.equals(digest, expectedDigest)
                 && (activation == null ? original.firstActivationJournalRevision() == null
                         : Objects.equals(original.firstActivationJournalRevision(), 2L)));
-        return new History(definition, lastUuid, activation);
+        try (PreparedStatement statement = statement(connection,
+                "SELECT latest_checkpoint_resource_id FROM qwen_managed_session_journal_head"
+                        + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
+            statement.setString(1, original.request().getScope().getTenantId());
+            statement.setString(2, original.request().getIsolationKey());
+            try (ResultSet row = statement.executeQuery()) {
+                require(row.next() && Objects.equals(checkpointResourceId, row.getString("latest_checkpoint_resource_id")));
+            }
+        }
+        return new History(genesis, lastUuid, activation, checkpointResourceId);
     }
 
     private static void noEarlierAuthorization(Connection connection, JdbcCsiFilesRetirementGuard.Original original)
@@ -371,6 +395,7 @@ public final class JdbcCsiActivationAdmission {
         }
     }
 
-    private record History(String definitionDigest, String lastUuid, CsiNativeActivationProof.Activation activation) {
+    private record History(CsiNativeActivationProof.Genesis genesis, String lastUuid,
+            CsiNativeActivationProof.Activation activation, String checkpointResourceId) {
     }
 }

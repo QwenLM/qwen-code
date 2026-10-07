@@ -186,11 +186,11 @@ public class ManagedExtensionRecordStore {
     }
 
     /**
-     * Collects the parsed records and all activation events in the same pass;
+     * Collects the parsed records in the same pass;
      * the legacy cache still uses the last activation payload.
      */
     record ApplyResult(List<JsonNode> receipts, JsonNode lastActivation,
-            List<JsonNode> records, List<JsonNode> activations) {
+            List<JsonNode> records) {
     }
 
     /**
@@ -225,7 +225,6 @@ public class ManagedExtensionRecordStore {
                 .split("\n");
         List<JsonNode> receipts = new ArrayList<>();
         List<JsonNode> records = new ArrayList<>();
-        List<JsonNode> activations = new ArrayList<>();
         int applied = 0;
         JsonNode lastActivation = null;
         boolean shaped = true;
@@ -297,7 +296,6 @@ public class ManagedExtensionRecordStore {
             }
             if ("activation.changed".equals(kind)) {
                 lastActivation = payload;
-                activations.add(event);
             }
             if ("tool.receipt".equals(kind)) {
                 receipts.add(event);
@@ -323,7 +321,7 @@ public class ManagedExtensionRecordStore {
                 "A transaction with a Stage H record holds only its events,"
                         + " then its commit marker.");
         return new ApplyResult(List.copyOf(receipts), lastActivation,
-                List.copyOf(records), List.copyOf(activations));
+                List.copyOf(records));
     }
 
     public TaskPage listTasks(String tenantId, String sessionId,

@@ -6,8 +6,12 @@ Status: completion design with a local K2-A1 prototype and K2-A2 implementation
 in progress, updated 2026-10-07. The native boundary observer is implemented;
 private CREATE/request pinning is locally implemented and verified. The original
 binding/Session/writer guards and first native SQL activation pin are locally
-implemented, with selected execution admission and dispatch consumers. Complete A2 admission
-closure and K2-B through K2-D remain pending; no complete K2 or new cluster
+implemented, with selected execution admission, dispatch and original SQL
+continuation consumers. The initial native checkpoint gate is locally
+implemented and independently verified on owned MySQL. The complete
+[native file execution chain](2026-10-07-k2-native-file-execution.md)
+is designed but not implemented. Complete A2 admission closure and K2-B through
+K2-D remain pending; no complete K2 or new cluster
 acceptance is claimed.
 Implementation baseline: main `4bffa678bced8b14c25c85e3ba4226b7b752414d`, after
 [PR #13289](https://github.com/QwenLM/qwen-code/pull/13289) merged as
@@ -247,13 +251,16 @@ The native genesis uses `managed-definition` and `managed-root` resources,
 with raw bodies exactly `{engine: 'managed', sessionId, toolProfile:
 'csi-files-retirement/1'}` and `{cwd}`. Require the Hosted creator and original
 CREATE Session scope. Imported histories or extra MCP, Hook, shell or approval
-configuration do not qualify. The initial narrow SQL reader only admits
-genesis, install and same-identity renew transactions; generic private-profile
-journal events remain refused until their canonical digest and continuation
-paths are separately qualified.
+configuration do not qualify. The narrow SQL reader admits genesis, install,
+same-identity renew transactions and once-only initial `before_model` checkpoint
+while READY. The complete closed empty checkpoint, original header references,
+covered prefix, activation, full events hash, marker and state resource must
+agree. The history fold retains its reference across later original renewals
+and compares it with the current head. A second checkpoint, later phase or
+unrelated event remains refused; these are not a qualified normal file chain.
 
-Retain the complete ordered activation-event list from the existing native
-record parse. First install and renewal each contain exactly one event;
+Retain the complete ordered records from the existing native parse. First
+install and renewal each contain exactly one activation event;
 multiple activation events, an activation operation without its event,
 replacement/installing/revoked activations and Hook/turn subjects are refused.
 Genesis may precede the pin. A pin-null journal with earlier activation history
@@ -300,9 +307,10 @@ Draft; complete writer closure remains pending.
 Also bound journal history to 64 MiB, each transaction to 8 MiB, each event line
 to 1 MiB and each marker line to 64 KiB; SQL proof statements time out after ten
 seconds. These are refusal bounds, not a complete overall operation deadline.
-The execution admission, claim and authorization seams can consume the live
-original proof, but unqualified direct create/CAS, dispatch renewal, cancellation,
-settlement and reconciliation mutations explicitly refuse this profile. This
+The execution admission, claim and authorization seams consume the live original
+proof. Section 4.2.1 adds narrowly qualified original dispatch renewal,
+cancellation and settlement. Unqualified direct create/CAS and reconciliation
+mutations still refuse this profile. This
 does not qualify normal file-work completion or the remaining recovery/loss
 writers. Generic runtime control also refuses at both Broker service and
 Workspace transport, including raw-file-history prepare/rewind for a cached
@@ -380,7 +388,9 @@ complete membership and revisions. A hash of an incomplete scan is not a fence.
 
 ### 4.2.1 Original execution continuation (A2 SQL batch)
 
-The first activation batch still refuses execution continuation. Separate the
+The first activation batch refused execution continuation; the SQL batch in
+`a6cc145edf2f586604c889b186dc10a20e534761` implements the following original
+continuation. Separate the
 live original proof from operation eligibility. New admission and authorization
 remain READY-only; an already-authorized original execution can renew, record
 cancellation intent, settle its returned result or become UNKNOWN while the

@@ -5,7 +5,9 @@
 状态：补全设计、本地 K2-A1 原型与进行中的 K2-A2 实现，更新于 2026-10-07。
 原生边界观测器已实现；私有 CREATE/request 固定点已在本地实现并验证。
 原 binding/Session/writer guard 与首次原生 SQL activation 固定点已在本地实现，
-并接入部分 execution 准入与 dispatch consumer。
+并接入部分 execution 准入、dispatch 与原 SQL continuation consumer。
+初始原生 checkpoint 门禁已在本地实现，并在自有 MySQL 上独立验证。
+完整[原生文件执行链](2026-10-07-k2-native-file-execution.zh-CN.md)已设计但尚未实现。
 完整 A2 准入关闭与 K2-B 到 K2-D 仍待完成；本文不声明完整 K2 或新增云上验收完成。
 实现基线为 main
 `4bffa678bced8b14c25c85e3ba4226b7b752414d`，已包含以
@@ -197,12 +199,14 @@ Managed Agent。
 原生 genesis 使用 `managed-definition` 与 `managed-root` 资源，原始 body 分别严格为
 `{engine: 'managed', sessionId, toolProfile: 'csi-files-retirement/1'}` 与 `{cwd}`。
 必须对应 Hosted creator 和原 CREATE Session scope。导入历史及额外 MCP、Hook、shell
-或 approval 配置不具备资格。初始窄 SQL reader 只接受 genesis、install 及同一身份
-renew transaction；私有 profile 的通用 journal event 继续拒绝，直到其 canonical
-摘要与 continuation 路径分别完成资格验证。
+或 approval 配置不具备资格。窄 SQL reader 接受 genesis、install、同一身份 renew
+transaction，以及 READY 下仅一次的初始 `before_model` checkpoint。完整封闭的空
+checkpoint、原 header 引用、已覆盖前缀、activation、全 events hash、marker 与 state
+resource 必须一致。History fold 跨后续原 renewal 保留其引用，并与当前 head 对照。
+第二个 checkpoint、后续 phase 和无关 event 继续拒绝；这不构成正常文件执行链的资格。
 
-在既有原生 record parse 中保留完整有序 activation-event 列表。首个 install 和
-renewal 各只有一个 event；多个 activation event、缺少 event 的 activation
+在既有原生 parse 中保留完整有序 record。首个 install 和 renewal 各只有一个
+activation event；多个 activation event、缺少 event 的 activation
 operation、replacement/installing/revoked activation 及 Hook/turn subject 均拒绝。
 Genesis 可以早于固定点。pin 为空但 journal 已有 activation 历史时，不能通过安装
 replacement 修复。Renewal 保持原 activation、install reference 与 worker，并推进
@@ -238,8 +242,8 @@ history。首个接受前扫描全状态 execution 历史，包含 terminal 授�
 Journal history 还限制为 64 MiB，每笔 transaction 为 8 MiB，每个 event line 为
 1 MiB，每个 marker line 为 64 KiB；SQL proof statement 十秒超时。这些是拒绝边界，
 不是完整的总体操作 deadline。Execution admission、claim 与 authorization 入口可以
-消费仍有效的原 proof，但未具备资格的直接 create/CAS、dispatch renewal、取消、结算
-与 reconciliation 变更会明确拒绝此 profile。这不构成正常文件工作完成或其余
+消费仍有效的原 proof。4.2.1 已增加窄资格的原 dispatch renewal、取消与结算；未具备
+资格的直接 create/CAS 和 reconciliation 变更仍明确拒绝此 profile。这不构成正常文件工作完成或其余
 recovery/loss writer 的资格验证。Broker service 与 Workspace transport 也均拒绝
 通用 runtime control，包含缓存 context 的 raw-file-history prepare/rewind；旧
 workspace capability 判别不能授权此私有 profile。Claim 还必须先锁定并检查当前
@@ -298,7 +302,9 @@ profile 合法的 writer 接管都不应被声称为 HTTP bypass。
 
 ### 4.2.1 原执行 continuation（A2 SQL 批次）
 
-首次 activation 批次仍拒绝 execution continuation。将有效原 proof 与操作资格分离。
+首次 activation 批次曾拒绝 execution continuation；SQL 批次
+`a6cc145edf2f586604c889b186dc10a20e534761` 已实现以下原 continuation。
+将有效原 proof 与操作资格分离。
 新增准入与授权仍仅限 READY；已经授权的原执行可在原 binding 为 DRAINING 时续租、
 记录取消意图、结算返回结果或变为 UNKNOWN。原 Runtime Session 仍必须 READY，原
 activation 和 generation-1 writer 必须有效。SQL 锁顺序仍为原 parent → native history

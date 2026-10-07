@@ -141,6 +141,15 @@ class CsiNativeActivationProofTest {
     }
 
     @Test
+    void refusesChangedEventWithUnchangedValidCommitMarker() {
+        var genesis = genesis();
+        var changed = records(1);
+        ObjectNode event = (ObjectNode) changed.getFirst().path("managedSession");
+        event.put("occurredAt", event.path("occurredAt").longValue() + 1);
+        rejected(() -> CsiNativeActivationProof.transaction(changed, request(1), original, genesis.lastRecordUuid()));
+    }
+
+    @Test
     void nativeTimeBoundaryAcceptsMaximumAndRefusesLargerSafeIntegersWithValidDigest() throws IOException {
         var genesis = genesis();
         for (long[] values : List.of(new long[] {8_639_999_999_940_000L, 8_640_000_000_000_000L},

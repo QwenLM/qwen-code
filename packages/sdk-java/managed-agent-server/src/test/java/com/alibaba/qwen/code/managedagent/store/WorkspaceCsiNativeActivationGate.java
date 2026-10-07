@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
+import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
@@ -21,6 +22,7 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -30,6 +32,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Base64;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.flywaydb.core.Flyway;
@@ -109,6 +113,103 @@ class WorkspaceCsiNativeActivationGate {
         token = nativeFixture.path("writerToken").textValue();
         transaction.execute(status -> journal.acquireWriter("tenant", sessionId, token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", writerId, 300_000L)));
+    }
+
+    @Test
+    void initialNativeCheckpointRetainsOriginalPinRenewalAndExecutionContinuation() throws Exception {
+        ready();
+        commit(2);
+        assertThat(commit(3).replayed()).isFalse();
+        String checkpoint = nativeFixture.path("commits").get(3).path("request")
+                .path("latestCheckpointResourceId").textValue();
+        assertThat(jdbc.queryForObject("SELECT latest_checkpoint_resource_id FROM qwen_managed_session_journal_head",
+                String.class)).isEqualTo(checkpoint);
+        var before = authorityRows();
+        assertThat(commit(3).replayed()).isTrue();
+        assertThat(authorityRows()).isEqualTo(before);
+        commit(4);
+        assertThat(pin()).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT latest_checkpoint_resource_id FROM qwen_managed_session_journal_head",
+                String.class)).isEqualTo(checkpoint);
+        var executing = authorize(admit("checkpoint-original"));
+        retire();
+        assertThat(executions.renewDispatch(executing.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120)))
+                .isNotNull();
+        var renewed = executions.findByExecutionCallId(executing.getExecutionCallId());
+        assertThat(executions.compareAndSet(renewed,
+                renewed.withResult(Map.of("executionStatus", "success", "responseParts", List.of()), 4, Instant.now()),
+                "owner", 1).getState()).isEqualTo(ToolExecutionRecord.State.SETTLED);
+    }
+
+    @Test
+    void initialCheckpointRefusesNonemptyOrMismatchedStateWithValidIntegrity() throws Exception {
+        ready();
+        commit(2);
+        var before = authorityRows();
+        for (String pointer : List.of("/identity/definitionRevision", "/identity/configRevision", "/identity/inputDigest",
+                "/identity/sessionKey/sessionId", "/identity/activationId", "/identity/turnId", "/identity/promptId",
+                "/identity/previousCheckpointId", "/resume/recording/lastCompletedUuid", "/resume/apiHistoryRef",
+                "/output/physicalStatus", "/followUp/stopBudgetRemaining")) {
+            ObjectNode request = changedCheckpoint(state -> {
+                int slash = pointer.lastIndexOf('/');
+                ((ObjectNode) state.at(pointer.substring(0, slash))).put(pointer.substring(slash + 1), "foreign");
+            }, event -> {});
+            rejectedCommit(request);
+            assertThat(authorityRows()).as(pointer).isEqualTo(before);
+        }
+        for (String pointer : List.of("/identity/coveredSequence", "/identity/schemaVersion", "/resume/throughSequence",
+                "/resume/initialTurn")) {
+            rejectedCommit(changedCheckpoint(state -> {
+                int slash = pointer.lastIndexOf('/');
+                ((ObjectNode) state.at(pointer.substring(0, slash))).put(pointer.substring(slash + 1), 99);
+            }, event -> {}));
+            assertThat(authorityRows()).as(pointer).isEqualTo(before);
+        }
+        for (String pointer : List.of("/continuation/pendingEventIds", "/resume/consumedNotificationIds",
+                "/resume/recording/turnParentUuids", "/followUp/childRunIds", "/output/mediaRefs")) {
+            rejectedCommit(changedCheckpoint(state -> ((com.fasterxml.jackson.databind.node.ArrayNode) state.at(pointer))
+                    .add("pending"), event -> {}));
+            assertThat(authorityRows()).as(pointer).isEqualTo(before);
+        }
+        for (String field : List.of("attempt", "tools", "runtime", "approval")) {
+            rejectedCommit(changedCheckpoint(state -> state.putObject(field), event -> {}));
+            assertThat(authorityRows()).as(field).isEqualTo(before);
+        }
+        rejectedCommit(changedCheckpoint(state -> ((ObjectNode) state.path("continuation"))
+                .put("phase", "results_ready"), event -> {}));
+        rejectedCommit(changedCheckpoint(state -> state.put("extra", true), event -> {}));
+        rejectedCommit(changedCheckpoint(state -> {}, event -> ((ObjectNode) event.path("subject"))
+                .put("activationId", "foreign")));
+        rejectedCommit(changedCheckpoint(state -> {}, event -> ((ObjectNode) event.path("payload"))
+                .put("coveredSequence", 99)));
+        assertThat(authorityRows()).isEqualTo(before);
+        assertThat(commit(3).replayed()).isFalse();
+    }
+
+    @Test
+    void sealedOriginalRefusesInitialCheckpointAndPreservesResources() throws Exception {
+        ready();
+        commit(2);
+        retire();
+        var before = authorityRows();
+        var value = JSON.treeToValue(nativeFixture.path("commits").get(3).path("request"),
+                ManagedSessionStoreModels.CommitTransactionRequest.class);
+        rejected(() -> transaction.execute(status -> journal.commit("tenant", sessionId, token, value)),
+                "runtime_admission_closed");
+        assertThat(authorityRows()).isEqualTo(before);
+    }
+
+    @Test
+    void corruptedDerivedCheckpointHeadRefusesRenewalReplayAndExecution() throws Exception {
+        ready();
+        commit(2);
+        commit(3);
+        jdbc.update("UPDATE qwen_managed_session_journal_head SET latest_checkpoint_resource_id = NULL");
+        var before = authorityRows();
+        rejectedCommit((ObjectNode) nativeFixture.path("commits").get(4).path("request"));
+        rejectedCommit((ObjectNode) nativeFixture.path("commits").get(3).path("request"));
+        rejected(() -> admit("corrupt-checkpoint-head"), "csi_original_activation_unavailable");
+        assertThat(authorityRows()).isEqualTo(before);
     }
 
     @Test
@@ -454,6 +555,66 @@ class WorkspaceCsiNativeActivationGate {
         var value = JSON.treeToValue(nativeFixture.path("commits").get(index).path("request"),
                 ManagedSessionStoreModels.CommitTransactionRequest.class);
         return transaction.execute(status -> journal.commit("tenant", sessionId, token, value));
+    }
+
+    private void rejectedCommit(ObjectNode request) throws Exception {
+        var value = JSON.treeToValue(request, ManagedSessionStoreModels.CommitTransactionRequest.class);
+        rejected(() -> transaction.execute(status -> journal.commit("tenant", sessionId, token, value)),
+                "csi_original_activation_unavailable");
+    }
+
+    private ObjectNode changedCheckpoint(java.util.function.Consumer<ObjectNode> changeState,
+            java.util.function.Consumer<ObjectNode> changeEvent) throws Exception {
+        ObjectNode request = nativeFixture.path("commits").get(3).path("request").deepCopy();
+        ObjectNode resource = (ObjectNode) request.path("resources").get(0);
+        ObjectNode state = (ObjectNode) JSON.readTree(Base64.getDecoder().decode(resource.path("bytesBase64").textValue()));
+        var records = CsiNativeActivationProof.records(Base64.getDecoder().decode(request.path("recordBytesBase64").textValue()));
+        ObjectNode event = (ObjectNode) records.getFirst().path("managedSession");
+        changeState.accept(state);
+        byte[] stateBytes = JSON.writeValueAsBytes(state);
+        String digest = CsiNativeActivationProof.sha256(stateBytes);
+        resource.put("bytesBase64", Base64.getEncoder().encodeToString(stateBytes))
+                .put("byteLength", stateBytes.length).put("digest", digest);
+        ((ObjectNode) event.path("payload").path("stateRef")).put("byteLength", stateBytes.length).put("digest", digest);
+        changeEvent.accept(event);
+        request.put("contentDigest", digest).put("eventsDigest",
+                CsiNativeActivationProof.sha256(JSON.writeValueAsBytes(List.of(sorted(event)))));
+        ObjectNode marker = (ObjectNode) records.getLast().path("managedSession");
+        marker.put("contentDigest", digest).put("eventsDigest", request.path("eventsDigest").textValue());
+        request.put("commitDigest", CsiNativeActivationProof.sha256(JSON.writeValueAsBytes(sorted(marker))));
+        StringBuilder text = new StringBuilder();
+        for (JsonNode record : records) {
+            text.append(JSON.writeValueAsString(record)).append('\n');
+        }
+        byte[] bytes = text.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        request.put("recordBytesBase64", Base64.getEncoder().encodeToString(bytes))
+                .put("recordDigest", CsiNativeActivationProof.sha256(bytes));
+        return request;
+    }
+
+    private static Object sorted(JsonNode node) {
+        if (node.isObject()) {
+            Map<String, Object> result = new TreeMap<>();
+            node.fields().forEachRemaining(field -> result.put(field.getKey(), sorted(field.getValue())));
+            return result;
+        }
+        if (node.isArray()) {
+            var result = new java.util.ArrayList<>();
+            node.forEach(child -> result.add(sorted(child)));
+            return result;
+        }
+        return JSON.convertValue(node, Object.class);
+    }
+
+    private Map<String, List<String>> authorityRows() {
+        Map<String, List<String>> rows = new TreeMap<>();
+        for (String table : List.of("qwen_managed_session_journal_head", "qwen_managed_session_journal_tx",
+                "qwen_managed_session_resource", "qwen_managed_session_resource_ref", "qwen_runtime_binding",
+                "managed_agent_session")) {
+            rows.put(table, jdbc.queryForList("SELECT * FROM " + table).stream()
+                    .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
+        }
+        return rows;
     }
 
     @Test

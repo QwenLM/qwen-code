@@ -5,7 +5,6 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.BlockRecoveryRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
@@ -444,10 +443,6 @@ public class ManagedSessionStore {
                 : extensionRecords.applyNativeCsi(tenantId, request.workspaceId(), sessionId,
                         request.firstSequence(), request.eventCount(), validated.recordBytes(), resourceReader);
         if (csiOriginal != null) {
-            if (applied.activations().size() != (request.eventCount() == 0 ? 0 : 1)) {
-                throw new RuntimeBrokerException(409, "csi_original_activation_unavailable",
-                        "The original CSI native activation proof is unavailable.", false);
-            }
             jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
                 JdbcCsiActivationAdmission.acceptCommit(connection, csiOriginal, CSI_JSON.valueToTree(request),
                         applied.records(), head.journalRevision(), head.committedSequence(),

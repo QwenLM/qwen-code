@@ -22,6 +22,11 @@ const hostedModule = pathToFileURL(
 const { LocalManagedSessionAuthority } = await import(authorityModule.href);
 const { createHttpManagedSessionStores } = await import(adapterModule.href);
 const { createHostedHarnessContract } = await import(hostedModule.href);
+const { createManagedHarnessHandle } = await import(
+  pathToFileURL(
+    root + '/packages/core/dist/src/managed-runtime/managed-harness-factory.js',
+  ).href
+);
 const contract = createHostedHarnessContract(input.capabilityDigest);
 const writerId = contract.bootId;
 const token = randomBytes(32).toString('base64url');
@@ -33,6 +38,7 @@ let leaseUntil = 0,
   writerGeneration = 0,
   sequence = 0,
   activationEpoch = 0,
+  latestCheckpointResourceId = null,
   lastDigest = null;
 const transactions = [];
 const initialClock = Date.now();
@@ -93,6 +99,9 @@ const server = http.createServer(async (req, res) => {
         activationEpoch,
         compactedThroughRevision: 0,
         recoveryStatus: 'READY',
+        ...(latestCheckpointResourceId === null
+          ? {}
+          : { latestCheckpointResourceId }),
       };
     } else if (suffix === '/transactions') {
       let after = Number(url.searchParams.get('afterRevision') ?? 0),
@@ -148,6 +157,8 @@ const server = http.createServer(async (req, res) => {
       sequence = body.lastSequence;
       lastDigest = body.commitDigest;
       activationEpoch = body.activationEpoch;
+      if (body.latestCheckpointResourceId !== null)
+        latestCheckpointResourceId = body.latestCheckpointResourceId;
       answer = {
         journalRevision: revision,
         transactionId: body.transactionId,
@@ -235,6 +246,13 @@ try {
     leaseDurationMs: 60000,
   });
   const renewed = await authority.renewActivation({ leaseDurationMs: 90000 });
+  const initialCheckpoint = await createManagedHarnessHandle({
+    authority,
+    activation: first,
+  }).ensureCheckpoint();
+  const afterCheckpointRenewal = await authority.renewActivation({
+    leaseDurationMs: 90000,
+  });
   const fixture = {
     format: 'csi-native-activation-test-generator/1',
     generatedAt: new Date().toISOString(),
@@ -245,6 +263,8 @@ try {
     writerToken: token,
     first,
     renewed,
+    initialCheckpoint,
+    afterCheckpointRenewal,
     clock: {
       initialClock,
       finalClock: nativeClock,
