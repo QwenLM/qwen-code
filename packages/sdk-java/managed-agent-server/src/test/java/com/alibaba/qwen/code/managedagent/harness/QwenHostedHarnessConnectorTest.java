@@ -70,6 +70,29 @@ class QwenHostedHarnessConnectorTest {
             SubmitHarnessTurn.computePayloadDigest(SUBMIT_CONTENT);
 
     @Test
+    void lifecycleCapabilityFailsClosedWhenTheCachedClientWasClosed() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities unsupported = mock(HostedHarnessCapabilities.class);
+        HostedHarnessCapabilities supported = mock(HostedHarnessCapabilities.class);
+        when(supported.getLifecycleProtocolVersion()).thenReturn(1);
+        when(client.capabilities()).thenReturn(unsupported, supported)
+                .thenThrow(new IllegalStateException("HostedHarnessClient is closed"));
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+        QwenHostedHarnessConnector connector =
+                new QwenHostedHarnessConnector(properties, sessions, execution);
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        assertThat(connector.supportsLifecycle()).isFalse();
+        assertThat(connector.supportsLifecycle()).isTrue();
+        assertThat(connector.supportsLifecycle()).isFalse();
+        verify(client, times(3)).capabilities();
+        verifyNoInteractions(sessions, execution);
+    }
+
+    @Test
     void successorDetachesTheOriginalSessionWithoutLoadingAnAttachment() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         QwenHostedHarnessConnector successor = connector(client);

@@ -130,7 +130,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
         try {
             return client().capabilities().getLifecycleProtocolVersion() == 1;
-        } catch (com.alibaba.qwen.code.daemon.DaemonException unavailable) {
+        } catch (com.alibaba.qwen.code.daemon.DaemonException
+                | IllegalStateException unavailable) {
             return false;
         }
     }
