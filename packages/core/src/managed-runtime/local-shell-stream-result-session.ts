@@ -12,7 +12,7 @@ import type {
   ToolResultExpectedIdentity,
   ToolResultSegmentStore,
 } from './managed-tool-result-store.js';
-import { parseChildRun } from './managed-child-run-record.js';
+import { parseChildShellRun } from './managed-child-run-record.js';
 import { parseMonitorRun } from './managed-extension-record.js';
 import { LocalShellStreamCapture } from './local-shell-stream-capture.js';
 
@@ -33,7 +33,7 @@ export interface LocalShellStreamAdmission {
 const DOMAINS = {
   child_run: {
     label: 'Background Shell',
-    parse: parseChildRun,
+    parse: parseChildShellRun,
   },
   monitor_run: {
     label: 'Monitor',
