@@ -18,6 +18,7 @@ import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
 import {
   getEmptyMcpToolTitleDescription,
   localizeToolDisplayName,
+  sanitizeControlChars,
 } from './toolFormatting';
 import {
   ThinkingTranslateButton,
@@ -564,6 +565,14 @@ export function ToolApproval({
     [request.content, hostOwnsEditDiffPreview],
   );
   const command = getCommandFromRawInput(request);
+  // The command block renders `rawInput.command`, which every producer leaves
+  // verbatim — so this is the last choke point before an approver reads what
+  // they are about to authorize. Neutralise invisible controls here (C0/ANSI,
+  // C1, and the bidi embedding/isolate controls) so a crafted command cannot
+  // display one string while authorizing different bytes. Same helper
+  // `ShellToolOutput` already uses for shell data. The raw `command` is kept
+  // for execution and for the explain button below.
+  const commandDisplay = sanitizeControlChars(command ?? '');
   const showsCommandBlock =
     !isGoal && Boolean((isExec && command) || showsContent);
   // Exec warnings (e.g. command-substitution notices) arrive as real content
@@ -640,8 +649,12 @@ export function ToolApproval({
       ) : isExec && command ? (
         <>
           <div className={styles.code}>
-            <pre className={styles.codeBlock} id={commandId} title={command}>
-              {command}
+            <pre
+              className={styles.codeBlock}
+              id={commandId}
+              title={commandDisplay}
+            >
+              {commandDisplay}
             </pre>
           </div>
           {execWarningsText && (
