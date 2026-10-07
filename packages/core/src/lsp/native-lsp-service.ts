@@ -53,25 +53,32 @@ import * as fs from 'node:fs';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { getLanguageFromFilePath } from '../utils/language-detection.js';
+import { isSubpath } from '../utils/paths.js';
+import { resolveWorkspacePath } from '../utils/workspaceContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { globSync } from 'glob';
 
 const debugLogger = createDebugLogger('LSP');
 
 /**
- * Mapping from LSP language identifiers to file extensions, only for cases
- * where the language ID does NOT match the file extension directly.
- * Languages whose ID is already a valid extension (e.g. "cpp", "java", "go")
+ * Mapping from LSP language identifiers to their standard file extensions.
+ * Languages whose ID is already a valid extension (e.g. "java", "go")
  * are handled by the fallback in getWorkspaceSymbolExtensions().
  */
 const LANGUAGE_ID_TO_EXTENSIONS: Record<string, string[]> = {
-  typescript: ['ts', 'tsx'],
+  typescript: ['ts', 'tsx', 'mts', 'cts'],
   typescriptreact: ['tsx'],
   javascript: ['js', 'jsx'],
   javascriptreact: ['jsx'],
-  python: ['py'],
+  python: ['py', 'pyi', 'pyw'],
+  cpp: ['cpp', 'cc', 'cxx', 'h', 'hpp', 'hh', 'hxx', 'inl', 'tpp'],
+  'objective-c': ['m'],
+  'objective-cpp': ['mm'],
   csharp: ['cs'],
+  fsharp: ['fs', 'fsi', 'fsx'],
   ruby: ['rb'],
+  shellscript: ['sh'],
 };
 
 const DEFAULT_EXCLUDE_PATTERNS = [
@@ -526,23 +533,86 @@ export class NativeLspService {
    * Get ready server handles filtered by optional server name.
    * Each handle is guaranteed to have a valid connection.
    *
-   * @param serverName - Optional server name to filter by
+   * @param serverName - Explicit server override, bypassing automatic routing
+   * @param uri - Document URI for automatic file-scoped routing
    * @returns Array of [serverName, handle] tuples with active connections
    */
   private getReadyHandles(
     serverName?: string,
+    uri?: string,
   ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
-    return Array.from(this.serverManager.getHandles().entries()).filter(
+    const filePath =
+      uri && /^file:/i.test(uri) && !serverName
+        ? fileURLToPath(uri)
+        : undefined;
+    const extension = filePath
+      ? path.extname(filePath).slice(1).toLowerCase()
+      : '';
+    const languages =
+      extension === 'mm'
+        ? ['objective-cpp']
+        : filePath
+          ? getLanguageFromFilePath(filePath)?.toLowerCase().split('/')
+          : undefined;
+    const resolvedFilePath = filePath
+      ? resolveWorkspacePath(filePath)
+      : undefined;
+    const primaryRoot = filePath
+      ? resolveWorkspacePath(this.workspaceRoot)
+      : this.workspaceRoot;
+    const handles = Array.from(
+      this.serverManager.getHandles().entries(),
+    ).filter(
       (
         entry,
       ): entry is [
         string,
         LspServerHandle & { connection: LspConnectionInterface },
-      ] =>
-        entry[1].status === 'READY' &&
-        entry[1].connection !== undefined &&
-        (!serverName || entry[0] === serverName),
+      ] => {
+        const [name, handle] = entry;
+        if (
+          handle.status !== 'READY' ||
+          !handle.connection ||
+          (serverName && name !== serverName)
+        ) {
+          return false;
+        }
+        if (!resolvedFilePath) return true;
+        if (
+          !this.workspaceContext
+            .getDirectories()
+            .some((directory) => isSubpath(directory, resolvedFilePath))
+        ) {
+          return false;
+        }
+        const root = resolveWorkspacePath(
+          handle.config.workspaceFolder ??
+            (handle.config.rootUri
+              ? fileURLToPath(handle.config.rootUri)
+              : this.workspaceRoot),
+        );
+        const isPrimaryRoot =
+          isSubpath(root, primaryRoot) && isSubpath(primaryRoot, root);
+        if (!isPrimaryRoot && !isSubpath(root, resolvedFilePath)) {
+          return false;
+        }
+        return (
+          this.getWorkspaceSymbolExtensions(handle).includes(extension) ||
+          (Object.keys(handle.config.extensionToLanguage ?? {}).length === 0 &&
+            languages !== undefined &&
+            handle.config.languages.some((id) =>
+              languages.includes(
+                getLanguageFromFilePath(`file.${id}`)?.toLowerCase() ??
+                  id.toLowerCase(),
+              ),
+            ))
+        );
+      },
     );
+    if (filePath && handles.length === 0) {
+      throw new Error(`No ready LSP server matches document ${uri}`);
+    }
+    return handles;
   }
 
   /** Synchronize disk text before a query; only a new didOpen needs warmup delay. */
@@ -898,9 +968,15 @@ export class NativeLspService {
             extensions.add(ext);
           }
         } else {
-          // For languages like "cpp", "java", "go", "rust" etc.,
+          // For languages like "java", "go", "rust" etc.,
           // the language ID itself is a valid file extension
           extensions.add(language.toLowerCase());
+        }
+        if (
+          language === 'cpp' &&
+          /^clangd(?:\.exe)?$/i.test(path.basename(handle.config.command ?? ''))
+        ) {
+          extensions.add('c');
         }
       }
     }
@@ -1050,7 +1126,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspDefinition[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.getReadyHandles(serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1119,7 +1195,7 @@ export class NativeLspService {
     includeDeclaration = false,
     limit = 200,
   ): Promise<LspReference[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.getReadyHandles(serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1185,7 +1261,7 @@ export class NativeLspService {
     location: LspLocation,
     serverName?: string,
   ): Promise<LspHoverResult | null> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.getReadyHandles(serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1236,7 +1312,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 200,
   ): Promise<LspSymbolInformation[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.getReadyHandles(serverName, uri);
     const requestParams = { textDocument: { uri } };
 
     for (const [name, handle] of handles) {
@@ -1316,7 +1392,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspDefinition[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.getReadyHandles(serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1516,7 +1592,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspCallHierarchyItem[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.getReadyHandles(serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1751,7 +1827,7 @@ export class NativeLspService {
     uri: string,
     serverName?: string,
   ): Promise<LspDiagnostic[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.getReadyHandles(serverName, uri);
     const allDiagnostics: LspDiagnostic[] = [];
 
     for (const [name, handle] of handles) {
@@ -1916,7 +1992,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 20,
   ): Promise<LspCodeAction[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.getReadyHandles(serverName, uri);
 
     for (const [name, handle] of handles) {
       try {

@@ -139,7 +139,7 @@ async function inTempDir(
   fakeTimers = false,
 ) {
   if (fakeTimers) vi.useFakeTimers();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   try {
     await fn(dir);
   } finally {
@@ -808,12 +808,12 @@ describe('NativeLspService', () => {
       const uri = writeDoc(dir, 'main.cpp', CPP_TEXT);
       const events: string[] = [];
       const connection = loggingConnection(events);
-      internalsOf(lspService).serverManager = managerFor(
-        'clangd',
-        makeHandle(connection),
+      const service = workspaceService(
+        dir,
+        managerFor('clangd', makeHandle(connection)),
       );
 
-      await hover(lspService, uri);
+      await hover(service, uri);
 
       expectDidOpen(connection, uri, 'cpp');
       expect(connection.request).toHaveBeenCalledWith(
@@ -822,7 +822,7 @@ describe('NativeLspService', () => {
       );
       expect(events[0]).toBe('send:textDocument/didOpen');
 
-      await hover(lspService, uri);
+      await hover(service, uri);
 
       expect(connection.send).toHaveBeenCalledTimes(1);
     }));
@@ -939,13 +939,13 @@ describe('NativeLspService', () => {
           ];
         }),
       });
-      internalsOf(lspService).serverManager = managerFor(
-        'clangd',
-        makeHandle(connection),
+      const service = workspaceService(
+        dir,
+        managerFor('clangd', makeHandle(connection)),
       );
 
       const results = await settle(
-        lspService.definitions({
+        service.definitions({
           uri,
           range: {
             start: { line: 0, character: 4 },
@@ -971,17 +971,17 @@ describe('NativeLspService', () => {
           if (message.method === 'textDocument/didOpen') didOpenCount += 1;
         }),
       });
-      internalsOf(lspService).serverManager = managerFor(
-        'clangd',
-        makeHandle(connection),
+      const service = workspaceService(
+        dir,
+        managerFor('clangd', makeHandle(connection)),
       );
 
-      await hover(lspService, uri); // opens the document
+      await hover(service, uri); // opens the document
       expect(didOpenCount).toBe(1);
 
       // Second hover should neither re-open nor delay.
       const startTime = Date.now();
-      await hover(lspService, uri);
+      await hover(service, uri);
       const elapsed = Date.now() - startTime;
 
       expect(didOpenCount).toBe(1);
@@ -991,7 +991,7 @@ describe('NativeLspService', () => {
 
   test('should not send duplicate didOpen for warmup-opened URI on subsequent requests', () =>
     inTempDirWithFakeTimers('lsp-warmup-track-', async (dir) => {
-      const queryUri = writeDoc(dir, 'main.cpp', CPP_TEXT);
+      const queryUri = writeDoc(dir, 'main.ts', TS_TEXT);
       const warmupUri = writeDoc(dir, 'index.ts', 'export const x = 1;\n');
       const didOpenUris: string[] = [];
       const connection = makeConnection({
@@ -1007,23 +1007,26 @@ describe('NativeLspService', () => {
         ),
       });
       // Warmup delegates its open through the service-owned synchronization.
-      internalsOf(lspService).serverManager = managerFor(
-        'typescript',
-        makeHandle(connection, 'typescript', ['typescript'], TS, ['--stdio']),
-        undefined,
-        vi.fn(async (_handle, synchronizeDocument) => {
-          synchronizeDocument(warmupUri, 'typescript');
-        }),
+      const service = workspaceService(
+        dir,
+        managerFor(
+          'typescript',
+          makeHandle(connection, 'typescript', ['typescript'], TS, ['--stdio']),
+          undefined,
+          vi.fn(async (_handle, synchronizeDocument) => {
+            synchronizeDocument(warmupUri, 'typescript');
+          }),
+        ),
       );
 
       // First request opens queryUri via ensureDocumentSynchronized; warmup opens warmupUri.
-      await hover(lspService, queryUri);
+      await hover(service, queryUri);
 
       expect(didOpenUris).toContain(queryUri);
       const countAfterFirst = didOpenUris.length;
 
       // warmupUri was tracked by the first call's warmup, so it is not reopened.
-      await hover(lspService, warmupUri);
+      await hover(service, warmupUri);
 
       expect(didOpenUris.length).toBe(countAfterFirst);
     }));
@@ -1078,13 +1081,16 @@ describe('NativeLspService', () => {
           return [];
         }),
       });
-      internalsOf(lspService).serverManager = managerFor(
-        'typescript',
-        makeHandle(connection, TS, ['typescript'], TS, ['--stdio']),
-        true,
+      const service = workspaceService(
+        dir,
+        managerFor(
+          'typescript',
+          makeHandle(connection, TS, ['typescript'], TS, ['--stdio']),
+          true,
+        ),
       );
 
-      await settle(lspService.documentSymbols(uri));
+      await settle(service.documentSymbols(uri));
 
       // Should NOT have retried: only 1 request
       expect(requestCount).toBe(1);

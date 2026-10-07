@@ -524,13 +524,14 @@ describe('NativeLspService Integration Tests', () => {
       expect(results).toEqual([]);
     });
 
-    it('should return empty diagnostics when no server is ready', async () => {
+    it('should report unavailable diagnostics when no server is ready', async () => {
       const uri = 'file:///test/workspace/src/app.ts';
-      const results = await lspService.diagnostics(uri);
-      expect(results).toEqual([]);
+      await expect(lspService.diagnostics(uri)).rejects.toThrow(
+        `No ready LSP server matches document ${uri}`,
+      );
     });
 
-    it('should return empty code actions when no server is ready', async () => {
+    it('should report unavailable code actions when no server is ready', async () => {
       const uri = 'file:///test/workspace/src/app.ts';
       const context = {
         diagnostics: [],
@@ -538,12 +539,9 @@ describe('NativeLspService Integration Tests', () => {
         triggerKind: 'invoked' as const,
       };
 
-      const results = await lspService.codeActions(
-        uri,
-        range(0, 0, 0, 10),
-        context,
-      );
-      expect(results).toEqual([]);
+      await expect(
+        lspService.codeActions(uri, range(0, 0, 0, 10), context),
+      ).rejects.toThrow(`No ready LSP server matches document ${uri}`);
     });
   });
 
