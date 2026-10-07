@@ -588,7 +588,22 @@ public class ManagedExtensionRecordStore {
             }
         }
         if (domain.equals("child_run")) {
-            for (String field : List.of("commandRef", "startReceiptRef", "outputRef")) {
+            for (String field : List.of("commandRef", "startReceiptRef", "outputRef",
+                    "inputRef", "resultRef", "terminalReceiptRef")) {
+                JsonNode ref = record.get(field);
+                if (ref != null && !ref.isNull()) {
+                    requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+            require(!"child_agent".equals(record.get("kind").textValue())
+                    || record.get("depth").longValue() != 1
+                    || record.get("rootSessionId").textValue()
+                            .equals(sessionId),
+                    "Child run rootSessionId must be this Session for a"
+                            + " first-level child.");
+        }
+        if (domain.equals("child_acceptance")) {
+            for (String field : List.of("contentRef", "terminalReceiptRef")) {
                 JsonNode ref = record.get(field);
                 if (ref != null && !ref.isNull()) {
                     requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
@@ -657,6 +672,47 @@ public class ManagedExtensionRecordStore {
                         record.get("run").get("definition")),
                         "An MCP server revision cannot name two definition digests.");
             }
+        }
+        if (domain.equals("child_acceptance")) {
+            String childRunKey = ManagedExtensionProjection.recordKey(sessionId,
+                    "child_run", record.get("childRunId").textValue());
+            String childRunResource = jdbc.query("SELECT record_resource_id FROM"
+                            + " qwen_managed_session_extension_record WHERE"
+                            + " session_scope_key = ? AND record_key = ?",
+                    (result, row) -> result.getString("record_resource_id"),
+                    scopeKey, childRunKey).stream().findFirst().orElse(null);
+            require(childRunResource != null,
+                    "Child acceptance must name a child agent run of this Session.");
+            JsonNode child = readBody(resources.apply(childRunResource));
+            require("child_agent".equals(child.get("kind").textValue()),
+                    "Child acceptance must name a child agent run of this Session.");
+            require("settled".equals(child.get("run").get("state").textValue())
+                    && "completed".equals(child.get("stopReason").textValue()),
+                    "Child acceptance must name a run that ended with its"
+                            + " result committed.");
+            require(child.get("ownerScopeId").textValue().equals(
+                    record.get("parentScopeId").textValue())
+                    && child.get("resultVersion").decimalValue().compareTo(
+                            record.get("resultVersion").decimalValue()) == 0,
+                    "Child acceptance must match its child run scope and"
+                            + " result version.");
+            String expectedCall = "tool".equals(child.get("completion")
+                    .textValue())
+                    ? child.get("run").get("executionCallId").textValue() : null;
+            String actualCall = record.get("parentExecutionCallId").isNull()
+                    ? null : record.get("parentExecutionCallId").textValue();
+            require(Objects.equals(expectedCall, actualCall),
+                    "Child acceptance must attach the completion call its"
+                            + " child run names.");
+            require(!child.get("resultRef").isNull()
+                    && record.get("contentDigest").textValue().equals(
+                            child.get("resultRef").get("digest").textValue())
+                    && !child.get("terminalReceiptRef").isNull()
+                    && record.get("terminalReceiptRef").get("digest")
+                            .textValue().equals(child.get("terminalReceiptRef")
+                                    .get("digest").textValue()),
+                    "Child acceptance must bind the result and receipt its"
+                            + " child run committed.");
         }
         StoredRow previous = jdbc.query("SELECT * FROM"
                         + " qwen_managed_session_extension_record WHERE"
@@ -763,8 +819,8 @@ public class ManagedExtensionRecordStore {
                                 + " ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         scopeKey, recordKey, tenantId, workspaceId, sessionId,
                         domain, recordId, operationHash, revision, resourceId,
-                        body.taskKind(),
-                        body.taskKind() == null ? null : projection.state(), projection.runtimeState(),
+                        body.taskKindOf().apply(record),
+                        body.taskKindOf().apply(record) == null ? null : projection.state(), projection.runtimeState(),
                         projection.definitionRevision(), deliveryTarget,
                         deliveryState, projection.createdAt(),
                         projection.startedAt(), projection.settledAt(), sequence,
@@ -789,13 +845,13 @@ public class ManagedExtensionRecordStore {
                             + " delivery_state = ?, started_at = ?,"
                             + " settled_at = ? WHERE session_scope_key = ?"
                             + " AND record_key = ?",
-                    revision, resourceId, body.taskKind() == null ? null : projection.state(),
+                    revision, resourceId, body.taskKindOf().apply(record) == null ? null : projection.state(),
                     projection.runtimeState(),
                     projection.definitionRevision(), deliveryTarget,
                     deliveryState, projection.startedAt(),
                     projection.settledAt(), scopeKey, recordKey);
         }
-        if (body.taskKind() != null && (previous == null
+        if (body.taskKindOf().apply(record) != null && (previous == null
                 || !Objects.equals(previous.projection(), projection))) {
             String taskId = ManagedExtensionProjection.taskId(recordKey);
             if (isBeingDeleted(tenantId, sessionId)) {

@@ -1234,6 +1234,9 @@ async function verifyWorkspaceRestore(
         : parseMonitorRun(
             JSON.parse((await resources.read(recordRef)).toString('utf8')),
           );
+    // A child agent owns no output manifest — its result travels the
+    // Session delivery line — so it has no detached lineage to verify.
+    if ('kind' in record && record.kind === 'child_agent') continue;
     if (record.run.executionCallId !== null)
       detached.set(record.run.executionCallId, record.outputRef);
   }
