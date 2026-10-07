@@ -56,14 +56,17 @@ class HostedHarnessClientTest {
     private HttpServer server;
     private ExecutorService serverExecutor;
     private URI baseUri;
+    private AtomicReference<String> capabilitiesBody;
 
     @BeforeEach
     void setUp() throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         serverExecutor = Executors.newCachedThreadPool();
         server.setExecutor(serverExecutor);
+        capabilitiesBody =
+                new AtomicReference<>(capabilitiesJson(DIGEST, BOOT_ID));
         server.createContext("/capabilities", exchange -> sendJson(exchange,
-                200, capabilitiesJson(DIGEST, BOOT_ID), false));
+                200, capabilitiesBody.get(), false));
         server.start();
         baseUri = URI.create("http://127.0.0.1:"
                 + server.getAddress().getPort());
@@ -453,6 +456,32 @@ class HostedHarnessClientTest {
                 + "\""));
         assertTrue(loadBody.get().contains(
                 "\"passiveManagedRuntimeRecovery\":true"));
+    }
+
+    // The cancellation flag rides the wire separately: a plain passive
+    // re-attach omits it, and only an explicit cancellation takeover adds
+    // the field — anything else would let the daemon mint a canned
+    // CANCELLED record for a wait whose owner could still exist (Arm B).
+    @Test
+    void carriesTheCancellationTakeoverFlagOnlyOnTheCancellationLoad() {
+        AtomicReference<String> loadBody = new AtomicReference<>();
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> {
+                    loadBody.set(new String(exchange.getRequestBody()
+                            .readAllBytes(), StandardCharsets.UTF_8));
+                    sendSessionJson(exchange, 200, sessionJson());
+                });
+        try (HostedHarnessClient client = newClient()) {
+            client.loadSession(new LoadHarnessSession(SESSION_ID, null,
+                    true));
+        }
+        assertFalse(loadBody.get().contains("cancellationTakeover"));
+        try (HostedHarnessClient client = newClient()) {
+            client.loadSession(new LoadHarnessSession(SESSION_ID, null,
+                    true, null, false, true));
+        }
+        assertTrue(loadBody.get().contains(
+                "\"cancellationTakeover\":true"));
     }
 
     @Test
@@ -4098,6 +4127,99 @@ class HostedHarnessClientTest {
                 .build();
     }
 
+    // The journal-contract marker is part of negotiation: a build too old to
+    // open message.delta journals is refused once here, not per Session.
+    @Test
+    void refusesAHarnessWithoutTheJournalContractToken() {
+        capabilitiesBody.set(
+                capabilitiesJsonWithoutJournalToken(DIGEST, BOOT_ID));
+        DaemonProtocolException error = assertThrows(
+                DaemonProtocolException.class, this::newClient);
+        assertTrue(error.getMessage()
+                .contains("managed_session_journal_delta_v1"));
+    }
+
+    // The load timeout is a distinct builder knob, validated like the
+    // other timeouts.
+    @Test
+    void loadTimeoutMustBePositive() {
+        assertThrows(IllegalArgumentException.class,
+                () -> HostedHarnessClient.builder()
+                        .loadTimeout(Duration.ZERO));
+    }
+
+    // The two knobs discriminate at the call site: a recovery-flagged load
+    // pays loadTimeout while a plain attach load meets requestTimeout
+    // (which also guards the connector's ConcurrentHashMap bin locks).
+    @Test
+    void recoveryLoadUsesLoadTimeoutPlainLoadUsesRequestTimeout()
+            throws Exception {
+        server.createContext("/session/" + SESSION_ID + "/load",
+                exchange -> {
+                    try {
+                        Thread.sleep(2_500);
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                    }
+                    sendSessionJson(exchange, 200, sessionJson());
+                });
+        try (HostedHarnessClient client = HostedHarnessClient.builder()
+                .baseUri(baseUri)
+                .bearerToken("harness-token")
+                .capabilityDigest(DIGEST)
+                .heartbeatInterval(Duration.ZERO)
+                // requestTimeout also caps the /capabilities negotiation
+                // inside build(); give it headroom past the contended-lane
+                // round trip while keeping requestTimeout < sleep <
+                // loadTimeout so the discrimination itself is unchanged.
+                .requestTimeout(Duration.ofMillis(1_000))
+                .loadTimeout(Duration.ofSeconds(10))
+                .build()) {
+            assertThrows(MutationOutcomeUnknownException.class,
+                    () -> client.loadSession(
+                            new LoadHarnessSession(SESSION_ID, null,
+                                    false)));
+            assertNotNull(client.loadSession(
+                    new LoadHarnessSession(SESSION_ID, null, true)));
+            // The drive disjunct of the same predicate: an active takeover
+            // drive (passive=false, drive=true) also pays loadTimeout —
+            // the connector's headline recovery path.
+            assertNotNull(client.loadSession(
+                    new LoadHarnessSession(SESSION_ID, null, false, null,
+                            true)));
+        }
+    }
+
+    // The serve delegating app answers with a bare 404 while its runtime is
+    // still starting (before the contract middleware exists); that window is
+    // transient, never a protocol defect (G3 Harness-restart race).
+    @Test
+    void preContract404IsTransientNotAProtocolDefect() {
+        createSessionRoute();
+        server.createContext("/session/" + SESSION_ID + "/prompt",
+                exchange -> {
+                    exchange.getResponseHeaders().set("Content-Type",
+                            "text/plain");
+                    exchange.sendResponseHeaders(404, -1);
+                    exchange.close();
+                });
+        Map<String, Object> block = Map.of("type", "text", "text", "hi");
+        try (HostedHarnessClient client = newClient()) {
+            HarnessSessionRef session = createSession(client);
+            DaemonTransportException error = assertThrows(
+                    DaemonTransportException.class,
+                    () -> client.submitTurn(SubmitHarnessTurn.builder()
+                            .session(session)
+                            .promptId(PROMPT_ID)
+                            .addContent(block)
+                            .payloadDigest(
+                                    SubmitHarnessTurn.computePayloadDigest(
+                                            List.of(block)))
+                            .build()));
+            assertTrue(error.getMessage().contains("pre-contract"));
+        }
+    }
+
     private void createSessionRoute() {
         server.createContext("/session", exchange ->
                 sendSessionJson(exchange, 200, sessionJson()));
@@ -4122,6 +4244,17 @@ class HostedHarnessClientTest {
     }
 
     private static String capabilitiesJson(String digest, String bootId) {
+        return "{\"v\":1,\"mode\":\"http-bridge\","
+                + "\"features\":[\"hosted_harness_private_v1\","
+                + "\"managed_session_journal_delta_v1\"],"
+                + "\"transports\":[\"rest\"],\"hostedHarness\":{"
+                + "\"protocolVersions\":{\"current\":1,"
+                + "\"supported\":[1]},\"bootId\":\"" + bootId
+                + "\",\"capabilityDigest\":\"" + digest + "\"}}";
+    }
+
+    private static String capabilitiesJsonWithoutJournalToken(String digest,
+            String bootId) {
         return "{\"v\":1,\"mode\":\"http-bridge\","
                 + "\"features\":[\"hosted_harness_private_v1\"],"
                 + "\"transports\":[\"rest\"],\"hostedHarness\":{"

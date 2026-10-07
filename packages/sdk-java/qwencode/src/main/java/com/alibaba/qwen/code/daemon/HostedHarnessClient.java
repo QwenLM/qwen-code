@@ -65,6 +65,7 @@ public final class HostedHarnessClient implements AutoCloseable {
     private final String baseUrl;
     private final String bearerToken;
     private final Duration requestTimeout;
+    private final Duration loadTimeout;
     private final Duration heartbeatInterval;
     private final Duration sseIdleTimeout;
     private final int maximumSseFrameBytes;
@@ -88,6 +89,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         String expectedDigest = requireDigest(
                 builder.capabilityDigest, "capabilityDigest");
         this.requestTimeout = builder.requestTimeout;
+        this.loadTimeout = builder.loadTimeout != null
+                ? builder.loadTimeout : builder.requestTimeout;
         this.heartbeatInterval = builder.heartbeatInterval;
         this.sseIdleTimeout = builder.sseIdleTimeout;
         this.maximumSseFrameBytes = builder.maximumSseFrameBytes;
@@ -186,10 +189,15 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         ensureOpen();
         String path = sessionPath(request.getHarnessSessionId()) + "/load";
+        // Only a takeover load may settle parked executions and need the
+        // longer ceiling; a plain attach stays on the steady-state one
+        // (it also runs under ConcurrentHashMap bin locks in the connector).
+        Duration timeout = request.isRuntimeRecoveryLoad()
+                ? loadTimeout : requestTimeout;
         HttpSupport.Response response;
         try {
             response = sendMutation(path, request.toJson(), null,
-                    "POST /session/:id/load");
+                    "POST /session/:id/load", timeout);
         } catch (MutationOutcomeUnknownException error) {
             throw namedLoadRefusal(error);
         }
@@ -266,7 +274,7 @@ public final class HostedHarnessClient implements AutoCloseable {
         try {
             raw = send(sessionPath(session.getHarnessSessionId()) + "/prompt",
                     "POST", request.toJson(), session.getHarnessClientId(),
-                    dispatched);
+                    requestTimeout, dispatched);
         } catch (DaemonTransportException e) {
             // A locally rejected send proves this submission never reached
             // the server, so a marker owned by it cannot be a running turn;
@@ -951,6 +959,14 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new DaemonProtocolException(
                     "Endpoint does not advertise hosted_harness_private_v1");
         }
+        // A build that predates message.delta records cannot open the
+        // journals one now writes; refuse it once here instead of failing
+        // every Session open.
+        if (!features.contains("managed_session_journal_delta_v1")) {
+            throw new DaemonProtocolException(
+                    "Endpoint does not advertise"
+                            + " managed_session_journal_delta_v1");
+        }
         Map<String, Object> hosted = JsonSupport.requiredObject(json,
                 "hostedHarness", "capabilities");
         Map<String, Object> versions = JsonSupport.requiredObject(hosted,
@@ -1154,9 +1170,15 @@ public final class HostedHarnessClient implements AutoCloseable {
 
     private HttpSupport.Response sendMutation(String path,
             Map<String, Object> body, String clientId, String operation) {
+        return sendMutation(path, body, clientId, operation, requestTimeout);
+    }
+
+    private HttpSupport.Response sendMutation(String path,
+            Map<String, Object> body, String clientId, String operation,
+            Duration timeout) {
         HttpResponse<HttpSupport.Body> raw;
         try {
-            raw = send(path, "POST", body, clientId);
+            raw = send(path, "POST", body, clientId, timeout);
         } catch (IOException | InterruptedException e) {
             restoreInterrupt(e);
             throw new MutationOutcomeUnknownException(operation, e);
@@ -1239,17 +1261,25 @@ public final class HostedHarnessClient implements AutoCloseable {
     private HttpResponse<HttpSupport.Body> send(String path, String method,
             Map<String, Object> body, String clientId)
             throws IOException, InterruptedException {
-        return send(path, method, body, clientId, new AtomicBoolean());
+        return send(path, method, body, clientId, requestTimeout,
+                new AtomicBoolean());
     }
 
     private HttpResponse<HttpSupport.Body> send(String path, String method,
-            Map<String, Object> body, String clientId,
+            Map<String, Object> body, String clientId, Duration timeout)
+            throws IOException, InterruptedException {
+        return send(path, method, body, clientId, timeout,
+                new AtomicBoolean());
+    }
+
+    private HttpResponse<HttpSupport.Body> send(String path, String method,
+            Map<String, Object> body, String clientId, Duration timeout,
             AtomicBoolean dispatched)
             throws IOException, InterruptedException {
         HttpRequest.Builder builder = sessionRequestBuilder(path, clientId)
                 .header("Accept", "application/json")
                 .header("Accept-Encoding", "identity")
-                .timeout(requestTimeout);
+                .timeout(timeout);
         if (body == null) {
             builder.method(method, HttpRequest.BodyPublishers.noBody());
         } else {
@@ -1427,8 +1457,19 @@ public final class HostedHarnessClient implements AutoCloseable {
             if (statusCode == 401 || statusCode == 403) {
                 return;
             }
+            // The serve delegating app answers requests with a bare
+            // pre-contract 404 while the runtime is still booting — the
+            // generation contract lives only in the runtime app, so this
+            // is "not ready yet", never a generation change.
+            if (statusCode == 404) {
+                throw new DaemonTransportException(
+                        "Hosted Harness answered a pre-contract 404"
+                                + " (still starting)",
+                        null);
+            }
             throw new DaemonProtocolException(
-                    "Hosted Harness response omitted " + BOOT_ID_HEADER);
+                    "Hosted Harness response omitted " + BOOT_ID_HEADER
+                            + " (HTTP " + statusCode + ")");
         }
         String normalized;
         try {
@@ -1602,6 +1643,7 @@ public final class HostedHarnessClient implements AutoCloseable {
         private String capabilityDigest;
         private Duration connectTimeout = Duration.ofSeconds(10);
         private Duration requestTimeout = Duration.ofSeconds(30);
+        private Duration loadTimeout;
         private Duration heartbeatInterval = Duration.ofMinutes(1);
         private Duration sseIdleTimeout = Duration.ofSeconds(45);
         private int maximumSseFrameBytes = 16 * 1024 * 1024;
@@ -1639,6 +1681,14 @@ public final class HostedHarnessClient implements AutoCloseable {
 
         public Builder requestTimeout(Duration requestTimeout) {
             this.requestTimeout = positive(requestTimeout, "requestTimeout");
+            return this;
+        }
+
+        /** A takeover load can take far longer than a steady-state call
+         * (it may settle parked Runtime executions), so it gets its own
+         * ceiling; unset falls back to {@link #requestTimeout}. */
+        public Builder loadTimeout(Duration loadTimeout) {
+            this.loadTimeout = positive(loadTimeout, "loadTimeout");
             return this;
         }
 
