@@ -178,9 +178,14 @@ function stepStatus(
   return previous ?? 'running';
 }
 
+/**
+ * The options put to the person. `allow_always` is left out: a session
+ * agent's hidden session is pinned to the default approval mode
+ * (`Config.markSessionAgentSession`), so an "always" grant cannot take
+ * effect there and the tool call it answers fails instead of running.
+ */
 const PERMISSION_KINDS = new Set([
   'allow_once',
-  'allow_always',
   'reject_once',
   'reject_always',
 ]);
@@ -359,6 +364,12 @@ export function createQwenAcpAdapter(
         }
       };
 
+      // The orchestrator shows one permission at a time (a run's frame has
+      // one slot), so overlapping requests are put to the person in turn;
+      // one resolved elsewhere while queued is skipped.
+      let permissionChain: Promise<void> = Promise.resolve();
+      const settledElsewhere = new Set<string>();
+
       const follow = (async () => {
         for await (const event of bridge.subscribeEvents(sessionId, {
           signal: streamController.signal,
@@ -374,44 +385,52 @@ export function createQwenAcpAdapter(
               withdrawPermission(prompt.requestId);
               continue;
             }
-            input.onEvent({ type: 'permission_request', prompt });
-            void (async () => {
-              // Until the bridge accepts a vote: a refused one (policy,
-              // unknown option) re-arms `awaitPermission` so the person can
-              // answer again instead of the run hanging on a dead prompt.
-              // `awaitPermission` rejects when the run is stopped or ends:
-              // the request is then refused, so the turn can wind down.
-              for (;;) {
-                let optionId: string;
-                try {
-                  optionId = await input.awaitPermission(prompt);
-                } catch {
-                  withdrawPermission(prompt.requestId);
-                  return;
-                }
-                let accepted = false;
-                try {
-                  accepted = bridge.respondToSessionPermission(
-                    sessionId,
-                    prompt.requestId,
-                    { outcome: { outcome: 'selected', optionId } },
-                    options.permissionVoteContext?.(prompt.requestId),
-                  );
-                } catch {
-                  accepted = false;
-                }
-                if (accepted) return;
+            permissionChain = permissionChain
+              .then(async () => {
+                if (settledElsewhere.delete(prompt.requestId)) return;
                 if (input.signal.aborted) {
                   withdrawPermission(prompt.requestId);
                   return;
                 }
-              }
-            })().catch(() => {});
+                input.onEvent({ type: 'permission_request', prompt });
+                // Until the bridge accepts a vote: a refused one (policy,
+                // unknown option) re-arms `awaitPermission` so the person can
+                // answer again instead of the run hanging on a dead prompt.
+                // `awaitPermission` rejects when the run is stopped or ends:
+                // the request is then refused, so the turn can wind down.
+                for (;;) {
+                  let optionId: string;
+                  try {
+                    optionId = await input.awaitPermission(prompt);
+                  } catch {
+                    withdrawPermission(prompt.requestId);
+                    return;
+                  }
+                  let accepted = false;
+                  try {
+                    accepted = bridge.respondToSessionPermission(
+                      sessionId,
+                      prompt.requestId,
+                      { outcome: { outcome: 'selected', optionId } },
+                      options.permissionVoteContext?.(prompt.requestId),
+                    );
+                  } catch {
+                    accepted = false;
+                  }
+                  if (accepted) return;
+                  if (input.signal.aborted) {
+                    withdrawPermission(prompt.requestId);
+                    return;
+                  }
+                }
+              })
+              .catch(() => {});
             continue;
           }
           if (event.type === 'permission_resolved') {
             const requestId = (event.data as { requestId?: string }).requestId;
             if (requestId) {
+              settledElsewhere.add(requestId);
               input.onEvent({ type: 'permission_resolved', requestId });
             }
             continue;

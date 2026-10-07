@@ -303,6 +303,15 @@ describe('codex-app-server adapter', () => {
     );
     expect(texts).not.toContain('replayed');
     expect(texts).not.toContain('subagent');
+    // The approval contract is re-pinned on resume, not trusted to persist.
+    const resume = spawns[0]!.fake.received.find(
+      (message) => message['method'] === 'thread/resume',
+    );
+    expect(resume!['params']).toMatchObject({
+      threadId: 'th_old',
+      approvalPolicy: 'on-request',
+      sandbox: 'read-only',
+    });
   });
 
   it('falls back to thread/start when thread/resume is refused', async () => {

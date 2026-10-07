@@ -249,7 +249,9 @@ const FULL_OPTIONS: SessionAgentPermissionPrompt['options'] = [
   { optionId: 'allow_once', name: 'Allow', kind: 'allow_once' },
   {
     optionId: 'allow_always',
-    name: 'Allow for this session',
+    // codex keeps the grant on this agent's thread, which only this chat
+    // resumes (the native session is bound per chat session and agent).
+    name: 'Allow for the rest of this chat',
     kind: 'allow_always',
   },
   { optionId: 'reject_once', name: 'Deny', kind: 'reject_once' },
@@ -879,6 +881,13 @@ export function createCodexAppServerAdapter(
             threadId: resumeThreadId,
             cwd: input.cwd,
             model: input.model ?? null,
+            // Re-asserted on every resume rather than trusted to persist with
+            // the thread: the approval contract must not rest on codex
+            // keeping these across resumes (see thread/start below). A codex
+            // that refuses the fields falls back to a fresh thread, which
+            // carries them.
+            approvalPolicy: 'on-request',
+            sandbox: 'read-only',
           },
           timeouts.threadSetupMs,
         );
@@ -913,9 +922,7 @@ export function createCodexAppServerAdapter(
             // inside the workspace through without asking.
             // Observed with codex 0.155.1 (acceptance 2.5): `ls` ran without
             // a prompt; apply_patch asked, and allow / reject were honoured.
-            // TODO(multi-agent): verify against real codex CLI — whether a
-            // resumed thread keeps this policy (thread/resume does not
-            // resend it).
+            // thread/resume re-sends both pins.
             sandbox: 'read-only',
             // TODO(multi-agent): verify against real codex CLI — that
             // `developerInstructions` carries the persona and persists with

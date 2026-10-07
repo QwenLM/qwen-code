@@ -202,9 +202,10 @@ function forceForeground(
     : input;
 }
 
+// No "always": claude would need `updatedPermissions` for that (unverified,
+// see below), so the option would act as allow once under another name.
 const PERMISSION_OPTIONS: SessionAgentPermissionPrompt['options'] = [
   { optionId: 'allow_once', name: 'Allow', kind: 'allow_once' },
-  { optionId: 'allow_always', name: 'Always allow', kind: 'allow_always' },
   { optionId: 'reject_once', name: 'Deny', kind: 'reject_once' },
 ];
 
@@ -389,10 +390,13 @@ export function createClaudeCliAdapter(
         request.input && typeof request.input === 'object'
           ? (request.input as Record<string, unknown>)
           : {};
-      const inputPreview = previewJson(toolInput, MAX_INPUT_PREVIEW_CHARS);
+      // What runs if allowed: the person approves this input, not the one
+      // claude asked with (a background flag is forced off before showing).
+      const executedInput = forceForeground(toolInput);
+      const inputPreview = previewJson(executedInput, MAX_INPUT_PREVIEW_CHARS);
       const prompt: SessionAgentPermissionPrompt = {
         requestId,
-        title: toolTitle(toolName, toolInput),
+        title: toolTitle(toolName, executedInput),
         toolName,
         ...(inputPreview ? { inputPreview } : {}),
         options: PERMISSION_OPTIONS,
@@ -417,7 +421,7 @@ export function createClaudeCliAdapter(
                   // is treated as allow once.
                   return {
                     behavior: 'allow',
-                    updatedInput: forceForeground(toolInput),
+                    updatedInput: executedInput,
                   };
                 }
                 return { behavior: 'deny', message: DENIED_MESSAGE };

@@ -300,9 +300,13 @@ describe('claude-cli adapter', () => {
     });
     expect(prompts[0]!.options.map((option) => option.kind)).toEqual([
       'allow_once',
-      'allow_always',
       'reject_once',
     ]);
+    // The person approves the input that runs: background forced off.
+    expect(JSON.parse(prompts[0]!.inputPreview!)).toEqual({
+      command: 'npm test',
+      run_in_background: false,
+    });
     const responses = spawns[0]!.fake.written.filter(
       (line) => line['type'] === 'control_response',
     );
