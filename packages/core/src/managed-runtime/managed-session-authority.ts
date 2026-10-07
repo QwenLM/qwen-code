@@ -46,6 +46,7 @@ import {
   assertManagedSessionStableId,
   assertManagedSessionTransaction,
   boundedString,
+  managedSessionDomainCarriesRecord,
   managedSessionEventsDigest,
   managedSessionKeysEqual,
   managedSessionReaderFacingBody,
@@ -1358,6 +1359,20 @@ export class LocalManagedSessionAuthority {
       // Refused before publishing, so a retry loop leaves no body behind.
       this.assertCommandWritable(command);
       this.assertExpectedSequence(command);
+      if (managedSessionDomainCarriesRecord(request.domain)) {
+        // The fence in commit() stays the backstop for the event channels;
+        // validating the record here keeps a refused domain commit from
+        // leaving a published envelope no event will ever reference.
+        const validated = validateManagedReaderFacingRecord(
+          request.content['record'],
+          this.sessionKey.sessionId,
+        );
+        if ('error' in validated) {
+          throw new ManagedSessionRecordError(
+            `${request.domain} record contains an invalid reader-facing record: ${validated.error}`,
+          );
+        }
+      }
       const previous = this.domainRecords.get(request.domain);
       const revision = (previous?.revision ?? 0) + 1;
       const recordRef = await store.publish(
@@ -2479,8 +2494,16 @@ export class LocalManagedSessionAuthority {
       operation: 'releaseActivation',
       subject: this.currentActivationSubject,
       // The pre-queue check ran before the boundary publish awaited, so a
-      // recovery block can have landed meanwhile.
-      hold: () => !this.recoveryBlocked,
+      // recovery block or a successor install can have landed meanwhile; a
+      // release that lost the queue to either is skipped, not rejected —
+      // there is nothing left of this activation to fence. Identity-only
+      // conjuncts keep a same-identity release admissible, so the double
+      // release in stopAdvancing still resolves via the replay path.
+      hold: (live) =>
+        !this.recoveryBlocked &&
+        live !== undefined &&
+        live.activationId === current.activationId &&
+        live.epoch === current.epoch,
     });
   }
 

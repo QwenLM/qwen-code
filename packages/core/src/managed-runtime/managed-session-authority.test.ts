@@ -12,7 +12,10 @@ import { assertSessionExecutionEngine } from '../services/session-execution-engi
 import { readSessionTranscriptSnapshot } from '../services/session-transcript-reader.js';
 import { SessionWriterLease } from '../services/session-writer-lease.js';
 import { Storage } from '../config/storage.js';
-import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
+import {
+  LocalJsonlManagedSessionJournalHandle,
+  LocalJsonlManagedSessionJournalStore,
+} from './local-jsonl-managed-session-journal-store.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import {
   assertManagedSessionRestoreBundle,
@@ -728,6 +731,11 @@ describe('managed session authority activation fences', () => {
   });
 
   describe('activation renewal', () => {
+    afterEach(() => {
+      // The commit gate spies on the journal handle's prototype.
+      vi.restoreAllMocks();
+    });
+
     async function openRenewable(fixture: Fixture, now: () => number) {
       const lease = await SessionWriterLease.acquire({
         runtimeBaseDir: fixture.runtimeBaseDir,
@@ -735,27 +743,62 @@ describe('managed session authority activation fences', () => {
         transcriptPath: fixture.transcriptPath,
       });
       try {
+        const resources = LocalManagedSessionResourceStore.create({
+          runtimeBaseDir: fixture.runtimeBaseDir,
+          sessionKey: sessionKeyFor(fixture),
+        });
         const authority = await LocalManagedSessionAuthority.open({
           lease,
           sessionKey: sessionKeyFor(fixture),
           cwd: '/workspace',
           version: 'test',
           now,
-          resources: LocalManagedSessionResourceStore.create({
-            runtimeBaseDir: fixture.runtimeBaseDir,
-            sessionKey: sessionKeyFor(fixture),
-          }),
+          resources,
           create: {
             definitionRef: ref('managed-definition'),
             rootSnapshotRef: ref('managed-root'),
             createdBy: 'daemon',
           },
         });
-        return { authority, release: () => lease.release() };
+        return { authority, resources, release: () => lease.release() };
       } catch (error) {
         await lease.release().catch(() => undefined);
         throw error;
       }
+    }
+
+    // Gates every commit of `operation` inside the serial queue — while the
+    // gated call still occupies it — so a later call reads the pre-commit
+    // state and queues behind it. `committing` resolves once the gate holds,
+    // `finish` lets the append through.
+    function holdCommitOf(operation: string): {
+      committing: Promise<void>;
+      finish: () => void;
+    } {
+      let started!: () => void;
+      const committing = new Promise<void>((resolve) => {
+        started = resolve;
+      });
+      let mayFinish!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        mayFinish = resolve;
+      });
+      const original =
+        LocalJsonlManagedSessionJournalHandle.prototype.appendTransaction;
+      vi.spyOn(
+        LocalJsonlManagedSessionJournalHandle.prototype,
+        'appendTransaction',
+      ).mockImplementation(async function (
+        this: LocalJsonlManagedSessionJournalHandle,
+        records,
+      ) {
+        if (JSON.stringify(records).includes(`"operation":"${operation}"`)) {
+          started();
+          await gate;
+        }
+        return original.call(this, records);
+      });
+      return { committing, finish: mayFinish };
     }
 
     it('extends the horizon without changing the activation identity', async () => {
@@ -800,32 +843,9 @@ describe('managed session authority activation fences', () => {
 
     it('does not revive a released activation when a renewal commits after the release', async () => {
       const fixture = await createFixture();
-      const lease = await SessionWriterLease.acquire({
-        runtimeBaseDir: fixture.runtimeBaseDir,
-        sessionId: fixture.sessionId,
-        transcriptPath: fixture.transcriptPath,
-      });
+      const opened = await openRenewable(fixture, () => 1_000_000);
       try {
-        const journal = LocalJsonlManagedSessionJournalStore.fromLease(
-          lease,
-          sessionKeyFor(fixture),
-        );
-        const authority = await LocalManagedSessionAuthority.open({
-          journal,
-          sessionKey: sessionKeyFor(fixture),
-          cwd: '/workspace',
-          version: 'test',
-          now: () => 1_000_000,
-          resources: LocalManagedSessionResourceStore.create({
-            runtimeBaseDir: fixture.runtimeBaseDir,
-            sessionKey: sessionKeyFor(fixture),
-          }),
-          create: {
-            definitionRef: ref('managed-definition'),
-            rootSnapshotRef: ref('managed-root'),
-            createdBy: 'daemon',
-          },
-        });
+        const { authority } = opened;
         await authority.installActivation({
           activationId: 'act-release-race',
           workerId: 'worker-1',
@@ -835,33 +855,11 @@ describe('managed session authority activation fences', () => {
         // Hold the release commit inside the serial queue, so the renewal
         // below reads the still-'active' pre-commit state and queues behind
         // the release it must not outlive.
-        let releaseCommitStarted!: () => void;
-        const releaseCommitting = new Promise<void>((resolve) => {
-          releaseCommitStarted = resolve;
-        });
-        let releaseCommitMayFinish!: () => void;
-        const releaseCommitGate = new Promise<void>((resolve) => {
-          releaseCommitMayFinish = resolve;
-        });
-        const appendTransaction = journal.appendTransaction.bind(journal);
-        vi.spyOn(journal, 'appendTransaction').mockImplementation(
-          async (records) => {
-            if (
-              JSON.stringify(records).includes(
-                '"operation":"releaseActivation"',
-              )
-            ) {
-              releaseCommitStarted();
-              await releaseCommitGate;
-            }
-            return appendTransaction(records);
-          },
-        );
-
+        const releaseGate = holdCommitOf('releaseActivation');
         const release = authority.releaseActivation();
-        await releaseCommitting;
+        await releaseGate.committing;
         const renewed = authority.renewActivation({ leaseDurationMs: 60_000 });
-        releaseCommitMayFinish();
+        releaseGate.finish();
         await release;
         await expect(renewed).resolves.toBeUndefined();
         expect(authority.currentActivation).toMatchObject({
@@ -870,39 +868,15 @@ describe('managed session authority activation fences', () => {
           renewalSeq: 0,
         });
       } finally {
-        await lease.release();
+        await opened.release();
       }
     });
 
     it('skips a queued renewal when a fresh activation installs behind the release', async () => {
       const fixture = await createFixture();
-      const lease = await SessionWriterLease.acquire({
-        runtimeBaseDir: fixture.runtimeBaseDir,
-        sessionId: fixture.sessionId,
-        transcriptPath: fixture.transcriptPath,
-      });
+      const opened = await openRenewable(fixture, () => 1_000_000);
       try {
-        const journal = LocalJsonlManagedSessionJournalStore.fromLease(
-          lease,
-          sessionKeyFor(fixture),
-        );
-        const resources = LocalManagedSessionResourceStore.create({
-          runtimeBaseDir: fixture.runtimeBaseDir,
-          sessionKey: sessionKeyFor(fixture),
-        });
-        const authority = await LocalManagedSessionAuthority.open({
-          journal,
-          sessionKey: sessionKeyFor(fixture),
-          cwd: '/workspace',
-          version: 'test',
-          now: () => 1_000_000,
-          resources,
-          create: {
-            definitionRef: ref('managed-definition'),
-            rootSnapshotRef: ref('managed-root'),
-            createdBy: 'daemon',
-          },
-        });
+        const { authority, resources } = opened;
         await authority.installActivation({
           activationId: 'act-a',
           workerId: 'worker-1',
@@ -935,31 +909,9 @@ describe('managed session authority activation fences', () => {
         // Hold the release commit inside the serial queue, so the renewal
         // below reads the still-'active' pre-commit state and queues behind
         // the install that replaces it.
-        let releaseCommitStarted!: () => void;
-        const releaseCommitting = new Promise<void>((resolve) => {
-          releaseCommitStarted = resolve;
-        });
-        let releaseCommitMayFinish!: () => void;
-        const releaseCommitGate = new Promise<void>((resolve) => {
-          releaseCommitMayFinish = resolve;
-        });
-        const appendTransaction = journal.appendTransaction.bind(journal);
-        vi.spyOn(journal, 'appendTransaction').mockImplementation(
-          async (records) => {
-            if (
-              JSON.stringify(records).includes(
-                '"operation":"releaseActivation"',
-              )
-            ) {
-              releaseCommitStarted();
-              await releaseCommitGate;
-            }
-            return appendTransaction(records);
-          },
-        );
-
+        const releaseGate = holdCommitOf('releaseActivation');
         const release = authority.releaseActivation();
-        await releaseCommitting;
+        await releaseGate.committing;
         const installed = authority.installActivation({
           activationId: 'act-b',
           workerId: 'worker-2',
@@ -969,9 +921,15 @@ describe('managed session authority activation fences', () => {
         const renewed = authority.renewActivation({ leaseDurationMs: 60_000 });
         // Captured at the renewal's resolution, before the later awaits: the
         // skip must pin the state the renewal saw, not only the final state
-        // any interleaving could end in.
-        const stateAtRenewal = renewed.then(() => authority.currentActivation);
-        releaseCommitMayFinish();
+        // any interleaving could end in. The rejection arm keeps a rejecting
+        // renewal from surfacing as an unhandled rejection against whatever
+        // test is running when it settles — the assertion below still fails
+        // on undefined, so the pin keeps its force.
+        const stateAtRenewal = renewed.then(
+          () => authority.currentActivation,
+          () => undefined,
+        );
+        releaseGate.finish();
         await release;
         await expect(installed).resolves.toEqual({
           activationId: 'act-b',
@@ -989,7 +947,7 @@ describe('managed session authority activation fences', () => {
           phase: 'active',
         });
       } finally {
-        await lease.release();
+        await opened.release();
       }
     });
 
@@ -1207,6 +1165,45 @@ describe('managed session authority activation fences', () => {
         });
       } finally {
         await lease.release();
+      }
+    });
+
+    it('skips a release that loses the serial queue to a successor install', async () => {
+      const fixture = await createFixture();
+      const opened = await openRenewable(fixture, () => 1_000_000);
+      try {
+        const { authority } = opened;
+        await authority.installActivation({
+          activationId: 'act-a',
+          workerId: 'worker-1',
+          leaseDurationMs: 60_000,
+        });
+
+        // Hold the successor install's commit inside the serial queue, so
+        // the release below captures act-a as its pre-queue current and
+        // queues behind the install that replaces it; the release's in-queue
+        // hold is what skips it instead of rejecting.
+        const installGate = holdCommitOf('installActivation');
+        const installed = authority.installActivation({
+          activationId: 'act-b',
+          workerId: 'worker-2',
+          leaseDurationMs: 60_000,
+        });
+        await installGate.committing;
+        const released = authority.releaseActivation();
+        installGate.finish();
+        await expect(installed).resolves.toEqual({
+          activationId: 'act-b',
+          epoch: 2,
+        });
+        await expect(released).resolves.toBeUndefined();
+        expect(authority.currentActivation).toMatchObject({
+          activationId: 'act-b',
+          epoch: 2,
+          phase: 'active',
+        });
+      } finally {
+        await opened.release();
       }
     });
 
@@ -2971,6 +2968,21 @@ describe('managed session checkpoints', () => {
         `turn result resource ${resultRef.resourceId} contains an invalid reader-facing record: it belongs to session f47ac10b-58cc-4372-a567-0e02b2c3d479, not managed-session.`,
     },
     {
+      label: 'a record whose sessionId carries control bytes',
+      body: () =>
+        turnResultBody({
+          sessionId: '\x1b[2J' + 'x'.repeat(5000),
+        }),
+      detail: () =>
+        `it belongs to session ${'x'.repeat(4096)}, not managed-session.`,
+      assertMessage: (message: string) => {
+        // The refusal interpolates the body-supplied sessionId: stripped of
+        // control bytes and bounded, or the daemon log takes both raw.
+        expect(message).not.toContain('\x1b');
+        expect(message.length).toBeLessThanOrEqual(4_300);
+      },
+    },
+    {
       label: 'a record without a cwd',
       body: () => turnResultBody({ cwd: undefined }),
       detail: () => 'missing sessionId/cwd/version/timestamp',
@@ -3017,7 +3029,7 @@ describe('managed session checkpoints', () => {
     },
   ])(
     'rejects a turn-complete whose result body is $label',
-    async ({ body, detail }) => {
+    async ({ body, detail, ...rest }) => {
       const harness = await openRunnableHarness();
       const resultRef = await harness.store.publish(
         'managed-turn-result',
@@ -3054,6 +3066,16 @@ describe('managed session checkpoints', () => {
       );
       await expect(settled).rejects.toThrow(/invalid reader-facing record/);
       await expect(settled).rejects.toThrow(detail(resultRef));
+      const assertMessage = (
+        rest as { assertMessage?: (message: string) => void }
+      ).assertMessage;
+      if (assertMessage !== undefined) {
+        const message = await settled.then(
+          () => '',
+          (error: unknown) => (error as Error).message,
+        );
+        assertMessage(message);
+      }
       expect(harness.authority.committedSequence).toBe(before);
       await harness.close();
     },
@@ -3129,6 +3151,127 @@ describe('managed session checkpoints', () => {
             role: 'user',
             contentRef,
             parentMessageId: null,
+          },
+        }),
+        HOLDS,
+      ),
+    ).rejects.toThrow(/invalid reader-facing record/);
+    expect(harness.authority.committedSequence).toBe(before);
+    await harness.close();
+  });
+
+  it('rejects a committed domain envelope that carries no record', async () => {
+    const harness = await openRunnableHarness();
+    // commitDomainRecord refuses this content before publishing, so the
+    // fence's backstop is reached the way a hand-composed envelope reaches
+    // it: through the raw event channel.
+    const recordRef = await harness.store.publish(
+      'managed-file_history',
+      Buffer.from(
+        JSON.stringify({ state: { files: {} }, pendingTurn: null }),
+        'utf8',
+      ),
+    );
+    const before = harness.authority.committedSequence;
+    await expect(
+      harness.authority.appendExecutionEvent(
+        inputCommand(harness.fixture, {
+          operation: 'commitDomainRecord',
+          commandId: 'cmd-domain-no-record',
+        }),
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'domain:file_history:no-record',
+          sessionKey: sessionKeyFor(harness.fixture),
+          kind: 'domain.committed',
+          occurredAt: 1,
+          payload: {
+            domain: 'file_history',
+            version: 1,
+            operationId: 'cmd-domain-no-record',
+            recordRef,
+          },
+        }),
+        { class: 'trusted_entry' },
+      ),
+    ).rejects.toThrow(/invalid reader-facing record/);
+    expect(harness.authority.committedSequence).toBe(before);
+    await harness.close();
+  });
+
+  it('refuses a record-carrying domain record before its envelope publishes', async () => {
+    const harness = await openRunnableHarness();
+    const before = harness.authority.committedSequence;
+    // The fence in commit() would refuse this record too, but only after the
+    // envelope is durable; the refusal must come first so no body is left.
+    const publish = vi.spyOn(harness.store, 'publish');
+    await expect(
+      harness.authority.commitDomainRecord(
+        inputCommand(harness.fixture, {
+          operation: 'commitDomainRecord',
+          commandId: 'cmd-domain-invalid-record',
+        }),
+        {
+          domain: 'file_history',
+          content: {
+            state: { files: {} },
+            pendingTurn: null,
+            record: {
+              uuid: 'rec-fh-1',
+              parentUuid: null,
+              sessionId: 'managed-session',
+              timestamp: new Date(1).toISOString(),
+              type: 'system',
+              subtype: 'file_history_snapshot',
+              cwd: '/workspace',
+              version: undefined,
+            },
+          },
+        },
+        { class: 'trusted_entry' },
+      ),
+    ).rejects.toThrow(/invalid reader-facing record/);
+    expect(publish).not.toHaveBeenCalled();
+    expect(harness.authority.committedSequence).toBe(before);
+    await harness.close();
+  });
+
+  it('rejects a compaction whose summary body is not a reader-facing record', async () => {
+    const harness = await openRunnableHarness();
+    const summaryRef = await harness.store.publish(
+      'managed-compaction-summary',
+      Buffer.from('{"state":"completed"}', 'utf8'),
+    );
+    const before = harness.authority.committedSequence;
+    // The cold projection replays this channel too, so a malformed summary
+    // body must be refused at write time or the whole log fails at restore.
+    await expect(
+      harness.authority.appendExecutionEvent(
+        inputCommand(harness.fixture, {
+          operation: 'compactContext',
+          commandId: 'cmd-compaction-invalid-body',
+        }),
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'compaction:invalid-body',
+          sessionKey: sessionKeyFor(harness.fixture),
+          kind: 'context.compacted',
+          occurredAt: 1,
+          subject: {
+            type: 'activation',
+            scopeId: 'act-1',
+            activationId: 'act-1',
+            epoch: 1,
+          },
+          payload: {
+            compactionId: 'cmp-invalid',
+            fromSequence: 1,
+            toSequence: sequence - 1,
+            summaryRef,
+            replacedMessageIds: [],
+            tokenCountsRef: null,
           },
         }),
         HOLDS,

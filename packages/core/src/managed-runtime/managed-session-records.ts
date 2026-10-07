@@ -271,7 +271,7 @@ function fail(message: string): never {
   throw new ManagedSessionRecordError(message);
 }
 
-function safeErrorValue(value: string): string {
+export function safeErrorValue(value: string): string {
   return stripAnsiAndControl(value).slice(0, MAX_ERROR_VALUE_LENGTH);
 }
 
@@ -1302,6 +1302,11 @@ const RECORD_CARRYING_DOMAINS: ReadonlySet<unknown> = new Set([
   'session_source',
 ]);
 
+/** Whether a domain's envelope carries a whole reader-facing record. */
+export function managedSessionDomainCarriesRecord(domain: unknown): boolean {
+  return RECORD_CARRYING_DOMAINS.has(domain);
+}
+
 /**
  * Where a whole reader-facing record lives, for the channels that carry one.
  *
@@ -1329,7 +1334,7 @@ export function managedSessionReaderFacingBody(event: ManagedSessionEvent):
     case 'context.compacted':
       return { ref: event.payload['summaryRef'], inDomainEnvelope: false };
     case 'domain.committed':
-      return RECORD_CARRYING_DOMAINS.has(event.payload['domain'])
+      return managedSessionDomainCarriesRecord(event.payload['domain'])
         ? { ref: event.payload['recordRef'], inDomainEnvelope: true }
         : undefined;
     default:
@@ -1351,7 +1356,7 @@ export function validateManagedReaderFacingRecord(
   const candidate = record as Partial<ChatRecord> | undefined;
   if (record !== undefined && record.sessionId !== sessionId) {
     return {
-      error: `it belongs to session ${record.sessionId}, not ${sessionId}.`,
+      error: `it belongs to session ${safeErrorValue(record.sessionId)}, not ${safeErrorValue(sessionId)}.`,
     };
   }
   if (

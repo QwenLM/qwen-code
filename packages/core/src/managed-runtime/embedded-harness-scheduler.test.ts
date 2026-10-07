@@ -353,6 +353,119 @@ describe('EmbeddedHarnessScheduler', () => {
     await waitUntil(() => handled.includes('a1') && handled.includes('a2'));
   });
 
+  it('restarts the blocked cadence when an external capacity signal arrives', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const store = await FileManagedActivationStore.open(filePath);
+    const hasMemoryHeadroom = vi.fn(() => false);
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 30_000,
+      hasMemoryHeadroom,
+      handler: async () => {},
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(activation('a1'));
+    await scheduler.start();
+    expect(scheduler.isMemoryBlocked).toBe(true);
+    const consulted = () => hasMemoryHeadroom.mock.calls.length;
+
+    // Grow the backoff: timer polls at 1s, 2s and 4s leave the wake 8s out.
+    await vi.advanceTimersByTimeAsync(7_000);
+    const grown = consulted();
+
+    // The capacity signal's pump consults once and, still blocked, re-arms
+    // the wake at the 1s base rather than the grown backoff.
+    scheduler.notifyCapacityChanged();
+    await waitUntil(() => consulted() === grown + 1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(consulted()).toBe(grown + 2);
+  });
+
+  it('handles queued work within a second of a capacity-signal burst', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const store = await FileManagedActivationStore.open(filePath);
+    const hasMemoryHeadroom = vi.fn(() => false);
+    const handled: string[] = [];
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 30_000,
+      hasMemoryHeadroom,
+      handler: async (item) => {
+        handled.push(item.activationId);
+      },
+    });
+    schedulers.push(scheduler);
+    await scheduler.submit(activation('a1'));
+    await scheduler.start();
+    expect(scheduler.isMemoryBlocked).toBe(true);
+    const consulted = () => hasMemoryHeadroom.mock.calls.length;
+
+    // Six signals in one macrotask queue six pumps behind the one running;
+    // the restart intent rides each of them, so the wake they leave behind
+    // is the 1s base, not a backoff the burst itself kept doubling.
+    scheduler.notifyCapacityChanged();
+    scheduler.notifyCapacityChanged();
+    scheduler.notifyCapacityChanged();
+    scheduler.notifyCapacityChanged();
+    scheduler.notifyCapacityChanged();
+    scheduler.notifyCapacityChanged();
+    await waitUntil(() => consulted() === 7);
+
+    hasMemoryHeadroom.mockReturnValue(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await waitUntil(() => handled.includes('a1'));
+    expect(handled).toEqual(['a1']);
+  });
+
+  it('lets the backoff reach its cap across a stream of idempotent re-submits', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const store = await FileManagedActivationStore.open(filePath);
+    const hasMemoryHeadroom = vi.fn(() => false);
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 1,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 30_000,
+      hasMemoryHeadroom,
+      handler: async () => {},
+    });
+    schedulers.push(scheduler);
+    const item = activation('a1');
+    await scheduler.submit(item);
+    await scheduler.start();
+    expect(scheduler.isMemoryBlocked).toBe(true);
+    const consulted = () => hasMemoryHeadroom.mock.calls.length;
+
+    // Three minutes of 1 Hz re-submits of the already-queued activation:
+    // each is idempotent (created: false) and consults once, but none may
+    // restart the backoff it did not cause.
+    for (let elapsed = 0; elapsed < 3 * 60_000; elapsed += 1_000) {
+      await expect(scheduler.submit(item)).resolves.toMatchObject({
+        created: false,
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+
+    // At the 30s cap the armed wake survives a 25s silence untouched and
+    // fires exactly once in the seconds after it; a cadence the stream kept
+    // resetting to the 1s base would consult throughout the silence.
+    const settled = consulted();
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(consulted()).toBe(settled);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(consulted()).toBe(settled + 1);
+  });
+
   it('clears the memory block when the queued work is cancelled', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const store = await FileManagedActivationStore.open(filePath);
@@ -393,7 +506,7 @@ describe('EmbeddedHarnessScheduler', () => {
     });
     const foreign = activation('foreign-1');
     await store.enqueue(foreign, { maxQueued: 10, maxQueuedPerTenant: 10 });
-    let foreignLease = await store.claim(foreign, 'other-worker', 30_000);
+    let foreignLease = await store.claim(foreign, 'other-worker', 3_000);
 
     const hasMemoryHeadroom = vi.fn(() => false);
     const scheduler = new EmbeddedHarnessScheduler({
@@ -412,16 +525,15 @@ describe('EmbeddedHarnessScheduler', () => {
     expect(scheduler.isMemoryBlocked).toBe(true);
     const consulted = () => hasMemoryHeadroom.mock.calls.length;
 
-    // Ten minutes behind a lease its owner renews every ten seconds: the
-    // expiry always sits inside the grown poll window but never lapses, and
-    // following it would poll at the fleet's renewal rate instead of the
-    // bounded cadence.
+    // Ten minutes behind a lease its owner renews every second: the expiry
+    // stays above the 1s base interval (so the guarded code keeps its own
+    // cadence) but never lapses, and following it would poll at the fleet's
+    // renewal rate — hundreds of consults, not tens — instead of the bounded
+    // cadence.
     const before = consulted();
     for (let elapsed = 0; elapsed < 10 * 60_000; elapsed += 1_000) {
       now += 1_000;
-      if (now % 10_000 === 0) {
-        foreignLease = await store.renew(foreignLease!, 30_000);
-      }
+      foreignLease = await store.renew(foreignLease!, 3_000);
       await vi.advanceTimersByTimeAsync(1_000);
     }
     expect(foreignLease).toBeDefined();

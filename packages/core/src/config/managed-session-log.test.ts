@@ -1072,6 +1072,27 @@ describe('Managed Session log recording', () => {
         version: 'test',
         message: { role: 'user', parts: [{ text: 'after the damage' }] },
       } as ChatRecord);
+      // A valid snapshot after the damaged one: the catch must skip the
+      // damaged record and keep accumulating, so this one survives.
+      await sink.write({
+        uuid: 'rec-history-2',
+        parentUuid: 'rec-user-2',
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'file_history_snapshot',
+        cwd: projectDir,
+        version: 'test',
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'prompt-survivor',
+              trackedFileBackups: {},
+              timestamp: new Date().toISOString(),
+            },
+          ],
+        },
+      } as unknown as ChatRecord);
 
       const projection = await sessionService().readRestoreProjection(
         SESSION_ID,
@@ -1082,7 +1103,11 @@ describe('Managed Session log recording', () => {
         { role: 'user', parts: [{ text: 'before the damage' }] },
         { role: 'user', parts: [{ text: 'after the damage' }] },
       ]);
-      expect(projection?.runtime.fileHistorySnapshots).toBeUndefined();
+      expect(
+        projection?.runtime.fileHistorySnapshots?.map(
+          (snapshot) => snapshot.promptId,
+        ),
+      ).toEqual(['prompt-survivor']);
       const page = await new SessionTranscriptReader(
         projectDir,
       ).readTurnIndexPage(SESSION_ID);

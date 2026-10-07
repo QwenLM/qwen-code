@@ -153,8 +153,11 @@ export class EmbeddedHarnessScheduler {
       throw error;
     }
     if (this.started) {
-      this.memoryBlockedPollMs = MEMORY_BLOCKED_POLL_MS;
-      void this.requestPump().catch(() => undefined);
+      // A genuinely new queued activation restarts the blocked poll cadence;
+      // an idempotent re-submit must not spend the backoff it did not cause.
+      void this.requestPump({ restartBlockedCadence: result.created }).catch(
+        () => undefined,
+      );
     }
     return result;
   }
@@ -163,8 +166,9 @@ export class EmbeddedHarnessScheduler {
     if (!this.started || this.disposed || this.fatalError) return;
     // External triggers restart the blocked poll cadence: the backoff belongs
     // to timer-driven polls, and a burst of submissions must not spend it.
-    this.memoryBlockedPollMs = MEMORY_BLOCKED_POLL_MS;
-    void this.requestPump().catch(() => undefined);
+    void this.requestPump({ restartBlockedCadence: true }).catch(
+      () => undefined,
+    );
   }
 
   dispose(): void {
@@ -182,10 +186,12 @@ export class EmbeddedHarnessScheduler {
     }
   }
 
-  private requestPump(): Promise<void> {
+  private requestPump(options?: {
+    restartBlockedCadence?: boolean;
+  }): Promise<void> {
     const result = this.pumpTail.then(async () => {
       this.assertUsable();
-      await this.pump();
+      await this.pump(options);
     });
     this.pumpTail = result.catch((error: unknown) => {
       this.halt(toError(error));
@@ -193,7 +199,9 @@ export class EmbeddedHarnessScheduler {
     return result;
   }
 
-  private async pump(): Promise<void> {
+  private async pump(options?: {
+    restartBlockedCadence?: boolean;
+  }): Promise<void> {
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = undefined;
 
@@ -210,6 +218,12 @@ export class EmbeddedHarnessScheduler {
       }
       if (!this.options.hasMemoryHeadroom()) {
         this.memoryBlocked = true;
+        // The restart is consumed here, inside the pump it was carried into:
+        // written ahead of the queue it would be spent by a pump that was
+        // already waiting.
+        if (options?.restartBlockedCadence === true) {
+          this.memoryBlockedPollMs = MEMORY_BLOCKED_POLL_MS;
+        }
         // Entries of the pump cleared the armed recovery wake above, and no
         // execute() completion is coming to re-arm it (zero or idle active
         // runs) — queued work and reclaimable leases would otherwise wait

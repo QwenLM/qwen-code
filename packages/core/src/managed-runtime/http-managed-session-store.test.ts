@@ -25,8 +25,12 @@ import {
 import type { McpConfiguration } from './managed-mcp-record.js';
 import type { HookExecution, HookRegistration } from './managed-hook-record.js';
 import {
+  MANAGED_SESSION_EVENT_SUBTYPE,
+  MANAGED_SESSION_HEADER_SUBTYPE,
+  managedSessionEventRefs,
   managedSessionEventsDigest,
   parseManagedSessionEvent,
+  parseManagedSessionHeader,
 } from './managed-session-records.js';
 import type {
   ManagedSessionDurableRef,
@@ -36,6 +40,7 @@ import {
   createInitialHarnessCheckpoint,
   encodeHarnessCheckpointV1,
 } from './managed-harness-checkpoint.js';
+import { MANAGED_TOOL_RESULT_KINDS } from './managed-tool-result.js';
 
 // monitor_run is enabled by H3; the Stage H case below runs ahead of it.
 vi.mock('./managed-session-records.js', async (importOriginal) => {
@@ -2295,6 +2300,39 @@ describe('HTTP Managed Session store', () => {
         },
         { class: 'trusted_entry' },
       );
+      vi.setSystemTime(1_790_000_002_000);
+      // A free-form cancel target names the five ref fields in a json
+      // position: the writer must not collect it, and the oracle below
+      // answers from the writer's own contract, so the two cannot drift.
+      await session.authority.appendExecutionEvent(
+        {
+          operation: 'requestCancel',
+          commandId: 'cancel-1',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'e'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'cancel:req-1',
+          sessionKey: SESSION_KEY,
+          kind: 'cancel.requested',
+          occurredAt: 1_790_000_002_000,
+          payload: {
+            requestId: 'req-1',
+            target: {
+              resourceId: 'not-a-ref',
+              kind: 'not-a-ref-kind',
+              schemaVersion: 1,
+              byteLength: 2,
+              digest: 'not-a-digest',
+            },
+            reason: 'user asked',
+            requestedBy: 'test',
+          },
+        }),
+        { class: 'trusted_entry' },
+      );
       const written = {
         contractVersion: 1,
         sessionKey: SESSION_KEY,
@@ -2331,45 +2369,15 @@ describe('HTTP Managed Session store', () => {
 
   it('commits a cancel.requested whose free-form target names the five ref fields', async () => {
     const server = new FakeManagedSessionStore();
-    const runtimeBaseDir = await mkdtemp(
-      path.join(tmpdir(), 'managed-http-store-'),
-    );
-    temporaryDirectories.push(runtimeBaseDir);
-    const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
-    const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
-      allowInsecureHttp: true,
-      sessionKey: SESSION_KEY,
-      writerId: 'harness-a',
-      writerToken: TOKEN_A,
-      fetchFn: server.fetch,
-    });
-    const definitionRef = await stores.resourceStore.publish(
-      'managed-session-definition',
-      Buffer.from('{"model":"test"}', 'utf8'),
-    );
-    const rootSnapshotRef = await stores.resourceStore.publish(
-      'managed-session-root-snapshot',
-      Buffer.from('{"version":1,"messages":[]}', 'utf8'),
-    );
-    const session = await openManagedSession({
-      runtimeBaseDir,
-      sessionId: SESSION_KEY.sessionId,
-      transcriptPath,
-      sessionKey: SESSION_KEY,
-      cwd: '/workspace',
-      version: 'test',
-      workerId: 'harness-a',
-      activationLeaseDurationMs: 60_000,
-      journalStore: stores.journalStore,
-      resourceStore: stores.resourceStore,
-      create: {
-        definitionRef,
-        rootSnapshotRef,
-        createdBy: 'test',
-      },
-    });
+    const { session } = await bootStoresAndSession(server);
     try {
+      // The target is a well-formed ref in a free-form json position: only a
+      // harvester that collects refs beyond the schema-declared positions
+      // would ship it, and this assertion fails on exactly that widening.
+      const outcomeRef = await session.resources.publish(
+        'managed-tool-outcome',
+        Buffer.from('{}', 'utf8'),
+      );
       await session.authority.appendExecutionEvent(
         {
           operation: 'requestCancel',
@@ -2386,13 +2394,7 @@ describe('HTTP Managed Session store', () => {
           occurredAt: 1,
           payload: {
             requestId: 'req-1',
-            target: {
-              resourceId: 'not-a-ref',
-              kind: 'not-a-ref-kind',
-              schemaVersion: 1,
-              byteLength: 2,
-              digest: 'not-a-digest',
-            },
+            target: { ...outcomeRef },
             reason: 'user asked',
             requestedBy: 'test',
           },
@@ -2489,43 +2491,7 @@ describe('HTTP Managed Session store', () => {
 
   it('commits the manifest a blocked tool receipt carries only in its resources', async () => {
     const server = new FakeManagedSessionStore();
-    const runtimeBaseDir = await mkdtemp(
-      path.join(tmpdir(), 'managed-http-store-'),
-    );
-    temporaryDirectories.push(runtimeBaseDir);
-    const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
-      allowInsecureHttp: true,
-      sessionKey: SESSION_KEY,
-      writerId: 'harness-a',
-      writerToken: TOKEN_A,
-      fetchFn: server.fetch,
-    });
-    const definitionRef = await stores.resourceStore.publish(
-      'managed-session-definition',
-      Buffer.from('{}', 'utf8'),
-    );
-    const rootSnapshotRef = await stores.resourceStore.publish(
-      'managed-session-root-snapshot',
-      Buffer.from('{}', 'utf8'),
-    );
-    const session = await openManagedSession({
-      runtimeBaseDir,
-      sessionId: SESSION_KEY.sessionId,
-      transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
-      sessionKey: SESSION_KEY,
-      cwd: '/workspace',
-      version: 'test',
-      workerId: 'harness-a',
-      activationLeaseDurationMs: 60_000,
-      journalStore: stores.journalStore,
-      resourceStore: stores.resourceStore,
-      create: {
-        definitionRef,
-        rootSnapshotRef,
-        createdBy: 'test',
-      },
-    });
+    const { session } = await bootStoresAndSession(server);
     try {
       // A blocked Shell capture commits its receipt with resultRef null, so
       // the manifest reaches the store only through the receipt's resources.
@@ -2534,7 +2500,7 @@ describe('HTTP Managed Session store', () => {
         Buffer.from('{}', 'utf8'),
       );
       const manifestRef = await session.resources.publish(
-        'managed-tool-output-manifest',
+        MANAGED_TOOL_RESULT_KINDS.manifest,
         Buffer.from('{}', 'utf8'),
       );
       await session.authority.appendExecutionEvent(
@@ -2575,44 +2541,7 @@ describe('HTTP Managed Session store', () => {
 
   it("rejects a restore head regressed below the writer's committed position", async () => {
     const server = new FakeManagedSessionStore();
-    const runtimeBaseDir = await mkdtemp(
-      path.join(tmpdir(), 'managed-http-store-'),
-    );
-    temporaryDirectories.push(runtimeBaseDir);
-    const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
-    const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
-      allowInsecureHttp: true,
-      sessionKey: SESSION_KEY,
-      writerId: 'harness-a',
-      writerToken: TOKEN_A,
-      fetchFn: server.fetch,
-    });
-    const definitionRef = await stores.resourceStore.publish(
-      'managed-session-definition',
-      Buffer.from('{"model":"test"}', 'utf8'),
-    );
-    const rootSnapshotRef = await stores.resourceStore.publish(
-      'managed-session-root-snapshot',
-      Buffer.from('{"version":1,"messages":[]}', 'utf8'),
-    );
-    const session = await openManagedSession({
-      runtimeBaseDir,
-      sessionId: SESSION_KEY.sessionId,
-      transcriptPath,
-      sessionKey: SESSION_KEY,
-      cwd: '/workspace',
-      version: 'test',
-      workerId: 'harness-a',
-      activationLeaseDurationMs: 60_000,
-      journalStore: stores.journalStore,
-      resourceStore: stores.resourceStore,
-      create: {
-        definitionRef,
-        rootSnapshotRef,
-        createdBy: 'test',
-      },
-    });
+    const { stores, session } = await bootStoresAndSession(server);
     try {
       const journal = await stores.journalStore.open({
         sessionKey: SESSION_KEY,
@@ -2634,44 +2563,7 @@ describe('HTTP Managed Session store', () => {
     'rejects a restore head regressed only in %s',
     async (override) => {
       const server = new FakeManagedSessionStore();
-      const runtimeBaseDir = await mkdtemp(
-        path.join(tmpdir(), 'managed-http-store-'),
-      );
-      temporaryDirectories.push(runtimeBaseDir);
-      const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
-      const stores = createHttpManagedSessionStores({
-        baseUrl: 'http://session-store.test',
-        allowInsecureHttp: true,
-        sessionKey: SESSION_KEY,
-        writerId: 'harness-a',
-        writerToken: TOKEN_A,
-        fetchFn: server.fetch,
-      });
-      const definitionRef = await stores.resourceStore.publish(
-        'managed-session-definition',
-        Buffer.from('{"model":"test"}', 'utf8'),
-      );
-      const rootSnapshotRef = await stores.resourceStore.publish(
-        'managed-session-root-snapshot',
-        Buffer.from('{"version":1,"messages":[]}', 'utf8'),
-      );
-      const session = await openManagedSession({
-        runtimeBaseDir,
-        sessionId: SESSION_KEY.sessionId,
-        transcriptPath,
-        sessionKey: SESSION_KEY,
-        cwd: '/workspace',
-        version: 'test',
-        workerId: 'harness-a',
-        activationLeaseDurationMs: 60_000,
-        journalStore: stores.journalStore,
-        resourceStore: stores.resourceStore,
-        create: {
-          definitionRef,
-          rootSnapshotRef,
-          createdBy: 'test',
-        },
-      });
+      const { stores, session } = await bootStoresAndSession(server);
       try {
         const journal = await stores.journalStore.open({
           sessionKey: SESSION_KEY,
@@ -2685,6 +2577,51 @@ describe('HTTP Managed Session store', () => {
       }
     },
   );
+
+  it('does not re-baseline the grant onto a self-consistent regressed head', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    try {
+      const messageRef = await stores.resourceStore.publish(
+        'managed-message',
+        MESSAGE_BODY,
+      );
+      await appendMessage(session, 1, messageRef);
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(journal.read()).resolves.toBeDefined();
+
+      // Roll the server back to the create commit, consistently: page and
+      // head agree on the prefix, so no digest or contiguity check can
+      // refuse it — only the writer's own committed position can.
+      const first = server.storedTransactions[0]!;
+      server.pageOverrides['transactions'] = [first];
+      server.pageOverrides['nextRevision'] = 1;
+      server.pageOverrides['hasMore'] = false;
+      server.headOverrides['journalRevision'] = first['journalRevision'];
+      server.headOverrides['committedSequence'] = first['lastSequence'];
+      server.headOverrides['lastCommitDigest'] = first['commitDigest'];
+      server.headOverrides['activationEpoch'] = first['activationEpoch'];
+
+      await expect(journal.read()).rejects.toThrow(/restore head regressed/);
+      // A refusal that re-baselined the grant anyway would let the same
+      // consistent head read through on the retry; the position must hold.
+      await expect(journal.read()).rejects.toThrow(/restore head regressed/);
+      expect(server.transactionReads).toBe(1);
+
+      delete server.pageOverrides['transactions'];
+      delete server.pageOverrides['nextRevision'];
+      delete server.pageOverrides['hasMore'];
+      delete server.headOverrides['journalRevision'];
+      delete server.headOverrides['committedSequence'];
+      delete server.headOverrides['lastCommitDigest'];
+      delete server.headOverrides['activationEpoch'];
+      await expect(journal.read()).resolves.toBeDefined();
+    } finally {
+      await session.close();
+    }
+  });
 
   it('restores a journal spanning more than one transaction page', async () => {
     const server = new FakeManagedSessionStore();
@@ -2992,6 +2929,11 @@ class FakeManagedSessionStore {
     Object.assign(this.transactions[index]!, patch);
   }
 
+  /** The stored transaction records, for a test that rebuilds a page. */
+  get storedTransactions(): ReadonlyArray<Record<string, unknown>> {
+    return this.transactions;
+  }
+
   readonly fetch = vi.fn<typeof fetch>(async (input, init) => {
     const url = new URL(requestUrl(input));
     const headers = new Headers(init?.headers);
@@ -3212,33 +3154,31 @@ class FakeManagedSessionStore {
   }
 }
 
+// Declared refs are the writer's contract, not a shape guess: the header's
+// own fields for the genesis commit, and the schema-declared positions of
+// each event after it. A ref-shaped value in a free-form json position (like
+// a cancel target) is deliberately not declared — a harvester widened to
+// collect it changes what the writer ships, and this oracle moves with it.
 function refsDeclaredBy(recordBytesBase64: string): ManagedSessionDurableRef[] {
   const refs: ManagedSessionDurableRef[] = [];
-  const walk = (value: unknown): void => {
-    if (Array.isArray(value)) {
-      value.forEach(walk);
-      return;
-    }
-    if (typeof value !== 'object' || value === null) {
-      return;
-    }
-    const record = value as Record<string, unknown>;
-    if (
-      typeof record['resourceId'] === 'string' &&
-      typeof record['kind'] === 'string' &&
-      typeof record['schemaVersion'] === 'number' &&
-      typeof record['byteLength'] === 'number' &&
-      typeof record['digest'] === 'string'
-    ) {
-      refs.push(record as unknown as ManagedSessionDurableRef);
-    }
-    Object.values(record).forEach(walk);
-  };
   for (const line of Buffer.from(recordBytesBase64, 'base64')
     .toString('utf8')
     .trimEnd()
     .split('\n')) {
-    walk(JSON.parse(line));
+    const record = JSON.parse(line) as Record<string, unknown>;
+    if (record['subtype'] === MANAGED_SESSION_HEADER_SUBTYPE) {
+      const header = parseManagedSessionHeader(record['managedSession']);
+      refs.push(header.definitionRef, header.rootSnapshotRef);
+      if (header.baseTranscriptProof !== undefined) {
+        refs.push(header.baseTranscriptProof);
+      }
+    } else if (record['subtype'] === MANAGED_SESSION_EVENT_SUBTYPE) {
+      refs.push(
+        ...managedSessionEventRefs(
+          parseManagedSessionEvent(record['managedSession']),
+        ),
+      );
+    }
   }
   return refs;
 }

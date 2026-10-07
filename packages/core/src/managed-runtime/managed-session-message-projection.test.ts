@@ -482,7 +482,76 @@ describe('managed session message projection', () => {
         runtimeBaseDir: harness.runtimeBaseDir,
         sessionKey,
       }),
-    ).rejects.toThrow(/invalid reader-facing record/);
+    ).rejects.toThrow(
+      /invalid reader-facing record: Ignored an invalid transcript record timestamp\. \(message\.committed event message:invalid-timestamp ref\)/,
+    );
+  });
+
+  it('projects a committed compaction summary back to the reader', async () => {
+    const harness = await createHarness();
+    try {
+      await harness.projection.commit(
+        command('commitMessage', 'cmd-msg-pre-compaction'),
+        { record: records[0] },
+        HOLDS,
+      );
+      // The summary body is the whole record, the way the record sink
+      // publishes it; the reader-facing list projects it back verbatim.
+      const summary = {
+        uuid: 'rec-compaction-1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-09-01T10:01:00.000Z',
+        type: 'system',
+        subtype: 'chat_compression',
+        cwd: '/workspace',
+        version: '1.2.3',
+        systemPayload: {
+          compressedHistory: [
+            { role: 'user', parts: [{ text: 'summarise the design docs' }] },
+          ],
+        },
+      } as ChatRecord;
+      const summaryRef = await harness.store.publish(
+        'managed-compaction-summary',
+        Buffer.from(JSON.stringify(summary), 'utf8'),
+      );
+      await harness.authority.appendExecutionEvent(
+        command('compactContext', 'cmd-compact-1'),
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'compaction:rec-compaction-1',
+          sessionKey,
+          kind: 'context.compacted',
+          occurredAt: 1,
+          subject: {
+            type: 'activation',
+            scopeId: 'act-1',
+            activationId: 'act-1',
+            epoch: 1,
+          },
+          payload: {
+            compactionId: 'rec-compaction-1',
+            fromSequence: 1,
+            toSequence: sequence - 1,
+            summaryRef,
+            replacedMessageIds: ['rec-user-1'],
+            tokenCountsRef: null,
+          },
+        }),
+        HOLDS,
+      );
+      await expect(
+        readManagedSessionRecords({
+          transcriptPath: harness.transcriptPath,
+          runtimeBaseDir: harness.runtimeBaseDir,
+          sessionKey,
+        }),
+      ).resolves.toEqual([records[0], summary]);
+    } finally {
+      await harness.close();
+    }
   });
 
   it('rejects a turn.settled with a null resultRef as a typed record error', async () => {

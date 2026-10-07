@@ -11,6 +11,7 @@ import {
   MANAGED_SESSION_LIMITS,
   ManagedSessionRecordError,
   managedSessionReaderFacingBody,
+  safeErrorValue,
   validateManagedReaderFacingRecord,
   type ManagedSessionDurableRef,
   type ManagedSessionEvent,
@@ -257,7 +258,11 @@ export async function projectManagedSessionRecords(options: {
     }
     if (branch !== undefined) {
       records.push(
-        requireProjectedRecord(branch, scan.header.sessionKey.sessionId),
+        requireProjectedRecord(
+          branch,
+          scan.header.sessionKey.sessionId,
+          `${event.kind} event ${event.eventId} ref`,
+        ),
       );
       continue;
     }
@@ -274,6 +279,7 @@ export async function projectManagedSessionRecords(options: {
           ? (body as unknown as { record: ChatRecord }).record
           : body,
         scan.header.sessionKey.sessionId,
+        `${event.kind} event ${event.eventId} ref`,
       ),
     );
   }
@@ -313,11 +319,17 @@ export async function projectManagedSessionTitleInfo(options: {
   };
 }
 
-function requireProjectedRecord(value: unknown, sessionId: string): ChatRecord {
+function requireProjectedRecord(
+  value: unknown,
+  sessionId: string,
+  at: string,
+): ChatRecord {
   const validated = validateManagedReaderFacingRecord(value, sessionId);
   if ('error' in validated) {
+    // The reason is bounded the way the writer fence's own message is: the
+    // predicate interpolates values decoded from the stored body.
     throw new ManagedSessionRecordError(
-      'Managed Session resource contains an invalid reader-facing record.',
+      `Managed Session resource contains an invalid reader-facing record: ${safeErrorValue(validated.error)} (${at}).`,
     );
   }
   return validated.record;
