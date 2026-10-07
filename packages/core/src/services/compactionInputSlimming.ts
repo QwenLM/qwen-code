@@ -230,8 +230,13 @@ export function estimatePartChars(
       total += output.length;
     } else if (typeof error === 'string') {
       total += error.length;
-    } else {
-      total += JSON.stringify(part.functionResponse.response ?? {}).length;
+    } else if (part.functionResponse.response != null) {
+      try {
+        total += JSON.stringify(part.functionResponse.response).length;
+      } catch {
+        // A circular or BigInt payload has no serialized size; bill only the
+        // wrapper floor rather than failing the whole retention analysis.
+      }
     }
     const nested = getFunctionResponseParts(part);
     if (nested) {
