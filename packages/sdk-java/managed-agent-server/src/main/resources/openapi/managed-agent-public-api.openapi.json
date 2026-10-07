@@ -3909,7 +3909,7 @@
         }
       },
       "Conflict": {
-        "description": "State, idempotency, or recovery conflict.",
+        "description": "State, idempotency, or recovery conflict. New Workspace-scoped admissions return workspace_unavailable with retryable=false while an offline Workspace migration holds the storage fence; authorized durable replays retain their existing behavior.",
         "content": {
           "application/json": {
             "schema": {
@@ -5685,6 +5685,10 @@
               "request_id": {
                 "type": "string",
                 "maxLength": 128
+              },
+              "retryable": {
+                "type": "boolean",
+                "description": "Present on Runtime Broker refusals; true permits retry, false is a definite refusal. Other errors may omit this field."
               },
               "replay_floor_sequence": {
                 "type": ["integer", "null"],
