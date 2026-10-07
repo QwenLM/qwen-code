@@ -61,7 +61,12 @@ export function toManagedPermissionRequest(
     toolName: action.toolName,
     title: tool?.title ?? action.toolName,
     content: tool?.args
-      ? [{ type: 'text', text: JSON.stringify(tool.args, null, 2) }]
+      ? [
+          {
+            type: 'text',
+            text: escapePreviewText(JSON.stringify(tool.args, null, 2)),
+          },
+        ]
       : action.inputPreview
         ? [{ type: 'text', text: escapePreviewText(action.inputPreview.text) }]
         : [],
