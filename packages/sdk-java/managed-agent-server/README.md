@@ -33,6 +33,10 @@ compares the mapped routes, the `ApiModels` records and real responses with it;
 `src/test/resources/openapi/contract-known-gaps.txt` lists the differences that
 a later slice still has to close; none remain after D4. The WebShell client types are generated from the
 same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
+The test-tree `SurfaceRegistry` names every mounted route, internal ones
+included, with its admission rule class; `SurfaceRegistryGateTest` fails any
+mounted route the registry lacks, so a new public or WebShell route needs both
+a spec operation and a registry entry ([actor-roles design](../../../docs/design/2026-10-07-managed-agent-actor-roles.md), D5).
 Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
 `1`) when they are created. `POST /v1/agents`, `GET /v1/agents/{id}` and
 `POST /v1/agents/{id}` store tenant-scoped, immutable AgentDefinition
