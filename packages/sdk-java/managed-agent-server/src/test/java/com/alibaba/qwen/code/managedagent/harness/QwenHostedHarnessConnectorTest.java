@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -392,6 +393,53 @@ class QwenHostedHarnessConnectorTest {
         properties.getHarness().setWorkspaceFilesEnabled(false);
         assertThatThrownBy(() -> connector.submit("tenant-a", SESSION_ID,
                 "prompt", java.util.List.of(), "digest"))
+                .hasMessage("Hosted Workspace files are disabled");
+    }
+
+    @Test
+    void channelOperationsReauthorizeTheWorkspaceLikeEveryNewWorkDispatch() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        SessionRecord session = mock(SessionRecord.class);
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+        when(execution.verifiedRecoveryEnabled()).thenReturn(true);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        when(session.tenantId()).thenReturn("tenant-a");
+        when(session.sessionId()).thenReturn(SESSION_ID);
+        when(session.workspace()).thenReturn(new ContextBinding("tenant-a", "workspace", 1,
+                "storage", ".", "config", 1));
+        when(session.toolProfile()).thenReturn("hosted-workspace-files/1");
+        when(client.loadSession(any(LoadHarnessSession.class))).thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        when(attached.getApprovalMode()).thenReturn("default");
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+        verify(execution).authorize(session);
+
+        // Even with the attachment cached, a channel operation is new work:
+        // it re-runs the Workspace authority like submit and continue do.
+        doThrow(WorkspaceExecutionStore.unavailable()).when(execution).authorize(session);
+        assertThatThrownBy(() -> connector.runChannelOperation("tenant-a", SESSION_ID,
+                Map.of("kind", "submit_input")))
+                .hasMessageContaining("Workspace execution authority is unavailable");
+        verify(client, never()).runChannelOperation(any(), any());
+
+        doNothing().when(execution).authorize(session);
+        connector.runChannelOperation("tenant-a", SESSION_ID, Map.of("kind", "submit_input"));
+        verify(client, times(1)).runChannelOperation(any(), any());
+
+        properties.getHarness().setWorkspaceFilesEnabled(false);
+        assertThatThrownBy(() -> connector.runChannelOperation("tenant-a", SESSION_ID,
+                Map.of("kind", "submit_input")))
                 .hasMessage("Hosted Workspace files are disabled");
     }
 

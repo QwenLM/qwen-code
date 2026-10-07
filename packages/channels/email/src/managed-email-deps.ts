@@ -43,11 +43,11 @@ export function createManagedEmailDeps(): ManagedEmailAdapterDeps {
       });
     },
     parse: async () => (await import('mailparser')).default.simpleParser,
-    lock: async (directory) => {
+    lock: async (directory, onCompromised) => {
       const { default: lockfile } = await import('proper-lockfile');
       const { mkdirSync } = await import('node:fs');
       mkdirSync(directory, { recursive: true, mode: 0o700 });
-      return lockfile.lock(directory, { retries: 0 });
+      return lockfile.lock(directory, { retries: 0, onCompromised });
     },
   };
 }

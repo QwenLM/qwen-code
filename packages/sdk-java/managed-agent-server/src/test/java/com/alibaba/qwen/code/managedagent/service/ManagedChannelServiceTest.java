@@ -355,6 +355,37 @@ class ManagedChannelServiceTest {
     }
 
     @Test
+    void translatesADaemonGenerationFailureIntoTheRetryableEnvelope() {
+        // A generation clash at the Hosted Harness is a transient daemon
+        // failure, not an HTTP answer: the adapter still takes the same
+        // retryable envelope an HTTP refusal produces.
+        harness.throwDaemonOnceOnSubmit = true;
+        assertThatThrownBy(() -> service.submitInbound(TENANT, channel,
+                event(1, "1700:99", "hello")))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus())
+                            .isEqualTo(org.springframework.http.HttpStatus
+                                    .SERVICE_UNAVAILABLE);
+                    assertThat(error.getCode())
+                            .isEqualTo("channel_operation_failed");
+                });
+        assertThat(jdbc.queryForObject("SELECT state FROM"
+                        + " qwen_managed_channel_route WHERE tenant_id = ?"
+                        + " AND channel_instance_id = '" + channel + "'"
+                        + " AND platform_event_id = '1700:99'", String.class,
+                TENANT)).isEqualTo("staged");
+        // The retry lands clean: the staged row admits on the second drive.
+        InboundAdmission retried = service.submitInbound(TENANT, channel,
+                event(1, "1700:99", "hello"));
+        assertThat(retried.replayed()).isFalse();
+        assertThat(jdbc.queryForObject("SELECT state FROM"
+                        + " qwen_managed_channel_route WHERE tenant_id = ?"
+                        + " AND channel_instance_id = '" + channel + "'"
+                        + " AND platform_event_id = '1700:99'", String.class,
+                TENANT)).isEqualTo("admitted");
+    }
+
+    @Test
     void reconcilesAClaimCommittedBeforeItsAnswerWasLost() {
         InboundAdmission admitted = service.submitInbound(TENANT, channel,
                 event(1, "1700:81", "please reply"));
@@ -642,6 +673,7 @@ class ManagedChannelServiceTest {
         boolean loseAnswerOnce;
         boolean loseClaimAnswerOnce;
         boolean loseReceiptAnswerOnce;
+        boolean throwDaemonOnceOnSubmit;
 
         RecordingHarness(Projection projection) {
             this.projection = projection;
@@ -695,6 +727,11 @@ class ManagedChannelServiceTest {
             String deliveryId = String.valueOf(body.get("deliveryId"));
             switch (kind) {
                 case "submit_input" -> {
+                    if (throwDaemonOnceOnSubmit) {
+                        throwDaemonOnceOnSubmit = false;
+                        throw new com.alibaba.qwen.code.daemon.DaemonException(
+                                "generation changed");
+                    }
                     String inputId = String.valueOf(body.get("inputId"));
                     boolean replayed = inputs.containsKey(inputId);
                     inputs.putIfAbsent(inputId, body);

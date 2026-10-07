@@ -534,6 +534,34 @@ describe('HostedChannelSession outbound', () => {
     });
   });
 
+  it('refuses an out-of-range receipt without committing anything', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (channels, authority) => {
+      const inputId = (await channels.submitInput(inbound())).inputId;
+      settleTurn(harness, inputId, 'Done.');
+      await settleInJournal(authority, inputId);
+      const planned = (await channels.planReply(inputId))!;
+      const claimed = await channels.claim(planned.deliveryId);
+      expect(claimed.segments).toHaveLength(1);
+      const revision = () =>
+        authority.extensionRecord('channel_delivery', planned.deliveryId)
+          ?.revision;
+      const before = revision();
+      await expect(
+        channels.receipt(planned.deliveryId, 5, RECEIPT),
+      ).rejects.toThrow(/has no segment 5/);
+      // The refusal committed nothing: the line is still sending at the
+      // revision the claim left it on.
+      expect(revision()).toBe(before);
+      expect(channels.delivery(planned.deliveryId)!.run.delivery?.state).toBe(
+        'sending',
+      );
+      await expect(
+        channels.receipt(planned.deliveryId, 0, RECEIPT),
+      ).resolves.toMatchObject({ run: { delivery: { state: 'delivered' } } });
+    });
+  });
+
   it('reconciles a settle → plan crash window on the next open', async () => {
     const harness = await createHarness();
     const inputId = (await withSession(harness, async (channels, authority) => {
@@ -655,6 +683,29 @@ describe('HostedChannelSession outbound', () => {
       await expect(channels.resend(planned.deliveryId)).rejects.toThrow(
         /cannot be resent/,
       );
+      // The chain is terminal now: a conflicting settle is answered with
+      // the committed chain, never a new revision — the caller's ledger
+      // follows the authority instead of looping on a refusal.
+      const revision = authority.extensionRecord(
+        'channel_delivery',
+        planned.deliveryId,
+      )?.revision;
+      expect(
+        (await channels.settle(planned.deliveryId, 'unknown')).run,
+      ).toMatchObject({
+        state: 'settled',
+        delivery: { state: 'delivered' },
+      });
+      expect(
+        (await channels.settle(planned.deliveryId, 'rejected')).run,
+      ).toMatchObject({
+        state: 'settled',
+        delivery: { state: 'delivered' },
+      });
+      expect(
+        authority.extensionRecord('channel_delivery', planned.deliveryId)
+          ?.revision,
+      ).toBe(revision);
     });
   });
 

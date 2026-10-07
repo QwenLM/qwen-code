@@ -16,6 +16,7 @@ import {
   parseChannelDelivery,
   parseChannelRoute,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-channel-record.js';
+import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
   CHANNEL_INPUT_SOURCE,
   CHANNEL_RESOURCE_KINDS,
@@ -521,6 +522,13 @@ export class HostedChannelSession {
     return this.serial(async () => {
       let delivery = this.mustDelivery(deliveryId);
       const segment = delivery.segments[ordinal];
+      if (segment === undefined) {
+        // Refuse before any revision: a partial line commits `sending`
+        // before the receipt body below could name the missing segment.
+        throw new Error(
+          `Channel delivery ${deliveryId} has no segment ${ordinal}.`,
+        );
+      }
       if (segment?.receipt !== null && segment?.receipt !== undefined) {
         if (segment.receipt.providerMessageId === receipt.providerMessageId)
           return delivery;
@@ -552,6 +560,12 @@ export class HostedChannelSession {
       const delivery = this.mustDelivery(deliveryId);
       const state = delivery.run.delivery?.state;
       if (state === outcome) return delivery;
+      if (isTerminalRunState(delivery.run.state)) {
+        // A settled, failed or cancelled chain admits no further revision:
+        // answer it unchanged, so the caller's ledger can follow the
+        // authority instead of looping on a 4xx.
+        return delivery;
+      }
       return this.revise(
         delivery,
         outcome === 'unknown'

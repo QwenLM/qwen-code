@@ -277,9 +277,9 @@ const CHANNEL_ID = /^[A-Za-z0-9._:@+-]{1,128}$/u;
 /**
  * H5b: the closed shape of a `submit_input` channel operation. Attachments
  * arrive base64-encoded and bounded; anything malformed answers 400, never
- * a partial commit.
+ * a partial commit. Exported for the parsing guard's own suite.
  */
-function parseChannelSubmitInput(
+export function parseChannelSubmitInput(
   body: Record<string, unknown> | null,
 ): import('./hosted-channel-session.js').ChannelSubmitInputParams | undefined {
   const inputId = body?.['inputId'];
@@ -347,6 +347,16 @@ function parseChannelSubmitInput(
       bytes: Buffer.from(bytesBase64, 'base64'),
     });
   }
+  const replyContext = body?.['replyContext'] ?? null;
+  // The reply context is adapter-opaque, but the closed guard is the last
+  // place that can refuse on size before staging would side-effect.
+  if (
+    replyContext !== null &&
+    Buffer.byteLength(JSON.stringify(replyContext), 'utf8') >
+      MANAGED_CHANNEL_LIMITS.maxReplyContextBytes
+  ) {
+    return undefined;
+  }
   return {
     inputId,
     channelInstanceId,
@@ -362,7 +372,7 @@ function parseChannelSubmitInput(
     subject,
     text,
     attachments: staged,
-    replyContext: body?.['replyContext'] ?? null,
+    replyContext,
   };
 }
 

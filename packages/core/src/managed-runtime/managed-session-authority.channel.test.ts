@@ -691,17 +691,25 @@ describe('managed session authority channel records', () => {
         ),
       ).rejects.toThrow(ManagedSessionRecordError);
       expect(authority.committedSequence).toBe(before);
-      // A later revision keeps the adapter its chain opened with: the gate
-      // reads the policy at the opening revision only.
+      // The gate runs on every revision: a rollover rebind that rebinds the
+      // policy cannot carry an adapter the enablement list does not admit,
+      // for a chain opened by email or anyone else.
       await bindRoute(authority, refs);
-      await authority.commitExtensionRecord(
-        command('channel_route', 'route-1:2'),
-        {
-          domain: 'channel_route',
-          record: route(foreign, { routeRevision: 4, accountGeneration: 8 }),
-        },
-        TRUSTED,
-      );
+      const opened = authority.committedSequence;
+      await expect(
+        authority.commitExtensionRecord(
+          command('channel_route', 'route-1:2'),
+          {
+            domain: 'channel_route',
+            record: route(foreign, {
+              routeRevision: 4,
+              accountGeneration: 8,
+            }),
+          },
+          TRUSTED,
+        ),
+      ).rejects.toThrow(/adapter telegram is not enabled/);
+      expect(authority.committedSequence).toBe(opened);
     });
   });
 

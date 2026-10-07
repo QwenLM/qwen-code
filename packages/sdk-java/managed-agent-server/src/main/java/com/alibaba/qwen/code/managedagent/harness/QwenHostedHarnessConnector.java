@@ -398,8 +398,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     @Override
     public Map<String, Object> runChannelOperation(String tenantId,
             String sessionId, Map<String, Object> body) {
-        return client().runChannelOperation(
-                attachment(tenantId, sessionId, true), body);
+        try {
+            requireReadyForNewWork(tenantId, sessionId);
+            return client().runChannelOperation(
+                    attachment(tenantId, sessionId, true), body);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
     }
 
     @Override

@@ -135,6 +135,7 @@ let box: Mailbox;
 let sent: ReturnType<typeof vi.fn>;
 let plane: FakeControlPlane;
 let adapters: ManagedEmailAdapter[];
+let lockCompromised: (() => void) | undefined;
 
 function raw(
   id: string,
@@ -186,7 +187,10 @@ function make(extra: Record<string, unknown> = {}): ManagedEmailAdapter {
       createSmtp: async () =>
         ({ sendMail: sent, close() {} }) as unknown as Transporter,
       parse: async () => simpleParser,
-      lock: async () => async () => {},
+      lock: async (_dir: string, onCompromised: () => void) => {
+        lockCompromised = onCompromised;
+        return async () => {};
+      },
       now: () => 1_750_000_000_000,
       log: () => {},
     },
@@ -206,6 +210,7 @@ beforeEach(() => {
   sent = vi.fn(async () => ({ accepted: ['alice@example.com'] }));
   plane = new FakeControlPlane();
   adapters = [];
+  lockCompromised = undefined;
 });
 
 afterEach(async () => {
@@ -308,6 +313,46 @@ describe('managed email inbound', () => {
     expect(state(restarted).pending).toEqual([]);
     expect(plane.events).toHaveLength(1);
     expect(plane.events[0]!.text).toBe('hello after restart');
+  });
+
+  it('drops an in-flight claim whose sender the restarted policy no longer allows, without resubmitting', async () => {
+    const log = vi.fn();
+    const adapter = make();
+    (adapter as unknown as { log: (line: string) => void }).log = log;
+    await adapter.connect();
+    plane.failSubmits = 1;
+    append(raw('gone', 'still pending'));
+    await adapter.tick();
+    expect(state(adapter).pending).toHaveLength(1);
+    expect(plane.submitAttempts).toBe(1);
+    await adapter.disconnect();
+    // The allowlist no longer covers the sender when the adapter restarts.
+    const restarted = make({ allowedUsers: [] });
+    (restarted as unknown as { log: (line: string) => void }).log = log;
+    await restarted.connect();
+    await restarted.tick();
+    await restarted.tick();
+    expect(state(restarted).pending).toEqual([]);
+    // The event was never resubmitted: one attempt at first sight, none
+    // after the policy dropped the claim.
+    expect(plane.submitAttempts).toBe(1);
+    expect(log.mock.calls.map((call) => String(call[0])).join('\n')).toContain(
+      'refused by the current sender policy',
+    );
+  });
+
+  it('stops polling and stays silent when another owner takes the state lock', async () => {
+    const adapter = make();
+    await adapter.connect();
+    expect(lockCompromised).toBeTypeOf('function');
+    append(raw('lost', 'hello'));
+    lockCompromised!();
+    await adapter.tick();
+    await adapter.tick();
+    // Nothing is admitted or claimed after a compromise reaps the lock.
+    expect(plane.events).toHaveLength(0);
+    expect(state(adapter).pending).toEqual([]);
+    await adapter.disconnect();
   });
 
   it('rolls the account generation on a mailbox epoch change and drops the old in-flight claims visibly', async () => {

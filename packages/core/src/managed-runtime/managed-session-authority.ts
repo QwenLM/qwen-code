@@ -1720,19 +1720,16 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
-   * H5b: a route chain opens only for an enabled adapter. The committed
-   * policy names the adapter, so the gate reads the policy the closure just
-   * verified; a later revision keeps the adapter its chain opened with.
+   * H5b: a route chain opens and rebinds only for an enabled adapter. The
+   * committed policy names the adapter, so the gate reads the policy the
+   * closure just verified; a rebind may change the policyRef, so the gate
+   * runs on every channel route revision, not only the opening one.
    */
   private async assertChannelRouteAdmittable(
     domain: ManagedSessionDomain,
     parsed: ReturnType<ManagedExtensionRecordBody['parse']>,
   ): Promise<void> {
-    if (
-      domain !== 'channel_route' ||
-      this.extensionRecord(domain, parsed.recordId) !== undefined
-    )
-      return;
+    if (domain !== 'channel_route') return;
     const policy = decodeChannelPolicy(
       await this.resources!.read(parseChannelRoute(parsed.record).policyRef),
     );

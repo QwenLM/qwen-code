@@ -96,7 +96,10 @@ export interface ManagedEmailAdapterDeps {
   readonly createImap: (settings: EmailSettings) => Promise<ImapFlow>;
   readonly createSmtp: (settings: EmailSettings) => Promise<Transporter>;
   readonly parse: () => Promise<typeof simpleParser>;
-  readonly lock: (directory: string) => Promise<() => Promise<void>>;
+  readonly lock: (
+    directory: string,
+    onCompromised: () => void,
+  ) => Promise<() => Promise<void>>;
   readonly now?: () => number;
   readonly log?: (line: string) => void;
 }
@@ -181,7 +184,14 @@ export class ManagedEmailAdapter {
     if (this.running || this.releaseLock)
       throw new Error('Managed email adapter is already connected.');
     try {
-      this.releaseLock = await this.deps.lock(this.store.directory);
+      this.releaseLock = await this.deps.lock(this.store.directory, () => {
+        // A reaped stale lock means a second owner won the mailbox: stop
+        // rather than keep polling as its silent twin.
+        this.log(
+          'Managed email state ownership was lost to another process; adapter stopped.',
+        );
+        this.stop();
+      });
     } catch {
       throw new Error(
         'Email state is owned by another process; managed adapter not started.',
@@ -595,7 +605,7 @@ export class ManagedEmailAdapter {
         event = await this.rebuildEvent(entry.uid);
         if (event === undefined) {
           this.log(
-            `Managed email event ${entry.eventId} is no longer in the mailbox; its admission stays unresolved.`,
+            `Managed email event ${entry.eventId} can no longer be rebuilt from the platform copy; its claim drops.`,
           );
           state.pending = state.pending.filter(
             (pending) => pending.uid !== entry.uid,
@@ -629,6 +639,21 @@ export class ManagedEmailAdapter {
     const sender = acceptedHeaderSender(mail, this.settings.address);
     if (!sender) return undefined;
     const eventId = `${state.uidValidity}:${uid}`;
+    if (!this.senderAllowed(sender)) {
+      // The policy moved on since the claim: the pending event drops
+      // visibly rather than drive a Session the current policy forbids.
+      this.log(
+        `Managed email event ${eventId} is refused by the current sender policy; its claim drops.`,
+      );
+      return undefined;
+    }
+    if (
+      mail.attachments.some((attachment) =>
+        /^(message\/|text\/calendar)/i.test(attachment.contentType),
+      )
+    ) {
+      return undefined;
+    }
     const route = replyRoute(
       mail,
       sender,

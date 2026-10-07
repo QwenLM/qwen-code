@@ -26,6 +26,7 @@ interface ManagedEmailArgs {
   workspace: string;
   'channel-id'?: string;
   'cwd-relative': string;
+  cwd: string;
 }
 
 export const managedEmailCommand: CommandModule<unknown, ManagedEmailArgs> = {
@@ -66,11 +67,22 @@ export const managedEmailCommand: CommandModule<unknown, ManagedEmailArgs> = {
         type: 'string',
         default: '.',
         description: 'Relative directory inside the Workspace',
+      })
+      .option('cwd', {
+        type: 'string',
+        default: process.cwd(),
+        description:
+          'Local workspace for channel config resolution; must be the' +
+          ' directory the Legacy path (daemon worker) resolves for the' +
+          ' same channel, so one state directory and one lock serve the' +
+          ' mailbox',
       }),
   handler: async (argv) => {
-    const [channel] = await parseConfiguredChannels(loadChannelsConfig(), [
-      argv.name,
-    ]);
+    const [channel] = await parseConfiguredChannels(
+      loadChannelsConfig(argv.cwd),
+      [argv.name],
+      { defaultCwd: argv.cwd },
+    );
     if (channel?.config['type'] !== 'email') {
       throw new Error(
         `Channel "${argv.name}" is not an email channel; the managed path serves email only.`,

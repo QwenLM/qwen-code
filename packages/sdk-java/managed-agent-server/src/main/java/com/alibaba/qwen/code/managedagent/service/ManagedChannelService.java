@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.daemon.DaemonException;
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
@@ -219,7 +220,7 @@ public class ManagedChannelService {
             result = harness.runChannelOperation(tenantId,
                     binding.sessionId(), submitBody(instance, event, inputId,
                             kind, senderId, chatId, threadId));
-        } catch (DaemonHttpException error) {
+        } catch (DaemonException error) {
             throw translate(error);
         }
         if (routes.admit(tenantId, routeKey, inputId) == null) {
@@ -292,7 +293,7 @@ public class ManagedChannelService {
         try {
             result = harness.runChannelOperation(tenantId, claim.sessionId(),
                     body);
-        } catch (DaemonHttpException error) {
+        } catch (DaemonException error) {
             throw translate(error);
         }
         String state = deliveryState(result);
@@ -313,7 +314,7 @@ public class ManagedChannelService {
         try {
             result = harness.runChannelOperation(tenantId, claim.sessionId(),
                     body);
-        } catch (DaemonHttpException error) {
+        } catch (DaemonException error) {
             throw translate(error);
         }
         Map<?, ?> delivery = (Map<?, ?>) result.get("delivery");
@@ -719,9 +720,16 @@ public class ManagedChannelService {
         }
     }
 
-    private static ApiException translate(DaemonHttpException error) {
+    private static ApiException translate(DaemonException error) {
+        if (!(error instanceof DaemonHttpException http)) {
+            // A generation clash or dropped connection is transient for the
+            // adapter: the same retryable envelope an HTTP refusal takes.
+            return new ApiException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "channel_operation_failed",
+                    "The Hosted Harness failed the channel operation.");
+        }
         String code = "channel_operation_failed";
-        String body = error.getResponseBody();
+        String body = http.getResponseBody();
         if (body != null) {
             int at = body.indexOf("\"code\":\"");
             if (at >= 0) {
@@ -731,7 +739,7 @@ public class ManagedChannelService {
                 }
             }
         }
-        return new ApiException(error.getStatusCode() == 409
+        return new ApiException(http.getStatusCode() == 409
                 ? HttpStatus.CONFLICT : HttpStatus.SERVICE_UNAVAILABLE, code,
                 "The Hosted Harness refused the channel operation.");
     }
