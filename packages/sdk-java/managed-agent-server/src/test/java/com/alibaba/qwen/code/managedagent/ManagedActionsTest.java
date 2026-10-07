@@ -23,6 +23,9 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedActionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitTransactionRequest;
+import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -359,6 +362,41 @@ class ManagedActionsTest {
     }
 
     @Test
+    void refusesNewActionResponsesAtTheHttpBoundaryDuringMigration() throws Exception {
+        String tenant = tenant();
+        String session = session(tenant);
+        ActionJournal journal = action(tenant, session, System.currentTimeMillis(), 9007199254740991L);
+        String storage = "storage-" + UUID.randomUUID();
+        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation, storage_id,"
+                + " display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, ?, 'workspace', ?, ?, 'ACTIVE')",
+                tenant, storage, WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
+                + " VALUES (?, 'workspace', ?, TRUE, TRUE)", tenant, "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        jdbc.update("UPDATE managed_agent_session SET workspace_storage_id = ?, workspace_id = 'workspace',"
+                + " workspace_generation = 1, cwd_relative = '.', context_config_ref = ?, context_revision = 1,"
+                + " workspace_config_ref = ?, workspace_policy_ref = ? WHERE tenant_id = ? AND session_id = ?",
+                storage, WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF, tenant, session);
+        new JdbcRuntimeBindingRepository(jdbc.getDataSource(), new AesGcmSecretProtector("test", new byte[32]))
+                .requestStorageFence(tenant, storage, UUID.randomUUID().toString());
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                .header("Idempotency-Key", "fenced-answer").contentType(MediaType.APPLICATION_JSON)
+                .content(response("allow")))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("workspace_unavailable"))
+                .andExpect(jsonPath("$.error.retryable").value(false));
+        assertThat(actions.find(tenant, session, journal.id).orElseThrow().state()).isEqualTo("requested");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?",
+                Long.class, tenant, session)).isZero();
+        jdbc.update("DELETE FROM qwen_runtime_storage_fence WHERE tenant_id = ? AND storage_id = ?", tenant, storage);
+        mvc.perform(auth(post(path(session, journal.id) + "/responses"), tenant, "owner")
+                .header("Idempotency-Key", "fenced-answer").contentType(MediaType.APPLICATION_JSON)
+                .content(response("allow"))).andExpect(status().isAccepted());
+    }
+
+    @Test
     void rejectsMalformedActionJournalWithoutProjectingIt() throws Exception {
         for (String field :
                 java.util.List.of(
@@ -393,6 +431,13 @@ class ManagedActionsTest {
             request.put("recordDigest", ExtensionRecordJournal.sha256(changed));
             CommitTransactionRequest invalid =
                     json.treeToValue(request, CommitTransactionRequest.class);
+            // The journal itself now owns event-envelope validation, so an
+            // envelope that is not a well-formed event is refused before
+            // the Action store reads it.
+            String expected =
+                    "version".equals(field)
+                            ? "managed_session_extension_record_rejected"
+                            : "managed_session_action_rejected";
             assertThatThrownBy(
                             () ->
                                     journals.commit(
@@ -402,9 +447,7 @@ class ManagedActionsTest {
                                             invalid))
                     .isInstanceOfSatisfying(
                             ApiException.class,
-                            error ->
-                                    assertThat(error.getCode())
-                                            .isEqualTo("managed_session_action_rejected"));
+                            error -> assertThat(error.getCode()).isEqualTo(expected));
             assertThat(actions.find(tenant, session, action.id)).isEmpty();
         }
     }

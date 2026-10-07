@@ -243,6 +243,83 @@ describe('LocalShellStreamResultSession record admission', () => {
     await fix.session.close();
   });
 
+  it('refuses a child agent record as a Background Shell start', async () => {
+    const fix = await fixture();
+    const inputRef = await publish(
+      fix.sessionResources,
+      'managed-input',
+      '{"prompt":"audit"}',
+    );
+    const agent = (run: Record<string, unknown>) => ({
+      kind: 'child_agent',
+      childRunId: 'agent-1',
+      ownerScopeId: sessionKey.sessionId,
+      rootSessionId: sessionKey.sessionId,
+      depth: 1,
+      completion: 'sent',
+      inputRef,
+      workspaceMode: 'shared',
+      workingDirectory: '.',
+      childSessionId: null,
+      predecessorChildRunId: null,
+      resultVersion: 1,
+      resultRef: null,
+      terminalReceiptRef: null,
+      stopReason: null,
+      stopRequested: false,
+      run: {
+        state: 'admitted',
+        reason: null,
+        definition: {
+          definitionId: 'agent-1',
+          definitionRevision: 1,
+          definitionDigest: 'f'.repeat(64),
+        },
+        executionCallId: 'agent-1',
+        effectId: null,
+        dispatchId: null,
+        deliveryId: null,
+        execution: 'intent',
+        runtime: null,
+        delivery: { target: 'session', state: 'planned' },
+        ...run,
+      },
+    });
+    const authority = fix.session.authority;
+    await authority.commitExtensionRecord(
+      command('agent-1:1'),
+      { domain: 'child_run', record: agent({}) },
+      TRUSTED,
+    );
+    await authority.commitExtensionRecord(
+      command('agent-1:2'),
+      {
+        domain: 'child_run',
+        record: agent({
+          state: 'running',
+          execution: 'dispatch_started',
+          dispatchId: 'dispatch-1',
+          runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+        }),
+      },
+      TRUSTED,
+    );
+    const admission = new LocalShellStreamResultSession(
+      fix.session,
+      fix.segments,
+      '1',
+      async () => {},
+      'runtime-a',
+    );
+    // Same record domain and call id, but a child agent's run is not a
+    // Background Shell's proven start.
+    await expect(admission.prepare(requestFor('agent-1'))).rejects.toThrow(
+      "Child run kind must be 'shell' for this consumer",
+    );
+    await fix.segments.close();
+    await fix.session.close();
+  });
+
   it('refuses a proven start in the wrong record domain', async () => {
     const fix = await fixture();
     await admitMonitor(fix, 'monitor-1');

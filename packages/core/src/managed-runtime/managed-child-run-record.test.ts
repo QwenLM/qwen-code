@@ -10,13 +10,19 @@ import {
   MANAGED_EXTENSION_RECORD_BODIES,
   MANAGED_TASK_KINDS,
 } from './managed-extension-projection.js';
-import { CHILD_RUN_STOP_REASONS } from './managed-child-run-record.js';
+import {
+  CHILD_AGENT_STOP_REASONS,
+  CHILD_RUN_STOP_REASONS,
+  parseChildRun,
+  parseChildShellRun,
+} from './managed-child-run-record.js';
 import { MANAGED_SESSION_ENABLED_DOMAINS } from './managed-session-records.js';
 
-type Domain = 'child_run';
 interface Fixture {
   id: string;
-  domain: Domain;
+  domain: 'child_run';
+  /** The fixture template the case merges onto; the domain's own by default. */
+  template?: string;
   patch: Record<string, unknown>;
   valid: boolean;
   start: boolean;
@@ -35,7 +41,10 @@ const fixtures = JSON.parse(
   keys: readonly string[];
   fixedKeys: readonly string[];
   stopReasons: Record<string, readonly string[]>;
-  templates: Record<Domain, Record<string, unknown>>;
+  childAgentKeys: readonly string[];
+  childAgentFixedKeys: readonly string[];
+  childAgentStopReasons: Record<string, readonly string[]>;
+  templates: Record<string, Record<string, unknown>>;
   cases: Fixture[];
   successors: Array<
     Omit<Fixture, 'patch' | 'start'> & {
@@ -64,14 +73,33 @@ function merge(
   return value;
 }
 
+/** Resolves a fixture's template, or fails loudly: a silent miss degenerates. */
+function templateOf(fixture: {
+  id: string;
+  domain: string;
+  template?: string;
+}) {
+  const name = fixture.template ?? fixture.domain;
+  const template = fixtures.templates[name];
+  if (template === undefined) {
+    throw new Error(`fixture ${fixture.id} names an unknown template`);
+  }
+  return template;
+}
+
 describe('managed-child-run-record/1 shared contract', () => {
-  it('projects a background_shell task and stays disabled for submission', () => {
-    // The body lands before its producer: enabling the domain is the H3
+  it('projects per-kind tasks and stays disabled for submission', () => {
+    // The body lands before its producers: enabling the domain is the
     // enablement slice's own explicit step.
-    expect(MANAGED_EXTENSION_RECORD_BODIES.child_run!.taskKind).toBe(
-      'background_shell',
-    );
+    const body = MANAGED_EXTENSION_RECORD_BODIES.child_run!;
+    expect(
+      body.taskKindOf(parseChildRun(fixtures.templates['child_run'])),
+    ).toBe('background_shell');
+    expect(
+      body.taskKindOf(parseChildRun(fixtures.templates['child_agent'])),
+    ).toBe('child_agent');
     expect(MANAGED_TASK_KINDS).toContain('background_shell');
+    expect(MANAGED_TASK_KINDS).toContain('child_agent');
     expect(MANAGED_SESSION_ENABLED_DOMAINS).not.toContain('child_run');
   });
 
@@ -99,11 +127,51 @@ describe('managed-child-run-record/1 shared contract', () => {
       failed: [...CHILD_RUN_STOP_REASONS.failed],
       cancelled: [...CHILD_RUN_STOP_REASONS.cancelled],
     });
+    expect(fixtures.childAgentKeys).toEqual(
+      [
+        'childRunId',
+        'childSessionId',
+        'completion',
+        'depth',
+        'inputRef',
+        'kind',
+        'ownerScopeId',
+        'predecessorChildRunId',
+        'resultRef',
+        'resultVersion',
+        'rootSessionId',
+        'run',
+        'stopReason',
+        'stopRequested',
+        'terminalReceiptRef',
+        'workspaceMode',
+        'workingDirectory',
+      ].sort(),
+    );
+    expect(fixtures.childAgentFixedKeys).toEqual(
+      [
+        'childRunId',
+        'completion',
+        'depth',
+        'inputRef',
+        'kind',
+        'ownerScopeId',
+        'predecessorChildRunId',
+        'rootSessionId',
+        'workspaceMode',
+        'workingDirectory',
+      ].sort(),
+    );
+    expect(fixtures.childAgentStopReasons).toEqual({
+      settled: [...CHILD_AGENT_STOP_REASONS.settled],
+      failed: [...CHILD_AGENT_STOP_REASONS.failed],
+      cancelled: [...CHILD_AGENT_STOP_REASONS.cancelled],
+    });
   });
 
   it.each(fixtures.cases)('$id', (fixture) => {
     const body = MANAGED_EXTENSION_RECORD_BODIES[fixture.domain]!;
-    const record = merge(fixtures.templates[fixture.domain], fixture.patch);
+    const record = merge(templateOf(fixture), fixture.patch);
     if (fixture.valid) {
       const parsed = body.parse(record);
       // The committed body round-trips the input and is deeply frozen.
@@ -129,12 +197,21 @@ describe('managed-child-run-record/1 shared contract', () => {
   });
 
   it.each(fixtures.successors)('$id', (fixture) => {
-    const template = fixtures.templates[fixture.domain];
+    const template = templateOf(fixture);
     expect(
       MANAGED_EXTENSION_RECORD_BODIES[fixture.domain]!.isSuccessor(
         merge(template, fixture.before),
         merge(template, fixture.after),
       ),
     ).toBe(fixture.valid);
+  });
+
+  it('refuses a child_agent body at the shell-only entry point', () => {
+    expect(() => parseChildShellRun(fixtures.templates['child_agent'])).toThrow(
+      "Child run kind must be 'shell' for this consumer, got child_agent.",
+    );
+    expect(parseChildShellRun(fixtures.templates['child_run']).kind).toBe(
+      'shell',
+    );
   });
 });

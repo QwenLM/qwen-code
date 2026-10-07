@@ -33,6 +33,10 @@ compares the mapped routes, the `ApiModels` records and real responses with it;
 `src/test/resources/openapi/contract-known-gaps.txt` lists the differences that
 a later slice still has to close; none remain after D4. The WebShell client types are generated from the
 same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
+The test-tree `SurfaceRegistry` names every mounted route, internal ones
+included, with its admission rule class; `SurfaceRegistryGateTest` fails any
+mounted route the registry lacks, so a new public or WebShell route needs both
+a spec operation and a registry entry ([actor-roles design](../../../docs/design/2026-10-07-managed-agent-actor-roles.md), D5).
 Sessions record the agent revision from `QWEN_MANAGED_AGENT_REVISION` (default
 `1`) when they are created. `POST /v1/agents`, `GET /v1/agents/{id}` and
 `POST /v1/agents/{id}` store tenant-scoped, immutable AgentDefinition
@@ -121,8 +125,9 @@ revalidation window: [English](../../../docs/design/2026-10-02-managed-agent-que
 - MySQL 8
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
-process. It supports durable no-tool Sessions and the opt-in Workspace file
-Turns described in the G0 section below.
+process (the credentialed launch is spelled out in the Full WebShell
+dual-path development entry below). It supports durable no-tool Sessions and
+the opt-in Workspace file Turns described in the G0 section below.
 
 Install the two sibling libraries once when building this module outside a
 Maven reactor:
@@ -209,8 +214,22 @@ until no Harness holds its journal writer under an unexpired lease (the
 holding Harness seals it when closing), drains the Runtime binding (currently
 only an in-process retirement flag) and completes the operation; a failed
 attempt is retried with the dispatch backoff until it succeeds, so a `202`
-never means that tools stopped. After the Hosted Harness restarts, its calls fail with a
-generation error until Java restarts too, as Turns do, and the operation waits. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
+never means that tools stopped (a Harness whose capability digest no longer
+matches retries the same way, logged with the permanent reason — nothing
+may complete honestly before an operator realigns the versions, because a
+confirmation requires the Harness's own acknowledgement). When the Hosted
+Harness restarts, a live
+control plane adopts the new process generation: the connector renegotiates
+once instead of failing every bound Session, pending Turns re-attach through
+the takeover load as their retries come due, and the Session's bound boot ID
+moves to the new generation without a Java restart. A takeover load that can
+never continue (its parked state is not one a replacement can drive) ends the
+Turn as `managed_runtime_recovery_blocked` with a typed reason instead of
+retrying forever — in this slice that includes a Turn parked mid model round,
+whose safe reissue is the named Step 3 follow-up. The Session row and its
+generation binding survive that decline, but the declined Turn's input stays
+unsettled in the journal, so the Session cannot admit a further Turn until
+the Step 3 reissue lands — close it and start a new Session. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
 needs no Harness. Archive accepts only a closed Session and completes at once;
 unarchive restores it to closed. Rename waits for the Harness to durably commit
 `session_metadata`. When a rename failure is recorded, its `PENDING` command becomes `FAILED`
@@ -228,9 +247,17 @@ Harness attachment uses strict create/load semantics: create returns `409` for
 an existing private Session authority, while load returns `404` for a missing
 authority and never initializes one. The Java connector attempts strict create for a new binding and loads on
 conflict or uncertain creation outcome. A known existing binding only loads.
-An in-memory Hosted attachment is bound to one normalized Store endpoint,
-tenant, workspace, and Harness writer generation; an attach or cold-load race
-with a different identity fails closed.
+The Java connector caches an attachment per `(tenantId, sessionId)`,
+so one tenant's cached reference is never handed to another by the connector.
+The Harness itself keys its in-memory Session by `sessionId` alone and does
+not compare the presented tenant, Store endpoint or workspace on attach; the
+only attach-time identity fence is the Harness writer generation, so tenant
+isolation on attach is the caller's responsibility in this slice. A presented
+Harness writer generation _is_ checked: an attach whose `writerId` is not this
+process's boot ID fails closed with `409 hosted_harness_generation_mismatch` —
+the restart-generation failure described above. That
+`managed_session_store_conflict` fence is target design for the integration
+slice, not shipped behavior.
 
 Delete writes a public tombstone: get and list stop returning the Session,
 while its operations stay readable. Completed deletion permanently marks an existing
@@ -362,9 +389,46 @@ Turn then fails with `hosted_harness_rejected` in the panel: a Harness
 `400` means the Session Store wiring in `spring.env` did not load
 (`invalid_managed_session_store` — an env file from an older run), while a
 Harness `401` means a launcher restarted without restarting Spring —
-re-source the new `spring.env` and restart Spring. To wire the pieces by
-hand instead, start an ordinary `qwen serve` on port 4170 in addition to the
-private Hosted Harness used by Spring, then run from the repository root:
+re-source the new `spring.env` and restart Spring.
+
+To wire the pieces by hand instead, keep the ordinary daemon on 4170 (the
+vite proxy's default) and start the private Hosted Harness on a distinct
+port. The profile refuses to start without credentials, so the launch
+reuses the same credential pair the Prerequisites section exports for
+Spring — CLI-side the token travels as `QWEN_SERVER_TOKEN` and the
+capability digest as `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` — plus
+`--no-web`, which the profile requires and no environment variable supplies:
+
+```bash
+QWEN_SERVER_TOKEN="$QWEN_MANAGED_AGENT_HARNESS_TOKEN" \
+QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST="$QWEN_MANAGED_AGENT_CAPABILITY_DIGEST" \
+qwen serve --profile hosted-harness --port 4171 --hostname 127.0.0.1 --no-web
+```
+
+— and Spring must point at it with the matching base URL. Spring's HTTP
+Session Store stays off by default, and the Hosted Harness rejects every
+attach without a store descriptor, so Spring also needs the three values
+the one-shot launcher writes into `spring.env` — the connector refuses to
+start when the store is enabled with a blank base URL or workspace ID.
+Export all four together:
+
+```bash
+export QWEN_MANAGED_AGENT_HARNESS_BASE_URL='http://127.0.0.1:4171'
+export QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED='true'
+export QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL='http://127.0.0.1:8080'
+export QWEN_MANAGED_AGENT_WORKSPACE_ID='local-dev-workspace'
+```
+
+All four are read once at JVM startup, so if `mvn spring-boot:run` is
+already up on the 4170 value exported in Prerequisites, restart it with the
+overrides in place.
+
+`--port` is a request, not a guarantee: `qwen serve` moves to the next free
+port on a collision, and 4171 is exactly where a daemon displaced from 4170
+lands. Confirm each server's bound port in its startup line before exporting
+the base URL above.
+
+With both up, run from the repository root:
 
 ```bash
 QWEN_DAEMON_URL=http://127.0.0.1:4170 \
@@ -884,6 +948,18 @@ requires one tool execution, one further continuation, only the replacement's
 answer in the public transcript, and one terminal event. Both modes run in the
 Hosted MySQL CI job.
 
+The `--big-output` long-answer mode is also Workspace-bound:
+
+```bash
+npm run test:e2e:managed-big-output
+```
+
+It streams a long answer, verifies the complete public text and stored record,
+deletes the original Harness and Runtime homes, and checks the complete answer
+in a cold replacement's model context. A short answer remains inline. This
+mode executes no tools and has no Runtime binding to reclaim, so it keeps
+`durable-local-process` disabled and does not require Linux.
+
 A zero-delay run checks the real-model path as shown above; a controlled
 cold-start delay additionally tests output before Runtime readiness:
 
@@ -906,3 +982,17 @@ credentials. The runner removes that file, the MySQL data directory,
 workspaces, and child processes on exit. Override the source with
 `--settings /path/to/settings.json`; credentials are never printed by the
 runner.
+
+### W1c offline Workspace migration
+
+See the [English design](../../../docs/design/workspace-storage-migration.md) and [Chinese design](../../../docs/design/workspace-storage-migration.zh-CN.md). Run only after every service is upgraded, admission/dispatch is disabled, accepted work is settled, Harness writers are stopped, and automatic restart is disabled. The source remains accessible on the same trusted Linux host. Export the original canonical absolute `QWEN_HOME` in the private maintenance and registration commands as well as the Broker/Harness environment, with no symlink components. `fileHistoryRoot` must equal the canonical `$QWEN_HOME/file-history` directory. Preserve that home and its independent history volume; do not move it with the Workspace.
+
+W1c adds Flyway V48–V50 after main's V47 channel-persistence migration, preserving all published migration bytes and applied history. Databases using earlier unpublished W1c migration numbers require fresh disposable fixtures; do not repair production Flyway history to reuse them.
+
+The private artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-migration.jar`. Set `W1_JDBC_URL`, `W1_JDBC_USER`, `W1_JDBC_PASSWORD`, `W1_RUNTIME_CREDENTIAL_KEY_ID`, and `W1_RUNTIME_CREDENTIAL_KEY` to the original deployment database and Broker credential key. The full request file contains `version` (the JSON integer `1`), `migrationOperationId`, `tenantId`, `storageId`, `fenceOperationId`, `captureOperationId`, `mountRevision`, `sourceRoot`, `targetRoot`, `bundleRoot`, `fileHistoryRoot`, `stateDirectory`, `nodeExecutable`, and `cliEntry`. Fence admission is storage-scoped for bound Sessions; unbound legacy Sessions are outside that ownership. Metadata transactions share the tenant placement lock, so other storages of the same tenant may wait until those transactions finish; file scans and physical retirement hold no such lock. Paths must be canonical absolute deployment paths; roots and the durable Runtime state directory cannot overlap. IDs must be distinct UUIDs. Keep this exact request file for retries.
+
+Before starting a new operation, the original Runtime state directory and retained history directory must exist at canonical paths, and the unchanged Linux identity reader must prove the history volume, including unambiguous birth time. Run maintenance as the original service user; the Runtime state directory must belong to that UID with exact POSIX `0700` permissions, checked by the same durable provider validator without creating or changing it. Failure returns `migration_state_unavailable` or `migration_history_unverified` before creating a migration row/fence or retiring placements. The target copy is still prepared after retirement. Run `java -jar <migration.jar> retire <request.json> --offline-confirmed` first. Then use the existing registration command to fence the original revision with the request's fence ID, and capture the W1b bundle with the request's capture ID. Prepare the target Workspace through the external offline copy procedure, preserving modes and the copied source marker. Run `prepare` and then `promote` with the same arguments. The first `prepare` and every new `promote` attempt verify sealed content, live source, target, retained history and original physical identities. Replaying `prepare` after PREPARED or any completed operation returns the saved receipt without rescanning; use `promote` for fresh transition verification. `inspect <request.json>` reads progress and the original receipt. `abort <request.json> --offline-confirmed` requires all placements retired and W1a still fenced; it does not restart anything or remove target artifacts. After abort or invalidation, prepare a fresh external target copy matching the new capture before starting a new operation; foreign marker or temporary files are rejected.
+
+Promotion increments mount revision once. Update the deployment's Workspace root and restart Broker/Harness with the original QWEN_HOME before opening admission. An old deployment mapping fails closed. New file Turns and undo use fresh Runtime identities. Source rows, messages, journal, keys and backup names remain unchanged. Failure preserves the fence; missing stop proof, unsupported profiles or drift require diagnosis. Reverse migration is a new verified operation at a higher revision.
+
+The target marker is the sole manifest exception and must match the copied source marker or the exact operation-pinned target marker. Do not hand-edit it. No online drain, directory copying, public migration route, Shell/MCP/Hook migration or source-lost recovery is provided. Uninitialized retained members without a verifiable frozen private definition are refused. Production Linux/MySQL acceptance evidence must be recorded separately from injected-identity tests.

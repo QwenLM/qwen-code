@@ -51,6 +51,9 @@ Harness 遵循 Java 创建 Hosted Session 时已经以 `approvalMode` 发送的�
 | `default`   | `read_file`                         | `write_file`、`edit` 与 `run_shell_command` |
 | `auto-edit` | `read_file`、`write_file` 与 `edit` | `run_shell_command`                         |
 
+`/2` 搜索 profile 在 `default` 与 `auto-edit` 下还预批准 `glob`；见
+[搜索 profile 设计](2026-10-01-hosted-workspace-search-profile.zh-CN.md)。
+
 每种模式列出的是它预批准的工具，因此之后加入配置的工具在有人把它列入之前都会被询问。Java 目前选择的文件配置 `hosted-workspace-files/1` 没有 shell 工具，因此 `auto-edit` 在其中什么都不询问；shell 那一行适用于 `hosted-workspace-shell/1`。
 
 对于工具配置，`plan` 与 `auto` 返回 `400 invalid_hosted_approval`：plan 模式需要自己的规划语义，auto 模式需要分类器，而 Hosted 路径两者都没有。超出范围的超时也返回同样的错误；`yolo` 从不等待，因此忽略超时。没有工具配置的 Session 继续忽略该模式，因为它不运行工具。

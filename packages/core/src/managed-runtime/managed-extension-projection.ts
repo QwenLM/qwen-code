@@ -39,7 +39,29 @@ import {
   isChildRunStart,
   isChildRunSuccessor,
   parseChildRun,
+  type AnyChildRun,
 } from './managed-child-run-record.js';
+import {
+  isChannelDeliveryStart,
+  isChannelDeliverySuccessor,
+  isChannelRouteStart,
+  isChannelRouteSuccessor,
+  parseChannelDelivery,
+  parseChannelRoute,
+} from './managed-channel-record.js';
+import {
+  isAutomationRunStart,
+  isAutomationRunSuccessor,
+  isScheduleStart,
+  isScheduleSuccessor,
+  parseAutomationRunRecord,
+  parseScheduleRecord,
+} from './managed-automation-record.js';
+import {
+  isChildAcceptanceStart,
+  isChildAcceptanceSuccessor,
+  parseChildAcceptance,
+} from './managed-child-acceptance-record.js';
 
 // H0c of #12827: how the Session authority keys, chains and projects the
 // Stage H records of managed-extension-record/1. The shared fixtures in
@@ -80,9 +102,12 @@ export type ManagedTaskRuntimeState =
 /**
  * A Stage H record body the authority can commit. `parse` returns the
  * identity that keys the record's revision chain and the run it embeds.
+ * `taskKindOf` gives the task kind of one parsed record — a constant for
+ * every body so far except `child_run`, whose kind follows the body's own
+ * `kind` field — and null for a body that projects no task.
  */
 export interface ManagedExtensionRecordBody {
-  readonly taskKind: ManagedTaskKind | null;
+  readonly taskKindOf: (record: unknown) => ManagedTaskKind | null;
   /** The parsed body is closed and frozen; the authority stores exactly it. */
   parse(value: unknown): {
     readonly record: unknown;
@@ -104,7 +129,7 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
   Partial<Record<ManagedSessionDomain, ManagedExtensionRecordBody>>
 > = Object.freeze({
   mcp_configuration: Object.freeze({
-    taskKind: null,
+    taskKindOf: () => null,
     parse: (value: unknown) => {
       const record = parseMcpConfiguration(value);
       return { record, recordId: record.configurationId, run: record.run };
@@ -113,7 +138,7 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isMcpConfigurationSuccessor,
   }),
   mcp_operation: Object.freeze({
-    taskKind: null,
+    taskKindOf: () => null,
     parse: (value: unknown) => {
       const record = parseMcpOperation(value);
       return { record, recordId: record.operationId, run: record.run };
@@ -122,7 +147,7 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isMcpOperationSuccessor,
   }),
   hook_registration: Object.freeze({
-    taskKind: null,
+    taskKindOf: () => null,
     parse: (value: unknown) => {
       const record = parseHookRegistration(value);
       return { record, recordId: record.registrationId, run: record.run };
@@ -131,7 +156,7 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isHookRegistrationSuccessor,
   }),
   hook_execution: Object.freeze({
-    taskKind: null,
+    taskKindOf: () => null,
     parse: (value: unknown) => {
       const record = parseHookExecution(value);
       return { record, recordId: record.hookExecutionId, run: record.run };
@@ -140,7 +165,7 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isHookExecutionSuccessor,
   }),
   monitor_run: Object.freeze({
-    taskKind: 'monitor',
+    taskKindOf: () => 'monitor',
     parse: (value: unknown) => {
       const monitor = parseMonitorRun(value);
       return { record: monitor, recordId: monitor.monitorId, run: monitor.run };
@@ -149,13 +174,65 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     isSuccessor: isMonitorRunSuccessor,
   }),
   child_run: Object.freeze({
-    taskKind: 'background_shell',
+    taskKindOf: (record: unknown) =>
+      (record as AnyChildRun).kind === 'shell'
+        ? 'background_shell'
+        : 'child_agent',
     parse: (value: unknown) => {
       const record = parseChildRun(value);
-      return { record, recordId: record.shellId, run: record.run };
+      return {
+        record,
+        recordId: record.kind === 'shell' ? record.shellId : record.childRunId,
+        run: record.run,
+      };
     },
     isStart: isChildRunStart,
     isSuccessor: isChildRunSuccessor,
+  }),
+  channel_route: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseChannelRoute(value);
+      return { record, recordId: record.routeId, run: record.run };
+    },
+    isStart: isChannelRouteStart,
+    isSuccessor: isChannelRouteSuccessor,
+  }),
+  channel_delivery: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseChannelDelivery(value);
+      return { record, recordId: record.deliveryId, run: record.run };
+    },
+    isStart: isChannelDeliveryStart,
+    isSuccessor: isChannelDeliverySuccessor,
+  }),
+  child_acceptance: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseChildAcceptance(value);
+      return { record, recordId: record.childRunId, run: record.run };
+    },
+    isStart: isChildAcceptanceStart,
+    isSuccessor: isChildAcceptanceSuccessor,
+  }),
+  schedule: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseScheduleRecord(value);
+      return { record, recordId: record.scheduleId, run: record.run };
+    },
+    isStart: isScheduleStart,
+    isSuccessor: isScheduleSuccessor,
+  }),
+  automation_run: Object.freeze({
+    taskKindOf: () => 'automation_run',
+    parse: (value: unknown) => {
+      const record = parseAutomationRunRecord(value);
+      return { record, recordId: record.automationRunId, run: record.run };
+    },
+    isStart: isAutomationRunStart,
+    isSuccessor: isAutomationRunSuccessor,
   }),
 });
 

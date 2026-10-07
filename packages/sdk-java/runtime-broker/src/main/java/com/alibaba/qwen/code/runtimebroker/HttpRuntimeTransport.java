@@ -219,7 +219,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     }
                     throw unavailable(cause);
                 });
-        returned.whenComplete((value, error) -> {
+        // A deadline completes the stage on the shared CompletableFuture delay
+        // thread, and cancelling the exchange closes a socket: keep that off
+        // the caller's completion path and off the timer thread.
+        returned.whenCompleteAsync((value, error) -> {
             if (error != null || returned.isCancelled()) {
                 exchange.cancel(true);
                 result.cancel(false);
@@ -747,7 +750,9 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     .thenApply(bytes -> ManagedShellProtocol.response(bytes, session, immutable));
         }
         ProviderRuntimeProtocol.control(immutable, session.getHarnessSessionId(), session.getRuntimeSessionId());
-        if ("history".equals(immutable.get("kind")) || "raw-file-history".equals(immutable.get("kind"))) {
+        // Workspace context reads the Session's files directly, as file history
+        // does: neither needs a provider Session acquired first.
+        if (Set.of("history", "raw-file-history", "workspace-context").contains(immutable.get("kind"))) {
             return provider(lease, session, immutable);
         }
         return provider(lease, session, Map.of("kind", "acquire"))
@@ -1109,7 +1114,10 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
                     }
                     throw unavailable(cause);
                 });
-        returned.whenComplete((value, error) -> {
+        // A deadline completes the stage on the shared CompletableFuture delay
+        // thread, and cancelling the exchange closes a socket: keep that off
+        // the caller's completion path and off the timer thread.
+        returned.whenCompleteAsync((value, error) -> {
             if (error != null || returned.isCancelled()) {
                 exchange.cancel(true);
                 result.cancel(false);
