@@ -482,8 +482,10 @@ public enum SurfaceRegistry {
      * The admission rule class a route follows. Each class names the rule
      * as implemented; the acceptance suite walks these classes to build its
      * probe matrix. Role grants rank NONE &lt; READER &lt; OPERATOR &lt;
-     * OWNER, and "below OPERATOR" everywhere answers the normalized {@code
-     * 403} of the family, the #12867 contract.
+     * OWNER; below the read grant every Session route answers {@code 404
+     * session_not_found}, and a readable actor below OPERATOR everywhere
+     * answers the normalized {@code 403} of the family — the #12867
+     * contract.
      */
     public enum RuleClass {
         /**
