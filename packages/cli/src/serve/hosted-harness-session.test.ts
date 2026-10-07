@@ -142,6 +142,7 @@ const state = vi.hoisted(() => ({
       modelScope?: import('@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js').ManagedHookModelScope;
       resumeFromToolResults?: readonly unknown[];
       textDeltas?: import('./hosted-text-deltas.js').HostedTextDeltaStream;
+      workspaceContext?: { read(): string | undefined };
     }) => ({
       text: 'hello back',
       model: 'test-model',
@@ -600,6 +601,10 @@ describe('settleCancelledHookTurn', () => {
 
 describe('Hosted Harness no-tool session', () => {
   beforeEach(async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'workspaceContext',
+    ).mockResolvedValue([]);
     resetManagedRuntimeDispatchGatesForTest();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'fileHistory').mockResolvedValue({
       ownerSessionId: SESSION_ID,
@@ -1214,6 +1219,7 @@ describe('Hosted Harness no-tool session', () => {
   async function prewriteDetachedOutput(
     family: DetachedFamily,
     publication: boolean,
+    withChildAgent = false,
   ): Promise<void> {
     const key = {
       tenantId: 'tenant',
@@ -1358,6 +1364,61 @@ describe('Hosted Harness no-tool session', () => {
         await monitors.advanceOutput('bg-1', tip);
         await monitors.settleQuiet('bg-1', 'exited');
       }
+      if (withChildAgent) {
+        // A child agent record beside the detached shell one: it owns no
+        // output manifest, so the workspace restore must skip it rather
+        // than refuse the whole Session.
+        const inputRef = await resources.publish(
+          'managed-input',
+          Buffer.from('{"prompt":"audit the diff"}'),
+        );
+        await managed.authority.commitExtensionRecord(
+          {
+            operation: 'commitExtensionRecord',
+            commandId: 'agent-1',
+            sessionKey: key,
+            contentDigest: 'd'.repeat(64),
+          },
+          {
+            domain: 'child_run',
+            record: {
+              kind: 'child_agent',
+              childRunId: 'agent-1',
+              ownerScopeId: key.sessionId,
+              rootSessionId: key.sessionId,
+              depth: 1,
+              completion: 'sent',
+              inputRef,
+              workspaceMode: 'shared',
+              workingDirectory: '.',
+              childSessionId: null,
+              predecessorChildRunId: null,
+              resultVersion: 1,
+              resultRef: null,
+              terminalReceiptRef: null,
+              stopReason: null,
+              stopRequested: false,
+              run: {
+                state: 'admitted',
+                reason: null,
+                definition: {
+                  definitionId: 'agent-def-1',
+                  definitionRevision: 1,
+                  definitionDigest: 'f'.repeat(64),
+                },
+                executionCallId: 'agent-call-1',
+                effectId: null,
+                dispatchId: null,
+                deliveryId: null,
+                execution: 'intent',
+                runtime: null,
+                delivery: { target: 'session', state: 'planned' },
+              },
+            },
+          },
+          { class: 'trusted_entry' },
+        );
+      }
     } finally {
       await managed.close().catch(() => undefined);
     }
@@ -1409,6 +1470,23 @@ describe('Hosted Harness no-tool session', () => {
       ).toBe(204);
     },
   );
+
+  it('restores a Session whose detached lineage sits beside a child agent record', async () => {
+    domainEnablement.childRun = true;
+    // The child_run domain holds both kinds at H4: the shell lineage must
+    // still verify while the child agent record is skipped, not misparsed.
+    await prewriteDetachedOutput('child_run', false, true);
+    const { server, loaded } = await loadDetachedSession();
+    expect(loaded.status).toBe(200);
+    expect(
+      (
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+          'X-Qwen-Client-Id',
+          loaded.body.clientId as string,
+        )
+      ).status,
+    ).toBe(204);
+  });
 
   it('still refuses the restore when a detached capture loses page content', async () => {
     domainEnablement.childRun = true;
@@ -7341,6 +7419,10 @@ describe('Hosted Harness tool approvals', () => {
     vi.waitFor(check, { timeout: 10_000 });
 
   beforeEach(async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'workspaceContext',
+    ).mockResolvedValue([]);
     state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
     state.model.mockReset();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'fileHistory').mockResolvedValue({
@@ -8650,6 +8732,10 @@ describe('Hosted Harness Runtime turn takeover', () => {
   let acquireSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(async () => {
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'workspaceContext',
+    ).mockResolvedValue([]);
     resetManagedRuntimeDispatchGatesForTest();
     state.root = await mkdtemp(path.join(tmpdir(), 'hosted-harness-test-'));
     state.model.mockReset();
@@ -9023,6 +9109,12 @@ describe('Hosted Harness Runtime turn takeover', () => {
         executionStatus: 'success',
         responseParts: [{ text: 'written' }],
       } as never);
+      // Non-empty so "fetched" is distinguishable from "never fetched": an
+      // empty read assembles to '', which the slot already looks like.
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'workspaceContext',
+      ).mockResolvedValue([{ name: 'AGENTS.md', text: 'never touch prod' }]);
       const release = vi
         .spyOn(HostedWorkspaceBroker.prototype, 'release')
         .mockResolvedValue();
@@ -9047,12 +9139,18 @@ describe('Hosted Harness Runtime turn takeover', () => {
         }),
       ]);
       let declarations: string[] | undefined;
-      state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
-        declarations = (await toolTurn!.declarations(signal)).map(
-          (tool) => tool.name!,
-        );
-        return { text: 'continued', model: 'test-model' };
-      });
+      let recoveredContext: string | undefined;
+      state.model.mockImplementationOnce(
+        async ({ toolTurn, signal, workspaceContext }) => {
+          // The takeover-built attachment must have read the Workspace
+          // instructions before this recovered turn drives the model.
+          recoveredContext = workspaceContext?.read();
+          declarations = (await toolTurn!.declarations(signal)).map(
+            (tool) => tool.name!,
+          );
+          return { text: 'continued', model: 'test-model' };
+        },
+      );
       const clientId = loaded.body.clientId as string;
       const continued = await replacementHeaders(
         supertest(server).post(
@@ -9082,6 +9180,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
         'edit',
         ...(toolProfile.endsWith('/2') ? ['glob'] : []),
       ]);
+      // The takeover-built attachment starts with an undefined slot: the
+      // recovered turn must have populated it before driving the model, or
+      // the user-visible answer is synthesized with no project instructions.
+      expect(recoveredContext).toContain('--- Context from: AGENTS.md ---');
+      expect(recoveredContext).toContain('never touch prod');
       const transcript = await replacementHeaders(
         supertest(server).get(`/session/${SESSION_ID}/transcript`),
       ).set('X-Qwen-Client-Id', clientId);
