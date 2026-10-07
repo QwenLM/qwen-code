@@ -181,6 +181,7 @@ describe('installAccessLogMiddleware', () => {
     const success = vi.mocked(h.logger.info).mock.calls.at(-1)?.[1] as
       | DaemonLogContext
       | undefined;
+    expect(success).toMatchObject({ route: 'GET /success', status: 200 });
     expect('code' in (success ?? {})).toBe(false);
     expect('reason' in (success ?? {})).toBe(false);
   });

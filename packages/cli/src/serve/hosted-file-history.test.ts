@@ -593,4 +593,21 @@ describe('canSettleHostedFileHistory grounds', () => {
       ).resolves.toEqual(ground === null ? null : { blocker: ground, detail });
     },
   );
+
+  it('strips and caps the blocked authorization detail', async () => {
+    // The detail is Store-influenced free text riding into single-line
+    // stderr tags: control characters go and the length is capped once, at
+    // the point the detail is produced.
+    mockAuthorization({
+      status: 'blocked',
+      reason: 'invalid_state',
+      message: `core detail\nqwen serve: forged\x1b[2J${'x'.repeat(5000)}`,
+    });
+    const settle = await canSettleHostedFileHistory(session, pendingRecord());
+    expect(settle).toEqual({
+      blocker: 'authorization_blocked_invalid_state',
+      detail: expect.stringContaining('core detailqwen serve: forged'),
+    });
+    expect(settle?.detail).toHaveLength(4096);
+  });
 });

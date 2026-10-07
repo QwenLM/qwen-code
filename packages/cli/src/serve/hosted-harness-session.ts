@@ -297,7 +297,9 @@ function hostedTurnBusyReason(session: HostedSession): HostedRefusalReason {
 /**
  * Renders the sub-cause of an unusable run authorization for stderr: the
  * five-way blocked reason plus, when core recorded one, the specific message.
- * The response body's reason stays inside the closed refusal vocabulary.
+ * The response body's reason stays inside the closed refusal vocabulary. The
+ * message is Store-influenced free text, so it is stripped and capped like
+ * the load gate's other single-line tags.
  */
 function harnessAuthorizationDetail(
   authorization: Exclude<HarnessRunAuthorization, { status: 'runnable' }>,
@@ -305,7 +307,7 @@ function harnessAuthorizationDetail(
   if (authorization.status !== 'blocked') return authorization.status;
   return authorization.message === undefined
     ? authorization.reason
-    : `${authorization.reason}: ${authorization.message}`;
+    : `${authorization.reason}: ${stripAnsiAndControl(authorization.message).slice(0, 4096)}`;
 }
 
 function identity(
@@ -1697,7 +1699,7 @@ export function registerHostedHarnessSessionRoutes(
             );
             // Retry-inviting, like the first load's recovery failure; the
             // attached Session keeps its owed lease for the next redrive.
-            error(res, 409, 'hosted_turn_recovery_required');
+            error(res, 409, 'hosted_turn_recovery_required', 'takeover_failed');
             return;
           }
           res.status(200).json(attachmentReply(attached, recovery));
@@ -3104,9 +3106,7 @@ export function registerHostedHarnessSessionRoutes(
         res,
         409,
         'hosted_turn_recovery_required',
-        session.managed.authority.writesStopped
-          ? 'writes_stopped'
-          : 'turn_blocked',
+        hostedTurnBusyReason(session),
       );
     }
     // A continuation whose reply was lost is replayed by the coordinator: it
@@ -3161,7 +3161,7 @@ export function registerHostedHarnessSessionRoutes(
     if (!continueAuthorization.ok) {
       releaseRecoveredRuntime(session);
       writeStderrLineSafe(
-        `qwen serve: Hosted Session ${req.params['id']} continue: run authorization could not be read: ${String(continueAuthorization.cause)}`,
+        `qwen serve: Hosted Session ${req.params['id']} continue: run authorization could not be read: ${stripAnsiAndControl(String(continueAuthorization.cause)).slice(0, 4096)}`,
       );
       return error(
         res,
@@ -3183,6 +3183,9 @@ export function registerHostedHarnessSessionRoutes(
       'results_ready'
     ) {
       releaseRecoveredRuntime(session);
+      writeStderrLineSafe(
+        `qwen serve: Hosted Session ${req.params['id']} continue: continuation not ready: phase=${continueAuthorization.authorization.checkpoint.continuation.phase}`,
+      );
       return error(
         res,
         409,
@@ -3398,9 +3401,7 @@ export function registerHostedHarnessSessionRoutes(
         res,
         409,
         'hosted_turn_recovery_required',
-        session.managed.authority.writesStopped
-          ? 'writes_stopped'
-          : 'turn_blocked',
+        hostedTurnBusyReason(session),
       );
     }
     // A cancellation whose reply was lost is replayed by the coordinator: it
@@ -3468,7 +3469,7 @@ export function registerHostedHarnessSessionRoutes(
     if (session.active) return error(res, 409, 'hosted_turn_active');
     if (!cancelAuthorization.ok) {
       writeStderrLineSafe(
-        `qwen serve: Hosted Session ${sessionId} cancel: run authorization could not be read: ${String(cancelAuthorization.cause)}`,
+        `qwen serve: Hosted Session ${sessionId} cancel: run authorization could not be read: ${stripAnsiAndControl(String(cancelAuthorization.cause)).slice(0, 4096)}`,
       );
       // Retry-inviting refusal: keep the adopted lease owed (see the
       // blocked refusal above).
@@ -3909,7 +3910,12 @@ export function registerHostedHarnessSessionRoutes(
         writeStderrLineSafe(
           `qwen serve: Hosted file undo requires recovery: ${String(cause)}`,
         );
-        error(res, 503, 'hosted_file_history_recovery_required');
+        error(
+          res,
+          503,
+          'hosted_file_history_recovery_required',
+          'turn_blocked',
+        );
       })
       .finally(() => {
         session.active = undefined;

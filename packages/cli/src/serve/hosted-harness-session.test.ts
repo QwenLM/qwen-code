@@ -257,16 +257,13 @@ function store() {
  * Parks a Turn that drove nothing durable: the model refuses before any
  * file-history prepare, leaving only the unsettled input in the journal.
  */
-async function parkBlockedTextTurn(
-  profile: boolean,
-  toolProfile = 'hosted-workspace-files/1',
-) {
+async function parkBlockedTextTurn(profile: boolean) {
   const server = await app(true);
   const created = await headers(supertest(server).post('/session')).send({
     sessionId: SESSION_ID,
     sessionScope: 'thread',
     managedSessionStore: store(),
-    ...(profile ? { toolProfile } : {}),
+    ...(profile ? { toolProfile: 'hosted-workspace-files/1' } : {}),
   });
   expect(created.status).toBe(200);
   const clientId = created.body.clientId as string;
@@ -8278,23 +8275,22 @@ describe('Hosted Harness refusal reasons', () => {
     await rm(state.root, { recursive: true, force: true });
   });
 
-  async function createAndDetach(tools: { profile?: boolean } = {}) {
+  async function createAndDetach() {
     const server = await app(true);
     const created = await headers(supertest(server).post('/session')).send({
       sessionId: SESSION_ID,
       sessionScope: 'thread',
       managedSessionStore: store(),
-      ...(tools.profile ? { toolProfile: 'hosted-workspace-files/1' } : {}),
+      toolProfile: 'hosted-workspace-files/1',
     });
     expect(created.status).toBe(200);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   }
 
   it('names a blocked restore bundle on a cold load', async () => {
-    await createAndDetach({ profile: true });
+    await createAndDetach();
     // A blocked bundle without a basis must carry both refs null
-    // (assertManagedSessionRestoreBundle), so the cause line prints the
-    // value production would emit.
+    // (assertManagedSessionRestoreBundle); throughSequence is always set.
     vi.spyOn(
       LocalManagedSessionAuthority.prototype,
       'restoreBundle',
@@ -8303,6 +8299,7 @@ describe('Hosted Harness refusal reasons', () => {
       restoreBasis: null,
       checkpointRef: null,
       restoreProofRef: null,
+      throughSequence: 41,
     } as never);
     const log = vi
       .spyOn(stdio, 'writeStderrLineSafe')
@@ -8316,7 +8313,7 @@ describe('Hosted Harness refusal reasons', () => {
     expect(loaded.body.reason).toBe('restore_blocked');
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining(
-        'load refused (restore_blocked): basis=null through=undefined',
+        'load refused (restore_blocked): basis=null through=41',
       ),
     );
     log.mockRestore();
@@ -8434,6 +8431,8 @@ describe('Hosted Harness refusal reasons', () => {
       .set('X-Qwen-Client-Id', clientId)
       .send({ requestId: randomUUID(), promptId: PROMPT_ID });
     expect(undo.status).toBe(503);
+    expect(undo.body.code).toBe('hosted_file_history_recovery_required');
+    expect(undo.body.reason).toBe('turn_blocked');
     await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
       .set('X-Qwen-Client-Id', clientId)
       .send({});
@@ -9236,6 +9235,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     });
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(refused.body.reason).toBe('takeover_failed');
     expect(release).not.toHaveBeenCalled();
     // The next redrive recovers: same attachment, same recovery snapshot.
     const redriven = await replacementHeaders(
@@ -10543,7 +10543,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     vi.spyOn(
       LocalManagedSessionAuthority.prototype,
       'harnessRunAuthorization',
-    ).mockRejectedValue(new Error('journal gone'));
+    ).mockRejectedValue(new Error('journal gone\nqwen serve: forged\x1b[2J'));
     const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
     const releasesBefore = release.mock.calls.length;
     const refused = await replacementHeaders(
@@ -10554,9 +10554,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
     expect(refused.body.reason).toBe('authorization_unreadable');
+    // The cause is Store-influenced free text: the single-line tag strips
+    // its newline and control sequence rather than replaying them.
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining(
-        'continue: run authorization could not be read: Error: journal gone',
+        'continue: run authorization could not be read: Error: journal goneqwen serve: forged',
       ),
     );
     await vi.waitFor(
@@ -10576,7 +10578,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     vi.spyOn(
       LocalManagedSessionAuthority.prototype,
       'harnessRunAuthorization',
-    ).mockRejectedValue(new Error('journal gone'));
+    ).mockRejectedValue(new Error('journal gone\nqwen serve: forged\x1b[2J'));
     const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
     const releasesBefore = release.mock.calls.length;
     const refused = await replacementHeaders(
@@ -10589,7 +10591,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(refused.body.reason).toBe('authorization_unreadable');
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining(
-        'cancel: run authorization could not be read: Error: journal gone',
+        'cancel: run authorization could not be read: Error: journal goneqwen serve: forged',
       ),
     );
     expect(release.mock.calls.length).toBe(releasesBefore);
@@ -10665,6 +10667,9 @@ describe('Hosted Harness Runtime turn takeover', () => {
 
   it('names a runnable but unready continuation on continue', async () => {
     const { server, clientId, recovery } = await loadParkedRecovery();
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
     vi.spyOn(
       LocalManagedSessionAuthority.prototype,
       'harnessRunAuthorization',
@@ -10680,6 +10685,57 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(refused.status).toBe(409);
     expect(refused.body.code).toBe('hosted_turn_recovery_required');
     expect(refused.body.reason).toBe('continuation_not_ready');
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining('continuation not ready: phase=await_runtime'),
+    );
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('strips control characters from the blocked authorization message', async () => {
+    const { server, clientId, recovery } = await loadParkedRecovery();
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    // The message is Store-influenced free text: the single-line tag must
+    // strip newlines and control sequences rather than replay them.
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({
+      status: 'blocked',
+      reason: 'invalid_state',
+      message: `invalid_state\nqwen serve: forged\x1b[2J${'x'.repeat(5000)}`,
+    } as never);
+    for (const route of ['continue', 'cancel'] as const) {
+      log.mockClear();
+      const refused = await replacementHeaders(
+        supertest(server).post(
+          `/session/${SESSION_ID}/managed-runtime/${route}`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ promptId: PROMPT_ID, ...recovery });
+      expect(refused.status).toBe(409);
+      expect(refused.body.reason).toBe('not_runnable');
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `${route}: run authorization not runnable: invalid_state: invalid_stateqwen serve: forged`,
+        ),
+      );
+      expect(
+        log.mock.calls
+          .map(([line]) => line)
+          .every((line) => line === stripAnsiAndControl(line)),
+      ).toBe(true);
+      const line = log.mock.calls
+        .map(([emitted]) => emitted)
+        .find((emitted) => emitted.includes('not runnable'));
+      expect(line).toBeDefined();
+      // The message is capped at 4096 characters before it is interpolated.
+      expect(line?.length).toBeLessThan(4400);
+    }
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );
