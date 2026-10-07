@@ -120,6 +120,7 @@ describe('automation definitions', () => {
       [{ cron: '0 24 * * *' }, /cron hour field values/],
       [{ timezone: 'Mars/Olympus Mons' }, /timezone/],
       [{ goal: '' }, /goal/],
+      [{ goal: 'x'.repeat(4097) }, /goal exceeds 4096 UTF-8 bytes/],
       [{ catchUp: 'bounded' }, /catchUpLimit/],
       [{ catchUp: 'none', catchUpLimit: 2 }, /catchUpLimit/],
       [{ overlap: 'always' }, /overlap/],

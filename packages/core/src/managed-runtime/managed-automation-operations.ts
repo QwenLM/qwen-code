@@ -224,6 +224,14 @@ export function assertAutomationDefinition(
         : null) as number | null,
     enabled: (record['enabled'] ?? defaults.enabled ?? true) as boolean,
   };
+  if (
+    Buffer.byteLength(definition.goal, 'utf8') >
+    MANAGED_AUTOMATION_LIMITS.maxGoalBytes
+  ) {
+    fail(
+      `Automation definition goal exceeds ${MANAGED_AUTOMATION_LIMITS.maxGoalBytes} UTF-8 bytes.`,
+    );
+  }
   // The contract validators decide the rest; a placeholder prompt
   // reference and identity make a body that only the definition can fail.
   parseScheduleRecord(
