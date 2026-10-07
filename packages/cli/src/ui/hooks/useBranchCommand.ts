@@ -146,6 +146,10 @@ export function useBranchCommand(
       let prevSessionData: ResumedSessionData | undefined;
 
       try {
+        // Extract turns the memory cadence skipped while this is still the
+        // outgoing session, before the swap transaction snapshots its usage.
+        await flushMemoryBeforeSessionSwitch(config);
+
         // 0. Open the telemetry swap transaction BEFORE touching the
         //    outgoing session. Opening takes the session-switch latch and
         //    fixes the outgoing session for this attempt; see the lifetime
@@ -253,7 +257,6 @@ export function useBranchCommand(
         //    The transaction opened in step 0 covers the initialize()
         //    replay (#9833; see beginTelemetrySwap's JSDoc in core
         //    client.ts).
-        await flushMemoryBeforeSessionSwitch(config);
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await waitForGoalRuntime(config);

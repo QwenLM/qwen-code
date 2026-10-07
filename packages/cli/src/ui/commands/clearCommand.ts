@@ -70,6 +70,10 @@ export const clearCommand: SlashCommand = {
           config.getDebugLogger().warn(`SessionEnd hook failed: ${err}`);
         });
 
+      // Extract turns the memory cadence skipped while this is still the
+      // outgoing session, before its usage is persisted below.
+      await flushMemoryBeforeSessionSwitch(config);
+
       // Abort old-session async work before creating the new session so
       // cancellation notifications cannot leak across the reset boundary.
       config.getBackgroundTaskRegistry().abortAll({ notify: false });
@@ -96,7 +100,6 @@ export const clearCommand: SlashCommand = {
         }
       }
 
-      await flushMemoryBeforeSessionSwitch(config);
       const newSessionId = config.startNewSession();
 
       // Reset UI telemetry metrics for the new session

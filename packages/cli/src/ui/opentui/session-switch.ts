@@ -113,6 +113,10 @@ export async function handleResumeSession(
     return;
   }
 
+  // Extract turns the memory cadence skipped while this is still the
+  // outgoing session, before the swap transaction snapshots its usage.
+  await flushMemoryBeforeSessionSwitch(config);
+
   // Open the telemetry swap transaction BEFORE touching the outgoing
   // session (ink useResumeCommand parity): the slot is the only
   // serialization for session switches, and a failed swap must restore
@@ -168,7 +172,6 @@ export async function handleResumeSession(
 
     // 1. Core swap first (ink order): any failure before the UI commits
     //    rolls the core back to the previous session below.
-    await flushMemoryBeforeSessionSwitch(config);
     resetBackgroundStateForSessionSwitch(config);
     config.startNewSession(sessionId, sessionData);
     coreSwapped = true;
@@ -292,6 +295,10 @@ export async function handleBranchSession(
     return;
   }
 
+  // Extract turns the memory cadence skipped while this is still the
+  // outgoing session, before the swap transaction snapshots its usage.
+  await flushMemoryBeforeSessionSwitch(config);
+
   // Telemetry swap transaction (ink useBranchCommand parity): the slot is
   // the only serialization for session switches; see the resume handler.
   const telemetrySwapOpened =
@@ -364,7 +371,6 @@ export async function handleBranchSession(
     }
 
     // 7. Core swap first.
-    await flushMemoryBeforeSessionSwitch(config);
     config.startNewSession(newSessionId, resumed);
     coreSwapped = true;
     await waitForGoalRuntime(config);
