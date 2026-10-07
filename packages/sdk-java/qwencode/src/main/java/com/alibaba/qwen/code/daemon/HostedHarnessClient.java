@@ -257,10 +257,16 @@ public final class HostedHarnessClient implements AutoCloseable {
         // same-identity retry that is the earlier registration, not this
         // call's candidate.
         ActivePrompt registered = ownsActivePrompt ? candidate : existing;
+        // The latch is per-attempt: this call's send has not concluded, so
+        // the registered entry is unsettled again even when an earlier
+        // attempt's latch survived.
+        registered.admissionSettled = false;
+        AtomicBoolean dispatched = new AtomicBoolean();
         HttpResponse<HttpSupport.Body> raw;
         try {
             raw = send(sessionPath(session.getHarnessSessionId()) + "/prompt",
-                    "POST", request.toJson(), session.getHarnessClientId());
+                    "POST", request.toJson(), session.getHarnessClientId(),
+                    dispatched);
         } catch (DaemonTransportException e) {
             // A locally rejected send proves this submission never reached
             // the server, so a marker owned by it cannot be a running turn;
@@ -271,23 +277,45 @@ public final class HostedHarnessClient implements AutoCloseable {
             }
             throw e;
         } catch (IOException | InterruptedException e) {
-            registered.admissionSettled = true;
+            if (ownsActivePrompt) {
+                registered.admissionSettled = true;
+            }
             restoreInterrupt(e);
             throw new PromptAdmissionUnknownException(e);
         } catch (RuntimeException | Error e) {
-            // An unchecked escape (for example an OutOfMemoryError while
-            // encoding the body) can never be matched by a terminal event,
-            // so the registered marker settles here: a later status read
-            // is the only recovery path that can clear it.
-            registered.admissionSettled = true;
+            // An unchecked escape before dispatch (a header value the
+            // request builder rejects, a failing executor state probe)
+            // proves this submission never reached the server, so a marker
+            // this call owns is released like a locally rejected send; a
+            // same-identity retry keeps the original entry. An escape past
+            // the dispatch boundary can never be matched by a terminal
+            // event, so the owning call's marker settles instead: a later
+            // status read is the recovery path that can clear it.
+            if (ownsActivePrompt && !dispatched.get()) {
+                activePrompts.remove(session.getHarnessSessionId(),
+                        registered);
+            } else if (ownsActivePrompt) {
+                registered.admissionSettled = true;
+            }
             throw e;
         }
-        // The send attempt concluded, so a status answer received from here
-        // on no longer predates this submission's admission window.
-        registered.admissionSettled = true;
+        // The owning call's send attempt concluded, so a status answer
+        // received from here on no longer predates this submission's
+        // admission window. A non-owning retry settles the entry only by
+        // publishing a fresh one on the 202 path below.
+        if (ownsActivePrompt) {
+            registered.admissionSettled = true;
+        }
         try {
             validateGeneration(raw.headers(), raw.statusCode());
-        } catch (DaemonProtocolException e) {
+        } catch (DaemonProtocolException | HostedHarnessGenerationException e) {
+            // A proven generation change means every local record for that
+            // peer is dead, the admission ledger included: retire it
+            // instead of leaving a veto no live turn can ever clear.
+            if (e instanceof HostedHarnessGenerationException) {
+                activePrompts.remove(session.getHarnessSessionId());
+                throw e;
+            }
             // An unfenced 408/5xx (for example a gateway error page) cannot
             // prove the prompt was not admitted, so it is outcome-unknown.
             // A definitive unfenced 4xx was produced before the route's
@@ -327,12 +355,13 @@ public final class HostedHarnessClient implements AutoCloseable {
             if (response.getStatusCode() == 409) {
                 // Narrow the release by refusal code, not by status class.
                 // hosted_prompt_recovery_required is answered from the
-                // route's hasAcceptedInput gate, so it proves this
-                // promptId already sits in the durable input log and the
-                // daemon still owes it a terminal event; releasing the
-                // marker would let a second prompt identity be admitted
-                // into a session with two unsettled inputs, which fails
-                // every recovery entrance closed. Every other 409 code is
+                // route's hasAcceptedInput gate, so this promptId already
+                // sits in the durable input log and the expected recovery
+                // is its same-identity replay. The retention is a hint,
+                // not a lock: the gate cannot distinguish an owed terminal
+                // event from an already-settled replay, and a status read
+                // answering hasActivePrompt:false still clears the marker.
+                // Every other 409 code is
                 // produced without admitting this submission
                 // (hosted_turn_active only after the same-identity replay
                 // branch already returned 202, the busy and closing codes
@@ -371,6 +400,23 @@ public final class HostedHarnessClient implements AutoCloseable {
             if (!candidate.promptId.equals(responsePromptId)) {
                 throw new PromptAdmissionUnknownException(
                         "Hosted Harness returned a different promptId");
+            }
+            if (!ownsActivePrompt) {
+                // A same-identity retry's 202 re-admitted the submission:
+                // publish a fresh, settled entry so a status read that
+                // snapshotted the earlier instance cannot clear the marker
+                // that is live now — its two-arg remove keys on the
+                // observed instance.
+                candidate.admissionSettled = true;
+                if (!activePrompts.replace(session.getHarnessSessionId(),
+                        registered, candidate)) {
+                    // A terminal event for the earlier registration raced
+                    // this flight and cleared the entry; this 202 is a
+                    // live admission, so plant the fresh marker for its
+                    // own terminal event.
+                    activePrompts.putIfAbsent(
+                            session.getHarnessSessionId(), candidate);
+                }
             }
             return new PromptReceipt(responsePromptId,
                     JsonSupport.requiredNonNegativeLong(json, "lastEventId",
@@ -657,10 +703,15 @@ public final class HostedHarnessClient implements AutoCloseable {
             }
             removeAttachment(ref);
         } catch (DaemonHttpException | HostedHarnessGenerationException e) {
-            // A definitive refusal retires the attachment; a proven
-            // generation change means every local record for that peer is
-            // dead. An outcome-unknown surface keeps it.
+            // A definitive refusal retires the attachment but says nothing
+            // about a turn detach leaves running server-side, so the
+            // admission ledger stays. A proven generation change means
+            // every local record for that peer is dead, ledger included.
+            // An outcome-unknown surface keeps both.
             removeAttachment(ref);
+            if (e instanceof HostedHarnessGenerationException) {
+                activePrompts.remove(ref.getHarnessSessionId());
+            }
             throw e;
         }
     }
@@ -1188,6 +1239,13 @@ public final class HostedHarnessClient implements AutoCloseable {
     private HttpResponse<HttpSupport.Body> send(String path, String method,
             Map<String, Object> body, String clientId)
             throws IOException, InterruptedException {
+        return send(path, method, body, clientId, new AtomicBoolean());
+    }
+
+    private HttpResponse<HttpSupport.Body> send(String path, String method,
+            Map<String, Object> body, String clientId,
+            AtomicBoolean dispatched)
+            throws IOException, InterruptedException {
         HttpRequest.Builder builder = sessionRequestBuilder(path, clientId)
                 .header("Accept", "application/json")
                 .header("Accept-Encoding", "identity")
@@ -1205,6 +1263,10 @@ public final class HostedHarnessClient implements AutoCloseable {
         // one that lands mid-flight (close() racing an in-flight send)
         // must keep its outcome-unknown classification.
         boolean terminatedBeforeSend = httpExecutor.isShutdown();
+        // Everything above is pre-dispatch construction; the flag lets the
+        // caller tell an escape from it (provably never on the wire) apart
+        // from one out of httpClient.send itself (outcome unknown).
+        dispatched.set(true);
         try {
             return httpClient.send(builder.build(),
                     HttpSupport.bodyHandler());
@@ -1333,6 +1395,13 @@ public final class HostedHarnessClient implements AutoCloseable {
                     if (!closed.get() && !state.cancelled.get()) {
                         sendHeartbeat(state.session);
                     }
+                } catch (HostedHarnessGenerationException e) {
+                    // A proven generation change means every local record
+                    // for that peer is dead: retire the attachment and the
+                    // admission ledger, or the ledger's veto wedges the
+                    // session for the rest of this client's life.
+                    discardLocalSessionState(
+                            state.session.getHarnessSessionId());
                 } catch (DaemonException ignored) {
                     // The next scheduled heartbeat is a new keepalive.
                 } finally {

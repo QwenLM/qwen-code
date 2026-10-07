@@ -18,9 +18,11 @@ public final class HarnessEventStream implements AutoCloseable {
     private final String eventEpoch;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final AtomicBoolean idleTimedOut = new AtomicBoolean();
-    private final AtomicLong lastActivity =
-            new AtomicLong(System.nanoTime());
-    private final AtomicBoolean consumerWaiting = new AtomicBoolean();
+    // The park stamp IS the waiting flag: 0 while no consumer is parked,
+    // otherwise the nanoTime of the park, refreshed by every frame the
+    // reader pulls while parked. One volatile write publishes both facts,
+    // so a watchdog tick can never pair a fresh flag with a stale stamp.
+    private final AtomicLong waitingSince = new AtomicLong();
     // Serializes concurrent next() callers so frames cannot interleave;
     // close() never takes this lock, so a blocked read stays abortable. A
     // monitor held across the blocking SSE read would pin a virtual thread
@@ -36,7 +38,8 @@ public final class HarnessEventStream implements AutoCloseable {
         this.session = session;
         this.input = input;
         this.reader = new SseReader(input, maximumFrameBytes,
-                () -> lastActivity.set(System.nanoTime()));
+                () -> waitingSince.updateAndGet(
+                        v -> v == 0 ? 0 : System.nanoTime()));
         this.lastEventId = lastEventId;
         this.eventEpoch = eventEpoch;
     }
@@ -61,14 +64,12 @@ public final class HarnessEventStream implements AutoCloseable {
                 throw closedFailure();
             }
             // The idle budget measures peer silence while a consumer is
-            // parked here; time between next() calls is not charged.
-            // Stamp before publishing the waiting flag: the watchdog reads
-            // the flag first, so a tick landing between the two writes
-            // then either skips (flag not yet set) or sees this fresh
-            // stamp — never one stale by the whole pause since the
+            // parked here; time between next() calls is not charged. The
+            // single waitingSince write publishes the park and its stamp
+            // together, so a watchdog tick either skips (0) or sees this
+            // fresh stamp — never one stale by the whole pause since the
             // previous next().
-            lastActivity.set(System.nanoTime());
-            consumerWaiting.set(true);
+            waitingSince.set(System.nanoTime());
             try {
                 SseReader.Frame frame = reader.next();
                 if (frame == null) {
@@ -104,7 +105,7 @@ public final class HarnessEventStream implements AutoCloseable {
                 closeQuietly();
                 throw e;
             } finally {
-                consumerWaiting.set(false);
+                waitingSince.set(0);
             }
         } finally {
             cursorLock.unlock();
@@ -168,10 +169,11 @@ public final class HarnessEventStream implements AutoCloseable {
                 }
                 // Only a consumer parked in next() is waiting on the peer;
                 // a stream nobody is pulling stays open until close().
-                if (!consumerWaiting.get()) {
+                long since = waitingSince.get();
+                if (since == 0) {
                     return;
                 }
-                if (System.nanoTime() - lastActivity.get() >= idleNanos
+                if (System.nanoTime() - since >= idleNanos
                         && idleTimedOut.compareAndSet(false, true)) {
                     // Closes the raw input without any stream monitor, so
                     // the single-thread scheduler never blocks behind the
