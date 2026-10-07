@@ -102,6 +102,7 @@ describe('HttpManagedChannelControlPlane', () => {
       attachments: [],
       replyContext: {
         to: 'a',
+        threadId: 't',
         parent: '<p>',
         references: ['<p>'],
         subject: '',
