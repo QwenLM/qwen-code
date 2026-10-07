@@ -1747,11 +1747,19 @@ async function executeHostedTurn(
           }
         }
         await toolTurn?.finish();
+        turnResult = record(session, sessionId, 'system', null, {
+          subtype: 'turn_result',
+          systemPayload: { promptId, state, stopReason, endedAt: Date.now() },
+        });
+        onTurnResult?.(turnResult);
+        await session.managed.sink.write(turnResult);
         // H4b: the tool-arm results this turn answered are consumed
-        // facts only once the turn settles — they commit ahead of the
-        // turn record, and each leaves the owed set as it commits, so a
-        // commit that dies mid-flush keeps the remainder owed, never
-        // widened and never silently dropped.
+        // facts only once the turn's own settlement commits durably — a
+        // crash before this point leaves accepted-not-consumed evidence
+        // (H4b decision 6), never a consumed claim without a settled
+        // Turn; each id leaves the owed set as it commits, so a commit
+        // that dies mid-flush keeps the remainder owed, never widened
+        // and never silently dropped.
         if (
           state === 'completed' &&
           session.childAgents &&
@@ -1763,12 +1771,6 @@ async function executeHostedTurn(
             session.childConsumption.delete(childRunId);
           }
         }
-        turnResult = record(session, sessionId, 'system', null, {
-          subtype: 'turn_result',
-          systemPayload: { promptId, state, stopReason, endedAt: Date.now() },
-        });
-        onTurnResult?.(turnResult);
-        await session.managed.sink.write(turnResult);
       }),
   );
   // Session availability must not gate on publisher cleanup: the drain is
