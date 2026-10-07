@@ -14,6 +14,10 @@
     "channel_route": null,
     "channel_delivery": null
   },
+  "additionalRecordBodies": {
+    "schedule": null,
+    "automation_run": "automation_run"
+  },
   "taskStates": [
     "pending",
     "running",
