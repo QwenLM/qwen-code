@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import { Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   readManagedRuntimeContainerBoot,
@@ -68,6 +69,15 @@ afterEach(async () => {
       .map((directory) => rm(directory, { recursive: true })),
   );
 });
+
+function listenOnEphemeralPort() {
+  const nativeListen = Server.prototype.listen;
+  return vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
+    this: Server,
+  ) {
+    return Reflect.apply(nativeListen, this, [0, '127.0.0.1']);
+  });
+}
 
 async function bootFile(contents: string): Promise<string> {
   const directory = await mkdtemp(path.join(tmpdir(), 'qwen-container-boot-'));
@@ -135,6 +145,7 @@ describe('Managed Runtime container entry', () => {
       'install',
     );
     const localPublications = new ManagedShellPublisherRegistry();
+    const listen = listenOnEphemeralPort();
     const worker = await startManagedRuntimeAttestationWorker(
       boot,
       undefined,
@@ -142,6 +153,7 @@ describe('Managed Runtime container entry', () => {
       true,
     );
     try {
+      expect(listen).toHaveBeenCalledWith(43190, '0.0.0.0');
       const binding = {
         tenantId: boot.context.tenantId,
         workspaceId: boot.context.workspaceId,
@@ -300,8 +312,8 @@ describe('Managed Runtime container entry', () => {
     }
   });
 
-  it('opens the explicit container port with authenticated attestation', async () => {
-    const listen = vi.spyOn(Server.prototype, 'listen');
+  it('requests the container port and serves authenticated attestation', async () => {
+    const listen = listenOnEphemeralPort();
     const worker = await startManagedRuntimeAttestationWorker(
       boot,
       undefined,
@@ -309,11 +321,13 @@ describe('Managed Runtime container entry', () => {
       true,
     );
     try {
-      expect(listen.mock.results[0]?.value?.address()).toMatchObject({
-        address: '0.0.0.0',
-        port: 43190,
+      expect(listen).toHaveBeenCalledWith(43190, '0.0.0.0');
+      const address = listen.mock.results[0]?.value?.address() as AddressInfo;
+      expect(address).toMatchObject({
+        address: '127.0.0.1',
+        port: expect.any(Number),
       });
-      expect(worker.ready.url).toBe('http://127.0.0.1:43190');
+      expect(worker.ready.url).toBe(`http://127.0.0.1:${address.port}`);
       const url = `${worker.ready.url}/internal/managed-runtime/v2/attest`;
       const body = {
         protocolVersion: 2,
