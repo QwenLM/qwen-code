@@ -619,6 +619,24 @@ public class ManagedExtensionRecordStore {
                 }
             }
         }
+        if (domain.equals("channel_route")) {
+            JsonNode ref = record.get("policyRef");
+            requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+        }
+        if (domain.equals("channel_delivery")) {
+            JsonNode ref = record.get("contentRef");
+            requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+            for (JsonNode segment : record.get("segments")) {
+                JsonNode segmentRef = segment.get("contentRef");
+                requireReference(resources.apply(segmentRef.get("resourceId").textValue()),
+                        segmentRef);
+                JsonNode proofRef = segment.get("receipt").get("proofRef");
+                if (proofRef != null && !proofRef.isNull()) {
+                    requireReference(resources.apply(proofRef.get("resourceId").textValue()),
+                            proofRef);
+                }
+            }
+        }
         if (domain.equals("hook_execution")) {
             StoredResource plan = resources.apply(record.get("planRef").get("resourceId").textValue());
             if (plan.kind().equals("managed-hook-plan")) {

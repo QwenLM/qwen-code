@@ -48,6 +48,35 @@ class RuntimeBrokerServiceTest {
             "capability", "session");
 
     @Test
+    void coldReleaseRejectsHistoricalAmbiguityWithAStableConflict() {
+        var target = new RuntimeScope("tenant", "workspace", "generation", "/target",
+                "capability", "workspace");
+        try (Fixture fixture = new Fixture(target)) {
+            var old = fixture.sessionRepository.findOrCreate(new RuntimeSessionRecord(
+                    new RuntimeSession("harness", "runtime", "bootstrap", WORKSPACE_SCOPE),
+                    "binding-old", 1, RuntimeSessionRecord.State.ACQUIRING, 0, START));
+            old = fixture.sessionRepository.compareAndSet(old,
+                    old.withState(RuntimeSessionRecord.State.RELEASED, START));
+            var current = fixture.sessionRepository.findOrCreate(new RuntimeSessionRecord(
+                    new RuntimeSession("harness", "runtime", "bootstrap", target),
+                    "binding-new", 1, RuntimeSessionRecord.State.ACQUIRING, 0, START));
+            current = fixture.sessionRepository.compareAndSet(current,
+                    current.withState(RuntimeSessionRecord.State.READY, START));
+
+            for (int attempt = 0; attempt < 2; attempt++) {
+                var ambiguity = failure(fixture.service.release("harness", "runtime"));
+                assertEquals(409, ambiguity.getStatusCode());
+                assertEquals("runtime_session_ambiguous", ambiguity.getCode());
+                assertFalse(ambiguity.isRetryable());
+            }
+            assertEquals(old, fixture.sessionRepository.findById(WORKSPACE_SCOPE, "runtime"));
+            assertEquals(current, fixture.sessionRepository.findById(target, "runtime"));
+            assertEquals(0, fixture.transport.releaseCalls.get());
+            assertEquals(0, fixture.provisioner.calls.get());
+        }
+    }
+
+    @Test
     void workspaceSessionsShareOneProvisionedBinding() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             RuntimeSessionRecord first = join(fixture.service.acquire(

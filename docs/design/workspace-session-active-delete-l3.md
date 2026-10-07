@@ -76,6 +76,10 @@ insertion; writer mutations and ordinary execution authorization must share
 admission's lock order. A tool-result receipt takes the placement guard before
 its original-result, publication tenant and journal locks, including receipt
 replay; its nested journal commit must not acquire placement in reverse order.
+Offline storage migration, including an ABORTED operation replay, follows the
+same placement-before-retention order as cleanup authorization for another
+Session in the tenant. This does not relax the stopped-writer/no-new-dispatch
+migration prerequisite.
 An ordinary journal transaction definitively refused with
 `workspace_lifecycle_admission_closed` before any uncertain commit response
 does not stop the cached Session's writes; current lifecycle authority is still
@@ -201,11 +205,12 @@ accept those Sessions; this PR does not implement compaction recovery.
 
 ## 4. Compatibility and rollout
 
-Add lifecycle migration V48 after the existing V35 tool-profile, V36–V39
-journal/query, V40 creator, V41–V44 CSI/dispatch, V45 H3 task-journal and V46
-W2 directory-change and V47 H5 channel route/delivery migrations; preserve those
-migrations and V32. The unmerged lifecycle SQL is unchanged when its version
-moves from V47 to V48. Main's `/2` search profiles coexist with L3, but lifecycle
+Add lifecycle migration V51 after the existing V35 tool-profile, V36–V39
+journal/query, V40 creator, V41–V44 CSI/dispatch, V45 H3 task-journal, V46
+W2 directory-change, V47 H5 channel route/delivery and V48–V50 W1c storage
+migration/index/identity migrations; preserve those migrations and V32. The
+unmerged lifecycle SQL is unchanged when its version moves from V48 to V51.
+Main's `/2` search profiles coexist with L3, but lifecycle
 admission still requires `hosted-workspace-files/1`. H5 channel contracts and
 persistence do not enable channel execution or lifecycle effects. Keep W2's
 directory/revision operation fields alongside the lifecycle protocol field.

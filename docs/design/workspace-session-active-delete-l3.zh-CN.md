@@ -61,7 +61,9 @@ placement guard 先于 retention、Session 和 journal 锁。仅检查 journal h
 或尚不存在的围栏行不能排除并发插入围栏；writer 变更和普通执行授权必须共用
 准入的锁顺序。工具结果 receipt 在原结果、publication 租户和 journal 锁之前
 获取 placement guard，receipt 重放也遵循此顺序，避免嵌套 journal commit
-反向获取 placement 锁。普通 journal 事务在尚无不确定提交响应前收到明确的
+反向获取 placement 锁。离线 storage 迁移（包括 ABORTED operation 重放）与同租户
+其他 Session 的清理授权使用相同的 placement 先于 retention 顺序；不放宽迁移
+要求 writer 已停止且不新增派发的前提。普通 journal 事务在尚无不确定提交响应前收到明确的
 `workspace_lifecycle_admission_closed` 回滚拒绝时，不会使缓存 Session 永久停写；
 后续结算仍须有效的当前 lifecycle authority。若此前已有不确定响应，仍保留
 写失败围栏。L3 之前的 Store 已经通过 Session 锁 helper 获取 publication
@@ -153,8 +155,8 @@ L3 返回 `workspace_lifecycle_journal_unverified`。未来 compaction 必须
 
 ## 4. 兼容与启用
 
-在已有 V35 工具配置、V36–V39 journal/查询、V40 创建者、V41–V44 CSI/派发、V45 H3 任务 journal、V46 W2 目录切换及 V47 H5 channel route/delivery 迁移之后新增 V48 生命周期迁移，
-保留这些迁移和 V32。未合入的生命周期迁移从 V47 顺延为 V48，SQL 内容不变。
+在已有 V35 工具配置、V36–V39 journal/查询、V40 创建者、V41–V44 CSI/派发、V45 H3 任务 journal、V46 W2 目录切换及 V47 H5 channel route/delivery 以及 V48–V50 W1c storage 迁移/索引/身份迁移之后新增 V51 生命周期迁移，
+保留这些迁移和 V32。未合入的生命周期迁移从 V48 顺延为 V51，SQL 内容不变。
 主线 `/2` 搜索画像与 L3 共存，但生命周期准入仍仅接受 `hosted-workspace-files/1`。
 H5 channel 契约和持久化不启用 channel 执行或生命周期 effects。
 W2 目录/revision 操作字段与生命周期协议字段同时保留。

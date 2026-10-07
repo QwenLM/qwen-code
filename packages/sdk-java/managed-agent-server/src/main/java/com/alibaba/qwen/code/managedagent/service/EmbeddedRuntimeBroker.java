@@ -111,6 +111,13 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 : new WorkspaceRuntimeProvisioner(baseProvisioner, workspaces, workspaceExecutionStore);
         HarnessSessionResolver resolver = new HarnessSessionResolver() {
             @Override
+            public java.util.concurrent.CompletionStage<String> resolveTenant(String sessionId) {
+                return store.findSessionById(sessionId).map(session ->
+                        CompletableFuture.completedFuture(session.tenantId())).orElseGet(() ->
+                        CompletableFuture.failedFuture(new IllegalArgumentException("Session is not owned by this service")));
+            }
+
+            @Override
             public CompletionStage<RuntimeScope> resolve(String sessionId) {
                 return resolve(sessionId, null);
             }

@@ -642,6 +642,8 @@ export interface components {
                 code: string;
                 message: string;
                 request_id: string;
+                /** @description Present on Runtime Broker refusals; true permits retry, false is a definite refusal. Other errors may omit this field. */
+                retryable?: boolean;
                 /** Format: int64 */
                 replay_floor_sequence?: number | null;
                 /** Format: int64 */
@@ -1099,7 +1101,7 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
-        /** @description State, idempotency, or recovery conflict. */
+        /** @description State, idempotency, or recovery conflict. New Workspace-scoped admissions return workspace_unavailable with retryable=false while an offline Workspace migration holds the storage fence; authorized durable replays retain their existing behavior. */
         Conflict: {
             headers: {
                 [name: string]: unknown;

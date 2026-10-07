@@ -290,6 +290,7 @@ public class ManagedSessionStore {
         validateStableId(request.writerId(), "writerId");
         validateLeaseMillis(request.leaseMillis());
         ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+        WorkspaceMigrationAdmission.sessionAdmission(jdbc, tenantId, sessionId);
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         List<String> closed = jdbc.query("SELECT status FROM managed_agent_session"
                 + " WHERE tenant_id = ? AND session_id = ? AND workspace_id IS NOT NULL FOR UPDATE",

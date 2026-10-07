@@ -81,6 +81,52 @@ class ManagedWorkspaceAdmissionTest {
     private PlatformTransactionManager transactionManager;
 
     @Test
+    void migrationFenceBlocksNewTurnsAndMutationsButPreservesReceipts() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-migration", "storage-migration",
+                WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-migration", "actor-a", true);
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {
+        }, registry, properties);
+        var transaction = new TransactionTemplate(transactionManager);
+        String digest = "sha256:" + "a".repeat(64);
+        String session = transaction.execute(status -> enabled.insertWorkspaceSessionCommand(
+                tenant, "actor-a", "create-migration", digest, "qwen-code", null, null,
+                List.of(), null, new WorkspaceSelection("ws-migration", "."))).sessionId();
+        var original = transaction.execute(status -> enabled.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "original-turn", digest, session, List.of(Map.of("type", "text", "text", "go")), digest));
+        jdbc.update("UPDATE managed_agent_turn SET status = 'SUCCEEDED' WHERE tenant_id = ? AND session_id = ?",
+                tenant, session);
+        transaction.executeWithoutResult(status -> {
+            enabled.beginSessionMutation(tenant, "RENAME_SESSION", "original-rename", digest, session,
+                    SessionMutationKind.RENAME);
+            enabled.completeSessionMutation(tenant, "RENAME_SESSION", "original-rename", session,
+                    SessionMutationKind.RENAME, "original", null);
+        });
+        jdbc.update("INSERT INTO qwen_runtime_storage_fence"
+                + " (tenant_key, storage_key, tenant_id, storage_id, operation_id) VALUES (?, ?, ?, ?, ?)",
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageFenceKey(tenant),
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.storageFenceKey("storage-migration"),
+                tenant, "storage-migration", UUID.randomUUID().toString());
+        assertThat(transaction.execute(status -> enabled.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "original-turn", digest, session, List.of(), digest)).turnId()).isEqualTo(original.turnId());
+        assertThat(transaction.execute(status -> enabled.beginSessionMutation(tenant, "RENAME_SESSION",
+                "original-rename", digest, session, SessionMutationKind.RENAME)).replayed()).isTrue();
+        assertThatThrownBy(() -> transaction.execute(status -> enabled.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "new-turn", digest, session, List.of(), digest))).isInstanceOf(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class)
+                .hasMessage("Workspace execution authority is unavailable.");
+        assertThatThrownBy(() -> transaction.execute(status -> enabled.beginSessionMutation(tenant, "RENAME_SESSION",
+                "new-rename", digest, session, SessionMutationKind.RENAME))).isInstanceOf(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException.class)
+                .hasMessage("Workspace execution authority is unavailable.");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_turn WHERE tenant_id = ? AND session_id = ?",
+                Long.class, tenant, session)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT title FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, session)).isEqualTo("original");
+    }
+
+    @Test
     void discoveryFiltersBeforePagingAndKeepsDefaultOutsidePage()
             throws Exception {
         String tenant = "tenant-" + UUID.randomUUID();
