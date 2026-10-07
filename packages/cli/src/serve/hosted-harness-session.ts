@@ -555,10 +555,15 @@ async function settleCancelledHarnessTurn(
   // gate is the sanctioned advance — the decision is the USER's and
   // nothing resumes: the Turn dies immediately after. Only an ENDED
   // record crosses here, exactly the cross-read the caller's gate made;
-  // a still-requested wait never reaches this helper through it.
-  const settleAuthorization = await managed.authority
-    .harnessRunAuthorization()
-    .catch(() => undefined);
+  // a still-requested wait never reaches this helper through it. A READ
+  // FAILURE here is a retriable store fault, not "nothing to close":
+  // the caller's gate just proved the park payable, and swallowing the
+  // fault as `undefined` minted the cancelled terminal over a wait the
+  // fault hid — the very Session whose next prompt then dies on the
+  // checkpoint it left behind (R9-5). Let the fault propagate: the
+  // caller's own catch answers the baseline retriable refusal, and the
+  // store's retry ladder owns the retry.
+  const settleAuthorization = await managed.authority.harnessRunAuthorization();
   if (
     settleAuthorization?.status === 'runnable' &&
     settleAuthorization.checkpoint.identity.turnId === promptId &&

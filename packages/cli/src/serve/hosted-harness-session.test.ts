@@ -9736,6 +9736,79 @@ describe('Hosted Harness Runtime turn takeover', () => {
     },
   );
 
+  it('refuses retriably when the wait-check faults, then settles on the replay', async () => {
+    // R9-5 (round-11 fault injection): an exhausted store retry used to
+    // hide as `undefined` inside the cancellation settle — the cancelled
+    // terminal got minted over a wait the fault hid, and the Session
+    // died on its stale checkpoint afterwards. The fault must refuse
+    // retriably instead; once it clears, the same shape settles.
+    await parkToolTurn();
+    mockApprovalWaitAuthorization();
+    const action = vi
+      .spyOn(LocalManagedSessionAuthority.prototype, 'action')
+      .mockReturnValue({ state: 'requested' } as never);
+    const { server, loaded } = await loadReplacement(true);
+    expect(loaded.status).toBe(200);
+    expect(loaded.body.recoveryRequired).toBeUndefined();
+    action.mockReturnValue({ state: 'decided' } as never);
+    // The caller's wait-gate reads fine (#1); the settle's own wait-check
+    // is the one that faults (#2) — a store transport failure surfacing
+    // after the retry budget, mirroring the probe.
+    const authorizationMethod = LocalManagedSessionAuthority.prototype
+      .harnessRunAuthorization as (
+      this: LocalManagedSessionAuthority,
+    ) => ReturnType<LocalManagedSessionAuthority['harnessRunAuthorization']>;
+    let helperReads = 0;
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
+      helperReads += 1;
+      if (helperReads === 2) throw new Error('store transport failed');
+      return authorizationMethod.call(this);
+    });
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const send = () =>
+      replacementHeaders(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: storeFor(BOOT_ID_2),
+        passiveManagedRuntimeRecovery: true,
+        cancellationTakeover: true,
+      });
+    const refused = await send();
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(
+      log.mock.calls
+        .map(([line]) => line)
+        .some((line) => line.includes('settles the cancelled park')),
+    ).toBe(false);
+    // Nothing terminal was minted: the plain cancel still answers the
+    // unsettled Turn honestly, exactly like pre-settle stock.
+    const cancelled = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/cancel`),
+    ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    expect(cancelled.status).toBe(409);
+    expect(cancelled.body.code).toBe('hosted_turn_recovery_required');
+    // The fault gone, the same shape settles through the same annex.
+    const taken = await send();
+    expect(taken.status).toBe(200);
+    expect(
+      log.mock.calls
+        .map(([line]) => line)
+        .filter((line) =>
+          line.includes('settles the cancelled park on the redriven load'),
+        ),
+    ).toHaveLength(1);
+    const settled = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/cancel`),
+    ).set('X-Qwen-Client-Id', taken.body.clientId as string);
+    expect(settled.status).toBe(204);
+  });
+
   it('keeps the held Runtime lease when a redriven load fails transiently', async () => {
     await parkToolTurn();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({

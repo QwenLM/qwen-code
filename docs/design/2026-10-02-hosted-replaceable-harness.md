@@ -343,6 +343,17 @@ its readings (R9):
   phase); the decision is the USER's and nothing resumes — the Turn
   dies immediately after. Only an ENDED record crosses the gate here,
   exactly the cross-read the caller's gate already made.
+- The cancellation settle reads as honestly as it pays (R9-5): the
+  wait's in-place re-read cannot degrade into "nothing to close". A
+  transient store fault surfacing between the caller's gate and the
+  settle's own wait-check used to be swallowed as `undefined`, so the
+  terminal landed over a wait the fault hid — and the Session's next
+  prompt then found the stale checkpoint it left behind, exactly the
+  defective shape the round-11 probe built by injecting one real
+  transport fault into that read. The helper now propagates the fault
+  into the caller's try-catch: the baseline retriable refusal answers,
+  the store's retry ladder owns the retry, and the same shape settles
+  identically once the fault has passed.
 - The escalation itself is paced (R9-4): a cancellation takeover load
   forced per ~500 ms lease-renewal tick against a wait that cannot
   settle yet only buys daemon work at ~4 requests/s — the coordinator
