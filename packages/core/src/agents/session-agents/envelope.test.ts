@@ -92,6 +92,17 @@ describe('formatAgentMentionModelText', () => {
     expect(out).toContain(AGENT_MESSAGE_AUTHORITY_NOTICE);
     expect(out.endsWith(AGENT_MENTION_NOTICE)).toBe(true);
   });
+
+  it('does not claim named agents answer an agent post that addressed no one', () => {
+    const out = formatAgentMentionModelText('Review done, LGTM.', [], {
+      authorName: 'bob',
+    });
+    expect(out).toMatch(/^<agent_mention to="" from="bob">/);
+    expect(out).not.toContain(AGENT_MENTION_NOTICE);
+    expect(out.endsWith(AGENT_MESSAGE_AUTHORITY_NOTICE)).toBe(true);
+    // Still recognised as agent context, so the orphan strip keeps it.
+    expect(isAgentEnvelopeText(out)).toBe(true);
+  });
 });
 
 describe('isAgentEnvelopeText', () => {

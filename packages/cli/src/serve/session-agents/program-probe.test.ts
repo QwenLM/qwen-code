@@ -149,6 +149,20 @@ describe('findOnPath', () => {
     );
     expect(found).toBe(join('C:\\npm', 'claude.CMD'));
   });
+
+  it("prefers a PATHEXT match over npm's extension-less sh shim on Windows", () => {
+    const files = new Set([
+      join('C:\\npm', 'claude'),
+      join('C:\\npm', 'claude.CMD'),
+    ]);
+    const found = findOnPath(
+      'claude',
+      { Path: 'C:\\npm', PATHEXT: '.EXE;.CMD' },
+      'win32',
+      (file) => files.has(file),
+    );
+    expect(found).toBe(join('C:\\npm', 'claude.CMD'));
+  });
 });
 
 describe('parseSemver', () => {

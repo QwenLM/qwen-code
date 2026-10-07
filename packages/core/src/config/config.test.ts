@@ -77,6 +77,7 @@ import {
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { LlmClient } from '../core/client.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { buildSessionAgentToolConfig } from '../agents/workspace-agents/capability.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import {
@@ -12333,6 +12334,34 @@ describe('applyWorkspaceAgentPersona', () => {
       expect(result.allowed).toBe(
         toolName === 'read_file' || toolName === 'thread_review',
       );
+    }
+  });
+
+  it("enforces a session agent's deny-only definition", async () => {
+    const config = agentSession();
+    config.markSessionAgentSession();
+    const toolConfig = buildSessionAgentToolConfig({
+      tools: ['*'],
+      disallowedTools: ['write_file'],
+    });
+    config.applyWorkspaceAgentPersona(
+      'You are alice.',
+      'alice',
+      toolConfig.executionAllowedTools,
+      toolConfig.disallowedTools,
+    );
+    const guard = config.getToolInvocationGuard()!;
+    for (const [toolName, allowed] of [
+      ['write_file', false],
+      ['read_file', true],
+    ] as const) {
+      const result = await guard({
+        callId: 'guard-check',
+        toolName,
+        args: {},
+        signal: new AbortController().signal,
+      });
+      expect(result.allowed).toBe(allowed);
     }
   });
 

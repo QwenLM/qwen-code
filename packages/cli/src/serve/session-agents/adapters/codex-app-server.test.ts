@@ -629,6 +629,91 @@ describe('codex-app-server adapter', () => {
     expect(spawns[0]!.fake.signalCode).toBe('SIGTERM');
   });
 
+  it('a cancel during thread setup never sends turn/start', async () => {
+    const controller = new AbortController();
+    const { spawn, spawns } = harness([
+      (message, fake) => {
+        if (message['method'] === 'initialize') {
+          fake.reply(message, { userAgent: 'codex' });
+        }
+        // thread/start is never answered: the cancel must unwind it.
+        if (message['method'] === 'thread/start') controller.abort();
+      },
+    ]);
+    const { input, events } = turnInput({ signal: controller.signal });
+    const result = await createCodexAppServerAdapter({
+      spawn,
+      env: {},
+      timeouts: { terminateGraceMs: 10 },
+    }).runTurn(input);
+    expect(result.status).toBe('cancelled');
+    expect(result.error).toBeUndefined();
+    const methods = spawns[0]!.fake.received.map((m) => m['method']);
+    expect(methods).toEqual(['initialize', 'initialized', 'thread/start']);
+    expect(events.map((event) => event.type)).not.toContain('native_session');
+    expect(spawns[0]!.fake.signalCode).toBe('SIGTERM');
+  });
+
+  it('interrupts a turn cancelled before its id was known', async () => {
+    const controller = new AbortController();
+    const { spawn, spawns } = harness([
+      codexScript({
+        onTurn: (request, fake) => {
+          // Cancelled while turn/start is in flight: no turn id yet.
+          controller.abort();
+          fake.reply(request, { turn: { id: 'turn_1' } });
+          fake.notify('turn/started', {
+            threadId: 'th_new',
+            turn: { id: 'turn_1' },
+          });
+        },
+        onOther: (message, fake) => {
+          if (message['method'] === 'turn/interrupt') {
+            fake.reply(message, {});
+            fake.notify('turn/completed', {
+              threadId: 'th_new',
+              turn: { id: 'turn_1', status: 'interrupted' },
+            });
+          }
+        },
+      }),
+    ]);
+    const result = await createCodexAppServerAdapter({
+      spawn,
+      env: {},
+      timeouts: { terminateGraceMs: 10 },
+    }).runTurn(turnInput({ signal: controller.signal }).input);
+    expect(result.status).toBe('cancelled');
+    const interrupts = spawns[0]!.fake.received.filter(
+      (m) => m['method'] === 'turn/interrupt',
+    );
+    expect(interrupts.map((m) => m['params'])).toEqual([
+      { threadId: 'th_new', turnId: 'turn_1' },
+    ]);
+    expect(spawns[0]!.fake.signalCode).toBe('SIGTERM');
+  });
+
+  it('unwinds a cancelled turn/start that is never answered', async () => {
+    const controller = new AbortController();
+    const { spawn, spawns } = harness([
+      codexScript({
+        // turn/start hangs: no response, no turn/started.
+        onTurn: () => controller.abort(),
+      }),
+    ]);
+    const result = await createCodexAppServerAdapter({
+      spawn,
+      env: {},
+      // The handshake timeout stays long: the cancel must not wait it out.
+      timeouts: { interruptMs: 20, handshakeMs: 60_000, terminateGraceMs: 10 },
+    }).runTurn(turnInput({ signal: controller.signal }).input);
+    expect(result.status).toBe('cancelled');
+    expect(
+      spawns[0]!.fake.received.some((m) => m['method'] === 'turn/interrupt'),
+    ).toBe(false);
+    expect(spawns[0]!.fake.signalCode).toBe('SIGTERM');
+  });
+
   it('adds the session_send MCP server with -c overrides', () => {
     expect(
       buildCodexArgs({

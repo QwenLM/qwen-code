@@ -325,9 +325,13 @@ export function renderSquadBriefing(
     lines.push('Squad members:');
     for (const member of squad.members) {
       const facts = [
-        member.role ? `role: ${oneLine(member.role)}` : undefined,
-        member.program ? `program: ${oneLine(member.program)}` : undefined,
-        member.runtime ? `runs on: ${oneLine(member.runtime)}` : undefined,
+        member.role ? `role: ${oneLine(defangTags(member.role))}` : undefined,
+        member.program
+          ? `program: ${oneLine(defangTags(member.program))}`
+          : undefined,
+        member.runtime
+          ? `runs on: ${oneLine(defangTags(member.runtime))}`
+          : undefined,
       ].filter(Boolean);
       const description = member.description
         ? ` — ${oneLine(defangTags(member.description))}`

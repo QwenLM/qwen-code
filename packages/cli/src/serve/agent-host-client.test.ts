@@ -387,6 +387,28 @@ it('reports an adapter that throws as a failed turn', async () => {
   });
 });
 
+it('reports the provider detail of a JSON-RPC error a turn rejects with', async () => {
+  const coordinator = fakeCoordinator([assignment('run-1')]);
+  getAdapter.mockReturnValue({
+    program: 'claude',
+    async runTurn() {
+      // The ACP SDK's RequestError: an Error carrying JSON-RPC `data`.
+      throw Object.assign(new Error('Internal error'), {
+        code: -32603,
+        data: { details: '400 PROVIDER_400_READABLE_CAUSE' },
+      });
+    },
+  });
+  await withHost(coordinator, async () => {
+    await vi.waitFor(() => expect(coordinator.results).toHaveLength(1));
+    expect(coordinator.results[0]!.result).toEqual({
+      status: 'failed',
+      outputText: '',
+      error: '400 PROVIDER_400_READABLE_CAUSE',
+    });
+  });
+});
+
 it('plans the qwen hidden session id when the coordinator has none', async () => {
   let nativeSessionId: string | undefined;
   const coordinator = fakeCoordinator([
@@ -402,6 +424,41 @@ it('plans the qwen hidden session id when the coordinator has none', async () =>
   await withHost(coordinator, async () => {
     await vi.waitFor(() => expect(coordinator.results).toHaveLength(1));
     expect(nativeSessionId).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+it('keeps a qwen binding relay across its run and closes it with the connection', async () => {
+  const closed: string[] = [];
+  openRelay.mockImplementation((runId: unknown) => ({
+    url: `http://127.0.0.1:1/agent-host-relay/runs/${String(runId)}/send`,
+    token: 'tok',
+    close: () => closed.push(String(runId)),
+  }));
+  const coordinator = fakeCoordinator([
+    assignment('run-1', { program: 'qwen' }),
+  ]);
+  getAdapter.mockImplementation((_program, options) => ({
+    program: 'qwen',
+    async runTurn() {
+      (
+        options as { sessionSend?: { rotate(): unknown } }
+      ).sessionSend?.rotate();
+      return { status: 'completed', outputText: 'ok' };
+    },
+  }));
+  await withHost(coordinator, async (workspaceCwd) => {
+    await vi.waitFor(() => expect(coordinator.results).toHaveLength(1));
+    expect(openRelay).toHaveBeenCalledTimes(1);
+    const relayId = String(openRelay.mock.calls[0]![0]);
+    expect(relayId).toMatch(/^qs-/);
+    // The hidden session outlives the run, so its relay does too.
+    expect(closed).toEqual([]);
+    stopAgentHostConnection({
+      serverUrl: 'http://127.0.0.1:18590',
+      workspaceId: 'ws-test',
+      workspaceCwd,
+    });
+    await vi.waitFor(() => expect(closed).toEqual([relayId]));
   });
 });
 

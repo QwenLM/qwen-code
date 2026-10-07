@@ -495,6 +495,29 @@ export function createCodexAppServerAdapter(
     function settleTurn() {
       settle?.();
     }
+    let cancelled = false as boolean;
+    /** `turn/start` was written: a cancel interrupts the turn from then on. */
+    let turnRequested = false as boolean;
+    /** The turn's id from the `turn/start` response, if `turn/started` lags. */
+    let requestedTurnId = undefined as string | undefined;
+    let interruptSent = false as boolean;
+    /**
+     * Interrupts the cancelled turn once its id is known (`turn/started`, or
+     * the `turn/start` response), so codex records it as interrupted; then
+     * stops waiting after `interruptMs`. Sent at most once.
+     * TODO(multi-agent): verify against real codex CLI — `turn/interrupt`
+     * params.
+     */
+    function interruptTurn() {
+      const turnId = gate.turnId ?? requestedTurnId;
+      if (!cancelled || interruptSent || !threadId || !turnId) return;
+      interruptSent = true;
+      void request(
+        'turn/interrupt',
+        { threadId, turnId },
+        timeouts.interruptMs,
+      ).catch(() => {});
+    }
 
     // ---- timers (paused while an approval is held) ----
     let inactivityTimer: ReturnType<typeof setTimeout> | undefined;
@@ -605,6 +628,10 @@ export function createCodexAppServerAdapter(
       }
       armTimers();
       switch (method) {
+        case 'turn/started':
+          // A cancel that landed while `turn/start` was in flight.
+          interruptTurn();
+          return;
         case 'turn/completed': {
           if (turnDone) return;
           turnDone = true;
@@ -773,20 +800,25 @@ export function createCodexAppServerAdapter(
       failTransport(new CodexTransportError('codex exited.')),
     );
 
-    let cancelled = false as boolean;
     const onAbort = () => {
       cancelled = true;
-      // Interrupt the turn so codex records it as interrupted, then stop.
-      // TODO(multi-agent): verify against real codex CLI — `turn/interrupt`
-      // params.
-      if (threadId && gate.turnId) {
-        void request(
-          'turn/interrupt',
-          { threadId, turnId: gate.turnId },
-          timeouts.interruptMs,
-        ).catch(() => {});
+      if (!turnRequested) {
+        // No turn yet (initialize, thread/resume, thread/start): unwind now.
+        // Pending requests reject, and `request` refuses every later one, so
+        // the prompt is never sent with `turn/start`; `failed` reports
+        // `cancelled` and stops the process.
+        failTransport(new CodexTransportError('codex turn cancelled.'));
+        return;
       }
-      const timer = setTimeout(settleTurn, timeouts.interruptMs);
+      // Interrupt the turn so codex records it as interrupted (now, or once
+      // its id arrives), then stop.
+      interruptTurn();
+      // No turn id by then (`turn/start` still unanswered): unwind instead of
+      // waiting out its handshake timeout.
+      const timer = setTimeout(() => {
+        if (interruptSent) settleTurn();
+        else failTransport(new CodexTransportError('codex turn cancelled.'));
+      }, timeouts.interruptMs);
       timer.unref?.();
     };
     if (input.signal.aborted) onAbort();
@@ -903,8 +935,9 @@ export function createCodexAppServerAdapter(
     input.onEvent({ type: 'native_session', nativeSessionId: threadId });
 
     gate.arm();
+    turnRequested = true;
     try {
-      await request(
+      const started = await request(
         'turn/start',
         {
           threadId,
@@ -919,6 +952,8 @@ export function createCodexAppServerAdapter(
         },
         timeouts.handshakeMs,
       );
+      requestedTurnId = nestedString(started, 'turn', 'id');
+      interruptTurn();
     } catch (error) {
       if (!turnDone)
         return failed(`codex turn/start failed: ${(error as Error).message}`);

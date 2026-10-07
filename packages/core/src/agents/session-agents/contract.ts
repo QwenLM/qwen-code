@@ -95,11 +95,14 @@ export type SessionSquadOutcome = 'no_action';
 
 /**
  * Whitespace plus the invisible characters a model may answer with when it
- * means "nothing": zero-width space / non-joiner / joiner (U+200B-U+200D),
- * word joiner (U+2060), zero-width no-break space (U+FEFF) and soft hyphen
- * (U+00AD). `String.prototype.trim()` keeps all but U+FEFF.
+ * means "nothing": every default-ignorable code point (zero-width space /
+ * non-joiner / joiner, word joiner, U+FEFF, soft hyphen, the bidi marks and
+ * isolates, variation selectors, ...). Matched by Unicode property rather
+ * than a hand-kept list so no invisible character is missed; visible format
+ * characters (e.g. the Arabic number signs, which are `Cf`) are not in it.
+ * `String.prototype.trim()` keeps all of these but U+FEFF.
  */
-const BLANK_AGENT_TEXT = /^[\s\u200B-\u200D\u2060\uFEFF\u00AD]*$/;
+const BLANK_AGENT_TEXT = /^[\s\p{Default_Ignorable_Code_Point}]*$/u;
 
 /**
  * True when an agent's text shows nothing: empty, or only whitespace and
@@ -110,6 +113,19 @@ const BLANK_AGENT_TEXT = /^[\s\u200B-\u200D\u2060\uFEFF\u00AD]*$/;
 export function isBlankAgentText(text: string): boolean {
   return BLANK_AGENT_TEXT.test(text);
 }
+
+/**
+ * Longest `displayText` an `agent_message` record may carry, in characters.
+ * The daemon must not send a longer reply, and the ACP child refuses one
+ * (session-external-record-params.ts), so both read this one value.
+ */
+export const MAX_AGENT_MESSAGE_DISPLAY_TEXT_CHARS = 262_144;
+
+/**
+ * Most `steps` an `agent_message` record may carry. The daemon keeps the
+ * latest ones; the ACP child refuses a longer list.
+ */
+export const MAX_AGENT_MESSAGE_STEPS = 64;
 
 /** `systemPayload` of an `agent_message` record. */
 export interface AgentMessageRecordPayload {

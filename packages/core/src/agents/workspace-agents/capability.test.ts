@@ -122,6 +122,37 @@ describe('agent capability boundary', () => {
     ).resolves.toEqual(expect.objectContaining({ allowed: false }));
   });
 
+  it("denies a session agent its definition's disallowedTools", async () => {
+    const base = {
+      callId: 'call-1',
+      signal: new AbortController().signal,
+      args: {},
+      cwd: process.cwd(),
+    };
+    // A deny-only definition: every tool but write_file and one MCP server.
+    const config = buildSessionAgentToolConfig({
+      tools: ['*'],
+      disallowedTools: [ToolNames.WRITE_FILE, 'mcp__secrets'],
+    });
+    expect(config.executionAllowedTools).toBeUndefined();
+    const guard = createSessionAgentToolInvocationGuard(
+      undefined,
+      undefined,
+      config.disallowedTools,
+    );
+    for (const [toolName, allowed] of [
+      [ToolNames.WRITE_FILE, false],
+      ['mcp__secrets__read', false],
+      [ToolNames.READ_FILE, true],
+      [ToolNames.EDIT, true],
+      ['mcp__other__read', true],
+    ] as const) {
+      await expect(guard({ ...base, toolName })).resolves.toEqual(
+        expect.objectContaining({ allowed }),
+      );
+    }
+  });
+
   it('enforces the boundary at invocation time', async () => {
     const guard = createAgentToolInvocationGuard();
     const base = { callId: 'call-1', signal: new AbortController().signal };

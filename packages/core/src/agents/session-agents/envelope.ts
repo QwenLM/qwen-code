@@ -133,7 +133,10 @@ export function formatAgentMessageModelText(
  * (and therefore did not start a main-model turn).
  *
  * `options.authorName` is set when an agent, not the user, posted the
- * message; the envelope then names it as the sender.
+ * message; the envelope then names it as the sender. An agent's post that
+ * addressed no one (a `session_send` status update, or a mention that
+ * resolved to nobody) ends with the authority notice alone: the mention
+ * notice would claim named agents answer it.
  */
 // TODO(multi-agent): model-facing text — needs eval before release
 export function formatAgentMentionModelText(
@@ -157,15 +160,19 @@ export function formatAgentMentionModelText(
     `<${AGENT_MENTION_ENVELOPE_TAG} ${attributes.join(' ')}>\n` +
     `${safeBody}\n` +
     `</${AGENT_MENTION_ENVELOPE_TAG}>\n\n` +
-    (author.length > 0 ? `${AGENT_MESSAGE_AUTHORITY_NOTICE} ` : '') +
-    AGENT_MENTION_NOTICE
+    (author.length === 0
+      ? AGENT_MENTION_NOTICE
+      : names.length === 0
+        ? AGENT_MESSAGE_AUTHORITY_NOTICE
+        : `${AGENT_MESSAGE_AUTHORITY_NOTICE} ${AGENT_MENTION_NOTICE}`)
   );
 }
 
 /**
  * Whether `text` is a whole envelope built by this module: it opens with one
- * of the two tags and ends with the matching notice. A user prompt that
- * merely starts with the tag does not also end with the notice.
+ * of the two tags and ends with the matching notice (for a mention, the
+ * authority notice when an agent's post addressed no one). A user prompt
+ * that merely starts with the tag does not also end with the notice.
  */
 export function isAgentEnvelopeText(text: string): boolean {
   const trimmed = text.trimEnd();
@@ -173,7 +180,10 @@ export function isAgentEnvelopeText(text: string): boolean {
     return trimmed.endsWith(AGENT_MESSAGE_AUTHORITY_NOTICE);
   }
   if (trimmed.startsWith(`<${AGENT_MENTION_ENVELOPE_TAG} `)) {
-    return trimmed.endsWith(AGENT_MENTION_NOTICE);
+    return (
+      trimmed.endsWith(AGENT_MENTION_NOTICE) ||
+      trimmed.endsWith(AGENT_MESSAGE_AUTHORITY_NOTICE)
+    );
   }
   return false;
 }

@@ -88,6 +88,10 @@ describe('session_send relay route', () => {
     expect((await send('run-1', 'x'.repeat(43), 'hi')).status).toBe(401);
     expect((await send('run-2', relay.token, 'hi')).status).toBe(401);
     expect((await send('run-1', relay.token, '  ')).status).toBe(400);
+    // Longer than the record writer takes: refused here, not reported as sent.
+    expect((await send('run-1', relay.token, 'x'.repeat(65_537))).status).toBe(
+      400,
+    );
     relay.close();
     expect((await send('run-1', relay.token, 'hi')).status).toBe(401);
     expect(push).not.toHaveBeenCalled();

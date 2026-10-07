@@ -15686,6 +15686,7 @@ class QwenAgent implements Agent {
             persona.systemPrompt,
             persona.agent.name,
             persona.toolConfig.executionAllowedTools,
+            persona.toolConfig.disallowedTools,
           );
           personaModel = persona.model;
         }

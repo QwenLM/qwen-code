@@ -14,11 +14,12 @@ import styles from './agent-message-details.module.css';
 
 /**
  * Whitespace plus the invisible characters a model may answer with when it
- * means "nothing" (U+200B-U+200D, U+2060, U+FEFF, U+00AD); `trim()` keeps
- * most of them. Mirrors `isBlankAgentText` in core's session-agents
- * contract.ts (web-shell cannot import core).
+ * means "nothing": every default-ignorable code point (zero-width characters,
+ * U+FEFF, soft hyphen, bidi marks and isolates, ...); `trim()` keeps most of
+ * them. Mirrors `isBlankAgentText` in core's session-agents contract.ts
+ * (web-shell cannot import core).
  */
-const BLANK_AGENT_TEXT = /^[\s\u200B-\u200D\u2060\uFEFF\u00AD]*$/;
+const BLANK_AGENT_TEXT = /^[\s\p{Default_Ignorable_Code_Point}]*$/u;
 
 /** True when an agent's text shows nothing: render it as no text at all. */
 export function isBlankAgentText(text: string): boolean {

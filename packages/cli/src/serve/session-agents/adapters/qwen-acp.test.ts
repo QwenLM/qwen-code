@@ -246,4 +246,66 @@ describe('createQwenAcpAdapter', () => {
     await expect(result).resolves.toMatchObject({ status: 'cancelled' });
     expect(bridge.cancelSession).toHaveBeenCalledWith(SESSION_ID);
   });
+
+  it('reports the JSON-RPC error detail when the prompt fails', async () => {
+    const { bridge } = thinkingBridge();
+    // A provider 400 reaches the bridge as a generic internal error whose
+    // detail is in `data.details`.
+    bridge.sendPrompt.mockImplementation(async () => {
+      throw Object.assign(new Error('Internal error'), {
+        code: -32603,
+        data: { details: '400 Bad Request: model qwen-x not found' },
+      });
+    });
+    const adapter = createQwenAcpAdapter({
+      bridge: bridge as unknown as QwenAcpAdapterBridge,
+      workspaceCwd: WS,
+      agentId: AGENT_ID,
+      idleCloseMs: 60_000,
+      sessionExists: async () => true,
+    });
+    const result = await adapter.runTurn({
+      prompt: 'go',
+      nativeSessionId: SESSION_ID,
+      cwd: WS,
+      signal: new AbortController().signal,
+      onEvent: () => {},
+      awaitPermission: () => new Promise<string>(() => {}),
+    });
+    expect(result).toMatchObject({ status: 'failed' });
+    expect(result.error).toBe('400 Bad Request: model qwen-x not found');
+  });
+
+  it('clips a permission prompt title like the other adapters', async () => {
+    const { bridge, feed, turn, permissionEvent } = thinkingBridge();
+    const adapter = createQwenAcpAdapter({
+      bridge: bridge as unknown as QwenAcpAdapterBridge,
+      workspaceCwd: WS,
+      agentId: AGENT_ID,
+      idleCloseMs: 60_000,
+      cancelSettleMs: 50,
+      sessionExists: async () => true,
+    });
+    const controller = new AbortController();
+    const prompts: SessionAgentPermissionPrompt[] = [];
+    const result = adapter.runTurn({
+      prompt: 'go',
+      nativeSessionId: SESSION_ID,
+      cwd: WS,
+      signal: controller.signal,
+      onEvent: () => {},
+      awaitPermission: (prompt) => {
+        prompts.push(prompt);
+        return new Promise<string>(() => {});
+      },
+    });
+    await vi.waitFor(() => expect(turn.promptId).toBeDefined());
+    const event = permissionEvent('p1');
+    event.data.toolCall.title = 'r'.repeat(5_000);
+    feed.push(event);
+    await vi.waitFor(() => expect(prompts).toHaveLength(1));
+    expect(prompts[0]!.title).toBe('r'.repeat(200));
+    controller.abort();
+    await expect(result).resolves.toMatchObject({ status: 'cancelled' });
+  });
 });

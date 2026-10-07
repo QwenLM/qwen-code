@@ -6,10 +6,12 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_EXTERNAL_RECORD_DISPLAY_TEXT_LENGTH,
   MAX_EXTERNAL_RECORD_ID_LENGTH,
   MAX_EXTERNAL_RECORD_MENTION_IDS,
   MAX_EXTERNAL_RECORD_STEP_TITLE_LENGTH,
   MAX_EXTERNAL_RECORD_STEPS,
+  MAX_EXTERNAL_RECORD_TEXT_LENGTH,
   parseSessionExternalRecordParams,
 } from './session-external-record-params.js';
 
@@ -55,6 +57,10 @@ describe('parseSessionExternalRecordParams size bounds', () => {
           'x'.repeat(MAX_EXTERNAL_RECORD_STEP_TITLE_LENGTH),
         ),
       }),
+      mention({ displayText: 'x'.repeat(MAX_EXTERNAL_RECORD_TEXT_LENGTH) }),
+      message({
+        displayText: 'x'.repeat(MAX_EXTERNAL_RECORD_DISPLAY_TEXT_LENGTH),
+      }),
     ]) {
       expect(parseSessionExternalRecordParams(params)).toMatchObject({
         kind: params.kind,
@@ -62,7 +68,34 @@ describe('parseSessionExternalRecordParams size bounds', () => {
     }
   });
 
+  it('accepts an agent reply as long as the daemon keeps one', () => {
+    // The daemon keeps up to 262,144 characters of a run's output; a reply
+    // that long must record rather than be refused.
+    expect(MAX_EXTERNAL_RECORD_DISPLAY_TEXT_LENGTH).toBeGreaterThanOrEqual(
+      262_144,
+    );
+    expect(
+      parseSessionExternalRecordParams(
+        message({
+          displayText: 'x'.repeat(MAX_EXTERNAL_RECORD_TEXT_LENGTH + 1),
+        }),
+      ),
+    ).toMatchObject({ kind: 'agent_message' });
+  });
+
   it.each([
+    [
+      'an overlong mention text',
+      mention({ displayText: 'x'.repeat(MAX_EXTERNAL_RECORD_TEXT_LENGTH + 1) }),
+      /payload\.displayText/,
+    ],
+    [
+      'an overlong agent reply',
+      message({
+        displayText: 'x'.repeat(MAX_EXTERNAL_RECORD_DISPLAY_TEXT_LENGTH + 1),
+      }),
+      /payload\.displayText/,
+    ],
     [
       'too many agent ids',
       mention({ mentionedAgentIds: ids(MAX_EXTERNAL_RECORD_MENTION_IDS + 1) }),

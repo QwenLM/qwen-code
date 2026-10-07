@@ -45,8 +45,14 @@ import {
   type SessionAgentStep,
 } from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
 import { isTerminalSessionAgentRunStatus } from '@qwen-code/qwen-code-core/agents/session-agents/binding-store.js';
-import type { WorkspaceRegistry } from '../workspace-registry.js';
-import { requireTrustedWorkspaceRuntime } from '../workspace-route-runtime.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from '../workspace-registry.js';
+import {
+  requireTrustedWorkspaceRuntime,
+  sendUntrustedWorkspaceResponse,
+} from '../workspace-route-runtime.js';
 import type {
   RateLimiterInstance,
   RateLimitTierConfig,
@@ -253,12 +259,26 @@ function boundedString(value: unknown, max: number): value is string {
   return typeof value === 'string' && value.length <= max;
 }
 
+/**
+ * Display text (a title, a preview, an option label) is clipped, not refused:
+ * one refused event sinks its whole batch, and a lost `permission_request`
+ * leaves the turn waiting on a question nobody is asked.
+ */
+const MAX_TITLE = 1_200;
+const MAX_LABEL = 256;
+const MAX_INPUT_PREVIEW = 16_384;
+
+function clipped(value: unknown, max: number): string | undefined {
+  return typeof value === 'string' ? value.slice(0, max) : undefined;
+}
+
 function readStep(value: unknown): SessionAgentStep | undefined {
   if (typeof value !== 'object' || value === null) return undefined;
-  const { id, title, status } = value as Record<string, unknown>;
+  const { id, status } = value as Record<string, unknown>;
+  const title = clipped((value as Record<string, unknown>)['title'], MAX_TITLE);
   if (
     !isId(id) ||
-    !boundedString(title, 1_200) ||
+    title === undefined ||
     (status !== 'running' && status !== 'completed' && status !== 'failed')
   ) {
     return undefined;
@@ -277,15 +297,16 @@ function readPermissionPrompt(
   value: unknown,
 ): SessionAgentPermissionPrompt | undefined {
   if (typeof value !== 'object' || value === null) return undefined;
-  const { requestId, title, toolName, inputPreview, options } = value as Record<
-    string,
-    unknown
-  >;
+  const raw = value as Record<string, unknown>;
+  const { requestId, options } = raw;
+  const title = clipped(raw['title'], MAX_TITLE);
+  const toolName = clipped(raw['toolName'], MAX_LABEL);
+  const inputPreview = clipped(raw['inputPreview'], MAX_INPUT_PREVIEW);
   if (
     !isId(requestId) ||
-    !boundedString(title, 1_200) ||
-    (toolName !== undefined && !boundedString(toolName, 256)) ||
-    (inputPreview !== undefined && !boundedString(inputPreview, 16_384)) ||
+    title === undefined ||
+    (raw['toolName'] !== undefined && toolName === undefined) ||
+    (raw['inputPreview'] !== undefined && inputPreview === undefined) ||
     !Array.isArray(options) ||
     options.length === 0 ||
     options.length > 16
@@ -295,10 +316,14 @@ function readPermissionPrompt(
   const parsed: SessionAgentPermissionPrompt['options'] = [];
   for (const option of options) {
     if (typeof option !== 'object' || option === null) return undefined;
-    const { optionId, name, kind } = option as Record<string, unknown>;
+    const { optionId, kind } = option as Record<string, unknown>;
+    const name = clipped(
+      (option as Record<string, unknown>)['name'],
+      MAX_LABEL,
+    );
     if (
       !isId(optionId) ||
-      !boundedString(name, 256) ||
+      name === undefined ||
       typeof kind !== 'string' ||
       !PERMISSION_OPTION_KINDS.has(kind)
     ) {
@@ -483,7 +508,8 @@ export function readAwaitedPermissions(
 /** Programs a Host may be handed turns for: v2 Hosts only. */
 function pickupPrograms(host: AgentHostView): SessionAgentProgram[] {
   // A v1 Host cannot execute a v2 assignment; handing it one would hold the
-  // lease until it rots to `offline`. It keeps polling and gets nothing.
+  // lease until it rots to `offline`. Its heartbeat is refused (426), so it
+  // goes offline; this keeps a stale record from being handed work anyway.
   if (host.protocol !== HOST_PROTOCOL_VERSION) return [];
   return hostAvailablePrograms(host);
 }
@@ -534,6 +560,44 @@ export function registerAgentHostTransportRoutes(
     }
     res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
   };
+  /**
+   * A refusal before the Host has proved who it is (a malformed request, an
+   * unknown, untrusted or collaboration-disabled workspace, an unsupported
+   * protocol). Charged per source like a failed credential, so neither the
+   * requests nor the workspace probing their answers allow are unlimited.
+   * An authenticated Host only ever spends its own budget (`allowHost`).
+   */
+  const refuse = (req: Request, res: Response, send: () => void) => {
+    if (
+      rateLimiter &&
+      !rateLimiter.checkRate(`agent-host:refused:${sourceOf(req)}`, 'read')
+    ) {
+      tooMany(res, 'read');
+      return;
+    }
+    send();
+  };
+  /** The workspace a Host route names; undefined once refused. */
+  const hostRuntime = (
+    req: Request,
+    res: Response,
+  ): WorkspaceRuntime | undefined => {
+    const runtime = runtimeFor(
+      workspaceRegistry,
+      String(req.params['workspaceId']),
+    );
+    if (runtime && !runtime.trusted) {
+      refuse(req, res, () => sendUntrustedWorkspaceResponse(res));
+      return undefined;
+    }
+    if (!runtime || !isEnabledFor(runtime.workspaceCwd)) {
+      refuse(req, res, () =>
+        res.status(404).json({ error: 'Workspace not found.' }),
+      );
+      return undefined;
+    }
+    return runtime;
+  };
   /** The authenticated Host's own budget; false (and 429 sent) when spent. */
   const allowHost = (req: Request, res: Response): boolean => {
     if (
@@ -554,16 +618,8 @@ export function registerAgentHostTransportRoutes(
   // those routes check trust, the collaboration setting and the credential:
   // the handlers below resolve the workspace again just to read its cwd.
   const authenticated: RequestHandler = async (req, res, next) => {
-    const runtime = runtimeFor(
-      workspaceRegistry,
-      String(req.params['workspaceId']),
-    );
-    if (!runtime) {
-      res.status(404).json({ error: 'Workspace not found.' });
-      return;
-    }
-    if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
-    if (!requireEnabled(runtime.workspaceCwd, res)) return;
+    const runtime = hostRuntime(req, res);
+    if (!runtime) return;
     const secret = hostSecret(req);
     if (
       !secret ||
@@ -582,7 +638,7 @@ export function registerAgentHostTransportRoutes(
 
   // Enrollment is throttled per source before anything else. Every other
   // route is throttled per Host once it authenticates (`allowHost`), and its
-  // failed authentications per source (`rejectCredential`).
+  // refusals before that per source (`refuse`, `rejectCredential`).
   app.use('/agent-hosts/enroll', (req, res, next) => {
     if (
       rateLimiter &&
@@ -666,7 +722,9 @@ export function registerAgentHostTransportRoutes(
         !providers.every((provider) => typeof provider === 'string') ||
         (enrollmentToken !== undefined && typeof enrollmentToken !== 'string')
       ) {
-        res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
+        refuse(req, res, () =>
+          res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED }),
+        );
         return;
       }
       const programs: HostProgramProbe[] | undefined =
@@ -679,16 +737,25 @@ export function registerAgentHostTransportRoutes(
         (rawProtocol !== undefined && protocol === undefined) ||
         runs === undefined
       ) {
-        res.status(400).json({ error: 'Invalid Agent Host heartbeat.' });
+        refuse(req, res, () =>
+          res.status(400).json({ error: 'Invalid Agent Host heartbeat.' }),
+        );
         return;
       }
-      const runtime = runtimeFor(workspaceRegistry, workspaceId);
-      if (!runtime) {
-        res.status(404).json({ error: 'Workspace not found.' });
+      // Refused before the store records it, so an older (v1, no
+      // `protocol`) Host goes offline in the roster and says why, instead
+      // of showing online while it can never be handed a turn. Not a 401:
+      // that would read as a revocation and delete the Host's credential.
+      if (protocol !== HOST_PROTOCOL_VERSION) {
+        refuse(req, res, () =>
+          res.status(426).json({
+            error: `This coordinator speaks Agent Host protocol ${HOST_PROTOCOL_VERSION}; this Host speaks ${protocol ?? 1}. Upgrade qwen on the older side.`,
+          }),
+        );
         return;
       }
-      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
-      if (!requireEnabled(runtime.workspaceCwd, res)) return;
+      const runtime = hostRuntime(req, res);
+      if (!runtime) return;
       try {
         const host = await heartbeatAgentHost(
           runtime.workspaceCwd,
@@ -763,7 +830,9 @@ export function registerAgentHostTransportRoutes(
           res.status(503).json({ error: 'Agent Host store busy.' });
           return;
         }
-        res.status(400).json({ error: 'Agent Host heartbeat refused.' });
+        refuse(req, res, () =>
+          res.status(400).json({ error: 'Agent Host heartbeat refused.' }),
+        );
       }
     },
   );
@@ -782,20 +851,19 @@ export function registerAgentHostTransportRoutes(
       const secret = hostSecret(req);
       const waitMs = readWaitMs(body(req)['waitMs']);
       if (!workspaceId || !hostId || !secret) {
-        res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED });
+        refuse(req, res, () =>
+          res.status(401).json({ error: AGENT_HOST_CREDENTIAL_REJECTED }),
+        );
         return;
       }
       if (waitMs === undefined) {
-        res.status(400).json({ error: 'Invalid Agent Host pickup.' });
+        refuse(req, res, () =>
+          res.status(400).json({ error: 'Invalid Agent Host pickup.' }),
+        );
         return;
       }
-      const runtime = runtimeFor(workspaceRegistry, workspaceId);
-      if (!runtime) {
-        res.status(404).json({ error: 'Workspace not found.' });
-        return;
-      }
-      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
-      if (!requireEnabled(runtime.workspaceCwd, res)) return;
+      const runtime = hostRuntime(req, res);
+      if (!runtime) return;
       let wake: (() => void) | undefined;
       const unsubscribe = getSessionAgentEventHub(
         runtime.workspaceCwd,

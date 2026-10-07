@@ -5,13 +5,26 @@
  */
 
 import type { BridgeSessionExternalRecordRequest } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  MAX_AGENT_MESSAGE_DISPLAY_TEXT_CHARS,
+  MAX_AGENT_MESSAGE_STEPS,
+} from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
 
 /** Longest `recordKey` accepted. */
 export const MAX_EXTERNAL_RECORD_KEY_LENGTH = 256;
-/** Longest `modelText` / `payload.displayText` accepted, in characters. */
+/**
+ * Longest `modelText`, and `payload.displayText` of an `agent_mention`,
+ * accepted, in characters.
+ */
 export const MAX_EXTERNAL_RECORD_TEXT_LENGTH = 65_536;
+/**
+ * Longest `payload.displayText` of an `agent_message` accepted: an agent's
+ * whole reply, bounded by the daemon to the same shared value.
+ */
+export const MAX_EXTERNAL_RECORD_DISPLAY_TEXT_LENGTH =
+  MAX_AGENT_MESSAGE_DISPLAY_TEXT_CHARS;
 /** Most `payload.steps` an `agent_message` may carry. */
-export const MAX_EXTERNAL_RECORD_STEPS = 64;
+export const MAX_EXTERNAL_RECORD_STEPS = MAX_AGENT_MESSAGE_STEPS;
 /** Most ids in `payload.mentionedAgentIds` / `payload.mentionedSquadIds`. */
 export const MAX_EXTERNAL_RECORD_MENTION_IDS = 32;
 /** Longest id (agent, squad, step) accepted, in characters. */
@@ -105,7 +118,10 @@ export function parseSessionExternalRecordParams(
   if (
     !isObject(payload) ||
     typeof payload['displayText'] !== 'string' ||
-    payload['displayText'].length > MAX_EXTERNAL_RECORD_TEXT_LENGTH
+    payload['displayText'].length >
+      (kind === 'agent_message'
+        ? MAX_EXTERNAL_RECORD_DISPLAY_TEXT_LENGTH
+        : MAX_EXTERNAL_RECORD_TEXT_LENGTH)
   ) {
     return 'Invalid or missing external record payload.displayText';
   }

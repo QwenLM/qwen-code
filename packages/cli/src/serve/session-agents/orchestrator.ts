@@ -64,6 +64,8 @@ import {
   AGENT_MESSAGE_SUBTYPE,
   HOST_PROTOCOL_VERSION,
   isBlankAgentText,
+  MAX_AGENT_MESSAGE_DISPLAY_TEXT_CHARS,
+  MAX_AGENT_MESSAGE_STEPS,
   type AgentAdapter,
   type AgentAdapterEvent,
   type AgentAdapterTurnInput,
@@ -118,6 +120,11 @@ import {
   type AcpSessionBridge,
   type BridgeClientRequestContext,
 } from '../acp-session-bridge.js';
+import {
+  MAX_EXTERNAL_RECORD_ID_LENGTH,
+  MAX_EXTERNAL_RECORD_STEP_TITLE_LENGTH,
+  MAX_EXTERNAL_RECORD_TEXT_LENGTH,
+} from '../../acp-integration/session-external-record-params.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { sessionAgentNativeSessionId } from '../../runtime/agent-session-source.js';
 import {
@@ -176,13 +183,27 @@ export const SESSION_AGENT_REPLY_NOT_RECORDED_ERROR =
 /** Remote turn lease; a Host renews it while it works. */
 export const HOST_TURN_LEASE_MS = 60_000;
 const SWEEP_INTERVAL_MS = 5_000;
-const MAX_OUTPUT_CHARS = 262_144;
+// A run's output is kept up to what its record may carry.
+const MAX_OUTPUT_CHARS = MAX_AGENT_MESSAGE_DISPLAY_TEXT_CHARS;
 const MAX_THOUGHT_CHARS = 65_536;
 const MAX_FRAME_STEPS = 8;
+/** Steps a run keeps (the oldest go first): what its record may carry. */
+const MAX_RUN_STEPS = MAX_AGENT_MESSAGE_STEPS;
 const CLIENT_MESSAGE_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
-// Matches the ACP child's limit on a record's display text
-// (session-external-record-params.ts), so an accepted mention can be recorded.
-const MAX_MENTION_TEXT_CHARS = 65_536;
+// The ACP child's limit on a mention's display text, so an accepted mention
+// can be recorded.
+const MAX_MENTION_TEXT_CHARS = MAX_EXTERNAL_RECORD_TEXT_LENGTH;
+/** Appended to a reply clipped to the record's display text limit. */
+const CLIPPED_REPLY_NOTE = '\n\n[Reply truncated.]';
+/**
+ * Tokens a turn that reported no count (a failed stats read, a Host that
+ * omits usage) is charged against `experimental.agentTokenBudget`. Counted
+ * as 0, such turns would let an agent-to-agent loop run unbounded while the
+ * chain limit is off (its default). A low estimate of one agent turn (the
+ * system prompt and tools alone come near it): the default budget allows
+ * about 100 such turns between a person's posts.
+ */
+export const UNREPORTED_TURN_TOKENS = 10_000;
 /** How long a deferred post is carried before it is assumed recorded. */
 const PENDING_POST_TTL_MS = 60 * 60_000;
 /** First re-check of a deferred / failed `agent_message` record write. */
@@ -441,6 +462,39 @@ interface PendingPost {
 }
 
 /** Maps an external-record failure to the error the route / run reports. */
+/**
+ * A reply's display text within the ACP child's limit for an `agent_message`
+ * record (the adapter's final answer is not bounded): longer text keeps its
+ * start and says it was cut, so the record is never refused for its size.
+ */
+function clipReplyText(text: string): string {
+  if (text.length <= MAX_AGENT_MESSAGE_DISPLAY_TEXT_CHARS) return text;
+  let end = MAX_AGENT_MESSAGE_DISPLAY_TEXT_CHARS - CLIPPED_REPLY_NOTE.length;
+  // Never split a surrogate pair.
+  const last = text.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return text.slice(0, end) + CLIPPED_REPLY_NOTE;
+}
+
+/**
+ * The steps an `agent_message` record carries, within the ACP child's
+ * limits: the latest {@link MAX_AGENT_MESSAGE_STEPS}, titles cut to their
+ * limit, and none whose id is too long to record.
+ */
+function recordSteps(steps: Iterable<SessionAgentStep>): SessionAgentStep[] {
+  return [...steps]
+    .filter((step) => step.id.length <= MAX_EXTERNAL_RECORD_ID_LENGTH)
+    .slice(-MAX_AGENT_MESSAGE_STEPS)
+    .map((step) =>
+      step.title.length > MAX_EXTERNAL_RECORD_STEP_TITLE_LENGTH
+        ? {
+            ...step,
+            title: step.title.slice(0, MAX_EXTERNAL_RECORD_STEP_TITLE_LENGTH),
+          }
+        : step,
+    );
+}
+
 function recordWriteError(error: unknown): SessionAgentError {
   const data = (error as { data?: unknown } | undefined)?.data;
   const kind =
@@ -571,6 +625,29 @@ function tokenBudgetError(budget: number, names: string[]): string {
 }
 
 /** Why mentioned squads were not started, one sentence each. */
+/**
+ * Why an agent's post started no one: the agents it named that cannot run,
+ * and the `@tokens` that matched no agent. Undefined when it named none.
+ */
+function unreachedAgentsError(
+  unavailable: readonly WorkspaceAgent[],
+  unknown: readonly string[],
+): string | undefined {
+  const reasons = [
+    ...(unavailable.length > 0
+      ? [
+          `${unavailable.map((agent) => `@${agent.name}`).join(', ')} cannot run (paused or retired)`,
+        ]
+      : []),
+    ...(unknown.length > 0
+      ? [`${unknown.map((name) => `@${name}`).join(', ')} matched no agent`]
+      : []),
+  ];
+  return reasons.length > 0
+    ? `This post reached no agent: ${reasons.join('; ')}.`
+    : undefined;
+}
+
 function squadUnavailableError(
   unavailable: readonly UnavailableSquadTarget[],
 ): string {
@@ -962,9 +1039,11 @@ export class SessionAgentOrchestrator {
    * (404 `run_not_found`), not retryable (409 `run_not_retryable`),
    * already retried (409 `run_already_retried`), or its agent can no longer
    * take work (409 `agent_unavailable`).
-   * TODO(multi-agent): retrying a squad member whose record is still pending
-   * drops the leader wake it owed and does not mark the new run outstanding,
-   * so that engagement ends early; carry both over to the new run.
+   * Squads carry over. A leader's retry leads its squad again (`squadId`),
+   * re-opening the engagement a restart or a failure ended. A member whose
+   * record is still pending owes its leaders a wake ({@link SettledRun.wakes}):
+   * the new run takes its place as an outstanding run of those engagements,
+   * so its reply wakes them instead.
    */
   async retry(
     sessionId: string,
@@ -1003,7 +1082,17 @@ export class SessionAgentOrchestrator {
         'This agent is disabled or no longer exists.',
       );
     }
-    // After the roster read, which another retry call may have raced.
+    // The squad a leader run led, if it still exists and is still led by
+    // this agent.
+    const ledSquad = run.squadId
+      ? (await this.loadSquads()).find(
+          (candidate) =>
+            candidate.id === run.squadId &&
+            candidate.leaderAgentId === agent.id,
+        )
+      : undefined;
+    // After the roster and squad reads, which another retry call may have
+    // raced.
     if (state.file.runs.some((candidate) => candidate.retryOf === runId)) {
       throw new SessionAgentError(
         409,
@@ -1011,11 +1100,28 @@ export class SessionAgentOrchestrator {
         'This run was already retried.',
       );
     }
+    const trigger = run.triggerRecordIds[0];
+    if (trigger === undefined) {
+      throw new SessionAgentError(
+        409,
+        'run_not_retryable',
+        'This run has no trigger to answer.',
+      );
+    }
+    // Synchronous from here to the persist, so no settle ends a carried
+    // engagement in between.
+    if (ledSquad) this.startEngagement(state, ledSquad, trigger);
     // A new run id: the record key is `agent:<runId>`, and the old run may
     // already own one, which would make the retry's reply a silent no-op.
     let summary: SessionAgentRunSummary | undefined;
-    for (const trigger of run.triggerRecordIds) {
-      summary = this.enqueue(state, agent, trigger, run.chainDepth);
+    for (const triggerId of run.triggerRecordIds) {
+      summary = this.enqueue(
+        state,
+        agent,
+        triggerId,
+        run.chainDepth,
+        ledSquad?.id,
+      );
     }
     const retried = summary && this.live.get(summary.runId)?.run;
     if (!retried) {
@@ -1027,7 +1133,14 @@ export class SessionAgentOrchestrator {
     }
     retried.retryOf ??= runId;
     if (run.recorded === false) delete run.recorded;
+    // The wakes a member's pending record owed: the new run answers for it.
+    for (const { squadId } of this.settled.get(runId)?.wakes ?? []) {
+      this.trackDelegation(state, squadId, retried.id);
+    }
     this.dropSettled(runId, { retriedAsRunId: retried.id });
+    // Saves the dropped `pendingWakeRunIds`; the engagements stay open on
+    // the new run.
+    this.settleEngagements(state);
     await this.persist(state).catch(() => {});
     this.pumpAgent(agent.id);
     return {
@@ -2185,6 +2298,11 @@ export class SessionAgentOrchestrator {
         break;
       case 'step':
         live.steps.set(event.step.id, event.step);
+        // Bounded: the oldest steps go first (an update keeps its place).
+        for (const id of live.steps.keys()) {
+          if (live.steps.size <= MAX_RUN_STEPS) break;
+          live.steps.delete(id);
+        }
         frame.steps = [...live.steps.values()].slice(-MAX_FRAME_STEPS);
         break;
       case 'permission_request':
@@ -2251,6 +2369,16 @@ export class SessionAgentOrchestrator {
     text: string,
   ): Promise<void> {
     if (isBlankAgentText(text)) return;
+    // A Host relays a remote agent's post unchecked; the HTTP entry points
+    // refuse the same text (see postFromAgent), and the record could not
+    // hold it.
+    if (text.length > MAX_MENTION_TEXT_CHARS) {
+      throw new SessionAgentError(
+        400,
+        'invalid_text',
+        `A session_send post of ${text.length.toLocaleString('en-US')} characters was not posted: the limit is ${MAX_MENTION_TEXT_CHARS.toLocaleString('en-US')}.`,
+      );
+    }
     const roster = await this.readAgents(this.workspaceCwd);
     const targets = resolveMentionTargetsWithSquads(
       text,
@@ -2268,6 +2396,13 @@ export class SessionAgentOrchestrator {
       targets.unavailableSquads.length > 0
         ? squadUnavailableError(targets.unavailableSquads)
         : undefined;
+    // A handoff that reaches no one says why, so its author can tell.
+    const postError = joinErrors(
+      squadError,
+      targets.agents.length === 0 && squadTargets.length === 0
+        ? unreachedAgentsError(targets.unavailable, targets.unknown)
+        : undefined,
+    );
     const squadMembers = await this.squadMembersFor(live);
     live.sendCount += 1;
     const recordKey = `send:${live.run.id}:${live.sendCount}`;
@@ -2291,11 +2426,15 @@ export class SessionAgentOrchestrator {
             ? { mentionedSquadIds: squadTargets.map(({ squad }) => squad.id) }
             : {}),
           author: live.author,
-          ...(squadError ? { error: squadError } : {}),
+          ...(postError ? { error: postError } : {}),
         },
       });
     } catch (error) {
       throw recordWriteError(error);
+    }
+    if (postError) {
+      live.frame.error = postError;
+      this.publish(live);
     }
     const triggerId = triggerIdFor(record, recordKey);
     if (record.deferred) {
@@ -2444,7 +2583,9 @@ export class SessionAgentOrchestrator {
         : (live.frame.outputText ?? '');
     // Only whitespace or invisible characters (a leader's U+200B) is no
     // reply: a squad leader's `no_action`, never a blank message.
-    const displayText = isBlankAgentText(replyText) ? '' : replyText;
+    const displayText = isBlankAgentText(replyText)
+      ? ''
+      : clipReplyText(replyText);
     // A remote run whose Host went away, or a local one the daemon stopped
     // with: no record yet. It is offered for retry like a run a restart cut
     // short; dismissing it lets it go.
@@ -2452,6 +2593,8 @@ export class SessionAgentOrchestrator {
       outcome.status === 'offline' || live.abortReason === 'shutdown';
     const nativeSessionId = outcome.nativeSessionId ?? live.nativeSessionId;
     const totalTokens = outcome.totalTokens ?? live.totalTokens;
+    /** What this turn costs the session's agent token budget. */
+    const chargedTokens = totalTokens ?? UNREPORTED_TURN_TOKENS;
 
     // Route before writing so a refused hop is recorded on the message.
     let followUps: WorkspaceAgent[] = [];
@@ -2491,9 +2634,7 @@ export class SessionAgentOrchestrator {
         const limit = normalizeAgentChainLimit(this.chainLimit());
         const budget = normalizeAgentTokenBudget(this.tokenBudget());
         // This run's tokens count before its own mentions are routed.
-        const spent =
-          (state.file.chainTokens ?? 0) +
-          (outcome.totalTokens ?? live.totalTokens ?? 0);
+        const spent = (state.file.chainTokens ?? 0) + chargedTokens;
         if (names.length > 0 && !isWithinChainLimit(depth, limit)) {
           error = joinErrors(error, chainLimitError(limit, names));
           followUps = [];
@@ -2532,9 +2673,7 @@ export class SessionAgentOrchestrator {
         });
         const limit = normalizeAgentChainLimit(this.chainLimit());
         const budget = normalizeAgentTokenBudget(this.tokenBudget());
-        const spent =
-          (state.file.chainTokens ?? 0) +
-          (outcome.totalTokens ?? live.totalTokens ?? 0);
+        const spent = (state.file.chainTokens ?? 0) + chargedTokens;
         for (const squadId of waiting) {
           const leaderId = state.file.squads?.[squadId]?.leaderAgentId;
           const leader = roster.find((agent) => agent.id === leaderId);
@@ -2571,7 +2710,9 @@ export class SessionAgentOrchestrator {
       runId: run.id,
       status: outcome.status,
       ...(error ? { error } : {}),
-      ...(live.steps.size > 0 ? { steps: [...live.steps.values()] } : {}),
+      ...(live.steps.size > 0
+        ? { steps: recordSteps(live.steps.values()) }
+        : {}),
       ...(nativeSessionId ? { nativeSessionId } : {}),
       ...(totalTokens !== undefined ? { totalTokens } : {}),
       ...(run.triggerRecordIds.length > 0
@@ -2672,10 +2813,8 @@ export class SessionAgentOrchestrator {
     if (landedRecordId) run.recorded = true;
     else if (watch || retryable) run.recorded = false;
     else delete run.recorded;
-    if (totalTokens !== undefined) {
-      run.totalTokens = totalTokens;
-      state.file.chainTokens = (state.file.chainTokens ?? 0) + totalTokens;
-    }
+    if (totalTokens !== undefined) run.totalTokens = totalTokens;
+    state.file.chainTokens = (state.file.chainTokens ?? 0) + chargedTokens;
     // Kept on a remote run cancelled here, so a restarted daemon can still
     // answer its Host `cancelled` (see adopt).
     if (!(outcome.status === 'cancelled' && live.remote)) delete run.lease;

@@ -43,7 +43,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
-import { getErrorMessage } from '@qwen-code/qwen-code-core/utils/errors.js';
+import { extractErrorMessage } from '@qwen-code/acp-bridge/bridge';
 import type {
   AgentAdapter,
   AgentAdapterTurnInput,
@@ -64,6 +64,8 @@ const TURN_POLL_MS = 250;
 export const QWEN_AGENT_CANCEL_SETTLE_MS = 5_000;
 const MAX_INPUT_PREVIEW_CHARS = 2_000;
 const MAX_STEP_TITLE_CHARS = 200;
+/** A permission prompt's title, as the other adapters clip theirs. */
+const MAX_PERMISSION_TITLE_CHARS = 200;
 
 export type QwenAcpAdapterBridge = Pick<
   AcpSessionBridge,
@@ -206,7 +208,7 @@ function toPermissionPrompt(data: {
   }
   return {
     requestId: data.requestId,
-    title: data.toolCall?.title ?? '',
+    title: (data.toolCall?.title ?? '').slice(0, MAX_PERMISSION_TITLE_CHARS),
     ...(data.toolCall?.kind ? { toolName: data.toolCall.kind } : {}),
     ...(inputPreview ? { inputPreview } : {}),
     options: (data.options ?? [])
@@ -318,7 +320,7 @@ export function createQwenAcpAdapter(
         return {
           status: 'failed',
           outputText: '',
-          error: getErrorMessage(error),
+          error: extractErrorMessage(error),
           nativeSessionId: sessionId,
         };
       }
@@ -580,7 +582,7 @@ export function createQwenAcpAdapter(
           : {
               status: 'failed',
               outputText: fullText,
-              error: getErrorMessage(error),
+              error: extractErrorMessage(error),
               nativeSessionId: sessionId,
             };
       } finally {

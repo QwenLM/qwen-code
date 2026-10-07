@@ -1025,6 +1025,25 @@ describe('AssistantMessage squad replies', () => {
     expect(container.querySelector('button')).toBeNull();
   });
 
+  it('shows no blank bubble for an agent reply of only bidi marks', () => {
+    const container = render(
+      <AssistantMessage
+        content={'‎⁦⁩'}
+        author={{ name: 'bob' }}
+        agentMessage={{
+          kind: 'agent_message',
+          runId: 'run-9',
+          status: 'completed',
+          author: { agentId: 'ag_bob', name: 'bob' },
+        }}
+        showFooterActions
+      />,
+    );
+    expect(container.textContent).toContain('bob');
+    expect(container.textContent).not.toContain('‎');
+    expect(container.querySelector('button')).toBeNull();
+  });
+
   it('never shows the dictionary key where the collaboration strings are absent', () => {
     // The transcript build stubs the collaboration dictionary; zh-CN here
     // still has it, so check the localized label instead.

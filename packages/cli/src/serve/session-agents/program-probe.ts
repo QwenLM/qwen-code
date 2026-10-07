@@ -65,13 +65,16 @@ export function findOnPath(
   platform: NodeJS.Platform = process.platform,
   isExecutable: (file: string) => boolean = defaultIsExecutable,
 ): string | undefined {
+  // PATHEXT first, bare name last (as cmd.exe does): npm puts an
+  // extension-less `sh` script beside `claude.cmd`, and that script cannot
+  // be executed on Windows.
   const extensions =
     platform === 'win32'
       ? [
-          '',
           ...(env['PATHEXT'] ?? '.COM;.EXE;.BAT;.CMD')
             .split(';')
             .filter(Boolean),
+          '',
         ]
       : [''];
   // Windows file names are case-insensitive, so PATHEXT's case is fine.

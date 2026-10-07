@@ -1378,6 +1378,11 @@ async function connectAgentHost(
       }
     } finally {
       clearInterval(timer);
+      // A binding relay outlives its runs, not the connection. `close` is
+      // identity-guarded, so a later connection's relay for the same
+      // binding is left alone.
+      for (const binding of qwenRelayBindings.values()) binding.relay.close();
+      qwenRelayBindings.clear();
       // Turns stop with the connection (their listeners abort on `stop`).
       if (!stop.signal.aborted) {
         stop.abort(new Error('Agent Host connection stopped.'));

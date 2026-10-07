@@ -207,6 +207,7 @@ it('reports every lease lost when the workspace has no orchestrator', async () =
 
   const response = await setup().beat({
     workspaceCwd: '/remote',
+    protocol: 2,
     providers: ['qwen'],
     runs: [{ runId: 'run-1', attempt: 1, leaseId: 'lease-1' }],
   });
@@ -226,24 +227,37 @@ it('announces auto-created agents on the workspace event stream', async () => {
     (frame) => frames.push(frame),
   );
   try {
-    await setup().beat({ workspaceCwd: '/remote', providers: ['qwen'] });
+    await setup().beat({
+      workspaceCwd: '/remote',
+      protocol: 2,
+      providers: ['qwen'],
+    });
     expect(frames).toContainEqual({ type: 'changed', scope: 'agents' });
   } finally {
     unsubscribe();
   }
 });
 
-it('does not create agents for a v1 Host', async () => {
+it('refuses a v1 Host heartbeat with an upgrade notice and never records it', async () => {
   heartbeat.mockResolvedValue({ ...V2_HOST, protocol: undefined });
 
-  await setup().beat({ workspaceCwd: '/remote', providers: ['Qwen Code ACP'] });
+  const response = await setup().beat({
+    workspaceCwd: '/remote',
+    providers: ['Qwen Code ACP'],
+  });
 
+  // Not 401: a v1 Host deletes its credential on that.
+  expect(response.status).toBe(426);
+  expect(response.body.error).toMatch(/protocol 2.*speaks 1.*Upgrade/);
+  // Its presence is not refreshed, so the roster shows it offline.
+  expect(heartbeat).not.toHaveBeenCalled();
   expect(ensure).not.toHaveBeenCalled();
 });
 
 it('rejects a malformed program probe', async () => {
   const response = await setup().beat({
     workspaceCwd: '/remote',
+    protocol: 2,
     providers: ['qwen'],
     programs: [{ program: 'vim', available: true }],
   });
@@ -461,7 +475,7 @@ it('refuses untrusted workspaces on every transport route', async () => {
   const app = setup(true, false);
   const responses = await Promise.all([
     app.poll(0),
-    app.beat({ workspaceCwd: '/remote', providers: ['qwen'] }),
+    app.beat({ workspaceCwd: '/remote', protocol: 2, providers: ['qwen'] }),
     app.events({ ...LEASE, sequence: 1, events: [] }),
     app.result({ ...LEASE, result: { status: 'completed', outputText: '' } }),
     app.decisions({ waitMs: 0, awaiting: [] }),
@@ -482,6 +496,7 @@ it('directs a valid replacement token to enrollment instead of consuming it as a
 
   const response = await setup().beat({
     workspaceCwd: '/remote',
+    protocol: 2,
     providers: ['qwen'],
     enrollmentToken: 'replacement-token',
   });
@@ -523,6 +538,43 @@ it('validates Host events and results field by field', () => {
   ).toBeUndefined();
 });
 
+it('clips over-long display text instead of refusing the event', () => {
+  // A qwen shell permission's title is the raw command; refusing it would
+  // drop the whole batch and leave the turn waiting on an unasked question.
+  const event = readHostEvent({
+    type: 'permission_request',
+    prompt: {
+      requestId: 'p',
+      title: 'x'.repeat(5_000),
+      inputPreview: 'i'.repeat(20_000),
+      options: [{ optionId: 'a', name: 'n'.repeat(500), kind: 'allow_once' }],
+    },
+  });
+  expect(event).toMatchObject({ type: 'permission_request' });
+  const prompt = (event as { prompt: Record<string, unknown> }).prompt;
+  expect(prompt['title']).toHaveLength(1_200);
+  expect(prompt['inputPreview']).toHaveLength(16_384);
+  expect((prompt['options'] as Array<{ name: string }>)[0]!.name).toHaveLength(
+    256,
+  );
+  expect(
+    readHostEvent({
+      type: 'step',
+      step: { id: 's', title: 't'.repeat(5_000), status: 'running' },
+    }),
+  ).toEqual({
+    type: 'step',
+    step: { id: 's', title: 't'.repeat(1_200), status: 'running' },
+  });
+  // Structure is still refused.
+  expect(
+    readHostEvent({
+      type: 'permission_request',
+      prompt: { requestId: 'p', title: 7, options: [] },
+    }),
+  ).toBeUndefined();
+});
+
 it('reads a cancellation from either ack shape', () => {
   expect(readHostAck({ ok: false, reason: 'cancelled' })).toEqual({
     ok: false,
@@ -550,6 +602,7 @@ it('reports a cancelled run in the heartbeat leases', async () => {
 
   const response = await setup().beat({
     workspaceCwd: '/remote',
+    protocol: 2,
     providers: ['qwen'],
     runs: [
       { runId: 'run-1', attempt: 1, leaseId: 'lease-1' },
@@ -734,6 +787,45 @@ it('throttles failed Host authentication per source', async () => {
     const second = await app.events({ ...LEASE, sequence: 1, events: [] });
     expect(second.status).toBe(429);
     expect(orchestrator.acceptHostEvents).not.toHaveBeenCalled();
+  } finally {
+    general.dispose();
+  }
+});
+
+it('throttles refusals before authentication per source', async () => {
+  const general = limiter(1);
+  const app = setup(true, true, { rateLimiter: general });
+  try {
+    // Malformed: no credential, no workspaceCwd.
+    const first = await request(app.app)
+      .post('/agent-hosts/workspace/host/heartbeat')
+      .send({});
+    expect(first.status).toBe(401);
+    // Same source probing for workspaces: the budget is already spent.
+    const second = await request(app.app)
+      .post('/agent-hosts/elsewhere/host/pickup')
+      .set('Authorization', `AgentHost ${SECRET}`)
+      .send({ waitMs: 0 });
+    expect(second.status).toBe(429);
+    expect(second.body).toMatchObject({ tier: 'read' });
+    expect(heartbeat).not.toHaveBeenCalled();
+    expect(authenticate).not.toHaveBeenCalled();
+  } finally {
+    general.dispose();
+  }
+});
+
+it('answers an unknown workspace with 404 while the source has budget', async () => {
+  const general = limiter(5);
+  const app = setup(true, true, { rateLimiter: general });
+  try {
+    const response = await request(app.app)
+      .post('/agent-hosts/elsewhere/host/events')
+      .set('Authorization', `AgentHost ${SECRET}`)
+      .send({ ...LEASE, sequence: 1, events: [] });
+    expect(response.status).toBe(404);
+    expect(response.body).toEqual({ error: 'Workspace not found.' });
+    expect(authenticate).not.toHaveBeenCalled();
   } finally {
     general.dispose();
   }

@@ -25,6 +25,12 @@ import {
 } from '@qwen-code/qwen-code-core/agents/session-agents/binding-store.js';
 import type { AgentAdapterContext } from './adapters/index.js';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
+import {
+  MAX_EXTERNAL_RECORD_DISPLAY_TEXT_LENGTH,
+  MAX_EXTERNAL_RECORD_STEP_TITLE_LENGTH,
+  MAX_EXTERNAL_RECORD_STEPS,
+  MAX_EXTERNAL_RECORD_TEXT_LENGTH,
+} from '../../acp-integration/session-external-record-params.js';
 import { SessionAgentEventHub } from './events.js';
 import {
   RECORD_RECOVERY_WATCH_MAX_MS,
@@ -35,6 +41,7 @@ import {
   SESSION_AGENT_STOPPED_ERRORS,
   SessionAgentError,
   SessionAgentOrchestrator,
+  UNREPORTED_TURN_TOKENS,
   type SessionAgentBridge,
   type SessionAgentOrchestratorOptions,
   type SessionAgentRecordWriter,
@@ -1255,6 +1262,214 @@ describe('SessionAgentOrchestrator', () => {
   });
 });
 
+describe('SessionAgentOrchestrator record bounds and token budget', () => {
+  it('refuses an over-long session_send post before recording it', async () => {
+    const { orchestrator, bridge, turns, frames } = harness();
+    const result = await orchestrator.mention(SESSION, {
+      text: '@alice go',
+      clientMessageId: 'm1',
+    });
+    const runId = result.runs[0]!.runId;
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    // What a Host relays for a remote agent arrives as this event.
+    turns[0]!.input.onEvent({
+      type: 'session_send',
+      text: `@bob ${'x'.repeat(MAX_EXTERNAL_RECORD_TEXT_LENGTH)}`,
+    });
+    await vi.waitFor(() =>
+      expect(
+        frames.some(
+          (frame) =>
+            frame.runId === runId &&
+            frame.error?.includes('was not posted') === true,
+        ),
+      ).toBe(true),
+    );
+    expect(
+      bridge.appendExternalRecord.mock.calls.filter(
+        ([, request]) => request.kind === 'agent_mention',
+      ),
+    ).toHaveLength(1); // The person's mention only.
+    // A post within the limit still goes through.
+    turns[0]!.input.onEvent({ type: 'session_send', text: '@bob help' });
+    await vi.waitFor(() => expect(turns).toHaveLength(2));
+    expect(turns[1]!.context.agentId).toBe('ag_bob');
+    expect(
+      bridge.appendExternalRecord.mock.calls.every(
+        ([, request]) =>
+          request.payload.displayText.length <= MAX_EXTERNAL_RECORD_TEXT_LENGTH,
+      ),
+    ).toBe(true);
+  });
+
+  it('records a reply within the ACP child limits on text and steps', async () => {
+    const { orchestrator, bridge, turns, lastFrame, frames } = harness();
+    const result = await orchestrator.mention(SESSION, {
+      text: '@alice go',
+      clientMessageId: 'm1',
+    });
+    const runId = result.runs[0]!.runId;
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    const stepCount = MAX_EXTERNAL_RECORD_STEPS + 6;
+    for (let index = 0; index < stepCount; index += 1) {
+      turns[0]!.input.onEvent({
+        type: 'step',
+        step: {
+          id: `st_${index}`,
+          title: index === stepCount - 1 ? 't'.repeat(5_000) : `step ${index}`,
+          status: 'completed',
+        },
+      });
+    }
+    // The run keeps only its latest steps: the first one is long gone, so
+    // a late update to it comes back as the newest.
+    turns[0]!.input.onEvent({
+      type: 'step',
+      step: { id: 'st_0', title: 'step 0', status: 'failed' },
+    });
+    await vi.waitFor(() =>
+      expect(lastFrame(runId)?.steps?.at(-1)?.id).toBe('st_0'),
+    );
+    // Every frame shows at most the latest 8, newest last, in order.
+    const stepFrames = frames.filter(
+      (frame) => frame.runId === runId && frame.steps !== undefined,
+    );
+    expect(stepFrames.length).toBeGreaterThan(0);
+    for (const frame of stepFrames) {
+      expect(frame.steps!.length).toBeLessThanOrEqual(8);
+    }
+    expect(lastFrame(runId)!.steps!.map((step) => step.id)).toEqual([
+      ...Array.from({ length: 7 }, (_, index) => `st_${stepCount - 7 + index}`),
+      'st_0',
+    ]);
+    turns[0]!.finish({
+      // A surrogate pair straddles the cut.
+      outputText:
+        'y'.repeat(
+          MAX_EXTERNAL_RECORD_DISPLAY_TEXT_LENGTH -
+            '\n\n[Reply truncated.]'.length -
+            1,
+        ) + '\u{1F600}'.repeat(20),
+    });
+    await vi.waitFor(() =>
+      expect(lastFrame(runId)).toMatchObject({
+        status: 'completed',
+        recorded: true,
+      }),
+    );
+    const request = bridge.appendExternalRecord.mock.calls
+      .map(([, call]) => call)
+      .find((call) => call.kind === 'agent_message')!;
+    expect(request.kind).toBe('agent_message');
+    if (request.kind !== 'agent_message') return;
+    const { displayText, steps } = request.payload;
+    expect(displayText.length).toBeLessThanOrEqual(
+      MAX_EXTERNAL_RECORD_DISPLAY_TEXT_LENGTH,
+    );
+    // The half emoji is dropped, not kept as a lone surrogate.
+    expect(displayText.endsWith('y\n\n[Reply truncated.]')).toBe(true);
+    expect(steps).toHaveLength(MAX_EXTERNAL_RECORD_STEPS);
+    // The latest steps are kept, the re-added one last.
+    expect(steps![0]!.id).toBe('st_7');
+    expect(steps!.at(-1)).toMatchObject({ id: 'st_0', status: 'failed' });
+    expect(
+      steps!.find((step) => step.id === `st_${stepCount - 1}`)!.title,
+    ).toHaveLength(MAX_EXTERNAL_RECORD_STEP_TITLE_LENGTH);
+    // Written once: the child accepted it.
+    expect(
+      bridge.records.filter((record) => record.subtype === 'agent_message'),
+    ).toHaveLength(1);
+  });
+
+  it('records why an agent post reached no one', async () => {
+    const dave: WorkspaceAgent = {
+      id: 'ag_dave',
+      name: 'dave',
+      createdAt: 1,
+      enabled: false,
+      execution: { mode: 'local', provider: 'claude' },
+    };
+    const { orchestrator, bridge, turns, frames } = harness({
+      roster: [alice, bob, dave],
+    });
+    const result = await orchestrator.mention(SESSION, {
+      text: '@alice go',
+      clientMessageId: 'm1',
+    });
+    const runId = result.runs[0]!.runId;
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    const posts = () =>
+      bridge.records.filter(
+        (record) =>
+          record.subtype === 'agent_mention' &&
+          (record.systemPayload as { author?: { agentId?: string } })?.author
+            ?.agentId === 'ag_alice',
+      );
+
+    // A plain status post names no one: nothing to report.
+    turns[0]!.input.onEvent({ type: 'session_send', text: 'Status: halfway.' });
+    await vi.waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0]!.systemPayload).not.toHaveProperty('error');
+
+    turns[0]!.input.onEvent({
+      type: 'session_send',
+      text: '@dave please take this over',
+    });
+    await vi.waitFor(() => expect(posts()).toHaveLength(2));
+    expect(posts()[1]!.systemPayload).toMatchObject({
+      mentionedAgentIds: [],
+      error:
+        'This post reached no agent: @dave cannot run (paused or retired).',
+    });
+    expect(
+      frames.some(
+        (frame) =>
+          frame.runId === runId &&
+          frame.error ===
+            'This post reached no agent: @dave cannot run (paused or retired).',
+      ),
+    ).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(turns).toHaveLength(1);
+  });
+
+  it('charges turns that report no tokens, so a mention loop ends at the budget', async () => {
+    const { orchestrator, bridge, turns } = harness({
+      // The chain limit is off (its default); only the budget stops a loop.
+      extra: { tokenBudget: () => 2.5 * UNREPORTED_TURN_TOKENS },
+    });
+    await orchestrator.mention(SESSION, {
+      text: '@alice start',
+      clientMessageId: 'm1',
+    });
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    // No turn reports a token count (a failed stats read, a silent Host).
+    turns[0]!.finish({ outputText: '@bob your turn' });
+    await vi.waitFor(() => expect(turns).toHaveLength(2));
+    turns[1]!.finish({ outputText: '@alice your turn' });
+    await vi.waitFor(() => expect(turns).toHaveLength(3));
+    turns[2]!.finish({ outputText: '@bob again' });
+
+    const messages = () =>
+      bridge.records.filter((record) => record.subtype === 'agent_message');
+    await vi.waitFor(() => expect(messages()).toHaveLength(3));
+    expect(messages()[2]!.systemPayload).toMatchObject({
+      status: 'completed',
+      error: expect.stringContaining('Agent token budget'),
+    });
+    expect(messages()[2]!.systemPayload).not.toHaveProperty('totalTokens');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(turns).toHaveLength(3);
+    await vi.waitFor(async () => {
+      const file = await fileFor();
+      expect(file.chainTokens).toBe(3 * UNREPORTED_TURN_TOKENS);
+      expect(file.runs.every((run) => run.totalTokens === undefined)).toBe(
+        true,
+      );
+    });
+  });
+});
+
 describe('SessionAgentOrchestrator squads', () => {
   const lead: WorkspaceAgent = {
     id: 'ag_lead',
@@ -1866,5 +2081,172 @@ describe('SessionAgentOrchestrator squads', () => {
       ),
     ).toMatchObject([{ agentId: 'ag_lead', squadId: 'sq_1' }]);
     expect(file.squads?.['sq_1']).not.toHaveProperty('pendingWakeRunIds');
+  });
+
+  it('retries a leader a restart cut short as its squad leader', async () => {
+    await updateSessionAgents(projectRoot, SESSION, (file) => {
+      file.runs.push({
+        id: 'sr_lead',
+        agentId: 'ag_lead',
+        status: 'running',
+        triggerRecordIds: ['rec-x'],
+        chainDepth: 1,
+        createdAt: 1,
+        startedAt: 2,
+        attempts: 1,
+        squadId: 'sq_1',
+      });
+      file.squads = {
+        sq_1: {
+          leaderAgentId: 'ag_lead',
+          startedByRecordId: 'rec-x',
+          outstandingRunIds: [],
+          active: true,
+        },
+      };
+    });
+    const h = squadHarness();
+    expect(await h.orchestrator.snapshot(SESSION)).toContainEqual(
+      expect.objectContaining({ runId: 'sr_lead', retryable: true }),
+    );
+    // Nothing runs for the squad any more: the restart ended it.
+    await vi.waitFor(async () =>
+      expect((await h.engagement())?.active).toBe(false),
+    );
+
+    const retried = await h.orchestrator.retry(SESSION, 'sr_lead');
+    await vi.waitFor(() => expect(h.turnOf('ag_lead')).toBeDefined());
+    expect(h.turnOf('ag_lead')!.input.prompt).toContain(
+      '<squad_briefing squad="crew">',
+    );
+    const retriedFrames = h.frames.filter(
+      (frame) => frame.runId === retried.runId,
+    );
+    expect(retriedFrames.length).toBeGreaterThan(0);
+    for (const frame of retriedFrames) {
+      expect(frame).toMatchObject({
+        squadId: 'sq_1',
+        squadName: 'crew',
+        author: { agentId: 'ag_lead', squadName: 'crew' },
+      });
+    }
+    await vi.waitFor(async () => {
+      const file = await fileFor();
+      expect(file.runs.find((run) => run.id === retried.runId)).toMatchObject({
+        squadId: 'sq_1',
+        retryOf: 'sr_lead',
+        chainDepth: 1,
+      });
+      expect(file.squads?.['sq_1']).toMatchObject({
+        leaderAgentId: 'ag_lead',
+        active: true,
+      });
+    });
+
+    // It leads again: its delegation is tracked and the reply wakes it.
+    h.turnOf('ag_lead')!.finish({ outputText: '@alice fix it' });
+    await vi.waitFor(() => expect(h.turnOf('ag_alice')).toBeDefined());
+    h.turnOf('ag_alice')!.finish({ outputText: 'Fixed in auth.ts.' });
+    await vi.waitFor(() => expect(h.turnOf('ag_lead', 1)).toBeDefined());
+    expect(h.turnOf('ag_lead', 1)!.input.prompt).toContain('Fixed in auth.ts.');
+  });
+
+  it('moves the wake a failed member reply owed to its retry', async () => {
+    const h = squadHarness();
+    await h.orchestrator.mention(SESSION, {
+      text: '@crew go',
+      clientMessageId: 'm1',
+    });
+    await vi.waitFor(() => expect(h.turnOf('ag_lead')).toBeDefined());
+    h.turnOf('ag_lead')!.finish({ outputText: '@alice fix it' });
+    await vi.waitFor(() => expect(h.turnOf('ag_alice')).toBeDefined());
+    const aliceRunId = h.frames.find(
+      (frame) => frame.author.agentId === 'ag_alice',
+    )!.runId;
+    // The failed run's own record never lands.
+    const write = h.bridge.appendExternalRecord.getMockImplementation()!;
+    h.bridge.appendExternalRecord.mockImplementation(
+      async (sessionId, request) => {
+        if (
+          request.kind === 'agent_message' &&
+          request.payload.runId === aliceRunId
+        ) {
+          throw new Error('disk full');
+        }
+        return write(sessionId, request);
+      },
+    );
+    h.turnOf('ag_alice')!.finish({
+      status: 'failed',
+      outputText: 'half done',
+      error: 'tool crashed',
+    });
+    await vi.waitFor(async () =>
+      expect(await h.engagement()).toMatchObject({
+        active: true,
+        pendingWakeRunIds: [aliceRunId],
+      }),
+    );
+    expect(h.turnOf('ag_lead', 1)).toBeUndefined();
+
+    const retried = await h.orchestrator.retry(SESSION, aliceRunId);
+    expect(h.lastFrame(aliceRunId)).toMatchObject({
+      retriedAsRunId: retried.runId,
+    });
+    await vi.waitFor(async () => {
+      const engagement = await h.engagement();
+      expect(engagement).toMatchObject({
+        active: true,
+        outstandingRunIds: [retried.runId],
+      });
+      expect(engagement).not.toHaveProperty('pendingWakeRunIds');
+    });
+    // The new run belongs to the engagement from the moment it is tracked.
+    expect(
+      h.frames.some(
+        (frame) => frame.runId === retried.runId && frame.squadId === 'sq_1',
+      ),
+    ).toBe(true);
+
+    await vi.waitFor(() => expect(h.turnOf('ag_alice', 1)).toBeDefined());
+    h.turnOf('ag_alice', 1)!.finish({ outputText: 'Fixed in auth.ts.' });
+    await vi.waitFor(() => expect(h.turnOf('ag_lead', 1)).toBeDefined());
+    expect(h.turnOf('ag_lead', 1)!.input.prompt).toContain('Fixed in auth.ts.');
+    const leaderWake = (await fileFor()).runs.filter(
+      (run) => run.agentId === 'ag_lead',
+    )[1];
+    expect(leaderWake).toMatchObject({ squadId: 'sq_1', chainDepth: 2 });
+    // Woken once: the failed run's dropped wake does not fire as well.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(
+      h.turns.filter((turn) => turn.context.agentId === 'ag_lead'),
+    ).toHaveLength(2);
+  });
+
+  it('moves the wake a member reply owed across a restart to its retry', async () => {
+    const { first, aliceRunId } = await stopWithMemberReplyPending();
+    const second = squadHarness();
+    second.bridge.records.push(...first.bridge.records);
+    expect(await second.orchestrator.snapshot(SESSION)).toContainEqual(
+      expect.objectContaining({ runId: aliceRunId, retryable: true }),
+    );
+
+    const retried = await second.orchestrator.retry(SESSION, aliceRunId);
+    await vi.waitFor(async () => {
+      const engagement = await second.engagement();
+      expect(engagement).toMatchObject({
+        active: true,
+        outstandingRunIds: [retried.runId],
+      });
+      expect(engagement).not.toHaveProperty('pendingWakeRunIds');
+    });
+    await vi.waitFor(() => expect(second.turnOf('ag_alice')).toBeDefined());
+    second.turnOf('ag_alice')!.finish({ outputText: 'Fixed again.' });
+    await vi.waitFor(() => expect(second.turnOf('ag_lead')).toBeDefined());
+    expect(second.turnOf('ag_lead')!.input.prompt).toContain('Fixed again.');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(
+      second.turns.filter((turn) => turn.context.agentId === 'ag_lead'),
+    ).toHaveLength(1);
   });
 });

@@ -2860,6 +2860,8 @@ export class Config {
   private systemPrompt: string | undefined;
   private workspaceAgentName: string | undefined;
   private workspaceAgentExecutionAllowedTools: ReadonlySet<string> | undefined;
+  /** The persona's `disallowedTools`; enforced for session-agents sessions. */
+  private workspaceAgentDisallowedTools: readonly string[] | undefined;
   /**
    * Set when this `agent` session was started by the session-agents
    * orchestrator rather than the thread dispatcher. See
@@ -6102,6 +6104,7 @@ export class Config {
     systemPrompt: string,
     agentName: string,
     executionAllowedTools?: readonly string[],
+    disallowedTools?: readonly string[],
   ): void {
     if (this.sessionSourceType !== 'agent') {
       throw new Error(
@@ -6117,6 +6120,9 @@ export class Config {
     this.workspaceAgentName = agentName;
     this.workspaceAgentExecutionAllowedTools = executionAllowedTools
       ? new Set(executionAllowedTools)
+      : undefined;
+    this.workspaceAgentDisallowedTools = disallowedTools
+      ? [...disallowedTools]
       : undefined;
   }
 
@@ -12206,6 +12212,7 @@ export class Config {
       return createSessionAgentToolInvocationGuard(
         this.toolInvocationGuard,
         this.workspaceAgentExecutionAllowedTools,
+        this.workspaceAgentDisallowedTools,
       );
     }
     return this.isWorkspaceAgentSession()

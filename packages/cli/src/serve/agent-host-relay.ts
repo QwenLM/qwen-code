@@ -31,9 +31,12 @@ import {
   isLoopbackBind,
   isWildcardBind,
 } from './loopback-binds.js';
+import { MAX_EXTERNAL_RECORD_TEXT_LENGTH } from '../acp-integration/session-external-record-params.js';
 
 export const AGENT_HOST_RELAY_PATH = '/agent-host-relay/runs';
-const MAX_SEND_TEXT = 100_000;
+// The record writer refuses a longer post; refusing here tells the model the
+// send failed instead of answering "sent" for a post that is then dropped.
+const MAX_SEND_TEXT = MAX_EXTERNAL_RECORD_TEXT_LENGTH;
 
 interface RelayRun {
   token: Buffer;
