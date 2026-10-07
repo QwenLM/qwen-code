@@ -125,7 +125,10 @@ import {
   validateMaxSessionTurns,
   type Config,
 } from '../../config/config.js';
-import { isTeammate } from '../../agents/team/identity.js';
+import {
+  isTeammate,
+  runOutsideTeammateIdentity,
+} from '../../agents/team/identity.js';
 import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-plan-tool-policy.js';
 import {
   buildAgentTranscriptAttach,
@@ -924,10 +927,14 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
       this.availableSubagents = BuiltinAgentRegistry.getBuiltinAgents();
       this.updateDescriptionAndSchema();
     } finally {
-      // Update the client with the new tools
+      // Update the client with the new tools. A teammate's derived Config
+      // resolves to the leader's client, and a schema such as send_message's
+      // reads the ambient teammate scope, so rebuilding here inside a
+      // teammate's context would write the teammate view into the leader's
+      // declarations.
       const llmClient = this.config.getLlmClient();
       if (llmClient) {
-        await llmClient.setTools();
+        await runOutsideTeammateIdentity(() => llmClient.setTools());
       }
     }
   }
