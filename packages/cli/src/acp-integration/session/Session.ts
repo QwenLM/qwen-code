@@ -784,6 +784,7 @@ async function claimGoalTurn(
 type PendingToolResultRecord = {
   ordinal: number;
   sequence: number;
+  subtype?: 'code_mode_tool_result';
   callId: string;
   toolName: string;
   toolArgs: Record<string, unknown>;
@@ -809,7 +810,10 @@ type PendingToolResultRecord = {
 
 type QueueToolResultRecord = (
   fc: FunctionCall,
-  record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence' | 'toolArgs'>,
+  record: Omit<
+    PendingToolResultRecord,
+    'ordinal' | 'sequence' | 'toolArgs' | 'subtype'
+  >,
 ) => void;
 
 type HistoryMutationRunner = <T>(operation: () => Promise<T>) => Promise<T>;
@@ -12608,6 +12612,10 @@ export class Session implements SessionContext {
       }
       target.push({
         ...record,
+        // Calls outside the model's batch are nested Code Mode originals.
+        ...(ordinal === -1
+          ? { subtype: 'code_mode_tool_result' as const }
+          : {}),
         toolArgs: (fc.args ?? {}) as Record<string, unknown>,
         ordinal: Math.max(0, ordinal),
         sequence: toolResultRecordSequence++,
@@ -12668,6 +12676,9 @@ export class Session implements SessionContext {
           record.toolArgs,
           finalized[index].responseParts,
         );
+        const options = record.subtype
+          ? { ...goalProvenance, subtype: record.subtype }
+          : goalProvenance;
         this.config.getChatRecordingService()?.recordToolResult(
           finalized[index].responseParts,
           {
@@ -12675,10 +12686,7 @@ export class Session implements SessionContext {
             persistedOutputFiles: finalized[index].persistedOutputFiles,
             artifacts: finalized[index].artifacts,
           },
-          // Passed only inside a Goal turn: outside one this call keeps its
-          // former two-argument shape, so nothing about ordinary recording
-          // changes.
-          ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+          ...(options ? ([options] as const) : ([] as const)),
         );
       });
       // A Managed session's Runtime batch closes in order: the recorded
