@@ -270,6 +270,10 @@ Use the optional `model` frontmatter field to control which model a subagent use
 - `openai:gpt-4o`: Use an explicit provider and model ID. This is useful when a
   subagent should run on a model registered under a different auth type from the
   main conversation.
+- `<providerId>:<modelId>`: Use a model declared by a custom provider registered
+  under `modelProviders` in `settings.json`. The provider must declare the bare
+  model ID; Qwen Code then sends the provider only that bare ID. This form also
+  disambiguates when two providers declare the same model ID.
 
 For example:
 
@@ -299,9 +303,9 @@ tools:
 The `fast` selector uses the same `fastModel` setting configured in
 `settings.json` or with `/model --fast`. That setting may itself refer to a
 model under another configured auth type, such as `openai:deepseek-v4-flash`.
-When the selector resolves to another auth type, Qwen Code creates a dedicated
-runtime provider for that subagent request and sends the provider only the bare
-model ID.
+When the selector resolves to another auth type or to a custom provider from
+`modelProviders`, Qwen Code creates a dedicated runtime provider for that
+subagent request and sends the provider only the bare model ID.
 
 The built-in Explore agent inherits the main session model by default. To
 select a different model for only that built-in agent, configure
