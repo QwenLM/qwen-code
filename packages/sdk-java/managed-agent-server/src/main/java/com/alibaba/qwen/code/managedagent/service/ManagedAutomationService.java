@@ -135,11 +135,12 @@ public class ManagedAutomationService {
         // same definition (the funnel answers unchanged content as a
         // replay) instead of minting a second one.
         String scheduleId = scheduleIdFor(tenantId, idempotencyKey);
-        PublicAutomation created = define(session, actorId, scheduleId,
-                definition);
+        Map<String, Object> answer = define(session, actorId, scheduleId,
+                definition, operationIdFor(tenantId, idempotencyKey));
+        PublicAutomation created = mirror(session, actorId, answer);
         remember(tenantId, actorId, idempotencyKey, requestDigest, scheduleId,
                 created);
-        return new Result<>(created, false);
+        return new Result<>(created, replayed(answer));
     }
 
     public Result<PublicAutomation> update(String tenantId, String actorId,
@@ -167,11 +168,12 @@ public class ManagedAutomationService {
                     "session_id cannot change after creation.");
         }
         requireEnabled();
-        PublicAutomation revised = define(session, actorId, automationId,
-                definition);
+        Map<String, Object> answer = define(session, actorId, automationId,
+                definition, operationIdFor(tenantId, idempotencyKey));
+        PublicAutomation revised = mirror(session, actorId, answer);
         remember(tenantId, actorId, idempotencyKey, requestDigest,
                 automationId, revised);
-        return new Result<>(revised, false);
+        return new Result<>(revised, replayed(answer));
     }
 
     public Result<PublicAutomation> retire(String tenantId, String actorId,
@@ -198,7 +200,7 @@ public class ManagedAutomationService {
             return new Result<>(already, true);
         }
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("operationId", UUID.randomUUID().toString());
+        body.put("operationId", operationIdFor(tenantId, idempotencyKey));
         body.put("kind", "retire_schedule");
         body.put("scheduleId", automationId);
         Map<String, Object> answer = relay(tenantId, session.sessionId(), body);
@@ -206,7 +208,7 @@ public class ManagedAutomationService {
         ledger.retire(tenantId, automationId, clock.get());
         remember(tenantId, actorId, idempotencyKey, requestDigest,
                 automationId, retired);
-        return new Result<>(retired, false);
+        return new Result<>(retired, replayed(answer));
     }
 
     /**
@@ -331,15 +333,20 @@ public class ManagedAutomationService {
 
     // --- the Harness relay ---
 
-    private PublicAutomation define(SessionRecord session, String actorId,
-            String scheduleId, Map<String, Object> definition) {
+    private Map<String, Object> define(SessionRecord session, String actorId,
+            String scheduleId, Map<String, Object> definition,
+            String operationId) {
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("operationId", UUID.randomUUID().toString());
+        body.put("operationId", operationId);
         body.put("kind", "define_schedule");
         body.put("scheduleId", scheduleId);
         body.put("definition", definition);
-        return mirror(session, actorId, relay(session.tenantId(),
-                session.sessionId(), body));
+        return relay(session.tenantId(), session.sessionId(), body);
+    }
+
+    /** The operation answer's replay mark, carried through to the caller. */
+    private static boolean replayed(Map<String, Object> answer) {
+        return Boolean.TRUE.equals(answer.get("replayed"));
     }
 
     private Map<String, Object> relay(String tenantId, String sessionId,
@@ -402,11 +409,12 @@ public class ManagedAutomationService {
                     "The Hosted Harness answered without the definition.");
         }
         long now = clock.get();
+        long recordRevision = schedule.required("revision").asLong();
         ScheduleRow row = ledger.upsertSchedule(new ScheduleRow(
                 session.tenantId(), schedule.required("scheduleId").asText(),
                 session.sessionId(), session.workspace() == null ? ""
                         : session.workspace().getWorkspaceId(), actorId,
-                schedule.required("revision").asLong(),
+                recordRevision,
                 schedule.required("definitionRevision").asLong(),
                 schedule.required("definitionDigest").asText(),
                 schedule.required("goal").asText(),
@@ -423,6 +431,28 @@ public class ManagedAutomationService {
                         ? AutomationLedgerStore.STATE_RETIRED
                         : AutomationLedgerStore.STATE_LIVE,
                 null, 0, null, null, null, 0, 0, 0), now);
+        if (row.recordRevision() > recordRevision) {
+            // The answer replays an operation committed before the
+            // revision the mirror already tracks: the ledger row kept the
+            // newer truth, but the remembered result is the operation's
+            // own committed one, or a later replay answers with another
+            // request's revision.
+            return new PublicAutomation(
+                    schedule.required("scheduleId").asText(),
+                    "agent.automation", session.sessionId(),
+                    schedule.required("definitionRevision").asLong(),
+                    schedule.required("definitionDigest").asText(),
+                    schedule.required("goal").asText(),
+                    schedule.required("cron").asText(),
+                    schedule.required("timezone").asText(),
+                    schedule.required("sessionMode").asText(),
+                    schedule.required("overlap").asText(),
+                    schedule.required("catchUp").asText(),
+                    schedule.required("catchUpLimit").isNull() ? null
+                            : schedule.required("catchUpLimit").asLong(),
+                    schedule.required("enabled").asBoolean(), row.state(),
+                    row.createdAt(), row.updatedAt());
+        }
         return publicAutomation(row);
     }
 
@@ -623,6 +653,19 @@ public class ManagedAutomationService {
     public static String scheduleIdFor(String tenantId, String idempotencyKey) {
         return "asch_" + AutomationLedgerStore.sha256(tenantId + '\0'
                 + idempotencyKey).substring(0, 32);
+    }
+
+    /**
+     * The relayed operation's identity: derived from the same identity as
+     * the definition id, so the same request re-sends it across a lost
+     * answer and the Harness answers the original committed revision
+     * instead of committing the content again over a newer one.
+     */
+    public static String operationIdFor(String tenantId,
+            String idempotencyKey) {
+        return UUID.nameUUIDFromBytes(("qwen-automation:\0" + tenantId + '\0'
+                + idempotencyKey).getBytes(StandardCharsets.UTF_8))
+                .toString();
     }
 
     static ApiException translate(DaemonHttpException error) {

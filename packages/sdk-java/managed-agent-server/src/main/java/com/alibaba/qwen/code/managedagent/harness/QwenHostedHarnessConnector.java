@@ -399,6 +399,11 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public Map<String, Object> runAutomationOperation(String tenantId,
             String sessionId, Map<String, Object> body) {
         try {
+            // Automation operations drive new work (a fire admits an input
+            // and wakes a turn), so a cached attachment is no admission:
+            // the Workspace checks submit and continueManagedRuntime run
+            // apply to every relay.
+            requireReadyForNewWork(tenantId, sessionId);
             return client().runAutomationOperation(
                     attachment(tenantId, sessionId, true), body);
         } catch (HostedHarnessGenerationException error) {

@@ -40,13 +40,16 @@ import { isTerminalRunState } from '@qwen-code/qwen-code-core/managed-runtime/ma
 import type {
   ManagedSessionActor,
   ManagedSessionCommand,
+  ManagedSessionExtensionReceipt,
   ManagedSessionInputRequest,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
-import type {
-  ManagedSessionDomain,
-  ManagedSessionDurableRef,
-  ManagedSessionEvent,
-  ManagedSessionKey,
+import {
+  MANAGED_SESSION_LIMITS,
+  parseManagedSessionRecordJson,
+  type ManagedSessionDomain,
+  type ManagedSessionDurableRef,
+  type ManagedSessionEvent,
+  type ManagedSessionKey,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import { wakeHasPriorAttempt } from './hosted-monitor-wake.js';
 
@@ -81,6 +84,10 @@ export interface HostedAutomationStore {
       },
       actor: ManagedSessionActor,
     ): Promise<unknown>;
+    committedExtensionOperation(
+      operation: string,
+      commandId: string,
+    ): ManagedSessionExtensionReceipt | undefined;
   };
   readonly resources: {
     publish(kind: string, bytes: Buffer): Promise<ManagedSessionDurableRef>;
@@ -93,6 +100,12 @@ export interface HostedAutomationStore {
 
 export interface AutomationDefineParams {
   readonly scheduleId: string;
+  /**
+   * The relayed operation's identity. A retry of one request carries the
+   * same one, and the committed commit under it answers with the original
+   * revision — however the chain moved since.
+   */
+  readonly operationId: string;
   /** The request's definition fields; a revision may carry a subset. */
   readonly definition: unknown;
 }
@@ -211,10 +224,23 @@ export class HostedAutomationSession {
   /**
    * `defineSchedule`: opens a definition, or appends its next revision. An
    * unchanged definition appends nothing and answers the committed one; a
-   * retired chain takes none.
+   * retired chain takes none. A retry of a committed operation is answered
+   * with its original revision first of all, so a relay whose answer was
+   * lost cannot rewrite a revision another request committed since.
    */
   define(params: AutomationDefineParams): Promise<AutomationDefineResult> {
     return this.serial(async () => {
+      const prior = this.store.authority.committedExtensionOperation(
+        'defineSchedule',
+        params.operationId,
+      );
+      if (prior !== undefined) {
+        return {
+          schedule: await this.scheduleOf(prior),
+          revision: prior.revision,
+          replayed: true,
+        };
+      }
       const existing = this.schedule(params.scheduleId);
       if (existing !== undefined && isTerminalRunState(existing.run.state)) {
         throw new AutomationRetiredError(params.scheduleId);
@@ -282,7 +308,7 @@ export class HostedAutomationSession {
               promptRef,
               definitionDigest,
             });
-      await this.commitSchedule(record, 'defineSchedule');
+      await this.commitSchedule(record, 'defineSchedule', params.operationId);
       return {
         schedule: record,
         revision: this.store.authority.extensionRecord(
@@ -295,8 +321,22 @@ export class HostedAutomationSession {
   }
 
   /** `retireSchedule`: the chain ends `cancelled` and freezes for good. */
-  retire(scheduleId: string): Promise<AutomationDefineResult> {
+  retire(
+    scheduleId: string,
+    operationId: string,
+  ): Promise<AutomationDefineResult> {
     return this.serial(async () => {
+      const prior = this.store.authority.committedExtensionOperation(
+        'retireSchedule',
+        operationId,
+      );
+      if (prior !== undefined) {
+        return {
+          schedule: await this.scheduleOf(prior),
+          revision: prior.revision,
+          replayed: true,
+        };
+      }
       const existing = this.schedule(scheduleId);
       if (existing === undefined) throw new AutomationNotFoundError(scheduleId);
       const revisionOf = () =>
@@ -305,7 +345,7 @@ export class HostedAutomationSession {
         return { schedule: existing, revision: revisionOf(), replayed: true };
       }
       const record = scheduleRetireBody(existing);
-      await this.commitSchedule(record, 'retireSchedule');
+      await this.commitSchedule(record, 'retireSchedule', operationId);
       return { schedule: record, revision: revisionOf(), replayed: false };
     });
   }
@@ -508,17 +548,28 @@ export class HostedAutomationSession {
     );
   }
 
+  /** The record body a committed operation carries, read from its ref. */
+  private async scheduleOf(
+    committed: ManagedSessionExtensionReceipt,
+  ): Promise<Schedule> {
+    const bytes = await this.store.resources.read(committed.recordRef);
+    return parseScheduleRecord(
+      parseManagedSessionRecordJson(
+        bytes.toString('utf8'),
+        MANAGED_SESSION_LIMITS.maxEventBytes,
+      ),
+    );
+  }
+
   private async commitSchedule(
     record: Schedule,
     operation: string,
+    operationId: string,
   ): Promise<void> {
-    const revision =
-      (this.store.authority.extensionRecord('schedule', record.scheduleId)
-        ?.revision ?? 0) + 1;
     await this.store.authority.commitExtensionRecord(
       {
         operation,
-        commandId: `${record.scheduleId}:${revision}`,
+        commandId: operationId,
         sessionKey: this.key,
         contentDigest: digest(record),
       },

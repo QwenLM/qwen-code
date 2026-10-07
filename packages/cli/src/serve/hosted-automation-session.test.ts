@@ -46,6 +46,11 @@ const sessionKey = {
 const SCHEDULE_ID = 'asch_0123456789abcdef0123456789abcdef';
 const SLOT_KEY = 'schedule:2026-03-08T07:00:00Z';
 
+/** Every fresh request relays a fresh operation identity. */
+function nextOperationId(): string {
+  return randomUUID();
+}
+
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
@@ -199,6 +204,7 @@ describe('hosted automation definitions', () => {
     await withSession(harness, async (automations, authority) => {
       const opened = await automations.define({
         scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
         definition,
       });
       expect(opened.replayed).toBe(false);
@@ -215,6 +221,7 @@ describe('hosted automation definitions', () => {
       // The same content again appends nothing.
       const same = await automations.define({
         scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
         definition,
       });
       expect(same.replayed).toBe(true);
@@ -222,6 +229,7 @@ describe('hosted automation definitions', () => {
       // A partial revision keeps the prompt and the other fields.
       const revised = await automations.define({
         scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
         definition: { cron: '30 2 * * *', enabled: false },
       });
       expect(revised.replayed).toBe(false);
@@ -234,6 +242,7 @@ describe('hosted automation definitions', () => {
       // A prompt change publishes a new prompt resource.
       const reprompted = await automations.define({
         scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
         definition: { prompt: 'Run the build and report.' },
       });
       expect(reprompted.schedule.promptRef).not.toEqual(
@@ -243,13 +252,19 @@ describe('hosted automation definitions', () => {
         'Run the build and report.',
       );
       // Retire ends and freezes the chain.
-      const retired = await automations.retire(SCHEDULE_ID);
+      const retired = await automations.retire(SCHEDULE_ID, nextOperationId());
       expect(retired.replayed).toBe(false);
       expect(retired.schedule.run.state).toBe('cancelled');
       expect(retired.schedule.enabled).toBe(false);
-      expect((await automations.retire(SCHEDULE_ID)).replayed).toBe(true);
+      expect(
+        (await automations.retire(SCHEDULE_ID, nextOperationId())).replayed,
+      ).toBe(true);
       await expect(
-        automations.define({ scheduleId: SCHEDULE_ID, definition }),
+        automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition,
+        }),
       ).rejects.toThrow(AutomationRetiredError);
       expect(authority.extensionRecord('schedule', SCHEDULE_ID)?.revision).toBe(
         4,
@@ -263,31 +278,42 @@ describe('hosted automation definitions', () => {
       await expect(
         automations.define({
           scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
           definition: { ...definition, sessionMode: 'per_run' },
         }),
       ).rejects.toThrow(/schedule session mode per_run is not enabled/);
       await expect(
         automations.define({
           scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
           definition: { ...definition, cron: '0 25 * * *' },
         }),
       ).rejects.toThrow(ManagedSessionRecordError);
-      await expect(automations.retire(SCHEDULE_ID)).rejects.toThrow(
-        AutomationNotFoundError,
-      );
+      await expect(
+        automations.retire(SCHEDULE_ID, nextOperationId()),
+      ).rejects.toThrow(AutomationNotFoundError);
       for (let index = 0; index < 32; index += 1) {
         await automations.define({
           scheduleId: `asch_${index.toString(16).padStart(32, '0')}`,
+          operationId: nextOperationId(),
           definition,
         });
       }
       await expect(
-        automations.define({ scheduleId: SCHEDULE_ID, definition }),
+        automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition,
+        }),
       ).rejects.toThrow(AutomationQuotaError);
       // A retired definition frees its slot.
-      await automations.retire(`asch_${'0'.repeat(32)}`);
+      await automations.retire(`asch_${'0'.repeat(32)}`, nextOperationId());
       await expect(
-        automations.define({ scheduleId: SCHEDULE_ID, definition }),
+        automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition,
+        }),
       ).resolves.toMatchObject({ revision: 1 });
     });
   });
@@ -297,6 +323,7 @@ describe('hosted automation definitions', () => {
     await withSession(harness, async (automations) => {
       const bounded = await automations.define({
         scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
         definition: { ...definition, catchUp: 'bounded', catchUpLimit: 3 },
       });
       expect(bounded.schedule.catchUp).toBe('bounded');
@@ -305,6 +332,7 @@ describe('hosted automation definitions', () => {
       // contract pins the limit to bounded, and the caller named none.
       const none = await automations.define({
         scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
         definition: { catchUp: 'none' },
       });
       expect(none.revision).toBe(2);
@@ -314,11 +342,13 @@ describe('hosted automation definitions', () => {
       await expect(
         automations.define({
           scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
           definition: { catchUp: 'bounded' },
         }),
       ).rejects.toThrow(ManagedSessionRecordError);
       const again = await automations.define({
         scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
         definition: { catchUp: 'bounded', catchUpLimit: 5 },
       });
       expect(again.revision).toBe(3);
@@ -330,6 +360,7 @@ describe('hosted automation definitions', () => {
         (
           await automations.define({
             scheduleId: SCHEDULE_ID,
+            operationId: nextOperationId(),
             definition: { goal: 'Nightly build' },
           })
         ).replayed,
@@ -337,21 +368,156 @@ describe('hosted automation definitions', () => {
       await expect(
         automations.define({
           scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
           definition: { catchUpLimit: null },
         }),
       ).rejects.toThrow(ManagedSessionRecordError);
       await expect(
         automations.define({
           scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
           definition: { catchUp: 'latest', catchUpLimit: 2 },
         }),
       ).rejects.toThrow(ManagedSessionRecordError);
       const latest = await automations.define({
         scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
         definition: { catchUp: 'latest' },
       });
       expect(latest.revision).toBe(4);
       expect(latest.schedule.catchUpLimit).toBeNull();
+    });
+  });
+
+  it('answers a retried mutation with its original result, never the moved chain', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (automations, authority) => {
+      const createOp = randomUUID();
+      const opened = await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: createOp,
+        definition,
+      });
+      expect(opened.revision).toBe(1);
+      const moved = await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: randomUUID(),
+        definition: { cron: '15 3 * * *' },
+      });
+      expect(moved.revision).toBe(2);
+      // The Harness committed the create, its answer was lost, and the
+      // control plane re-drives it: the retry answers revision 1 with the
+      // revision-1 record, and the second request's revision stays put.
+      const retried = await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: createOp,
+        definition,
+      });
+      expect(retried.replayed).toBe(true);
+      expect(retried.revision).toBe(1);
+      expect(retried.schedule.definitionRevision).toBe(1);
+      expect(retried.schedule.cron).toBe(definition.cron);
+      expect(retried.schedule.promptRef).toEqual(opened.schedule.promptRef);
+      const chain = automations.schedule(SCHEDULE_ID)!;
+      expect(chain.definitionRevision).toBe(2);
+      expect(chain.cron).toBe('15 3 * * *');
+      expect(authority.extensionRecord('schedule', SCHEDULE_ID)?.revision).toBe(
+        2,
+      );
+      // A retried retire answers its own cancel revision, once.
+      const retireOp = randomUUID();
+      const retired = await automations.retire(SCHEDULE_ID, retireOp);
+      expect(retired.replayed).toBe(false);
+      const retriedRetire = await automations.retire(SCHEDULE_ID, retireOp);
+      expect(retriedRetire.replayed).toBe(true);
+      expect(retriedRetire.revision).toBe(retired.revision);
+      expect(retriedRetire.schedule.run.state).toBe('cancelled');
+      // The lost-answer retry of the original create still answers its
+      // first revision — it never re-opens the retired chain.
+      const afterRetire = await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: createOp,
+        definition,
+      });
+      expect(afterRetire.replayed).toBe(true);
+      expect(afterRetire.revision).toBe(1);
+      expect(authority.extensionRecord('schedule', SCHEDULE_ID)?.revision).toBe(
+        3,
+      );
+    });
+  });
+
+  it('replays a retried mutation after a reopen', async () => {
+    const harness = await createHarness();
+    const createOp = randomUUID();
+    await withSession(harness, async (automations) => {
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: createOp,
+        definition,
+      });
+    });
+    await withSession(
+      harness,
+      async (automations) => {
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: randomUUID(),
+          definition: { cron: '45 4 * * *' },
+        });
+        // A retry of the create relayed before the restart still answers
+        // the first revision and moves nothing.
+        const retried = await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: createOp,
+          definition,
+        });
+        expect(retried.replayed).toBe(true);
+        expect(retried.revision).toBe(1);
+        expect(retried.schedule.definitionRevision).toBe(1);
+        expect(automations.schedule(SCHEDULE_ID)?.definitionRevision).toBe(2);
+      },
+      { create: false },
+    );
+  });
+
+  it('refuses a definition whose final execution input cannot be published', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (automations, authority) => {
+      const before = authority.committedSequence;
+      // A 64 KiB ASCII prompt admits itself, but the wrapped input the
+      // fire would publish already exceeds the inline resource bound.
+      await expect(
+        automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: {
+            ...definition,
+            prompt: 'x'.repeat(64 * 1024),
+          },
+        }),
+      ).rejects.toThrow(/final execution input would exceed/);
+      // A newline-only prompt of 33 KiB escapes past it, too.
+      await expect(
+        automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: {
+            ...definition,
+            prompt: '\n'.repeat(33_792),
+          },
+        }),
+      ).rejects.toThrow(/final execution input would exceed/);
+      expect(automations.schedule(SCHEDULE_ID)).toBeUndefined();
+      expect(authority.committedSequence).toBe(before);
+      // A prompt that carries the wrapping defines and fires.
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
+        definition: { ...definition, prompt: 'x'.repeat(48 * 1024) },
+      });
+      const fired = await automations.fire(fireParams());
+      expect(fired.run.run.execution).toBe('dispatch_started');
     });
   });
 });
@@ -360,7 +526,11 @@ describe('hosted automation runs', () => {
   it('fires one run with its input and wake, and replays the occurrence', async () => {
     const harness = await createHarness();
     await withSession(harness, async (automations, authority) => {
-      await automations.define({ scheduleId: SCHEDULE_ID, definition });
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
+        definition,
+      });
       const before = authority.committedSequence;
       const fired = await automations.fire(fireParams());
       const runId = automationRunId(SCHEDULE_ID, SLOT_KEY);
@@ -420,6 +590,7 @@ describe('hosted automation runs', () => {
     await withSession(harness, async (automations, authority) => {
       const opened = await automations.define({
         scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
         definition,
       });
       const claim = automationRunClaimBody({
@@ -454,7 +625,11 @@ describe('hosted automation runs', () => {
       await expect(automations.fire(fireParams())).rejects.toThrow(
         AutomationNotFoundError,
       );
-      await automations.define({ scheduleId: SCHEDULE_ID, definition });
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
+        definition,
+      });
       await expect(automations.fire(fireParams(2))).rejects.toThrow(
         AutomationRevisionStaleError,
       );
@@ -463,12 +638,13 @@ describe('hosted automation runs', () => {
       ).rejects.toThrow(ManagedSessionRecordError);
       await automations.define({
         scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
         definition: { enabled: false },
       });
       await expect(automations.fire(fireParams(1))).rejects.toThrow(
         /revision 1 admits nothing/,
       );
-      await automations.retire(SCHEDULE_ID);
+      await automations.retire(SCHEDULE_ID, nextOperationId());
       await expect(automations.fire(fireParams(3))).rejects.toThrow(
         AutomationRetiredError,
       );
@@ -479,10 +655,15 @@ describe('hosted automation runs', () => {
   it('replays a dispatched run after its definition moved or retired', async () => {
     const harness = await createHarness();
     await withSession(harness, async (automations, authority) => {
-      await automations.define({ scheduleId: SCHEDULE_ID, definition });
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
+        definition,
+      });
       const fired = await automations.fire(fireParams());
       await automations.define({
         scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
         definition: { goal: 'Moved' },
       });
       const sequence = authority.committedSequence;
@@ -496,7 +677,7 @@ describe('hosted automation runs', () => {
       await expect(
         automations.fire(fireParams(1, 'schedule:2026-03-09T07:00:00Z')),
       ).rejects.toThrow(AutomationRevisionStaleError);
-      await automations.retire(SCHEDULE_ID);
+      await automations.retire(SCHEDULE_ID, nextOperationId());
       const retired = await automations.fire(fireParams(1));
       expect(retired.replayed).toBe(true);
       expect(retired.run).toEqual(fired.run);
@@ -515,6 +696,7 @@ describe('hosted automation runs', () => {
     await withSession(harness, async (automations, authority) => {
       const opened = await automations.define({
         scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
         definition,
       });
       const claim = automationRunClaimBody({
@@ -531,7 +713,7 @@ describe('hosted automation runs', () => {
         { domain: 'automation_run', record: claim },
         { class: 'trusted_entry' },
       );
-      await automations.retire(SCHEDULE_ID);
+      await automations.retire(SCHEDULE_ID, nextOperationId());
       const before = authority.committedSequence;
       const ended = await automations.fire(fireParams());
       expect(ended.replayed).toBe(true);
@@ -560,7 +742,11 @@ describe('hosted automation runs', () => {
     const runId = automationRunId(SCHEDULE_ID, SLOT_KEY);
     const turnId = automationInputId(runId);
     await withSession(harness, async (automations) => {
-      await automations.define({ scheduleId: SCHEDULE_ID, definition });
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
+        definition,
+      });
       await automations.fire(fireParams());
       // Nothing settled yet.
       expect(await automations.settleRun(turnId)).toBeUndefined();
@@ -610,7 +796,11 @@ describe('hosted automation runs', () => {
     const harness = await createHarness();
     const runId = automationRunId(SCHEDULE_ID, SLOT_KEY);
     await withSession(harness, async (automations, authority) => {
-      await automations.define({ scheduleId: SCHEDULE_ID, definition });
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
+        definition,
+      });
       await automations.fire(fireParams());
       const sink = {
         project: async () => [...harness.records],

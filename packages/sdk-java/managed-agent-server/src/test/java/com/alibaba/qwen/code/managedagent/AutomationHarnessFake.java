@@ -17,7 +17,10 @@ import java.util.Map;
  * append-only definition revisions with a content digest, an unchanged
  * definition answered as a replay, a retired chain refusing everything, a
  * run derived from its occurrence and answered again on a second fire, and
- * a stale definition revision refused. Refusals are the daemon's own HTTP
+ * a stale definition revision refused. A mutation re-relayed under the
+ * same operationId is answered with its originally committed revision:
+ * the journal holds the operation, so a control plane retry after a lost
+ * answer never rewrites a newer one. Refusals are the daemon's own HTTP
  * exception with the code the hosted route answers, so the control plane's
  * translation is exercised as in production.
  */
@@ -26,8 +29,18 @@ public final class AutomationHarnessFake {
     private final Map<String, Map<String, Object>> schedules =
             new LinkedHashMap<>();
     private final Map<String, Map<String, Object>> runs = new LinkedHashMap<>();
+    /** The definition summary each committed mutation operation answered. */
+    private final Map<String, Map<String, Object>> mutations =
+            new LinkedHashMap<>();
     /** A test seam: thrown once by the next fire_run, then cleared. */
     public volatile RuntimeException failNextFire;
+    /**
+     * A test seam: the next define_schedule commits (its operation, too)
+     * and then has its answer lost once.
+     */
+    public volatile RuntimeException failAfterNextDefineCommit;
+    /** The same seam for retire_schedule. */
+    public volatile RuntimeException failAfterNextRetireCommit;
 
     public synchronized Map<String, Object> run(String sessionId,
             Map<String, Object> body) {
@@ -40,6 +53,14 @@ public final class AutomationHarnessFake {
         result.put("state", "settled");
         switch (kind) {
             case "define_schedule" -> {
+                String mutationKey = sessionId + "|define|"
+                        + body.get("operationId");
+                Map<String, Object> prior = mutations.get(mutationKey);
+                if (prior != null) {
+                    result.put("schedule", new LinkedHashMap<>(prior));
+                    result.put("replayed", true);
+                    break;
+                }
                 Map<?, ?> definition = (Map<?, ?>) body.get("definition");
                 Map<String, Object> schedule = schedules.get(key);
                 boolean replayed = false;
@@ -80,10 +101,26 @@ public final class AutomationHarnessFake {
                         schedule = next;
                     }
                 }
+                // The operation is part of the commit, so a relay whose
+                // answer is lost replays it instead of committing twice.
+                mutations.put(mutationKey, new LinkedHashMap<>(schedule));
+                RuntimeException failure = failAfterNextDefineCommit;
+                if (failure != null) {
+                    failAfterNextDefineCommit = null;
+                    throw failure;
+                }
                 result.put("schedule", new LinkedHashMap<>(schedule));
                 result.put("replayed", replayed);
             }
             case "retire_schedule" -> {
+                String mutationKey = sessionId + "|retire|"
+                        + body.get("operationId");
+                Map<String, Object> prior = mutations.get(mutationKey);
+                if (prior != null) {
+                    result.put("schedule", new LinkedHashMap<>(prior));
+                    result.put("replayed", true);
+                    break;
+                }
                 Map<String, Object> schedule = schedules.get(key);
                 if (schedule == null) {
                     throw refusal(404, "automation_not_found");
@@ -95,6 +132,13 @@ public final class AutomationHarnessFake {
                     schedule.put("revision", (Long) schedule.get("revision") + 1);
                     schedule.put("definitionRevision",
                             (Long) schedule.get("definitionRevision") + 1);
+                    mutations.put(mutationKey,
+                            new LinkedHashMap<>(schedule));
+                    RuntimeException failure = failAfterNextRetireCommit;
+                    if (failure != null) {
+                        failAfterNextRetireCommit = null;
+                        throw failure;
+                    }
                 }
                 result.put("schedule", new LinkedHashMap<>(schedule));
                 result.put("replayed", replayed);
@@ -146,6 +190,14 @@ public final class AutomationHarnessFake {
         return (int) operations.stream()
                 .filter(operation -> "fire_run".equals(operation.get("kind")))
                 .count();
+    }
+
+    /** The committed definition summary, or null when none committed. */
+    public synchronized Map<String, Object> scheduleOf(String sessionId,
+            String scheduleId) {
+        Map<String, Object> schedule = schedules.get(sessionId + "|"
+                + scheduleId);
+        return schedule == null ? null : new LinkedHashMap<>(schedule);
     }
 
     public synchronized List<String> firedOccurrences() {

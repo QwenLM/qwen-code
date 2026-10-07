@@ -8,8 +8,10 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   AUTOMATION_RUN_INSTRUCTION,
+  MANAGED_AUTOMATION_LIMITS,
   assertAutomationDefinition,
   automationDefinitionDigest,
+  automationInputBudgetBytes,
   automationInputId,
   automationRunClaimBody,
   automationRunDispatchBody,
@@ -154,6 +156,58 @@ describe('automation definitions', () => {
     expect(
       automationDefinitionDigest({ ...definition, enabled: false }),
     ).not.toBe(digest);
+  });
+
+  it('applies the final-input budget, not just the raw prompt bound', () => {
+    const base = { goal: 'g', cron: '0 2 * * *', timezone: 'UTC' };
+    // A 64 KiB raw prompt passes the byte bound, but once wrapped with
+    // the run framing and JSON-escaped it cannot be published: admission
+    // refuses it instead of committing a definition whose fire strands.
+    expect(() =>
+      assertAutomationDefinition({ ...base, prompt: 'x'.repeat(64 * 1024) }),
+    ).toThrow(/final execution input would exceed/);
+    expect(() =>
+      assertAutomationDefinition({ ...base, prompt: '\n'.repeat(33_792) }),
+    ).toThrow(/final execution input would exceed/);
+    expect(
+      assertAutomationDefinition({ ...base, prompt: 'x'.repeat(48 * 1024) })
+        .prompt,
+    ).toHaveLength(48 * 1024);
+  });
+
+  it('sizes the budget no smaller than any envelope a fire can build', () => {
+    const scheduleId = 'asch_0123456789abcdef0123456789abcdef';
+    const occurrenceKey = 'schedule:2026-03-08T07:00:00Z';
+    const firedAt = Date.parse('2026-03-08T07:00:05Z');
+    const actual = encodeAutomationInputEnvelope({
+      automationRunId: automationRunId(scheduleId, occurrenceKey),
+      scheduleId,
+      definitionRevision: 1,
+      occurrenceKey,
+      trigger: 'scheduled',
+      firedAt,
+      text: automationTurnText({
+        schedule: {
+          scheduleId,
+          goal: definition.goal,
+          cron: definition.cron,
+          timezone: definition.timezone,
+        },
+        occurrenceKey,
+        trigger: 'scheduled',
+        firedAt,
+        prompt: definition.prompt,
+      }),
+    }).byteLength;
+    const budget = automationInputBudgetBytes(definition);
+    expect(actual).toBeLessThanOrEqual(budget);
+    expect(budget).toBeLessThan(MANAGED_AUTOMATION_LIMITS.maxInputBytes);
+    expect(
+      automationInputBudgetBytes({
+        ...definition,
+        prompt: `${definition.prompt}x`,
+      }),
+    ).toBeGreaterThan(budget);
   });
 });
 

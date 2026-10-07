@@ -736,6 +736,146 @@ class AutomationScannerTest {
     }
 
     @Test
+    void aMutationsRetryAfterALostAnswerAnswersTheOriginalResult()
+            throws Exception {
+        AutomationDefinitionRequest requestA = new AutomationDefinitionRequest(
+                sessionId, "Goal", "0 2 * * *", "UTC", "Run it.", null, null,
+                null, null, null);
+        String keyA = "lost-" + UUID.randomUUID();
+        String automationId = ManagedAutomationService.scheduleIdFor(tenant,
+                keyA);
+        // The Harness commits revision 1, but the answer never arrives: no
+        // command row and no mirror.
+        fake.failAfterNextDefineCommit = new DaemonException("connection lost");
+        assertThatThrownBy(() -> service.create(tenant, ACTOR, keyA, requestA))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus())
+                            .isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                    assertThat(error.getCode())
+                            .isEqualTo("automation_operation_unknown");
+                });
+        assertThat(ledger.findCommand(tenant, keyA)).isEmpty();
+        assertThat(ledger.findSchedule(tenant, automationId)).isEmpty();
+        // The committed record reaches the record store out of band (the
+        // projection of the Session store), and the next scanner tick
+        // refreshes the mirror from it — the repair arm of the lost answer.
+        Map<?, ?> committed = fake.scheduleOf(sessionId, automationId);
+        assertThat(committed).isNotNull();
+        Map<String, Object> record = new LinkedHashMap<>();
+        record.put("scheduleId", automationId);
+        record.put("definitionRevision", 1L);
+        record.put("definitionDigest", committed.get("definitionDigest"));
+        record.put("goal", "Goal");
+        record.put("cron", "0 2 * * *");
+        record.put("timezone", "UTC");
+        record.put("sessionMode", "persistent");
+        record.put("overlap", "skip");
+        record.put("catchUp", "none");
+        record.put("catchUpLimit", null);
+        record.put("enabled", true);
+        record.put("run", Map.of("state", "admitted"));
+        byte[] bytes = mapper.writeValueAsBytes(record);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, sessionId);
+        jdbc.update("INSERT INTO qwen_managed_session_resource"
+                        + " (session_scope_key, tenant_id, workspace_id,"
+                        + " session_id, resource_id, kind, schema_version,"
+                        + " byte_length, sha256, storage_kind, inline_bytes,"
+                        + " publish_command_id, state, created_at)"
+                        + " VALUES (?, ?, ?, ?, 'schedule-rev-1',"
+                        + " 'managed-schedule', 1, ?, ?, 'MYSQL_INLINE', ?,"
+                        + " 'publish', 'REFERENCED', ?)",
+                scope, tenant, WORKSPACE, sessionId, bytes.length,
+                AutomationLedgerStore.sha256(new String(bytes,
+                        StandardCharsets.UTF_8)), bytes,
+                new java.sql.Timestamp(T0));
+        jdbc.update("INSERT INTO qwen_managed_session_extension_record"
+                        + " (session_scope_key, record_key, tenant_id,"
+                        + " workspace_id, session_id, domain, record_id,"
+                        + " operation_hash, revision, record_resource_id,"
+                        + " task_kind, task_state, definition_revision,"
+                        + " created_at)"
+                        + " VALUES (?, ?, ?, ?, ?, 'schedule', ?, ?, 1,"
+                        + " 'schedule-rev-1', 'schedule', 'running', 1, ?)",
+                scope, ManagedExtensionProjection.recordKey(sessionId,
+                        "schedule", automationId), tenant, WORKSPACE,
+                sessionId, automationId, "0".repeat(64), T0);
+        scanner.tick(clock.get());
+        assertThat(ledger.findSchedule(tenant, automationId).orElseThrow()
+                .definitionRevision()).isEqualTo(1);
+        // Another request moves the same definition to revision 2.
+        AutomationDefinitionRequest requestB = new AutomationDefinitionRequest(
+                null, null, "30 3 * * *", null, null, null, null, null, null,
+                null);
+        var revised = service.update(tenant, ACTOR, automationId,
+                "key-" + UUID.randomUUID(), requestB);
+        assertThat(revised.body().definitionRevision()).isEqualTo(2);
+        // The retry of the same key re-sends the same derived operationId,
+        // so the Harness replays revision 1 rather than committing A over B.
+        var retried = service.create(tenant, ACTOR, keyA, requestA);
+        assertThat(retried.replayed()).isTrue();
+        assertThat(retried.body().definitionRevision()).isEqualTo(1);
+        assertThat(retried.body().cron()).isEqualTo("0 2 * * *");
+        // The mirror kept revision 2 instead of following the replay.
+        ScheduleRow mirror = ledger.findSchedule(tenant, automationId)
+                .orElseThrow();
+        assertThat(mirror.definitionRevision()).isEqualTo(2);
+        assertThat(mirror.definitionDigest()).isEqualTo(revised.body().digest());
+        // The remembered row answers revision 1 again, without a third relay.
+        int relays = fake.operations.size();
+        var replayed = service.create(tenant, ACTOR, keyA, requestA);
+        assertThat(replayed.replayed()).isTrue();
+        assertThat(replayed.body().definitionRevision()).isEqualTo(1);
+        assertThat(fake.operations).hasSize(relays);
+        // The first create and its retry carried the same derived
+        // operationId; the update in between carried its own.
+        List<Map<String, Object>> defines = fake.operations.stream()
+                .filter(operation -> "define_schedule"
+                        .equals(operation.get("kind")))
+                .toList();
+        assertThat(defines).hasSize(3);
+        assertThat(defines.get(0).get("operationId"))
+                .isEqualTo(defines.get(2).get("operationId"))
+                .isNotEqualTo(defines.get(1).get("operationId"));
+    }
+
+    @Test
+    void aRetiresRetryAfterALostAnswerAnswersTheCancelItCommitted() {
+        PublicAutomation created = define("0 2 * * *", "skip", "none", null,
+                true);
+        String keyR = "lost-" + UUID.randomUUID();
+        fake.failAfterNextRetireCommit = new DaemonException("connection lost");
+        assertThatThrownBy(
+                () -> service.retire(tenant, ACTOR, created.id(), keyR))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode())
+                                .isEqualTo("automation_operation_unknown"));
+        // The answer never arrived: the mirror still reads the chain live.
+        assertThat(
+                ledger.findSchedule(tenant, created.id()).orElseThrow().state())
+                .isEqualTo(AutomationLedgerStore.STATE_LIVE);
+        assertThat(ledger.findCommand(tenant, keyR)).isEmpty();
+        // The retry re-sends the same derived operationId and answers the
+        // cancel revision the first attempt committed.
+        var retried = service.retire(tenant, ACTOR, created.id(), keyR);
+        assertThat(retried.replayed()).isTrue();
+        assertThat(retried.body().state()).isEqualTo("retired");
+        assertThat(
+                ledger.findSchedule(tenant, created.id()).orElseThrow().state())
+                .isEqualTo(AutomationLedgerStore.STATE_RETIRED);
+        var replayed = service.retire(tenant, ACTOR, created.id(), keyR);
+        assertThat(replayed.replayed()).isTrue();
+        assertThat(replayed.body().state()).isEqualTo("retired");
+        // Two relays, one derived operationId, no further ones.
+        List<Map<String, Object>> retires = fake.operations.stream()
+                .filter(operation -> "retire_schedule"
+                        .equals(operation.get("kind")))
+                .toList();
+        assertThat(retires).hasSize(2);
+        assertThat(retires.get(0).get("operationId"))
+                .isEqualTo(retires.get(1).get("operationId"));
+    }
+
+    @Test
     void listsOnlyTheDefinitionsTheActorMayReadWithoutLeakingACursor() {
         // A second Workspace the reader has no grant in, holding the three
         // newest definitions.

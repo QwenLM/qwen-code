@@ -35,8 +35,16 @@ import {
 // docs/design/2026-10-07-managed-automation-runtime.md.
 
 export const MANAGED_AUTOMATION_LIMITS = Object.freeze({
-  /** The inline resource bound of the hosted Session store. */
+  /** The raw prompt bound; the real budget is the final input's. */
   maxPromptBytes: 64 * 1024,
+  /**
+   * The bound of the wrapped execution input, matching the inline
+   * resource bound of the hosted Session store (`http-managed-session-store.ts`'s
+   * `maxInlineResourceBytes`). A definition whose worst-case input envelope
+   * exceeds it fires into an unpublishable resource and strands the run, so
+   * it is refused at admission instead.
+   */
+  maxInputBytes: 64 * 1024,
   maxGoalBytes: 4096,
   maxDefinitionsPerSession: 32,
 } as const);
@@ -228,6 +236,14 @@ export function assertAutomationDefinition(
       definitionDigest: '0'.repeat(64),
     }),
   );
+  if (
+    automationInputBudgetBytes(definition) >
+    MANAGED_AUTOMATION_LIMITS.maxInputBytes
+  ) {
+    fail(
+      `Automation definition's final execution input would exceed ${MANAGED_AUTOMATION_LIMITS.maxInputBytes} bytes once wrapped; shorten the prompt.`,
+    );
+  }
   return Object.freeze(definition);
 }
 
@@ -534,4 +550,46 @@ export function automationTurnText(params: {
     '',
     params.prompt,
   ].join('\n');
+}
+
+/**
+ * The byte size of the largest execution input this definition could
+ * produce: the real turn text under the largest identity fields the
+ * operations route admits (identity ids and number fields are longest
+ * here; an occurrence key is at most 512 chars, each of which may JSON-escape
+ * to six). Admission compares it against
+ * {@link MANAGED_AUTOMATION_LIMITS.maxInputBytes}, so a definition never
+ * commits whose `fire` could not publish the input.
+ */
+export function automationInputBudgetBytes(
+  definition: Pick<
+    AutomationDefinition,
+    'goal' | 'cron' | 'timezone' | 'prompt'
+  >,
+): number {
+  const scheduleId = `asch_${'0'.repeat(32)}`;
+  // The latest representable instant, whose ISO text is longest.
+  const firedAt = 8_640_000_000_000_000;
+  // Escapes maximally under JSON: control chars cost six bytes each.
+  const occurrenceKey = '\u0001'.repeat(512);
+  return encodeAutomationInputEnvelope({
+    automationRunId: `arun_${'0'.repeat(64)}`,
+    scheduleId,
+    definitionRevision: Number.MAX_SAFE_INTEGER,
+    occurrenceKey,
+    trigger: 'scheduled',
+    firedAt,
+    text: automationTurnText({
+      schedule: {
+        scheduleId,
+        goal: definition.goal,
+        cron: definition.cron,
+        timezone: definition.timezone,
+      },
+      occurrenceKey,
+      trigger: 'scheduled',
+      firedAt,
+      prompt: definition.prompt,
+    }),
+  }).byteLength;
 }

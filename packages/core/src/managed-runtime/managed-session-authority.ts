@@ -1555,6 +1555,43 @@ export class LocalManagedSessionAuthority {
   }
 
   /**
+   * The extension commit an earlier `commitExtensionRecord` landed under
+   * this operation/command identity, without the content comparison the
+   * commit path applies: a caller answering a relayed operation's retry
+   * with its original result must never rebuild the revision first (the
+   * rebuilt body would not digest-match the committed one).
+   */
+  committedExtensionOperation(
+    operation: string,
+    commandId: string,
+  ): ManagedSessionExtensionReceipt | undefined {
+    const previous = this.transactions.get(
+      managedSessionCommandKey(operation, commandId),
+    );
+    if (previous === undefined) {
+      return undefined;
+    }
+    for (
+      let sequence = previous.receipt.firstSequence;
+      sequence <= previous.receipt.lastSequence;
+      sequence++
+    ) {
+      const committed = this.extensionEvents.get(sequence);
+      if (committed !== undefined) {
+        return {
+          receipt: {
+            ...previous.receipt,
+            committedSequence: this.committed,
+            replayed: true,
+          },
+          ...committed,
+        };
+      }
+    }
+    return undefined;
+  }
+
+  /**
    * The Stage H resources read and verified when this log was opened, by
    * resource ID: each record, together with every resource its body
    * references. A caller verifying a wider closure can skip them, still

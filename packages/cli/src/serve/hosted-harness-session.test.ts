@@ -929,6 +929,7 @@ describe('Hosted Harness no-tool session', () => {
       );
       await automations.define({
         scheduleId: AUTOMATION_ID,
+        operationId: randomUUID(),
         definition: automationDefinition,
       });
       const fired = await automations.fire({

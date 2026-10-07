@@ -4573,7 +4573,11 @@ export function registerHostedHarnessSessionRoutes(
           const definition = object(body?.['definition']);
           if (definition === null)
             return error(res, 400, 'invalid_automation_operation');
-          const defined = await automations.define({ scheduleId, definition });
+          const defined = await automations.define({
+            scheduleId,
+            operationId,
+            definition,
+          });
           result = {
             schedule: scheduleSummary(defined.schedule, defined.revision),
             replayed: defined.replayed,
@@ -4581,7 +4585,7 @@ export function registerHostedHarnessSessionRoutes(
           break;
         }
         case 'retire_schedule': {
-          const retired = await automations.retire(scheduleId);
+          const retired = await automations.retire(scheduleId, operationId);
           result = {
             schedule: scheduleSummary(retired.schedule, retired.revision),
             replayed: retired.replayed,
