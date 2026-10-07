@@ -10,7 +10,9 @@
       "shell": "background_shell",
       "child_agent": "child_agent"
     },
-    "child_acceptance": null
+    "child_acceptance": null,
+    "channel_route": null,
+    "channel_delivery": null
   },
   "additionalRecordBodies": {
     "schedule": null,

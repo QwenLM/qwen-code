@@ -42,6 +42,14 @@ import {
   type AnyChildRun,
 } from './managed-child-run-record.js';
 import {
+  isChannelDeliveryStart,
+  isChannelDeliverySuccessor,
+  isChannelRouteStart,
+  isChannelRouteSuccessor,
+  parseChannelDelivery,
+  parseChannelRoute,
+} from './managed-channel-record.js';
+import {
   isAutomationRunStart,
   isAutomationRunSuccessor,
   isScheduleStart,
@@ -180,6 +188,24 @@ export const MANAGED_EXTENSION_RECORD_BODIES: Readonly<
     },
     isStart: isChildRunStart,
     isSuccessor: isChildRunSuccessor,
+  }),
+  channel_route: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseChannelRoute(value);
+      return { record, recordId: record.routeId, run: record.run };
+    },
+    isStart: isChannelRouteStart,
+    isSuccessor: isChannelRouteSuccessor,
+  }),
+  channel_delivery: Object.freeze({
+    taskKindOf: () => null,
+    parse: (value: unknown) => {
+      const record = parseChannelDelivery(value);
+      return { record, recordId: record.deliveryId, run: record.run };
+    },
+    isStart: isChannelDeliveryStart,
+    isSuccessor: isChannelDeliverySuccessor,
   }),
   child_acceptance: Object.freeze({
     taskKindOf: () => null,

@@ -1483,9 +1483,12 @@ public final class ManagedExtensionRecords {
 
     /**
      * Equality that compares numbers by value, so a record built in Java,
-     * where 4 may be a long, matches the same record parsed from JSON.
+     * where 4 may be a long, matches the same record parsed from JSON, and
+     * both read decimal spellings canonically, like JSON.stringify does.
+     * Package-wide: the sibling record classes share it rather than
+     * comparing doubles, which splits -0.0 from 0.0.
      */
-    private static boolean same(JsonNode left, JsonNode right) {
+    static boolean same(JsonNode left, JsonNode right) {
         return left.equals(SAME_VALUE, right);
     }
 
