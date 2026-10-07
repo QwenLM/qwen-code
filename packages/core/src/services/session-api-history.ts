@@ -98,10 +98,10 @@ export function getSessionTurnSettlementHint(
 
 export function getLastApiHistoryPromptId(
   history: readonly Content[],
-  trailingSystemNotifications = 0,
+  trailingSystemNotifications?: number,
 ): string | undefined {
   const prompt = history
-    .slice(0, effectiveHistoryEnd(history, trailingSystemNotifications))
+    .slice(0, effectiveHistoryEnd(history, trailingSystemNotifications ?? 0))
     .findLast(
       (content) =>
         isApiUserPrompt(
@@ -110,7 +110,8 @@ export function getLastApiHistoryPromptId(
             ? undefined
             : {
                 excludeTextPart: isTodoStopGuardPromptText,
-                excludeTaskNotifications: true,
+                excludeTaskNotifications:
+                  trailingSystemNotifications === undefined,
               },
         ) ||
         (content.role === 'user' &&
@@ -124,7 +125,7 @@ export function getLastApiHistoryPromptId(
 export function isLastApiPromptCancelled(
   history: readonly Content[],
   hints: ReadonlyArray<SessionTurnSettlementHint | undefined>,
-  trailingSystemNotifications = 0,
+  trailingSystemNotifications?: number,
 ): boolean {
   const promptId = getLastApiHistoryPromptId(
     history,

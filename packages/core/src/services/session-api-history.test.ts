@@ -660,4 +660,20 @@ describe('cancelled prompt identity with automatic tails', () => {
       ]),
     ).toBeUndefined();
   });
+  it('honors an authoritative zero count for an automatic-looking tail', () => {
+    const original: Content = { role: 'user', parts: [{ text: 'work' }] };
+    markApiHistoryPrompt(original, 'client-1');
+    expect(
+      getLastApiHistoryPromptId(
+        [
+          original,
+          {
+            role: 'user',
+            parts: [{ text: '<task-notification>ready</task-notification>' }],
+          },
+        ],
+        0,
+      ),
+    ).toBeUndefined();
+  });
 });
