@@ -44,6 +44,7 @@ public final class ManagedExtensionRecords {
             "lifecycle.changed", "domain.committed", "message.delta",
             "message.retracted");
     public static final int MAX_ID_BYTES = 512;
+    public static final int MAX_TEXT_BYTES = 4096;
     public static final int MAX_GRANT_PHASES = 16;
     public static final int MAX_PHASE_LENGTH = 64;
     public static final int MAX_MONITOR_EVENTS = 10_000;
@@ -135,6 +136,10 @@ public final class ManagedExtensionRecords {
     private static final Pattern DIGEST = Pattern.compile("[0-9a-f]{64}");
     private static final Pattern PHASE = Pattern.compile(
             "[a-z][a-z0-9_]{0," + (MAX_PHASE_LENGTH - 1) + "}");
+    // Prefix semantics matching TypeScript's `/^[A-Za-z]/.test` — the
+    // matcher runs lookingAt, never matches, so Java line terminators
+    // cannot slip a drive spec past the shared contract.
+    private static final Pattern DRIVE_SPEC = Pattern.compile("[A-Za-z]:");
     /** Run states after which no observation, output or run change may land. */
     static final List<String> TERMINAL = List.of("settled", "failed",
             "cancelled");
@@ -158,8 +163,48 @@ public final class ManagedExtensionRecords {
             "stopReason", "stopRequested", "exitCode", "exitSignal", "run");
     private static final List<String> CHILD_FIXED = List.of("kind", "shellId",
             "ownerScopeId", "commandRef");
+    private static final Set<String> CHILD_AGENT_KEYS = Set.of("kind",
+            "childRunId", "ownerScopeId", "rootSessionId", "depth",
+            "completion", "inputRef", "workspaceMode", "workingDirectory",
+            "childSessionId", "predecessorChildRunId", "resultVersion",
+            "resultRef", "terminalReceiptRef", "stopReason", "stopRequested",
+            "run");
+    // The fields that no revision of a child agent may change.
+    // `resultVersion` is not here on purpose: the parser forces it to 1,
+    // so no two revisions can ever differ on it, and a fixed-key entry
+    // for it could never refuse.
+    private static final List<String> CHILD_AGENT_FIXED = List.of("kind",
+            "childRunId", "ownerScopeId", "rootSessionId", "depth",
+            "completion", "inputRef", "workspaceMode", "workingDirectory",
+            "predecessorChildRunId");
+    private static final List<String> CHILD_WORKSPACE_MODES = List.of(
+            "shared", "snapshot", "worktree");
+    private static final String CHILD_WORKSPACE_MODES_TEXT =
+            String.join(", ", CHILD_WORKSPACE_MODES);
+    private static final long CHILD_MAX_DEPTH = 8;
+    private static final List<String> CHILD_UNSTARTED_EXECUTIONS = List.of(
+            "intent", "dispatch_started", "not_started_proven");
+    private static final Set<String> ACCEPTANCE_KEYS = Set.of("childRunId",
+            "parentScopeId", "parentExecutionCallId", "resultVersion",
+            "contentRef", "contentDigest", "terminalReceiptRef", "run");
+    private static final List<String> ACCEPTANCE_FIXED = List.of("childRunId",
+            "parentScopeId", "parentExecutionCallId", "resultVersion",
+            "contentRef", "contentDigest", "terminalReceiptRef");
     private static final List<String> RUN_IDENTITIES = List.of("definition",
             "executionCallId", "effectId", "dispatchId", "deliveryId");
+    private static final Set<String> SCHEDULE_KEYS = Set.of("kind",
+            "scheduleId", "ownerScopeId", "goal", "cron", "timezone",
+            "definitionRevision", "definitionDigest", "promptRef",
+            "sessionMode", "targetSessionId", "overlap", "catchUp",
+            "catchUpLimit", "enabled", "run");
+    private static final List<String> SCHEDULE_FIXED = List.of("kind",
+            "scheduleId", "ownerScopeId");
+    private static final Set<String> AUTOMATION_RUN_KEYS = Set.of("kind",
+            "automationRunId", "scheduleId", "definitionRevision",
+            "occurrenceKey", "sessionMode", "targetSessionId", "run");
+    private static final List<String> AUTOMATION_RUN_FIXED = List.of("kind",
+            "automationRunId", "scheduleId", "definitionRevision",
+            "occurrenceKey", "sessionMode", "targetSessionId");
 
     private ManagedExtensionRecords() {
     }
@@ -170,9 +215,39 @@ public final class ManagedExtensionRecords {
                     List.of("start_failed", "process_failed",
                             "quota_exceeded"),
                     "cancelled", List.of("stop_requested"));
+    /** The overlap policies a Schedule picks exactly one of (H6 decision 4). */
+    public static final List<String> SCHEDULE_OVERLAP_POLICIES = List.of(
+            "skip", "queue_one", "allow");
+    /** The catch-up policies; unbounded catch-up has no name here. */
+    public static final List<String> SCHEDULE_CATCH_UP_POLICIES = List.of(
+            "none", "latest", "bounded");
+    /** The two target modes, frozen into each run's intent (H6 decision 6). */
+    public static final List<String> SCHEDULE_SESSION_MODES = List.of(
+            "persistent", "per_run");
+
+    /** Why a child agent ended, by the state its run ended in. */
+    public static final Map<String, List<String>> CHILD_AGENT_STOP_REASONS =
+            Map.of("settled", List.of("completed"), "failed",
+                    List.of("creation_failed", "child_failed",
+                            "quota_exceeded"),
+                    "cancelled", List.of("stop_requested"));
 
     private static final Pattern EXIT_SIGNAL = Pattern.compile(
             "[A-Z][A-Z0-9]{0,15}");
+    private static final Pattern CRON_PART = Pattern.compile(
+            "[0-9*,/\\-]{1,64}");
+    private static final Pattern CRON_DIGITS = Pattern.compile(
+            "[0-9]{1,10}");
+    private static final Pattern TIMEZONE = Pattern.compile(
+            "[A-Za-z][A-Za-z0-9_+\\-]{0,63}(/[A-Za-z0-9_+\\-]{1,64}){0,2}");
+    private static final Pattern SLOT = Pattern.compile(
+            "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z");
+    /** The value bounds each cron field's digit atoms live in, by index. */
+    private static final List<int[]> CRON_BOUNDS = List.of(
+            new int[]{0, 59}, new int[]{0, 23}, new int[]{1, 31},
+            new int[]{1, 12}, new int[]{0, 7});
+    private static final List<String> CRON_NAMES = List.of("minute",
+            "hour", "day-of-month", "month", "day-of-week");
 
     /** A record that breaks the contract. */
     public static final class InvalidRecordException
@@ -630,14 +705,47 @@ public final class ManagedExtensionRecords {
     }
 
     /**
-     * Checks the body of a managed-child_run schema version 1 record
-     * ({@code kind: "shell"}): one background Shell per record (H3 of
-     * #12827; see managed-child-run-record.ts for the same rules).
+     * Checks the body of a managed-child_run schema version 1 record by its
+     * own {@code kind} field: {@code "shell"} (H3) or {@code "child_agent"}
+     * (H4), each a closed shape (see managed-child-run-record.ts for the
+     * same rules).
      */
     public static void requireChildRun(JsonNode child) {
+        JsonNode kind = child == null ? null : child.get("kind");
+        if (kind != null && kind.isTextual()) {
+            if ("shell".equals(kind.textValue())) {
+                requireChildShell(child);
+                return;
+            }
+            if ("child_agent".equals(kind.textValue())) {
+                requireChildAgent(child);
+                return;
+            }
+        }
+        require(false, "Child run kind must be one of shell, child_agent in"
+                + " schema version 1");
+    }
+
+    /** The task kind one child run projects, by its own kind. */
+    public static String childRunTaskKind(JsonNode child) {
+        return "shell".equals(child.get("kind").textValue())
+                ? "background_shell" : "child_agent";
+    }
+
+    /** The identity that keys a child run's revision chain, by its kind. */
+    public static String childRunRecordId(JsonNode child) {
+        return "shell".equals(child.get("kind").textValue())
+                ? child.get("shellId").textValue()
+                : child.get("childRunId").textValue();
+    }
+
+    /**
+     * Checks the body of a managed-child_run schema version 1 record
+     * ({@code kind: "shell"}): one background Shell per record (H3 of
+     * #12827).
+     */
+    private static void requireChildShell(JsonNode child) {
         closed(child, CHILD_KEYS, "childRun");
-        require("shell".equals(child.get("kind").textValue()),
-                "childRun.kind must be 'shell' in schema version 1");
         JsonNode run = child.get("run");
         requireRun(run);
         // A background Shell is started by one tool call and is observed
@@ -690,11 +798,24 @@ public final class ManagedExtensionRecords {
                         CHILD_STOP_REASONS.get("cancelled")),
                 "childRun.stopReason");
         JsonNode stopRequested = child.get("stopRequested");
+        String state = text(run, "state");
+        String reason = text(run, "reason");
+        // These five run in the TypeScript helpers' place and order, so a
+        // doubly broken body reports the same clause in both languages.
+        require((stopReason == null) != TERMINAL.contains(state),
+                "childRun.stopReason is set exactly when the run ends");
+        require(stopReason == null
+                || CHILD_STOP_REASONS.get(state).contains(stopReason),
+                "childRun.stopReason does not fit the " + state + " state");
         require(stopRequested.isBoolean(),
                 "childRun.stopRequested must be boolean");
         require(!"stop_requested".equals(stopReason)
                 || stopRequested.booleanValue(),
                 "childRun stop_requested needs its stop request");
+        require("quota_exceeded".equals(stopReason)
+                == (reason != null && QUOTA_REASONS.contains(reason)),
+                "childRun.stopReason is quota_exceeded exactly for a "
+                        + "quota reason");
         JsonNode exitCode = child.get("exitCode");
         if (!exitCode.isNull()) {
             count(exitCode, 0, 255, "childRun.exitCode");
@@ -705,13 +826,6 @@ public final class ManagedExtensionRecords {
                         && EXIT_SIGNAL.matcher(exitSignal.textValue())
                                 .matches(),
                 "childRun.exitSignal must be an uppercase signal name");
-        String state = text(run, "state");
-        String reason = text(run, "reason");
-        require((stopReason == null) != TERMINAL.contains(state),
-                "childRun.stopReason is set exactly when the run ends");
-        require(stopReason == null
-                || CHILD_STOP_REASONS.get(state).contains(stopReason),
-                "childRun.stopReason does not fit the " + state + " state");
         // Every terminal run names the ending execution line: a natural
         // exit is proven only by an observed settled execution under its
         // receipt, a pre-start failure lands on not_started_proven, and an
@@ -738,10 +852,6 @@ public final class ManagedExtensionRecords {
                 || "settled".equals(execution),
                 "childRun.stopReason process failure needs its settled "
                         + "execution");
-        require("quota_exceeded".equals(stopReason)
-                == (reason != null && QUOTA_REASONS.contains(reason)),
-                "childRun.stopReason is quota_exceeded exactly for a "
-                        + "quota reason");
         // Exit evidence is proven exactly when a Shell exits: any other
         // end carries no exit status.
         require("exited".equals(stopReason)
@@ -752,15 +862,211 @@ public final class ManagedExtensionRecords {
     }
 
     /**
-     * Whether {@code child} may be the first revision of a background
-     * Shell: its run opens, nobody has asked it to stop yet, and it has
-     * written no output, which needs a started process.
+     * Checks the body of a managed-child_run schema version 1 record
+     * ({@code kind: "child_agent"}): one child Session per record (H4 of
+     * #12827; the checks run in the same order as the TypeScript validator
+     * so both report the same clause of a doubly broken body).
+     */
+    private static void requireChildAgent(JsonNode child) {
+        closed(child, CHILD_AGENT_KEYS, "childRun");
+        JsonNode run = child.get("run");
+        requireRun(run);
+        // A child agent is started by one tool call; its result travels
+        // the session delivery line its relay scans, never an effect
+        // identity or an external delivery.
+        require(!run.get("executionCallId").isNull()
+                && run.get("effectId").isNull()
+                && run.get("deliveryId").isNull(),
+                "Child run must name its start call, never an effect or a"
+                        + " channel delivery");
+        JsonNode delivery = run.get("delivery");
+        require(!delivery.isNull()
+                && "session".equals(delivery.get("target").textValue()),
+                "Child run delivery must target the parent session");
+        // The launched definition is pinned no later than the dispatch
+        // that admits the creation; the shared successor rule makes it
+        // unaddable after that dispatch, so an absence is unrepairable.
+        String executionState = text(run, "execution");
+        require(executionState == null || "intent".equals(executionState)
+                || !run.get("definition").isNull(),
+                "Child run must pin the definition it dispatched");
+        count(child.get("depth"), 1, CHILD_MAX_DEPTH, "Child run depth");
+        require(child.get("completion").isTextual()
+                && List.of("tool", "sent").contains(
+                        child.get("completion").textValue()),
+                "Child run completion must be 'tool' or 'sent'");
+        durableRef(child.get("inputRef"), "inputRef");
+        require(child.get("workspaceMode").isTextual()
+                && CHILD_WORKSPACE_MODES.contains(
+                        child.get("workspaceMode").textValue()),
+                "Child run workspaceMode must be one of "
+                        + CHILD_WORKSPACE_MODES_TEXT);
+        requireWorkingDirectory(child.get("workingDirectory"));
+        JsonNode session = child.get("childSessionId");
+        if (!session.isNull()) {
+            id(session, "childSessionId");
+        }
+        String execution = text(run, "execution");
+        // The Session exists only once the control plane admitted its
+        // creation.
+        require(session.isNull() || execution != null
+                && !CHILD_UNSTARTED_EXECUTIONS.contains(execution),
+                "Child run childSessionId needs its admitted creation"
+                        + " dispatch");
+        require(!session.isNull()
+                || !"running_attached".equals(execution)
+                        && !"settled".equals(execution),
+                "Child run childSessionId is set once creation is proven");
+        // The Session the child runs in is hosted by a Runtime binding,
+        // set with the dispatch and unaddable once dispatched, like the
+        // definition pin.
+        require(session.isNull() || !run.get("runtime").isNull(),
+                "Child run childSessionId needs the Runtime binding that"
+                        + " hosts it");
+        // A dispatch that never started (not_started_proven) may carry no
+        // binding; the dispatch itself may never lack one — the shared
+        // successor rules forbid adding it later, and the chain would
+        // never reach attach. The same holds of a recoverable unknown
+        // dispatch: without the binding it claimed, the re-attach and the
+        // original-result paths are both unreachable, so the unknown could
+        // never be recovered as H0b frames it.
+        require((!"dispatch_started".equals(execution)
+                        && !"outcome_unknown".equals(execution))
+                || !run.get("runtime").isNull(),
+                "Child run dispatch needs a Runtime binding");
+        JsonNode predecessor = child.get("predecessorChildRunId");
+        if (!predecessor.isNull()) {
+            id(predecessor, "predecessorChildRunId");
+        }
+        JsonNode resultVersion = child.get("resultVersion");
+        require(resultVersion.isNumber()
+                && Double.isFinite(resultVersion.doubleValue())
+                && resultVersion.decimalValue()
+                        .compareTo(java.math.BigDecimal.ONE) == 0,
+                "Child run resultVersion must be 1 in schema version 1");
+        JsonNode resultRef = child.get("resultRef");
+        if (!resultRef.isNull()) {
+            durableRef(resultRef, "resultRef");
+        }
+        JsonNode terminalReceipt = child.get("terminalReceiptRef");
+        if (!terminalReceipt.isNull()) {
+            durableRef(terminalReceipt, "terminalReceiptRef");
+        }
+        String state = text(run, "state");
+        // The result and its receipt appear only together, in the revision
+        // that settles the run: a half-result can never be committed early,
+        // and a settled run carries both.
+        require(resultRef.isNull() == terminalReceipt.isNull(),
+                "Child run resultRef and terminalReceiptRef change only"
+                        + " together");
+        require(!resultRef.isNull() == "settled".equals(state),
+                "Child run resultRef and terminalReceiptRef are set exactly"
+                        + " when the run settles");
+        require(("failed".equals(state) || "cancelled".equals(state))
+                == "cancelled".equals(text(delivery, "state")),
+                "Child run delivery cancelled is set exactly when the run"
+                        + " ends without a result");
+        JsonNode stopReasonNode = child.get("stopReason");
+        require(stopReasonNode.isNull() || stopReasonNode.isTextual()
+                && CHILD_AGENT_STOP_REASONS.values().stream()
+                        .flatMap(List::stream)
+                        .anyMatch(stopReasonNode.textValue()::equals),
+                "Child run stopReason is not a closed stop reason");
+        String stopReason = stopReasonNode.isNull() ? null
+                : stopReasonNode.textValue();
+        require((stopReason == null) != TERMINAL.contains(state),
+                "Child run stopReason is set exactly when the run ends");
+        require(stopReason == null
+                || CHILD_AGENT_STOP_REASONS.getOrDefault(state, List.of())
+                        .contains(stopReason),
+                () -> "Child run stopReason " + stopReason
+                        + " does not fit the " + state + " state");
+        JsonNode stopRequested = child.get("stopRequested");
+        require(stopRequested.isBoolean(),
+                "Child run stopRequested must be boolean");
+        require(!"stop_requested".equals(stopReason)
+                || stopRequested.booleanValue(),
+                "Child run stop_requested needs its stop request");
+        String reason = text(run, "reason");
+        require("quota_exceeded".equals(stopReason)
+                == (reason != null && QUOTA_REASONS.contains(reason)),
+                "Child run stopReason is quota_exceeded exactly for a quota"
+                        + " reason");
+        // Every terminal run names the ending execution line: a completion
+        // is the child's own settled execution, a failure before creation
+        // lands on not_started_proven, and an honored stop or a later
+        // failure settles the execution that the child Session's existence
+        // proves started.
+        require(!"settled".equals(state) || "settled".equals(execution),
+                "Child run settled needs its settled execution");
+        require(!"cancelled".equals(state) || "settled".equals(execution)
+                || "not_started_proven".equals(execution),
+                "Child run cancelled needs settled or not_started_proven"
+                        + " execution");
+        require(!"failed".equals(state) || "settled".equals(execution)
+                || "not_started_proven".equals(execution),
+                "Child run failed needs settled or not_started_proven"
+                        + " execution");
+        require(!"creation_failed".equals(stopReason)
+                || "not_started_proven".equals(execution)
+                        && session.isNull(),
+                "Child run creation_failed needs a creation that never"
+                        + " started");
+        require(!"child_failed".equals(stopReason)
+                || "settled".equals(execution),
+                "Child run child_failed needs its settled execution");
+        // The identities last, as the TypeScript validator reads them, so a
+        // doubly broken body reports the same clause in both languages.
+        id(child.get("childRunId"), "childRunId");
+        id(child.get("ownerScopeId"), "ownerScopeId");
+        id(child.get("rootSessionId"), "rootSessionId");
+    }
+
+    /** A normalized relative directory: `.` or NFC text without `.`/`..` segments. */
+    private static void requireWorkingDirectory(JsonNode directory) {
+        String message = "Child run workingDirectory must be a normalized"
+                + " relative directory";
+        require(directory != null && directory.isTextual(), message);
+        String value = directory.textValue();
+        // A drive spec (`C:/x`, drive-relative `C:x`) resolves absolute
+        // on Windows — the platform the backslash clause defends.
+        require(".".equals(value)
+                || !value.startsWith("/") && !value.endsWith("/")
+                        && !value.contains("\\")
+                        && !DRIVE_SPEC.matcher(value).lookingAt()
+                        && Stream.of(value.split("/", -1))
+                                .noneMatch(segment -> segment.isEmpty()
+                                        || segment.equals(".")
+                                        || segment.equals("..")),
+                message);
+        if (!".".equals(value)) {
+            try {
+                id(directory, "workingDirectory");
+            } catch (InvalidRecordException error) {
+                require(false, message);
+            }
+        }
+    }
+
+    /**
+     * Whether {@code child} may open its chain: a Shell's run opens with no
+     * stop request and no output; a child agent's run opens with the
+     * delivery planned, no Session created, no result and no stop request.
      */
     public static boolean isChildRunStart(JsonNode child) {
-        return accepts(() -> requireChildRun(child))
-                && isRunStart(child.get("run"))
-                && !child.get("stopRequested").booleanValue()
-                && child.get("outputRef").isNull();
+        if (!accepts(() -> requireChildRun(child))
+                || !isRunStart(child.get("run"))
+                || child.get("stopRequested").booleanValue()) {
+            return false;
+        }
+        if ("shell".equals(child.get("kind").textValue())) {
+            return child.get("outputRef").isNull();
+        }
+        return "planned".equals(text(child.get("run").get("delivery"),
+                "state"))
+                && child.get("childSessionId").isNull()
+                && child.get("resultRef").isNull()
+                && child.get("terminalReceiptRef").isNull();
     }
 
     /**
@@ -780,32 +1086,409 @@ public final class ManagedExtensionRecords {
                 || !accepts(() -> requireChildRun(next))) {
             return false;
         }
-        for (String key : CHILD_FIXED) {
+        String kind = previous.get("kind").textValue();
+        if (!kind.equals(next.get("kind").textValue())) {
+            return false;
+        }
+        if ("shell".equals(kind)) {
+            for (String key : CHILD_FIXED) {
+                if (!same(previous.get(key), next.get(key))) {
+                    return false;
+                }
+            }
+            if (!isRunSuccessor(previous.get("run"), next.get("run"))
+                    || !previous.get("outputRef").isNull()
+                            && next.get("outputRef").isNull()
+                    || previous.get("stopRequested").booleanValue()
+                            && !next.get("stopRequested").booleanValue()
+                    || !previous.get("startReceiptRef").isNull()
+                            && !same(previous.get("startReceiptRef"),
+                                    next.get("startReceiptRef"))) {
+                return false;
+            }
+            if (TERMINAL.contains(text(previous.get("run"), "state"))) {
+                return same(previous, next);
+            }
+            return true;
+        }
+        // Once the run is terminal the record changes only its delivery
+        // line: the run's own freeze confines movement to the delivery, and
+        // nothing outside the run may change at all.
+        if (TERMINAL.contains(text(previous.get("run"), "state"))) {
+            return same(without(previous, "run"), without(next, "run"))
+                    && isRunSuccessor(previous.get("run"), next.get("run"));
+        }
+        for (String key : CHILD_AGENT_FIXED) {
+            if (!same(previous.get(key), next.get(key))) {
+                return false;
+            }
+        }
+        return isRunSuccessor(previous.get("run"), next.get("run"))
+                && (!previous.get("stopRequested").booleanValue()
+                        || next.get("stopRequested").booleanValue())
+                && setOnce(previous.get("childSessionId"),
+                        next.get("childSessionId"));
+    }
+
+    private static boolean setOnce(JsonNode before, JsonNode after) {
+        return before.isNull() || same(before, after);
+    }
+
+    /**
+     * Checks the body of a managed-child_acceptance schema version 1 record
+     * (H4 of #12827): the parent's receipt of one child run's terminal
+     * result. The acceptance is purely logical — no physical identity, no
+     * execution, no Runtime — and every revision is settled with the
+     * delivery a session delivery at {@code accepted} or {@code consumed}
+     * (decision 9 of docs/design/2026-10-06-managed-child-agent-runtime.md).
+     */
+    public static void requireChildAcceptance(JsonNode acceptance) {
+        closed(acceptance, ACCEPTANCE_KEYS, "Child acceptance");
+        JsonNode run = acceptance.get("run");
+        requireRun(run);
+        require(run.get("executionCallId").isNull()
+                && run.get("effectId").isNull()
+                && run.get("dispatchId").isNull()
+                && run.get("deliveryId").isNull()
+                && run.get("runtime").isNull()
+                && run.get("execution").isNull()
+                && run.get("definition").isNull(),
+                "Child acceptance run must be purely logical");
+        require("settled".equals(text(run, "state")),
+                "Child acceptance run must be settled");
+        JsonNode delivery = run.get("delivery");
+        require(!delivery.isNull()
+                && "session".equals(delivery.get("target").textValue())
+                && List.of("accepted", "consumed").contains(
+                        delivery.get("state").textValue()),
+                "Child acceptance delivery must be accepted or consumed");
+        durableRef(acceptance.get("contentRef"), "contentRef");
+        digest(acceptance.get("contentDigest"), "contentDigest");
+        require(acceptance.get("contentDigest").textValue().equals(
+                acceptance.get("contentRef").get("digest").textValue()),
+                "Child acceptance contentDigest must name the content's"
+                        + " digest");
+        durableRef(acceptance.get("terminalReceiptRef"), "terminalReceiptRef");
+        JsonNode resultVersion = acceptance.get("resultVersion");
+        require(resultVersion.isNumber()
+                && Double.isFinite(resultVersion.doubleValue())
+                && resultVersion.decimalValue()
+                        .compareTo(java.math.BigDecimal.ONE) == 0,
+                "Child acceptance resultVersion must be 1 in schema version 1");
+        id(acceptance.get("childRunId"), "childRunId");
+        id(acceptance.get("parentScopeId"), "parentScopeId");
+        JsonNode call = acceptance.get("parentExecutionCallId");
+        if (!call.isNull()) {
+            id(call, "parentExecutionCallId");
+        }
+    }
+
+    /**
+     * Whether {@code acceptance} may open an acceptance chain: a settled
+     * run whose delivery is accepted — never already consumed.
+     */
+    public static boolean isChildAcceptanceStart(JsonNode acceptance) {
+        return accepts(() -> requireChildAcceptance(acceptance))
+                && "accepted".equals(text(acceptance.get("run")
+                        .get("delivery"), "state"));
+    }
+
+    /**
+     * Whether {@code next} may follow {@code previous}: the identity,
+     * content and receipt never change, and the delivery may only advance
+     * from {@code accepted} to {@code consumed} — an acceptance consumed
+     * once can never be restated.
+     */
+    public static boolean isChildAcceptanceSuccessor(JsonNode previous,
+            JsonNode next) {
+        if (!accepts(() -> requireChildAcceptance(previous))
+                || !accepts(() -> requireChildAcceptance(next))) {
+            return false;
+        }
+        for (String key : ACCEPTANCE_FIXED) {
             if (!same(previous.get(key), next.get(key))) {
                 return false;
             }
         }
         if (!isRunSuccessor(previous.get("run"), next.get("run"))
-                || !previous.get("outputRef").isNull()
-                        && next.get("outputRef").isNull()
-                || previous.get("stopRequested").booleanValue()
-                        && !next.get("stopRequested").booleanValue()
-                || !previous.get("startReceiptRef").isNull()
-                        && !same(previous.get("startReceiptRef"),
-                                next.get("startReceiptRef"))) {
+                || !"accepted".equals(text(previous.get("run")
+                        .get("delivery"), "state"))) {
+            return false;
+        }
+        return "consumed".equals(text(next.get("run").get("delivery"),
+                "state"))
+                || same(previous.get("run"), next.get("run"));
+    }
+
+    // One cron field: comma-separated atoms, each `*`, `*/n`, a digit value
+    // or a range `a-b`, any of them carrying a `/n` step. Values stay inside
+    // the field's bounds, steps are positive and a range never wraps — the
+    // same lexical checks both validators run, so no tz database is
+    // consulted here.
+    private static void cronField(String field, String name, int min,
+            int max) {
+        for (String atom : field.split(",", -1)) {
+            String[] stepped = atom.split("/", -1);
+            require(stepped.length <= 2 && !stepped[0].isEmpty()
+                    && CRON_PART.matcher(atom).matches(),
+                    "cron " + name
+                            + " field must use digit, range, list or step atoms");
+            if (stepped.length == 2) {
+                require(CRON_DIGITS.matcher(stepped[1]).matches(),
+                        "cron " + name
+                                + " field must use digit, range, list or step atoms");
+                long step = Long.parseLong(stepped[1]);
+                require(step >= 1 && step <= max, "cron " + name
+                        + " field steps must stay within 1-" + max);
+            }
+            if ("*".equals(stepped[0])) {
+                continue;
+            }
+            String[] range = stepped[0].split("-", -1);
+            boolean digits = range.length <= 2;
+            for (String end : range) {
+                digits = digits && CRON_DIGITS.matcher(end).matches();
+            }
+            require(digits, "cron " + name
+                    + " field must use digit, range, list or step atoms");
+            long from = Long.parseLong(range[0]);
+            require(from >= min && from <= max, "cron " + name
+                    + " field values must stay within " + min + "-" + max);
+            if (range.length == 2) {
+                long to = Long.parseLong(range[1]);
+                require(to >= min && to <= max, "cron " + name
+                        + " field values must stay within " + min + "-" + max);
+                require(from < to,
+                        "cron " + name + " field ranges must not wrap");
+            }
+        }
+    }
+
+    /**
+     * A purely logical lifecycle: no execution, delivery or physical
+     * identity — the shape a Schedule definition's run keeps.
+     */
+    private static JsonNode logicalRun(JsonNode run, String label) {
+        requireRun(run);
+        require(run.get("executionCallId").isNull()
+                && run.get("effectId").isNull()
+                && run.get("dispatchId").isNull()
+                && run.get("deliveryId").isNull()
+                && run.get("definition").isNull()
+                && run.get("execution").isNull()
+                && run.get("runtime").isNull()
+                && run.get("delivery").isNull(),
+                label + " run must stay a purely logical lifecycle");
+        return run;
+    }
+
+    private static void requireTargetSession(String sessionMode,
+            JsonNode targetSessionId, String label) {
+        require("persistent".equals(sessionMode) == !targetSessionId.isNull(),
+                label + " targetSessionId is frozen exactly for the "
+                        + "persistent target mode");
+    }
+
+    /**
+     * Checks the body of a managed-schedule schema version 1 record: a
+     * Schedule definition, the append-only revision chain the scanner's
+     * occurrences pin (H6 decision 1).
+     */
+    public static void requireScheduleRecord(JsonNode schedule) {
+        closed(schedule, SCHEDULE_KEYS, "schedule");
+        require("schedule".equals(schedule.get("kind").textValue()),
+                "schedule.kind must be 'schedule' in schema version 1");
+        logicalRun(schedule.get("run"), "schedule");
+        String sessionMode = oneOf(schedule.get("sessionMode"),
+                SCHEDULE_SESSION_MODES, "schedule.sessionMode");
+        JsonNode targetSessionId = schedule.get("targetSessionId");
+        if (!targetSessionId.isNull()) {
+            id(targetSessionId, "schedule.targetSessionId");
+        }
+        requireTargetSession(sessionMode, targetSessionId, "schedule");
+        String catchUp = oneOf(schedule.get("catchUp"),
+                SCHEDULE_CATCH_UP_POLICIES, "schedule.catchUp");
+        JsonNode catchUpLimit = schedule.get("catchUpLimit");
+        if (!catchUpLimit.isNull()) {
+            count(catchUpLimit, 1, MAX_COUNT, "schedule.catchUpLimit");
+        }
+        require("bounded".equals(catchUp) == !catchUpLimit.isNull(),
+                "schedule.catchUpLimit is set exactly for bounded catch-up");
+        id(schedule.get("scheduleId"), "schedule.scheduleId");
+        id(schedule.get("ownerScopeId"), "schedule.ownerScopeId");
+        boundedText(schedule.get("goal"), "schedule.goal");
+        String cron = boundedText(schedule.get("cron"), "schedule.cron");
+        String[] fields = cron.split(" ", -1);
+        require(fields.length == 5 && cron.equals(String.join(" ", fields)),
+                "schedule.cron must have exactly five fields");
+        for (int index = 0; index < CRON_BOUNDS.size(); index++) {
+            int[] bounds = CRON_BOUNDS.get(index);
+            cronField(fields[index], CRON_NAMES.get(index), bounds[0],
+                    bounds[1]);
+        }
+        require(TIMEZONE.matcher(boundedText(schedule.get("timezone"),
+                "schedule.timezone")).matches(),
+                "schedule.timezone must have the IANA timezone name form");
+        count(schedule.get("definitionRevision"), 1, MAX_COUNT,
+                "schedule.definitionRevision");
+        digest(schedule.get("definitionDigest"), "schedule.definitionDigest");
+        durableRef(schedule.get("promptRef"), "schedule.promptRef");
+        oneOf(schedule.get("overlap"), SCHEDULE_OVERLAP_POLICIES,
+                "schedule.overlap");
+        require(schedule.get("enabled").isBoolean(),
+                "schedule.enabled must be boolean");
+    }
+
+    /**
+     * Whether {@code schedule} may be the first revision of a Schedule:
+     * its purely logical run opens.
+     */
+    public static boolean isScheduleStart(JsonNode schedule) {
+        return accepts(() -> requireScheduleRecord(schedule))
+                && isRunStart(schedule.get("run"));
+    }
+
+    /**
+     * Whether {@code next} may follow {@code previous} as a later revision
+     * of one Schedule: its identity is fixed, its run moves forward, its
+     * definition revision advances by exactly one with each new record
+     * revision — append-only, as the AgentDefinition contract is — and
+     * once the run is terminal the definition is frozen for good.
+     */
+    public static boolean isScheduleSuccessor(JsonNode previous,
+            JsonNode next) {
+        if (!accepts(() -> requireScheduleRecord(previous))
+                || !accepts(() -> requireScheduleRecord(next))) {
+            return false;
+        }
+        for (String key : SCHEDULE_FIXED) {
+            if (!same(previous.get(key), next.get(key))) {
+                return false;
+            }
+        }
+        if (!isRunSuccessor(previous.get("run"), next.get("run"))
+                || next.get("definitionRevision").asLong()
+                        != previous.get("definitionRevision").asLong() + 1) {
             return false;
         }
         if (TERMINAL.contains(text(previous.get("run"), "state"))) {
-            return same(previous, next);
+            return same(without(previous, "run"), without(next, "run"));
         }
         return true;
     }
 
+    private static String occurrenceKey(JsonNode key) {
+        String value = boundedText(key, "automationRun.occurrenceKey");
+        int separator = value.indexOf(':');
+        String kind = separator < 0 ? "" : value.substring(0, separator);
+        String valuePart = separator < 0 ? "" : value.substring(separator + 1);
+        if ("schedule".equals(kind)) {
+            require(SLOT.matcher(valuePart).matches()
+                    && isCanonicalInstant(valuePart),
+                    "automationRun.occurrenceKey slot must be a canonical UTC"
+                            + " instant to the second");
+            return value;
+        }
+        if ("manual".equals(kind)) {
+            id(com.fasterxml.jackson.databind.node.TextNode
+                    .valueOf(valuePart),
+                    "automationRun.occurrenceKey commandId");
+            return value;
+        }
+        require(!"webhook".equals(kind),
+                "automationRun webhook occurrences are reserved until their "
+                        + "slice lands");
+        require(false, "automationRun.occurrenceKey must be schedule:<slot>"
+                + " or manual:<commandId>");
+        return value;
+    }
+
+    /**
+     * Checks the body of a managed-automation_run schema version 1 record:
+     * one occurrence, claimed under one durable dispatch (H6 decisions 2
+     * and 6).
+     */
+    public static void requireAutomationRunRecord(JsonNode automation) {
+        closed(automation, AUTOMATION_RUN_KEYS, "automationRun");
+        require("automation_run".equals(automation.get("kind").textValue()),
+                "automationRun.kind must be 'automation_run' in schema "
+                        + "version 1");
+        JsonNode run = automation.get("run");
+        requireRun(run);
+        // One occurrence, claimed under one durable dispatch: the scanner
+        // is no tool call of this Session, the run names its effect only
+        // when the dispatch has one, and it never carries its own
+        // definition pin — the definition it fired with freezes on the body.
+        require(run.get("executionCallId").isNull()
+                && !run.get("dispatchId").isNull()
+                && run.get("definition").isNull(),
+                "automationRun.run must name its dispatch, no call and no "
+                        + "definition");
+        // The delivery of a settled run reconciles on Channel rules, but
+        // the run's model work is never retried for it (decision 7): a
+        // delivery line beyond its plan exists only after the run ended.
+        JsonNode delivery = run.get("delivery");
+        require(delivery.isNull()
+                || "planned".equals(delivery.get("state").textValue())
+                || TERMINAL.contains(text(run, "state")),
+                "automationRun delivery moves past its plan only once the "
+                        + "run ended");
+        String sessionMode = oneOf(automation.get("sessionMode"),
+                SCHEDULE_SESSION_MODES, "automationRun.sessionMode");
+        JsonNode targetSessionId = automation.get("targetSessionId");
+        if (!targetSessionId.isNull()) {
+            id(targetSessionId, "automationRun.targetSessionId");
+        }
+        requireTargetSession(sessionMode, targetSessionId, "automationRun");
+        id(automation.get("automationRunId"), "automationRun.automationRunId");
+        id(automation.get("scheduleId"), "automationRun.scheduleId");
+        count(automation.get("definitionRevision"), 1, MAX_COUNT,
+                "automationRun.definitionRevision");
+        occurrenceKey(automation.get("occurrenceKey"));
+    }
+
+    /** Whether {@code automation} may open an AutomationRun: its run opens. */
+    public static boolean isAutomationRunStart(JsonNode automation) {
+        return accepts(() -> requireAutomationRunRecord(automation))
+                && isRunStart(automation.get("run"));
+    }
+
+    /**
+     * Whether {@code next} may follow {@code previous} as a later revision
+     * of one AutomationRun: the occurrence identity, the pinned definition
+     * revision and the frozen target never change, so only its run moves,
+     * under the shared block's rules.
+     */
+    public static boolean isAutomationRunSuccessor(JsonNode previous,
+            JsonNode next) {
+        if (!accepts(() -> requireAutomationRunRecord(previous))
+                || !accepts(() -> requireAutomationRunRecord(next))) {
+            return false;
+        }
+        for (String key : AUTOMATION_RUN_FIXED) {
+            if (!same(previous.get(key), next.get(key))) {
+                return false;
+            }
+        }
+        return isRunSuccessor(previous.get("run"), next.get("run"));
+    }
+
+    private static boolean isCanonicalInstant(String value) {
+        try {
+            return java.time.Instant.parse(value).toString().equals(value);
+        } catch (java.time.format.DateTimeParseException error) {
+            return false;
+        }
+    }
+
     /**
      * Equality that compares numbers by value, so a record built in Java,
-     * where 4 may be a long, matches the same record parsed from JSON.
+     * where 4 may be a long, matches the same record parsed from JSON, and
+     * both read decimal spellings canonically, like JSON.stringify does.
+     * Package-wide: the sibling record classes share it rather than
+     * comparing doubles, which splits -0.0 from 0.0.
      */
-    private static boolean same(JsonNode left, JsonNode right) {
+    static boolean same(JsonNode left, JsonNode right) {
         return left.equals(SAME_VALUE, right);
     }
 
@@ -874,6 +1557,41 @@ public final class ManagedExtensionRecords {
                 () -> label + " exceeds " + MAX_ID_BYTES + " UTF-8 bytes");
         require(Normalizer.isNormalized(value, Normalizer.Form.NFC),
                 () -> label + " must use NFC normalization");
+        return value;
+    }
+
+    /**
+     * A bounded free-text field, the same rule boundedString applies in
+     * packages/core: a non-empty string of at most MAX_TEXT_BYTES UTF-8
+     * bytes with no control content (an ANSI escape holds one). An
+     * unpaired surrogate is charged the three bytes of the U+FFFD both
+     * encoders write for it — Java's default encoder folds it to one
+     * byte on its own, so it is counted explicitly.
+     */
+    static String boundedText(JsonNode node, String label) {
+        require(node != null && node.isTextual() && !node.textValue()
+                .isEmpty(), label + " must be a non-empty string");
+        String value = node.textValue();
+        long loneSurrogates = 0;
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            require(character > 0x1f
+                    && (character < 0x7f || character > 0x9f),
+                    label + " must not contain control characters");
+            if (Character.isHighSurrogate(character)) {
+                if (index + 1 < value.length()
+                        && Character.isLowSurrogate(value.charAt(index + 1))) {
+                    index++;
+                } else {
+                    loneSurrogates++;
+                }
+            } else if (Character.isLowSurrogate(character)) {
+                loneSurrogates++;
+            }
+        }
+        require(value.getBytes(StandardCharsets.UTF_8).length
+                + 2L * loneSurrogates <= MAX_TEXT_BYTES,
+                label + " exceeds " + MAX_TEXT_BYTES + " UTF-8 bytes");
         return value;
     }
 

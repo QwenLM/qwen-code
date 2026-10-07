@@ -143,13 +143,18 @@ class ManagedAgentWorkspaceReplayTest {
     }
 
     // A delete-tolerant rename replay shows the Session as last visible, but
-    // the capabilities must describe the tombstone: artifact reads on a
-    // deleted Session answer 404, so capabilities.artifacts must be false
-    // even while the artifact feature is enabled.
+    // the capabilities must describe the tombstone: every route they gate
+    // reads through requireVisibleSession and answers 404 once deleted_at is
+    // set, so a replayed body must not advertise them.
     @Test
     void aDeletedBoundSessionReplaysItsRenameWithoutAdvertisingArtifacts() {
         freshDatabase();
         properties.getArtifacts().setEnabled(true);
+        // A non-yolo approval mode keeps the actions capability live before
+        // the delete; the store snapshots it at construction.
+        properties.getHarness().setApprovalMode("default");
+        store = new ManagedAgentStore(jdbc, new ObjectMapper(),
+                Clock.systemUTC(), events -> { }, registry, properties);
         String tenant = "tenant-" + UUID.randomUUID();
         String sessionId = boundSession(tenant);
         ManagedAgentService service = service(new AtomicBoolean(true));
@@ -161,13 +166,66 @@ class ManagedAgentWorkspaceReplayTest {
             var renamed = service.renameSession(tenant, "actor-a", "rename",
                     sessionId, "new title");
             assertThat(renamed.replayed()).isFalse();
-            // The capability is live before the delete, so its absence in
-            // the replay is measured rather than defaulted.
+            // The capabilities are live before the delete, so their absence
+            // in the replay is measured rather than defaulted.
             assertThat(renamed.body().capabilities().artifacts()).isTrue();
+            assertThat(renamed.body().capabilities().actions()).isTrue();
         });
 
-        // The delete flow's durable footprint: the command row records the
-        // last-visible status, and the Session row becomes a tombstone.
+        // The delete flow's durable footprint for a bound Session: the
+        // operation row records the last-visible status — CLOSED, the only
+        // pre-delete state a bound delete admits — and the Session row
+        // becomes a tombstone. The command-row fallback can never serve a
+        // bound delete: its only writer refused bound Sessions since the
+        // binding existed.
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                        + " session_id, operation_id, operation_kind,"
+                        + " actor_digest, idempotency_key, request_digest,"
+                        + " state, admission_stage, delivery_state,"
+                        + " session_status_before, available_at, created_at,"
+                        + " updated_at, completed_at) VALUES (?, ?, 'op-del',"
+                        + " 'DELETE', '', 'delete', 'delete-digest',"
+                        + " 'COMPLETED', 'JAVA_DURABLE', 'CONFIRMED',"
+                        + " 'CLOSED', 0, 0, 0, 0)",
+                tenant, sessionId);
+        jdbc.update("UPDATE managed_agent_session SET status = 'DELETED',"
+                        + " deleted_at = 1, updated_at = 1, version ="
+                        + " version + 1 WHERE tenant_id = ? AND session_id"
+                        + " = ?",
+                tenant, sessionId);
+
+        transaction.executeWithoutResult(status -> {
+            var replay = service.renameSession(tenant, "actor-a", "rename",
+                    sessionId, "new title");
+            assertThat(replay.replayed()).isTrue();
+            assertThat(replay.body().status()).isEqualTo("closed");
+            assertThat(replay.body().capabilities().items()).isFalse();
+            assertThat(replay.body().capabilities().snapshots()).isFalse();
+            assertThat(replay.body().capabilities().artifacts()).isFalse();
+            assertThat(replay.body().capabilities().resync()).isFalse();
+            assertThat(replay.body().capabilities().tasks()).isFalse();
+            assertThat(replay.body().capabilities().actions()).isFalse();
+        });
+    }
+
+    // The pre-V17 footprint, on the only shape it can legitimately serve: an
+    // unbound Session's delete wrote a DELETE_SESSION command row, and the
+    // fallback query answers its last-visible status.
+    @Test
+    void aDeletedLegacySessionReplaysItsRenameFromTheCommandRowFallback() {
+        freshDatabase();
+        String tenant = "tenant-" + UUID.randomUUID();
+        ManagedAgentService service = service(new AtomicBoolean(true));
+        String sessionId = transaction.execute(status -> store
+                .insertSessionCommand(tenant, "CREATE_SESSION", "create",
+                        "create-digest", "qwen-code", null, null, List.of(),
+                        null)
+                .sessionId());
+
+        transaction.executeWithoutResult(status -> assertThat(
+                service.renameSession(tenant, "actor-a", "rename", sessionId,
+                        "new title").replayed()).isFalse());
+
         jdbc.update("INSERT INTO managed_agent_command (tenant_id,"
                         + " operation, idempotency_key, request_digest,"
                         + " session_id, turn_id, command_status,"
@@ -187,7 +245,46 @@ class ManagedAgentWorkspaceReplayTest {
                     sessionId, "new title");
             assertThat(replay.replayed()).isTrue();
             assertThat(replay.body().status()).isEqualTo("active");
-            assertThat(replay.body().capabilities().artifacts()).isFalse();
         });
+    }
+
+    // The cancel twin of the submit replay above: the recorded cancel must
+    // also answer through a Workspace-files outage — cancelTurn runs the
+    // same split gate, the actor check above the replay and the
+    // availability refusal below it.
+    @Test
+    void aRecordedCancelAnswersThroughAWorkspaceFilesOutage() {
+        freshDatabase();
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        AtomicBoolean files = new AtomicBoolean(true);
+        ManagedAgentService service = service(files);
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+
+        String turnId = transaction.execute(status -> service.submitTurn(
+                tenant, "actor-a", "submit", sessionId, input).turnId());
+        transaction.executeWithoutResult(status -> assertThat(
+                service.cancelTurn(tenant, "actor-a", "cancel", sessionId,
+                        turnId).replayed()).isFalse());
+
+        files.set(false);
+        transaction.executeWithoutResult(status -> assertThat(
+                service.cancelTurn(tenant, "actor-a", "cancel", sessionId,
+                        turnId).replayed()).isTrue());
+        // The outage changes nothing about who the recorded outcome answers
+        // to...
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.cancelTurn(tenant, "actor-b",
+                        "cancel", sessionId, turnId))
+                        .isInstanceOfSatisfying(ApiException.class, error ->
+                                assertThat(error.getCode())
+                                        .isEqualTo("workspace_unavailable")));
+        // ...and a fresh key keeps the honest refusal.
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.cancelTurn(tenant, "actor-a",
+                        "cancel-fresh", sessionId, turnId))
+                        .isInstanceOfSatisfying(ApiException.class, error ->
+                                assertThat(error.getCode())
+                                        .isEqualTo("workspace_unavailable")));
     }
 }

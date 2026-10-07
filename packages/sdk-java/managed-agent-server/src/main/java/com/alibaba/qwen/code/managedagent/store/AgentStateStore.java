@@ -280,12 +280,16 @@ public interface AgentStateStore {
     void markSubmissionAttempted(String tenantId, String sessionId,
             String turnId, String owner);
 
+    boolean withdrawSubmissionAttempted(String tenantId, String sessionId,
+            String turnId, String owner);
+
     void recordAdmission(String tenantId, String sessionId, String turnId,
             String owner, String eventEpoch, long lastEventId);
 
     void recordRecoveryAdmission(String tenantId, String sessionId,
-            String turnId, String owner, String expectedEventEpoch,
-            String eventEpoch, long lastEventId);
+            String turnId, String owner, String expectedTurnEventEpoch,
+            String expectedSessionEventEpoch, String eventEpoch,
+            long lastEventId);
 
     /**
      * Clears non-terminal text from a continuation epoch that did not reach

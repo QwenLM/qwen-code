@@ -102,7 +102,7 @@ public class ManagedAgentService {
     }
 
     private boolean hasActions(SessionRecord session) {
-        return session.workspace() != null
+        return session.workspace() != null && session.deletedAt() == null
                 && !"yolo".equals(session.approvalMode());
     }
 
@@ -259,7 +259,7 @@ public class ManagedAgentService {
             return response(replay);
         }
         if (!admissible) {
-            requireLegacyWorkspace(session, actorId);
+            refuseBoundSession(session);
         }
         requireHarness();
         String payloadDigest = SubmitHarnessTurn.computePayloadDigest(input);
@@ -279,14 +279,25 @@ public class ManagedAgentService {
     public CommandAdmission cancelTurn(String tenantId, String actorId,
             String idempotencyKey, String sessionId, String turnId) {
         validateIdempotencyKey(idempotencyKey);
-        requireSubmitter(tenantId, actorId, sessionId);
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "turnId", turnId));
+        SessionRecord session = store.requireSession(tenantId, sessionId);
+        // The same split as submitTurn: the actor gate stays above the
+        // replay, so a recorded cancel still answers after the Session
+        // leaves ACTIVE or Workspace files turn off, and only a fresh key
+        // meets the refusal below.
+        boolean admissible = maySubmitWorkspaceTurn(session, actorId);
+        if (!admissible) {
+            requireReplayActor(session, actorId);
+        }
         Admission replay = replay(tenantId, CANCEL, idempotencyKey,
                 requestDigest);
         if (replay != null) {
             dispatch(tenantId, replay);
             return response(replay);
+        }
+        if (!admissible) {
+            refuseBoundSession(session);
         }
         Admission admission;
         try {
@@ -649,6 +660,12 @@ public class ManagedAgentService {
             boolean retention) {
         Map<String, Object> metadata = session.title() == null ? Map.of()
                 : Map.of("title", session.title());
+        // Every route these capabilities gate reads through
+        // requireVisibleSession, which answers 404 once deletedAt is set —
+        // a replay-after-delete body must not advertise affordances that
+        // 404. DELETING stays advertised: those routes still answer while
+        // the delete drains.
+        boolean visible = session.deletedAt() == null;
         return new PublicSession(
                 session.sessionId(),
                 "agent.session",
@@ -664,12 +681,12 @@ public class ManagedAgentService {
                 snapshotCoveredSequence,
                 // Bound close is advertised separately from archive/delete.
                 new SessionCapabilities(
-                        true,
-                        true,
+                        visible,
+                        visible,
                         hasArtifacts(session),
-                        true,
+                        visible,
                         session.workspace() == null,
-                        true,
+                        visible,
                         hasActions(session), supportsClose(session), retention, retention, retention),
                 publicWorkspace(session));
     }
@@ -736,8 +753,11 @@ public class ManagedAgentService {
                 session.lastSequence(),
                 webShellWorkspace(session),
                 // Every Session serves its task list and detail; the tasks come from the
-                // Stage H records its Session store holds (H0c).
-                new WebShellSessionCapabilities(true, hasArtifacts(session),
+                // Stage H records its Session store holds (H0c). The
+                // tombstone test matches publicSession: the tasks route
+                // 404s once deletedAt is set.
+                new WebShellSessionCapabilities(session.deletedAt() == null,
+                        hasArtifacts(session),
                         hasActions(session), maySubmit, supportsClose(session),
                         retention, retention, retention));
     }
@@ -870,9 +890,12 @@ public class ManagedAgentService {
         // A replay answers while the Harness is down, but the replay itself
         // must not spend the Turn's pre-admission budget: re-dispatching
         // here would let a client's own retries defer the Turn into a
-        // terminal hosted_harness_unavailable. Only the availability-gated
-        // recovery sweep re-offers the parked Turn once the Harness
-        // returns.
+        // terminal hosted_harness_unavailable. The gate protects the
+        // Harness axis only — the production connector's isAvailable() is
+        // constant true, so during a Workspace-files outage replays and the
+        // sweep still re-offer the parked Turn, and there the outage hold
+        // keeps spending the budget: the sweep is the spender, not the
+        // rescuer.
         if (admission.turnId() != null && harness.isAvailable()) {
             coordinator.dispatch(tenantId, admission.sessionId(),
                     admission.turnId());
@@ -984,6 +1007,18 @@ public class ManagedAgentService {
                 throw new ApiException(HttpStatus.NOT_FOUND,
                         "session_not_found", "The Session was not found.");
             }
+            throw new ApiException(HttpStatus.CONFLICT, "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
+        }
+    }
+
+    // The post-replay half of the split submit/cancel gate:
+    // requireReplayActor already verified the read grant above the replay,
+    // so requireLegacyWorkspace's 404 arm is unreachable here and its
+    // canRead re-query would be a duplicate round trip. A legacy Session
+    // needs nothing.
+    private void refuseBoundSession(SessionRecord session) {
+        if (session.workspace() != null) {
             throw new ApiException(HttpStatus.CONFLICT, "workspace_unavailable",
                     "Hosted Workspace execution is not available.");
         }

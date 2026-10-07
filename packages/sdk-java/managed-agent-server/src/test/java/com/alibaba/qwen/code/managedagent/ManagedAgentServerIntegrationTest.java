@@ -126,6 +126,10 @@ class ManagedAgentServerIntegrationTest {
                 + " dispatch_owner = NULL, dispatch_lease_until = NULL,"
                 + " retry_after = NULL WHERE status IN ('ACCEPTED',"
                 + " 'RUNNING', 'CANCELLING')", System.currentTimeMillis());
+        // A hold leaks past the test that set it: the gate map outlives
+        // the test, and a stale latch would satisfy a later test's
+        // sweep witness for a Turn it never parked.
+        harness.releaseHeldTurns();
         harness.setAvailable(true);
     }
 
@@ -1399,11 +1403,14 @@ class ManagedAgentServerIntegrationTest {
                 .isTrue();
 
         store.recordRecoveryAdmission(tenant, session.sessionId(),
-                turn.turnId(), owner, "epoch-old", "epoch-new", 0);
+                turn.turnId(), owner, "epoch-old", "epoch-old", "epoch-new",
+                0);
         store.recordRecoveryAdmission(tenant, session.sessionId(),
-                turn.turnId(), owner, "epoch-old", "epoch-new", 0);
+                turn.turnId(), owner, "epoch-old", "epoch-old", "epoch-new",
+                0);
         store.recordRecoveryAdmission(tenant, session.sessionId(),
-                turn.turnId(), owner, "epoch-new", "epoch-new", 3);
+                turn.turnId(), owner, "epoch-new", "epoch-new", "epoch-new",
+                3);
 
         assertThat(store.requireSession(tenant, session.sessionId()))
                 .satisfies(record -> {
@@ -1422,10 +1429,71 @@ class ManagedAgentServerIntegrationTest {
                 });
         assertThatThrownBy(() -> store.recordRecoveryAdmission(tenant,
                 session.sessionId(), turn.turnId(), owner, "epoch-old",
-                "epoch-other", 0)).isInstanceOfSatisfying(
+                "epoch-old", "epoch-other", 0)).isInstanceOfSatisfying(
                         IllegalStateException.class, error ->
                                 assertThat(error.getMessage()).contains(
                                         "recovery epoch changed"));
+    }
+
+    // A lost admission reply leaves the Turn epoch NULL while the Session
+    // still carries an earlier generation's: the adoption CAS must expect
+    // each as it stands (R10-4). The epoch predicates are null-safe, not
+    // `= NULL` (which never matches), so this must succeed against the
+    // real store where the Mockito suite can only mock it away.
+    @Test
+    void adoptsRecoveryAdmissionOntoANullTurnEpoch() {
+        pauseRecoveryScanning();
+        String tenant = "tenant-harness-null-epoch-" + UUID.randomUUID();
+        Admission session = store.insertSessionCommand(tenant,
+                "CREATE_SESSION", "null-epoch-create",
+                "sha256:" + "1".repeat(64), "qwen-code", null, null,
+                List.of(), null);
+        Admission first = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "null-epoch-first", "sha256:" + "2".repeat(64),
+                session.sessionId(), List.of(Map.of(
+                        "type", "text", "text", "first")),
+                "sha256:" + "3".repeat(64));
+        String owner = "null-epoch-owner";
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                first.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        assertThat(store.bindHarness(tenant, session.sessionId(),
+                first.turnId(), owner, "boot-old")).isTrue();
+        store.markSubmissionAttempted(tenant, session.sessionId(),
+                first.turnId(), owner);
+        store.recordAdmission(tenant, session.sessionId(), first.turnId(),
+                owner, "epoch-0", 4);
+        store.recordHarnessEvents(tenant, session.sessionId(),
+                first.turnId(), owner, "epoch-0", List.of(new HarnessEvent(5,
+                        "boot-old:epoch-0:5", new ProjectedEvent(
+                                "turn.completed", Map.of(), true,
+                                "COMPLETED", null, null))));
+        Admission turn = store.insertTurnCommand(tenant, "SUBMIT_TURN",
+                "null-epoch-turn", "sha256:" + "4".repeat(64),
+                session.sessionId(), List.of(Map.of(
+                        "type", "text", "text", "lost reply")),
+                "sha256:" + "5".repeat(64));
+        assertThat(store.claimTurn(tenant, session.sessionId(),
+                turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+        store.markSubmissionAttempted(tenant, session.sessionId(),
+                turn.turnId(), owner);
+        // Turn epoch NULL (the reply was lost), Session epoch epoch-0.
+        store.recordRecoveryAdmission(tenant, session.sessionId(),
+                turn.turnId(), owner, null, "epoch-0", "epoch-new", 4);
+        assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
+                .get().satisfies(record -> {
+                    assertThat(record.harnessEventEpoch())
+                            .isEqualTo("epoch-new");
+                    assertThat(record.harnessLastEventId()).isEqualTo(4);
+                });
+        assertThat(store.requireSession(tenant, session.sessionId())
+                .harnessEventEpoch()).isEqualTo("epoch-new");
+        // A wrong expected Session epoch is still refused, null-safe or
+        // not: the CAS keeps proving the row it moves.
+        assertThatThrownBy(() -> store.recordRecoveryAdmission(tenant,
+                session.sessionId(), turn.turnId(), owner, null,
+                "epoch-wrong", "epoch-later", 4))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("recovery epoch changed");
     }
 
     @Test
@@ -1719,7 +1787,7 @@ class ManagedAgentServerIntegrationTest {
                     .getResponse().getContentAsString()).get("id").asText());
         }
 
-        JsonNode page1 = objectMapper.readTree(mvc.perform(
+        JsonNode first = objectMapper.readTree(mvc.perform(
                         get("/v1/agents/sessions")
                                 .param("limit", "2")
                                 .header(TenantContextFilter.HEADER, tenant))
@@ -1728,20 +1796,31 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.data.length()").value(2))
                 .andReturn().getResponse().getContentAsString());
         List<String> page1Ids = new ArrayList<>();
-        page1.get("data").forEach(row -> page1Ids.add(row.get("id").asText()));
+        first.get("data").forEach(row -> page1Ids.add(row.get("id").asText()));
         String leftover = ids.stream()
                 .filter(id -> !page1Ids.contains(id)).findFirst().orElseThrow();
-        String cursor = page1.get("next_cursor").asText();
 
-        // Touch the not-yet-returned session: the rename bumps its
-        // updated_at past every row the first page already served. Keyset
-        // paging must follow the immutable created_at, not updated_at, or
-        // the row slides behind the cursor and never appears.
-        lifecycle(patch("/v1/agents/sessions/{id}", leftover)
+        // Move a row page 1 already served: the rename bumps its updated_at,
+        // so a cursor minted from the mutable timestamp would jump past
+        // every older row. The mint must follow the immutable created_at,
+        // or the not-yet-served row slides behind the cursor and never
+        // appears. The move has to precede the mint — nextCursor runs while
+        // page 1 is assembled — so page 1 is re-read for the cursor.
+        lifecycle(patch("/v1/agents/sessions/{id}", page1Ids.getLast())
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("{\"title\":\"paging-renamed\"}"), tenant,
                 "paging-rename")
                 .andExpect(status().isOk());
+
+        JsonNode page1 = objectMapper.readTree(mvc.perform(
+                        get("/v1/agents/sessions")
+                                .param("limit", "2")
+                                .header(TenantContextFilter.HEADER, tenant))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.has_more").value(true))
+                .andExpect(jsonPath("$.data.length()").value(2))
+                .andReturn().getResponse().getContentAsString());
+        String cursor = page1.get("next_cursor").asText();
 
         mvc.perform(get("/v1/agents/sessions")
                         .param("limit", "2")
@@ -1776,6 +1855,7 @@ class ManagedAgentServerIntegrationTest {
         // the Turn is parked unadmitted and no dispatch can race the
         // replays.
         harness.setAvailable(false);
+        String turnId;
         try {
             List<Map<String, Object>> input =
                     List.of(Map.of("type", "text", "text", "hold"));
@@ -1784,7 +1864,7 @@ class ManagedAgentServerIntegrationTest {
                     new RequestDigests().digest(Map.of("sessionId", sessionId,
                             "input", input)),
                     sessionId, input, "payload");
-            String turnId = turn.turnId();
+            turnId = turn.turnId();
             // More replays than the pre-admission retry budget: every one
             // must answer the recorded 202, and none may re-dispatch — each
             // replay-driven deferral would spend a retry and terminally fail
@@ -1830,9 +1910,13 @@ class ManagedAgentServerIntegrationTest {
         }
 
         // The availability-gated sweep re-offers the parked Turn once the
-        // Harness returns.
+        // Harness returns. The witness is this test's own Turn leaving its
+        // parked state: the fixture's gate map is shared by the whole
+        // context, so a latch a sibling leaked would satisfy hasHeldTurn()
+        // with the sweep dead.
         await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
-                assertThat(harness.hasHeldTurn()).isTrue());
+                assertThat(store.findTurn(tenant, sessionId, turnId)
+                        .orElseThrow().status()).isNotEqualTo("ACCEPTED"));
         harness.releaseHeldTurns();
     }
 

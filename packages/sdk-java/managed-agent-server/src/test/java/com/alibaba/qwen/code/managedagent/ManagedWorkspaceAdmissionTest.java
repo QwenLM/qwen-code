@@ -570,15 +570,21 @@ class ManagedWorkspaceAdmissionTest {
                 service.renameSession(tenant, "actor-a", "rename", sessionId,
                         "new title").replayed()).isFalse());
 
-        // The delete flow's durable footprint: the command row records the
-        // last-visible status, and the Session row becomes a tombstone.
-        jdbc.update("INSERT INTO managed_agent_command (tenant_id,"
-                        + " operation, idempotency_key, request_digest,"
-                        + " session_id, turn_id, command_status,"
-                        + " session_status_before, created_at, updated_at)"
-                        + " VALUES (?, 'DELETE_SESSION', 'delete',"
-                        + " 'delete-digest', ?, NULL, 'COMPLETED', 'ACTIVE',"
-                        + " 0, 0)",
+        // The delete flow's durable footprint for a bound Session: the
+        // operation row records the last-visible status — CLOSED, the only
+        // pre-delete state a bound delete admits — and the Session row
+        // becomes a tombstone. The command-row fallback can never serve a
+        // bound delete: its only writer refused bound Sessions since the
+        // binding existed.
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                        + " session_id, operation_id, operation_kind,"
+                        + " actor_digest, idempotency_key, request_digest,"
+                        + " state, admission_stage, delivery_state,"
+                        + " session_status_before, available_at, created_at,"
+                        + " updated_at, completed_at) VALUES (?, ?, 'op-del',"
+                        + " 'DELETE', '', 'delete', 'delete-digest',"
+                        + " 'COMPLETED', 'JAVA_DURABLE', 'CONFIRMED',"
+                        + " 'CLOSED', 0, 0, 0, 0)",
                 tenant, sessionId);
         jdbc.update("UPDATE managed_agent_session SET status = 'DELETED',"
                         + " deleted_at = 1, updated_at = 1, version ="
@@ -592,7 +598,7 @@ class ManagedWorkspaceAdmissionTest {
             var replay = service.renameSession(tenant, "actor-a", "rename",
                     sessionId, "new title");
             assertThat(replay.replayed()).isTrue();
-            assertThat(replay.body().status()).isEqualTo("active");
+            assertThat(replay.body().status()).isEqualTo("closed");
         });
 
         // The outcome answers only to the Session's own actor: a readable
