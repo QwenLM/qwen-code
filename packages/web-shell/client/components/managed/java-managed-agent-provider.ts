@@ -195,7 +195,8 @@ export function createJavaManagedAgentProvider(
           requestId: managedRequestId(),
           idempotencyKey: command.idempotencyKey,
           agentId,
-          environmentId: options.environmentId,
+          // environmentId scopes the storageKey only: the standalone Java
+          // server 400s any non-blank value with unsupported_feature.
           title: titleFor(request.text),
           input: [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
@@ -238,6 +239,7 @@ export function createJavaManagedAgentProvider(
       for await (const event of client.streamEvents(
         { sessionId, afterSequence: request.lastEventId },
         request.signal,
+        request.onEstablished,
       )) {
         if (isJavaAgentResyncRequired(event)) {
           // Events after the cursor are gone: reload the transcript.
@@ -318,6 +320,7 @@ function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {
       policyRevision: action.policyRevision,
       expiresAt: action.expiresAt,
       options: action.options.map(({ id, label }) => ({ id, label })),
+      ...(action.inputPreview ? { inputPreview: action.inputPreview } : {}),
     },
   ];
 }

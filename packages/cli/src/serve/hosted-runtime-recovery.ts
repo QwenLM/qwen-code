@@ -20,6 +20,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
+import { truncateHostedGlobResponse } from './hosted-workspace-tool-turn.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   HostedWorkspaceBroker,
@@ -409,7 +410,7 @@ export async function recoverHostedRuntimeTurn(input: {
             stored.payloadJson,
             new AbortController().signal,
           );
-          const parts = toolResultParts(item, result);
+          let parts = toolResultParts(item, result);
           let outcome = outcomeBytes(item, parts);
           let record: ChatRecord = {
             uuid: randomUUID(),
@@ -422,12 +423,24 @@ export async function recoverHostedRuntimeTurn(input: {
             daemonPromptId: promptId,
             message: { role: 'user', parts },
           };
-          if (
-            outcome.byteLength >
-              HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes ||
-            Buffer.byteLength(JSON.stringify(record)) >
-              HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes
-          ) {
+          const fits = (candidate: Part[]) =>
+            outcomeBytes(item, candidate).byteLength <=
+              HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes &&
+            Buffer.byteLength(
+              JSON.stringify({
+                ...record,
+                message: { role: 'user', parts: candidate },
+              }),
+            ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
+          if (item.toolName === 'glob' && !fits(parts)) {
+            const truncated = truncateHostedGlobResponse(parts, fits);
+            if (truncated) {
+              parts = truncated;
+              outcome = outcomeBytes(item, parts);
+              record = { ...record, message: { role: 'user', parts } };
+            }
+          }
+          if (!fits(parts)) {
             // Mirror the live turn's durable ceiling: keep the settled outcome
             // but omit an oversized body rather than replaying the execution.
             const omitted = convertToFunctionErrorResponse(
