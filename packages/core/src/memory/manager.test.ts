@@ -2184,6 +2184,35 @@ describe('MemoryManager', () => {
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
     });
 
+    it('keeps a later skipped turn pending when an older trailing run completes', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const releases: Array<() => void> = [];
+      const slowRun = () =>
+        new Promise<ReturnType<typeof engagedNoop>>((resolve) => {
+          releases.push(() => resolve(engagedNoop()));
+        });
+      vi.mocked(runAutoMemoryExtract)
+        .mockImplementationOnce(slowRun)
+        .mockImplementationOnce(slowRun);
+
+      const first = turn(mgr, 2);
+      // Queued as a trailing request behind the first run.
+      expect((await turn(mgr, 4)).skippedReason).toBe('queued');
+      releases[0]();
+      await first;
+      // The trailing run (history 4) is now active and the session is armed.
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+      releases[1]();
+      await mgr.drain();
+
+      await mgr.flushPendingExtract('sess');
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls[2][0].history,
+      ).toHaveLength(6);
+    });
+
     it("flush waits for another session's run on the same project", async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
       const mgr = new MemoryManager();
