@@ -318,6 +318,34 @@ describe('Goal verifier evidence window', () => {
     },
   );
 
+  it.each(['thread_block', 'thread_post'])(
+    'keeps a legacy %s result an external fact the verifier can spend',
+    (name) => {
+      // An `infeasible` or `external` blocker is accepted only on external_fact
+      // evidence in the window, and thread_block's fixed reply is what a blocked
+      // proposal cites as user authority. The wrapper stamp must not reach the
+      // rest of the thread family at this layer either.
+      const direct = record('direct-thread', 'tool_result', {
+        turnId: 'turn-3',
+        provenance: 'tool_result',
+      });
+      direct.message = {
+        parts: [
+          {
+            functionResponse: {
+              name,
+              response: { output: 'Question posted.' },
+            },
+          },
+        ],
+      };
+      const window = build([direct]);
+      expect(
+        window.evidence.map(({ uuid, proofKind }) => ({ uuid, proofKind })),
+      ).toEqual([{ uuid: direct.uuid, proofKind: 'external_fact' }]);
+    },
+  );
+
   it('spends the budget on the serialized record, its comma and each new turn id, to the byte', () => {
     const records = [
       tool('older', 'turn-2', 'é"\n'.repeat(50)),
