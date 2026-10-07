@@ -786,6 +786,7 @@ describe('createJavaManagedAgentProvider', () => {
         fetch: fetchImpl,
       });
 
+      // eslint-disable-next-line vitest/valid-expect -- awaited via `answer` below, after the fake timers advance (handler attached early so the rejection is not unhandled)
       const answer = expect(
         provider.actions!.respond(action, 'allow', {
           clientId: 'client-1',
@@ -810,6 +811,7 @@ describe('createJavaManagedAgentProvider', () => {
         fetch: fetchImpl,
       });
 
+      // eslint-disable-next-line vitest/valid-expect -- awaited via `answer` below, after the fake timers advance (handler attached early so the rejection is not unhandled)
       const answer = expect(
         provider.actions!.respond(action, 'allow', {
           clientId: 'client-1',
