@@ -3259,6 +3259,10 @@ describe('MemoryManager', () => {
   });
 
   describe('resetExtractStateForTests()', () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
     it('clears in-flight extract state so subsequent calls are not blocked', async () => {
       const extract = deferred<ExtractResult>();
       vi.mocked(runAutoMemoryExtract)
@@ -3277,6 +3281,35 @@ describe('MemoryManager', () => {
       expect(result.skippedReason).not.toBe('already_running');
 
       extract.resolve(extractResult('sess'));
+    });
+
+    it('clears the #13004 cadence state so a leaked skip cannot suppress the next test', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      vi.mocked(runAutoMemoryExtract).mockResolvedValue({
+        ...extractResult('sess'),
+        extractorEngaged: true,
+      });
+
+      // The shape memoryLifecycle.integration.test.ts already uses: one shared
+      // manager with this helper in afterEach. Without the cadence clear, the
+      // armed skip from the first "test" suppresses the second one's extract.
+      const mgr = new MemoryManager();
+      const turn = (length: number) =>
+        mgr.scheduleExtract({
+          ...extractParams(
+            '/project',
+            'sess',
+            Array.from({ length }, (_, i) => userText(`turn ${i}`)),
+          ),
+          belowCompactionWarn: true,
+        });
+
+      await turn(2);
+      expect((await turn(4)).skippedReason).toBe('cadence');
+
+      mgr.resetExtractStateForTests();
+
+      expect((await turn(6)).skippedReason).toBeUndefined();
     });
   });
 

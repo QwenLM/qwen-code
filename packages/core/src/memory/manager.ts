@@ -1278,9 +1278,10 @@ export class MemoryManager {
   /**
    * #13004: skip this turn's extraction only when the previous run for the
    * session engaged with memory and saved nothing, the skip budget is not
-   * spent, every unprocessed entry still fits the next run's history tail,
-   * and the prompt is below the compaction warning. A skip records the turn as
-   * pending for {@link flushPendingExtract} and leaves the cursor untouched.
+   * spent, every unprocessed entry still fits the next run's history tail as
+   * measured at skip time (not a guarantee for later turns), and the prompt is
+   * below the compaction warning. A skip records the turn as pending for
+   * {@link flushPendingExtract} and leaves the cursor untouched.
    * Arming requires a completed run, so a skip can overlap this session's own
    * extraction only when that run is a trailing request with older history
    * (see {@link recordCadenceOutcome}).
@@ -1348,8 +1349,10 @@ export class MemoryManager {
    * extracted nothing (skipped or threw — the turns stay recorded so a later
    * boundary can retry them), and when the snapshot went stale before it ran.
    * Overlapping calls for one session share a single run while keeping their
-   * own timeout. A run whose caller timed out keeps going and is *not*
-   * registered in `inFlight`, so `drain()` does not wait for it.
+   * own timeout. That shared run is tracked here, not in `inFlight`, so
+   * `drain()` does not wait for the flush wrapper itself — but the extraction
+   * it schedules goes through `scheduleExtract` and `track`, so `drain()` does
+   * wait for that extraction while it runs.
    */
   async flushPendingExtract(
     sessionId: string,
@@ -1408,9 +1411,10 @@ export class MemoryManager {
     pending: ScheduleExtractParams,
   ): Promise<boolean> {
     try {
-      // Another session on the same project (daemon mode), or this session's
-      // older trailing request, may hold the slot; wait for it and for any
-      // trailing request it starts.
+      // This session's own in-flight or trailing extraction may hold the
+      // slot; wait for it and for any trailing request it starts. Both maps
+      // are per-manager, and a manager is built per Config, so another
+      // session's extraction lives on another manager and never appears here.
       for (;;) {
         const taskId = this.extractCurrentTaskId.get(pending.projectRoot);
         const active = taskId ? this.inFlight.get(taskId) : undefined;
@@ -2815,6 +2819,8 @@ export class MemoryManager {
     this.extractRunning.clear();
     this.extractCurrentTaskId.clear();
     this.extractQueued.clear();
+    this.extractCadence.clear();
+    this.extractFlushRuns.clear();
   }
 
   /** Reset all dream scheduling state. */

@@ -29,7 +29,11 @@ export const MAX_EXTRACT_NOOP_SKIP_TURNS = 3;
  */
 export const EXTRACT_CADENCE_MAX_PENDING_ENTRIES = 20;
 
-/** Default bound for the pending-turn flush at an ACP session close. */
+/**
+ * Fallback bound for a pending-turn flush whose caller supplies no budget. The
+ * one production caller (ACP session close) always passes its own, smaller
+ * deadline residue instead.
+ */
 export const EXTRACT_FLUSH_TIMEOUT_MS = 60_000;
 
 export function getExtractNoopSkipTurns(): number {

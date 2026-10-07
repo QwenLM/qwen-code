@@ -247,8 +247,9 @@ export function computeThresholds(
 
 /**
  * Whether a prompt of `promptTokens` sits below the compaction warning tier
- * for this config's window. Memory extraction cadence (#13004) only skips a
- * turn there, so no skipped turn is pending when compaction is near.
+ * for this config's window. Memory extraction cadence (#13004) only *arms* a
+ * skip below this tier: a skip armed on an earlier turn can still be pending
+ * when compaction fires, and compaction does not flush it.
  */
 export function isBelowCompactionWarn(
   config: Config,
