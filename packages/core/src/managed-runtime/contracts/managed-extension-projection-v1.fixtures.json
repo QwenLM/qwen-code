@@ -12,6 +12,10 @@
     },
     "child_acceptance": null
   },
+  "additionalRecordBodies": {
+    "schedule": null,
+    "automation_run": "automation_run"
+  },
   "taskStates": [
     "pending",
     "running",
