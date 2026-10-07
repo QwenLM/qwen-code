@@ -6469,7 +6469,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, a definitive invalid response, or a delivery that exhausted its retry budget (action_response_delivery_failed). Workspace close recovery_blocked reports original resource identity or unsettled execution, or session_close_writer_live while a Harness still holds the journal writer; the Session remains closing. A lifecycle operation that exhausted its retry budget carries the settle's failure (session_lifecycle_delivery_failed or the workspace close refusal)."
+            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, a definitive invalid response, or a delivery that exhausted its retry budget (action_response_delivery_failed). Workspace close recovery_blocked reports original resource identity or unsettled execution, session_close_writer_live while a Harness still holds the journal writer, or hosted_harness_generation_mismatch while this replica's view of the Harness boot is stale; the Session remains closing. A lifecycle operation that exhausted its retry budget carries the settle's failure (session_lifecycle_delivery_failed or the workspace close refusal)."
           },
           "replayed": {
             "type": "boolean"
@@ -6855,7 +6855,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 128,
-            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, a definitive invalid response, or a delivery that exhausted its retry budget (action_response_delivery_failed). Workspace close recovery_blocked reports original resource identity or unsettled execution, or session_close_writer_live while a Harness still holds the journal writer; the Session remains closing. A lifecycle operation that exhausted its retry budget carries the settle's failure (session_lifecycle_delivery_failed or the workspace close refusal)."
+            "description": "Reason a durable response or task cancellation failed. Action response failures come from the original committed Action, a definitive invalid response, or a delivery that exhausted its retry budget (action_response_delivery_failed). Workspace close recovery_blocked reports original resource identity or unsettled execution, session_close_writer_live while a Harness still holds the journal writer, or hosted_harness_generation_mismatch while this replica's view of the Harness boot is stale; the Session remains closing. A lifecycle operation that exhausted its retry budget carries the settle's failure (session_lifecycle_delivery_failed or the workspace close refusal)."
           },
           "replayed": {
             "type": "boolean"

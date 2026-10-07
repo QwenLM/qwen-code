@@ -39,7 +39,9 @@ import org.springframework.stereotype.Component;
  * wait is published as recovery_blocked with the
  * session_close_writer_live code), and a generation error from
  * Java's stale view of a restarted Harness (the close can still
- * succeed once this replica refreshes). A cwd change is settled
+ * succeed once this replica refreshes; past the budget that wait
+ * is published as recovery_blocked with the
+ * hosted_harness_generation_mismatch code). A cwd change is settled
  * without Harness or worker involvement — a read-only mount probe
  * and one revision-CAS commit. A structural probe refusal or a
  * moved fact is a terminal failure that is never retried; a
@@ -196,7 +198,10 @@ public class SessionLifecycleCoordinator {
             // generation error from Java's stale view of a restarted
             // Harness (the close can still succeed once this replica
             // refreshes). Both reschedule through the budget-exempt
-            // baseline.
+            // baseline, and past the budget both are published as
+            // recovery_blocked with their own code: an unbounded wait has
+            // to stay visible, because neither row is otherwise
+            // distinguishable from a healthy pending retry.
             // A cwd change never reaches settle(): the close-specific
             // waits (live writer, stale boot) and the terminal budget arm
             // are not its semantics — its rethrown probe refusal takes the
@@ -302,6 +307,17 @@ public class SessionLifecycleCoordinator {
                 store.blockLifecycleOperation(tenantId, sessionId,
                         operationId, owner, claimed.claimGeneration(),
                         "session_close_writer_live",
+                        Math.addExact(clock.millis(), delay), true);
+            } else if (valid.get() && !cwdChange && staleBoot
+                    && claimed.attemptCount() >= maxOperationRetries) {
+                // The stale-view wait is unbounded like the writer wait —
+                // only a Java restart clears it — so past the budget it is
+                // published the same way rather than reading as a healthy
+                // pending retry. The recovery scan still re-drives it, so
+                // the wait itself stays unbounded.
+                store.blockLifecycleOperation(tenantId, sessionId,
+                        operationId, owner, claimed.claimGeneration(),
+                        "hosted_harness_generation_mismatch",
                         Math.addExact(clock.millis(), delay), true);
             } else if (valid.get() && (writerLive || staleBoot)) {
                 store.retryOperation(tenantId, sessionId, operationId, owner,

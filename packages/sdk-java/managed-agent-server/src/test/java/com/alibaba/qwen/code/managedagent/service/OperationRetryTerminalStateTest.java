@@ -148,9 +148,11 @@ class OperationRetryTerminalStateTest {
     // generation error until Java restarts too. That failure is this
     // replica's stale view, not the close's own failure: the operation keeps
     // waiting past the budget instead of recording an unrecoverable
-    // terminal (review round 6, R6-3).
+    // terminal (review round 6, R6-3) — but the wait is published, because
+    // an unbounded wait that reads as a healthy pending retry is invisible
+    // to the operator who has to restart this replica.
     @Test
-    void aStaleHarnessViewKeepsTheOperationWaitingPastTheBudget() {
+    void aStaleHarnessViewPublishesItsWaitPastTheBudget() {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
@@ -175,9 +177,58 @@ class OperationRetryTerminalStateTest {
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
+            // Past the budget the stale-view wait is published like the
+            // writer wait: recovery_blocked with its own code, still
+            // budget-exempt so the wait itself stays unbounded.
+            verify(store).blockLifecycleOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L),
+                    eq("hosted_harness_generation_mismatch"), anyLong(),
+                    eq(true));
+            verify(store, never()).failOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyString());
+            verify(store, never()).retryOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyLong(),
+                    anyBoolean());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // Below the budget the same stale view is still a plain budget-exempt
+    // reschedule: publication is what spending the budget buys, not the
+    // first response to a generation error.
+    @Test
+    void aStaleHarnessViewReschedulesExemptlyBelowTheBudget() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        OperationRecord claimed = lifecycleOperation(9);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.closeSession("tenant", "session")).thenThrow(
+                mock(HostedHarnessGenerationException.class));
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(false);
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        mock(RuntimeWarmer.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
             verify(store).retryOperation(eq("tenant"), eq("session"),
                     eq("op-close"), anyString(), eq(1L), anyLong(),
                     eq(true));
+            verify(store, never()).blockLifecycleOperation(anyString(),
+                    anyString(), anyString(), anyString(), anyLong(),
+                    anyString(), anyLong(), anyBoolean());
             verify(store, never()).failOperation(anyString(), anyString(),
                     anyString(), anyString(), anyLong(), anyString());
         } finally {
