@@ -15,13 +15,14 @@ const read = (file) =>
 const ci = parse(read('.github/workflows/ci.yml'));
 const java = parse(read('.github/workflows/sdk-java.yml'));
 const pkg = JSON.parse(read('package.json'));
+const pom = read('packages/sdk-java/managed-agent-server/pom.xml').replace(
+  /<!--[\s\S]*?-->/g,
+  '',
+);
 // Bounded to the named profile: an unbounded read runs to EOF and silently
 // matches a later profile's byte-identical value.
 const mavenProfile = (id) =>
-  read('packages/sdk-java/managed-agent-server/pom.xml')
-    .replace(/<!--[\s\S]*?-->/g, '')
-    .split(`<id>${id}</id>`)[1]
-    .split('</profile>')[0];
+  pom.split(`<id>${id}</id>`)[1].split('</profile>')[0];
 const focused = 'test:integration:hosted:sandbox:none';
 const windowsRun = [
   `npm run ${focused} -- --reporter=default --reporter=json --outputFile.json=hosted-process-suite.json`,
@@ -165,9 +166,8 @@ describe('Hosted real-process gates', () => {
     // 25 min on Verify: the measurement basis lives in the
     // hosted-harness-mysql job comment (issue #13471). Keyed by step name --
     // a positional list stays green when a ceiling migrates between steps or
-    // a step loses its hang guard entirely. A bump to any of the six fails
-    // here and prompts updating that comment's sum, which nothing
-    // cross-checks.
+    // a step loses its hang guard entirely. A bump to any of the ten fails
+    // here and prompts updating the job comment's sum.
     const ceilingsByName = Object.fromEntries(
       job.steps
         .filter((step) => step['timeout-minutes'] !== undefined)
@@ -179,19 +179,20 @@ describe('Hosted real-process gates', () => {
       'Run session owner failover E2E': 10,
       'Run in-flight owner failover E2E': 10,
       'Run continuation owner failover E2E': 10,
+      'Run Harness-restart session failover E2E': 10,
+      'Run Harness-restart in-flight failover E2E': 10,
+      'Run Harness-restart continuation failover E2E': 10,
+      'Run frozen former-owner fencing E2E': 10,
       'Verify O4 filesystem process and capacity gates': 12,
     });
-    // Pin the cap too -- and keep every per-step hang guard reachable inside
-    // it: a cap below the Verify ceiling would silently disarm that guard.
-    expect(job['timeout-minutes']).toBe(60);
+    // Pin the cap too: no single ceiling may exceed it, or that step's hang
+    // guard is disarmed outright. The cumulative sum-vs-cap tradeoff is the
+    // job comment's, cross-checked by the summed-ceilings test below.
+    expect(job['timeout-minutes']).toBe(130);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(
       Math.max(...Object.values(ceilingsByName)),
     );
     expect(run['continue-on-error']).toBeUndefined();
-    const pom = read('packages/sdk-java/managed-agent-server/pom.xml').replace(
-      /<!--[\s\S]*?-->/g,
-      '',
-    );
     // The report check sees a test selection only when Maven passes it as a
     // user property. Set in the workflow (MAVEN_OPTS included) or in a POM,
     // it would narrow the run unrecorded.
@@ -201,9 +202,9 @@ describe('Hosted real-process gates', () => {
     expect(read('packages/sdk-java/runtime-broker/pom.xml')).not.toMatch(
       selection,
     );
-    const [mariadb] = pom.split('<id>hosted-harness-mysql</id>');
+    const mariadb = mavenProfile('mysql-integration');
     const hosted = mavenProfile('hosted-harness-mysql');
-    expect(mariadb).toContain('<id>mysql-integration</id>');
+    expect(mariadb).toBeDefined();
     expect(mariadb).toContain('<exclude>**/Hosted*IT.java</exclude>');
     expect(hosted).toContain('<include>**/Hosted*IT.java</include>');
     expect(hosted).toContain('<failIfNoTests>true</failIfNoTests>');
@@ -261,6 +262,97 @@ describe('Hosted real-process gates', () => {
     );
     expect(upload.if).toBe('always()');
     expect(upload.with.path).toContain('failsafe-reports');
+  });
+
+  it('keeps the Hosted MySQL job ceiling above its summed step ceilings', () => {
+    const job = java.jobs['hosted-harness-mysql'];
+    const summed = job.steps.reduce(
+      (total, step) => total + (step['timeout-minutes'] ?? 0),
+      0,
+    );
+    // Step ceilings today (25 + 8x10 + 12); the uncapped setup steps need
+    // their own allowance, which is exactly what the job comment claims.
+    expect(summed).toBe(117);
+    expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 10);
+  });
+
+  it.each([
+    [
+      'Run in-flight owner failover E2E',
+      'test:e2e:managed-inflight-failover',
+      ['--inflight-failover'],
+    ],
+    [
+      'Run continuation owner failover E2E',
+      'test:e2e:managed-continuation-failover',
+      ['--continuation-failover'],
+    ],
+    [
+      'Run session owner failover E2E',
+      'test:e2e:managed-session-failover',
+      ['--session-failover'],
+    ],
+    [
+      'Run Harness-restart session failover E2E',
+      'test:e2e:managed-harness-restart-failover',
+      ['--session-failover', '--harness-only'],
+    ],
+    [
+      'Run Harness-restart in-flight failover E2E',
+      'test:e2e:managed-harness-restart-inflight-failover',
+      ['--inflight-failover', '--harness-only'],
+    ],
+    [
+      'Run Harness-restart continuation failover E2E',
+      'test:e2e:managed-harness-restart-continuation-failover',
+      ['--continuation-failover', '--harness-only'],
+    ],
+    [
+      'Run frozen former-owner fencing E2E',
+      'test:e2e:managed-continuation-frozen-owner-failover',
+      ['--continuation-failover', '--freeze'],
+    ],
+  ])('pins the %s arm into the Hosted MySQL job', (stepName, script, flags) => {
+    const job = java.jobs['hosted-harness-mysql'];
+    expect(job['timeout-minutes']).toBe(130);
+    const install = job.steps.find(
+      (step) => step.name === 'Install MySQL binaries for the failover E2E',
+    );
+    const step = job.steps.find((s) => s.name === stepName);
+    expect(step, stepName).toBeDefined();
+    expect(install, 'the MySQL binaries install step').toBeDefined();
+    expect(
+      job.steps.indexOf(step),
+      `${stepName} must run after the MySQL binaries install`,
+    ).toBeGreaterThan(job.steps.indexOf(install));
+    expect(step.run).toContain(`npm run ${script}`);
+    expect(step['timeout-minutes'], stepName).toBe(10);
+    expect(step.if, stepName).toBeUndefined();
+    expect(step['continue-on-error'], stepName).toBeUndefined();
+    // A renamed or deleted npm script would leave the step failing for
+    // the wrong reason; pin that it drives the failover runner — with
+    // the flags that make each row a different arm.
+    expect(pkg.scripts[script], script).toContain(
+      'run-managed-agent-server-e2e',
+    );
+    for (const flag of flags) {
+      expect(pkg.scripts[script], `${script} carries ${flag}`).toContain(flag);
+    }
+    // Each row must also be the only row with its mode flag, or two CI
+    // steps silently run the same arm.
+    for (const flag of [
+      '--session-failover',
+      '--inflight-failover',
+      '--continuation-failover',
+      '--harness-only',
+      '--freeze',
+    ]) {
+      if (!flags.includes(flag)) {
+        expect(pkg.scripts[script], `${script} omits ${flag}`).not.toContain(
+          flag,
+        );
+      }
+    }
   });
 
   it('keeps the Hosted verify step ceiling above its failsafe fork timeout', () => {

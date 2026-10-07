@@ -504,32 +504,34 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The six step ceilings (25+10+10+10+10+12, pinned by
-    # scripts/tests/hosted-process-ci.test.js) sum to 77 min against this
-    # 60-min job cap. Each ceiling is a per-step hang guard, not a share of
-    # a budget -- and not a tight one: under pool contention the runner's
-    # own output/enforcement loop can stall, and the Verify step's 25-min
-    # ceiling has fired at 42-49 min of wall clock (Oct 2026). A job-cap
-    # overrun cancels the job mid-flight and concludes `cancelled`, which
-    # main-ci-failure-issue.yml does not file on -- a cap hit is a silent
-    # failure, not a degraded one. The always() uploads do not rescue it:
-    # the O4 gate upload never ran in any of the five observed cap
-    # cancellations, and the Hosted upload that did run found no failsafe
-    # reports to preserve. Green jobs measure 24-35 min end to end (median
-    # ~32, Oct 2026). The Verify step runs the unit tests, SpotBugs,
-    # Checkstyle and the Hosted*IT suite in one Maven invocation; green
-    # runs measured 9.4 min - 12 min 33 s for it once the ceiling stopped
-    # censoring the tail (Oct 2026, runs 37479786927-37494454308);
-    # pre-raise samples topped out at 11 m 55 s only because the 12-min
-    # ceiling killed anything longer, leaving as little as 5 s. Run
-    # 37346072729 hit it: Maven printed BUILD SUCCESS at 12:03 with all 19
-    # Hosted*IT green and the failsafe reports written, and the runner
-    # killed the step 93 ms later, so the six gate steps after it were
-    # skipped. 25 minutes restores ~2.0x headroom over the slowest green
-    # Verify step and keeps the ceiling above the measured pre-fork phases
-    # (~220 s) plus the hosted profile's fork timeout, so failsafe's own
-    # hang diagnostic stays reachable.
-    timeout-minutes: 60
+    # The step ceilings (25 + 8×10 + 12 = 117, pinned by
+    # scripts/tests/hosted-process-ci.test.js -- the Verify step's 25 sits
+    # above its failsafe fork timeout) plus ~10 minutes for the uncapped
+    # setup steps (Checkout..Install MySQL binaries, the report checks)
+    # need ~127; 130 keeps a thin margin, and each arm buys its own 10
+    # instead of sharing an envelope. Each ceiling is a per-step hang
+    # guard, not a share of a budget -- and not a tight one: under pool
+    # contention the runner's own output/enforcement loop can stall, and
+    # the Verify step's 25-min ceiling has fired at 42-49 min of wall
+    # clock (Oct 2026). A job-cap overrun cancels the job mid-flight and
+    # concludes `cancelled`, which main-ci-failure-issue.yml does not file
+    # on -- a cap hit is a silent failure, not a degraded one. The
+    # always() uploads do not rescue it: the O4 gate upload never ran in
+    # any of the five observed cap cancellations, and the Hosted upload
+    # that did run found no failsafe reports to preserve. The Verify step
+    # runs the unit tests, SpotBugs, Checkstyle and the Hosted*IT suite in
+    # one Maven invocation; green runs measured 9.4 min - 12 min 33 s for
+    # it once the ceiling stopped censoring the tail (Oct 2026, runs
+    # 37479786927-37494454308); pre-raise samples topped out at 11 m 55 s
+    # only because the 12-min ceiling killed anything longer, leaving as
+    # little as 5 s. Run 37346072729 hit it: Maven printed BUILD SUCCESS
+    # at 12:03 with all 19 Hosted*IT green and the failsafe reports
+    # written, and the runner killed the step 93 ms later, so the six gate
+    # steps after it were skipped. 25 minutes restores ~2.0x headroom over
+    # the slowest green Verify step and keeps the ceiling above the
+    # measured pre-fork phases (~220 s) plus the hosted profile's fork
+    # timeout, so failsafe's own hang diagnostic stays reachable.
+    timeout-minutes: 130
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -622,6 +624,22 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-continuation-failover
+      - name: 'Run Harness-restart session failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-failover
+      - name: 'Run Harness-restart in-flight failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-inflight-failover
+      - name: 'Run Harness-restart continuation failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-continuation-failover
+      - name: 'Run frozen former-owner fencing E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-continuation-frozen-owner-failover
       - name: 'Upload Hosted process reports'
         if: 'always()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
