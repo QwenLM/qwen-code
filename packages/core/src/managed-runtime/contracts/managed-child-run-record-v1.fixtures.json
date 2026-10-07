@@ -1,0 +1,1560 @@
+{
+  "contract": "managed-child-run-record/1",
+  "keys": [
+    "commandRef",
+    "exitCode",
+    "exitSignal",
+    "kind",
+    "outputRef",
+    "ownerScopeId",
+    "run",
+    "shellId",
+    "startReceiptRef",
+    "stopReason",
+    "stopRequested"
+  ],
+  "fixedKeys": ["commandRef", "kind", "ownerScopeId", "shellId"],
+  "stopReasons": {
+    "settled": ["exited"],
+    "failed": ["start_failed", "process_failed", "quota_exceeded"],
+    "cancelled": ["stop_requested"]
+  },
+  "templates": {
+    "child_run": {
+      "kind": "shell",
+      "shellId": "shell-1",
+      "ownerScopeId": "scope-1",
+      "commandRef": {
+        "resourceId": "args-1",
+        "kind": "managed-tool-args",
+        "schemaVersion": 1,
+        "byteLength": 2,
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "startReceiptRef": null,
+      "outputRef": null,
+      "stopReason": null,
+      "stopRequested": false,
+      "exitCode": null,
+      "exitSignal": null,
+      "run": {
+        "state": "admitted",
+        "reason": null,
+        "definition": null,
+        "executionCallId": "call-1",
+        "effectId": null,
+        "dispatchId": null,
+        "deliveryId": null,
+        "execution": "intent",
+        "runtime": null,
+        "delivery": null
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "start",
+      "domain": "child_run",
+      "patch": {},
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "reserved-start",
+      "domain": "child_run",
+      "patch": { "run": { "state": "reserved", "execution": null } },
+      "valid": true,
+      "start": true
+    },
+    {
+      "id": "kind-unknown",
+      "domain": "child_run",
+      "patch": { "kind": "child_agent" },
+      "valid": false,
+      "error": "must be 'shell' in schema version 1",
+      "start": false
+    },
+    {
+      "id": "extra-key",
+      "domain": "child_run",
+      "patch": { "extra": true },
+      "valid": false,
+      "error": "exactly",
+      "start": false
+    },
+    {
+      "id": "start-with-output",
+      "domain": "child_run",
+      "patch": {
+        "outputRef": {
+          "resourceId": "manifest-1",
+          "kind": "managed-tool-result-manifest",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "valid": false,
+      "error": "needs a start receipt",
+      "start": false
+    },
+    {
+      "id": "attached-needs-receipt",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        }
+      },
+      "valid": false,
+      "error": "must be set once the process started",
+      "start": false
+    },
+    {
+      "id": "receipt-before-start",
+      "domain": "child_run",
+      "patch": {
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "valid": false,
+      "error": "must be null before the process starts",
+      "start": false
+    },
+    {
+      "id": "receipt-needs-runtime",
+      "domain": "child_run",
+      "patch": {
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "run": { "execution": "running_attached" }
+      },
+      "valid": false,
+      "error": "needs the Runtime binding",
+      "start": false
+    },
+    {
+      "id": "attached",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "output-needs-receipt",
+      "domain": "child_run",
+      "patch": {
+        "outputRef": {
+          "resourceId": "manifest-1",
+          "kind": "managed-tool-result-manifest",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "valid": false,
+      "error": "needs a start receipt",
+      "start": false
+    },
+    {
+      "id": "output-ok",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "outputRef": {
+          "resourceId": "manifest-1",
+          "kind": "managed-tool-result-manifest",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "output-kind",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "outputRef": {
+          "resourceId": "manifest-1",
+          "kind": "other-kind",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "valid": false,
+      "error": "must reference managed-tool-result-manifest version 1",
+      "start": false
+    },
+    {
+      "id": "settled-code",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitCode": 0
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "settled-signal",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitSignal": "SIGKILL"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "settled-both-evidence",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitCode": 137,
+        "exitSignal": "SIGKILL"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "settled-no-evidence",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited"
+      },
+      "valid": false,
+      "error": "is proven exactly when it exits",
+      "start": false
+    },
+    {
+      "id": "settled-running-execution",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitCode": 0
+      },
+      "valid": false,
+      "error": "execution proven to have ended",
+      "start": false
+    },
+    {
+      "id": "settled-no-receipt",
+      "domain": "child_run",
+      "patch": {
+        "run": { "state": "settled", "execution": "settled" },
+        "stopReason": "exited",
+        "exitCode": 0
+      },
+      "valid": false,
+      "error": "must be set once the process started",
+      "start": false
+    },
+    {
+      "id": "failed-start",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "failed",
+          "execution": "not_started_proven"
+        },
+        "stopReason": "start_failed"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "start-failed-with-receipt",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "failed",
+          "execution": "not_started_proven"
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "start_failed"
+      },
+      "valid": false,
+      "error": "must be null before the process starts",
+      "start": false
+    },
+    {
+      "id": "process-failed",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "process_failed"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "process-failed-no-receipt",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "failed",
+          "execution": "not_started_proven"
+        },
+        "stopReason": "process_failed"
+      },
+      "valid": false,
+      "error": "needs a process that started",
+      "start": false
+    },
+    {
+      "id": "quota",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "failed",
+          "reason": "rate_limit",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "quota_exceeded"
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "settled-null-execution",
+      "domain": "child_run",
+      "patch": {
+        "run": { "state": "settled", "execution": null },
+        "stopReason": "exited",
+        "exitCode": 0
+      },
+      "valid": false,
+      "error": "settled needs its settled execution",
+      "start": false
+    },
+    {
+      "id": "start-failed-with-settled-execution",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "start_failed"
+      },
+      "valid": false,
+      "error": "needs a process that never started",
+      "start": false
+    },
+    {
+      "id": "quota-unsettled-execution",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "failed",
+          "reason": "rate_limit",
+          "execution": "not_started_proven"
+        },
+        "stopReason": "quota_exceeded"
+      },
+      "valid": false,
+      "error": "process failure needs its settled execution",
+      "start": false
+    },
+    {
+      "id": "quota-mismatch",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "failed",
+          "reason": "rate_limit",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "process_failed"
+      },
+      "valid": false,
+      "error": "is quota_exceeded exactly for a quota reason",
+      "start": false
+    },
+    {
+      "id": "nonquota-mismatch",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "quota_exceeded"
+      },
+      "valid": false,
+      "error": "is quota_exceeded exactly for a quota reason",
+      "start": false
+    },
+    {
+      "id": "cancelled",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "cancelled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "stop_requested",
+        "stopRequested": true
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "cancelled-without-request",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "cancelled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "stop_requested"
+      },
+      "valid": false,
+      "error": "needs its stop request",
+      "start": false
+    },
+    {
+      "id": "start-with-stop-request",
+      "domain": "child_run",
+      "patch": { "stopRequested": true },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "stop-request-type",
+      "domain": "child_run",
+      "patch": { "stopRequested": "yes" },
+      "valid": false,
+      "error": "must be boolean",
+      "start": false
+    },
+    {
+      "id": "stop-on-open",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitCode": 0
+      },
+      "valid": false,
+      "error": "is set exactly when the run ends",
+      "start": false
+    },
+    {
+      "id": "stop-mismatch",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "failed",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitCode": 0
+      },
+      "valid": false,
+      "error": "does not fit the failed state",
+      "start": false
+    },
+    {
+      "id": "evidence-without-exited",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "cancelled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "stop_requested",
+        "exitCode": 143
+      },
+      "valid": false,
+      "error": "needs its stop request",
+      "start": false
+    },
+    {
+      "id": "evidence-no-stop",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "exitCode": 0
+      },
+      "valid": false,
+      "error": "is proven exactly when it exits",
+      "start": false
+    },
+    {
+      "id": "exit-code-256",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitCode": 256
+      },
+      "valid": false,
+      "error": "must be an integer from 0 to 255",
+      "start": false
+    },
+    {
+      "id": "exit-code-negative",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitCode": -1
+      },
+      "valid": false,
+      "error": "must be an integer from 0 to 255",
+      "start": false
+    },
+    {
+      "id": "exit-code-fractional",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitCode": 1.5
+      },
+      "valid": false,
+      "error": "must be an integer from 0 to 255",
+      "start": false
+    },
+    {
+      "id": "output-version-2",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "outputRef": {
+          "resourceId": "manifest-1",
+          "kind": "managed-tool-result-manifest",
+          "schemaVersion": 2,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "valid": false,
+      "error": "must reference managed-tool-result-manifest version 1",
+      "start": false
+    },
+    {
+      "id": "exit-signal-lowercase",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitSignal": "sigterm"
+      },
+      "valid": false,
+      "error": "must be an uppercase signal name",
+      "start": false
+    },
+    {
+      "id": "exit-signal-numeric",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitSignal": 9
+      },
+      "valid": false,
+      "error": "must be an uppercase signal name",
+      "start": false
+    },
+    {
+      "id": "blocked-after-start",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "recovery_blocked",
+          "reason": "runtime_lost",
+          "execution": "outcome_unknown",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "blocked-never-started",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "recovery_blocked",
+          "reason": "outcome_unknown",
+          "execution": "outcome_unknown"
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "id": "delivery-present",
+      "domain": "child_run",
+      "patch": {
+        "run": { "delivery": { "target": "session", "state": "planned" } }
+      },
+      "valid": false,
+      "error": "must name its start call and nothing else",
+      "start": false
+    },
+    {
+      "id": "effect-id-present",
+      "domain": "child_run",
+      "patch": { "run": { "effectId": "effect-1" } },
+      "valid": false,
+      "error": "names one physical identity at most",
+      "start": false
+    },
+    {
+      "id": "definition-present",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "definition": {
+            "definitionId": "profile-1",
+            "definitionRevision": 1,
+            "definitionDigest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+          }
+        }
+      },
+      "valid": false,
+      "error": "must name its start call and nothing else",
+      "start": false
+    },
+    {
+      "id": "no-start-call",
+      "domain": "child_run",
+      "patch": { "run": { "executionCallId": null } },
+      "valid": false,
+      "error": "needs an executionCallId or an effectId",
+      "start": false
+    },
+    {
+      "id": "terminal-no-stop-reason",
+      "domain": "child_run",
+      "patch": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "valid": false,
+      "error": "is set exactly when the run ends",
+      "start": false
+    }
+  ],
+  "successors": [
+    {
+      "id": "admit-to-dispatch",
+      "domain": "child_run",
+      "before": {},
+      "after": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "dispatch-to-attach",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "state": "running",
+          "execution": "dispatch_started",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        }
+      },
+      "after": {
+        "run": {
+          "state": "waiting",
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "attach-skips-dispatch",
+      "domain": "child_run",
+      "before": {},
+      "after": {
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "receipt-once-same",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "after": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "receipt-change-no-rebuild",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "after": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-2",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "reattach-same-receipt",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "state": "recovery_blocked",
+          "reason": "runtime_lost",
+          "execution": "outcome_unknown",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "after": {
+        "run": {
+          "state": "running",
+          "reason": "runtime_lost",
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-2", "generation": "2" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "reattach-changed-receipt",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "state": "recovery_blocked",
+          "reason": "runtime_lost",
+          "execution": "outcome_unknown",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "after": {
+        "run": {
+          "state": "running",
+          "reason": "runtime_lost",
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-2", "generation": "2" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-2",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "rebuild-same-generation",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "state": "recovery_blocked",
+          "reason": "runtime_lost",
+          "execution": "outcome_unknown",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "after": {
+        "run": {
+          "state": "running",
+          "reason": "runtime_lost",
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-2", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-2",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "output-appears",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "after": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "outputRef": {
+          "resourceId": "manifest-1",
+          "kind": "managed-tool-result-manifest",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "output-removed",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "outputRef": {
+          "resourceId": "manifest-1",
+          "kind": "managed-tool-result-manifest",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "after": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "output-revised",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "outputRef": {
+          "resourceId": "manifest-1",
+          "kind": "managed-tool-result-manifest",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "after": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "outputRef": {
+          "resourceId": "manifest-2",
+          "kind": "managed-tool-result-manifest",
+          "schemaVersion": 1,
+          "byteLength": 4,
+          "digest": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+      },
+      "valid": true
+    },
+    {
+      "id": "settle-with-code",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "state": "waiting",
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "after": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitCode": 0
+      },
+      "valid": true
+    },
+    {
+      "id": "terminal-frozen",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitCode": 0
+      },
+      "after": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitCode": 0
+      },
+      "valid": true
+    },
+    {
+      "id": "terminal-any-change",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitCode": 0
+      },
+      "after": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitCode": 1
+      },
+      "valid": false
+    },
+    {
+      "id": "owner-scope-changed",
+      "domain": "child_run",
+      "before": {},
+      "after": { "ownerScopeId": "scope-other" },
+      "valid": false
+    },
+    {
+      "id": "reopen-settled",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitCode": 0
+      },
+      "after": {
+        "run": {
+          "state": "running",
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "cancel-settles",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "after": {
+        "run": {
+          "state": "cancelled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "stop_requested",
+        "stopRequested": true
+      },
+      "valid": true
+    },
+    {
+      "id": "exit-evidence-once",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitCode": 0
+      },
+      "after": {
+        "run": {
+          "state": "settled",
+          "execution": "settled",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "stopReason": "exited",
+        "exitSignal": "SIGKILL"
+      },
+      "valid": false
+    },
+    {
+      "id": "fixed-command",
+      "domain": "child_run",
+      "before": {},
+      "after": {
+        "commandRef": {
+          "resourceId": "args-2",
+          "kind": "managed-tool-args",
+          "schemaVersion": 1,
+          "byteLength": 4,
+          "digest": "9999999999999999999999999999999999999999999999999999999999999999"
+        }
+      },
+      "valid": false
+    },
+    {
+      "id": "fixed-shell-id",
+      "domain": "child_run",
+      "before": {},
+      "after": { "shellId": "shell-2" },
+      "valid": false
+    },
+    {
+      "id": "blocked-keeps-hold",
+      "domain": "child_run",
+      "before": {
+        "run": {
+          "execution": "running_attached",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "after": {
+        "run": {
+          "state": "recovery_blocked",
+          "reason": "runtime_lost",
+          "execution": "outcome_unknown",
+          "runtime": { "runtimeBindingId": "binding-1", "generation": "1" }
+        },
+        "startReceiptRef": {
+          "resourceId": "receipt-1",
+          "kind": "managed-runtime-receipt",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+      },
+      "valid": true
+    }
+  ]
+}
