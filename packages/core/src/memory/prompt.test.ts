@@ -408,13 +408,12 @@ describe('managed auto-memory prompt helpers', () => {
     expect(prompt).toContain('## Before recommending from memory');
   });
 
-  it('emits full prompt with forceFullProtocol even when all indexes are empty', () => {
+  it('emits the full protocol even when all indexes are empty', () => {
     const prompt = buildManagedAutoMemoryPrompt(
       '/tmp/project/.qwen/memory',
       null,
       undefined,
       undefined,
-      { forceFullProtocol: true },
     );
 
     expect(prompt).toContain('## Types of memory');
@@ -463,6 +462,41 @@ describe('managed auto-memory prompt helpers', () => {
     expect(scenariosLine).toContain('double-quote every value');
     expect(example).not.toContain('starts with "#"');
     expect(MEMORY_METADATA_ITEM_BOUNDS).toContain('double-quote every');
+  });
+
+  it('carries the user and team tiers through the request-tail catalog', () => {
+    // The session policy is built with includeIndexes: false, so this
+    // catalog is the only channel for the USER and TEAM indexes.
+    const result = buildAutoMemoryIndexContext(
+      '/tmp/project/.qwen/memory',
+      '- [p](p.md) — PROJECT_ENTRY',
+      {
+        memoryDir: '/home/u/.qwen/memory',
+        indexContent: '- [u](u.md) — USER_ENTRY',
+      },
+      {
+        memoryDir: '/tmp/project/.qwen/team',
+        indexContent: '- [t](t.md) — TEAM_ENTRY',
+      },
+    );
+
+    expect(result).toContain('PROJECT_ENTRY');
+    expect(result).toContain('USER_ENTRY');
+    expect(result).toContain('TEAM_ENTRY');
+  });
+
+  it('keeps the guardrail bullets of the full protocol', () => {
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      null,
+      undefined,
+      { memoryDir: '/tmp/project/.qwen/team', indexContent: null },
+    );
+
+    expect(prompt).toContain('never API keys, tokens, or credentials');
+    expect(prompt).toContain('`user` memories are always private');
+    expect(prompt).toContain('will be truncated');
+    expect(prompt).toContain('- Do not write duplicate memories.');
   });
 
   it('escapes a closing system-reminder tag inside the index catalog', () => {

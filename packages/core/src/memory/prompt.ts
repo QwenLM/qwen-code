@@ -273,11 +273,6 @@ function buildIndexSections(
 
 export interface BuildMemoryPromptOptions {
   /**
-   * Accepted and ignored: the full protocol is now the only path, so there is
-   * no condensed branch left to opt out of.
-   */
-  forceFullProtocol?: boolean;
-  /**
    * Drop the inline `MEMORY.md` sections, for a caller that ships them as
    * request-tail catalog data instead.
    */

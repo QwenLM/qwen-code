@@ -711,7 +711,7 @@ describe('remember memory helper', () => {
     await run('Remember this fact.', undefined, { clean: true });
 
     const { systemPrompt } = forkParams();
-    // Full-protocol markers must be present (forceFullProtocol: true)
+    // Full-protocol markers must be present (the only prompt path)
     expect(systemPrompt).toContain('category:');
     expect(systemPrompt).toContain('keywords:');
     expect(systemPrompt).toContain('usage_scenarios:');

@@ -5547,7 +5547,7 @@ export class Config {
           managedAutoMemoryIndex,
           userSection,
           teamSection,
-          { forceFullProtocol: true, includeIndexes: false },
+          { includeIndexes: false },
         );
         const catalog = buildAutoMemoryIndexContext(
           memoryDir,

@@ -8012,7 +8012,7 @@ describe('Server Config (config.ts)', () => {
 
   it('refreshHierarchicalMemory should count the request-only catalog in the context warning estimate', async () => {
     // The warning is built from [userMemory, policy, catalog]. With
-    // forceFullProtocol the policy alone already exceeds the small-window
+    // the full protocol the policy alone already exceeds the small-window
     // bound, so asserting only that the warning fires cannot tell which term
     // it was built from — dropping the catalog keeps it green while the
     // estimate under-reports by every MEMORY.md index line. Compare the quoted

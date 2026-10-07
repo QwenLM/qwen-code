@@ -12,7 +12,7 @@ The intended outcome is that saving, updating or deleting managed memories with 
 
 ## Design and tradeoff
 
-Keep the existing full memory policy in the system instruction, independent of index contents. Session callers select `forceFullProtocol: true` and `includeIndexes: false`; maintenance writers keep the existing default combined prompt. The complete policy preserves access, type and scope rules, including TEAM privacy and credential restrictions. The policy explicitly identifies request-tail catalog entries as data and pointers, rather than instructions.
+Keep the existing full memory policy in the system instruction, independent of index contents. The full policy is the only path. Session callers select `includeIndexes: false`; maintenance writers keep the existing default combined prompt. The complete policy preserves access, type and scope rules, including TEAM privacy and credential restrictions. The policy explicitly identifies request-tail catalog entries as data and pointers, rather than instructions.
 
 Build the catalog separately with the existing per-scope headers, empty placeholders and truncation. Append one text part after the current request's conversation and tool responses. Copy the tail Content container and its parts array; never persist this part in history, mutate caller input or append a new history event on refresh. An unchanged refresh produces identical catalog text. A later request replaces the prior request-only catalog rather than accumulating old revisions.
 
