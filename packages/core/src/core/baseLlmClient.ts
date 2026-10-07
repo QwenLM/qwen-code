@@ -118,11 +118,25 @@ function estimateToolTokens(tools: Tool[] | undefined): number {
 }
 
 /**
+ * Estimate the tokens a caller-supplied `responseJsonSchema` occupies on the
+ * wire. `openaiContentGenerator/pipeline.ts` sends it as
+ * `response_format.json_schema` beside the prompt, and `goals/goal-verifier.ts`
+ * reaches the text route with one and no `maxOutputTokens` of its own — so a
+ * room term that skips it exact-fits the window while the request carrying that
+ * budget overshoots it by the schema's size (#13208).
+ */
+function estimateResponseSchemaTokens(schema: unknown): number {
+  if (schema === undefined) return 0;
+  return Math.ceil(JSON.stringify(schema).length / CHARS_PER_TOKEN);
+}
+
+/**
  * Give a request an output budget that fits the window it is actually going
  * to, so `prompt + max_tokens <= window` holds (#13208) for the prompt terms
- * this layer can measure: `contents`, `systemInstruction`, and `tools` — in
- * JSON mode the `respond_in_schema` declaration carries the caller's whole
- * schema and is priced by the caller passing it through.
+ * this layer can measure: `contents`, `systemInstruction`, `tools`, and a
+ * caller-supplied `responseJsonSchema` — in JSON mode the `respond_in_schema`
+ * declaration carries the caller's whole schema and is priced by the caller
+ * passing it through.
  *
  * Side queries reach the provider through `generateJson`/`generateText` and
  * never enter `llm-chat.ts`, so the main turn's `clampOutputTokensToWindow`
@@ -245,7 +259,8 @@ function budgetOutputTokensForWindow(
     // prevent.
     estimateContentTokens(contents, imageTokenEstimate) -
     estimateSystemInstructionTokens(requestConfig.systemInstruction) -
-    estimateToolTokens(tools);
+    estimateToolTokens(tools) -
+    estimateResponseSchemaTokens(requestConfig.responseJsonSchema);
 
   // A window the measured prompt all but fills is not this layer's to paper
   // over: `max_tokens: 12` would send a request that can only answer with a

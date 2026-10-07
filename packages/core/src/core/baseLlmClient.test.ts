@@ -1350,6 +1350,44 @@ describe('BaseLlmClient', () => {
       );
     });
 
+    it('prices a caller-supplied responseJsonSchema on the text route too', async () => {
+      // The failure this case pins, on a live caller: `goals/goal-verifier.ts`
+      // sends `responseMimeType` plus `responseJsonSchema` through
+      // `runSideQuery` in text mode with no `maxOutputTokens` of its own, and
+      // `openaiContentGenerator/pipeline.ts` puts the schema on the wire as
+      // `response_format.json_schema`. A room term pricing only the prompt
+      // emits `window − prompt`, so the wire adds the schema on top and
+      // overshoots by exactly its size — the unretried 400 the budget exists
+      // to prevent, on a caller that sets `maxAttempts: 1`.
+      const schema = {
+        type: 'object',
+        properties: Object.fromEntries(
+          Array.from({ length: 1_000 }, (_, i) => [
+            `field_${i}`,
+            { type: 'string', description: `column ${i} of the record` },
+          ]),
+        ),
+      };
+      useWindow('qwen3-coder-plus', 131_072);
+
+      await askText('qwen3-coder-plus', 100_000, {
+        config: {
+          responseMimeType: 'application/json',
+          responseJsonSchema: schema,
+        },
+      });
+
+      const schemaTokens = Math.ceil(
+        JSON.stringify(schema).length / CHARS_PER_TOKEN,
+      );
+      const budget = sentBudget();
+      expect(schemaTokens).toBeGreaterThan(10_000);
+      expect(budget).toBe(31_072 - schemaTokens);
+      expect(100_000 + (budget ?? 0) + schemaTokens).toBeLessThanOrEqual(
+        131_072,
+      );
+    });
+
     it('budgets the streaming request too', async () => {
       useWindow('qwen3-coder-plus', 131_072);
       streamYields(mockTextStream(['ok']));
