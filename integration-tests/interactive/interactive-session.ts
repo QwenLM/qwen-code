@@ -79,6 +79,8 @@ export interface InteractiveSessionOptions {
   env?: NodeJS.ProcessEnv;
   /** Extra CLI arguments (e.g. ['--approval-mode', 'yolo']) */
   args?: string[];
+  /** Spawn this instead of the built CLI bundle (drives stub processes in tests). */
+  command?: { bin: string; args: string[] };
 }
 
 export class InteractiveSession {
@@ -144,21 +146,27 @@ export class InteractiveSession {
       allowProposedApi: true,
     });
 
-    const bundlePath = join(__dirname, '..', '..', 'dist/cli.js');
-    const ptyProcess = pty.spawn(
-      resolveE2eCliCommand(pickE2eRenderer()),
-      [bundlePath, ...args],
-      {
-        name: 'xterm-256color',
-        cols,
-        rows,
-        cwd,
-        env: env as Record<string, string>,
-      },
-    );
+    const target = options?.command ?? {
+      bin: resolveE2eCliCommand(pickE2eRenderer()),
+      args: [join(__dirname, '..', '..', 'dist/cli.js'), ...args],
+    };
+    const ptyProcess = pty.spawn(target.bin, target.args, {
+      name: 'xterm-256color',
+      cols,
+      rows,
+      cwd,
+      env: env as Record<string, string>,
+    });
 
     const session = new InteractiveSession(ptyProcess, terminal);
-    await session.waitFor('Type your message', 30_000);
+    // The sandbox:docker e2e leg boots a fresh container per attempt, and
+    // shared self-hosted ECS hosts have stalled that boot past 30s — #13552
+    // died here on all three retries, before the CLI printed its prompt.
+    // Self-hosted runners get the /about loop's 90s stall budget; elsewhere
+    // the tight 30s keeps a genuinely broken boot failing fast.
+    const startupTimeoutMs =
+      process.env['RUNNER_ENVIRONMENT'] === 'self-hosted' ? 90_000 : 30_000;
+    await session.waitFor('Type your message', startupTimeoutMs);
     return session;
   }
 

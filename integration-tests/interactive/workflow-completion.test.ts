@@ -188,12 +188,10 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       await session.send(
         isSlash ? '/report-probe' : 'Run the saved report-probe workflow.',
       );
-      // Inherit the helper's default wait instead of a tight cap: on the
-      // sandbox:docker leg a shared-host stall window longer than 30s failed
-      // this wait while the reply was genuinely in flight (#13552).
       await session.waitForScreen(
         (screen) => screen.includes(reply),
         'model reply based on the workflow completion, without a follow-up prompt',
+        30_000,
       );
       await session.idle(1_000);
 
@@ -288,6 +286,7 @@ describe.skipIf(pickE2eRenderer() === 'opentui')(
       await session.waitForScreen(
         (text) => text.includes(`${reply}_FOLLOWUP`),
         'follow-up result',
+        30_000,
       );
       await session.idle(1_000);
       const followUpRequests = server.requests.filter(
