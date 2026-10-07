@@ -163,6 +163,22 @@ describe('Hosted real-process gates', () => {
     );
     expect(run.run).toContain('clean verify checkstyle:check');
     expect(run.run).not.toContain('skip');
+    // The relay-header filter otherwise surfaces only as an intermittent
+    // socket-reuse failure in the Maven gate below, so the direct check must
+    // keep running first.
+    const relay = job.steps.findIndex(
+      (step) => step.name === 'Check Hosted proxy header relay',
+    );
+    expect(relay).toBeGreaterThan(-1);
+    expect(job.steps[relay].run).toBe(
+      'cd integration-tests\n' +
+        'npx vitest run helpers/hosted-relay-headers.test.ts',
+    );
+    expect(job.steps[relay]['continue-on-error']).toBeUndefined();
+    expect(job.steps[relay].if).toBeUndefined();
+    expect(job.steps[relay].shell).toBeUndefined();
+    expect(job.steps[relay]['working-directory']).toBeUndefined();
+    expect(relay).toBeLessThan(job.steps.indexOf(run));
     // 25 min on Verify: the measurement basis lives in the
     // hosted-harness-mysql job comment (issue #13471). Keyed by step name --
     // a positional list stays green when a ceiling migrates between steps or
