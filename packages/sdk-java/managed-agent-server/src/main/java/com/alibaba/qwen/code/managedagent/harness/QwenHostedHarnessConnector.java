@@ -229,7 +229,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private Admission doSubmit(String tenantId, String sessionId,
             String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
-        requireReadyForNewWork(tenantId, sessionId);
+        requireReadyForNewWork(tenantId, sessionId, false);
         SubmitHarnessTurn.Builder builder = SubmitHarnessTurn.builder()
                 .session(attachment(tenantId, sessionId, true))
                 .promptId(promptId)
@@ -257,7 +257,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private Admission doContinueManagedRuntime(String tenantId,
             String sessionId, String promptId, String checkpointId,
             String activationId) {
-        requireReadyForNewWork(tenantId, sessionId);
+        requireReadyForNewWork(tenantId, sessionId, false);
         // Resolve the attachment BEFORE fetching the client: the resolution
         // may block on a create/load round trip, and an adoption closing the
         // captured client during that window would strand this call on a
@@ -355,8 +355,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             String sessionId,
             String actionId,
             JsonNode response) {
-        requireReadyForNewWork(tenantId, sessionId);
-        HarnessSessionRef ref = attachment(tenantId, sessionId, true);
+        requireReadyForNewWork(tenantId, sessionId, true);
+        HarnessSessionRef ref = attachment(tenantId, sessionId, false);
         client().resolveAction(
                         ref,
                         actionId,
@@ -446,13 +446,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         return attached;
     }
 
-    private void requireReadyForNewWork(String tenantId, String sessionId) {
+    private void requireReadyForNewWork(String tenantId, String sessionId, boolean actionResponse) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         if (session.workspace() != null) {
             if (!isWorkspaceFilesAvailable()) {
                 throw new IllegalStateException("Hosted Workspace files are disabled");
             }
-            workspaceExecution.authorize(session);
+            if (actionResponse) {
+                workspaceExecution.authorizePassiveAttachment(session);
+                workspaceExecution.verifyMountForProbe(session.workspace());
+            } else {
+                workspaceExecution.authorize(session);
+            }
         }
     }
 
