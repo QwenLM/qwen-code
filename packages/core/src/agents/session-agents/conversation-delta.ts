@@ -303,7 +303,7 @@ export function renderSquadBriefing(
 ): string {
   const lines = [
     `<squad_briefing squad="${escapeAttribute(squad.name)}">`,
-    `You are @${leaderName}, the leader of the squad @${squad.name}. Your job is to coordinate the squad, not to do the work yourself, even when the request reads like "do X".`,
+    `You are @${defangTags(leaderName)}, the leader of the squad @${defangTags(squad.name)}. Your job is to coordinate the squad, not to do the work yourself, even when the request reads like "do X".`,
     'Protocol:',
     '1. Pick the member(s) whose role and description fit the work, and delegate by writing @MemberName in your reply with what they should do. Writing the @name is what starts them.',
     '2. Be terse. Members read this conversation themselves: do not restate it. Say only who, why (one short clause), and any extra constraints or ordering.',
@@ -337,7 +337,7 @@ export function renderSquadBriefing(
         ? ` — ${oneLine(defangTags(member.description))}`
         : '';
       lines.push(
-        `- @${member.name}${facts.length > 0 ? ` (${facts.join('; ')})` : ''}${description}`,
+        `- @${defangTags(member.name)}${facts.length > 0 ? ` (${facts.join('; ')})` : ''}${description}`,
       );
     }
   }
