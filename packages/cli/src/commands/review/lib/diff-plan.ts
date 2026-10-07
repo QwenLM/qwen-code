@@ -223,19 +223,19 @@ export const DEFAULT_MAX_CHUNK_LINES = 400;
  * Hard ceiling on a chunk's size in characters.
  *
  * `read_file` truncates a single read at `truncateToolOutputThreshold`
- * (default 25 000 chars) and reports `isTruncated`. A chunk agent is told to
+ * (default 80 000 chars) and reports `isTruncated`. A chunk agent is told to
  * read its range in one call, so a chunk above that ceiling would come back
  * silently short — reintroducing, per-chunk, exactly the blind spot the plan
  * exists to remove. 400 lines of ordinary source stays near 16 000 chars, but
- * one minified or long-line file would blow past 25 000, so bound both.
+ * one minified or long-line file would blow past 80 000, so bound both.
  */
 export const MAX_CHUNK_CHARS = 20_000;
 
 /**
  * What one `read_file` call returns before it truncates and sets `isTruncated`
- * (`Config.getTruncateToolOutputThreshold()`, default 25 000).
+ * (`Config.getTruncateToolOutputThreshold()`, default 80 000).
  */
-export const READ_FILE_CHAR_CAP = 25_000;
+export const READ_FILE_CHAR_CAP = 80_000;
 
 const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 

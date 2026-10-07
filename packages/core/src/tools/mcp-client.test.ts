@@ -24,6 +24,8 @@ import {
 } from 'vitest';
 import {
   AuthProviderType,
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
   MCPServerConfig,
   type Config,
 } from '../config/config.js';
@@ -113,6 +115,10 @@ function cfgWithResources(
   return {
     getMcpToolIdleTimeoutMs: () => TEST_MCP_TOOL_IDLE_TIMEOUT_MS,
     getResourceRegistry: () => ({ ...registry }),
+    getTruncateToolOutputThreshold: () =>
+      DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+    getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+    storage: { getProjectTempDir: () => '/tmp' },
   } as unknown as Config;
 }
 

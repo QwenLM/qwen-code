@@ -120,8 +120,8 @@ const PLAN = {
       startLine: 4201,
       endLine: 4202,
       lines: 2,
-      chars: 60_000,
-      maxLineChars: 59_000, // a minified bundle: one line no paging can reach
+      chars: 90_000,
+      maxLineChars: 89_000, // a minified bundle: one line no paging can reach
       oversized: true,
       files: [{ path: 'bundle.min.js', newStart: 1, newEnd: 1 }],
     },
@@ -264,6 +264,20 @@ describe('buildChunkAgentPrompt — what the real launches left out', () => {
     const p = buildChunkAgentPrompt(PLAN, 15);
     expect(p).toContain('Uncoverable: chunk 15');
     expect(p).toContain('exceeds the read limit');
+  });
+
+  it('allows a long line within the increased default read limit', () => {
+    const plan = {
+      ...PLAN,
+      chunks: PLAN.chunks.map((chunk) =>
+        chunk.id === 15
+          ? { ...chunk, chars: 60_000, maxLineChars: 59_000 }
+          : chunk,
+      ),
+    };
+    const prompt = buildChunkAgentPrompt(plan, 15);
+    expect(prompt).not.toContain('Uncoverable: chunk 15');
+    expect(prompt).not.toContain('exceeds the read limit');
   });
 
   it('scopes the agent to its own territory', () => {
@@ -7677,10 +7691,10 @@ describe('the tool budget in the briefs', () => {
     expect(buildChunkAgentPrompt(budgetPlan, 13)).toContain(
       'About **42 tool calls**',
     );
-    // Chunk 14's 40,000 chars take two reads to page through: brief + two
-    // pages ride on top of its 38-call allowance.
+    // Chunk 14's 40,000 chars fit one 80K read: brief + one
+    // page ride on top of its 38-call allowance.
     expect(buildChunkAgentPrompt(budgetPlan, 14)).toContain(
-      'About **41 tool calls**',
+      'About **40 tool calls**',
     );
   });
 
@@ -7696,19 +7710,19 @@ describe('the tool budget in the briefs', () => {
   });
 
   it('gives a whole-diff role the plan allowance plus its reading list', () => {
-    // 42 from the plan + its brief + every chunk's PAGES (1 + 2 + 3 = 6
-    // for the fixture's 9k/40k/60k-char chunks) — an oversized chunk's
+    // 42 from the plan + its brief + every chunk's PAGES (1 + 1 + 2 = 4
+    // for the fixture's 9k/40k/90k-char chunks) — an oversized chunk's
     // `isTruncated` paging must not be paid out of the analysis allowance.
     for (const role of ['1a', '2', '6b'] as const) {
       expect(buildRoleBrief(budgetPlan, role)).toContain(
-        'About **49 tool calls**',
+        'About **47 tool calls**',
       );
     }
     // The chunkless (Step 3A) reverse auditor also owes the cumulative
     // findings list its brief orders read in full — same three pages the
     // chunk-scoped branch counts, keyed on `acceptsFindings`.
     expect(buildRoleBrief(budgetPlan, 'reverse-audit')).toContain(
-      'About **52 tool calls**',
+      'About **50 tool calls**',
     );
   });
 
@@ -7845,9 +7859,9 @@ describe('the tool budget in the briefs', () => {
     // Specialists launch through buildWholeDiffBlock (its one consumer);
     // without this they were the one launch class that could still wander
     // unbudgeted. Its domain brief is appended inline, so its reading list
-    // is the diff pages alone — all six of them, per chunk size.
+    // is the diff pages alone — all four of them, per chunk size.
     expect(buildWholeDiffBlock(budgetPlan)).toContain(
-      'About **48 tool calls**',
+      'About **46 tool calls**',
     );
   });
 
@@ -7906,8 +7920,8 @@ describe('the tool budget in the briefs', () => {
     // A version-skewed or hand-edited plan: a positive-but-absurd value is
     // clamped into the budget's own band, in both directions — 0.5 must not
     // become a three-call brief, 100000 must not remove the ceiling.
-    ['a fraction', 0.5, 37],
-    ['oversized', 100_000, 67],
+    ['a fraction', 0.5, 35],
+    ['oversized', 100_000, 65],
   ])(
     'a plan whose ceiling is %s is clamped, not obeyed',
     (_name, value, expected) => {

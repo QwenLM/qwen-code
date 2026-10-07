@@ -55,7 +55,11 @@ import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGe
 import { EnhancedErrorHandler } from './openaiContentGenerator/errorHandler.js';
 import { APIConnectionTimeoutError } from 'openai';
 import type { OpenAICompatibleProvider } from './openaiContentGenerator/provider/index.js';
-import type { Config } from '../config/config.js';
+import {
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+  DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  type Config,
+} from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { CompressionStatus, type ChatCompressionInfo } from './turn.js';
@@ -276,6 +280,9 @@ describe('LlmChat', async () => {
     // Pass-through for tests that don't care about retry logic.
     mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
     mockConfig = {
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getSessionId: () => 'test-session-id',
       getTelemetryLogPromptsEnabled: () => true,
       getUsageStatisticsEnabled: () => true,
@@ -716,7 +723,10 @@ describe('LlmChat', async () => {
     expect(syncReviewedDeclarations).toHaveBeenCalledOnce();
     expect(syncReviewedDeclarations).toHaveBeenCalledWith(
       expect.arrayContaining([
-        expect.objectContaining({ role: 'user', parts: [searchResponse] }),
+        expect.objectContaining({
+          role: 'user',
+          parts: [expect.objectContaining(searchResponse)],
+        }),
       ]),
       chat,
     );
@@ -732,7 +742,15 @@ describe('LlmChat', async () => {
       syncedShapes.push({
         length: history.length,
         hasSearchResponse: history.some((entry) =>
-          (entry.parts ?? []).some((part) => part === searchResponse),
+          (entry.parts ?? []).some(
+            (part) =>
+              part.functionResponse?.id ===
+                searchResponse.functionResponse?.id &&
+              part.functionResponse?.name ===
+                searchResponse.functionResponse?.name &&
+              part.functionResponse?.response?.['output'] ===
+                searchResponse.functionResponse?.response?.['output'],
+          ),
         ),
       });
     });
@@ -2431,7 +2449,9 @@ describe('LlmChat', async () => {
       const output = sentParts[1].functionResponse?.response?.['output'];
       expect(typeof output).toBe('string');
       expect((output as string).length).toBeLessThanOrEqual(100);
-      expect(chat.getHistory()[0].parts).toEqual(sentParts);
+      expect(chat.getHistory()[0].parts).toEqual(
+        JSON.parse(JSON.stringify(sentParts)),
+      );
     });
 
     const retainOneImage = () =>
