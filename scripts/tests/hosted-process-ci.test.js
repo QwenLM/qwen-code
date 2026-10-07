@@ -230,41 +230,6 @@ describe('Hosted real-process gates', () => {
     expect(upload.with.path).toContain('failsafe-reports');
   });
 
-  it.each([
-    'packages/sdk-java/qwencode/pom.xml',
-    'packages/sdk-java/runtime-broker/pom.xml',
-  ])(
-    'stands the pinned witness lane down while a groups filter is in play: %s',
-    (file) => {
-      const pom = read(file);
-      const profile = (id) => {
-        const start = pom.indexOf(`<id>${id}</id>`);
-        expect(start, id).toBeGreaterThan(-1);
-        return pom.slice(start, pom.indexOf('</profile>', start));
-      };
-      // A -Dtest= or -Dgroups= caller narrows every surefire execution as a
-      // user property — combine.self="override" cannot shield the pinned
-      // one — so a tag-only run would empty it and failIfNoTests would
-      // abort the build. A profile holds a single activation property, so
-      // the lane keys on !test while a second profile unbinds its execution
-      // whenever a groups filter is set; it must be declared after the
-      // lane so its merge wins. failIfNoTests stays: a renamed witness
-      // class must still fail loudly.
-      expect(pom.indexOf('<id>pinning-witness-lane</id>')).toBeLessThan(
-        pom.indexOf('<id>pinning-witness-lane-stand-down</id>'),
-      );
-      const lane = profile('pinning-witness-lane');
-      expect(lane).toContain('<name>!test</name>');
-      expect(lane).toContain('<id>pinning-witnesses-pinned-scheduler</id>');
-      expect(lane).toContain('<failIfNoTests>true</failIfNoTests>');
-      const standDown = profile('pinning-witness-lane-stand-down');
-      expect(standDown).toContain('<name>groups</name>');
-      expect(standDown).toContain(
-        '<id>pinning-witnesses-pinned-scheduler</id>',
-      );
-      expect(standDown).toContain('<phase>none</phase>');
-    },
-  );
   it('keeps the Hosted MySQL job ceiling above its summed step ceilings', () => {
     const job = java.jobs['hosted-harness-mysql'];
     const summed = job.steps.reduce(

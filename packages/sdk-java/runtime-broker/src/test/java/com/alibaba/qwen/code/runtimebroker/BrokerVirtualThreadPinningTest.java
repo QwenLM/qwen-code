@@ -86,6 +86,7 @@ class BrokerVirtualThreadPinningTest {
         AtomicBoolean allOk = new AtomicBoolean(true);
         AtomicInteger probeProgress = new AtomicInteger();
         List<Thread> callers = new ArrayList<>();
+        Throwable primary = null;
         sessions.arm();
         try {
             for (int index = 0; index < callerCount; index++) {
@@ -121,15 +122,32 @@ class BrokerVirtualThreadPinningTest {
                             + carriers + " carriers (progress="
                             + probeProgress.get() + ") — a guard pinned"
                             + " its carrier");
+        } catch (Throwable failure) {
+            primary = failure;
+            throw failure;
         } finally {
             sessions.open();
+            // The latch is carrier-sized, so it opens without the last two
+            // callers; a caller wedged before the guarded call fails no other
+            // assertion. One shared budget keeps the method inside @Timeout,
+            // and a pending failure keeps its own message: the wedged callers
+            // ride along as a suppressed error instead of replacing it.
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            int unsettled = 0;
             for (Thread caller : callers) {
-                caller.join(30_000);
-                // The latch is carrier-sized, so it opens without the last
-                // two callers; a caller wedged before the guarded call
-                // fails no other assertion.
-                assertTrue(!caller.isAlive(),
-                        "a caller never finished after the latch opened");
+                caller.join(Math.max(1L, TimeUnit.NANOSECONDS.toMillis(
+                        deadline - System.nanoTime())));
+                if (caller.isAlive()) {
+                    unsettled++;
+                }
+            }
+            if (unsettled > 0) {
+                AssertionError wedged = new AssertionError(unsettled
+                        + " caller(s) never finished after the latch opened");
+                if (primary == null) {
+                    throw wedged;
+                }
+                primary.addSuppressed(wedged);
             }
         }
         assertTrue(allOk.get(), "callers failed after the latch opened");
