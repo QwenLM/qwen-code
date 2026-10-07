@@ -1988,6 +1988,41 @@ describe('subagent.ts', () => {
         await expectExecuteError(scope, 'API Failure');
         expect(scope.getLastError()).toBe('API Failure');
       });
+
+      it('bounds and sanitizes the retained message before the model reads it (#13597)', async () => {
+        // The reason line is spliced into the parent's tool result, persisted
+        // into chat history and re-sent on every later turn, so a provider SDK
+        // that packs a whole response body into `message` must not be able to
+        // grow the parent's context without limit.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          new Error(`\u001b[31m${'x'.repeat(5000)}`),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'x'.repeat(50));
+        const retained = scope.getLastError()!;
+        expect(retained).toHaveLength(501); // the 500-char bound plus the '…'
+        expect(retained.endsWith('…')).toBe(true);
+        expect(retained).not.toContain('\u001b[31m');
+      });
+
+      it('folds `cause` into the retained message (#13597)', async () => {
+        // Raw `error.message` drops it, and the cause is the half that tells the
+        // parent what to change — without it the reason line names only the
+        // mode, which is what #13597 set out to fix.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('upstream request failed'), {
+            cause: Object.assign(new Error('socket hang up'), {
+              code: 'ECONNRESET',
+            }),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'upstream request failed');
+        expect(scope.getLastError()).toContain('socket hang up');
+        expect(scope.getLastError()).toContain('ECONNRESET');
+      });
     });
 
     describe('execute - retry waits', () => {

@@ -20,6 +20,8 @@ import type { LlmChat } from '../../core/llm-chat.js';
 import type { RuntimeContentGeneratorView } from './agent-context.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { getErrorMessage } from '../../utils/errors.js';
+import { stripAnsiAndControl } from '../../utils/textUtils.js';
 import type {
   AgentEventEmitter,
   AgentStartEvent,
@@ -44,6 +46,13 @@ import { AgentCore, EXTERNAL_MESSAGE_PREFIX } from './agent-core.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 
 const debugLogger = createDebugLogger('SUBAGENT');
+
+// `lastError` is spliced into the parent model's tool result, persisted into
+// chat history and re-sent on every later turn, so it gets the same treatment
+// as the sibling model-visible error text in workflow-orchestrator.ts: control
+// characters stripped, then bounded. A provider SDK can pack a whole response
+// body into `message` (#13597).
+const MAX_MODEL_VISIBLE_ERROR_LENGTH = 500;
 
 // ─── Utilities (unchanged, re-exported for consumers) ────────
 
@@ -140,10 +149,11 @@ export class AgentHeadless implements SubagentExecutor {
   private readonly core: AgentCore;
   private finalText: string = '';
   private terminateMode: AgentTerminateMode = AgentTerminateMode.ERROR;
-  // The message behind an ERROR terminateMode. The reasoning loop rethrows, so
-  // a caller that survives the throw has no other way to learn why the run died
-  // — the AgentEventType.ERROR emission goes to the transcript, not to the
-  // caller's tool result (#13597).
+  // Best-effort cause behind an ERROR terminateMode, sanitized and bounded for
+  // the parent model's tool result (#13597). Not guaranteed under ERROR: a
+  // throw out of `createChat` escapes `execute()` before anything is recorded,
+  // and a reasoning-loop ERROR that returns instead of throwing copies only the
+  // mode. Consumers must treat `undefined` as a normal outcome.
   private lastError: string | undefined;
   // Which loop detector fired when terminateMode is LOOP_DETECTED (#9450).
   private loopType: string | null = null;
@@ -430,8 +440,15 @@ export class AgentHeadless implements SubagentExecutor {
         this.terminateMode = AgentTerminateMode.ERROR;
         const message = error instanceof Error ? error.message : String(error);
         // Retained on the instance because the rethrow below is what the caller
-        // sees; without this the reason is only ever emitted as an event.
-        this.lastError = message;
+        // sees; without this the reason is only ever emitted as an event. The
+        // model-visible copy is sanitized and bounded and folds in `cause`,
+        // which raw `error.message` drops; the event below keeps the full text
+        // because it goes to the transcript, not to the model.
+        const clean = stripAnsiAndControl(getErrorMessage(error));
+        this.lastError =
+          clean.length > MAX_MODEL_VISIBLE_ERROR_LENGTH
+            ? `${clean.slice(0, MAX_MODEL_VISIBLE_ERROR_LENGTH)}…`
+            : clean;
         this.core.eventEmitter?.emit(AgentEventType.ERROR, {
           subagentId: this.core.subagentId,
           error: message,

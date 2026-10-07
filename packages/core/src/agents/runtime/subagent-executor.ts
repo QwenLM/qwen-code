@@ -51,9 +51,10 @@ export interface SubagentExecutor {
   getFinalText(): string;
   getTerminateMode(): AgentTerminateMode;
   /**
-   * The message of the failure that ended the run, when `getTerminateMode()` is
-   * ERROR; undefined otherwise. Optional because external executors (ACP,
-   * Codex) own their own failure reporting and do not retain one.
+   * Best-effort message of the failure that ended the run. May be `undefined`
+   * even when `getTerminateMode()` is ERROR — not every ERROR route records one
+   * — and is never present on external executors (ACP, Codex), which own their
+   * own failure reporting and do not implement this.
    */
   getLastError?(): string | undefined;
   getExecutionSummary(): AgentStatsSummary;
