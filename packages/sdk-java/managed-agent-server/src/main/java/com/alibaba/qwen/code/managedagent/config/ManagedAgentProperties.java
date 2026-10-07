@@ -16,9 +16,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.convert.DurationUnit;
+import org.springframework.context.EnvironmentAware;
+import org.springframework.core.env.Environment;
 
 @ConfigurationProperties("qwen.managed-agent")
-public class ManagedAgentProperties {
+public class ManagedAgentProperties implements EnvironmentAware {
     private static final Logger LOG = LoggerFactory.getLogger(
             ManagedAgentProperties.class);
 
@@ -33,6 +35,8 @@ public class ManagedAgentProperties {
     private final InternalServer internalServer = new InternalServer();
     private String agentRevision = "1";
     private String trustedActorHeader = "";
+    // Null on a plain `new`; the sweep then falls back to magnitude bands.
+    private Environment environment;
 
     public Harness getHarness() {
         return harness;
@@ -86,15 +90,21 @@ public class ManagedAgentProperties {
         this.trustedActorHeader = trustedActorHeader;
     }
 
+    @Override
+    public void setEnvironment(Environment environment) {
+        this.environment = environment;
+    }
+
     @PostConstruct
     void validateWorkspaceFiles() {
-        // The sweep runs first: a stale milliseconds-scale approval timeout
-        // is always past the range ceiling below, so the unit hint must
-        // fire before that check fails the boot.
+        // The sweep runs first, so a bare milliseconds-style override
+        // warns with the unit hint before the range check below fails the
+        // boot, and the refusal message itself names the convention.
         warnOnSecondScaleOverrides();
         long timeout = harness.getApprovalTimeout().toMillis();
         if (timeout < 1000 || timeout > 86400000) {
-            throw new IllegalStateException("Hosted approval timeout must be between 1s and 24h");
+            throw new IllegalStateException("Hosted approval timeout must be between 1s and 24h;"
+                    + " a suffix-less number binds as seconds, so write 300s rather than 300000");
         }
         if (harness.isWorkspaceFilesEnabled()
                 && (!harness.isEnabled()
@@ -115,21 +125,24 @@ public class ManagedAgentProperties {
     }
 
     // A suffix-less override bound milliseconds before the @DurationUnit
-    // sweep and now binds seconds; a bound value at 1000x its field
-    // default or more is that flip's signature (every shipped value is
-    // suffixed, so a default never trips this). The mirror band catches
-    // the other direction: a bare value meant in a larger unit binds at
-    // least 10x below the default (zero is unambiguous and never trips).
-    // A required field ships no default to compare against, so it warns
-    // from one hour up instead. Warn, never refuse: a deliberate value
-    // must still boot.
+    // sweep and now binds seconds, and the written shape is the signal:
+    // with an Environment (every Spring boot) the sweep reads each
+    // seconds-convention field's raw property text, warns when it is a
+    // bare integer and stays quiet on a suffixed value. With no
+    // Environment (a plain `new`) the magnitude bands are the fallback:
+    // a bound value at 1000x its field default or more is that flip's
+    // signature, the mirror band catches the other direction — a bare
+    // value meant in a larger unit binds at least 10x below the default
+    // (zero is unambiguous and never trips) — and a required field ships
+    // no default to compare against, so it warns from one hour up
+    // instead. Warn, never refuse: a deliberate value must still boot.
     private void warnOnSecondScaleOverrides() {
         warnOnSecondScaleOverrides("qwen.managed-agent.", this,
-                new ManagedAgentProperties());
+                new ManagedAgentProperties(), environment);
     }
 
     private static void warnOnSecondScaleOverrides(String prefix,
-            Object bound, Object initial) {
+            Object bound, Object initial, Environment environment) {
         for (Field field : bound.getClass().getDeclaredFields()) {
             if (Modifier.isStatic(field.getModifiers())) {
                 continue;
@@ -164,7 +177,24 @@ public class ManagedAgentProperties {
                         ? basisDuration : null;
                 if (unit != null && unit.value() == ChronoUnit.SECONDS
                         && value instanceof Duration boundValue) {
-                    if (basisDefault != null
+                    String written = environment == null ? null
+                            : environment.getProperty(property);
+                    if (written != null) {
+                        // A bare integer is the stale milliseconds-style
+                        // override; a suffixed value never flips units.
+                        String text = written.trim();
+                        if (text.matches("-?\\d+")) {
+                            LOG.warn("{}={} binds as {} (seconds); before"
+                                    + " the @DurationUnit sweep the same"
+                                    + " suffix-less value bound as"
+                                    + " milliseconds ({}). Write an"
+                                    + " explicit suffix (for example"
+                                    + " 1800000ms or 30m) to confirm"
+                                    + " the intent.",
+                                    property, text, boundValue,
+                                    Duration.ofMillis(Long.parseLong(text)));
+                        }
+                    } else if (environment == null && basisDefault != null
                             && boundValue.compareTo(
                                     basisDefault.multipliedBy(1000)) >= 0) {
                         LOG.warn("{} resolved to {}, at least 1000x its"
@@ -175,7 +205,8 @@ public class ManagedAgentProperties {
                                 + " (for example 1800000ms) to confirm"
                                 + " the intent.",
                                 property, boundValue, basisDefault);
-                    } else if (basisDefault != null && !boundValue.isZero()
+                    } else if (environment == null && basisDefault != null
+                            && !boundValue.isZero()
                             && !boundValue.isNegative()
                             && boundValue.compareTo(
                                     basisDefault.dividedBy(10)) <= 0) {
@@ -186,7 +217,7 @@ public class ManagedAgentProperties {
                                 + " Write an explicit suffix (for example"
                                 + " 30m) to confirm the intent.",
                                 property, boundValue, basisDefault);
-                    } else if (basisDefault == null
+                    } else if (environment == null && basisDefault == null
                             && boundValue.compareTo(Duration.ofHours(1))
                                     >= 0) {
                         LOG.warn("{} resolved to {} — this required setting"
@@ -201,7 +232,8 @@ public class ManagedAgentProperties {
                     }
                 }
             } else if (value != null) {
-                warnOnSecondScaleOverrides(property + ".", value, basis);
+                warnOnSecondScaleOverrides(property + ".", value, basis,
+                        environment);
             }
         }
     }

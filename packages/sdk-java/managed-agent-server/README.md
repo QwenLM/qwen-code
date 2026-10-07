@@ -643,12 +643,11 @@ minutes instead of widening the signature-replay window to ~83 hours), the
 sub-second `events.batch-interval` and `events.materialize-interval`, and the
 two scheduler cadences `dispatch.scan-delay` and
 `artifacts.projection-interval`, which bind through `@Scheduled` placeholders.
-Always write the suffix (`90s`, `500ms`). At startup the server logs a warning
-for any seconds-convention duration bound at least 1000x above — or at least
-10x below — its default, the two signatures of a stale or mis-suffixed
-override; the three required `tool-publication` deadlines (`operation-timeout`,
-`claim-timeout`, `max-verification-timeout`) ship no default to compare
-against, so they warn from one hour up.
+Always write the suffix (`90s`, `500ms`). At startup the server reads each
+seconds-convention setting's written value and warns on a bare integer — the
+shape of a stale milliseconds-style override — naming what the number binds as
+now (seconds) and what it would have bound before (milliseconds); a suffixed
+value never warns.
 
 When `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
 16-character SHA-256 workspace ID that Qwen Code uses from the canonical

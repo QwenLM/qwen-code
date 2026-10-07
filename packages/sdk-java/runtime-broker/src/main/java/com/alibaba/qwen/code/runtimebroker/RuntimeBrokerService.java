@@ -62,12 +62,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
     static final Duration UNKNOWN_LOOKUP_COOLDOWN =
             Duration.ofSeconds(1);
     /**
-     * Floor for {@code v3ResultWindow}: refuses sub-second durations. A
-     * suffix-less config value binds as seconds, so a stale
-     * milliseconds-style override is accepted — always write the suffix.
-     * A bare value meant in minutes (30 binds 30 seconds) clears this
-     * floor; the startup sweep warns when a seconds-convention field
-     * binds at least 10x below its default.
+     * Floor for {@code v3ResultWindow}: refuses sub-second durations. The
+     * managed-agent-server property declares {@code @DurationUnit(SECONDS)},
+     * so a suffix-less override there binds as seconds and its startup
+     * sweep warns on the bare number — always write the suffix. A consumer
+     * binding its own {@code Duration} without that annotation gets Spring
+     * Boot's millisecond default instead; this module performs no config
+     * binding and runs no startup sweep, so such callers must validate
+     * their own window.
      */
     public static final Duration MIN_V3_RESULT_WINDOW = Duration.ofSeconds(1);
     private static final Duration DEFAULT_V3_RESULT_WINDOW =
@@ -198,10 +200,11 @@ public final class RuntimeBrokerService implements AutoCloseable {
         this.v3ResultWindow = requireDuration(v3ResultWindow,
                 "v3ResultWindow");
         if (this.v3ResultWindow.compareTo(MIN_V3_RESULT_WINDOW) < 0) {
-            // A suffix-less duration config binds as seconds, so the floor
-            // refuses only sub-second values; a stale milliseconds-style
-            // override passes as that many seconds. Refuse values below a
-            // floor no intended configuration lands under.
+            // In managed-agent-server a suffix-less override binds as
+            // seconds, so the floor refuses only sub-second values; a
+            // stale milliseconds-style override passes as that many
+            // seconds. Refuse values below a floor no intended
+            // configuration lands under.
             throw new IllegalArgumentException(
                     "v3ResultWindow must be at least "
                             + MIN_V3_RESULT_WINDOW);

@@ -145,17 +145,19 @@ class ManagedAgentPropertiesTest {
         // every 20 s invites double execution. The v3 result window is the
         // documented case: a stale milliseconds-style 1800000 meant as 30
         // minutes binds as PT500H, so the suffix is mandatory.
-        // Auth.allowedDrift declares MILLIS on purpose: the same stale
-        // 300000 must keep binding the documented PT5M — as seconds it
-        // would widen the signature-replay window to ~83h and still pass
-        // the 1s floor. This arm goes red if the field flips to SECONDS.
+        // Auth.allowedDrift declares MILLIS on purpose: a suffix-less
+        // override must keep binding milliseconds — 120000 reads as PT2M,
+        // where a SECONDS flip would widen the signature-replay window to
+        // PT33H20M and still pass the 1s floor, so this arm goes red if
+        // the field flips. Every value here differs from its field
+        // default, so a property that silently stops binding goes red too.
         new ApplicationContextRunner()
                 .withPropertyValues(
                         "qwen.managed-agent.dispatch.lease-duration=120",
                         "qwen.managed-agent.runtime-broker.v3-result-window=1800000",
-                        "qwen.managed-agent.auth.allowed-drift=300000",
-                        "qwen.managed-agent.events.materialize-interval=100",
-                        "qwen.managed-agent.events.batch-interval=75")
+                        "qwen.managed-agent.auth.allowed-drift=120000",
+                        "qwen.managed-agent.events.materialize-interval=250",
+                        "qwen.managed-agent.events.batch-interval=150")
                 .withUserConfiguration(PropertiesConfiguration.class)
                 .run(started -> {
                     assertThat(started).hasNotFailed();
@@ -167,13 +169,13 @@ class ManagedAgentPropertiesTest {
                             .isEqualTo(java.time.Duration.ofSeconds(1_800_000));
                     assertThat(started.getBean(ManagedAgentProperties.class)
                             .getAuth().getAllowedDrift())
-                            .isEqualTo(java.time.Duration.ofMinutes(5));
+                            .isEqualTo(java.time.Duration.ofMinutes(2));
                     assertThat(started.getBean(ManagedAgentProperties.class)
                             .getEvents().getMaterializeInterval())
-                            .isEqualTo(java.time.Duration.ofMillis(100));
+                            .isEqualTo(java.time.Duration.ofMillis(250));
                     assertThat(started.getBean(ManagedAgentProperties.class)
                             .getEvents().getBatchInterval())
-                            .isEqualTo(java.time.Duration.ofMillis(75));
+                            .isEqualTo(java.time.Duration.ofMillis(150));
                 });
     }
 
@@ -181,8 +183,8 @@ class ManagedAgentPropertiesTest {
     @ExtendWith(OutputCaptureExtension.class)
     void aMillisecondScaleOverrideWarnsAtStartup(CapturedOutput output) {
         // A bare 1800000 meant as 30 minutes in milliseconds binds PT500H
-        // under the seconds convention — exactly 1000x the 30m default,
-        // the stale-override signature the startup warning names.
+        // under the seconds convention — the stale-override signature the
+        // startup warning names.
         new ApplicationContextRunner()
                 .withUserConfiguration(PropertiesConfiguration.class)
                 .run(started -> {
@@ -200,9 +202,8 @@ class ManagedAgentPropertiesTest {
                             "qwen.managed-agent.harness.turn-deadline");
                 });
         // A stale 600000 (10 minutes in milliseconds) for the approval
-        // timeout can never reach the 1000x threshold — the 24h range
-        // check throws first — so the sweep runs before it, and the boot
-        // still fails with the range message.
+        // timeout is past the 24h range ceiling, so the sweep runs first
+        // and the boot still fails with the range message.
         new ApplicationContextRunner()
                 .withPropertyValues(
                         "qwen.managed-agent.harness.approval-timeout=600000")
@@ -211,12 +212,31 @@ class ManagedAgentPropertiesTest {
                     assertThat(failed).hasFailed()
                             .getFailure().hasRootCauseMessage(
                                     "Hosted approval timeout must be between"
-                                            + " 1s and 24h");
+                                            + " 1s and 24h; a suffix-less"
+                                            + " number binds as seconds, so"
+                                            + " write 300s rather than"
+                                            + " 300000");
                     assertThat(output).contains(
                             "qwen.managed-agent.harness.approval-timeout");
                 });
-        // The required publication deadlines ship no default, so the 1000x
-        // comparison has no basis: they warn from a one-hour floor.
+        // A stale 300000 (5 minutes in milliseconds) binds PT83H20M: past
+        // the 24h ceiling, so the boot refuses and the message itself must
+        // carry the unit convention.
+        new ApplicationContextRunner()
+                .withPropertyValues(
+                        "qwen.managed-agent.harness.approval-timeout=300000")
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(failed -> {
+                    assertThat(failed).hasFailed()
+                            .getFailure().hasRootCauseMessage(
+                                    "Hosted approval timeout must be between"
+                                            + " 1s and 24h; a suffix-less"
+                                            + " number binds as seconds, so"
+                                            + " write 300s rather than"
+                                            + " 300000");
+                });
+        // The required publication deadlines ship no default to compare
+        // against; a bare value warns on its written shape like any other.
         new ApplicationContextRunner()
                 .withPropertyValues(
                         "qwen.managed-agent.tool-publication.operation-timeout=1800000")
@@ -241,6 +261,72 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    void theUnitSweepKeysOnTheWrittenShapeNotTheMagnitude(
+            CapturedOutput output) {
+        // 600000 binds PT166H40M — only ~333x the 30m default, inside no
+        // magnitude band, so the written shape is the only signal that
+        // names it stale.
+        new ApplicationContextRunner()
+                .withPropertyValues(
+                        "qwen.managed-agent.harness.turn-deadline=600000")
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    assertThat(output).contains(
+                            "qwen.managed-agent.harness.turn-deadline=600000");
+                });
+        // Suffixed overrides never warn, however far below the default
+        // they land — these are this repository's own E2E failover
+        // settings, which the mirror band used to warn on.
+        new ApplicationContextRunner()
+                .withPropertyValues(
+                        "qwen.managed-agent.dispatch.lease-duration=2s",
+                        "qwen.managed-agent.dispatch.lease-renew-interval=500ms",
+                        "qwen.managed-agent.session-store.writer-lease-duration=1s")
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    assertThat(output).doesNotContain(
+                            "qwen.managed-agent.dispatch.lease-duration");
+                    assertThat(output).doesNotContain(
+                            "qwen.managed-agent.dispatch.lease-renew-interval");
+                    assertThat(output).doesNotContain(
+                            "qwen.managed-agent.session-store.writer-lease-duration");
+                });
+    }
+
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    void aZeroOverrideStaysOutsideTheSweep(CapturedOutput output) {
+        // PT0S is the documented per-chunk / per-event re-verification
+        // setting; the sweep must never name it.
+        new ApplicationContextRunner()
+                .withPropertyValues(
+                        "qwen.managed-agent.artifacts.read-revalidation-interval=0s",
+                        "qwen.managed-agent.events.read-grant-recheck-interval=0s")
+                .withUserConfiguration(PropertiesConfiguration.class)
+                .run(started -> {
+                    assertThat(started).hasNotFailed();
+                    assertThat(output).doesNotContain(
+                            "read-revalidation-interval");
+                    assertThat(output).doesNotContain(
+                            "read-grant-recheck-interval");
+                });
+        // With no Environment the magnitude bands are the fallback, and
+        // PT0S satisfies 0 <= default / 10 — only the zero guard keeps it
+        // out of the mirror band.
+        ManagedAgentProperties plain = new ManagedAgentProperties();
+        plain.getArtifacts().setReadRevalidationInterval(
+                java.time.Duration.ZERO);
+        plain.getEvents().setReadGrantRecheckInterval(
+                java.time.Duration.ZERO);
+        plain.validateWorkspaceFiles();
+        assertThat(output).doesNotContain("read-revalidation-interval");
+        assertThat(output).doesNotContain("read-grant-recheck-interval");
+    }
+
+    @Test
     void materializeIntervalDrivesTheScheduledCadence() {
         // The typed field is the cadence's only driving source:
         // ManagedArtifactConfiguration.messageMaterializerTask schedules
@@ -249,8 +335,10 @@ class ManagedAgentPropertiesTest {
         assertThat(new ManagedAgentProperties().getEvents()
                 .getMaterializeInterval())
                 .isEqualTo(java.time.Duration.ofMillis(100));
-        assertThat(MessageMaterializer.class.getMethods())
-                .noneMatch(method -> method.isAnnotationPresent(Scheduled.class));
+        // An empty fragment matches every schedule attribute on every
+        // declared method, so any reintroduced @Scheduled — package-private
+        // or repeated — fails here.
+        assertThat(schedulesOn(MessageMaterializer.class, "")).isEmpty();
     }
 
     @Test
@@ -261,13 +349,8 @@ class ManagedAgentPropertiesTest {
         // qualifier and the unit are pinned together: adding
         // timeUnit = SECONDS stretches the pass to ~17 minutes and must go
         // red here.
-        var schedules = java.util.Arrays.stream(
-                        ManagedToolResultProjector.class.getDeclaredMethods())
-                .map(method -> method.getAnnotationsByType(Scheduled.class))
-                .flatMap(java.util.Arrays::stream)
-                .filter(scheduled -> scheduled.fixedDelayString()
-                        .contains("artifacts.projection-interval"))
-                .toList();
+        var schedules = schedulesOn(ManagedToolResultProjector.class,
+                "artifacts.projection-interval");
         assertThat(schedules).hasSize(1).allSatisfy(scheduled -> {
             assertThat(scheduled.fixedDelayString()).isEqualTo(
                     "${qwen.managed-agent.artifacts.projection-interval:1000}");
@@ -293,7 +376,7 @@ class ManagedAgentPropertiesTest {
         String expected = "${qwen.managed-agent.dispatch.scan-delay:1s}";
         for (Class<?> coordinator : List.of(ActionResponseCoordinator.class,
                 HarnessCoordinator.class, SessionLifecycleCoordinator.class)) {
-            assertThat(scanDelaySchedules(coordinator))
+            assertThat(schedulesOn(coordinator, "dispatch.scan-delay"))
                     .as(coordinator.getSimpleName())
                     .hasSize(1)
                     .allSatisfy(scheduled -> {
@@ -305,20 +388,23 @@ class ManagedAgentPropertiesTest {
         }
     }
 
-    private static List<Scheduled> scanDelaySchedules(Class<?> coordinator) {
-        // getAnnotationsByType, not getAnnotation: javac emits only the
-        // @Schedules container for a repeated annotation, so getAnnotation
-        // would drop a doubled sweep entirely. Matching every schedule
-        // attribute keeps a fixedRateString or cron twin on the same
-        // placeholder visible to hasSize(1) too.
-        return java.util.Arrays.stream(coordinator.getDeclaredMethods())
+    private static List<Scheduled> schedulesOn(Class<?> owner,
+            String placeholderFragment) {
+        // getDeclaredMethods, not getMethods: Spring schedules
+        // package-private methods too. getAnnotationsByType, not
+        // getAnnotation: javac emits only the @Schedules container for a
+        // repeated annotation, so getAnnotation would drop a doubled sweep
+        // entirely. Matching every schedule attribute keeps a
+        // fixedRateString or cron twin on the same placeholder visible to
+        // hasSize(1) too.
+        return java.util.Arrays.stream(owner.getDeclaredMethods())
                 .map(method -> method.getAnnotationsByType(Scheduled.class))
                 .flatMap(java.util.Arrays::stream)
                 .filter(scheduled -> scheduled.fixedDelayString()
-                        .contains("dispatch.scan-delay")
+                        .contains(placeholderFragment)
                         || scheduled.fixedRateString()
-                                .contains("dispatch.scan-delay")
-                        || scheduled.cron().contains("dispatch.scan-delay"))
+                                .contains(placeholderFragment)
+                        || scheduled.cron().contains(placeholderFragment))
                 .toList();
     }
 

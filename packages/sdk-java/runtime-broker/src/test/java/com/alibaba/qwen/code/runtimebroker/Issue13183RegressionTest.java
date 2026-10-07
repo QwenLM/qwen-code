@@ -1034,8 +1034,9 @@ class Issue13183RegressionTest {
     /**
      * The window is validated against a floor: a sub-second window would
      * silently degrade every v3 execution to UNKNOWN, so construction
-     * refuses it. A suffix-less duration config binds as seconds, so the
-     * floor no longer catches a stale milliseconds-style override.
+     * refuses it. In managed-agent-server a suffix-less override binds as
+     * seconds, so the floor no longer catches a stale milliseconds-style
+     * override there.
      */
     @Test
     void v3ResultWindowBelowTheFloorIsRefused() {
