@@ -378,6 +378,81 @@ describe('OpenAIContentConverter', () => {
       responseParsingOptions: { contentOnlyThinkingTagLeaks: true },
     });
 
+    it('withholds a split trailing orphan tag until a normal finish', () => {
+      const stream = contentOnlyStream();
+      const responses = [
+        send(stream, { content: 'I need to verify the branch state.\n    <' }),
+        send(stream, { content: '/thi' }),
+        send(stream, { content: 'nk>\n' }),
+      ];
+      expect(responses.flatMap((response) => partsOf(response) ?? [])).toEqual([
+        { text: 'I need to verify the branch state.' },
+      ]);
+      expect(partsOf(finishStream(stream, 'stop'))).toEqual([]);
+    });
+
+    it.each([
+      'Example: `</think>`\n</think>',
+      '```xml\n</think>\n```\n</think>',
+      '~~~xml\n</thinking>\n~~~\n</thinking>',
+      'Example:\n<think>literal\n</think>',
+      'Explanation:\n</think>\nMore text.',
+    ])('preserves ambiguous or nonterminal literal text: %s', (text) => {
+      const stream = contentOnlyStream();
+      const parts = [...text].flatMap(
+        (character) => partsOf(send(stream, { content: character })) ?? [],
+      );
+      parts.push(...(partsOf(finishStream(stream, 'stop')) ?? []));
+      expect(parts.map((part) => part.text ?? '').join('')).toBe(text);
+    });
+
+    it('preserves a closing tag when the provider reports truncation', () => {
+      const stream = contentOnlyStream();
+      const first = send(stream, { content: 'Answer.\n</think>' });
+      const last = finishStream(stream, 'length');
+      expect(
+        [...(partsOf(first) ?? []), ...(partsOf(last) ?? [])]
+          .map((part) => part.text ?? '')
+          .join(''),
+      ).toBe('Answer.\n</think>');
+    });
+
+    it('also filters a normally completed nonstreaming prose suffix', () => {
+      const response = converter.convertOpenAIResponseToLlm(
+        {
+          choices: [choice({ content: 'Answer.\n    </thinking>\n' })],
+        } as OpenAI.Chat.ChatCompletion,
+        contentOnlyStream(),
+      );
+      expect(partsOf(response)).toEqual([{ text: 'Answer.' }]);
+    });
+
+    it('holds a CRLF split across chunks without leaving a carriage return', () => {
+      const stream = contentOnlyStream();
+      const parts = ['Answer.\r', '\n', '</think>'].flatMap(
+        (content) => partsOf(send(stream, { content })) ?? [],
+      );
+      parts.push(...(partsOf(finishStream(stream, 'stop')) ?? []));
+      expect(parts.map((part) => part.text ?? '').join('')).toBe('Answer.');
+    });
+
+    it.each([true, false])(
+      'retains cross-channel leak rejection with reasoning in the same chunk: %s',
+      (sameChunk) => {
+        const stream = contentOnlyStream();
+        const reasoning_content = 'Let me check<think>';
+        if (!sameChunk) send(stream, { reasoning_content });
+        expectThrowType(
+          () =>
+            send(stream, {
+              ...(sameChunk ? { reasoning_content } : {}),
+              content: 'the result\n</think>\n',
+            }),
+          'PROTOCOL_TAG_LEAK',
+        );
+      },
+    );
+
     const emitReasoning = (stream: RequestContext, text = 'Let me check.') =>
       send(stream, { reasoning_content: text });
     /** A plain-parser stream that has already emitted `text` as reasoning. */

@@ -48,6 +48,7 @@ import { isDisclosureText } from '../../omni/disclosure.js';
 import { evictOldestImagesBeyondCap } from './image-budget.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 import { SchemaValidator } from '../../utils/schemaValidator.js';
+import { TrailingThinkingTagFilter } from './trailing-thinking-tag-filter.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -1237,11 +1238,20 @@ function convertOpenAITextToParts(
   text: string,
   requestContext: RequestContext,
   final = true,
+  completed = true,
 ): Part[] {
   if (
     !requestContext.responseParsingOptions?.taggedThinkingTags &&
     !requestContext.taggedThinkingParser
   ) {
+    if (requestContext.responseParsingOptions?.contentOnlyThinkingTagLeaks) {
+      text = (requestContext.trailingThinkingTagFilter ??=
+        new TrailingThinkingTagFilter()).parse(
+        text,
+        final || requestContext.hasThinkingTagInReasoning === true,
+        completed && !requestContext.hasThinkingTagInReasoning,
+      );
+    }
     return text ? [{ text }] : [];
   }
 
@@ -1367,7 +1377,13 @@ export function convertOpenAIResponseToLlm(
   if (choice) {
     const parts: Part[] = [];
     const textParts = choice.message.content
-      ? convertOpenAITextToParts(choice.message.content, requestContext)
+      ? convertOpenAITextToParts(
+          choice.message.content,
+          requestContext,
+          true,
+          choice.finish_reason === 'stop' &&
+            !THINKING_TAG_PATTERN.test(reasoningText ?? ''),
+        )
       : [];
 
     // Handle reasoning content (thoughts).
@@ -1512,6 +1528,13 @@ export function convertOpenAIChunkToLlm(
       (choice.delta as ExtendedCompletionChunkDelta)?.reasoning_content ??
       (choice.delta as ExtendedCompletionChunkDelta)?.reasoning;
 
+    if (
+      !requestContext.responseParsingOptions?.taggedThinkingTags &&
+      THINKING_TAG_PATTERN.test(reasoningText ?? '')
+    ) {
+      requestContext.hasThinkingTagInReasoning = true;
+    }
+
     // Handle text content
     if (typeof choice.delta?.content === 'string') {
       const rawContent = choice.delta.content;
@@ -1563,11 +1586,19 @@ export function convertOpenAIChunkToLlm(
           normalizedContent,
           requestContext,
           Boolean(choice.finish_reason),
+          choice.finish_reason === 'stop' &&
+            !THINKING_TAG_PATTERN.test(reasoningText ?? ''),
         );
       }
     } else if (choice.finish_reason) {
       // Flush any buffered tagged-thinking content on stream end
-      contentParts = convertOpenAITextToParts('', requestContext, true);
+      contentParts = convertOpenAITextToParts(
+        '',
+        requestContext,
+        true,
+        choice.finish_reason === 'stop' &&
+          !THINKING_TAG_PATTERN.test(reasoningText ?? ''),
+      );
     }
 
     if (

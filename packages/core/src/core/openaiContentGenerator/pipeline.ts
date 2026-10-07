@@ -803,6 +803,23 @@ export class ContentGenerationPipeline {
         }
       }
 
+      const trailingText = context.trailingThinkingTagFilter?.parse(
+        '',
+        true,
+        false,
+      );
+      if (trailingText) {
+        const response = new GenerateContentResponse();
+        response.candidates = [
+          {
+            content: { parts: [{ text: trailingText }], role: 'model' },
+            index: 0,
+          },
+        ];
+        contentYielded = true;
+        yield response;
+      }
+
       if (
         context.pendingThinkingTagCandidate &&
         !context.pendingThinkingTagCandidate.closingTagName &&
@@ -863,6 +880,28 @@ export class ContentGenerationPipeline {
 
       if (error instanceof InvalidStreamError) {
         throw error;
+      }
+
+      if (
+        request.config?.abortSignal?.aborted !== true &&
+        !context.hasThinkingTagInReasoning
+      ) {
+        const trailingText = context.trailingThinkingTagFilter?.parse(
+          '',
+          true,
+          false,
+        );
+        if (trailingText) {
+          const response = new GenerateContentResponse();
+          response.candidates = [
+            {
+              content: { parts: [{ text: trailingText }], role: 'model' },
+              index: 0,
+            },
+          ];
+          contentYielded = true;
+          yield response;
+        }
       }
 
       // A finish chunk parked for the usage merge must not be lost when the

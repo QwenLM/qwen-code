@@ -2661,6 +2661,43 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it.each([false, true])(
+      'preserves pending suffix text without a normal stop (transport error: %s)',
+      async (transportError) => {
+        const actual =
+          await vi.importActual<typeof import('./converter.js')>(
+            './converter.js',
+          );
+        vi.mocked(
+          OpenAIContentConverter.convertOpenAIChunkToLlm,
+        ).mockImplementation(
+          actual.OpenAIContentConverter.convertOpenAIChunkToLlm,
+        );
+        mockProvider.getResponseParsingOptions = vi.fn().mockReturnValue({
+          contentOnlyThinkingTagLeaks: true,
+        });
+        const error = new Error('connection reset');
+        const { items, error: observedError } = await settle(
+          await streamFrom(
+            streamOf(
+              chunkOf({ content: 'Answer.\n</thi' }),
+              ...(transportError ? [error] : []),
+            ),
+          ),
+        );
+        expect(observedError).toBe(transportError ? error : undefined);
+        expect(
+          items
+            .flatMap((item) => item.candidates?.[0]?.content?.parts ?? [])
+            .map((part) => part.text ?? '')
+            .join(''),
+        ).toBe('Answer.\n</thi');
+        expect(items.every((item) => !item.candidates?.[0]?.finishReason)).toBe(
+          true,
+        );
+      },
+    );
+
     it('should redact proxy credentials from stream creation errors', async () => {
       const request = userRequest();
       const testError = new Error('407 via http://user:pass@proxy.local');
