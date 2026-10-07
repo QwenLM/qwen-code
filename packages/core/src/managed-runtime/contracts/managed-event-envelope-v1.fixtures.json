@@ -1653,11 +1653,12 @@
       "same": false,
       "first": {
         "v": 1,
-        "sessionId": "session-\u0085",
+        "sessionId": "session-1",
         "tenantId": "tenant-1",
         "workspaceId": "workspace-1",
         "stream": "authoritative_journal",
         "sequence": 42,
+        "eventId": "evt-000042",
         "kind": "domain.committed",
         "occurredAt": 1760000000000,
         "payloadRef": {
@@ -1666,11 +1667,12 @@
       },
       "second": {
         "v": 1,
-        "sessionId": "session-\u0085",
+        "sessionId": "session-1",
         "tenantId": "tenant-1",
         "workspaceId": "workspace-1",
         "stream": "public_event",
         "sequence": 42,
+        "eventId": "evt-000042",
         "kind": "domain.committed",
         "occurredAt": 1760000000000,
         "payloadRef": {
