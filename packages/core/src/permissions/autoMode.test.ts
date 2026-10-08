@@ -1439,8 +1439,12 @@ describe('applyAutoModeDecision — blocked:destructive-command escalation', () 
     expect(result.kind).toBe('fallback');
     if (result.kind === 'fallback') {
       expect(result.reason).toBe('total_denial');
-      // Same non-empty-banner requirement as the consecutive cap.
+      // Same banner requirement as the consecutive cap, plus the guard's
+      // reason: `total_denial` wins on precedence, so this is the route a
+      // denial-heavy session actually lands on, and a banner without the
+      // reason reads like a rate limit rather than a destructive-command stop.
       expect(result.message).toContain('session denial limit');
+      expect(result.message).toContain('Blocked destructive git command');
     }
     expect(setAutoModeDenialState).toHaveBeenCalledWith(counters(1, 0, 20, 0));
   });

@@ -731,7 +731,7 @@ function formatDenialFallbackMessage(
     case 'consecutive_unavailable':
       return 'Auto mode could not classify consecutive actions. Review this action manually.';
     case 'total_denial':
-      return 'Auto mode reached its session denial limit. Review this action manually.';
+      return `Auto mode reached its session denial limit${classifierReason ? ` (${classifierReason})` : ''}. Review this action manually.`;
     default: {
       const _exhaustive: never = reason;
       return _exhaustive;
