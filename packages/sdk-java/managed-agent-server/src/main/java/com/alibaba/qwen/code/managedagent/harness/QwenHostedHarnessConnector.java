@@ -209,7 +209,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             boolean loadExisting, boolean passiveManagedRuntimeRecovery) {
         try {
             return doCreateOrLoad(tenantId, sessionId, loadExisting,
-                    passiveManagedRuntimeRecovery);
+                    passiveManagedRuntimeRecovery, false);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -217,7 +217,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private Attachment doCreateOrLoad(String tenantId, String sessionId,
-            boolean loadExisting, boolean passiveManagedRuntimeRecovery) {
+            boolean loadExisting, boolean passiveManagedRuntimeRecovery,
+            boolean actionResponse) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         if (session.workspace() != null) {
             if (!isWorkspaceFilesAvailable()) {
@@ -227,7 +228,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 throw new IllegalStateException("Hosted Workspace Sessions"
                         + " require the Managed Action store");
             }
-            if (passiveManagedRuntimeRecovery) {
+            if (actionResponse) {
+                workspaceExecution.authorizeActionResponse(session);
+                if (!passiveManagedRuntimeRecovery) {
+                    workspaceExecution.verifyMountForProbe(session.workspace());
+                }
+            } else if (passiveManagedRuntimeRecovery) {
                 workspaceExecution.authorizePassiveAttachment(session);
             } else {
                 workspaceExecution.authorize(session);
@@ -426,7 +432,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             String actionId,
             JsonNode response) {
         requireReadyForNewWork(tenantId, sessionId, true);
-        HarnessSessionRef ref = attachment(tenantId, sessionId, false);
+        AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+        HarnessSessionRef ref = attachments.get(key);
+        if (ref == null) {
+            doCreateOrLoad(tenantId, sessionId, true,
+                    workspaceExecution.verifiedRecoveryEnabled(), true);
+            ref = attachments.get(key);
+        }
         client().resolveAction(
                         ref,
                         actionId,

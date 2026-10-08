@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -310,7 +311,7 @@ class WorkspaceStorageGuardTest {
         guard.register("tenant", "storage", UUID.randomUUID().toString());
         // The action-response authority is derived from the real grant rows,
         // not injected.
-        var execution = new WorkspaceExecutionStore(jdbc, manager, guard);
+        var execution = spy(new WorkspaceExecutionStore(jdbc, manager, guard));
         var bound = new ContextBinding("tenant", "workspace", 1, "storage", "child",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
         String sessionId = UUID.randomUUID().toString();
@@ -353,6 +354,17 @@ class WorkspaceStorageGuardTest {
         ReflectionTestUtils.setField(connector, "client", client);
         var response = new ObjectMapper().createObjectNode().put("optionId", "allow")
                 .put("inputRevision", 1).put("policyRevision", "policy");
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            assertThat(jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE"
+                    + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'")).isEqualTo(1);
+            return null;
+        }).doCallRealMethod().when(execution).authorizeActionResponse(session);
+        assertThatThrownBy(() -> connector.resolveAction("tenant", sessionId, "action", response))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                    assertThat(error.isRetryable()).isTrue();
+                });
         // A revoked creation grant is operator-reversible: the refusal must
         // stay retryable so a restored grant still delivers the answer.
         jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE"
