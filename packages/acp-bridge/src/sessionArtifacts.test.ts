@@ -2144,7 +2144,7 @@ describe('SessionArtifactStore', () => {
       expect(
         stderr.mock.calls.map((call) => String(call[0])).join(''),
       ).toContain(
-        `action=local_published_coerced_ephemeral artifactId=${localId}`,
+        `action=local_published_coerced_ephemeral artifactId=${localId} requestedRetention=restorable`,
       );
       await expect(store.list()).resolves.toMatchObject({
         artifacts: expect.arrayContaining([
@@ -7395,6 +7395,7 @@ describe('SessionArtifactStore', () => {
     });
 
     expect(warnings).toEqual([]);
+    expect(store.consumeLegacyOnlyRestore()).toBe(false);
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [
         expect.objectContaining({
@@ -7459,6 +7460,7 @@ describe('SessionArtifactStore', () => {
     const warnings = await store.restore(rebuilt);
 
     expect(warnings).toEqual([]);
+    expect(store.consumeLegacyOnlyRestore()).toBe(false);
     const listed = await store.list();
     expect(listed.warnings).toBeUndefined();
     expect(listed.artifacts).toHaveLength(3);
@@ -7600,6 +7602,10 @@ describe('SessionArtifactStore', () => {
               sessionId,
               'a582c3d4-6666-4666-8666-666666666666',
             ),
+            persistedLocalPublishedPage(
+              sessionId,
+              'a582c3d4-6666-4666-8666-666666666667',
+            ),
           ],
           tombstonedIds: [],
           stickyEphemeralIds: [],
@@ -7609,10 +7615,19 @@ describe('SessionArtifactStore', () => {
       );
 
       expect(warnings).toEqual([]);
+      const otherId = stableSessionArtifactId(
+        sessionId,
+        'managed:a582c3d4-6666-4666-8666-666666666667',
+      );
       expect(
         stderr.mock.calls.map((call) => String(call[0])).join(''),
       ).not.toContain(
         `action=legacy_local_published_dropped artifactId=${pageId}`,
+      );
+      expect(
+        stderr.mock.calls.map((call) => String(call[0])).join(''),
+      ).toContain(
+        `action=legacy_local_published_dropped artifactId=${otherId}`,
       );
       await expect(store.list()).resolves.toMatchObject({
         artifacts: [
@@ -8309,6 +8324,14 @@ describe('SessionArtifactStore', () => {
       );
       await store.remove(pageId);
 
+      expect(
+        events.flatMap((payload) =>
+          payload.changes
+            .map((change) => change.artifact?.url)
+            .filter((url) => url?.startsWith('file:')),
+        ),
+      ).toEqual([]);
+
       const rebuilt = rebuildSessionArtifactSnapshot(
         events.map((systemPayload) => ({
           type: 'system' as const,
@@ -8323,6 +8346,85 @@ describe('SessionArtifactStore', () => {
       });
       await expect(restored.restore(rebuilt)).resolves.toEqual([]);
       await expect(restored.list()).resolves.toMatchObject({ artifacts: [] });
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the live local page when rewind rebuilds a superseded hosted record', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const sessionId = 's11-rewind-keeps-local-over-hosted';
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      const managedId = managedIdForWorkspacePath('report.html');
+      const hostedUrl = 'https://cdn.example.com/pages/report.html';
+      await store.upsertMany(
+        [
+          {
+            kind: 'html',
+            title: 'Hosted report',
+            storage: 'published',
+            source: 'tool',
+            toolName: 'artifact',
+            managedId,
+            url: hostedUrl,
+          },
+        ],
+        { strict: true, trustedPublisher: true },
+      );
+      const url = pathToFileURL(path.join(outside, 'report.html')).href;
+      await fs.writeFile(path.join(outside, 'report.html'), '<html>ok</html>');
+      await store.upsertMany(
+        [
+          {
+            kind: 'html',
+            title: 'Local report',
+            storage: 'published',
+            source: 'tool',
+            toolName: 'artifact',
+            managedId,
+            url,
+          },
+        ],
+        { strict: true, trustedPublisher: true },
+      );
+
+      const rebuilt = rebuildSessionArtifactSnapshot(
+        events.map((systemPayload) => ({
+          type: 'system' as const,
+          subtype: 'session_artifact_event' as const,
+          systemPayload,
+        })),
+        sessionId,
+      )!;
+      const warnings = await store.restore(rebuilt, {
+        preserveLiveEphemeral: true,
+      });
+      expect(warnings).toEqual([]);
+      await expect(store.list()).resolves.toMatchObject({
+        artifacts: [
+          expect.objectContaining({
+            title: 'Local report',
+            url,
+            retention: 'ephemeral',
+          }),
+        ],
+      });
+      expect(
+        (await store.list()).artifacts.some((artifact) =>
+          artifact.url?.startsWith('https://cdn.example.com/'),
+        ),
+      ).toBe(false);
     } finally {
       await fs.rm(outside, { recursive: true, force: true });
     }
@@ -8594,6 +8696,62 @@ describe('SessionArtifactStore', () => {
     );
   });
 
+  it('keeps a sticky unpin when the page is recreated and removed', async () => {
+    const sessionId = 's11-sticky-survives-recreate';
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+    const managedId = 'a582c3d4-eeee-4eee-8eee-eeeeeeeeeeee';
+    const url = 'https://cdn.example.com/pages/sticky-recreate.html';
+    const published = {
+      kind: 'html' as const,
+      storage: 'published' as const,
+      source: 'tool' as const,
+      toolName: 'artifact',
+      managedId,
+      url,
+    };
+    const created = await store.upsertMany(
+      [{ ...published, title: 'Hosted report', retention: 'restorable' }],
+      { strict: true, trustedPublisher: true },
+    );
+    const pageId = created.changes[0]!.artifactId;
+    await store.upsertMany(
+      [{ ...published, title: 'Hosted report', retention: 'ephemeral' }],
+      { strict: true, trustedPublisher: true },
+    );
+    await expect(store.recordSnapshot()).resolves.toEqual([]);
+    expect(snapshots.at(-1)?.stickyEphemeralIds).toContain(pageId);
+
+    const again: SessionArtifactSnapshotRecordPayload[] = [];
+    const restored = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          again.push(payload);
+        },
+      },
+    });
+    await restored.restore(snapshots.at(-1)!);
+    await restored.upsertMany(
+      [{ ...published, title: 'Hosted report renamed' }],
+      { strict: true, trustedPublisher: true },
+    );
+    await restored.remove(pageId);
+    await expect(restored.recordSnapshot()).resolves.toEqual([]);
+    expect(again.at(-1)?.stickyEphemeralIds).toContain(pageId);
+  });
+
   it('rolls back a forged non-html published file whose id matches its identity', async () => {
     const sessionId = 's11-restore-forged-link-matching-id';
     const store = new SessionArtifactStore({
@@ -8695,7 +8853,7 @@ describe('SessionArtifactStore', () => {
     }
   });
 
-  it('marks a legacy-only restore so attach can replay transcript artifacts', async () => {
+  it('marks a legacy-only restore on the store', async () => {
     const sessionId = 's11-legacy-only-restore-replay';
     const store = new SessionArtifactStore({
       sessionId,

@@ -48,8 +48,14 @@ journal。恢复并不信任该定位符，加载时出现
 `retentionExplicit`，因此被强制的页面不会满足 `shouldRecordEphemeralUnpin`，
 也不会写出 `unpin_to_ephemeral` durable event；调用方原来的 `retention`
 请求不按显式意图处理。如果被替换的记录已经在 journal 里，降级时保留
-`durableTombstoneRequired`，之后删除仍会给该 id 写 tombstone。当前页仍出现在
-本会话列表中。
+`durableTombstoneRequired`，之后删除仍会给该 id 写 tombstone，并且这次降级
+本身会为被取代的 hosted 定位符写一条 durable `removed` event。这条 marker
+保留 hosted URL，不带机器本地的 `file://` 路径。同一 identity 之后再次以
+https 发布会清掉该 tombstone。当前页仍出现在本会话列表中。stderr 会记录
+`action=local_published_coerced_ephemeral`，并带上 `artifactId` 和
+`requestedRetention`。`requestedRetention` 是默认之后的生效 retention，不必是
+调用方传入的值：普通 Artifact 发布不带 `retention`，仍会记成
+`requestedRetention=restorable`。
 
 恢复和 marker 恢复时，按定位符和 identity 丢弃本地页：
 
@@ -79,10 +85,13 @@ HTTP/HTTPS published 定位符和快照描述符不变。
 ## 风险
 
 回放（rewind）时 live 页面仍然可见 —— rewind 调用方使用 `preserveLiveEphemeral`
-进行 restore，而该页面现在是 ephemeral —— 除非被回放到的 journal 把该页 id
-列入 tombstone，此时页面会被丢掉且不发 warning。页面被丢掉时，回放之后记录的
-snapshot 不再包含它。这就是丢弃后的 durable metadata 状态；不会产生面向用户的
-warning。运维仍然可以通过 stderr action 看到。rewind 又放回的页面不会被记成
+进行 restore，而该页面现在是 ephemeral —— 除非被回放到的 journal 给同一个
+定位符写了 tombstone。marker URL 是被取代的 hosted 页时，不会丢掉当前的本地页。
+页面被丢掉时，回放之后记录的 snapshot 不再包含它。这就是丢弃后的 durable
+metadata 状态；不会产生面向用户的 warning。运维仍然可以通过 stderr action
+看到，包括写入时的 `action=local_published_coerced_ephemeral`，以及恢复时的
+`action=legacy_local_published_dropped` 或
+`action=legacy_local_published_drop_rolled_back`。rewind 又放回的页面不会被记成
 已丢弃。
 
 只包含这类本地页的 journal 会恢复成空列表，且没有面向用户的 warning。这种情况下
@@ -112,3 +121,7 @@ warning。运维仍然可以通过 stderr action 看到。rewind 又放回的页
 OpenCode 应去重恢复 warning，并通过
 `GET /session/:id/artifacts/:artifactId/content` 打开快照卡片。该项不在本次
 范围内。
+
+会话控制面的 attach 和 rewind 会消费 `consumeLegacyOnlyRestore()`。这两处
+调用还没有测试。只包含这类本地页的 journal 在 attach 时仍须回放 transcript
+里的产物，rewind 也不能把清空后的列表写成新 snapshot。

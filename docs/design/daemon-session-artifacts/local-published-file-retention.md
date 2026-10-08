@@ -53,7 +53,14 @@ also clears `retentionExplicit`, so the coerced page never satisfies
 emitted; the caller's original `retention` request is deliberately not treated
 as explicit. If the record being replaced was already in the journal, the
 downgrade keeps `durableTombstoneRequired`, so a later delete still tombstones
-that id. The live page remains in the current session list.
+that id, and the downgrade itself journals a durable `removed` event for the
+superseded hosted locator. That marker keeps the hosted URL and does not carry
+a machine-local `file://` path. A later https publish of the same identity
+clears the tombstone. The live page remains in the current session list.
+Stderr logs `action=local_published_coerced_ephemeral` with `artifactId` and
+`requestedRetention`. `requestedRetention` is the effective retention after
+defaulting, not necessarily a value the caller passed: an ordinary Artifact
+publish omits `retention` and still logs `requestedRetention=restorable`.
 
 On restore and marker restore, drop local pages by locator and identity:
 
@@ -88,10 +95,14 @@ descriptors are unchanged.
 
 On rewind the live page stays visible — the rewind caller restores with
 `preserveLiveEphemeral`, and the page is now ephemeral — unless the rewound
-journal tombstones the page's id, in which case it is dropped and no warning
-is emitted. When the page is dropped, the snapshot recorded after the rewind
-no longer contains it. That is the durable metadata state after the drop; no
-user-facing warning is emitted. Operators can still see the stderr action.
+journal tombstones that same locator. A tombstone whose marker URL is the
+superseded hosted page does not drop the live local page. When the page is
+dropped, the snapshot recorded after the rewind no longer contains it. That is
+the durable metadata state after the drop; no user-facing warning is emitted.
+Operators can still see the stderr action, including
+`action=local_published_coerced_ephemeral` at write time and
+`action=legacy_local_published_dropped` or
+`action=legacy_local_published_drop_rolled_back` at restore time.
 A committed drop of a page that rewind puts back is not logged as dropped.
 
 A journal that contains only these local pages restores empty, without a
@@ -125,3 +136,8 @@ and rewind does not record the emptied list as a new snapshot.
 OpenCode should de-duplicate restore warnings and open snapshot cards through
 `GET /session/:id/artifacts/:artifactId/content`. That work is outside this
 change.
+
+Attach and rewind in the session control plane consume
+`consumeLegacyOnlyRestore()`. Those two call sites have no test yet. A journal
+that contains only these local pages must still replay transcript artifacts on
+attach, and rewind must not `recordSnapshot` the emptied list.

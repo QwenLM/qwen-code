@@ -432,7 +432,7 @@ export class SessionArtifactStore {
               insertSeq: ++this.insertSeq,
             };
             this.artifacts.set(stored.id, stored);
-            this.clearResurrectionMarkers(stored.id);
+            this.clearTombstone(stored.id);
             changes.push({
               action: 'created',
               artifactId: stored.id,
@@ -457,7 +457,22 @@ export class SessionArtifactStore {
           }
           const updated = mergeArtifact(existing, artifact);
           if (updated.changed) {
-            if (updated.artifact.id !== existing.id) {
+            const supersededHosted =
+              updated.artifact.id === existing.id &&
+              wasDurablyJournaled(existing) &&
+              isNonSnapshotPublishedFileUrl(updated.artifact) &&
+              !shouldRecordEphemeralUnpin(existing, artifact);
+            if (supersededHosted) {
+              const removeChange: InternalSessionArtifactChange = {
+                action: 'removed',
+                artifactId: existing.id,
+                artifact: toRemovedPublicArtifact(existing),
+                reason: 'explicit',
+                durableTombstoneRequired: true,
+                removedClientId: existing.clientId,
+              };
+              changes.push(removeChange);
+            } else if (updated.artifact.id !== existing.id) {
               const removeChange: InternalSessionArtifactChange = {
                 action: 'removed',
                 artifactId: existing.id,
@@ -480,7 +495,7 @@ export class SessionArtifactStore {
               });
             }
             this.artifacts.set(updated.artifact.id, updated.artifact);
-            this.clearResurrectionMarkers(updated.artifact.id);
+            this.clearTombstone(updated.artifact.id);
             changes.push({
               action: 'updated',
               artifactId: updated.artifact.id,
@@ -683,10 +698,13 @@ export class SessionArtifactStore {
       // any caller that already passed session mutation auth.
       this.denyCrossClientMutation('remove', artifactId, existing, options);
       const removedAt = new Date().toISOString();
+      const removedArtifact = isNonSnapshotPublishedFileUrl(existing)
+        ? undefined
+        : toRemovedPublicArtifact(existing, removedAt);
       const removeChange: InternalSessionArtifactChange = {
         action: 'removed',
         artifactId,
-        artifact: toRemovedPublicArtifact(existing, removedAt),
+        ...(removedArtifact ? { artifact: removedArtifact } : {}),
         reason: 'explicit',
         durableTombstoneRequired:
           existing.durableTombstoneRequired ||
@@ -924,11 +942,10 @@ export class SessionArtifactStore {
         return rollbackWarnings;
       }
       for (const artifact of preservedLiveEphemeralArtifacts) {
-        if (
-          this.artifacts.has(artifact.id) ||
-          this.tombstonedIds.has(artifact.id)
-        ) {
-          continue;
+        if (this.artifacts.has(artifact.id)) continue;
+        if (this.tombstonedIds.has(artifact.id)) {
+          const markerUrl = this.markerArtifacts.get(artifact.id)?.url;
+          if (markerUrl === undefined || markerUrl === artifact.url) continue;
         }
         this.artifacts.set(artifact.id, {
           ...artifact,
@@ -1013,9 +1030,13 @@ export class SessionArtifactStore {
     return value;
   }
 
-  private clearResurrectionMarkers(id: string): void {
+  private clearTombstone(id: string): void {
     this.tombstonedIds.delete(id);
     this.tombstonedClientIds.delete(id);
+  }
+
+  private clearResurrectionMarkers(id: string): void {
+    this.clearTombstone(id);
     this.markerArtifacts.delete(id);
   }
 
@@ -1339,12 +1360,8 @@ export class SessionArtifactStore {
       if (seen.has(id)) continue;
       seen.add(id);
       const live = this.artifacts.get(id);
-      if (live) {
-        if (!isNonSnapshotPublishedFileUrl(live)) {
-          artifacts.push(
-            toPersistedArtifact(toPublicArtifact(live), recordedAt),
-          );
-        }
+      if (live && !isNonSnapshotPublishedFileUrl(live)) {
+        artifacts.push(toPersistedArtifact(toPublicArtifact(live), recordedAt));
         continue;
       }
       const markerArtifact = this.markerArtifacts.get(id);
@@ -2253,7 +2270,7 @@ function mergeBatchArtifact(
       lastStatAt: undefined,
     };
     delete merged.workspacePath;
-    coerceMergedPublishedFile(merged, wasDurablyJournaled(existing));
+    coerceNonSnapshotPublishedFile(merged);
     return merged;
   }
   const refreshDisplay =
@@ -2282,7 +2299,7 @@ function mergeBatchArtifact(
     retention: mergeRetention(existing, next),
     lastStatAt: next.lastStatAt ?? existing.lastStatAt,
   };
-  coerceMergedPublishedFile(merged, wasDurablyJournaled(existing));
+  coerceNonSnapshotPublishedFile(merged);
   return merged;
 }
 
