@@ -119,13 +119,9 @@ class HostedHarnessClientTest {
                 assertThrows(expected, detach::run);
             }
             detached.set(true);
-            // The unconfirmed arm waits for the heartbeat to CONTINUE: a
-            // busy runner only owes the beats themselves — give the
-            // scheduler real room instead of a fixed 200 ms slot (only the
-            // ceiling lifts; the assertion keeps the exact same semantics).
-            boolean continued = laterHeartbeats.await(confirmed ? 200 : 2_000,
-                    TimeUnit.MILLISECONDS);
-            assertEquals(!confirmed, continued);
+            assertEquals(!confirmed, confirmed
+                    ? laterHeartbeats.await(200, TimeUnit.MILLISECONDS)
+                    : laterHeartbeats.await(5, TimeUnit.SECONDS));
         }
     }
 
