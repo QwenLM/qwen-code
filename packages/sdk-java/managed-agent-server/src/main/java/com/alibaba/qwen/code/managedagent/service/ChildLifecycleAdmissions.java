@@ -28,6 +28,13 @@ public class ChildLifecycleAdmissions {
         this.runtimeWarmer = runtimeWarmer;
     }
 
+    /** Whether this host can close a Workspace Session at all. Without it
+     * no close is ever admitted, so a caller must not hold anything else
+     * (a parent's settlement) hostage to one. */
+    public boolean closeSupported() {
+        return runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose();
+    }
+
     /** Admits the child Session's idempotent close, or replays the
      * admission already in flight under this key. The caller's duty is
      * only to dispatch; an active Turn or an unavailable Runtime lane

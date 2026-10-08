@@ -2203,12 +2203,31 @@ describe('Hosted Harness no-tool session', () => {
     expect(state.authorizeLifecycle).not.toHaveBeenCalled();
     // The matching lifecycle claim: authorized through its own gate,
     // carrying the lifecycle kind the fence phase requires (the
-    // pre-effects evaluation never asks for DRAINING).
+    // pre-effects evaluation never asks for DRAINING). And at the
+    // moment the child operation's verb commits, the store client still
+    // carries the claim — the stamp is only restored at the route's
+    // own boundary, never before the write.
+    const originalRequestStop = HostedChildAgentSession.prototype.requestStop;
+    let stampedDuringVerb: unknown;
+    vi.spyOn(
+      HostedChildAgentSession.prototype,
+      'requestStop',
+    ).mockImplementation(function (
+      this: HostedChildAgentSession,
+      runId: string,
+    ) {
+      stampedDuringVerb = state.setLifecycleAuthority.mock.calls.at(-1)?.[0];
+      return originalRequestStop.call(this, runId);
+    });
     const first = await operation({
       kind: 'cancel',
       authority: { operationId: 'close-1', claimGeneration: 7, kind: 'close' },
     });
     expect(first.status).toBe(202);
+    expect(stampedDuringVerb).toEqual({
+      operationId: 'close-1',
+      claimGeneration: 7,
+    });
     expect(state.authorizeLifecycle).toHaveBeenCalledTimes(1);
     expect(state.authorizeLifecycle).toHaveBeenLastCalledWith('close');
     // A claim the gate itself refuses: conflict, never a silent pass —

@@ -340,7 +340,7 @@ public class ChildResultRelay {
      * is idempotent, a faltherd is owed and retried via the ordinary
      * relay defer, never settled on suspicion. */
     private void closeFinishedChild(RelayRow row, long now) {
-        if (row.childSessionId() == null) {
+        if (row.childSessionId() == null || !childCloses.closeSupported()) {
             return;
         }
         try {
@@ -392,7 +392,7 @@ public class ChildResultRelay {
             String child = row.childSessionId() != null ? row.childSessionId()
                     : relayStore.findLineageChild(row.tenantId(),
                             row.parentSessionId(), row.childRunId());
-            if (child != null) {
+            if (child != null && childCloses.closeSupported()) {
                 childCloses.admitChildClose(row.tenantId(),
                         row.parentSessionId(), child, row.childRunId());
             }

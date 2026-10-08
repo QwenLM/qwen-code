@@ -128,6 +128,7 @@ class ChildResultRelayTest {
         when(provider.getIfAvailable()).thenAnswer(ignored -> broker);
         harness = new RecordingHarness();
         childCloses = mock(ChildLifecycleAdmissions.class);
+        when(childCloses.closeSupported()).thenReturn(true);
         now = 1_000_000L;
         AtomicReference<Long> clock = new AtomicReference<>(now);
         relay = new ChildResultRelay(store, sessions, provider, harness,
@@ -353,6 +354,25 @@ class ChildResultRelayTest {
         assertThat(fail).containsEntry("stopReason", "child_failed")
                 .containsEntry("started", true);
         verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+    }
+
+    // A host that cannot close a Workspace Session never admits one, so
+    // the close-first order must not hold the parent's settlement on it:
+    // the failed and over-bound runs still settle, and the row retires.
+    @Test
+    void aHostWithoutCloseStillSettlesAFailedChild() {
+        when(childCloses.closeSupported()).thenReturn(false);
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "FAILED", now + 1L, "model"));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
+                anyString(), anyString());
     }
 
     // R4-3: a faltered close admission parks the row BEFORE the fail
