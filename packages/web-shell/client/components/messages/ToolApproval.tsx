@@ -10,7 +10,7 @@ import {
 } from 'react';
 import { isAgentTool } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { PermissionRequest, TodoItem } from '../../adapters/types';
-import { useI18n } from '../../i18n';
+import { toSurfaceLanguage, useI18n } from '../../i18n';
 import { GoalApprovalContent } from './GoalApprovalContent';
 import { PlanExecutionView } from './PlanExecutionView';
 import { isExitPlanApprovalRequest } from '../../utils/todos';
@@ -261,7 +261,7 @@ export function ToolApproval({
   planExecutionMode,
   generateContent,
 }: ToolApprovalProps) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const isAgent = isAgentTool(request.toolName);
   const isGoal = request.toolName === 'propose_goal';
   const isExitPlanApproval = isExitPlanApprovalRequest(request);
@@ -617,6 +617,7 @@ export function ToolApproval({
         .join(' ')}
       data-web-shell-permission-panel
       data-web-shell-goal-approval={isGoal || undefined}
+      lang={isGoal ? toSurfaceLanguage(language) : undefined}
       aria-busy={isGoal ? submitting : undefined}
       role="alertdialog"
       aria-labelledby={headingId}

@@ -44746,6 +44746,7 @@ describe('settings-derived theme and language (#11955)', () => {
   });
 
   it('resolves general.language ru to ru for host but leaves DOM lang as en', async () => {
+    mockConnection.goalState = activeGoalSnapshot('keep working');
     testState.settings = [languageSetting('ru')];
     const onLanguageResolved = vi.fn();
     const { container } = renderApp({ onLanguageResolved });
@@ -44754,7 +44755,69 @@ describe('settings-derived theme and language (#11955)', () => {
     expect(
       container.querySelector('[data-web-shell-root]')?.getAttribute('lang'),
     ).toBe('en');
+    expect(
+      document
+        .querySelector('[data-web-shell-portal-root]')
+        ?.getAttribute('lang'),
+    ).toBe('en');
+    expect(container.textContent).toContain('В работе');
     expect(onLanguageResolved).toHaveBeenCalledWith('ru');
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="goals-page"]')?.textContent,
+    ).toContain('Цели');
+  });
+
+  it('accepts /language ui ru, including underscore aliases, and rejects unknown tags', async () => {
+    const onLanguageResolved = vi.fn();
+    const onToast = vi.fn();
+    renderApp({ onLanguageResolved, onToast });
+    await flush();
+
+    const submit = async (command: string) => {
+      await act(async () => {
+        expect(testState.latestChatEditorProps).toBeDefined();
+        testState.latestChatEditorProps?.onSubmit(command);
+        await Promise.resolve();
+      });
+      await flush();
+    };
+
+    mockSessionActions.sendPrompt.mockClear();
+    await submit('/language ui ru');
+    expect(mockSessionActions.sendPrompt.mock.calls[0]?.[0]).toBe(
+      '/language ui ru',
+    );
+    expect(onLanguageResolved).toHaveBeenLastCalledWith('ru');
+    expect(onToast).not.toHaveBeenCalledWith(
+      'error',
+      expect.stringContaining('Invalid language'),
+    );
+
+    mockSessionActions.sendPrompt.mockClear();
+    await submit('/language ui ru_RU');
+    expect(mockSessionActions.sendPrompt.mock.calls[0]?.[0]).toBe(
+      '/language ui ru',
+    );
+
+    mockSessionActions.sendPrompt.mockClear();
+    await submit('/language ui zh_CN');
+    expect(mockSessionActions.sendPrompt.mock.calls[0]?.[0]).toBe(
+      '/language ui zh-CN',
+    );
+    expect(onLanguageResolved).toHaveBeenLastCalledWith('zh-CN');
+
+    mockSessionActions.sendPrompt.mockClear();
+    await submit('/language ui fr');
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(onLanguageResolved).toHaveBeenLastCalledWith('zh-CN');
+    expect(onToast).toHaveBeenLastCalledWith(
+      'error',
+      expect.stringMatching(/Invalid language|语言无效/),
+    );
   });
 
   it('lets an explicit language prop win over general.language', async () => {

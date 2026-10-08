@@ -76,7 +76,7 @@ const SUBCOMMAND_TREE_ZH: Record<string, SubcommandNode[]> = {
       children: [
         { name: 'en', description: 'English' },
         { name: 'zh-CN', description: '中文' },
-        { name: 'ru', description: 'Русский' },
+        { name: 'ru', description: 'Русский · частично' },
       ],
     },
     {
@@ -117,7 +117,7 @@ const SUBCOMMAND_TREE_EN: Record<string, SubcommandNode[]> = {
       children: [
         { name: 'en', description: 'English' },
         { name: 'zh-CN', description: '中文' },
-        { name: 'ru', description: 'Русский' },
+        { name: 'ru', description: 'Русский · частично' },
       ],
     },
     {

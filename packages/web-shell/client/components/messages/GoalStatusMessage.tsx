@@ -1,5 +1,5 @@
 import { DAEMON_GOAL_STATUS_SENTINEL_PREFIX } from '@qwen-code/sdk/daemon';
-import { useI18n } from '../../i18n';
+import { toSurfaceLanguage, useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import styles from './GoalStatusMessage.module.css';
@@ -181,7 +181,7 @@ export function GoalStatusMessage({
     status.kind === 'checking' ? t('goal.judge') : t('goal.lastCheck');
 
   return (
-    <div className={styles.message} lang={language === 'ru' ? 'ru' : undefined}>
+    <div className={styles.message} lang={toSurfaceLanguage(language)}>
       <div className={styles.body}>
         <div className={`${styles.title} ${title.colorClass}`}>
           {title.title}
@@ -189,11 +189,13 @@ export function GoalStatusMessage({
         </div>
         <div className={styles.row}>
           <span className={styles.label}>{t('goal.label')}:</span>
-          <span className={styles.value}>{status.condition}</span>
+          <span className={styles.value} lang="">
+            {status.condition}
+          </span>
         </div>
         {showReason && (
           <div className={styles.muted}>
-            {reasonLabel}: {showReason}
+            {reasonLabel}: <span lang="">{showReason}</span>
           </div>
         )}
       </div>

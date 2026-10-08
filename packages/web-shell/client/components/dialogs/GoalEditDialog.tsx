@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useI18n } from '../../i18n';
+import { toSurfaceLanguage, useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
 import styles from './GoalsDialog.module.css';
 
@@ -18,7 +18,7 @@ export function GoalEditDialog({
   onSave,
   onClose,
 }: GoalEditDialogProps) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [value, setValue] = useState(objective);
   const [edited, setEdited] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -47,6 +47,7 @@ export function GoalEditDialog({
   return (
     <DialogShell
       title={t('goals.edit')}
+      lang={toSurfaceLanguage(language)}
       size="md"
       dismissible={!saving}
       onClose={() => !saving && onClose()}

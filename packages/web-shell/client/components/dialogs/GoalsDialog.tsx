@@ -12,7 +12,7 @@ import {
   type DaemonGoal,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { Pause, Pencil, Play, Trash2 } from 'lucide-react';
-import { useI18n } from '../../i18n';
+import { toSurfaceLanguage, useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
 import {
   getGoalActiveTimeLabel,
@@ -245,7 +245,7 @@ export function GoalsDialog({
   );
 
   return (
-    <div className={styles.root} lang={language === 'ru' ? 'ru' : undefined}>
+    <div className={styles.root} lang={toSurfaceLanguage(language)}>
       <div className={styles.intro}>{t('goals.subtitle')}</div>
 
       <div className={styles.toolbar}>
@@ -280,6 +280,7 @@ export function GoalsDialog({
       {showForm && (
         <DialogShell
           title={t(editingGoal ? 'goals.edit' : 'goals.new')}
+          lang={toSurfaceLanguage(language)}
           size="md"
           // A submit that outlives its form applies `resetForm()`/`setFormError`
           // to whatever form is open when it settles, so closing mid-flight

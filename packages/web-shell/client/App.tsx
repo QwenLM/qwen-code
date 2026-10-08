@@ -378,8 +378,11 @@ import {
   getTranslator,
   languageSettingToWebShellLanguage,
   languageLabel,
+  languageOptionLines,
   normalizeLanguage,
+  parseUiLanguageArg,
   toDomLanguage,
+  toSurfaceLanguage,
   type WebShellLanguage,
 } from './i18n';
 import { CapacityRecoveryDialog } from './components/workspaces/CapacityRecoveryDialog';
@@ -1340,8 +1343,12 @@ export interface WebShellProps {
    * would be shadowed by the stale copy.
    */
   onThemeResolved?: (theme: WebShellTheme) => void;
-  /** UI language for the web-shell. Defaults to `?language=` or browser language. */
-  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn' | 'ru';
+  /**
+   * UI language for the web-shell. Any string is accepted and normalized
+   * (`ru-RU`, `zh_CN`, …); an unknown tag falls back to English.
+   * Defaults to `?language=` or the browser language.
+   */
+  language?: string;
   /** Called when `/language ui` changes the web-shell UI language. */
   onLanguageChange?: (language: WebShellLanguage) => void;
   /**
@@ -16743,13 +16750,11 @@ export function App({
                   type: 'status',
                   text: [
                     t('language.current', {
-                      language: languageLabel(selectedLanguage),
+                      language: languageLabel(selectedLanguage, t),
                     }),
                     t('language.usage'),
                     t('language.options'),
-                    '  - en: English',
-                    '  - zh-CN: 中文',
-                    '  - ru: Русский',
+                    ...languageOptionLines(t),
                   ].join('\n'),
                 },
               ]);
@@ -16766,28 +16771,17 @@ export function App({
                       t('language.usage'),
                       '',
                       t('language.options'),
-                      '  - en: English',
-                      '  - zh-CN: 中文',
-                      '  - ru: Русский',
+                      ...languageOptionLines(t),
                     ].join('\n'),
                   },
                 ]);
                 return true;
               }
-              const normalizedArg = languageArg.toLowerCase();
-              const valid = [
-                'en',
-                'zh',
-                'zh-cn',
-                'zh_cn',
-                'ru',
-                'ru-ru',
-              ].includes(normalizedArg);
-              if (!valid) {
+              const nextLanguage = parseUiLanguageArg(languageArg);
+              if (!nextLanguage) {
                 pushToast('error', t('language.invalid'));
                 return true;
               }
-              const nextLanguage = normalizeLanguage(languageArg);
               const owner = { current: sessionOwnerGuard.capture() };
               const previousLanguage = selectedLanguage;
               // The daemon sync is what keeps the agent answering in the
@@ -21461,7 +21455,10 @@ export function App({
                         </svg>
                       </button>
                     )}
-                    <div className={styles.fullPageTitle}>
+                    <div
+                      className={styles.fullPageTitle}
+                      lang={toSurfaceLanguage(selectedLanguage)}
+                    >
                       {t('goals.title')}
                     </div>
                   </div>

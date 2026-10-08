@@ -4,8 +4,12 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   getTranslator,
+  languageLabel,
   languageSettingToWebShellLanguage,
   normalizeLanguage,
+  parseUiLanguageArg,
+  toDomLanguage,
+  toSurfaceLanguage,
 } from './i18n';
 
 // getTranslator returns the raw key when EN has no entry. SettingsMessage
@@ -67,7 +71,26 @@ describe('ru locale', () => {
   it('maps Russian browser languages and settings aliases to ru', () => {
     expect(normalizeLanguage('ru')).toBe('ru');
     expect(normalizeLanguage('ru-RU')).toBe('ru');
+    expect(normalizeLanguage('ru_RU')).toBe('ru');
+    expect(normalizeLanguage('zh_CN')).toBe('zh-CN');
     expect(normalizeLanguage('fr-FR')).toBe('en');
+    expect(parseUiLanguageArg('ru_RU')).toBe('ru');
+    expect(parseUiLanguageArg('ru-UA')).toBe('ru');
+    expect(parseUiLanguageArg('zh_CN')).toBe('zh-CN');
+    expect(parseUiLanguageArg('fr')).toBeUndefined();
+    expect(parseUiLanguageArg('auto')).toBeUndefined();
+    expect(toDomLanguage('ru')).toBe('en');
+    expect(toDomLanguage('zh-CN')).toBe('zh-CN');
+    expect(toDomLanguage('en')).toBe('en');
+    expect(toSurfaceLanguage('ru')).toBe('ru');
+    expect(toSurfaceLanguage('en')).toBeUndefined();
+    expect(toSurfaceLanguage('zh-CN')).toBeUndefined();
+    expect(languageLabel('en')).toBe('English [en]');
+    expect(languageLabel('zh-CN')).toBe('中文 [zh-CN]');
+    expect(languageLabel('ru')).toBe('Русский [ru] · частично');
+    expect(languageLabel('ru', getTranslator('en'))).toBe(
+      'Русский [ru] · partial',
+    );
     expect(languageSettingToWebShellLanguage('ru')).toBe('ru');
     expect(languageSettingToWebShellLanguage('ru-ru')).toBe('ru');
     expect(languageSettingToWebShellLanguage('russian')).toBe('ru');
@@ -77,6 +100,7 @@ describe('ru locale', () => {
   it('renders goal-card strings in Russian and falls back to EN', () => {
     const t = getTranslator('ru');
     expect(t('goal.blocked')).toBe('Цель заблокирована');
+    expect(t('goal.failed')).toBe('Цель не достигнута');
     expect(t('goal.lastCheck')).toBe('Последняя проверка');
     expect(t('approval.goal.title')).toBe('Подтвердите цель сессии');
     expect(t('goal.turns', { count: 1 })).toBe('1 ход');

@@ -62,7 +62,8 @@ export interface WebShellTranscriptProps {
   blocks: readonly DaemonTranscriptBlock[];
   renderMode?: 'readonly' | 'document';
   theme?: WebShellTheme;
-  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn' | 'ru';
+  /** Any string; normalized the same way as the shell `language` prop. */
+  language?: string;
   className?: string;
   style?: CSSProperties;
   chatMaxWidth?: number;

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { GoalSnapshotV2 } from '@qwen-code/sdk/daemon';
 import { Pause, Pencil, Play, Target, Trash2 } from 'lucide-react';
-import { useI18n } from '../i18n';
+import { toSurfaceLanguage, useI18n } from '../i18n';
 import { formatRuntime } from '../utils/formatRuntime';
 import { formatContextTokens } from '../utils/formatTokenCount';
 import { canResumeGoal } from '../utils/goalGate';
@@ -108,7 +108,7 @@ export function GoalStatusStrip({
       className={styles.root}
       data-testid="goal-status-strip"
       data-web-shell-goal-status=""
-      lang={language === 'ru' ? 'ru' : undefined}
+      lang={toSurfaceLanguage(language)}
     >
       <Target className={styles.target} size={17} aria-hidden="true" />
       <div className={styles.summary}>
@@ -116,13 +116,17 @@ export function GoalStatusStrip({
         <span className={styles.activity}>
           {t(`goal.activity.${snapshot.activity}`)}
         </span>
-        <span className={styles.objective} title={goal.objective}>
+        <span className={styles.objective} title={goal.objective} lang="">
           {goal.objective}
         </span>
         <span className={styles.separator} aria-hidden="true">
           ·
         </span>
-        <span className={styles.elapsed} data-testid="goal-active-elapsed">
+        <span
+          className={styles.elapsed}
+          data-testid="goal-active-elapsed"
+          lang=""
+        >
           {getGoalActiveTimeLabel(goal, getGoalActiveTimeMs(snapshot, now), t)}
         </span>
         {turnLabel ? (

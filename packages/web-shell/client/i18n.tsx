@@ -34,6 +34,13 @@ export const FULL_CATALOG_LANGUAGES: Record<WebShellLanguage, boolean> = {
 export function toDomLanguage(language: WebShellLanguage): string {
   return FULL_CATALOG_LANGUAGES[language] ? language : 'en';
 }
+
+/** Lang for translated chrome. Full catalogs inherit the document root. */
+export function toSurfaceLanguage(
+  language: WebShellLanguage,
+): string | undefined {
+  return FULL_CATALOG_LANGUAGES[language] ? undefined : language;
+}
 type MessageValue =
   | string
   | ((vars?: Record<string, string | number>) => string);
@@ -2325,6 +2332,7 @@ const EN: Messages = {
   'language.current': (v) => `Current UI language: ${v?.language ?? ''}`,
   'language.invalid': 'Invalid language. Available: en, zh-CN, ru',
   'language.options': 'Available options:',
+  'language.partial': 'partial',
   'language.set': 'Set UI language',
   'language.usage': 'Usage: /language ui [en|zh-CN|ru]',
   'localCommand.noSession':
@@ -6492,6 +6500,7 @@ const ZH: Messages = {
   'language.current': (v) => `当前 UI 语言：${v?.language ?? ''}`,
   'language.invalid': '语言无效。可用值：en, zh-CN, ru',
   'language.options': '可用选项：',
+  'language.partial': '部分覆盖',
   'language.set': '设置 UI 语言',
   'language.usage': '用法：/language ui [en|zh-CN|ru]',
   'localCommand.noSession':
@@ -8333,6 +8342,7 @@ function ruPluralForm(
 // The goal card is the first surface shipped for ru (#13391); keys missing
 // here fall back to EN through getTranslator.
 const RU: Messages = {
+  'language.partial': 'частично',
   'approval.goal.title': 'Подтвердите цель сессии',
   'approval.goal.overview': 'Обзор цели',
   'approval.goal.full': 'Полное содержимое',
@@ -8355,7 +8365,7 @@ const RU: Messages = {
   'goal.achieved': 'Цель достигнута',
   'goal.check': 'Проверка цели',
   'goal.cleared': 'Цель очищена',
-  'goal.failed': 'Цель не удалось достичь',
+  'goal.failed': 'Цель не достигнута',
   'goal.judge': 'Оценка',
   'goal.label': 'Цель',
   'goal.lastCheck': 'Последняя проверка',
@@ -8525,8 +8535,34 @@ export function languageSettingToWebShellLanguage(
   return undefined;
 }
 
-export function languageLabel(language: WebShellLanguage): string {
-  return LANGUAGE_LABELS[language];
+export function languageLabel(
+  language: WebShellLanguage,
+  t: (key: string, vars?: Record<string, string | number>) => string = (key) =>
+    getTranslator(language)(key),
+): string {
+  const label = LANGUAGE_LABELS[language];
+  if (FULL_CATALOG_LANGUAGES[language]) return label;
+  return `${label} · ${t('language.partial')}`;
+}
+
+/** `/language ui` argument. Unknown values stay undefined; `normalizeLanguage` would map them to `en`. */
+export function parseUiLanguageArg(
+  value: string,
+): WebShellLanguage | undefined {
+  const normalized = value.trim().toLowerCase().replace(/_/g, '-');
+  if (normalized === 'en') return 'en';
+  if (normalized === 'zh' || normalized === 'zh-cn') return 'zh-CN';
+  if (normalized === 'ru' || normalized.startsWith('ru-')) return 'ru';
+  return undefined;
+}
+
+export function languageOptionLines(
+  t?: (key: string, vars?: Record<string, string | number>) => string,
+): string[] {
+  return WEB_SHELL_LANGUAGES.map((code) => {
+    const name = languageLabel(code, t).replace(/ \[[^\]]+\]/, '');
+    return `  - ${code}: ${name}`;
+  });
 }
 
 export function getTranslator(language: WebShellLanguage) {

@@ -107,6 +107,7 @@ async function mount(
     onOpenSession?: (sessionId: string) => void;
     onError?: (error: unknown, message: string) => void;
     droppedCount?: number;
+    language?: 'en' | 'zh-CN' | 'ru';
   } = {},
 ) {
   actions.listGoals.mockResolvedValue({
@@ -122,7 +123,7 @@ async function mount(
   root = createRoot(container);
   await act(async () => {
     root!.render(
-      <I18nProvider language="en">
+      <I18nProvider language={opts.language ?? 'en'}>
         <GoalsDialog
           onCreateGoal={opts.onCreateGoal ?? vi.fn()}
           onOpenSession={opts.onOpenSession ?? vi.fn()}
@@ -560,6 +561,16 @@ describe('GoalsDialog', () => {
       releases.get('sess-2')?.();
       await Promise.resolve();
     });
+  });
+
+  it('tags the portaled create form with the partial locale', async () => {
+    await mount([], { language: 'ru' });
+    click(findButton('Новая цель'));
+    expect(
+      document
+        .querySelector('[data-slot="dialog-content"]')
+        ?.getAttribute('lang'),
+    ).toBe('ru');
   });
 
   it('rejects an empty condition instead of submitting it', async () => {
