@@ -1917,6 +1917,14 @@ export function convertOpenAIChunkToLlm(
     const toolCallsTruncated = choice.finish_reason
       ? toolCallParser.hasIncompleteToolCalls()
       : false;
+    // The trailing-tag filter stamps this from inside convertOpenAITextToParts,
+    // which runs before tool calls are parsed, so it can only record the tag
+    // name. Fill the count in here, where it exists, so the two writers of one
+    // field agree on its meaning.
+    if (choice.finish_reason && requestContext.protocolTagSanitized) {
+      requestContext.protocolTagSanitized.toolCallCount =
+        completedToolCalls.length;
+    }
     if (
       choice.finish_reason &&
       requestContext.pendingThinkingTagCandidate?.closingTagName

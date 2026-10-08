@@ -428,6 +428,7 @@ describe('OpenAIContentConverter', () => {
           ?.map((part) => part.text ?? '')
           .join(''),
       ).toBe('');
+      expectSanitized(stream, 'thinking', 1);
     });
 
     it('also filters a nonstreaming suffix with no finish reason', () => {
