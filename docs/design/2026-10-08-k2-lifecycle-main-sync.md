@@ -4,11 +4,16 @@
 
 ## Problem and baseline
 
-The private CSI foundation at `4f82b9d597bdc8e2c2bcba1942a344e4273c599b`
-conflicts with main `fe4d4e345` after the Workspace lifecycle L3 change.
-Both change the managed journal, original Runtime admission and publication
-locking. Main also uses migration V51, which collides with an unpublished
-CSI migration. A textual merge alone does not establish compatible behavior.
+The first synchronization integrated private CSI foundation
+`4f82b9d597bdc8e2c2bcba1942a344e4273c599b` with main `fe4d4e345`
+after Workspace lifecycle L3. Both changed the managed journal, original
+Runtime admission and publication locking; main V51 collided with an
+unpublished CSI migration.
+
+The subsequent synchronization integrates private Hosted attachment with main
+`bb213cd05`. Main adds mutation-attempt sequence V52 and ordinary Hosted
+resident recovery. V52 collides again with this Draft's unpublished request-pin
+migration. A textual merge alone does not establish compatible behavior.
 
 ## Decisions and scope
 
@@ -16,57 +21,65 @@ Keep main's lifecycle claim, authorization, settlement and original Hook
 recovery checks. Keep the private CSI original writer, journal admission,
 publication identity and retirement checks. Lifecycle authorization cannot
 replace CSI authority or make ordinary release sufficient for CSI finalization.
-Run the lifecycle dispatch/settlement checks before applying the journal,
-then use the existing CSI-specific application and activation validation for
-an original CSI Session. Refusals retain the enclosing transaction rollback.
+Run lifecycle dispatch/settlement checks before applying the journal, then use
+the CSI-specific application and activation validation for an original Session.
+Refusals retain the enclosing transaction rollback.
 
-Keep both Runtime replacement refusals: a lifecycle recovery cannot replace
-an original Runtime, and an original private CSI request cannot create a
-replacement generation. Preserve both groups of tests and both sets of schema
-columns. Publication admission takes placement before the CSI/retention locks,
-matching the existing placement-before-retention order. Main now requires
-legacy DELETE to wait behind the journal commit too; its entry must acquire
-placement before the Session, preserving main's two committed revisions.
-Keep private CSI CLOSE/DELETE unavailable at persisted-profile admission and
+Keep both Runtime replacement refusals: lifecycle recovery cannot replace an
+original Runtime, and an original private CSI request cannot create a replacement
+generation. Preserve both groups of tests and both sets of schema columns.
+Publication admission takes placement before CSI/retention locks. Legacy DELETE
+waits behind the journal commit and takes placement before the Session.
+Private CSI CLOSE/DELETE remain unavailable at persisted-profile admission and
 capability projection, before writing a lifecycle operation or fence.
 
-Leave main V48–V51 byte-identical. Rename only this Draft's unpublished
-request pin and first activation migrations from V51/V52 to V52/V53, keeping
-their SQL bytes and order. This is not an upgrade path for a shared database
-that already applied the unpublished numbers. Prior local qualification
-schemas were owned and cleaned. Do not rewrite applied history or backfill
-request/activation authority.
+The subsequent integration preserves main's creator/bound-registry checks,
+recorded mutation replay boundary and resident recovery. The private Hosted
+registrar remains before ordinary routes; its case-insensitive owner gate
+includes ordinary sessions and opening sessions. Ordinary recovery never adopts
+a reserved private owner.
 
-The affected layers are the Java managed Session/lifecycle stores, publication
-admission, JDBC Runtime binding/schema and their tests. No new public selector,
-CSI retirement coordinator, physical stop proof or volume reuse is added.
-The Hosted Parts report remains evidence for its original commit; syncing main
-requires fresh checks and does not extend that report to a new build.
+Leave published main V48–V52 byte-identical. The first synchronization renamed
+unpublished CSI V51/V52 to V52/V53; the subsequent one renames only those Draft
+migrations to V53/V54, preserving SQL bytes and order. This is not an upgrade
+path for shared databases that applied unpublished numbers. All prior local
+qualification schemas were owned and cleaned. Never rewrite applied history or
+backfill request/activation authority.
+
+Affected layers are Java managed Session/lifecycle stores, publication admission,
+JDBC binding/schema and tests, plus the ordinary Hosted owner/recovery boundary.
+No new public selector, retirement coordinator, physical stop proof or volume
+reuse is added. Previous reports remain tied to their original inputs; syncing
+main requires fresh checks rather than relabeling those reports.
 
 ## Validation and acceptance
 
-Verify actual Flyway rejects the duplicate V51 before the rename. After the
-rename, check fresh migration and upgrades from main V51 and request-only V52:
-retain prior migration checksums/history and legacy row values, and leave the
-new authority pins NULL. Verify all migration versions are unique.
+The first synchronization reproduced duplicate V51. The subsequent one reproduced
+duplicate V52 using actual Flyway on an immutable merge preview: it rejected both
+V52 resources before creating any PUBLIC tables. Preserve that failure evidence.
 
-Run the affected Runtime Broker and managed Session/lifecycle tests against
-fresh compiled classes. Exercise the original CSI writer and finalization
-refusals, ordinary lifecycle claim/settlement, and original Hook recovery.
-Keep new admission closed during draining; ordinary Workspace deletion must
-not authorize early CSI release. Preserve failures and distinguish isolated
-repeats from a proved cause.
+After renaming, check fresh migration and upgrades from published main V52 and
+request-only V53, as well as earlier supported baselines. Preserve prior migration
+checksums/history, legacy row values and NULL new authority pins. Verify unique
+migration versions and byte equality for published main and renamed CSI SQL.
+
+Run affected Runtime Broker and managed Session/lifecycle tests against fresh
+compiled classes. Exercise original CSI writer/finalization refusals, ordinary
+claim/settlement/replay, creator/grant checks and Hook recovery. Draining remains
+closed to new admission; ordinary deletion never authorizes early CSI release.
+Keep failures and distinguish isolated repeats from a proved cause.
 
 Build, typecheck and bundle the integrated TypeScript tree; run focused Hosted,
-HTTP journal, tool-turn and environment isolation tests. Audit the resolutions
-and automatic merges at the overlapping boundaries. Keep Draft and maintainer
-review requirements. Native review unavailability must be reported without
-substituting a reviewer verdict. CI, local stores and earlier cloud runs do not
-establish complete K2 acceptance.
+HTTP journal, tool-turn and environment isolation tests. Independently exercise
+the actual Java private text entry, integrated Hosted bundle and original SQL
+Store with explicit synthetic/H2/provider seams. Audit manual resolutions and
+automatic merges. Keep Draft and maintainer review. Report native review
+unavailability without substituting a verdict. CI, local stores and earlier
+cloud runs do not establish complete K2 acceptance.
 
 ## Remaining work
 
-The native conversation admission and private producer integration, atomic
-batch reservation/recovery, aggregate DRAINED/RELEASED, physical writers and
-CSI NodeUnpublish, safe volume reuse, public wiring and a fresh full acceptance
-matrix remain separate K2 work tracked in issue 13395.
+Private text attachment is implemented. Native file intent/definition admission,
+atomic batch reservation/recovery, file grant execution, aggregate
+DRAINED/RELEASED, physical writers, CSI NodeUnpublish, safe volume reuse, public
+wiring and a fresh full acceptance matrix remain tracked in issue 13395.

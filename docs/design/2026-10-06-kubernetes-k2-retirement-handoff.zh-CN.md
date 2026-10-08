@@ -116,7 +116,7 @@ Finalization 引用 cut digest；`DRAINED` 引用两者。物理证据引用相�
 读取与创建权限，并使用固定 `csi-files-retirement-tools/1` 与
 `csi-files-retirement-policy/1` 引用。先分配 Session UUID，再导出以 Session 隔离的
 `kubernetes-workspace` request。远端 mount root 来自 registration，不在宿主机解析
-文件系统。V52 增加可空 `runtime_request_key`，不为旧数据回填成功证据；CREATE 将它与
+文件系统。V53 增加可空 `runtime_request_key`，不为旧数据回填成功证据；CREATE 将它与
 `tool_profile=csi-files-retirement/1` 同时插入。
 
 Capability digest 是精确 `CsiFilesRetirementProfile.CAPABILITY_MANIFEST` UTF-8
@@ -221,7 +221,7 @@ workspace 的旧 Session。所有 lifecycle 入口必须在锁定 Session 和检
 随后准入删除。旧 main 仅锁 Session 的删除准入报告保留为历史证据，不能证明新的
 锁序。Session 的 workspace 身份不可变。
 
-在 V53 及独立 JDBC 的 fresh/upgrade schema 中增加可空
+在 V54 及独立 JDBC 的 fresh/upgrade schema 中增加可空
 `first_activation_journal_revision`，不回填 legacy，也不增加调用方可设置的 binding
 字段。在原 SQL 连接上，首个接受在既有 binding/version 条件下将 NULL 固定为精确
 SQL journal revision，并将 `record_version` 增加一次。Resources、journal、head 与
@@ -503,11 +503,12 @@ ACK 或 release receipt。跨 tenant alias 仍在同一 physical key 上串行�
 查询不应要求当前仍为 `DRAINING` holder，但也不能变更新 holder，或为已释放 retirement
 提交新 ACK。缺少原 handle、CREATE 不确定仍阻塞；“没有 handle”不证明从未挂载。
 
-当前同步 main 保留已发布的 V48–V51，包括 Workspace lifecycle V51，将本 Draft
-尚未发布的 Session request 与首次 activation migration 重编号为 V52、V53，
-SQL 字节与顺序不变。新升级检查必须分别从 main V51 和仅 request 的 V52 开始，
-保留 legacy 行及版本，要求 first-activation pin 保持 NULL，不能回填权威。此前
-本地资格验证数据库使用旧 V51/V52 编号，均自有且已清理，其证据仅属于历史提交。
+当前同步 main 保留已发布的 V48–V52，包括 Workspace lifecycle V51 与 mutation
+attempt sequence V52，将本 Draft 尚未发布的 Session request 与首次 activation
+migration 重编号为 V53、V54，SQL 字节与顺序不变。新升级检查必须分别从 main V52
+和仅 request 的 V53 开始，保留 legacy 行及版本，要求 first-activation pin 保持
+NULL，不能回填权威。此前本地资格验证数据库使用 V51/V52 或 V52/V53 编号，均自有
+且已清理，其证据仅属于历史提交。
 这不是使用未发布编号的共享数据库升级，不改写已应用 migration history。
 参见 [lifecycle main 同步设计](2026-10-08-k2-lifecycle-main-sync.zh-CN.md)。
 

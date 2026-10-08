@@ -27,6 +27,7 @@ import org.flywaydb.core.Flyway;
 import org.flywaydb.core.api.MigrationVersion;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
  * The embedded Broker writes through the runtime-broker repositories into
@@ -72,11 +73,16 @@ class RuntimeBrokerFlywaySchemaTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"11", "13", "50", "51"})
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"11", "13", "50", "51", "52", "53"})
     void migrationsPreserveRowsWrittenByOldBinaries(String version) throws SQLException {
         DataSource source = migrate(dataSource(), MigrationVersion.fromVersion(version));
         RuntimeProvisionRequest request = JdbcRepositoryContract.writeLegacyRows(source, "upgrade");
+        var jdbc = new JdbcTemplate(source);
+        var applied = jdbc.queryForList("SELECT * FROM flyway_schema_history ORDER BY installed_rank");
+        int lastRank = jdbc.queryForObject("SELECT MAX(installed_rank) FROM flyway_schema_history", Integer.class);
         migrate(source, MigrationVersion.LATEST);
+        assertThat(jdbc.queryForList("SELECT * FROM flyway_schema_history"
+                + " WHERE installed_rank <= ? ORDER BY installed_rank", lastRank)).isEqualTo(applied);
         JdbcRuntimeBindingRepository bindings = new JdbcRuntimeBindingRepository(source,
                 new AesGcmSecretProtector("key", new byte[32]));
         RuntimeBindingRecord binding = bindings.findOrCreate(request);

@@ -140,7 +140,7 @@ creation requires matching registered storage, ACTIVE Workspace, read/create
 permission, and fixed `csi-files-retirement-tools/1` and
 `csi-files-retirement-policy/1` references. The Session UUID is allocated before
 deriving its Session-isolated `kubernetes-workspace` request. Its remote mount
-root comes from the registration, without host filesystem resolution. V52 adds
+root comes from the registration, without host filesystem resolution. V53 adds
 nullable `runtime_request_key` with no legacy evidence backfill; the CREATE
 inserts it alongside `tool_profile=csi-files-retirement/1`.
 The first profile only accepts Workspace root selection (`cwdRelative="."`).
@@ -280,7 +280,7 @@ admission; its revision and task projection persist. Earlier reports for the
 previous main's Session-only deletion admission remain historical and do not
 establish the new ordering. Session workspace identity is immutable.
 
-Install V53 and the standalone JDBC fresh/upgrade schema with a nullable
+Install V54 and the standalone JDBC fresh/upgrade schema with a nullable
 `first_activation_journal_revision`, without legacy backfill or a caller-settable
 binding field. On the same original SQL connection, first acceptance changes
 NULL to the exact SQL journal revision and increments `record_version` once,
@@ -667,14 +667,14 @@ volume now belongs to someone else. Historical lookup must not require current
 for a released retirement. Missing original handles and ambiguous CREATE remain
 blocked; “no handle” is not proof that no mount existed.
 
-The current main synchronization keeps published migrations V48–V51 unchanged,
-including the Workspace lifecycle V51, and renumbers this Draft's unpublished
-Session request and first activation migrations to V52 and V53. Their SQL bytes
-and ordering do not change. Fresh upgrade checks must start from main V51 and
-request-only V52, retain legacy rows and versions, and require a NULL
-first-activation pin rather than backfilling authority. Earlier local
-qualification databases used the previous V51/V52 numbering and were owned and
-cleaned; their evidence is historical. This is not a shared database upgrade
+The current main synchronization keeps published migrations V48–V52 unchanged,
+including Workspace lifecycle V51 and mutation-attempt sequence V52, and
+renumbers this Draft's unpublished Session request and first activation
+migrations to V53 and V54. Their SQL bytes and ordering do not change. Fresh
+upgrade checks must start from main V52 and request-only V53, retain legacy rows
+and versions, and require a NULL first-activation pin rather than backfilling
+authority. Earlier local qualification databases used V51/V52 or V52/V53
+numbering and were owned and cleaned; their evidence is historical. This is not a shared database upgrade
 from unpublished versions and does not rewrite applied migration history.
 See the [lifecycle main synchronization design](2026-10-08-k2-lifecycle-main-sync.md).
 
