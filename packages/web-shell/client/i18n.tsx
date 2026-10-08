@@ -5,6 +5,11 @@ import {
   type PropsWithChildren,
 } from 'react';
 
+import {
+  TRAJECTORY_FILTER_MESSAGES_EN,
+  TRAJECTORY_FILTER_MESSAGES_ZH,
+} from './trajectory/filter-messages.js';
+
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
 import {
   COLLAB_MESSAGES_EN,
@@ -4286,6 +4291,7 @@ const EN: Messages = {
   ...LIVE_MESSAGES_EN,
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
+  ...TRAJECTORY_FILTER_MESSAGES_EN,
 };
 
 const ZH: Messages = {
@@ -8297,6 +8303,7 @@ const ZH: Messages = {
   ...LIVE_MESSAGES_ZH,
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
+  ...TRAJECTORY_FILTER_MESSAGES_ZH,
 };
 
 const MESSAGES: Record<WebShellLanguage, Messages> = {
