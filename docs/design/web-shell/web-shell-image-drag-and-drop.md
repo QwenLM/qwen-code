@@ -644,7 +644,7 @@ BMP 的下游回归不只停在 mock HTTP 入参：在既有 ACP session prompt 
 已有结构化 `413` 测试，Core 已有 inline-media within/over limit 测试；本功能不复制
 production 限制，只确认 Web Shell 对这些既有失败语义的状态保留。
 
-Playwright CI 当前只安装 Chromium，因此 issue 中报告的 Linux Firefox 场景采用明确的
+Playwright CI 当前安装 Chromium 与 WebKit（仍无 Firefox 项目），因此 issue 中报告的 Linux Firefox 场景采用明确的
 人工验收：从文件管理器拖入 PNG、BMP、多图、混合非法文件，并验证页面不跳转、顺序、
 预览、删除和发送。后续若仓库统一增加 Firefox browser matrix，再把该用例加入自动化，
 本功能不单独扩大整个 Web Shell CI 浏览器安装范围。

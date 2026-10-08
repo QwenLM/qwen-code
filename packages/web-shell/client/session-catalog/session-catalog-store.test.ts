@@ -9,6 +9,8 @@ import {
   SESSION_CATALOG_RETENTION_MS,
   SessionCatalogStore,
   getSessionCatalogQueryKey,
+  loadSessionCatalogOnce,
+  peekSessionCatalogDisplayName,
   type SessionCatalogQuery,
 } from './session-catalog-store';
 
@@ -116,6 +118,148 @@ describe('SessionCatalogStore', () => {
         }),
       );
     }
+  });
+
+  it('peeks a cached display name without scheduling a request', async () => {
+    const response = deferred<DaemonSessionListPage>();
+    legacy.mockReturnValue(response.promise);
+    const target = query('/work');
+    const unsubscribe = store.subscribe(target, vi.fn(), { autoLoad: true });
+    response.resolve({
+      ...page('s1'),
+      sessions: [
+        {
+          sessionId: 's1',
+          workspaceCwd: '/work',
+          displayName: 'Fix the header',
+        },
+      ],
+    });
+    await vi.runAllTimersAsync();
+    unsubscribe();
+
+    legacy.mockClear();
+    const timersBefore = vi.getTimerCount();
+    expect(store.peekSessionDisplayName('s1', '/work')).toBe('Fix the header');
+    // "Without scheduling a request" means no request AND no timer: a trailing
+    // refresh would only fire on a later tick, so check both before and after
+    // letting the timers run.
+    expect(vi.getTimerCount()).toBe(timersBefore);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(legacy).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'peeks the most recently refreshed title regardless of query insertion order (reversed: %s)',
+    async (reversed) => {
+      const legacyQuery = query('/work');
+      const qualifiedQuery = query('/work', 'qualified');
+      for (const target of reversed
+        ? [qualifiedQuery, legacyQuery]
+        : [legacyQuery, qualifiedQuery]) {
+        store.getSnapshot(target);
+      }
+      legacy.mockResolvedValue({
+        ...page('s1'),
+        sessions: [
+          { sessionId: 's1', workspaceCwd: '/work', displayName: 'Old' },
+        ],
+      });
+      await store.loadOnce(legacyQuery);
+      await vi.advanceTimersByTimeAsync(1);
+      qualified.mockResolvedValue({
+        ...page('s1'),
+        sessions: [
+          { sessionId: 's1', workspaceCwd: '/work', displayName: 'New' },
+        ],
+      });
+      await store.loadOnce(qualifiedQuery);
+      expect(store.peekSessionDisplayName('s1', '/work')).toBe('New');
+
+      await vi.advanceTimersByTimeAsync(1);
+      legacy.mockResolvedValue({
+        ...page('s1'),
+        sessions: [
+          { sessionId: 's1', workspaceCwd: '/work', displayName: 'Newest' },
+        ],
+      });
+      await store.loadOnce(legacyQuery, { fresh: true });
+      expect(store.peekSessionDisplayName('s1', '/work')).toBe('Newest');
+    },
+  );
+
+  it('peeks by workspace and ignores blank or unknown names', async () => {
+    const response = deferred<DaemonSessionListPage>();
+    legacy.mockReturnValue(response.promise);
+    const unsubscribe = store.subscribe(query('/work'), vi.fn(), {
+      autoLoad: true,
+    });
+    response.resolve({
+      ...page('s1'),
+      sessions: [
+        { sessionId: 's1', workspaceCwd: '/work', displayName: 'Named' },
+        { sessionId: 's2', workspaceCwd: '/work', displayName: '   ' },
+      ],
+    });
+    await vi.runAllTimersAsync();
+    unsubscribe();
+
+    expect(store.peekSessionDisplayName('s1', '/work')).toBe('Named');
+    expect(store.peekSessionDisplayName('s2', '/work')).toBeUndefined();
+    expect(store.peekSessionDisplayName('missing', '/work')).toBeUndefined();
+    // A same-id session in another workspace must not answer.
+    expect(store.peekSessionDisplayName('s1', '/other')).toBeUndefined();
+    expect(store.peekSessionDisplayName('s1', undefined)).toBeUndefined();
+  });
+
+  it('does not answer with a row from another workspace', async () => {
+    const response = deferred<DaemonSessionListPage>();
+    legacy.mockReturnValue(response.promise);
+    const unsubscribe = store.subscribe(query('/work'), vi.fn(), {
+      autoLoad: true,
+    });
+    response.resolve({
+      ...page('foreign'),
+      sessions: [
+        {
+          sessionId: 'foreign',
+          workspaceCwd: '/elsewhere',
+          displayName: 'Foreign title',
+        },
+        { sessionId: 'bare', displayName: 'Row without a workspace' },
+      ],
+    });
+    await vi.runAllTimersAsync();
+    unsubscribe();
+
+    // A page for one workspace can carry rows from another (the daemon merges
+    // live runtime state); they must not name a session here.
+    expect(store.peekSessionDisplayName('foreign', '/work')).toBeUndefined();
+    expect(store.peekSessionDisplayName('bare', '/work')).toBe(
+      'Row without a workspace',
+    );
+  });
+
+  it('delegates the exported peek to the client store', async () => {
+    const client = {
+      listWorkspaceSessionsPage: vi.fn().mockResolvedValue({
+        ...page('s1'),
+        sessions: [
+          { sessionId: 's1', workspaceCwd: '/work', displayName: 'Named' },
+        ],
+      }),
+      workspaceByCwd: vi.fn(),
+    } as unknown as DaemonClient;
+    const loaded = loadSessionCatalogOnce(client, query('/work'));
+    // Only the zero-delay load schedule may run: `runAllTimersAsync` would
+    // also fire the retention cleanup and drop the entry this peeks at.
+    await vi.advanceTimersByTimeAsync(0);
+    await loaded;
+
+    expect(peekSessionCatalogDisplayName(client, 's1', '/work')).toBe('Named');
+    expect(
+      peekSessionCatalogDisplayName(client, undefined, '/work'),
+    ).toBeUndefined();
   });
 
   it('shares an automatic request and preserves page metadata', async () => {
@@ -925,7 +1069,7 @@ describe('SessionCatalogStore', () => {
     ).toEqual(['pinned', 'a', 'b']);
   });
 
-  it('records, snapshots, and resolves pending session activity', () => {
+  it('records, snapshots, and resolves pending session activity', async () => {
     const wake = vi.fn();
     const stopWake = store.onLiveStateWake(wake);
 
@@ -954,6 +1098,7 @@ describe('SessionCatalogStore', () => {
     // Releasing the last live-state user drops pending completions.
     store.recordSessionActivity('/work', 'b');
     releaseLiveState();
+    await Promise.resolve();
     expect(store.snapshotSessionActivity('/work')).toBeUndefined();
     stopWake();
   });
@@ -1820,6 +1965,41 @@ describe('SessionCatalogStore live-session snapshots (#9487)', () => {
     vi.useRealTimers();
   });
 
+  it('publishes background execution changes while the session remains busy', () => {
+    const first = {
+      turnId: 'auto-1',
+      taskId: 'task-1',
+      kind: 'agent' as const,
+      startedAt: 100,
+    };
+    store.applyLiveState('/work', [
+      { ...live('session', true), backgroundTurn: first },
+    ]);
+    const observer = vi.fn();
+    const unsubscribe = store.subscribeLiveSessionObservations(
+      '/work',
+      observer,
+    );
+    const second = {
+      ...first,
+      turnId: 'auto-2',
+      taskId: 'task-2',
+      startedAt: 200,
+    };
+    store.applyLiveState('/work', [
+      { ...live('session', true), backgroundTurn: second },
+    ]);
+    expect(store.getLiveSession('/work', 'session')?.backgroundTurn).toEqual(
+      second,
+    );
+    expect(observer).toHaveBeenCalled();
+    store.applyLiveState('/work', [live('session', false)]);
+    expect(
+      store.getLiveSession('/work', 'session')?.backgroundTurn,
+    ).toBeUndefined();
+    unsubscribe();
+  });
+
   it('answers per-session lookups independently of any loaded page', () => {
     expect(store.hasLiveSessions('/work')).toBe(false);
     expect(store.getLiveSession('/work', 'off-page')).toBeUndefined();
@@ -1835,26 +2015,54 @@ describe('SessionCatalogStore live-session snapshots (#9487)', () => {
     expect(store.getLiveSession('/work', 'unknown')).toBeUndefined();
   });
 
-  it('notifies live-session subscribers only when volatile state changes', () => {
+  it('separates content changes from fresh live-state observations', () => {
     const listener = vi.fn();
+    const observationListener = vi.fn();
     const unsubscribe = store.subscribeLiveSessions('/work', listener);
+    const unsubscribeObservations = store.subscribeLiveSessionObservations(
+      '/work',
+      observationListener,
+    );
 
     store.applyLiveState('/work', [live('s1', true)]);
     expect(listener).toHaveBeenCalledTimes(1);
+    expect(observationListener).toHaveBeenCalledTimes(1);
 
-    // The 2s poll cadence keeps re-applying identical state: no churn.
+    // Identical polls do not churn content readers, but still advance the
+    // freshness signal used by session ownership handoffs.
     store.applyLiveState('/work', [live('s1', true)]);
     expect(listener).toHaveBeenCalledTimes(1);
+    expect(observationListener).toHaveBeenCalledTimes(2);
 
     store.applyLiveState('/work', [live('s1', false)]);
     expect(listener).toHaveBeenCalledTimes(2);
+    expect(observationListener).toHaveBeenCalledTimes(3);
 
     unsubscribe();
+    unsubscribeObservations();
     store.applyLiveState('/work', [live('s1', true)]);
     expect(listener).toHaveBeenCalledTimes(2);
+    expect(observationListener).toHaveBeenCalledTimes(3);
   });
 
-  it('drops the snapshot when the last live-state retainer releases', () => {
+  it('publishes background activity changes while the main prompt remains idle', () => {
+    store.applyLiveState('/work', [
+      { ...live('s1', false), hasRunningBackgroundTasks: true },
+    ]);
+    const listener = vi.fn();
+    const unsubscribe = store.subscribeLiveSessions('/work', listener);
+    store.applyLiveState('/work', [
+      { ...live('s1', false), hasRunningBackgroundTasks: false },
+    ]);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(store.getLiveSession('/work', 's1')).toMatchObject({
+      hasActivePrompt: false,
+      hasRunningBackgroundTasks: false,
+    });
+    unsubscribe();
+  });
+
+  it('drops the snapshot when the last live-state retainer releases', async () => {
     const release = store.retainWorkspaceLiveState('/work');
     store.applyLiveState('/work', [live('s1', true)]);
     const listener = vi.fn();
@@ -1862,9 +2070,29 @@ describe('SessionCatalogStore live-session snapshots (#9487)', () => {
 
     release();
 
+    expect(store.hasLiveSessions('/work')).toBe(true);
+    await Promise.resolve();
     expect(store.hasLiveSessions('/work')).toBe(false);
     expect(store.getLiveSession('/work', 's1')).toBeUndefined();
     expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it('keeps the snapshot during a same-tick live-state owner handoff', async () => {
+    const releaseFirst = store.retainWorkspaceLiveState('/work');
+    store.applyLiveState('/work', [live('s1', true)]);
+    const listener = vi.fn();
+    const unsubscribe = store.subscribeLiveSessions('/work', listener);
+
+    releaseFirst();
+    const releaseSecond = store.retainWorkspaceLiveState('/work');
+    await Promise.resolve();
+
+    expect(store.getLiveSession('/work', 's1')).toEqual(live('s1', true));
+    expect(listener).not.toHaveBeenCalled();
+
+    releaseSecond();
+    await Promise.resolve();
     unsubscribe();
   });
 });

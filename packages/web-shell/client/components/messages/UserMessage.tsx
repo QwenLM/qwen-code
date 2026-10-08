@@ -1,5 +1,4 @@
 import {
-  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -7,13 +6,18 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from 'react';
-import { CalendarClockIcon, PencilIcon, RefreshCwIcon } from 'lucide-react';
+import { CalendarClockIcon, RefreshCwIcon } from 'lucide-react';
 import { FileTypeIcon } from '../FileTypeIcon';
+import { FileAttachmentContent } from '../FileAttachmentContent';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
+  getComposerTagDisplay,
   getComposerTagIconUrl,
+  getComposerTagLabel,
+  getComposerTagValue,
   getComposerTagViewModel,
   isBuiltinComposerTagIconUrl,
   isPreviewableFileComposerTag,
@@ -22,6 +26,7 @@ import {
 } from '../../utils/composerTag';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from './Markdown';
+import { LinkifiedText } from './LinkifiedText';
 import { useWebShellCustomization } from '../../customization';
 import type {
   ComposerTagClickHandler,
@@ -29,13 +34,14 @@ import type {
   WebShellComposerTag,
   WebShellComposerTagIconMap,
 } from '../../customization';
-import type { AttachmentPreviewRequest } from '../../adapters/messageTypes';
-import {
-  getComposerTagDisplay,
-  getComposerTagLabel,
-  getComposerTagValue,
-} from '../../hooks/useComposerCore';
+import type {
+  AttachmentPreviewRequest,
+  DaemonMessageAuthor,
+} from '../../adapters/messageTypes';
+import { AuthorAvatar } from './AuthorAvatar';
+import type { ImageTabSource } from '../artifacts/ArtifactPanel';
 import { useI18n } from '../../i18n';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { cssUrlVar } from '../../utils/cssUrlVar';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './UserMessage.module.css';
@@ -43,6 +49,7 @@ import styles from './UserMessage.module.css';
 interface UserMessageImage {
   data: string;
   mimeType: string;
+  attachmentId?: string;
 }
 
 interface UserMessageFile {
@@ -61,10 +68,18 @@ interface UserMessageProps {
   isLocateFlashing?: boolean;
   sendFailed?: boolean;
   onRetrySend?: () => void;
-  onEdit?: () => void;
+  /** Render the message as an in-place editor instead of rendered content. */
+  editing?: boolean;
+  /** The edited text is being sent; the editor stays open and inert. */
+  submittingEdit?: boolean;
+  /** Submit trimmed text; attachment-only messages may have empty text. */
+  onEditSubmit?: (content: string) => void;
+  onEditCancel?: () => void;
   /** Click an uploaded image to preview it in the right panel. */
-  onImagePreview?: (src: string, alt?: string) => void;
+  onImagePreview?: (src: string, alt?: string, source?: ImageTabSource) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
+  /** Set when a workspace agent, not the user, posted this message. */
+  author?: DaemonMessageAuthor;
 }
 
 interface ScheduledTaskRunContent {
@@ -157,7 +172,9 @@ function ScheduledTaskRunMessage({ run }: { run: ScheduledTaskRunContent }) {
       <div className={styles.scheduledTaskId}>
         {t('scheduledTasks.runContext.taskId')}: <code>{run.id}</code>
       </div>
-      <div className={styles.scheduledTaskPrompt}>{run.prompt}</div>
+      <div className={styles.scheduledTaskPrompt}>
+        <LinkifiedText text={run.prompt} />
+      </div>
     </div>
   );
 }
@@ -189,7 +206,7 @@ function DefaultUserMessageContent({
     <>
       {segments.map((segment, index) =>
         segment.type === 'text' ? (
-          <Fragment key={index}>{segment.text}</Fragment>
+          <LinkifiedText key={index} text={segment.text} />
         ) : (
           <ReadonlyComposerTag
             composerTagIcons={composerTagIcons}
@@ -221,11 +238,16 @@ export const UserMessage = memo(function UserMessage({
   isLocateFlashing = false,
   sendFailed = false,
   onRetrySend,
-  onEdit,
+  editing = false,
+  submittingEdit = false,
+  onEditSubmit,
+  onEditCancel,
   onImagePreview,
   onAttachmentPreview,
+  author,
 }: UserMessageProps) {
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const {
     parseUserMessageContent,
     renderUserMessageContent,
@@ -237,6 +259,35 @@ export const UserMessage = memo(function UserMessage({
   const contentRef = useRef<HTMLDivElement>(null);
   const [expanded, setExpanded] = useState(false);
   const [heightOverflowing, setHeightOverflowing] = useState(false);
+  // The draft lives here so opening the editor always starts from the message
+  // as recorded, not from a stale keystroke the user cancelled earlier.
+  const [draft, setDraft] = useState(content);
+  useEffect(() => {
+    if (editing) setDraft(content);
+  }, [editing, content]);
+  const submitEdit = useCallback(() => {
+    const next = draft.trim();
+    if ((!next && !images?.length && !files?.length) || submittingEdit) return;
+    onEditSubmit?.(next);
+  }, [draft, files?.length, images?.length, onEditSubmit, submittingEdit]);
+  const handleEditKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+      if (submittingEdit) return;
+      // An IME candidate window owns Enter and Escape while composing.
+      if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)
+        return;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onEditCancel?.();
+        return;
+      }
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        submitEdit();
+      }
+    },
+    [onEditCancel, submitEdit, submittingEdit],
+  );
   const handleComposerTagClick = useCallback<ComposerTagClickHandler>(
     (info) => {
       if (isPreviewableFileComposerTag(info.tag)) {
@@ -286,9 +337,11 @@ export const UserMessage = memo(function UserMessage({
       parseUserMessageContent,
       '[WebShell] failed to parse user message content',
     );
-    if (!parts) return content;
+    if (!parts) return <LinkifiedText text={content} />;
     return parts.map((part, index) => {
-      if (part.type === 'text') return part.text;
+      if (part.type === 'text') {
+        return <LinkifiedText key={index} text={part.text} />;
+      }
       return (
         <ReadonlyComposerTag
           key={`${part.tag.id}-${index}`}
@@ -330,7 +383,9 @@ export const UserMessage = memo(function UserMessage({
   useLayoutEffect(() => {
     setExpanded(false);
     measureOverflow();
-  }, [content, images?.length, measureOverflow]);
+    // `editing` is a dep so leaving the editor re-measures the re-shown
+    // content: it is `hidden` while editing, which reads as zero height.
+  }, [content, images?.length, editing, measureOverflow]);
 
   useEffect(() => {
     const el = contentRef.current;
@@ -349,6 +404,12 @@ export const UserMessage = memo(function UserMessage({
             : ''
         }`}
       >
+        {author && (
+          <div className={styles.author}>
+            <AuthorAvatar name={author.name} color={author.color} />
+            <span className={styles.authorName}>{author.name}</span>
+          </div>
+        )}
         {images && images.length > 0 && (
           <div className={styles.chatImages} data-web-shell-user-images>
             {images.map((img, index) => {
@@ -370,6 +431,12 @@ export const UserMessage = memo(function UserMessage({
                           onImagePreview(
                             src,
                             t('user.uploadedImage', { index: index + 1 }),
+                            img.attachmentId
+                              ? {
+                                  kind: 'attachment',
+                                  attachmentId: img.attachmentId,
+                                }
+                              : undefined,
                           )
                       : undefined
                   }
@@ -408,20 +475,16 @@ export const UserMessage = memo(function UserMessage({
                     }
                   }}
                 >
-                  <FileTypeIcon
+                  <FileAttachmentContent
                     name={file.name}
                     mimeType={file.mimeType}
-                    size={16}
-                    className={styles.chatFileIcon}
-                    aria-hidden="true"
                   />
-                  <span className={styles.chatFileName}>{file.name}</span>
                 </span>
               );
             })}
           </div>
         )}
-        {content.trim().length > 0 && (
+        {(content.trim().length > 0 || editing) && (
           <div
             className={`${styles.chatBubble}${
               scheduledTaskRun ? ` ${styles.scheduledTaskBubble}` : ''
@@ -431,14 +494,51 @@ export const UserMessage = memo(function UserMessage({
             <div
               ref={contentRef}
               className={`${styles.chatContent} ${
-                heightOverflowing && !expanded
+                heightOverflowing && !documentMode && !expanded
                   ? styles.chatContentCollapsed
                   : ''
               }`}
+              hidden={editing}
             >
               {renderedContent}
             </div>
-            {heightOverflowing && (
+            {editing && (
+              <div className={styles.editArea}>
+                <textarea
+                  className={styles.editInput}
+                  value={draft}
+                  onChange={(event) => setDraft(event.target.value)}
+                  onKeyDown={handleEditKeyDown}
+                  aria-label={t('userMessage.edit')}
+                  readOnly={submittingEdit}
+                  autoFocus
+                />
+                <div className={styles.editActions}>
+                  <button
+                    type="button"
+                    className={styles.editCancel}
+                    onClick={onEditCancel}
+                    disabled={submittingEdit}
+                  >
+                    {t('common.cancel')}
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.editSubmit}
+                    onClick={submitEdit}
+                    disabled={
+                      submittingEdit ||
+                      (!draft.trim() && !images?.length && !files?.length)
+                    }
+                  >
+                    {submittingEdit
+                      ? t('userMessage.editSending')
+                      : t('userMessage.editSubmit')}
+                  </button>
+                </div>
+              </div>
+            )}
+            {heightOverflowing && !documentMode && !editing && (
               <button
                 type="button"
                 className={styles.toggleButton}
@@ -482,17 +582,6 @@ export const UserMessage = memo(function UserMessage({
               <span>{t('common.retry')}</span>
             </button>
           </div>
-        )}
-        {onEdit && (
-          <button
-            type="button"
-            className={styles.editButton}
-            onClick={onEdit}
-            aria-label="Edit message"
-            title="Edit message"
-          >
-            <PencilIcon aria-hidden="true" />
-          </button>
         )}
       </div>
     </div>
@@ -577,13 +666,22 @@ export function ReadonlyComposerTag({
     >
       {custom ?? (
         <>
-          {safeIconUrl && (
+          {isPreviewableFileComposerTag(tag) &&
+          !tag.icon &&
+          safeIconUrl === getComposerTagIconUrl('file') ? (
+            <FileTypeIcon
+              name={tagValue}
+              size={16}
+              className={styles.fileTagIcon}
+              aria-hidden="true"
+            />
+          ) : safeIconUrl ? (
             <span
               className={styles.messageTagIcon}
               style={cssUrlVar('--user-message-tag-icon-url', safeIconUrl)}
               aria-hidden="true"
             />
-          )}
+          ) : null}
           {tagLabel && (
             <span className={styles.messageTagLabel}>{tagLabel}</span>
           )}

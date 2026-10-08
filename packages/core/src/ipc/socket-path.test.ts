@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as os from 'node:os';
 import {
   isLocalIpcPath,
+  resolvePeerSocketCandidates,
   MAX_SOCKET_PATH_BYTES,
   resolvePeerSocketPath,
 } from './socket-path.js';
@@ -21,6 +22,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // packages/core's vitest config does not set `unstubEnvs`, so a test
+  // that throws before its own cleanup would otherwise leak its stubs.
+  vi.unstubAllEnvs();
   if (originalRuntimeDir === undefined) {
     delete process.env['XDG_RUNTIME_DIR'];
   } else {
@@ -102,5 +106,68 @@ describe('isLocalIpcPath', () => {
     expect(isLocalIpcPath('')).toBe(false);
     expect(isLocalIpcPath(undefined as unknown as string)).toBe(false);
     expect(isLocalIpcPath(42 as unknown as string)).toBe(false);
+  });
+});
+
+describe.skipIf(isWindows)('resolvePeerSocketCandidates', () => {
+  it('lists the runtime directory first, then a nonce directory under tmpdir, then /tmp', () => {
+    vi.stubEnv('XDG_RUNTIME_DIR', '/run/user/1000');
+    vi.stubEnv('TMPDIR', '/var/tmp');
+    try {
+      const candidates = resolvePeerSocketCandidates(42);
+      expect(candidates[0]).toBe('/run/user/1000/qwen-socks/42.sock');
+      expect(candidates[1]).toMatch(
+        /^\/var\/tmp\/qwen-socks-[0-9a-f]{16}\/42\.sock$/,
+      );
+      expect(candidates[2]).toMatch(
+        /^\/tmp\/qwen-socks-[0-9a-f]{16}\/42\.sock$/,
+      );
+      // The same nonce for both fallbacks: one session, one directory name.
+      expect(candidates[1]!.split('/')[3]).toBe(candidates[2]!.split('/')[2]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('drops candidates that cannot fit in sun_path', () => {
+    vi.stubEnv('XDG_RUNTIME_DIR', '/' + 'r'.repeat(120));
+    vi.stubEnv('TMPDIR', undefined);
+    try {
+      const candidates = resolvePeerSocketCandidates(42);
+      expect(candidates.some((c) => c.startsWith('/rrr'))).toBe(false);
+      expect(candidates.every((c) => Buffer.byteLength(c) <= 103)).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('deduplicates the /tmp fallback', () => {
+    // TMPDIR is named, not unset: deleting it does not make os.tmpdir()
+    // return /tmp, it only moves libuv on to TMP, then TEMP. A shell
+    // exporting either (Nix and Guix shells, some container images) would
+    // yield three distinct candidates and fail this assertion without any
+    // change to the resolver. Construct the duplicate rather than hope
+    // the environment supplies it.
+    vi.stubEnv('XDG_RUNTIME_DIR', '/run/user/1000');
+    vi.stubEnv('TMPDIR', '/tmp');
+    try {
+      const candidates = resolvePeerSocketCandidates(42);
+      expect(candidates).toHaveLength(2);
+      expect(new Set(candidates).size).toBe(candidates.length);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('drops an over-long temp-dir candidate and keeps the short /tmp one', () => {
+    vi.stubEnv('XDG_RUNTIME_DIR', undefined);
+    vi.stubEnv('TMPDIR', '/' + 't'.repeat(200));
+    try {
+      const candidates = resolvePeerSocketCandidates(42);
+      expect(candidates).toHaveLength(1);
+      expect(candidates.at(-1)).toMatch(/^\/tmp\/qwen-socks-/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

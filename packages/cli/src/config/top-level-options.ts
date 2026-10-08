@@ -46,6 +46,7 @@ const APPROVAL_MODE_DESCRIPTIONS: Record<`${ApprovalMode}`, string> = {
 
 const AUTH_TYPE_CHOICES = [
   'openai',
+  'openai-responses',
   'anthropic',
   'qwen-oauth',
   'gemini',
@@ -58,6 +59,7 @@ const AUTH_TYPE_CHOICES = [
 // runtime; exported only so noUnusedLocals preserves the witness.
 export const AUTH_TYPE_PARITY_WITNESS: Record<`${CoreAuthType}`, true> = {
   openai: true,
+  'openai-responses': true,
   anthropic: true,
   'qwen-oauth': true,
   gemini: true,
@@ -185,6 +187,11 @@ export const DEFAULT_COMMAND_OPTIONS = {
     type: 'string' as const,
     description: 'Model',
   },
+  advisor: {
+    type: 'string' as const,
+    description:
+      'Advisor model selector for this session. Use "off" to disable native Advisor for this run.',
+  },
   'fallback-model': {
     type: 'array' as const,
     description:
@@ -210,10 +217,24 @@ export const DEFAULT_COMMAND_OPTIONS = {
     description:
       'Append instructions to the main session system prompt for this run. Can be combined with --system-prompt.',
   },
+  'output-style': {
+    type: 'string' as const,
+    description:
+      'Output style for this run, for example "Concise" or "Explanatory". Overrides the general.outputStyle setting; "default" selects no style.',
+  },
   sandbox: {
     alias: 's',
-    type: 'boolean' as const,
-    description: 'Run in sandbox?',
+    type: 'string' as const,
+    coerce: (raw: string | boolean | Array<string | boolean>) => {
+      const value = Array.isArray(raw) ? raw.at(-1) : raw;
+      if (typeof value === 'boolean') return value;
+      const selection = (value ?? '').trim().toLowerCase();
+      if (['', 'true', '1'].includes(selection)) return true;
+      if (['false', '0'].includes(selection)) return false;
+      return selection;
+    },
+    description:
+      'Run in a sandbox: true, false, docker, podman, sandbox-exec. Use --sandbox -p <prompt> for automatic selection.',
   },
   'sandbox-image': {
     type: 'string' as const,
@@ -417,7 +438,8 @@ export const DEFAULT_COMMAND_OPTIONS = {
       'Slash command names to hide/disable (comma-separated or ' +
       'repeated). Merged with the `slashCommands.disabled` setting ' +
       'and QWEN_DISABLED_SLASH_COMMANDS. Matched case-insensitively ' +
-      'against the final command name.',
+      'against the final command name; a skill command matches under ' +
+      'its registered name (rust:pdf) or its authored name (pdf).',
   },
   'auth-type': {
     type: 'string' as const,

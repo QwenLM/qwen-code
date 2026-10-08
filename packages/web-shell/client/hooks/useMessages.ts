@@ -11,17 +11,25 @@ import {
   useTranscriptBlocks,
   useWorkspace,
 } from '@qwen-code/web-shell/daemon-react-sdk';
-import { transcriptBlocksToDaemonMessages } from '../adapters/transcriptToMessages';
+import {
+  transcriptBlocksToLocalizedMessages,
+  type Translator,
+} from '../adapters/localizedMessages';
 import type { Message } from '../adapters/types';
 import {
   isActiveToolStatus,
   isBackgroundSubAgentToolCall,
+  isTerminalBackgroundAgentStatus,
+  projectTerminalBackgroundAgentTool,
 } from '../adapters/toolClassification';
 
-type Translator = (
-  key: string,
-  vars?: Record<string, string | number>,
-) => string;
+// Re-exported for existing callers. The projection itself lives in a leaf module
+// so the read-only transcript entry does not pull this file's daemon imports —
+// see adapters/localizedMessages.ts.
+export {
+  transcriptBlocksToLocalizedMessages,
+  type Translator,
+} from '../adapters/localizedMessages';
 
 const BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS = 3_000;
 const BACKGROUND_AGENT_RECONCILIATION_RETRY_MAX_MS = 60_000;
@@ -62,20 +70,6 @@ interface ReconciliationRound {
   errors: ReadonlyArray<{ callId: string; error: unknown }>;
   notFounds: ReadonlyArray<string>;
   succeeded: ReadonlyArray<string>;
-}
-
-export function transcriptBlocksToLocalizedMessages(
-  blocks: readonly DaemonTranscriptBlock[],
-  t: Translator,
-): Message[] {
-  return transcriptBlocksToDaemonMessages(blocks, {
-    labels: {
-      promptCancelled: t('request.cancelled'),
-      branchSuccess: (name) => t('branch.success', { name }),
-      modelStreamInterrupted: t('error.modelStreamInterrupted'),
-      loopDetected: t('error.loopDetected'),
-    },
-  });
 }
 
 function reuseUnchangedProjectedPrefix(
@@ -247,15 +241,6 @@ export function projectStreamingTailMessages(
   return messages;
 }
 
-function isTerminalBackgroundAgentStatus(status: string): boolean {
-  return (
-    status === 'completed' ||
-    status === 'failed' ||
-    status === 'cancelled' ||
-    status === 'canceled'
-  );
-}
-
 function getRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -361,30 +346,18 @@ export function reconcileBackgroundAgentResolutions(
       ) {
         return tool;
       }
+      const endTime =
+        tool.startTime !== undefined
+          ? tool.startTime + (resolution.durationMs ?? 0)
+          : undefined;
+      const reconciledTool = projectTerminalBackgroundAgentTool(
+        tool,
+        resolution.status,
+        endTime,
+      );
+      if (reconciledTool === tool) return tool;
       toolsChanged = true;
-      const cancelled =
-        resolution.status === 'cancelled' || resolution.status === 'canceled';
-      const status: typeof tool.status =
-        resolution.status === 'failed' ? 'failed' : 'completed';
-      return {
-        ...tool,
-        status,
-        ...(tool.startTime !== undefined
-          ? { endTime: tool.startTime + (resolution.durationMs ?? 0) }
-          : {}),
-        ...(cancelled
-          ? {
-              rawOutput: {
-                ...(typeof tool.rawOutput === 'object' &&
-                tool.rawOutput !== null &&
-                !Array.isArray(tool.rawOutput)
-                  ? tool.rawOutput
-                  : {}),
-                status: 'cancelled',
-              },
-            }
-          : {}),
-      };
+      return reconciledTool;
     });
     if (!toolsChanged) return message;
     changed = true;

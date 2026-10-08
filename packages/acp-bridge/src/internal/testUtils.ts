@@ -79,6 +79,15 @@ export const WS_B = path.resolve(path.sep, 'work', 'b');
 export const SESS_A = `sess:${WS_A}`;
 
 /**
+ * Deliberately attest that a test-fake channel factory forwards its
+ * `childEnvOverrides` argument into the child. Production factories receive
+ * this mark from `createSpawnChannelFactory`; test fakes must opt in
+ * explicitly so a shape-resembling but non-forwarding fake fails the
+ * bridge's mandatory-lease attestation.
+ */
+export { markChannelFactoryForwardsChildEnv as attestChannelFactoryForwardsChildEnv } from '../child-env-forwarding.js';
+
+/**
  * Convenience wrapper: `createAcpSessionBridge` requires the workspace owned
  * by this bridge. Tests that only ever talk
  * to `WS_A` would otherwise repeat `boundWorkspace: WS_A` everywhere;

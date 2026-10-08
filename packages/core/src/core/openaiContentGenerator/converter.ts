@@ -21,6 +21,7 @@ import { GenerateContentResponse, FinishReason } from '@google/genai';
 import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { markToolCallArgumentsIncomplete } from '../incomplete-tool-call-args.js';
 import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import {
   estimateTextTokens,
@@ -28,7 +29,10 @@ import {
   TOKEN_ESTIMATE_UNITS_PER_TOKEN,
 } from '../../utils/request-tokenizer/textTokenizer.js';
 import type { RequestContext, StreamingTextDeltaState } from './types.js';
-import { parseTaggedThinkingText } from './taggedThinkingParser.js';
+import {
+  parseTaggedThinkingText,
+  TaggedThinkingParser,
+} from './taggedThinkingParser.js';
 import {
   convertSchema,
   relaxSchemaForFunctionCalling,
@@ -40,7 +44,10 @@ import {
 } from '../tool-call-preparation.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
+import { isDisclosureText } from '../../omni/disclosure.js';
+import { evictOldestImagesBeyondCap } from './image-budget.js';
 import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { SchemaValidator } from '../../utils/schemaValidator.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -331,6 +338,32 @@ export function convertLlmToolParametersToOpenAI(
  * Handles both Gemini tools (using 'parameters' field) and MCP tools
  * (using 'parametersJsonSchema' field).
  */
+const grammarSchemaValidationCache = new WeakMap<object, boolean>();
+
+const PARAMETERLESS_SCHEMA_KEYS = new Set([
+  '$comment',
+  '$schema',
+  'additionalProperties',
+  'deprecated',
+  'description',
+  'examples',
+  'properties',
+  'readOnly',
+  'title',
+  'type',
+  'writeOnly',
+]);
+
+function isStrictlyValidSchema(schema: object): boolean {
+  const cached = grammarSchemaValidationCache.get(schema);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const valid = SchemaValidator.compileStrict(schema) === null;
+  grammarSchemaValidationCache.set(schema, valid);
+  return valid;
+}
+
 export async function convertLlmToolsToOpenAI(
   llmTools: ToolListUnion,
   schemaCompliance: SchemaComplianceMode = 'auto',
@@ -370,6 +403,34 @@ export async function convertLlmToolsToOpenAI(
           }
 
           if (parameters) {
+            const sourceSchema =
+              typeof func.parametersJsonSchema === 'object' &&
+              func.parametersJsonSchema !== null &&
+              !Array.isArray(func.parametersJsonSchema)
+                ? (func.parametersJsonSchema as Record<string, unknown>)
+                : undefined;
+            const canValidateLocally =
+              sourceSchema !== undefined &&
+              !('$id' in sourceSchema) &&
+              isStrictlyValidSchema(sourceSchema);
+            const sourceProperties = sourceSchema?.['properties'];
+            const sourceAdditionalProperties =
+              sourceSchema?.['additionalProperties'];
+            const hasEmptyProperties =
+              typeof sourceProperties === 'object' &&
+              sourceProperties !== null &&
+              !Array.isArray(sourceProperties) &&
+              Object.keys(sourceProperties).length === 0;
+            const declaresEmptyArgumentList =
+              sourceSchema !== undefined &&
+              ((hasEmptyProperties &&
+                (sourceAdditionalProperties === false ||
+                  sourceAdditionalProperties === undefined)) ||
+                (sourceProperties === undefined &&
+                  sourceAdditionalProperties === false)) &&
+              Object.keys(sourceSchema).every((key) =>
+                PARAMETERLESS_SCHEMA_KEYS.has(key),
+              );
             parameters = convertSchema(parameters, schemaCompliance);
             // #7315: gateways enforcing OpenAI's structured-output contract
             // promote every property to required when an object level has
@@ -377,7 +438,20 @@ export async function convertLlmToolsToOpenAI(
             // mutually exclusive optional fields (Agent working_dir vs
             // isolation). Relax the wire schema; client-side
             // validateToolParams still enforces the source schema.
-            parameters = relaxSchemaForFunctionCalling(parameters);
+            parameters = relaxSchemaForFunctionCalling(
+              parameters,
+              canValidateLocally,
+            );
+            if (
+              canValidateLocally &&
+              declaresEmptyArgumentList &&
+              parameters['type'] === 'object' &&
+              Object.keys(parameters).every((key) =>
+                PARAMETERLESS_SCHEMA_KEYS.has(key),
+              )
+            ) {
+              parameters = undefined;
+            }
           }
 
           openAITools.push({
@@ -417,6 +491,12 @@ export function convertLlmRequestToOpenAI(
     messages = cleanOrphanedToolCalls(messages);
     messages = mergeConsecutiveAssistantMessages(messages);
   }
+
+  // Bound the number of images in the assembled request below the backing
+  // API's hard per-request image cap (256 on qwen-omni). Omni keyframes
+  // accumulate across turns; without this a long look-closer trajectory
+  // eventually sends >256 image parts and the API rejects the whole request.
+  evictOldestImagesBeyondCap(messages);
 
   return messages;
 }
@@ -668,6 +748,15 @@ function processContent(
         ) {
           const mediaParts: OpenAIContentPart[] = [];
           const textParts: OpenAI.Chat.ChatCompletionContentPartText[] = [];
+          // Track the previous part so an omni media-degradation disclosure
+          // (emitted immediately before its media part) moves WITH the media
+          // into the follow-up user message instead of being stranded in the
+          // text-only tool message, where the model could not attribute it.
+          // The asymmetry with transcript text (§6.2) is deliberate:
+          // transcripts FOLLOW their media part and read fine as plain text
+          // in the tool message — only the disclosure carries the D8
+          // adjacency requirement, so only the preceding disclosure migrates.
+          let prev: OpenAIContentPart | undefined;
           for (const cp of toolMessage.content as OpenAIContentPart[]) {
             if (
               cp &&
@@ -676,10 +765,17 @@ function processContent(
                 cp.type === 'video_url' ||
                 cp.type === 'file')
             ) {
+              if (prev?.type === 'text' && isDisclosureText(prev.text)) {
+                textParts.pop();
+                mediaParts.push(prev);
+              }
               mediaParts.push(cp);
             } else if (cp && cp.type === 'text') {
               textParts.push(cp);
             }
+            // Consecutive media parts after one disclosure must not each
+            // claim it: only the part directly following the text does.
+            prev = cp;
           }
           if (mediaParts.length > 0) {
             const textOnly = textParts.map((p) => p.text).join('\n');
@@ -921,7 +1017,9 @@ function createMediaContentPart(
           type: 'input_audio' as const,
           input_audio: {
             data: `data:${mimeType};base64,${part.inlineData.data}`,
-            format,
+            // DashScope accepts flac/ogg/m4a beyond the OpenAI SDK's
+            // wav|mp3 union; the request wire format is identical.
+            format: format as 'wav' | 'mp3',
           },
         };
       }
@@ -998,6 +1096,33 @@ function createMediaContentPart(
       };
     }
 
+    if (mediaType === 'audio') {
+      if (!modalities.audio) {
+        return unsupportedModalityPlaceholder(
+          'audio',
+          filename,
+          requestContext,
+        );
+      }
+      const format = getAudioFormat(mimeType);
+      if (format) {
+        // Unlike the inline branch (data: URI), the upload channel passes
+        // the bare URL — DashScope's input_audio.data accepts either, and
+        // oss:// references are resolved server-side via the
+        // X-DashScope-OssResourceResolve header (verified live 2026-08-03
+        // on qwen3.5-omni-plus).
+        return {
+          type: 'input_audio' as const,
+          input_audio: {
+            data: fileUri,
+            // See inline branch: DashScope accepts a wider format set
+            // than the OpenAI SDK union.
+            format: format as 'wav' | 'mp3',
+          },
+        };
+      }
+    }
+
     const displayNameStr = part.fileData.displayName
       ? ` (${part.fileData.displayName})`
       : '';
@@ -1042,9 +1167,26 @@ function getMediaType(mimeType: string): 'image' | 'audio' | 'video' | 'file' {
   return 'file';
 }
 
-function getAudioFormat(mimeType: string): 'wav' | 'mp3' | null {
+/**
+ * Audio formats the DashScope input_audio channel accepts. Kept in
+ * lockstep with the omni recognizer's audio sniff set — an upload the
+ * recognizer accepts must never textify here after paying for transfer.
+ *
+ * flac/ogg/m4a are a DashScope acceptance extension beyond the OpenAI
+ * SDK's wav|mp3 union, applied unconditionally because RequestContext
+ * carries no provider identity to scope on. The trade is deliberate:
+ * a non-DashScope endpoint that rejects the format returns an explicit
+ * 400, whereas textifying would silently drop the audio. Revisit if a
+ * provider flag ever lands on RequestContext.
+ */
+function getAudioFormat(
+  mimeType: string,
+): 'wav' | 'mp3' | 'flac' | 'ogg' | 'm4a' | null {
   if (mimeType.includes('wav')) return 'wav';
   if (mimeType.includes('mp3') || mimeType.includes('mpeg')) return 'mp3';
+  if (mimeType.includes('flac')) return 'flac';
+  if (mimeType.includes('ogg')) return 'ogg';
+  if (mimeType === 'audio/mp4' || mimeType.includes('m4a')) return 'm4a';
   return null;
 }
 
@@ -1096,7 +1238,10 @@ function convertOpenAITextToParts(
   requestContext: RequestContext,
   final = true,
 ): Part[] {
-  if (!requestContext.responseParsingOptions?.taggedThinkingTags) {
+  if (
+    !requestContext.responseParsingOptions?.taggedThinkingTags &&
+    !requestContext.taggedThinkingParser
+  ) {
     return text ? [{ text }] : [];
   }
 
@@ -1369,17 +1514,51 @@ export function convertOpenAIChunkToLlm(
 
     // Handle text content
     if (typeof choice.delta?.content === 'string') {
-      const normalizedContent = normalizeStreamingTextDelta(
-        choice.delta.content,
-        (requestContext.textDeltaState ??= {
-          emittedText: '',
-          emittedLength: 0,
-          cumulativeMode: false,
-        }),
-      );
-      // Skip empty-string push mid-stream; still call on finish_reason to
-      // flush any buffered tagged-thinking content.
-      if (normalizedContent || choice.finish_reason) {
+      const rawContent = choice.delta.content;
+      const replayState = requestContext.textDeltaState;
+      const replayedTaggedThinkingSnapshot =
+        requestContext.responseParsingOptions
+          ?.taggedThinkingTagsAfterReasoning === true &&
+        requestContext.taggedThinkingParser !== undefined &&
+        replayState !== undefined &&
+        (replayState.emittedText === rawContent ||
+          (rawContent.length === replayState.emittedLength &&
+            rawContent.startsWith(replayState.emittedText))) &&
+        THINKING_TAG_PATTERN.test(rawContent);
+      if (replayedTaggedThinkingSnapshot) {
+        replayState.emittedText = rawContent;
+        replayState.emittedLength = rawContent.length;
+        replayState.cumulativeMode = true;
+      }
+      const normalizedContent = replayedTaggedThinkingSnapshot
+        ? ''
+        : normalizeStreamingTextDelta(
+            rawContent,
+            (requestContext.textDeltaState ??= {
+              emittedText: '',
+              emittedLength: 0,
+              cumulativeMode: false,
+            }),
+          );
+      const taggedThinkingCandidate =
+        (requestContext.pendingThinkingTagCandidate?.text ?? '') +
+        normalizedContent;
+      if (
+        requestContext.responseParsingOptions
+          ?.taggedThinkingTagsAfterReasoning &&
+        (requestContext.hasStructuredReasoningContent || reasoningText) &&
+        LEADING_THINKING_TAG_PATTERN.test(taggedThinkingCandidate) &&
+        !taggedThinkingCandidate.trimStart().startsWith('</')
+      ) {
+        requestContext.taggedThinkingParser ??= new TaggedThinkingParser();
+        requestContext.pendingThinkingTagCandidate = undefined;
+        contentParts = requestContext.taggedThinkingParser.parse(
+          taggedThinkingCandidate,
+          Boolean(choice.finish_reason),
+        );
+      } else if (normalizedContent || choice.finish_reason) {
+        // Skip empty-string push mid-stream; still call on finish_reason to
+        // flush any buffered tagged-thinking content.
         contentParts = convertOpenAITextToParts(
           normalizedContent,
           requestContext,
@@ -1389,6 +1568,14 @@ export function convertOpenAIChunkToLlm(
     } else if (choice.finish_reason) {
       // Flush any buffered tagged-thinking content on stream end
       contentParts = convertOpenAITextToParts('', requestContext, true);
+    }
+
+    if (
+      choice.finish_reason &&
+      requestContext.responseParsingOptions?.taggedThinkingTagsAfterReasoning &&
+      requestContext.taggedThinkingParser?.hasUnclosedThought()
+    ) {
+      throwProtocolTagLeak(requestContext);
     }
 
     if (hasThoughtPart(contentParts)) {
@@ -1741,11 +1928,56 @@ export function convertOpenAIChunkToLlm(
     }
 
     // If tool call JSON was truncated, override to "length" so downstream
-    // (turn.ts) correctly sets wasOutputTruncated=true.
+    // (turn.ts) correctly sets wasOutputTruncated=true. Brace depth alone
+    // does not prove truncation: providers can emit malformed (e.g. fused)
+    // tool-call arguments that end incomplete without any token-limit cut,
+    // and the override then misdiagnoses the schema-validation failure as
+    // max_tokens truncation (QwenLM/qwen-code#12970). Only apply it when
+    // the reported usage cannot disprove truncation.
+    const suspectTruncation =
+      toolCallsTruncated && choice.finish_reason !== 'length';
+    const usageVerdict = corroborateTruncationFromCompletionTokens(
+      chunk.usage?.completion_tokens,
+      requestContext.maxOutputTokens,
+    );
+    if (suspectTruncation) {
+      // This rewrite decides whether a file-modifying call is rejected and
+      // whether the max_tokens recovery loop runs, and the heuristic has been
+      // wrong in both directions (#4964 missed a real cut, #12970 invented
+      // one), so the two numbers it was decided from have to be recoverable
+      // from a log rather than re-derived from source.
+      debugLogger.debug('Truncated tool-call finish_reason override', {
+        providerFinishReason: choice.finish_reason,
+        completionTokens: chunk.usage?.completion_tokens ?? null,
+        maxOutputTokens: requestContext.maxOutputTokens ?? null,
+        verdict: usageVerdict,
+        overrideApplied: usageVerdict !== 'disproved',
+      });
+    }
     const effectiveFinishReason =
-      toolCallsTruncated && choice.finish_reason !== 'length'
+      suspectTruncation && usageVerdict !== 'disproved'
         ? 'length'
         : choice.finish_reason;
+    if (suspectTruncation && usageVerdict === 'unknown') {
+      // This chunk carried no usable usage, which is the normal case rather
+      // than an edge one: the pipeline requests `stream_options.include_usage`
+      // (pipeline.ts) and under that convention the finish chunk reports
+      // `usage: null` while the totals land on a later `choices: []` chunk.
+      // Hand the provider's own reason to the pipeline so it can settle the
+      // rewrite on the parked finish response, where the delayed evidence is
+      // merged in before the response is ever yielded.
+      requestContext.pendingTruncationOverride = {
+        finishReason: mapOpenAIFinishReasonToLlm(choice.finish_reason),
+      };
+    }
+    if (suspectTruncation && usageVerdict === 'disproved') {
+      // The token-limit diagnosis is withdrawn, so `wasOutputTruncated` will
+      // not be set downstream — but the arguments really did arrive
+      // unterminated and were repaired into shape. Mark them so the
+      // scheduler's reject-incomplete-file-writes guard stays armed and only
+      // the wording follows the corrected diagnosis (#12970).
+      markToolCallArgumentsIncomplete(parts);
+    }
 
     // Only include finishReason key if finish_reason is present
     const candidate: Candidate = {
@@ -1832,6 +2064,63 @@ export function convertOpenAIChunkToLlm(
   }
 
   return response;
+}
+
+/**
+ * Fraction of the output budget a response must have consumed before
+ * incomplete tool-call JSON may be attributed to max_tokens truncation.
+ * Deliberately conservative: genuine truncation lands at ~100% of the budget,
+ * so 50% keeps the heuristic for plausible cuts while clearing it for
+ * responses that ended far below the ceiling.
+ */
+const TRUNCATION_COMPLETION_TOKEN_RATIO_THRESHOLD = 0.5;
+
+/** What reported usage says about a suspected token-limit cut. */
+export type TruncationUsageVerdict =
+  /** Consumption reached the threshold, so a real cut is plausible. */
+  | 'corroborated'
+  /** Consumption is decisively below the ceiling: not a token-limit cut. */
+  | 'disproved'
+  /** No usable evidence either way; the legacy brace-depth inference stands. */
+  | 'unknown';
+
+/**
+ * The truncated-tool-call finish_reason override exists for providers that
+ * report "stop"/"tool_calls" for output actually cut by the token limit
+ * (QwenLM/qwen-code#4964). A genuine cut means the model generated (very
+ * nearly) the full output budget, so usage reporting completion tokens well
+ * below the ceiling disproves truncation — the incomplete tool-call JSON then
+ * comes from malformed generation instead (QwenLM/qwen-code#12970). When
+ * usage or the ceiling is unavailable the check is inconclusive and the
+ * legacy inference stands.
+ *
+ * A count that is missing, non-numeric or non-positive is *not* a disproof.
+ * Callers only consult this once the parser found incomplete tool-call JSON,
+ * so output existed and merely went uncounted: providers that zero-fill usage
+ * on the finish chunk and send the real totals on a trailing `choices: []`
+ * chunk (ModelScope) would otherwise read as proof against truncation, which
+ * suppresses the #4964 recovery and disarms the scheduler's
+ * reject-file-writes-while-truncated guard on exactly the responses it exists
+ * for. Such a count returns `unknown` so the delayed totals can still settle
+ * it (see RequestContext.pendingTruncationOverride).
+ */
+export function corroborateTruncationFromCompletionTokens(
+  completionTokens: number | null | undefined,
+  maxOutputTokens: number | undefined,
+): TruncationUsageVerdict {
+  if (
+    typeof completionTokens !== 'number' ||
+    !Number.isFinite(completionTokens) ||
+    completionTokens <= 0 ||
+    maxOutputTokens === undefined ||
+    maxOutputTokens <= 0
+  ) {
+    return 'unknown';
+  }
+  return completionTokens >=
+    maxOutputTokens * TRUNCATION_COMPLETION_TOKEN_RATIO_THRESHOLD
+    ? 'corroborated'
+    : 'disproved';
 }
 
 function mapOpenAIFinishReasonToLlm(openaiReason: string | null): FinishReason {

@@ -38,7 +38,15 @@ function normalizeAllowances(
 
 const allowedProcessEnvAccesses = normalizeAllowances([
   [
-    'packages/acp-bridge/src/bridge.ts',
+    'packages/cli/src/serve/workspace-recovery-worker.ts',
+    {
+      reason:
+        'The private offline migration worker pins deployment-owned QWEN_HOME and its retained file-history volume before validating recovery evidence.',
+      accesses: { 'key:QWEN_HOME': 2 },
+    },
+  ],
+  [
+    'packages/acp-bridge/src/session-control-plane.ts',
     {
       reason: 'The ACP bridge debug switch is process-scoped.',
       accesses: { 'key:QWEN_SERVE_DEBUG': 1 },
@@ -151,6 +159,132 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/local-path-open.ts',
+    {
+      reason:
+        'Local-open availability probes process-scoped host session state ' +
+        '(SSH markers, display server, Windows session name, terminal ' +
+        'emulators on PATH), so embedded callers may omit the environment ' +
+        'argument; the win32 terminal fallback inherits the daemon ' +
+        'environment to hand the target directory to PowerShell via one ' +
+        'added variable.',
+      accesses: { whole: 4 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-context-worker.ts',
+    {
+      reason:
+        'Managed Runtime startup selects its deployment-owned MCP and Hook manifests and the delegated cgroup root for process isolation from the process environment; definitions are then scoped by tenant and workspace.',
+      accesses: {
+        'key:QWEN_MANAGED_HOOK_CGROUP_ROOT': 1,
+        'key:QWEN_MANAGED_HOOK_CONFIG': 1,
+        'key:QWEN_MANAGED_MCP_CONFIG': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-csi-worker.ts',
+    {
+      reason:
+        'The Kubernetes Downward API supplies the current Pod identity to the single-Pod CSI worker process; attestation, drain and ACK routes capture it at registration rather than from workspace environment overlays.',
+      accesses: {
+        'key:QWEN_NODE_NAME': 3,
+        'key:QWEN_POD_NAMESPACE': 3,
+        'key:QWEN_POD_UID': 3,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-hook-runtime.ts',
+    {
+      reason:
+        'Hook commands use the Runtime host PATH and Windows SystemRoot for executable lookup and OS startup, and the deployment-owned cgroup root for process-tree isolation; HOME and USERPROFILE come from the verified Session directory.',
+      accesses: {
+        'key:PATH': 1,
+        'key:QWEN_MANAGED_HOOK_CGROUP_ROOT': 1,
+        'key:SystemRoot': 2,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-mcp-runtime.ts',
+    {
+      reason:
+        'MCP stdio children use the Runtime host PATH and Windows SystemRoot for executable lookup and OS startup; their remaining environment comes from the verified workspace directory and deployment-owned definition.',
+      accesses: { 'key:PATH': 1, 'key:SystemRoot': 2 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-runtime-attestation-worker.ts',
+    {
+      reason:
+        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/session-agents/adapters/claude-cli.ts',
+    {
+      reason:
+        "A session agent runs the user's own Claude Code CLI as a child process, so it inherits the daemon process environment (with nested-Claude markers scrubbed).",
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/session-agents/adapters/codex-app-server.ts',
+    {
+      reason:
+        "A session agent runs the user's own Codex CLI as a child process, so it inherits the daemon process environment (CODEX_HOME, auth).",
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/session-agents/program-probe.ts',
+    {
+      reason:
+        'Probing which agent CLIs are installed reads the process PATH and the QWEN_AGENT_*_PATH overrides of the daemon process.',
+      accesses: { whole: 2 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/session-agents/orchestrator.ts',
+    {
+      reason:
+        'The session_send MCP child re-runs this CLI; its entry point is process-scoped, mirroring managed-runtime-session-worker.',
+      accesses: { 'key:QWEN_CLI_ENTRY': 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-runtime-ledger.ts',
+    {
+      reason:
+        'The worker keeps its Shell process groups in a ledger the host named in the launch environment — read once and scrubbed so its own commands never inherit the path; its process-table queries read a full environment ' +
+        'only to force the ps locale, and its Windows stop path resolves taskkill from the process-scoped OS root.',
+      accesses: {
+        'computed:MANAGED_RUNTIME_LEDGER_ENV': 2,
+        'key:SystemRoot': 1,
+        whole: 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-runtime-session-worker.ts',
+    {
+      reason:
+        "A Managed session's host starts its Runtime worker from its own CLI entry and process environment, as a Legacy host's commands inherit it.",
+      accesses: { 'key:QWEN_CLI_ENTRY': 1, whole: 3 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/managed-runtime-tool-executor.ts',
+    {
+      reason:
+        'The background Shell environment copies a fixed allowlist of inherited shell variables (PATH, HOME, locale, TMPDIR, USER, SHELL) from the Runtime worker process, matching what a Legacy host hands its commands; secrets are never copied by name.',
+      accesses: { 'computed:key': 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/native-directory-picker.ts',
     {
       reason:
@@ -179,9 +313,11 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'contents, not just the path, and a second read could see a different value. The whole-object read copies the ' +
         'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
         'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
-        'via fetch, which honors it, so the strict probe would flag an outage that never happens.',
+        'via fetch, which honors it, so the strict probe would flag an outage that never happens. ' +
+        'The Hosted Harness capability digest is a process-scoped contract fixed at daemon bootstrap.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
+        'computed:HOSTED_HARNESS_CAPABILITY_DIGEST_ENV': 1,
         'computed:QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV': 1,
         'computed:QWEN_SERVE_PROMPT_DEADLINE_MS_ENV': 1,
@@ -202,8 +338,18 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/serve-token.ts',
     {
       reason:
-        'Daemon token selection defaults to the process-scoped QWEN_SERVER_TOKEN.',
-      accesses: { 'computed:QWEN_SERVER_TOKEN_ENV': 1 },
+        'Daemon token selection defaults to the process-scoped QWEN_SERVER_TOKEN; ' +
+        'the remote-bind resolver reads the same variable so the generation ' +
+        'decision distinguishes an absent source from an explicitly empty one.',
+      accesses: { 'computed:QWEN_SERVER_TOKEN_ENV': 2 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/session-attachments-root.ts',
+    {
+      reason:
+        'The session-attachment storage root is a process-scoped daemon setting read once at bridge construction.',
+      accesses: { 'computed:SESSION_ATTACHMENTS_ROOT_ENV': 1 },
     },
   ],
   [
@@ -214,7 +360,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'it passes through the process environment, forwards provider keys, ' +
         'proxy settings, and debug switches, and reads the SANDBOX_* control ' +
         'variables. It entered the scanned serve/ layer via the #9146 ' +
-        'leaf-layer move; its access surface is unchanged.',
+        'leaf-layer move.',
       accesses: {
         'computed:envVar': 2,
         'key:BUILD_SANDBOX': 2,
@@ -262,6 +408,36 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/routes/daemon-update.ts',
+    {
+      reason:
+        'The process-global updater snapshots the running daemon launcher and its managed npm installation stamp, not workspace configuration.',
+      accesses: {
+        'key:QWEN_CODE_CLI': 1,
+        'key:QWEN_CODE_MANAGED_NPM_PIN': 1,
+      },
+    },
+  ],
+  [
+    'packages/cli/src/serve/routes/workspace-extensions-controller.ts',
+    {
+      reason:
+        'A daemon-wide ambient usage-statistics opt-out is a process-scoped ' +
+        'operator decision that must close the gate for every hosted ' +
+        'workspace; an ambient opt-in belongs to another hosted repository.',
+      accesses: { 'key:QWEN_USAGE_STATISTICS_ENABLED': 2 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/routes/workspace-git-branches.ts',
+    {
+      reason:
+        "The git error redaction mirrors the daemon process's own HOME/" +
+        'XDG_CONFIG_HOME to label the inherited config paths git echoes.',
+      accesses: { 'key:HOME': 1, 'key:XDG_CONFIG_HOME': 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/server/fs-factory.ts',
     {
       reason:
@@ -274,8 +450,11 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/server.ts',
     {
       reason:
-        'Embedded server construction keeps a process-environment compatibility fallback.',
-      accesses: { whole: 1 },
+        'Embedded server construction keeps a process-environment compatibility fallback. ' +
+        'The collaboration opt-in is read once at daemon startup and is process-scoped ' +
+        'by design: it governs work no session owns (the dispatch timer and Host ' +
+        'transport routes), so it cannot be a per-session setting.',
+      accesses: { whole: 1, 'key:QWEN_CODE_ENABLE_AGENT_COLLABORATION': 1 },
     },
   ],
   [

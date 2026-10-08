@@ -54,6 +54,33 @@ function buildParser(): Argv {
 }
 
 describe('serve command args', () => {
+  it('documents the complete IPv4 loopback range', async () => {
+    // Remove whitespace before checking so a long option name forcing yargs
+    // to wrap the description does not split the CIDR literal across lines.
+    expect((await buildParser().getHelp()).replace(/\s/g, '')).toContain(
+      '127.0.0.0/8',
+    );
+  });
+
+  it('documents Hosted Runtime Broker options and does not declare them unimplemented', async () => {
+    // yargs hard-wraps the description column mid-word at its 80-column
+    // default, so compare with whitespace and type hints removed. The next
+    // row starts with "--", so stale text appended to a row cannot hide.
+    const squash = (text: string) => text.replace(/\[string\]|\s+/g, '');
+    const help = squash(await buildParser().getHelp());
+    expect(help).toContain(
+      squash(
+        '--managed-runtime-broker-url Private Broker URL for --profile hosted-harness; required together with token for Workspace tool turns. --',
+      ),
+    );
+    expect(help).toContain(
+      squash(
+        '--managed-runtime-broker-token Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. --',
+      ),
+    );
+    expect(help).not.toContain('ReservedBroker');
+  });
+
   it('defaults authenticated open to disabled', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['open-with-auth']).toBe(false);
@@ -403,7 +430,28 @@ describe('serve rate limit env parsing', () => {
         rateLimitRead: 121,
         rateLimitWindowMs: 60000,
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
+  });
+
+  it.each([
+    ['--experimental-paired-engines --no-web', true],
+    ['--no-web', undefined],
+  ])('maps "%s" to experimentalPairedEngines', async (args, expected) => {
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(args);
+
+    expect(
+      (
+        mockRunQwenServe.mock.calls[0]?.[0] as {
+          experimentalPairedEngines?: boolean;
+        }
+      ).experimentalPairedEngines,
+    ).toBe(expected);
   });
 
   it('applies authenticated open before the yargs path starts the daemon', async () => {
@@ -421,6 +469,9 @@ describe('serve rate limit env parsing', () => {
     );
 
     await startServeHandlerWithArgs('--open-with-auth');
+    // Wait out the fire-and-forget handler's browser-open phase so its
+    // openBrowserSecurely call cannot land in the next test.
+    await vi.waitFor(() => expect(mockOpenBrowserSecurely).toHaveBeenCalled());
 
     expect(mockApplyOpenWithAuth).toHaveBeenCalledWith(expect.any(Object));
     expect(tokenAtBoot).toBe('generated-token');
@@ -477,6 +528,7 @@ describe('serve rate limit env parsing', () => {
         maxJournalEvents: 5000,
         maxJournalBytes: 1048576,
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -492,6 +544,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ maxJournalEvents: 5000 }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
     expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
       'maxJournalBytes',
@@ -508,6 +561,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ maxJournalBytes: 1048576 }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
     expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty(
       'maxJournalEvents',
@@ -586,6 +640,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ token: 'generated-token' }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
     expect(mockQr.generate).toHaveBeenCalledWith(
       'http://192.168.1.20:4170/#token=pairing-token',
@@ -619,6 +674,9 @@ describe('serve rate limit env parsing', () => {
     await startServeHandlerWithArgs(
       '--local-control --token fixed --allow-origin http://localhost:3000 --port 0',
     );
+    // Wait out the fire-and-forget handler's pairing phase so it cannot
+    // consume the one-shot QR mock the next test installs.
+    await vi.waitFor(() => expect(mockQr.generate).toHaveBeenCalled());
 
     const options = mockRunQwenServe.mock.calls[0]?.[0];
     expect(options).toEqual(
@@ -705,6 +763,7 @@ describe('serve rate limit env parsing', () => {
       expect.objectContaining({
         channelSelection: { mode: 'names', names: ['telegram', 'feishu'] },
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -722,6 +781,7 @@ describe('serve rate limit env parsing', () => {
       expect.objectContaining({
         compactedReplayMaxBytes: 1024 * 1024,
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -735,6 +795,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ maxTotalSessions: 42 }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -748,6 +809,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ memoryProjectScope: 'git-root' }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -773,6 +835,7 @@ describe('serve rate limit env parsing', () => {
           timeoutMs: 2500,
         },
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
     expect(process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN']).toBeUndefined();
   });
@@ -807,23 +870,28 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ memoryPressureMode: 'off' }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
-  it('passes --child-heap-mode to runQwenServe', async () => {
-    mockRunQwenServe.mockResolvedValueOnce({
-      url: 'http://127.0.0.1:4170/',
-      webShellMounted: false,
-    });
+  it.each(['off', 'admit', 'enforce'])(
+    'passes --child-heap-mode %s to runQwenServe',
+    async (mode) => {
+      mockRunQwenServe.mockResolvedValueOnce({
+        url: 'http://127.0.0.1:4170/',
+        webShellMounted: false,
+      });
 
-    await startServeHandlerWithArgs('--no-web --child-heap-mode off');
+      await startServeHandlerWithArgs(`--no-web --child-heap-mode ${mode}`);
 
-    expect(mockRunQwenServe).toHaveBeenCalledWith(
-      expect.objectContaining({ childHeapMode: 'off' }),
-    );
-  });
+      expect(mockRunQwenServe).toHaveBeenCalledWith(
+        expect.objectContaining({ childHeapMode: mode }),
+        expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
+      );
+    },
+  );
 
-  it('defaults the child heap mode to observe, and rejects enforce outright', async () => {
+  it('defaults the child heap mode to observe, and rejects an unknown mode', async () => {
     mockRunQwenServe.mockResolvedValueOnce({
       url: 'http://127.0.0.1:4170/',
       webShellMounted: false,
@@ -833,10 +901,9 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ childHeapMode: 'observe' }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
-    // `enforce` is not a value yet, and boot must say so rather than accept
-    // it: applying the partition needs an observation this daemon cannot make.
-    expect(() => buildParser().parseSync('--child-heap-mode enforce')).toThrow(
+    expect(() => buildParser().parseSync('--child-heap-mode unknown')).toThrow(
       /Invalid values/,
     );
   });
@@ -851,6 +918,7 @@ describe('serve rate limit env parsing', () => {
 
     expect(mockRunQwenServe).toHaveBeenCalledWith(
       expect.objectContaining({ memoryPressureMode: 'observe' }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -872,6 +940,7 @@ describe('serve rate limit env parsing', () => {
       expect.objectContaining({
         channelSelection: { mode: 'all' },
       }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
     );
   });
 
@@ -1034,176 +1103,243 @@ describe('maybeOpenWebShellBrowser', () => {
 });
 
 describe('serve startup import boundary', () => {
-  it('reaches listening through the dev entrypoint without loading interactive Ink internals first', async () => {
-    const workspace = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-import-boundary-')),
-    );
-    const qwenHome = fs.realpathSync(
-      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-import-boundary-home-')),
-    );
-    const root = path.resolve(process.cwd(), '../..');
-    const childEnv: NodeJS.ProcessEnv = {
-      ...process.env,
-      QWEN_CODE_NO_RELAUNCH: '1',
-      QWEN_CODE_SUPPRESS_YOLO_WARNING: '1',
-      QWEN_HOME: qwenHome,
-      QWEN_RUNTIME_DIR: workspace,
-      QWEN_SERVE_RATE_LIMIT: '0',
-    };
-    delete childEnv['VITEST_WORKER_ID'];
-    const child = spawn(
-      process.execPath,
-      [
-        path.join(root, 'scripts/dev.js'),
-        'serve',
-        '--port',
-        '0',
-        '--hostname',
-        '127.0.0.1',
-        '--workspace',
-        workspace,
-        '--no-web',
-        '--no-open',
-        '--rate-limit-prompt',
-        '0',
-        '--rate-limit-window-ms',
-        '1',
-      ],
-      {
-        cwd: root,
-        detached: process.platform !== 'win32',
-        env: childEnv,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
+  // The dev entrypoint pays a cold tsx transform before the daemon can listen,
+  // so this wait is CPU-bound, not a fixed cost: measured 12s on an idle host
+  // and 88s on a shared one running several jobs at once. RUNNER_NAME is unset
+  // on some shared pools, so the budget cannot be keyed to it.
+  const startupMs = 180_000;
+  const testMs = 200_000;
 
-    let stdout = '';
-    let stderr = '';
-    let childExited = false;
-    const exited = new Promise<void>((resolve) => {
-      child.once('exit', () => {
-        childExited = true;
-        resolve();
-      });
-    });
-    const waitForExit = (ms: number) =>
-      Promise.race([
-        exited,
-        new Promise<'timeout'>((resolve) => setTimeout(resolve, ms, 'timeout')),
-      ]);
-    const cleanup = async () => {
-      if (child.pid === undefined) return;
-      const childPid = child.pid;
-      const signalProcessTree = (signal: NodeJS.Signals) => {
-        if (process.platform === 'win32') {
-          spawnSync('taskkill', ['/pid', String(childPid), '/T', '/F']);
-          return;
-        }
-        process.kill(-childPid, signal);
+  it(
+    'reaches listening through the dev entrypoint without loading interactive Ink internals first',
+    async () => {
+      const workspace = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-import-boundary-')),
+      );
+      const qwenHome = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qws-import-boundary-home-')),
+      );
+      const root = path.resolve(process.cwd(), '../..');
+      const childEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        QWEN_CODE_NO_RELAUNCH: '1',
+        QWEN_CODE_SUPPRESS_YOLO_WARNING: '1',
+        QWEN_HOME: qwenHome,
+        QWEN_RUNTIME_DIR: workspace,
+        QWEN_SERVE_RATE_LIMIT: '0',
       };
-      try {
-        signalProcessTree('SIGTERM');
-      } catch {
-        // Process may have already exited.
-      }
-      if (!childExited) {
-        await waitForExit(2_000);
-      }
-      if (process.platform !== 'win32') {
+      delete childEnv['VITEST_WORKER_ID'];
+      const child = spawn(
+        process.execPath,
+        [
+          path.join(root, 'scripts/dev.js'),
+          'serve',
+          '--port',
+          '0',
+          '--hostname',
+          '127.0.0.1',
+          '--workspace',
+          workspace,
+          '--no-web',
+          '--no-open',
+          '--rate-limit-prompt',
+          '0',
+          '--rate-limit-window-ms',
+          '1',
+        ],
+        {
+          cwd: root,
+          detached: process.platform !== 'win32',
+          env: childEnv,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      );
+
+      let stdout = '';
+      let stderr = '';
+      let childExited = false;
+      const exited = new Promise<void>((resolve) => {
+        child.once('exit', () => {
+          childExited = true;
+          resolve();
+        });
+      });
+      const waitForExit = (ms: number) =>
+        Promise.race([
+          exited,
+          new Promise<'timeout'>((resolve) =>
+            setTimeout(resolve, ms, 'timeout'),
+          ),
+        ]);
+      const cleanup = async () => {
+        if (child.pid === undefined) return;
+        const childPid = child.pid;
+        const signalProcessTree = (signal: NodeJS.Signals) => {
+          if (process.platform === 'win32') {
+            spawnSync('taskkill', ['/pid', String(childPid), '/T', '/F']);
+            return;
+          }
+          process.kill(-childPid, signal);
+        };
         try {
-          signalProcessTree('SIGKILL');
+          signalProcessTree('SIGTERM');
         } catch {
           // Process may have already exited.
         }
         if (!childExited) {
           await waitForExit(2_000);
         }
-      }
-    };
-    const removeTempDir = async (dir: string) => {
-      for (let attempt = 0; attempt < 5; attempt++) {
-        try {
-          fs.rmSync(dir, { recursive: true, force: true });
-          return;
-        } catch (err) {
-          if (attempt === 4) throw err;
+        if (process.platform !== 'win32') {
+          try {
+            signalProcessTree('SIGKILL');
+          } catch {
+            // Process may have already exited.
+          }
+          if (!childExited) {
+            await waitForExit(2_000);
+          }
+        }
+      };
+      const removeTempDir = async (dir: string) => {
+        for (let attempt = 0; attempt < 5; attempt++) {
+          try {
+            fs.rmSync(dir, { recursive: true, force: true });
+            return;
+          } catch (err) {
+            if (attempt === 4) throw err;
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+        }
+      };
+      const processGroupHasMembers = (pgid: number): boolean => {
+        if (process.platform === 'win32') return false;
+        const result = spawnSync('ps', ['-o', 'pid=', '-g', String(pgid)], {
+          encoding: 'utf8',
+        });
+        if (result.status !== 0) return false;
+        return result.stdout
+          .split(/\s+/)
+          .some((pid) => pid.length > 0 && Number(pid) > 0);
+      };
+      const waitForProcessGroupExit = async (pgid: number) => {
+        if (process.platform === 'win32') return;
+        for (let attempt = 0; attempt < 20; attempt++) {
+          if (!processGroupHasMembers(pgid)) return;
           await new Promise((resolve) => setTimeout(resolve, 100));
         }
-      }
-    };
-    const processGroupHasMembers = (pgid: number): boolean => {
-      if (process.platform === 'win32') return false;
-      const result = spawnSync('ps', ['-o', 'pid=', '-g', String(pgid)], {
-        encoding: 'utf8',
-      });
-      if (result.status !== 0) return false;
-      return result.stdout
-        .split(/\s+/)
-        .some((pid) => pid.length > 0 && Number(pid) > 0);
-    };
-    const waitForProcessGroupExit = async (pgid: number) => {
-      if (process.platform === 'win32') return;
-      for (let attempt = 0; attempt < 20; attempt++) {
-        if (!processGroupHasMembers(pgid)) return;
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      throw new Error(`serve process group ${pgid} did not exit`);
-    };
+        throw new Error(`serve process group ${pgid} did not exit`);
+      };
 
-    try {
-      const reachedListening = await new Promise<boolean>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          void cleanup();
-          reject(
-            new Error(
-              `serve did not reach listening\nstdout:\n${stdout}\nstderr:\n${stderr}`,
-            ),
-          );
-        }, 30_000);
+      try {
+        const reachedListening = await new Promise<boolean>(
+          (resolve, reject) => {
+            const timeout = setTimeout(() => {
+              void cleanup();
+              reject(
+                new Error(
+                  `serve did not reach listening\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+                ),
+              );
+            }, startupMs);
 
-        child.stdout.on('data', (chunk: Buffer) => {
-          stdout += chunk.toString('utf8');
-          if (stdout.includes('qwen serve listening on')) {
-            clearTimeout(timeout);
-            void cleanup();
-            resolve(true);
-          }
-        });
-        child.stderr.on('data', (chunk: Buffer) => {
-          stderr += chunk.toString('utf8');
-          if (
-            stderr.includes('ERR_PACKAGE_PATH_NOT_EXPORTED') ||
-            stderr.includes('ink/dom') ||
-            stderr.includes('ink/components/CursorContext')
-          ) {
-            clearTimeout(timeout);
-            void cleanup();
-            reject(new Error(stderr));
-          }
-        });
-        child.on('error', (err) => {
-          clearTimeout(timeout);
-          reject(err);
-        });
-        child.on('exit', (code, signal) => {
-          if (stdout.includes('qwen serve listening on')) return;
-          clearTimeout(timeout);
-          reject(
-            new Error(
-              `serve exited before listening: code=${code} signal=${signal}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
-            ),
-          );
-        });
-      });
+            child.stdout.on('data', (chunk: Buffer) => {
+              stdout += chunk.toString('utf8');
+              if (stdout.includes('qwen serve listening on')) {
+                clearTimeout(timeout);
+                void cleanup();
+                resolve(true);
+              }
+            });
+            child.stderr.on('data', (chunk: Buffer) => {
+              stderr += chunk.toString('utf8');
+              if (
+                stderr.includes('ERR_PACKAGE_PATH_NOT_EXPORTED') ||
+                stderr.includes('ink/dom') ||
+                stderr.includes('ink/components/CursorContext')
+              ) {
+                clearTimeout(timeout);
+                void cleanup();
+                reject(new Error(stderr));
+              }
+            });
+            child.on('error', (err) => {
+              clearTimeout(timeout);
+              reject(err);
+            });
+            child.on('exit', (code, signal) => {
+              if (stdout.includes('qwen serve listening on')) return;
+              clearTimeout(timeout);
+              reject(
+                new Error(
+                  `serve exited before listening: code=${code} signal=${signal}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+                ),
+              );
+            });
+          },
+        );
 
-      expect(reachedListening).toBe(true);
-    } finally {
-      await cleanup();
-      if (child.pid !== undefined) {
-        await waitForProcessGroupExit(child.pid);
+        expect(reachedListening).toBe(true);
+      } finally {
+        await cleanup();
+        if (child.pid !== undefined) {
+          await waitForProcessGroupExit(child.pid);
+        }
+        await removeTempDir(workspace);
+        await removeTempDir(qwenHome);
       }
-      await removeTempDir(workspace);
-      await removeTempDir(qwenHome);
-    }
-  }, 40_000);
+    },
+    testMs,
+  );
+});
+
+describe('serve tokenQr resolution', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env = {
+      ...originalEnv,
+      QWEN_CODE_SUPPRESS_YOLO_WARNING: '1',
+    };
+    mockRunQwenServe.mockResolvedValue({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    vi.restoreAllMocks();
+  });
+
+  async function startWith(args: string) {
+    const handler = serveCommand.handler;
+    if (!handler) throw new Error('serve handler missing');
+    const argv = buildParser().parseSync(args);
+    void handler(argv as Parameters<typeof handler>[0]);
+    await vi.waitFor(() => {
+      expect(mockRunQwenServe).toHaveBeenCalled();
+    });
+  }
+
+  it('sets tokenQr from the --token-qr flag', async () => {
+    await startWith('--token-qr --no-web');
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenQr: true }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
+    );
+  });
+
+  it('passes an explicit --no-token-qr through as false', async () => {
+    await startWith('--no-token-qr --no-web');
+    expect(mockRunQwenServe).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenQr: false }),
+      expect.objectContaining({ updateRestartArgv: process.argv.slice(2) }),
+    );
+  });
+
+  it('leaves tokenQr unset by default', async () => {
+    await startWith('--no-web');
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).not.toHaveProperty('tokenQr');
+  });
 });

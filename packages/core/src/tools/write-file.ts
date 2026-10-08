@@ -8,6 +8,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import {
+  captureRuntimeFileVersion,
+  writeRuntimeFile,
+} from '../sandbox/runtime-file.js';
 import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
 import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
 import type {
@@ -292,9 +296,27 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     return confirmationDetails;
   }
 
-  async execute(_abortSignal: AbortSignal): Promise<ToolResult> {
+  async execute(abortSignal: AbortSignal): Promise<ToolResult> {
     const { file_path, content, ai_proposed_content, modified_by_user } =
       this.params;
+
+    let sandboxFileVersion: ReturnType<typeof captureRuntimeFileVersion>;
+    try {
+      sandboxFileVersion = captureRuntimeFileVersion(this.config, file_path);
+    } catch (error) {
+      const message = `${file_path}: ${getErrorMessage(error)}`;
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: {
+          message,
+          type:
+            isNodeError(error) && error.code === 'EISDIR'
+              ? ToolErrorType.TARGET_IS_DIRECTORY
+              : ToolErrorType.FILE_WRITE_FAILURE,
+        },
+      };
+    }
 
     let fileExists = await isFilefileExists(file_path);
     let originalContent = '';
@@ -467,14 +489,9 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     //
     // It does NOT eliminate the race. A concurrent writer that
     // lands between this stat and the writeTextFile call below
-    // can still be clobbered — that residual is an OS-level
-    // limitation of the stat-then-write pattern, and the only way
-    // to close it is an atomic write (write-to-temp + rename) or
-    // a content-hash post-check that re-reads the bytes after the
-    // write. Both are deferred to a follow-up; operators who care
-    // about strict overwrite-protection should set
-    // `fileReadCacheDisabled: true` and rely on application-level
-    // locking.
+    // can still be clobbered. Atomic replacement is not compare-and-swap;
+    // the sandbox worker rechecks the prepared version before commit,
+    // but strict protection against concurrent writers requires locking.
     //
     // Run unconditionally (not gated on `fileExists`): if the path
     // was absent during the earlier checkPriorRead but a different
@@ -518,21 +535,26 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     // directories on the failure path (rejected new-file writes
     // would otherwise litter the filesystem with empty mkdir'd
     // ancestors).
-    if (!fileExists) {
+    if (!fileExists && !this.config.getShellExecutionSandbox?.()) {
       fs.mkdirSync(dirName, { recursive: true });
     }
 
     try {
-      await this.config.getFileSystemService().writeTextFile({
-        path: file_path,
-        content,
-        toolWriteOrigin: 'write_file',
-        _meta: {
-          bom: useBOM,
-          encoding: detectedEncoding,
-          lineEnding: detectedLineEnding,
+      await writeRuntimeFile(
+        this.config,
+        {
+          path: file_path,
+          content,
+          toolWriteOrigin: 'write_file',
+          _meta: {
+            bom: useBOM,
+            encoding: detectedEncoding,
+            lineEnding: detectedLineEnding,
+          },
         },
-      });
+        sandboxFileVersion,
+        abortSignal,
+      );
 
       // Track AI contribution for commit attribution.
       // Pass null only when the file truly did not exist before this write;
@@ -632,6 +654,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       const displayResult: FileDiff = {
         fileDiff,
         fileName,
+        filePath: file_path,
         originalContent,
         newContent: content,
         diffStat,
@@ -652,7 +675,12 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         errorMsg = `Error writing to file '${file_path}': ${error.message} (${error.code})`;
 
         // Log specific error types for better debugging
-        if (error.code === 'EACCES') {
+        if (
+          error.code === 'ESTALE' &&
+          this.config.getShellExecutionSandbox?.()
+        ) {
+          errorType = ToolErrorType.FILE_CHANGED_SINCE_READ;
+        } else if (error.code === 'EACCES') {
           errorMsg = `Permission denied writing to file: ${file_path} (${error.code})`;
           errorType = ToolErrorType.PERMISSION_DENIED;
         } else if (error.code === 'ENOSPC') {
@@ -784,6 +812,9 @@ function inferWorkspaceArtifactKind(filePath: string): ToolArtifactKind {
   );
 }
 
+export const WRITE_FILE_ARTIFACT_DESCRIPTION =
+  'Artifact-like files such as HTML, PDF, images, notebooks, and office documents are automatically registered as session artifacts. Intermediate files that exist only to produce another artifact — for example HTML written solely to print a PDF — must set record_as_artifact=false, or be written under .qwen/tmp/ so they are not registered. Delete those intermediates when done.';
+
 /**
  * Implementation of the WriteFile tool logic
  */
@@ -799,7 +830,7 @@ export class WriteFileTool
       ToolDisplayNames.WRITE_FILE,
       `Writes content to a specified file in the local filesystem. A request to create or generate a file does not establish that the target path is new. Unless the target's absence or current text contents have already been established in this session, you MUST use the ${ToolNames.READ_FILE} tool first; if the file does not exist, then create it. With prior-read enforcement enabled, blind overwrites are rejected. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first.
 
-Artifact-like files such as HTML, PDF, images, notebooks, and office documents are automatically registered as session artifacts. Intermediate files that exist only to produce another artifact — for example HTML written solely to print a PDF — must set record_as_artifact=false, or be written under .qwen/tmp/ so they are not registered. Delete those intermediates when done.
+${WRITE_FILE_ARTIFACT_DESCRIPTION}
 
 The user has the ability to modify \`content\`. If modified, this will be stated in the response.`,
       Kind.Edit,

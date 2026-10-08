@@ -81,6 +81,80 @@ describe('workspace actions', () => {
     });
   });
 
+  it('leaves model-provider mutation timeouts to the SDK client', async () => {
+    vi.useFakeTimers();
+    let resolveInstall!: (value: {
+      v: 1;
+      providerId: string;
+      providerLabel: string;
+      authType: string;
+      message: string;
+    }) => void;
+    let resolveDelete!: (value: {
+      removed: true;
+      clearedActiveModel: false;
+      requiresRestart: false;
+    }) => void;
+    const installAuthProvider = vi.fn(
+      () =>
+        new Promise<{
+          v: 1;
+          providerId: string;
+          providerLabel: string;
+          authType: string;
+          message: string;
+        }>((resolve) => {
+          resolveInstall = resolve;
+        }),
+    );
+    const deleteModel = vi.fn(
+      () =>
+        new Promise<{
+          removed: true;
+          clearedActiveModel: false;
+          requiresRestart: false;
+        }>((resolve) => {
+          resolveDelete = resolve;
+        }),
+    );
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ installAuthProvider, deleteModel }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+    let installSettled = false;
+    let deleteSettled = false;
+    const install = actions
+      .installAuthProvider({ providerId: 'openai', apiKey: 'key' })
+      .finally(() => {
+        installSettled = true;
+      });
+    const deletion = actions
+      .deleteModel({ authType: 'openai', modelId: 'gpt-4o' })
+      .finally(() => {
+        deleteSettled = true;
+      });
+
+    await vi.advanceTimersByTimeAsync(50_000);
+    expect(installSettled).toBe(false);
+    expect(deleteSettled).toBe(false);
+
+    resolveInstall({
+      v: 1,
+      providerId: 'openai',
+      providerLabel: 'OpenAI',
+      authType: 'openai',
+      message: 'saved',
+    });
+    resolveDelete({
+      removed: true,
+      clearedActiveModel: false,
+      requiresRestart: false,
+    });
+    await Promise.all([install, deletion]);
+  });
+
   it('applies the action timeout to workspace removal', async () => {
     vi.useFakeTimers();
     const remove = vi.fn(() => new Promise<never>(() => {}));
@@ -260,16 +334,132 @@ describe('workspace actions', () => {
     expect(activeExtensionOperations).toHaveBeenCalledOnce();
   });
 
-  it('reloads MCP settings through the daemon client', async () => {
-    const reloadWorkspaceMcp = vi.fn().mockResolvedValue({ accepted: true });
+  it('reloads MCP through the selected workspace runtime client', async () => {
+    const reloadRuntimeMcp = vi.fn().mockResolvedValue({ accepted: true });
+    const workspaceByCwd = vi.fn(() => ({ reloadRuntimeMcp }));
     const actions = createDaemonWorkspaceActions({
-      getClient: () => ({ reloadWorkspaceMcp }) as unknown as DaemonClient,
+      getClient: () => ({ workspaceByCwd }) as unknown as DaemonClient,
       getWorkspaceCwd: () => '/workspace',
       baseUrl: 'http://daemon',
     });
 
     await expect(actions.reloadMcp()).resolves.toEqual({ accepted: true });
-    expect(reloadWorkspaceMcp).toHaveBeenCalledOnce();
+    expect(workspaceByCwd).toHaveBeenCalledWith('/workspace');
+    expect(reloadRuntimeMcp).toHaveBeenCalledOnce();
+  });
+
+  it('loads MCP status from the selected workspace runtime', async () => {
+    const runtimeMcp = vi.fn().mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/secondary',
+      initialized: false,
+      servers: [],
+    });
+    const workspaceByCwd = vi.fn(() => ({ runtimeMcp }));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ workspaceByCwd }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/secondary',
+      baseUrl: 'http://daemon',
+    });
+
+    await expect(actions.loadMcpStatus()).resolves.toMatchObject({
+      workspaceCwd: '/secondary',
+    });
+    expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
+  });
+
+  it('persists MCP configuration in the requested scope', async () => {
+    const setUserMcpServer = vi
+      .fn()
+      .mockResolvedValue({ activation: 'reconciling' });
+    const setMcpServer = vi
+      .fn()
+      .mockResolvedValue({ activation: 'reconciling' });
+    const workspaceByCwd = vi.fn(() => ({ setMcpServer }));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({ setUserMcpServer, workspaceByCwd }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/secondary',
+      baseUrl: 'http://daemon',
+    });
+
+    await actions.setMcpServer('user-docs', 'user', { command: 'user' });
+    await actions.setMcpServer('workspace-docs', 'workspace', {
+      command: 'workspace',
+    });
+
+    expect(setUserMcpServer).toHaveBeenCalledWith('user-docs', {
+      command: 'user',
+    });
+    expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
+    expect(setMcpServer).toHaveBeenCalledWith('workspace-docs', {
+      command: 'workspace',
+    });
+  });
+
+  it('enables an MCP server in every disabled scope', async () => {
+    const setUserMcpServerEnabled = vi
+      .fn()
+      .mockResolvedValue({ changed: true, activation: 'reconciling' });
+    const setMcpServerEnabled = vi
+      .fn()
+      .mockResolvedValue({ changed: true, activation: 'reconciling' });
+    const workspaceByCwd = vi.fn(() => ({
+      mcpConfig: vi.fn().mockResolvedValue({
+        user: {},
+        workspace: {},
+      }),
+      setMcpServerEnabled,
+    }));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({
+          setUserMcpServerEnabled,
+          workspaceByCwd,
+        }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/secondary',
+      baseUrl: 'http://daemon',
+    });
+
+    await expect(actions.manageMcpServer('docs', 'enable')).resolves.toEqual({
+      serverName: 'docs',
+      action: 'enable',
+      ok: true,
+      changed: true,
+    });
+    expect(setUserMcpServerEnabled).toHaveBeenCalledWith('docs', true);
+    expect(setMcpServerEnabled).toHaveBeenCalledWith('docs', true);
+    expect(setUserMcpServerEnabled.mock.invocationCallOrder[0]!).toBeLessThan(
+      setMcpServerEnabled.mock.invocationCallOrder[0]!,
+    );
+  });
+
+  it('disables a user MCP server in user scope', async () => {
+    const setUserMcpServerEnabled = vi
+      .fn()
+      .mockResolvedValue({ changed: true, activation: 'reconciling' });
+    const setMcpServerEnabled = vi.fn();
+    const workspaceByCwd = vi.fn(() => ({
+      mcpConfig: vi.fn().mockResolvedValue({
+        user: { docs: { command: 'docs' } },
+        workspace: {},
+      }),
+      setMcpServerEnabled,
+    }));
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({
+          setUserMcpServerEnabled,
+          workspaceByCwd,
+        }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/secondary',
+      baseUrl: 'http://daemon',
+    });
+
+    await actions.manageMcpServer('docs', 'disable');
+
+    expect(setUserMcpServerEnabled).toHaveBeenCalledWith('docs', false);
+    expect(setMcpServerEnabled).not.toHaveBeenCalled();
   });
 
   it('forwards an extension interaction response to the daemon client', async () => {

@@ -122,11 +122,20 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
           _meta,
           ...rest
         } = body as Record<string, unknown>;
+        const startupScope =
+          body.startupConfig !== undefined && _ !== undefined
+            ? { sessionScope: _ }
+            : {};
         if (sessionId === undefined) {
-          return { ...rest, ...(_meta !== undefined ? { _meta } : {}) };
+          return {
+            ...rest,
+            ...startupScope,
+            ...(_meta !== undefined ? { _meta } : {}),
+          };
         }
         return {
           ...rest,
+          ...startupScope,
           _meta: {
             ...(isRecord(_meta) ? _meta : {}),
             [REQUESTED_SESSION_ID_META_KEY]: sessionId,
@@ -311,6 +320,15 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: (segs) => ({ sessionId: segs[0] }),
     },
   },
+  // GET /session/:id/attachments → _qwen/session/attachments
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/attachments$/,
+    mapping: {
+      method: '_qwen/session/attachments',
+      extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
   // POST /session/:id/artifacts → _qwen/session/artifacts/add
   {
     httpMethod: 'POST',
@@ -440,7 +458,57 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     pattern: /^\/session\/([^/]+)\/tasks$/,
     mapping: {
       method: '_qwen/session/tasks',
+      extractParams: (segs, _body, _method, query) => ({
+        sessionId: segs[0],
+        ...boolParam(query, 'includeWorkflows'),
+      }),
+    },
+  },
+  // POST /session/:id/tasks/:taskId/cancel → _qwen/session/tasks/cancel
+  {
+    httpMethod: 'POST',
+    pattern: /^\/session\/([^/]+)\/tasks\/([^/]+)\/cancel$/,
+    mapping: {
+      method: '_qwen/session/tasks/cancel',
+      extractParams: (segs, body) => ({
+        ...bodyRecord(body),
+        sessionId: segs[0],
+        taskId: segs[1],
+      }),
+    },
+  },
+  // POST /session/:id/tasks/:taskId/workflow-action → _qwen/session/tasks/workflow_action
+  {
+    httpMethod: 'POST',
+    pattern: /^\/session\/([^/]+)\/tasks\/([^/]+)\/workflow-action$/,
+    mapping: {
+      method: '_qwen/session/tasks/workflow_action',
+      extractParams: (segs, body) => ({
+        ...bodyRecord(body),
+        sessionId: segs[0],
+        taskId: segs[1],
+      }),
+    },
+  },
+  // GET /session/:id/agents → _qwen/session/agents
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/agents$/,
+    mapping: {
+      method: '_qwen/session/agents',
       extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
+  // GET /session/:id/agent-trace → _qwen/session/agent_trace
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/agent-trace$/,
+    mapping: {
+      method: '_qwen/session/agent_trace',
+      extractParams: (segs, _body, _method, query) => ({
+        sessionId: segs[0],
+        ...strParam(query, 'rootAgentId'),
+      }),
     },
   },
   // GET /session/:id/lsp -> _qwen/session/lsp
@@ -450,6 +518,15 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     mapping: {
       method: '_qwen/session/lsp',
       extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
+  // GET /session/:id/saved-workflows/:name -> _qwen/session/saved_workflow
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/saved-workflows\/([^/]+)$/,
+    mapping: {
+      method: '_qwen/session/saved_workflow',
+      extractParams: (segs) => ({ sessionId: segs[0], name: segs[1] }),
     },
   },
 
@@ -527,6 +604,15 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: (_s, body) => bodyRecord(body),
     },
   },
+  // POST /workspace/trust/grant → _qwen/workspace/trust/grant
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/trust\/grant\/?$/,
+    mapping: {
+      method: '_qwen/workspace/trust/grant',
+      extractParams: () => ({}),
+    },
+  },
   // GET /workspace/permissions → _qwen/workspace/permissions
   {
     httpMethod: 'GET',
@@ -581,13 +667,13 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: () => ({}),
     },
   },
-  // GET /workspace/memory → _qwen/workspace/memory
+  // GET /workspace/memory?content=true → _qwen/workspace/memory
   {
     httpMethod: 'GET',
     pattern: /^\/workspace\/memory\/?$/,
     mapping: {
       method: '_qwen/workspace/memory',
-      extractParams: () => ({}),
+      extractParams: (_s, _b, _m, q) => boolParam(q, 'content'),
     },
   },
   // POST /workspace/memory → _qwen/workspace/memory/write

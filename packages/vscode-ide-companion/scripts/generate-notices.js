@@ -44,19 +44,14 @@ SOFTWARE.`;
  *
  * @param {string} depName - Package name
  * @param {string} depVersion - Resolved version string
- * @param {string} resolvedKey - Lockfile key indicating where the package is installed
+ * @param {string} packageDir - Directory the package is installed in
  * @returns {Promise<{name: string, version: string, repository: string, license: string}>}
  */
-async function getDependencyLicense(depName, depVersion, resolvedKey) {
+async function getDependencyLicense(depName, depVersion, packageDir) {
   let licenseContent = 'License text not found.';
   let repositoryUrl = 'No repository found';
 
-  // Derive the on-disk path directly from the lockfile key
-  const depPackageJsonPath = path.join(
-    projectRoot,
-    resolvedKey,
-    'package.json',
-  );
+  const depPackageJsonPath = path.join(packageDir, 'package.json');
 
   try {
     const depPackageJsonContent = await fs.readFile(
@@ -333,114 +328,82 @@ export function getFallbackLicenseText(license, author) {
 }
 
 /**
- * Resolve a package in the lockfile by walking up the node_modules chain,
- * mirroring Node.js module resolution algorithm.
+ * Find where `packageName` resolves from `fromDir` by walking up the
+ * node_modules chain the way Node.js does. This reads the installed tree
+ * rather than a lockfile, so the notices describe what the extension actually
+ * bundles, whichever package manager laid that tree out.
  *
  * @param {string} packageName - Package to find
- * @param {object} packages - packageLock.packages map
- * @param {string} resolveFrom - Lockfile key to start resolution from
- * @returns {{info: object, key: string} | null}
+ * @param {string} fromDir - Real directory of the package that depends on it
+ * @returns {Promise<{dir: string, manifest: object} | null>}
  */
-function resolveInLockfile(packageName, packages, resolveFrom) {
-  // Walk up from resolveFrom, trying each node_modules level
-  let current = resolveFrom;
-  while (current) {
-    const candidate = `${current}/node_modules/${packageName}`;
-    if (packages[candidate]) {
-      return { info: packages[candidate], key: candidate };
+async function resolveInstalled(packageName, fromDir) {
+  let dir = fromDir;
+  for (;;) {
+    const candidate = path.join(dir, 'node_modules', packageName);
+    try {
+      const manifest = JSON.parse(
+        await fs.readFile(path.join(candidate, 'package.json'), 'utf-8'),
+      );
+      return { dir: await fs.realpath(candidate), manifest };
+    } catch (error) {
+      if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
     }
-    // Move up: strip the last /node_modules/... segment
-    const lastNm = current.lastIndexOf('/node_modules/');
-    if (lastNm === -1) break;
-    current = current.slice(0, lastNm);
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
   }
-  // Finally try root hoisted level
-  const hoistedKey = `node_modules/${packageName}`;
-  if (packages[hoistedKey]) {
-    return { info: packages[hoistedKey], key: hoistedKey };
-  }
-  return null;
 }
 
 /**
- * Recursively collect third-party dependencies by walking the lockfile.
- * Mirrors Node.js module resolution: walks up the node_modules chain from
- * the current package's location.
+ * Recursively collect third-party dependencies from the installed tree,
+ * resolving each one from the real location of the package that needs it.
  *
  * @param {string} packageName - Package to resolve
- * @param {object} packageLock - Parsed package-lock.json
- * @param {Map<string, {version: string, resolvedKey: string}>} dependenciesMap - Accumulated results
- * @param {string} resolveFrom - Lockfile key prefix to resolve from (e.g. "packages/vscode-ide-companion")
- * @param {Set<string>} visitedKeys - Lockfile keys already traversed
+ * @param {string} fromDir - Real directory to resolve from
+ * @param {Map<string, {name: string, version: string, dir: string}>} dependenciesMap - Accumulated results
+ * @param {Set<string>} visitedDirs - Installed directories already traversed
  */
-export function collectDependencies(
+export async function collectDependencies(
   packageName,
-  packageLock,
+  fromDir,
   dependenciesMap,
-  resolveFrom,
-  visitedKeys,
+  visitedDirs,
 ) {
-  const resolved = resolveInLockfile(
-    packageName,
-    packageLock.packages,
-    resolveFrom,
-  );
+  const resolved = await resolveInstalled(packageName, fromDir);
   if (!resolved) {
     console.warn(
-      `Warning: Could not find package info for ${packageName} in package-lock.json.`,
+      `Warning: ${packageName} is not installed where ${fromDir} resolves it.`,
     );
     return;
   }
 
-  const { info: packageInfo, key: resolvedKey } = resolved;
+  const { dir, manifest } = resolved;
 
-  // Traversal guard: skip if this exact lockfile path was already visited.
-  // Keyed by resolved path (not package name) so different installed versions
-  // of the same package are each traversed once.
-  if (visitedKeys.has(resolvedKey)) {
+  // Traversal guard: keyed by real directory, not package name, so different
+  // installed versions of the same package are each traversed once.
+  if (visitedDirs.has(dir)) {
     return;
   }
-  visitedKeys.add(resolvedKey);
+  visitedDirs.add(dir);
 
-  // Workspace-linked packages: follow resolved pointer to collect their third-party deps
-  if (packageInfo.link) {
-    const realInfo = packageLock.packages[packageInfo.resolved];
-    if (realInfo?.dependencies) {
-      for (const depName of Object.keys(realInfo.dependencies)) {
-        collectDependencies(
-          depName,
-          packageLock,
-          dependenciesMap,
-          packageInfo.resolved,
-          visitedKeys,
-        );
-      }
+  // A workspace package resolves outside every node_modules directory: follow
+  // it for its third-party dependencies without listing it.
+  if (dir.split(path.sep).includes('node_modules')) {
+    // Output dedup: emit each (name, version) pair once, even when the same
+    // version is installed at multiple paths.
+    const outputKey = `${packageName}@${manifest.version}`;
+    if (!dependenciesMap.has(outputKey)) {
+      dependenciesMap.set(outputKey, {
+        name: packageName,
+        version: manifest.version,
+        dir,
+      });
     }
-    return;
   }
 
-  // Output dedup: emit each (name, version) pair once, even when the same
-  // version is installed at multiple paths.
-  const outputKey = `${packageName}@${packageInfo.version}`;
-  if (!dependenciesMap.has(outputKey)) {
-    dependenciesMap.set(outputKey, {
-      name: packageName,
-      version: packageInfo.version,
-      resolvedKey,
-    });
-  }
-
-  if (packageInfo.dependencies) {
-    for (const depName of Object.keys(packageInfo.dependencies)) {
-      // Resolve transitive deps from THIS package's location
-      collectDependencies(
-        depName,
-        packageLock,
-        dependenciesMap,
-        resolvedKey,
-        visitedKeys,
-      );
-    }
+  for (const depName of Object.keys(manifest.dependencies ?? {})) {
+    await collectDependencies(depName, dir, dependenciesMap, visitedDirs);
   }
 }
 
@@ -450,33 +413,25 @@ async function main() {
     const packageJsonContent = await fs.readFile(packageJsonPath, 'utf-8');
     const packageJson = JSON.parse(packageJsonContent);
 
-    const packageLockJsonPath = path.join(projectRoot, 'package-lock.json');
-    const packageLockJsonContent = await fs.readFile(
-      packageLockJsonPath,
-      'utf-8',
-    );
-    const packageLockJson = JSON.parse(packageLockJsonContent);
-
     const allDependencies = new Map();
-    const visitedKeys = new Set();
+    const visitedDirs = new Set();
     const directDependencies = Object.keys(packageJson.dependencies);
-    const workspacePrefix = path.relative(projectRoot, packagePath);
 
+    // Sequential on purpose: the traversal order is the file's order, and it
+    // must not depend on which filesystem read finishes first.
     for (const depName of directDependencies) {
-      collectDependencies(
+      await collectDependencies(
         depName,
-        packageLockJson,
+        packagePath,
         allDependencies,
-        workspacePrefix,
-        visitedKeys,
+        visitedDirs,
       );
     }
 
     const dependencyEntries = Array.from(allDependencies.values());
 
-    const licensePromises = dependencyEntries.map(
-      ({ name, version, resolvedKey }) =>
-        getDependencyLicense(name, version, resolvedKey),
+    const licensePromises = dependencyEntries.map(({ name, version, dir }) =>
+      getDependencyLicense(name, version, dir),
     );
 
     const dependencyLicenses = await Promise.all(licensePromises);
@@ -506,11 +461,26 @@ async function main() {
   }
 }
 
+export async function runNoticeGeneration(env = process.env) {
+  const skipGeneration = ['1', 'true'].includes(
+    (env.QWEN_SKIP_NOTICE_GENERATION ?? '').toLowerCase(),
+  );
+
+  if (skipGeneration) {
+    console.log(
+      'Skipping VS Code notice generation during worktree bootstrap.',
+    );
+    return;
+  }
+
+  await main();
+}
+
 // Only run when executed directly (e.g. `npm run generate:notices`), not when
 // imported by tests.
 if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  main().catch(console.error);
+  runNoticeGeneration().catch(console.error);
 }

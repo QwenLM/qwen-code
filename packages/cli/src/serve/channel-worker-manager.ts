@@ -25,6 +25,10 @@ import type {
 } from './channel-worker-supervisor.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { ServeChannelSelection } from './types.js';
+import {
+  assertChannelControlWorkspaceCapacity,
+  ChannelControlWorkspaceLimitError,
+} from './channel-control-capacity.js';
 
 export type ChannelWorkerControlTransition =
   | 'idle'
@@ -115,6 +119,17 @@ export interface ChannelWorkerManager {
     owner: ChannelWorkerRequiredOwner,
     enabled: boolean,
   ): Promise<ChannelWorkerSetResult | ChannelWorkerStopResult>;
+  /**
+   * Adds names to the committed selection, reading that selection inside the
+   * control lane so the result builds on every change queued before it. Names
+   * already committed are left alone, and a committed `all` selection is never
+   * rewritten. `precondition` is evaluated in the lane too, immediately before
+   * anything is committed; when it returns false nothing changes.
+   */
+  addChannels(
+    names: readonly string[],
+    options?: { precondition?: () => boolean },
+  ): Promise<ChannelWorkerSetResult | ChannelWorkerStopResult>;
   stopSelection(): Promise<ChannelWorkerStopResult>;
   reload(): Promise<ChannelWorkerSnapshot>;
   reloadWorkspace(
@@ -135,7 +150,10 @@ export interface ChannelWorkerManager {
   beginWorkspaceDrain(workspaceCwd: string): void;
   cancelWorkspaceDrain(workspaceCwd: string): void;
   workspaceActivity(workspaceCwd: string): number;
-  removeWorkspace(workspaceCwd: string): Promise<void>;
+  removeWorkspace(
+    workspaceCwd: string,
+    options?: { permanent?: boolean },
+  ): Promise<void>;
   restoreWorkspace(workspaceCwd: string): Promise<void>;
   refreshWorkspaces(): Promise<void>;
   workerChanged(): void;
@@ -321,7 +339,8 @@ export function createChannelWorkerManager(
   const classifyFailure = (
     error: unknown,
     fallbackCode: 'channel_worker_start_failed' | 'channel_worker_stop_failed',
-  ): ChannelWorkerControlError => {
+  ): ChannelWorkerControlError | ChannelControlWorkspaceLimitError => {
+    if (error instanceof ChannelControlWorkspaceLimitError) return error;
     if (error instanceof ChannelWorkerReconcileError) {
       return new ChannelWorkerControlError(
         error.stopFailed ? 'channel_worker_stop_failed' : fallbackCode,
@@ -370,6 +389,9 @@ export function createChannelWorkerManager(
         resolvedGroups ??
         (await opts.resolveGroups(selection, initial ? 'initial' : 'set'));
       if (hardKilled) throw drainingError();
+      assertChannelControlWorkspaceCapacity(
+        targetGroups.map((target) => target.workspaceCwd),
+      );
       reserve(selection);
     } catch (error) {
       setTransition('idle');
@@ -390,6 +412,12 @@ export function createChannelWorkerManager(
           }
         }
         setTransition('idle');
+        if (
+          error instanceof ChannelControlWorkspaceLimitError &&
+          !cleanupError
+        ) {
+          throw error;
+        }
         throw new ChannelWorkerControlError(
           'channel_worker_start_failed',
           errorMessage(error),
@@ -537,6 +565,25 @@ export function createChannelWorkerManager(
         assertRequiredOwner(targetGroups, requiredOwner);
         if (hardKilled) throw drainingError();
         return applySelection(selection, false, targetGroups);
+      });
+    },
+    addChannels(names, options = {}) {
+      if (draining) {
+        return Promise.reject(drainingError());
+      }
+      return enqueue(async () => {
+        const unchanged = () => ({ changed: false, state: snapshot() });
+        if (options.precondition && !options.precondition()) {
+          return unchanged();
+        }
+        if (committedSelection?.mode === 'all') return unchanged();
+        const committedNames = committedChannelNames();
+        const pending = names.filter((name) => !committedNames.includes(name));
+        if (pending.length === 0) return unchanged();
+        return applySelection(
+          { mode: 'names', names: [...committedNames, ...pending] },
+          false,
+        );
       });
     },
     setChannelEnabled(owner, enabled) {
@@ -725,11 +772,52 @@ export function createChannelWorkerManager(
     workspaceActivity(workspaceCwd) {
       return group?.workspaceActivity(workspaceCwd) ?? 0;
     },
-    removeWorkspace(workspaceCwd) {
+    removeWorkspace(workspaceCwd, options) {
       return enqueue(async () => {
         try {
-          await group?.removeWorkspace(workspaceCwd);
-          notify();
+          let removalError: unknown;
+          try {
+            await group?.removeWorkspace(workspaceCwd, options);
+          } catch (error) {
+            removalError = error;
+          }
+          try {
+            if (!options?.permanent) {
+              notify();
+            } else {
+              const removedNames = new Set<string>();
+              const nextGroups = committedGroups.filter((committedGroup) => {
+                if (committedGroup.workspaceCwd !== workspaceCwd) return true;
+                if (committedGroup.selection.mode === 'names') {
+                  for (const name of committedGroup.selection.names) {
+                    removedNames.add(name);
+                  }
+                }
+                return false;
+              });
+              if (!committedSelection || committedSelection.mode === 'all') {
+                commit(committedSelection, nextGroups);
+              } else {
+                const names = committedSelection.names.filter(
+                  (name) => !removedNames.has(name),
+                );
+                if (names.length > 0) {
+                  commit({ mode: 'names', names }, nextGroups);
+                } else {
+                  await stopSelectionNow();
+                }
+              }
+            }
+          } catch (error) {
+            if (removalError) {
+              throw new AggregateError(
+                [removalError, error],
+                'Failed to remove channel workspace and converge manager state.',
+              );
+            }
+            throw error;
+          }
+          if (removalError) throw removalError;
         } finally {
           workspaceDrains.delete(workspaceCwd);
         }

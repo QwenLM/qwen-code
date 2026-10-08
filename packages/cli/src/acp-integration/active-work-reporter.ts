@@ -26,6 +26,8 @@ const debugLogger = createDebugLogger('ACTIVE_WORK');
 export interface ActiveWorkSource {
   readonly sessionId: string;
   collectActiveWorkHolds(): ActiveWorkHoldV1[];
+  hasRunningBackgroundTasks?(): boolean;
+  getFinishedBackgroundTurnId?(): string | undefined;
 }
 
 type SendNotification = (
@@ -121,8 +123,13 @@ export class ActiveWorkReporter {
     try {
       sessions = [];
       for (const source of this.listSources()) {
+        const finishedBackgroundTurnId = source.getFinishedBackgroundTurnId?.();
         sessions.push({
           sessionId: source.sessionId,
+          ...(finishedBackgroundTurnId ? { finishedBackgroundTurnId } : {}),
+          ...(source.hasRunningBackgroundTasks
+            ? { hasRunningBackgroundTasks: source.hasRunningBackgroundTasks() }
+            : {}),
           holds: source
             .collectActiveWorkHolds()
             .filter((hold) => this.#enabledCategories.has(hold.category)),

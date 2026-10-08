@@ -14,7 +14,10 @@ import { QWEN_DIR } from '../config/storage.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { applyOutputStyle } from './output-styles.js';
+import {
+  applyOutputStyle,
+  resolveEffectiveOutputStyle,
+} from './output-styles.js';
 import type { OutputStyleDefinition } from './output-styles.js';
 
 const debugLogger = createDebugLogger('PROMPTS');
@@ -200,6 +203,17 @@ export function resolvePathFromEnv(envVar?: string): {
 }
 
 /**
+ * Whether `QWEN_SYSTEM_MD` replaces the base system prompt. The override is a
+ * full, user-owned prompt that carries no output-style section, so the prompt
+ * builders and the per-turn style reminder consult this together — a session
+ * is never reminded about a style its prompt does not carry.
+ */
+export function isSystemMdActive(): boolean {
+  const resolution = resolvePathFromEnv(process.env['QWEN_SYSTEM_MD']);
+  return resolution.value !== null && !resolution.isDisabled;
+}
+
+/**
  * Processes a custom system instruction by appending user memory if available.
  * This function should only be used when there is actually a custom instruction.
  *
@@ -248,25 +262,246 @@ export function getCustomSystemPrompt(
 }
 
 /**
+ * The tools a session declared to the model, used to keep tool-specific prompt
+ * text in step with the request (#12032). `declaredTools: undefined` means
+ * "assume every tool is declared" and reproduces the prompt byte for byte as it
+ * was before gating existed, which is what every caller that has no registry
+ * snapshot to offer gets.
+ */
+export interface PromptToolSurface {
+  declaredTools?: ReadonlySet<string>;
+  agentReachable?: boolean;
+  executionSandboxFilesystem?: 'read-only' | 'workspace-write';
+  executionSandboxBackend?: 'bwrap' | 'landlock';
+  executionSandboxNetwork?: 'open' | 'closed';
+}
+
+/**
+ * Which tools each gated line of `## Using Your Tools` talks about. A line
+ * survives only when every tool it names is one the session can call: declared,
+ * or — for Agent alone — reachable through the deferred-tool bridge (see
+ * `gateToolGuidance`). A line that named an uncallable tool would send the
+ * model after something it cannot call, which is the defect this gating exists
+ * to fix. Any other deferred tool is reachable but not declared, so its line
+ * drops; its selection rule travels in the first description line the
+ * deferred-tool reminder shows instead (#12702). Lines absent from this table
+ * are policy that holds regardless of the tool surface (tool fallback, parallel
+ * calls, respecting denials) and are never dropped.
+ */
+const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
+  prefix: string;
+  tools: readonly string[];
+}> = [
+  { prefix: '- **Prefer Dedicated Tools:**', tools: [ToolNames.SHELL] },
+  { prefix: '  - To read files use', tools: [ToolNames.READ_FILE] },
+  { prefix: '  - To edit files use', tools: [ToolNames.EDIT] },
+  { prefix: '  - To create files use', tools: [ToolNames.WRITE_FILE] },
+  { prefix: '  - To search for files use', tools: [ToolNames.GLOB] },
+  { prefix: '  - To search the content of files', tools: [ToolNames.GREP] },
+  { prefix: '  - Reserve using the', tools: [ToolNames.SHELL] },
+  { prefix: '- **Task Management:**', tools: [ToolNames.TODO_WRITE] },
+  {
+    prefix: '- **File Paths:**',
+    tools: [ToolNames.READ_FILE, ToolNames.WRITE_FILE],
+  },
+  { prefix: '- **Background Processes:**', tools: [ToolNames.SHELL] },
+  { prefix: '- **Monitor Processes:**', tools: [ToolNames.MONITOR] },
+  { prefix: '- **Interactive Commands:**', tools: [ToolNames.SHELL] },
+  { prefix: '- **Subagent Delegation:**', tools: [ToolNames.AGENT] },
+  {
+    prefix: '- **Codebase Search:**',
+    tools: [ToolNames.AGENT, ToolNames.GREP, ToolNames.GLOB],
+  },
+];
+
+const PREFER_DEDICATED_TOOLS_PREFIX = '- **Prefer Dedicated Tools:**';
+
+/**
+ * Drops tool-guidance lines whose tools the session cannot call. Agent policy
+ * also survives when Agent is reachable through the deferred-tool bridge.
+ *
+ * Agent is deliberately the only tool with that exception: the delegation and
+ * codebase-search bullets are the policy that sends the model to the bridge to
+ * discover Agent, so dropping them whenever Agent is deferred would turn
+ * deferral into silent removal. Every other deferred tool's line (monitor
+ * included) is still dropped — discovery of those is the startup reminder's
+ * job, and their bullets are usage guidance rather than the policy that drives
+ * their own discovery.
+ *
+ * Implemented as a line filter rather than a rebuilt template on purpose: with
+ * no snapshot the section returns unchanged, so the default prompt cannot drift
+ * while gating is added.
+ */
+function gateToolGuidance(
+  section: string,
+  surface: PromptToolSurface | undefined,
+): string {
+  const declared = surface?.declaredTools;
+  if (!declared) return section;
+
+  const kept = section.split('\n').filter((line) => {
+    const gate = TOOL_GUIDANCE_LINE_GATES.find((entry) =>
+      line.startsWith(entry.prefix),
+    );
+    return (
+      !gate ||
+      gate.tools.every(
+        (tool) =>
+          declared.has(tool) ||
+          (tool === ToolNames.AGENT && surface?.agentReachable === true),
+      )
+    );
+  });
+  // The "prefer dedicated tools" bullet only introduces its sub-bullets, so it
+  // goes when every tool it was going to recommend is gone.
+  const parentIndex = kept.findIndex((line) =>
+    line.startsWith(PREFER_DEDICATED_TOOLS_PREFIX),
+  );
+  if (
+    parentIndex !== -1 &&
+    !kept[parentIndex + 1]?.startsWith('  - To ') &&
+    !kept[parentIndex + 1]?.startsWith('  - Reserve using the')
+  ) {
+    kept.splice(parentIndex, 1);
+  }
+  return kept.join('\n');
+}
+
+// Every notation the example blocks use, because `getToolCallExamples` picks a
+// different one per model: the bracket form (general and code mode), the
+// qwen-coder XML form, the qwen-vl JSON form, and the Gemma 4 native form. The
+// JSON alternative requires the `"arguments"` key that always follows it, so a
+// `"name"` field in unrelated JSON inside an example is not read as a call.
+const TOOL_CALL_IN_EXAMPLE =
+  /\[tool_call:\s*([A-Za-z0-9_]+)|<function=([A-Za-z0-9_]+)>|"name":\s*"([A-Za-z0-9_]+)",\s*"arguments"|<\|tool_call>call:([A-Za-z0-9_]+)/g;
+
+function exampleToolNames(block: string): string[] {
+  return [...block.matchAll(TOOL_CALL_IN_EXAMPLE)].map(
+    (match) => match[1] ?? match[2] ?? match[3] ?? match[4]!,
+  );
+}
+
+// Matched as a pair rather than split on blank lines: a single example can
+// contain blank lines of its own, and splitting on them orphans the tool calls
+// in its later paragraphs from the `<example>` tag that gates them.
+const EXAMPLE_BLOCK = /<example>[\s\S]*?<\/example>\n*/g;
+
+/**
+ * Drops `<example>` blocks that demonstrate a tool this session did not
+ * declare, so the prompt never shows the model a call it cannot make (#12032).
+ *
+ * When no example survives the heading goes too, rather than leaving a section
+ * with nothing under it. All four notations are recognised, so gating does not
+ * silently stop working on the model-specific example sets.
+ */
+function filterToolCallExamples(
+  examples: string,
+  surface: PromptToolSurface | undefined,
+): string {
+  const declared = surface?.declaredTools;
+  if (!declared) return examples;
+
+  let keptExamples = 0;
+  const filtered = examples.replace(EXAMPLE_BLOCK, (block) => {
+    const callsUndeclared = exampleToolNames(block).some(
+      (name) => !declared.has(name),
+    );
+    if (callsUndeclared) return '';
+    keptExamples++;
+    return block;
+  });
+  if (keptExamples === 0) return '';
+  // Dropping a block from the middle can leave the gap behind it.
+  return filtered.replace(/\n{3,}/g, '\n\n').trimEnd();
+}
+
+/**
  * The workflow guidance for performing software-engineering work.
  *
  * Split out so an output style with `keepCodingInstructions: false` can drop
  * exactly this section and nothing else — mandates, safety rules, tool
  * guidance and tone stay in force under every style.
  */
-function getSoftwareEngineeringTasksSection(): string {
+function getSoftwareEngineeringTasksSection(todoWriteEnabled: boolean): string {
+  // With todo_write on, the when/how rules live in '# Task Management'; the
+  // Plan bullet only names the tool and the skip rule.
+  const planGuidance = todoWriteEnabled
+    ? `Track complex, ambiguous, or multi-step work with '${ToolNames.TODO_WRITE}'; skip it for simple tasks unless the user explicitly requests a plan.`
+    : 'For complex, ambiguous, or multi-step work, form a concise, outcome-oriented approach and revise it as you learn. Skip formal planning for simple tasks unless the user explicitly requests a plan.';
   return `## Software Engineering Tasks
 When requested to perform tasks like fixing bugs, adding features, refactoring, or explaining code, follow this iterative approach:
-- **Plan:** Use '${ToolNames.TODO_WRITE}' for complex, ambiguous, or multi-step work when visible progress tracking adds value. Keep the plan short and outcome-oriented; skip it for simple tasks unless the user explicitly requests a plan.
+- **Plan:** ${planGuidance}
 - **Implement:** Begin implementing while gathering context as needed. Use available search and editing tools strategically, adhering to project conventions (see 'Core Mandates'). Do not add features, refactor code, or make "improvements" beyond what was asked. Don't add error handling, fallbacks, or validation for scenarios that can't happen—only validate at system boundaries (user input, external APIs). Don't create helpers, utilities, or abstractions for one-time operations. Three similar lines of code is better than a premature abstraction. Prefer editing existing files over creating new ones.
-- **Adapt:** Refine your approach as you discover new information or encounter obstacles. If a todo list exists, keep it current as the scope or approach changes. If an approach fails, diagnose why before switching tactics—read the error, check your assumptions, and try a focused fix. Don't retry blindly, but don't abandon a viable approach after a single failure.
-- **Verify (Tests):** If applicable and feasible, verify the changes using the project's testing procedures. Identify the correct test commands and frameworks by examining 'README' files, build/package configuration (e.g., 'package.json'), or existing test execution patterns. NEVER assume standard test commands. Before reporting a task complete, verify it actually works. If you can't verify (no test exists, can't run the code), say so explicitly rather than claiming success.
-- **Verify (Standards):** When your task involves a code or system change, execute the project-specific build, linting and type-checking commands (e.g., 'tsc', 'npm run lint', 'ruff check .') that you have identified for this project (or obtained from the user). This ensures code quality and adherence to standards. Read-only or explanatory turns do not require verification.
-- **Report outcomes faithfully:** If tests fail, say so with the relevant output. If you did not run a verification step, say that rather than implying it succeeded. Never claim "all tests pass" when output shows failures, never suppress failing checks to manufacture a green result, and never characterize incomplete or broken work as done.
-
-**Key Principle:** Start with a reasonable approach based on available information, then adapt as you learn. Users prefer seeing progress quickly rather than waiting for perfect understanding.
+- **Adapt:** Refine your approach as you discover new information or encounter obstacles. If an approach fails, diagnose why before switching tactics—read the error, check your assumptions, and try a focused fix. Don't retry blindly, but don't abandon a viable approach after a single failure.
+- **Verify:** When your task involves a code or system change, verify it actually works before reporting it complete — run the project's own test, build, lint, and type-check commands, identified from 'README' files, build/package configuration (e.g., 'package.json'), or existing execution patterns. NEVER assume standard commands. Read-only or explanatory turns do not require verification.
+- **Report outcomes faithfully:** If a check fails, say so with the relevant output; if you did not run a verification step — including when you could not (no test exists, can't run the code) — say that rather than implying it succeeded. Never claim "all tests pass" when output shows failures, never suppress failing checks to manufacture a green result, and never characterize incomplete or broken work as done.
 
 `;
+}
+
+/**
+ * Builds the "Using Your Tools" section.
+ *
+ * In CodeModeOnly the model can only call `exec`, so the Direct-mode text would
+ * name a tool surface it does not have. The mechanics of `exec` itself live in
+ * its tool description; this section carries only policy.
+ */
+function getToolGuidanceSection(
+  codeModeOnly: boolean,
+  todoWriteEnabled: boolean,
+  surface?: PromptToolSurface,
+): string {
+  const taskManagementToolGuidance = todoWriteEnabled
+    ? `- **Task Management:** Use '${ToolNames.TODO_WRITE}' to keep user-visible progress on multi-step work; '# Task Management' governs its use.\n`
+    : '';
+  const directControls = todoWriteEnabled
+    ? `'${ToolNames.TODO_WRITE}', '${ToolNames.AGENT}' and the other direct controls`
+    : `'${ToolNames.AGENT}' and the other direct controls`;
+  if (codeModeOnly) {
+    return `
+## Using Your Tools
+- **Calling Convention:** Ordinary tools exist only inside '${ToolNames.EXEC}', as \`tools.<jsName>(args)\`. Every other tool declared to you — ${directControls} — is called directly and is not reachable through \`tools\`.
+- **Tool Discovery:** If a needed tool's signature is absent from '${ToolNames.EXEC}', use the top-level '${ToolNames.TOOL_SEARCH}' when available. Read its returned schema and JavaScript name before calling that tool in a later '${ToolNames.EXEC}' program.
+- **Prefer Dedicated Tools:** Do NOT use \`tools.${ToolNames.SHELL}\` to run commands when a relevant dedicated tool is provided. Dedicated tools make actions easier to review:
+  - To read files use \`tools.${ToolNames.READ_FILE}\` instead of cat, head, tail, or sed
+  - To edit files use \`tools.${ToolNames.EDIT}\` instead of sed or awk
+  - To create files use \`tools.${ToolNames.WRITE_FILE}\` instead of cat with heredoc or echo redirection
+  - To search for files use \`tools.${ToolNames.GLOB}\` instead of find or ls
+  - To search the content of files, use \`tools.${ToolNames.GREP}\` instead of grep or rg
+  - Reserve \`tools.${ToolNames.SHELL}\` for system commands and terminal operations that require shell execution.
+- **Batch Into One Program:** Put independent searches and reads in a single '${ToolNames.EXEC}' program with \`await Promise.allSettled([...])\`. Inspect every result: print fulfilled outputs and rejected reasons with \`String(result.reason)\`. The runtime runs safe calls concurrently within its limit; one rejected promise leaves the other results available. Keep dependent actions, mutations, and approvals sequential. Whatever you need to see must be passed to \`text()\` — a result you only assign is never reported back to you. User cancellation still stops unfinished calls.
+- **Tool Fallback:** If a tool returns empty, unhelpful, or unexpected results, try an alternative tool that can accomplish the same goal before telling the user it cannot be done. Never give up after a single tool failure.
+${taskManagementToolGuidance}- **File Paths:** Always use absolute paths when referring to files with tools like \`tools.${ToolNames.READ_FILE}\` or \`tools.${ToolNames.WRITE_FILE}\`. Relative paths are not supported.
+- **Background Processes:** Use background execution with \`is_background: true\` for commands that are unlikely to stop on their own, e.g. \`node server.js\`. Do not append a trailing \`&\` when using the shell tool's managed background mode. If unsure, follow the active interaction mode's question guidance.
+- **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
+- **Subagent Delegation:** Use the '${ToolNames.AGENT}' tool with specialized agents when the task at hand matches the agent's description. Do not duplicate work a subagent is already doing — if you delegate research to a subagent, do not perform the same searches yourself. A background subagent's result arrives as a task notification in a later turn; while waiting, do not read its transcript, predict its findings, or launch a replacement for the same task.
+- **Codebase Search:** For simple, directed codebase searches (e.g. for a specific file/class/function) call \`tools.${ToolNames.GREP}\` or \`tools.${ToolNames.GLOB}\` yourself. For broader codebase exploration and deep research, use the '${ToolNames.AGENT}' tool with subagent_type=Explore — it is slower, so only when a directed search proves insufficient or the task clearly requires more than 3 queries.
+- **Respect Tool Decisions:** Tool permissions are enforced by the runtime. If a call is denied or canceled, respect that decision and do _not_ try the same action through another path. Retry only if the user subsequently requests that action.
+`.trim();
+  }
+  // CodeModeOnly is deliberately not gated above: there the declared surface is
+  // `exec` plus a few direct controls, while the tools this section names are
+  // reached as `tools.<jsName>` inside `exec` and are not declarations at all.
+  const directGuidance = `
+## Using Your Tools
+- **Prefer Dedicated Tools:** Do NOT use the '${ToolNames.SHELL}' to run commands when a relevant dedicated tool is provided. Dedicated tools make actions easier to review:
+  - To read files use '${ToolNames.READ_FILE}' instead of cat, head, tail, or sed
+  - To edit files use '${ToolNames.EDIT}' instead of sed or awk
+  - To create files use '${ToolNames.WRITE_FILE}' instead of cat with heredoc or echo redirection
+  - To search for files use '${ToolNames.GLOB}' instead of find or ls
+  - To search the content of files, use '${ToolNames.GREP}' instead of grep or rg
+  - Reserve using the '${ToolNames.SHELL}' for system commands and terminal operations that require shell execution.
+- **Tool Fallback:** If a tool returns empty, unhelpful, or unexpected results, try an alternative tool that can accomplish the same goal before telling the user it cannot be done. Never give up after a single tool failure.
+${taskManagementToolGuidance}- **Parallel Tool Calls:** Call independent tools in parallel; run dependent calls sequentially, using earlier results to supply later arguments.
+- **File Paths:** Always use absolute paths when referring to files with tools like '${ToolNames.READ_FILE}' or '${ToolNames.WRITE_FILE}'. Relative paths are not supported.
+- **Background Processes:** Use background execution with \`is_background: true\` for commands that are unlikely to stop on their own, e.g. \`node server.js\`. Do not append a trailing \`&\` when using the shell tool's managed background mode. If unsure, follow the active interaction mode's question guidance.
+- **Monitor Processes:** Use the '${ToolNames.MONITOR}' tool with \`command: "tail -f log.txt"\` when a long-running command's output should stream back to you as events, e.g. a log file or a \`--watch\` build. Keep using \`is_background: true\` instead when the command produces no output, or when you only need its result at the end.
+- **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
+- **Subagent Delegation:** Use the '${ToolNames.AGENT}' tool with specialized agents when the task at hand matches the agent's description. Do not duplicate work a subagent is already doing — if you delegate research to a subagent, do not perform the same searches yourself. A background subagent's result arrives as a task notification in a later turn; while waiting, do not read its transcript, predict its findings, or launch a replacement for the same task.
+- **Codebase Search:** For simple, directed codebase searches (e.g. for a specific file/class/function) use the '${ToolNames.GREP}' or '${ToolNames.GLOB}' tools directly. For broader codebase exploration and deep research, use the '${ToolNames.AGENT}' tool with subagent_type=Explore — it is slower, so only when a directed search proves insufficient or the task clearly requires more than 3 queries.
+- **Respect Tool Decisions:** Tool permissions are enforced by the runtime. If a call is denied or canceled, respect that decision and do _not_ try the same action through another path. Retry only if the user subsequently requests that action.
+`.trim();
+  return gateToolGuidance(directGuidance, surface);
 }
 
 /**
@@ -278,7 +513,10 @@ When requested to perform tasks like fixing bugs, adding features, refactoring, 
 function buildDefaultBasePrompt(
   interaction: { role: string; questions: string },
   model: string | undefined,
-  outputStyle?: OutputStyleDefinition | null,
+  outputStyle: OutputStyleDefinition | null | undefined,
+  todoWriteEnabled = false,
+  codeModeOnly = false,
+  surface?: PromptToolSurface,
 ): string {
   // A style with `keepCodingInstructions: false` drops exactly the
   // software-engineering workflow section; every other section, including the
@@ -286,34 +524,10 @@ function buildDefaultBasePrompt(
   const softwareEngineeringTasks =
     outputStyle?.keepCodingInstructions === false
       ? ''
-      : getSoftwareEngineeringTasksSection();
+      : getSoftwareEngineeringTasksSection(todoWriteEnabled);
 
-  // A QWEN_SYSTEM_IDENTITY_MD override is inserted verbatim, so the styled
-  // variant applies only to the default identity sentence — the override is
-  // distributor-owned wording we must not rewrite.
-  const coreIdentity =
-    resolveCoreIdentityOverride() ??
-    getDefaultCoreIdentitySentence(interaction.role, Boolean(outputStyle));
-  return `
-${coreIdentity}
-
-# Core Mandates
-
-- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
-- **Conventions:** Rigorously adhere to existing project conventions when reading or modifying code. Analyze surrounding code, tests, and configuration first.
-- **Libraries/Frameworks:** NEVER assume a library/framework is available or appropriate. Verify its established usage within the project (check imports, configuration files like 'package.json', 'Cargo.toml', 'requirements.txt', 'build.gradle', etc., or observe neighboring files) before employing it.
-- **Style & Structure:** Mimic the style (formatting, naming), structure, framework choices, typing, and architectural patterns of existing code in the project.
-- **Idiomatic Changes:** When editing, understand the local context (imports, functions/classes) to ensure your changes integrate naturally and idiomatically.
-- **Comments:** Default to none. Only add a comment when the _why_ cannot be conveyed through naming or code structure — a hidden constraint, a subtle invariant, or a workaround for a specific bug. Do not narrate what the code does. Do not edit comments that are separate from the code you are changing. *NEVER* talk to the user or describe your changes through comments.
-- **Proactiveness:** Fulfill the user's request thoroughly. When the task involves code modifications, add tests to verify the change works. Consider all created files, especially tests, to be permanent artifacts unless the user says otherwise.
-- **Confirm Ambiguity/Expansion:** Do not take significant actions beyond the clear scope of the request without following the active interaction mode's question guidance. If asked *how* to do something, explain first, don't just do it.
-- **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
-- **Preserve Existing Work:** Treat existing or unexpected changes as user-owned. Do not modify, stage, commit, or revert unrelated changes. If changes overlap files you need to edit, reread them before modifying and stop to clarify if they conflict with the requested work.
-- **Denied Tool Calls:** If a tool call is denied, do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and request explicit approval only when the current interaction mode can receive it; otherwise report the blocker. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.
-- **Plan before uncertain work:** If the task is not yet clear enough to safely execute, do not make small speculative edits. Continue read-only investigation, make a plan in the current mode, or follow the active interaction mode's question guidance. Do not enter plan mode or call ${ToolNames.ENTER_PLAN_MODE} on your own just because the task involves planning or complexity. Use plan mode only when the user explicitly asks you to switch to plan mode, has already enabled it, or confirms they want it.
-
-
-# Task Management
+  const taskManagementSection = todoWriteEnabled
+    ? `# Task Management
 You have access to the ${ToolNames.TODO_WRITE} tool to keep user-visible progress for work that benefits from explicit tracking. Use it for complex, ambiguous, or multi-phase tasks or requests with multiple independent outcomes. Do not use it for simple or single-step queries that you can answer or complete immediately unless the user explicitly asks for a plan.
 
 When you create a todo list:
@@ -322,7 +536,39 @@ When you create a todo list:
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 
-# Primary Workflows
+`
+    : '';
+  // A QWEN_SYSTEM_IDENTITY_MD override is inserted verbatim, so the styled
+  // variant applies only to the default identity sentence — the override is
+  // distributor-owned wording we must not rewrite.
+  const coreIdentity =
+    resolveCoreIdentityOverride() ??
+    getDefaultCoreIdentitySentence(interaction.role, Boolean(outputStyle));
+
+  const toolGuidance = getToolGuidanceSection(
+    codeModeOnly,
+    todoWriteEnabled,
+    surface,
+  );
+  return `
+${coreIdentity}
+
+# Core Mandates
+
+- **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
+- **Answer From Context First:** For follow-up questions, reuse prior observations when they already answer the question and remain current. Re-check when facts may have changed, the user asks for current or post-change state, or history is insufficient, uncertain, or only a summary lacking the needed evidence. This saves redundant investigation, not verification before claiming a change works.
+- **Conventions:** Never assume file contents. Read relevant code, imports, tests, and configuration before making changes. Follow the project's formatting, naming, typing, structure, and architectural patterns.
+- **Libraries/Frameworks:** Verify a dependency's availability and established usage in project manifests, imports, or neighboring code before using it.
+- **Comments:** Default to none. Add one only when the _why_ cannot be conveyed through naming or code structure — a hidden constraint, a subtle invariant, or a workaround for a specific bug. Do not edit comments that are separate from the code you are changing.
+- **Proactiveness:** Fulfill the user's request thoroughly. When the task involves code modifications, add tests to verify the change works. Consider all created files, especially tests, to be permanent artifacts unless the user says otherwise.
+- **Confirm Ambiguity/Expansion:** Do not take significant actions beyond the clear scope of the request without following the active interaction mode's question guidance. If asked *how* to do something, explain first, don't just do it.
+- **Do Not revert changes:** Do not revert changes to the codebase unless asked to do so by the user. Only revert changes made by you if they have resulted in an error or if the user has explicitly asked you to revert the changes.
+- **Preserve Existing Work:** Treat existing or unexpected changes as user-owned. Do not modify, stage, commit, or revert unrelated changes. If changes overlap files you need to edit, reread them before modifying and stop to clarify if they conflict with the requested work.
+- **Denied Tool Calls:** If a tool call is denied, do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and request explicit approval only when the current interaction mode can receive it; otherwise report the blocker. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.
+- **Plan before uncertain work:** If the task is not yet clear enough to safely execute, do not make small speculative edits. Continue read-only investigation, make a plan in the current mode, or follow the active interaction mode's question guidance. Do not enter plan mode or call ${ToolNames.ENTER_PLAN_MODE} on your own just because the task involves planning or complexity. Use plan mode only when the user explicitly asks you to switch to plan mode, has already enabled it, or confirms they want it.
+
+
+${taskManagementSection}# Primary Workflows
 
 ${softwareEngineeringTasks}- Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are NOT part of the user's provided input or the tool result.
 - When you see a <persisted-output> tag in a tool result, the full output was saved to disk because it was too large. Use the read_file tool to access the complete content if the preview is insufficient.
@@ -337,13 +583,10 @@ When a user wants to create a new application, project, website, game, or librar
 
 Before your first tool call, briefly state what you're about to do. While working, give short updates at key moments: when you find something load-bearing (a bug, a root cause), when changing direction, or when you've made progress without an update.
 
-Final responses should be concise by default, but their shape and depth must match the request. Lead with the outcome for simple tasks. For code reviews, explanations, investigations, or substantial changes, provide enough structured detail and include code references, verification results, risks, and next steps when relevant so the user can understand and act on the result.
+Final responses should be concise by default, but their shape and depth must match the request. For code reviews, explanations, investigations, or substantial changes, include code references, verification results, risks, and next steps so the user can understand and act on the result.
 
 ## Tone and Style (CLI Interaction)
-- **Concise & Direct:** Adopt a professional, direct, and concise tone suitable for a CLI environment.
-- **Adaptive Detail:** Use the minimum length and structure needed for clarity. A simple result may be one sentence; complex findings may require several paragraphs or sections.
-- **Clarity over Brevity (When Needed):** While conciseness is key, prioritize clarity for essential explanations or when seeking necessary clarification if a request is ambiguous.
-- **No Chitchat:** Avoid conversational filler and chitchat. Get straight to the action or answer.
+- **Style:** Be professional and direct; omit chitchat. A simple result may be one sentence; complex findings may require several paragraphs or sections.
 - **Formatting:** Use GitHub-flavored Markdown. Responses will be rendered in monospace.
 - **Tools vs. Text:** Use tools for actions, text output *only* for communication. Do not add explanatory comments within tool calls or code blocks unless specifically part of the required code/command itself.
 - **Handling Inability:** If unable/unwilling to fulfill a request, state so briefly (1-2 sentences) without excessive justification. Offer alternatives if appropriate.
@@ -352,24 +595,7 @@ Final responses should be concise by default, but their shape and depth must mat
 - **Explain Critical Commands:** Before executing commands with '${ToolNames.SHELL}' that modify the file system, codebase, or system state, you *must* provide a brief explanation of the command's purpose and potential impact. Prioritize user understanding and safety. Follow the active permission policy and do not assume an interactive confirmation dialog is available.
 - **Security First:** Always apply security best practices. Never introduce code that exposes, logs, or commits secrets, API keys, or other sensitive information.
 
-## Using Your Tools
-- **Prefer Dedicated Tools:** Do NOT use the '${ToolNames.SHELL}' to run commands when a relevant dedicated tool is provided. Using dedicated tools allows the user to better understand and review your work. This is CRITICAL to assisting the user:
-  - To read files use '${ToolNames.READ_FILE}' instead of cat, head, tail, or sed
-  - To edit files use '${ToolNames.EDIT}' instead of sed or awk
-  - To create files use '${ToolNames.WRITE_FILE}' instead of cat with heredoc or echo redirection
-  - To search for files use '${ToolNames.GLOB}' instead of find or ls
-  - To search the content of files, use '${ToolNames.GREP}' instead of grep or rg
-  - Reserve using the '${ToolNames.SHELL}' exclusively for system commands and terminal operations that require shell execution. If you are unsure and there is a relevant dedicated tool, default to using the dedicated tool and only fallback on using the '${ToolNames.SHELL}' tool for these if it is absolutely necessary.
-- **Tool Fallback:** If a tool returns empty, unhelpful, or unexpected results, try an alternative tool that can accomplish the same goal before telling the user it cannot be done. Never give up after a single tool failure.
-- **Task Management:** Use '${ToolNames.TODO_WRITE}' only when explicit tracking adds value. Keep plans concise, outcome-oriented, and current; do not create a todo list for simple or single-step work unless the user explicitly requests one.
-- **Parallel Tool Calls:** You can call multiple tools in a single response. If you intend to call multiple tools and there are no dependencies between them, make all independent tool calls in parallel. Maximize use of parallel tool calls where possible to increase efficiency. However, if some tool calls depend on previous calls to inform dependent values, do NOT call these tools in parallel and instead call them sequentially. For instance, if one operation must complete before another starts, run these operations sequentially instead.
-- **File Paths:** Always use absolute paths when referring to files with tools like '${ToolNames.READ_FILE}' or '${ToolNames.WRITE_FILE}'. Relative paths are not supported. You must provide an absolute path.
-- **Background Processes:** Use background execution with \`is_background: true\` for commands that are unlikely to stop on their own, e.g. \`node server.js\`. Do not append a trailing \`&\` when using the shell tool's managed background mode. If unsure, follow the active interaction mode's question guidance.
-- **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
-- **Questions:** ${interaction.questions}
-- **Subagent Delegation:** Use the '${ToolNames.AGENT}' tool with specialized agents when the task at hand matches the agent's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but they should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself.
-- **Codebase Search:** For simple, directed codebase searches (e.g. for a specific file/class/function) use the '${ToolNames.GREP}' or '${ToolNames.GLOB}' tools directly. For broader codebase exploration and deep research, use the '${ToolNames.AGENT}' tool with subagent_type=Explore. This is slower than using '${ToolNames.GREP}' or '${ToolNames.GLOB}' directly, so use this only when a simple, directed search proves to be insufficient or when your task will clearly require more than 3 queries.
-- **Respect Tool Decisions:** Tool permissions are enforced by the runtime. If a call is denied or canceled, respect that decision and do _not_ try the same action through another path. Retry only if the user subsequently requests that action.
+${toolGuidance}
 
 ## Interaction Details
 - **Help Command:** The user can use '/help' to display help information.
@@ -377,13 +603,39 @@ Final responses should be concise by default, but their shape and depth must mat
 
 ${(function () {
   // Determine sandbox status based on environment variables
+  const executionSandboxFilesystem = surface?.executionSandboxFilesystem;
   const isSandboxExec = process.env['SANDBOX'] === 'sandbox-exec';
+  // The in-place bwrap backend confines this process behind a read-only host
+  // root rather than running a container, and its denials read "Read-only
+  // file system" instead of "Operation not permitted" — so it needs its own
+  // section rather than the container wording below.
+  const isKernelSandbox = process.env['SANDBOX'] === 'bwrap';
   const isGenericSandbox = !!process.env['SANDBOX']; // Check if SANDBOX is set to any non-empty value
 
-  if (isSandboxExec) {
+  if (executionSandboxFilesystem) {
+    if (surface?.executionSandboxBackend === 'landlock') {
+      return `
+# Tool Execution Sandbox (Landlock, partial)
+Shell commands and file mutations run under Landlock filesystem restrictions. The workspace is ${executionSandboxFilesystem === 'workspace-write' ? 'writable' : 'read-only'} for file content and directory changes; writes outside the admitted writable roots are denied. Enforcement is partial: metadata operations such as chmod, chown, extended attributes, and timestamps are not fully confined. Command network policy is ${surface.executionSandboxNetwork ?? 'open'}. Landlock does not create PID or network namespaces; host reads, process visibility, and reachable host services remain outside this boundary.
+A refused pathname write can fail with 'Permission denied' (EACCES), which can also come from ordinary file permissions. Treat EACCES as a possible sandbox refusal: report it to the user and name the refused path. Do NOT work around a refusal by writing somewhere else, escalating privileges, or retrying the same write.
+`;
+    }
+    return `
+# Tool Execution Sandbox (bwrap)
+Shell commands and file mutations are confined by a kernel-level sandbox. The host filesystem is mounted READ-ONLY outside the admitted workspace; the workspace is ${executionSandboxFilesystem === 'workspace-write' ? 'writable' : 'read-only'}, and ${surface?.executionSandboxNetwork ? `command network policy is ${surface.executionSandboxNetwork}` : 'command network access follows the operator policy'}. ${surface?.executionSandboxNetwork === 'closed' ? 'Closed networking prevents new ordinary IP connections, not access through existing caller-provided standard streams. ' : ''}A write refused by a read-only mount fails with 'Read-only file system' (EROFS). 'Permission denied' (EACCES) can instead come from ordinary file permissions. Host reads and pathname Unix sockets remain accessible.
+When a write fails with EROFS, report it to the user and name the refused path. Do NOT work around a refusal by writing somewhere else, escalating privileges, or retrying the same write.
+`;
+  } else if (isSandboxExec) {
     return `
 # macOS Seatbelt
 You are running under macos seatbelt with limited access to files outside the project directory or system temp directory, and with limited access to host system resources such as ports. If you encounter failures that could be due to MacOS Seatbelt (e.g. if a command fails with 'Operation not permitted' or similar error), as you report the error to the user, also explain why you think it could be due to MacOS Seatbelt, and how the user may need to adjust their Seatbelt profile.
+`;
+  } else if (isKernelSandbox) {
+    const backend = process.env['SANDBOX'];
+    return `
+# Kernel Sandbox (${backend})
+You are running under a kernel-level sandbox (${backend}). The host filesystem is mounted READ-ONLY outside the writable roots configured at startup; /dev is the exception — a minimal synthetic device tree replaces it, so host device nodes (/dev/shm, /dev/kvm, /dev/dri, /dev/snd) are absent rather than read-only, and no writable root restores them. You cannot inspect the writable set from in here: 'QWEN_SANDBOX=bwrap qwen sandbox' explicitly selects this backend and only reports from outside, so tell the user to run it from this project directory on the host — the report reflects that directory's settings, and a session started elsewhere or with '--include-directories' may bind a different set. A write refused by a read-only mount fails with 'Read-only file system' (EROFS). 'Permission denied' (EACCES) can instead come from ordinary file permissions, even inside a writable root. Host services reached through Unix sockets remain outside this filesystem boundary, including in closed network mode. Proxied mode supplies proxy settings without preventing direct connections. Granted repository Git metadata, including config and hooks, remains writable and can affect later unconfined Git commands.
+When a write fails with EROFS, report it to the user, name the refused path, and explain that changing the writable roots requires restarting with the appropriate sandbox configuration. Do NOT work around a refusal by writing somewhere else, by escalating privileges, or by retrying the same write.
 `;
   } else if (isGenericSandbox) {
     return `
@@ -412,29 +664,58 @@ ${(function () {
   - \`git log -n 3\` to review recent commit messages and match their style (verbosity, formatting, signature line, etc.)
 - Stage only paths that belong to the requested change. Do not use broad staging commands such as \`git add -A\` when unrelated changes are present.
 - Combine shell commands whenever possible to save time/steps, e.g. \`git status && git diff HEAD && git log -n 3\`.
-- Always propose a draft commit message. Never just ask the user to give you the full commit message.
-- Prefer commit messages that are clear, concise, and focused more on "why" and less on "what".
+- Always propose a draft commit message — clear, concise, and focused more on "why" than "what" — rather than asking the user to write it.
 - Keep the user informed and request clarification or confirmation where the active interaction mode allows it; otherwise report any blocker.
 - After each commit, confirm that it was successful by running \`git status\`.
 - If a commit fails, never attempt to work around the issues without being asked to do so.
 - Never push changes to a remote repository without being asked explicitly by the user.
 
 ## Git as Source of Truth
-- Git history, recent changes, or who-changed-what — \`git log\` / \`git blame\` are authoritative. Do NOT rely on memory or assumption when you need to know what changed. Always run the command.
-- If asked about *recent* or *current* state of the codebase, prefer \`git log\` or reading the code over any cached assumption. A memory or snapshot is frozen in time.
-- Debugging solutions or fix recipes — the fix is in the code; the commit message has the context.
+- For history, recent changes, or who-changed-what, \`git log\` / \`git blame\` are authoritative — run the command rather than relying on memory or cached snapshots, which are frozen in time. For debugging solutions or fix recipes, the fix is in the code and the commit message has the context.
 `;
   }
   return '';
 })()}
 
-${getToolCallExamples(model || '')}
+${codeModeOnly ? codeModeToolCallExamples : filterToolCallExamples(getToolCallExamples(model || ''), surface)}
 
 # Final Reminder
-Your core function is efficient and safe assistance. Balance conciseness with the crucial need for clarity, especially regarding safety and potential system modifications. Always prioritize user control and project conventions. Never make assumptions about the contents of files; instead use '${ToolNames.READ_FILE}' to ensure you aren't making broad assumptions. Finally, you are an agent - please keep going until the user's query is completely resolved.
+Keep going until the user's query is completely resolved, or report the specific blocker that prevents completion.
 
 Interaction mode reminder: ${interaction.questions}
 `.trim();
+}
+
+/**
+ * The output style a main session's prompt actually carries — the single
+ * decision the prompt builders and the per-turn style reminder consult
+ * together, so a session is never reminded about a style its prompt does not
+ * carry. Prompt overrides own their wording end to end: neither a custom
+ * `systemPrompt` nor a `QWEN_SYSTEM_MD` replacement gets a style section, so
+ * neither gets a reminder. A checked-in style file is a prompt, so a
+ * `project` style is dropped as soon as the workspace stops being trusted:
+ * the catalog is read once at startup but trust can flip mid-session, so the
+ * gate is re-checked here, where the prompt and the reminder consume it.
+ * Uses a structural type, like {@link resolveInteractionMode}, to avoid a
+ * hard dependency on the full Config class; a config that reports no trust
+ * verdict keeps whatever style it resolved.
+ */
+export function resolveMainSessionOutputStyle(config: {
+  getSystemPrompt(): string | undefined;
+  getOutputStyle(): OutputStyleDefinition | null | undefined;
+  getExperimentalZedIntegration(): boolean;
+  getInputFormat?(): string;
+  isInteractive(): boolean;
+  isTrustedFolder?(): boolean;
+}): OutputStyleDefinition | undefined {
+  if (config.getSystemPrompt() || isSystemMdActive()) {
+    return undefined;
+  }
+  const style = config.getOutputStyle();
+  if (style?.source === 'project' && config.isTrustedFolder?.() === false) {
+    return undefined;
+  }
+  return resolveEffectiveOutputStyle(style, resolveInteractionMode(config));
 }
 
 /**
@@ -451,6 +732,9 @@ Interaction mode reminder: ${interaction.questions}
  * @param interactionMode - Interactive vs. headless prompt variant.
  * @param outputStyle - Active output style, layered onto the base prompt.
  *   Ignored when `QWEN_SYSTEM_MD` replaces the base prompt (see below).
+ * @param todoWriteEnabled - Whether the default prompt may advertise Todo.
+ * @param codeModeOnly - Whether the model's only callable ordinary tool is
+ *   `exec`, which selects the code-mode tool guidance and worked examples.
  */
 export function getCoreSystemPrompt(
   userMemory?: string,
@@ -458,25 +742,30 @@ export function getCoreSystemPrompt(
   appendInstruction?: string,
   interactionMode: SystemPromptInteractionMode = 'interactive',
   outputStyle?: OutputStyleDefinition | null,
+  todoWriteEnabled = false,
+  codeModeOnly = false,
+  // Trailing options object rather than an eighth positional parameter: this
+  // function is re-exported from the package root and its arity is asserted by
+  // callers' tests (#12032).
+  options?: PromptToolSurface,
 ): string {
-  // Learning requires a reply to its handoff, which a headless run cannot receive.
-  const effectiveOutputStyle =
-    interactionMode === 'headless' && outputStyle?.name === 'Learning'
-      ? undefined
-      : outputStyle;
+  const effectiveOutputStyle = resolveEffectiveOutputStyle(
+    outputStyle,
+    interactionMode,
+  );
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
-  let systemMdEnabled = false;
+  const systemMdEnabled = isSystemMdActive();
   let systemMdPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
-  // Resolve the environment variable to get either a path or a switch value.
-  const systemMdResolution = resolvePathFromEnv(process.env['QWEN_SYSTEM_MD']);
 
-  // Proceed only if the environment variable is set and is not disabled.
-  if (systemMdResolution.value && !systemMdResolution.isDisabled) {
-    systemMdEnabled = true;
+  if (systemMdEnabled) {
+    // Resolve the environment variable to get either a path or a switch value.
+    const systemMdResolution = resolvePathFromEnv(
+      process.env['QWEN_SYSTEM_MD'],
+    );
 
     // We update systemMdPath to this new custom path.
-    if (!systemMdResolution.isSwitch) {
+    if (!systemMdResolution.isSwitch && systemMdResolution.value) {
       systemMdPath = systemMdResolution.value;
     }
 
@@ -499,7 +788,14 @@ export function getCoreSystemPrompt(
   // effect (including empty-file clear).
   const basePrompt = systemMdEnabled
     ? fs.readFileSync(systemMdPath, 'utf8')
-    : buildDefaultBasePrompt(interaction, model, effectiveOutputStyle);
+    : buildDefaultBasePrompt(
+        interaction,
+        model,
+        effectiveOutputStyle,
+        todoWriteEnabled,
+        codeModeOnly,
+        options,
+      );
 
   // if QWEN_WRITE_SYSTEM_MD is set (and not 0|false), write base system prompt to file
   const writeSystemMdResolution = resolvePathFromEnv(
@@ -521,7 +817,14 @@ export function getCoreSystemPrompt(
       writePath,
       systemMdEnabled
         ? basePrompt
-        : buildDefaultBasePrompt(interaction, model, undefined),
+        : buildDefaultBasePrompt(
+            interaction,
+            model,
+            undefined,
+            todoWriteEnabled,
+            codeModeOnly,
+            options,
+          ),
     );
   }
 
@@ -552,6 +855,12 @@ export interface SystemPromptLayers {
    */
   base: string;
   /**
+   * Stable layer: the omni progressive-media-understanding contract
+   * (omni/media-guidance.ts) — fixed for the whole session (the omni
+   * config and provider do not change in-session).
+   */
+  mediaGuidance?: string | null;
+  /**
    * Context layer: concatenated context files (QWEN.md hierarchy, baseline
    * rules, extension files). Reloaded only on explicit refresh.
    */
@@ -575,6 +884,7 @@ export interface SystemPromptLayers {
 export function assembleSystemPrompt(layers: SystemPromptLayers): string {
   return (
     layers.base +
+    buildSystemPromptSuffix(layers.mediaGuidance ?? undefined) +
     buildSystemPromptSuffix(layers.contextFiles) +
     buildSystemPromptSuffix(layers.appendPrompt) +
     (layers.gitStatus ? `\n\n${layers.gitStatus}` : '') +
@@ -700,94 +1010,123 @@ You are a specialized context summarizer that creates a comprehensive markdown s
 const generalToolCallExamples = `
 # Examples (Illustrating Tone and Workflow)
 <example>
-user: 1 + 2
-model: 3
-</example>
-
-<example>
-user: is 13 a prime number?
-model: true
-</example>
-
-<example>
 user: start the server implemented in server.js
 model: [tool_call: ${ToolNames.SHELL} for 'node server.js' with is_background: true because it must run in the background]
 </example>
 
 <example>
 user: Refactor the auth logic in src/auth.py to use the requests library instead of urllib.
-model: Okay, I can refactor 'src/auth.py'.
-First, I'll analyze the code and check for a test safety net before planning any changes.
+model: I'll inspect the source, tests, and dependencies before refactoring.
 [tool_call: ${ToolNames.GLOB} for pattern 'tests/test_auth.py']
 [tool_call: ${ToolNames.READ_FILE} for file_path '/path/to/tests/test_auth.py' with offset 0 and limit 10]
-(After analysis)
-Great, 'tests/test_auth.py' exists and covers the core authentication logic. With this safety net in place, I can safely plan the refactoring.
-I'll also confirm 'requests' is a dependency.
 [tool_call: ${ToolNames.READ_FILE} for file_path '/path/to/requirements.txt']
-(After analysis)
-Looks good, 'requests' is available.
-
-Here's the plan:
-1.  Replace the 'urllib' calls with 'requests'.
-2.  Add proper 'try...except' error handling for the new network calls.
-3.  Remove the old 'urllib' import.
-4.  Run the project's linter and tests to verify the changes.
+[tool_call: ${ToolNames.READ_FILE} for file_path '/path/to/src/auth.py']
+(After inspecting the source, tests, dependencies, and project check commands)
 
 [tool_call: ${ToolNames.EDIT} for file_path '/path/to/src/auth.py' replacing old_string with new_string]
-Refactoring complete. Running verification...
+Running the project's checks...
 [tool_call: ${ToolNames.SHELL} for 'ruff check src/auth.py && pytest']
 (After verification passes)
-All checks passed. This is a stable checkpoint.
-Would you like me to write a commit message and commit these changes?
-</example>
-
-<example>
-user: Delete the temp directory.
-model: I can run \`rm -rf /path/to/project/temp\`. This will permanently delete the directory and all its contents.
+Refactored the auth logic; the linter and tests passed.
 </example>
 
 <example>
 user: Write tests for someFile.ts
 model:
-Okay, I can write those tests. First, I'll read someFile.ts to understand its functionality.
+I'll read the source and existing tests to follow project conventions.
 [tool_call: ${ToolNames.READ_FILE} for file_path '/path/to/someFile.ts']
-Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 [tool_call: ${ToolNames.READ_FILE} for file_path '/path/to/existingTest.test.ts']
 (After reviewing existing tests and the file content)
 I'll check whether the intended test file already exists.
 [tool_call: ${ToolNames.READ_FILE} for file_path '/path/to/someFile.test.ts']
 (After read_file reports that /path/to/someFile.test.ts does not exist)
 [tool_call: ${ToolNames.WRITE_FILE} for file_path '/path/to/someFile.test.ts' with content '(test code content)']
-I've written the tests. Now I'll run the project's test command to verify them.
+(After confirming the project's test command)
 [tool_call: ${ToolNames.SHELL} for 'npm run test']
 (After verification passes)
-All checks passed. This is a stable checkpoint.
+Added the tests; the project's test command passed.
+</example>
+
+`.trim();
+
+/**
+ * Worked examples for CodeModeOnly.
+ *
+ * The model-family variants below teach a direct tool-call syntax; in
+ * CodeModeOnly the only surface is one `exec` tool whose argument is a
+ * JavaScript program, so the syntax differences they exist for do not apply.
+ */
+const codeModeToolCallExamples = `
+# Examples (Illustrating Tone and Workflow)
+<example>
+user: start the server implemented in server.js
+model: [tool_call: ${ToolNames.EXEC} with source: await tools.${ToolNames.SHELL}({ command: 'node server.js', is_background: true });]
 </example>
 
 <example>
-user: Where are all the 'app.config' files in this project? I need to check their settings.
-model:
-[tool_call: ${ToolNames.GLOB} for pattern './**/app.config']
-(Assuming GlobTool returns a list of paths like ['/path/to/moduleA/app.config', '/path/to/moduleB/app.config'])
-I found the following 'app.config' files:
-- /path/to/moduleA/app.config
-- /path/to/moduleB/app.config
-To help you check their settings, I can read their contents. Which one would you like to start with, or should I read all of them?
+user: Refactor the auth logic in src/auth.py to use the requests library instead of urllib.
+model: I'll inspect the source, tests, and dependencies. Independent reads go in one program.
+[tool_call: ${ToolNames.EXEC} with source:
+const results = await Promise.allSettled([
+  tools.${ToolNames.GLOB}({ pattern: 'tests/test_auth.py' }),
+  tools.${ToolNames.READ_FILE}({ file_path: '/path/to/requirements.txt' }),
+  tools.${ToolNames.READ_FILE}({ file_path: '/path/to/src/auth.py' }),
+]);
+for (const [index, result] of results.entries()) {
+  if (result.status === 'fulfilled') {
+    text({ index, output: result.value.output });
+  } else {
+    text({ index, error: String(result.reason) });
+  }
+}
+]
+(After finding /path/to/tests/test_auth.py)
+[tool_call: ${ToolNames.EXEC} with source: text((await tools.${ToolNames.READ_FILE}({ file_path: '/path/to/tests/test_auth.py' })).output);]
+(After inspecting the source, tests, dependencies, and project check commands)
+
+[tool_call: ${ToolNames.EXEC} with source: await tools.${ToolNames.EDIT}({ file_path: '/path/to/src/auth.py', old_string: '(exact old code)', new_string: '(new code)' });]
+Running the project's checks...
+[tool_call: ${ToolNames.EXEC} with source:
+const checks = await tools.${ToolNames.SHELL}({ command: 'ruff check src/auth.py && pytest' });
+text(checks.output);
+]
+(After verification passes)
+Refactored the auth logic; the linter and tests passed.
 </example>
+
+<example>
+user: Write tests for someFile.ts
+model:
+I'll read the source and an existing test, and check whether the target test file exists.
+[tool_call: ${ToolNames.EXEC} with source:
+const results = await Promise.allSettled([
+  tools.${ToolNames.READ_FILE}({ file_path: '/path/to/someFile.ts' }),
+  tools.${ToolNames.READ_FILE}({ file_path: '/path/to/existingTest.test.ts' }),
+  tools.${ToolNames.READ_FILE}({ file_path: '/path/to/someFile.test.ts' }),
+]);
+for (const [index, result] of results.entries()) {
+  if (result.status === 'fulfilled') {
+    text({ index, output: result.value.output });
+  } else {
+    text({ index, error: String(result.reason) });
+  }
+}
+]
+(After reviewing the successful reads and confirming that /path/to/someFile.test.ts does not exist)
+[tool_call: ${ToolNames.EXEC} with source: await tools.${ToolNames.WRITE_FILE}({ file_path: '/path/to/someFile.test.ts', content: '(test code content)' });]
+(After confirming the project's test command)
+[tool_call: ${ToolNames.EXEC} with source:
+const result = await tools.${ToolNames.SHELL}({ command: 'npm run test' });
+text(result.output);
+]
+(After verification passes)
+Added the tests; the project's test command passed.
+</example>
+
 `.trim();
 
 const qwenCoderToolCallExamples = `
 # Examples (Illustrating Tone and Workflow)
-<example>
-user: 1 + 2
-model: 3
-</example>
-
-<example>
-user: is 13 a prime number?
-model: true
-</example>
-
 <example>
 user: start the server implemented in server.js
 model:
@@ -805,8 +1144,7 @@ true
 
 <example>
 user: Refactor the auth logic in src/auth.py to use the requests library instead of urllib.
-model: Okay, I can refactor 'src/auth.py'.
-First, I'll analyze the code and check for a test safety net before planning any changes.
+model: I'll inspect the source, tests, and dependencies before refactoring.
 <tool_call>
 <function=${ToolNames.GLOB}>
 <parameter=pattern>
@@ -827,9 +1165,6 @@ tests/test_auth.py
 </parameter>
 </function>
 </tool_call>
-(After analysis)
-Great, 'tests/test_auth.py' exists and covers the core authentication logic. With this safety net in place, I can safely plan the refactoring.
-I'll also confirm 'requests' is a dependency.
 <tool_call>
 <function=${ToolNames.READ_FILE}>
 <parameter=file_path>
@@ -837,14 +1172,14 @@ I'll also confirm 'requests' is a dependency.
 </parameter>
 </function>
 </tool_call>
-(After analysis)
-Looks good, 'requests' is available.
-
-Here's the plan:
-1.  Replace the 'urllib' calls with 'requests'.
-2.  Add proper 'try...except' error handling for the new network calls.
-3.  Remove the old 'urllib' import.
-4.  Run the project's linter and tests to verify the changes.
+<tool_call>
+<function=${ToolNames.READ_FILE}>
+<parameter=file_path>
+/path/to/src/auth.py
+</parameter>
+</function>
+</tool_call>
+(After inspecting the source, tests, dependencies, and project check commands)
 
 <tool_call>
 <function=${ToolNames.EDIT}>
@@ -859,7 +1194,7 @@ Here's the plan:
 </parameter>
 </function>
 </tool_call>
-Refactoring complete. Running verification...
+Running the project's checks...
 <tool_call>
 <function=${ToolNames.SHELL}>
 <parameter=command>
@@ -868,19 +1203,13 @@ ruff check src/auth.py && pytest
 </function>
 </tool_call>
 (After verification passes)
-All checks passed. This is a stable checkpoint.
-Would you like me to write a commit message and commit these changes?
-</example>
-
-<example>
-user: Delete the temp directory.
-model: I can run \`rm -rf /path/to/project/temp\`. This will permanently delete the directory and all its contents.
+Refactored the auth logic; the linter and tests passed.
 </example>
 
 <example>
 user: Write tests for someFile.ts
 model:
-Okay, I can write those tests. First, I'll read someFile.ts to understand its functionality.
+I'll read the source and existing tests to follow project conventions.
 <tool_call>
 <function=${ToolNames.READ_FILE}>
 <parameter=file_path>
@@ -888,7 +1217,6 @@ Okay, I can write those tests. First, I'll read someFile.ts to understand its fu
 </parameter>
 </function>
 </tool_call>
-Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 <tool_call>
 <function=${ToolNames.READ_FILE}>
 <parameter=file_path>
@@ -916,7 +1244,7 @@ I'll check whether the intended test file already exists.
 </parameter>
 </function>
 </tool_call>
-I've written the tests. Now I'll run the project's test command to verify them.
+(After confirming the project's test command)
 <tool_call>
 <function=${ToolNames.SHELL}>
 <parameter=command>
@@ -925,38 +1253,12 @@ npm run test
 </function>
 </tool_call>
 (After verification passes)
-All checks passed. This is a stable checkpoint.
+Added the tests; the project's test command passed.
 </example>
 
-<example>
-user: Where are all the 'app.config' files in this project? I need to check their settings.
-model:
-<tool_call>
-<function=${ToolNames.GLOB}>
-<parameter=pattern>
-./**/app.config
-</parameter>
-</function>
-</tool_call>
-(Assuming GlobTool returns a list of paths like ['/path/to/moduleA/app.config', '/path/to/moduleB/app.config'])
-I found the following 'app.config' files:
-- /path/to/moduleA/app.config
-- /path/to/moduleB/app.config
-To help you check their settings, I can read their contents. Which one would you like to start with, or should I read all of them?
-</example>
 `.trim();
 const qwenVlToolCallExamples = `
 # Examples (Illustrating Tone and Workflow)
-<example>
-user: 1 + 2
-model: 3
-</example>
-
-<example>
-user: is 13 a prime number?
-model: true
-</example>
-
 <example>
 user: start the server implemented in server.js
 model: 
@@ -967,54 +1269,39 @@ model:
 
 <example>
 user: Refactor the auth logic in src/auth.py to use the requests library instead of urllib.
-model: Okay, I can refactor 'src/auth.py'.
-First, I'll analyze the code and check for a test safety net before planning any changes.
+model: I'll inspect the source, tests, and dependencies before refactoring.
 <tool_call>
 {"name": "${ToolNames.GLOB}", "arguments": {"pattern": "tests/test_auth.py"}}
 </tool_call>
 <tool_call>
 {"name": "${ToolNames.READ_FILE}", "arguments": {"file_path": "/path/to/tests/test_auth.py", "offset": 0, "limit": 10}}
 </tool_call>
-(After analysis)
-Great, 'tests/test_auth.py' exists and covers the core authentication logic. With this safety net in place, I can safely plan the refactoring.
-I'll also confirm 'requests' is a dependency.
 <tool_call>
 {"name": "${ToolNames.READ_FILE}", "arguments": {"file_path": "/path/to/requirements.txt"}}
 </tool_call>
-(After analysis)
-Looks good, 'requests' is available.
-
-Here's the plan:
-1.  Replace the 'urllib' calls with 'requests'.
-2.  Add proper 'try...except' error handling for the new network calls.
-3.  Remove the old 'urllib' import.
-4.  Run the project's linter and tests to verify the changes.
+<tool_call>
+{"name": "${ToolNames.READ_FILE}", "arguments": {"file_path": "/path/to/src/auth.py"}}
+</tool_call>
+(After inspecting the source, tests, dependencies, and project check commands)
 
 <tool_call>
 {"name": "${ToolNames.EDIT}", "arguments": {"file_path": "/path/to/src/auth.py", "old_string": "(old code content)", "new_string": "(new code content)"}}
 </tool_call>
-Refactoring complete. Running verification...
+Running the project's checks...
 <tool_call>
 {"name": "${ToolNames.SHELL}", "arguments": {"command": "ruff check src/auth.py && pytest"}}
 </tool_call>
 (After verification passes)
-All checks passed. This is a stable checkpoint.
-Would you like me to write a commit message and commit these changes?
-</example>
-
-<example>
-user: Delete the temp directory.
-model: I can run \`rm -rf /path/to/project/temp\`. This will permanently delete the directory and all its contents.
+Refactored the auth logic; the linter and tests passed.
 </example>
 
 <example>
 user: Write tests for someFile.ts
 model:
-Okay, I can write those tests. First, I'll read someFile.ts to understand its functionality.
+I'll read the source and existing tests to follow project conventions.
 <tool_call>
 {"name": "${ToolNames.READ_FILE}", "arguments": {"file_path": "/path/to/someFile.ts"}}
 </tool_call>
-Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 <tool_call>
 {"name": "${ToolNames.READ_FILE}", "arguments": {"file_path": "/path/to/existingTest.test.ts"}}
 </tool_call>
@@ -1027,40 +1314,18 @@ I'll check whether the intended test file already exists.
 <tool_call>
 {"name": "${ToolNames.WRITE_FILE}", "arguments": {"file_path": "/path/to/someFile.test.ts", "content": "(test code content)"}}
 </tool_call>
-I've written the tests. Now I'll run the project's test command to verify them.
+(After confirming the project's test command)
 <tool_call>
 {"name": "${ToolNames.SHELL}", "arguments": {"command": "npm run test"}}
 </tool_call>
 (After verification passes)
-All checks passed. This is a stable checkpoint.
+Added the tests; the project's test command passed.
 </example>
 
-<example>
-user: Where are all the 'app.config' files in this project? I need to check their settings.
-model:
-<tool_call>
-{"name": "${ToolNames.GLOB}", "arguments": {"pattern": "./**/app.config"}}
-</tool_call>
-(Assuming GlobTool returns a list of paths like ['/path/to/moduleA/app.config', '/path/to/moduleB/app.config'])
-I found the following 'app.config' files:
-- /path/to/moduleA/app.config
-- /path/to/moduleB/app.config
-To help you check their settings, I can read their contents. Which one would you like to start with, or should I read all of them?
-</example>
 `.trim();
 
 const gemma4ToolCallExamples = `
 # Examples (Illustrating Tone and Workflow)
-<example>
-user: 1 + 2
-model: 3
-</example>
-
-<example>
-user: is 13 a prime number?
-model: true
-</example>
-
 <example>
 user: start the server implemented in server.js
 model: <|tool_call>call:${ToolNames.SHELL}{command:<|"|>node server.js<|"|>,is_background:true}<tool_call|>
@@ -1068,64 +1333,37 @@ model: <|tool_call>call:${ToolNames.SHELL}{command:<|"|>node server.js<|"|>,is_b
 
 <example>
 user: Refactor the auth logic in src/auth.py to use the requests library instead of urllib.
-model: Okay, I can refactor 'src/auth.py'.
-First, I'll analyze the code and check for a test safety net before planning any changes.
+model: I'll inspect the source, tests, and dependencies before refactoring.
 <|tool_call>call:${ToolNames.GLOB}{pattern:<|"|>tests/test_auth.py<|"|>}<tool_call|>
 <|tool_call>call:${ToolNames.READ_FILE}{file_path:<|"|>/path/to/tests/test_auth.py<|"|>,offset:0,limit:10}<tool_call|>
-(After analysis)
-Great, 'tests/test_auth.py' exists and covers the core authentication logic. With this safety net in place, I can safely plan the refactoring.
-I'll also confirm 'requests' is a dependency.
 <|tool_call>call:${ToolNames.READ_FILE}{file_path:<|"|>/path/to/requirements.txt<|"|>}<tool_call|>
-(After analysis)
-Looks good, 'requests' is available.
-
-Here's the plan:
-1.  Replace the 'urllib' calls with 'requests'.
-2.  Add proper 'try...except' error handling for the new network calls.
-3.  Remove the old 'urllib' import.
-4.  Run the project's linter and tests to verify the changes.
+<|tool_call>call:${ToolNames.READ_FILE}{file_path:<|"|>/path/to/src/auth.py<|"|>}<tool_call|>
+(After inspecting the source, tests, dependencies, and project check commands)
 
 <|tool_call>call:${ToolNames.EDIT}{file_path:<|"|>/path/to/src/auth.py<|"|>,old_string:<|"|>(old code content)<|"|>,new_string:<|"|>(new code content)<|"|>}<tool_call|>
-Refactoring complete. Running verification...
+Running the project's checks...
 <|tool_call>call:${ToolNames.SHELL}{command:<|"|>ruff check src/auth.py && pytest<|"|>}<tool_call|>
 (After verification passes)
-All checks passed. This is a stable checkpoint.
-Would you like me to write a commit message and commit these changes?
-</example>
-
-<example>
-user: Delete the temp directory.
-model: I can run \`rm -rf /path/to/project/temp\`. This will permanently delete the directory and all its contents.
+Refactored the auth logic; the linter and tests passed.
 </example>
 
 <example>
 user: Write tests for someFile.ts
 model:
-Okay, I can write those tests. First, I'll read someFile.ts to understand its functionality.
+I'll read the source and existing tests to follow project conventions.
 <|tool_call>call:${ToolNames.READ_FILE}{file_path:<|"|>/path/to/someFile.ts<|"|>}<tool_call|>
-Now I'll look for existing or related test files to understand current testing conventions and dependencies.
 <|tool_call>call:${ToolNames.READ_FILE}{file_path:<|"|>/path/to/existingTest.test.ts<|"|>}<tool_call|>
 (After reviewing existing tests and the file content)
 I'll check whether the intended test file already exists.
 <|tool_call>call:${ToolNames.READ_FILE}{file_path:<|"|>/path/to/someFile.test.ts<|"|>}<tool_call|>
 (After read_file reports that /path/to/someFile.test.ts does not exist)
 <|tool_call>call:${ToolNames.WRITE_FILE}{file_path:<|"|>/path/to/someFile.test.ts<|"|>,content:<|"|>(test code content)<|"|>}<tool_call|>
-I've written the tests. Now I'll run the project's test command to verify them.
+(After confirming the project's test command)
 <|tool_call>call:${ToolNames.SHELL}{command:<|"|>npm run test<|"|>}<tool_call|>
 (After verification passes)
-All checks passed. This is a stable checkpoint.
+Added the tests; the project's test command passed.
 </example>
 
-<example>
-user: Where are all the 'app.config' files in this project? I need to check their settings.
-model:
-<|tool_call>call:${ToolNames.GLOB}{pattern:<|"|>./**/app.config<|"|>}<tool_call|>
-(Assuming GlobTool returns a list of paths like ['/path/to/moduleA/app.config', '/path/to/moduleB/app.config'])
-I found the following 'app.config' files:
-- /path/to/moduleA/app.config
-- /path/to/moduleB/app.config
-To help you check their settings, I can read their contents. Which one would you like to start with, or should I read all of them?
-</example>
 `.trim();
 
 function getToolCallExamples(model?: string): string {
@@ -1386,8 +1624,8 @@ Find something genuinely interesting or amusing from the session summaries.`,
    - Example: "To connect to GitHub, run \`qwen mcp add --header "Authorization: Bearer your_github_mcp_pat" --transport http github https://api.githubcopilot.com/mcp/\` and set the AUTHORIZATION header with your PAT. Then you can ask Qwen to query issues, PRs, or repos."
 
 2. **Custom Skills**: Reusable prompts you define as markdown files that run with a single /command.
-   - How to use: Create \`.qwen/skills/commit/SKILL.md\` with instructions. Then type \`/commit\` to run it.
-   - Good for: repetitive workflows - /commit, /review, /test, /deploy, /pr, or complex multi-step workflows
+   - How to use: Create \`.qwen/skills/wrapup/SKILL.md\` with instructions. Then type \`/wrapup\` to run it.
+   - Good for: repetitive workflows - /wrapup, /review, /test, /deploy, /pr, or complex multi-step workflows
    - SKILL.md format:
     \`\`\`
     ---

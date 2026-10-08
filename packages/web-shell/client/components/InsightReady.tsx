@@ -6,10 +6,7 @@ interface InsightReadyProps {
   onInsightReportOpen?: (path: string) => void;
 }
 
-export function InsightReady({
-  path,
-  onInsightReportOpen,
-}: InsightReadyProps) {
+export function InsightReady({ path, onInsightReportOpen }: InsightReadyProps) {
   const { t } = useI18n();
   return (
     <div className={`${styles.progress} ${styles.done}`}>

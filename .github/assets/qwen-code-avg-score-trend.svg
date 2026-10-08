@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="430" viewBox="0 0 1120 430">
+  <rect width="100%" height="100%" fill="#FFFFFF"/>
+  <g font-family="Arial, sans-serif">
+    <line x1="70" y1="368" x2="1082" y2="368" stroke="#D8E0EA" stroke-width="1"/>
+    <text x="56" y="373" text-anchor="end" font-size="14" fill="#52606D">76.0%</text>
+    <line x1="70" y1="285.5" x2="1082" y2="285.5" stroke="#D8E0EA" stroke-width="1"/>
+    <text x="56" y="290.5" text-anchor="end" font-size="14" fill="#52606D">76.5%</text>
+    <line x1="70" y1="203" x2="1082" y2="203" stroke="#D8E0EA" stroke-width="1"/>
+    <text x="56" y="208" text-anchor="end" font-size="14" fill="#52606D">77.0%</text>
+    <line x1="70" y1="120.5" x2="1082" y2="120.5" stroke="#D8E0EA" stroke-width="1"/>
+    <text x="56" y="125.5" text-anchor="end" font-size="14" fill="#52606D">77.5%</text>
+    <line x1="70" y1="38" x2="1082" y2="38" stroke="#D8E0EA" stroke-width="1"/>
+    <text x="56" y="43" text-anchor="end" font-size="14" fill="#52606D">78.0%</text>
+    <path d="M 70 71 L 238.7 247.6 L 407.3 269 L 576 290.5 L 744.7 92.5 L 913.3 302 L 1082 148.6" fill="none" stroke="#1F6FEB" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="70" cy="71" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/>
+    <text x="70" y="55" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">77.80%</text>
+    <text x="70" y="407" text-anchor="middle" font-size="14" fill="#344054">0.0.14</text>
+    <circle cx="238.7" cy="247.6" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/>
+    <text x="238.7" y="231.6" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">76.73%</text>
+    <text x="238.7" y="407" text-anchor="middle" font-size="14" fill="#344054">0.1.0</text>
+    <circle cx="407.3" cy="269" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/>
+    <text x="407.3" y="253" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">76.60%</text>
+    <text x="407.3" y="407" text-anchor="middle" font-size="14" fill="#344054">0.5.0</text>
+    <circle cx="576" cy="290.5" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/>
+    <text x="576" y="274.5" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">76.47%</text>
+    <text x="576" y="407" text-anchor="middle" font-size="14" fill="#344054">0.10.0</text>
+    <circle cx="744.7" cy="92.5" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/>
+    <text x="744.7" y="76.5" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">77.67%</text>
+    <text x="744.7" y="407" text-anchor="middle" font-size="14" fill="#344054">0.15.0</text>
+    <circle cx="913.3" cy="302" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/>
+    <text x="913.3" y="286" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">76.40%</text>
+    <text x="913.3" y="407" text-anchor="middle" font-size="14" fill="#344054">0.19.0</text>
+    <circle cx="1082" cy="148.6" r="6" fill="#1F6FEB" stroke="#FFFFFF" stroke-width="3"/>
+    <text x="1082" y="132.6" text-anchor="middle" font-size="14" font-weight="700" fill="#16324F">77.33%</text>
+    <text x="1082" y="407" text-anchor="middle" font-size="14" fill="#344054">0.22.0</text>
+  </g>
+</svg>

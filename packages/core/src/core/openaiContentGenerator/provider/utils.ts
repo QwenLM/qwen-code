@@ -27,3 +27,19 @@ export function ensureReasoningContentOnAssistantMessage(
     reasoning_content: '',
   } as OpenAI.Chat.ChatCompletionMessageParam;
 }
+
+// Some strict OpenAI-compatible endpoints (Mistral, Cerebras) reject the
+// non-standard `reasoning_content` field on input with HTTP 400. Shared
+// conversation history must stay intact for providers that require the
+// replay; remove the field only at the outbound request boundary.
+export function stripReasoningContent(
+  message: OpenAI.Chat.ChatCompletionMessageParam,
+): OpenAI.Chat.ChatCompletionMessageParam {
+  if (!('reasoning_content' in message)) {
+    return message;
+  }
+
+  const next = { ...(message as unknown as Record<string, unknown>) };
+  delete next['reasoning_content'];
+  return next as unknown as OpenAI.Chat.ChatCompletionMessageParam;
+}

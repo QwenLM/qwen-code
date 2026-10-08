@@ -17,9 +17,21 @@ import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
 
 const debugLogger = createDebugLogger('TRUNCATION');
 
-const PREVIEW_SIZE_CHARS = 2000;
+export const PREVIEW_SIZE_CHARS = 2000;
 const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
 export const MAX_SESSION_BYTES = 500 * 1024 * 1024; // 500MB
+
+/**
+ * Label of the line `buildStub` embeds carrying a sha256 of the FULL
+ * pre-truncation output. The preview only covers the first
+ * PREVIEW_SIZE_CHARS chars and the envelope embeds a per-call unique file
+ * path, so consumers that fingerprint results (the loop guards in
+ * services/loopDetectionService.ts) read this digest instead of hashing the
+ * envelope: a board mutating beyond the preview window still fingerprints
+ * differently each poll, and a frozen board identically no matter where it
+ * was persisted (issue #9450).
+ */
+export const FULL_OUTPUT_DIGEST_LABEL = 'Full output sha256: ';
 
 /**
  * Stable prefix every truncated tool output starts with. Used as an
@@ -65,6 +77,7 @@ export async function truncateAndSaveToFile(
   truncateLines: number,
   keep: 'head' | 'tail' | 'both' = 'both',
   previewChars = threshold,
+  exclusive = false,
 ): Promise<{ content: string; outputFile?: string }> {
   // Fast path: when no line cap applies (per-tool char budgets pass
   // truncateLines = Infinity) and content is within the char threshold, return
@@ -204,7 +217,10 @@ ${truncatedContent}`;
     // with the logger/checkpoints and is normally created earlier without one,
     // and mkdir would not tighten an already-existing directory anyway.
     await fs.mkdir(projectTempDir, { recursive: true });
-    await fs.writeFile(outputFile, content, { mode: 0o600 });
+    await fs.writeFile(outputFile, content, {
+      mode: 0o600,
+      ...(exclusive ? { flag: 'wx' } : {}),
+    });
 
     return {
       content: wrappedMessage,
@@ -266,14 +282,16 @@ export async function truncateToolOutput(
 
   const originalLength = content.length;
   const fileName = `${toolName}_${crypto.randomBytes(6).toString('hex')}`;
+  const outputDirectory = config.getExecutionEnvironment?.()?.outputDirectory;
   const result = await truncateAndSaveToFile(
     content,
     fileName,
-    config.storage.getProjectTempDir(),
+    outputDirectory ?? config.storage.getProjectTempDir(),
     threshold,
     lines,
     keep,
     previewChars,
+    outputDirectory !== undefined,
   );
 
   if (result.outputFile) {
@@ -459,16 +477,23 @@ export async function persistAndTruncateToolResult(
       bytesWritten: 0,
     };
   }
+  const outputDirectory = config.getExecutionEnvironment?.()?.outputDirectory;
   try {
-    const toolResultsDir = config.storage.getToolResultsDir();
+    const toolResultsDir =
+      outputDirectory ?? config.storage.getToolResultsDir();
     const outputFile = path.join(toolResultsDir, `${safeCallId}.txt`);
     await fs.mkdir(toolResultsDir, { recursive: true });
-    await atomicWriteFile(outputFile, content, {
-      mode: 0o600,
-      forceMode: true,
-      noFollow: true,
-      flush: false,
-    });
+    if (outputDirectory !== undefined) {
+      // The worker can replace shared entries; never chmod or reopen them by path.
+      await fs.writeFile(outputFile, content, { mode: 0o600, flag: 'wx' });
+    } else {
+      await atomicWriteFile(outputFile, content, {
+        mode: 0o600,
+        forceMode: true,
+        noFollow: true,
+        flush: false,
+      });
+    }
 
     return {
       content: buildStub(content, byteSize, outputFile),
@@ -481,9 +506,12 @@ export async function persistAndTruncateToolResult(
       const fallback = await truncateAndSaveToFile(
         content,
         `${toolName}_${crypto.randomBytes(6).toString('hex')}`,
-        config.storage.getProjectTempDir(),
+        outputDirectory ?? config.storage.getProjectTempDir(),
         config.getTruncateToolOutputThreshold(),
         config.getTruncateToolOutputLines(),
+        'both',
+        undefined,
+        outputDirectory !== undefined,
       );
       if (fallback.outputFile) {
         return {
@@ -513,10 +541,16 @@ function buildStub(
   const preview = generatePreview(content);
   const sizeKb = Math.round(byteSize / 1024);
   const isFilePath = path.isAbsolute(filePathOrNote);
+  // sha256 of the FULL pre-truncation output (see FULL_OUTPUT_DIGEST_LABEL):
+  // the envelope's per-call unique path would otherwise fingerprint uniquely
+  // every poll, silently disabling every result-aware loop guard for exactly
+  // the largest results (issue #9450).
+  const fullDigest = crypto.createHash('sha256').update(content).digest('hex');
 
   if (isFilePath) {
     return `<persisted-output>
 Output too large (${sizeKb} KB). Full output saved to: ${filePathOrNote}
+${FULL_OUTPUT_DIGEST_LABEL}${fullDigest}
 Note: this file may be cleaned up after 24 hours.
 To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
 
@@ -526,6 +560,7 @@ ${preview}
   }
 
   return `Output too large (${sizeKb} KB). ${filePathOrNote}
+${FULL_OUTPUT_DIGEST_LABEL}${fullDigest}
 
 Preview (up to ${PREVIEW_SIZE_CHARS} chars):
 ${preview}`;

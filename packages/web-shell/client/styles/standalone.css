@@ -5,6 +5,15 @@ body,
   margin: 0;
 }
 
+.qwen-code-macos-titlebar-drag-region {
+  position: fixed;
+  z-index: 40;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 38px;
+}
+
 /*
  * Mobile overscroll / safe-area fix:
  *

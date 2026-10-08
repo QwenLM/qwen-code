@@ -115,3 +115,9 @@ The release process is automated through GitHub Actions. The release workflow pe
 1.  Build the NPM packages using `tsc`.
 2.  Publish the NPM packages to the artifact registry.
 3.  Create GitHub releases with bundled assets.
+
+**OpenTUI preview flavor**
+
+Standalone archives ship in the classic Node.js flavor by default. Setting the `OPENTUI_PREVIEW_RELEASE_ENABLED` repository variable to `true` additionally builds the bun/OpenTUI preview flavor, whose archives carry an `-opentui-preview` suffix and whose launcher defaults `QWEN_TUI_RENDERER` to `opentui`. Leaving the variable unset keeps that flavor off.
+
+The variable decides only what a new release builds. The workflow that mirrors a release to Aliyun OSS does not read it: that workflow can be re-dispatched for any tag, and a tag cut before the flavor existed has no preview archives to verify, so it derives the flavor from the archives the release actually shipped.

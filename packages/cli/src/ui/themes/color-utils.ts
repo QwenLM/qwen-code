@@ -261,7 +261,7 @@ const INK_NAME_TO_HEX: Readonly<Record<string, string>> = {
  * Resolves any accepted color string to a 6-digit hex (#rrggbb), or undefined
  * if it cannot be parsed into RGB.
  */
-function toHex(color: string): string | undefined {
+export function toHex(color: string): string | undefined {
   const resolved = (resolveColor(color) ?? color).toLowerCase();
   if (resolved.startsWith('#')) {
     if (/^#[0-9a-f]{3}$/.test(resolved)) {

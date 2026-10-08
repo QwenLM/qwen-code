@@ -74,6 +74,10 @@ const CLI_BIN =
   process.env['TEST_CLI_PATH'] ??
   path.resolve(__dirname, '../../packages/cli/dist/index.js');
 const TOKEN = 'streaming-integ-secret';
+// The 10s production handshake budget is a desktop budget, not a shared-runner
+// one: macOS E2E shards died on it in #11030 and reddened again in #11034.
+// Match qwen-serve-routes.test.ts.
+const ACP_INITIALIZE_TIMEOUT_MS = 60_000;
 
 // Windows: this suite shells out to `pgrep` / `kill -KILL` to simulate
 // child-process crashes for the SIGKILL → `session_died` test, and those
@@ -197,6 +201,27 @@ beforeAll(async () => {
       return { content: 'The test Todo remains unfinished.' };
     }
 
+    // Gate out the memory-selection side query (its system prompt starts
+    // with "You are selecting memories"): it replays the prompt text, so a
+    // bare marker match would error it too and muddy the request count.
+    if (
+      messages.includes('turn-error-provider-detail-e2e') &&
+      !messages.includes('You are selecting memories')
+    ) {
+      // Reproduces the production failure shape: the gateway reports an
+      // upstream overload as a single `error_finish` chunk whose content is
+      // the provider's JSON error body instead of an HTTP error status.
+      return {
+        errorContent: JSON.stringify({
+          error: {
+            message:
+              'The engine is currently overloaded, please try again later',
+            type: 'engine_overloaded_error',
+          },
+        }),
+      };
+    }
+
     if (messages.includes('turn-final-answer-boundary-e2e')) {
       const toolCallId = 'call_turn_final_answer_boundary';
       if (!messages.includes(toolCallId)) {
@@ -297,6 +322,7 @@ beforeAll(async () => {
     path.join(qwenHome, 'settings.json'),
     JSON.stringify({
       experimental: { todoStopGuard: true },
+      tools: { todoWrite: { enabled: true } },
       ui: { enableFollowupSuggestions: false },
     }),
   );
@@ -325,11 +351,13 @@ beforeAll(async () => {
       // tests below would all silently 404. A scratch workspace (not
       // the checkout) also keeps sessions hermetic: the daemon merges
       // the workspace's `.qwen/settings.json` into every session, and
-      // a stray one on a shared runner (e.g. a `tools.sandbox` mode or
-      // a `tools.core` allowlist missing `todo_write`) silently breaks
+      // a stray one on a shared runner (e.g. a `tools.sandbox` mode or a
+      // disabled `tools.todoWrite` setting) silently breaks
       // the Stop Guard flow below.
       '--workspace',
       workspaceDir,
+      '--initialize-timeout-ms',
+      String(ACP_INITIALIZE_TIMEOUT_MS),
     ],
     {
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -537,6 +565,79 @@ describePOSIX('qwen serve — pollable turn results', () => {
   }, 60_000);
 });
 
+describePOSIX('qwen serve — turn_error provider detail', () => {
+  it('publishes the provider message as the turn_error message', async () => {
+    const marker = 'turn-error-provider-detail-e2e';
+    const session = await client.createOrAttachSession({
+      workspaceCwd: workspaceDir,
+      sessionScope: 'thread',
+    });
+
+    const events: DaemonEvent[] = [];
+    const ac = new AbortController();
+    let promptId: string | undefined;
+    const subscriber = (async () => {
+      try {
+        for await (const event of sseFrames(session.sessionId, {
+          signal: ac.signal,
+        })) {
+          events.push(event);
+          const data = event.data as { promptId?: string } | undefined;
+          if (event.type === 'turn_error' && data?.promptId === promptId) {
+            break;
+          }
+        }
+      } catch {
+        /* aborted */
+      }
+    })();
+
+    const requestStart = fakeServer.requests.length;
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const accepted = asAccepted(
+        await client.promptNonBlocking(session.sessionId, {
+          prompt: [{ type: 'text', text: marker }],
+        }),
+      );
+      expect(accepted).toBeDefined();
+      if (!accepted) return;
+      promptId = accepted.promptId;
+
+      const findTurnError = () =>
+        events.find((event) => {
+          if (event.type !== 'turn_error') return false;
+          const data = event.data as { promptId?: string } | undefined;
+          return data?.promptId === promptId;
+        });
+      await expect.poll(findTurnError, { timeout: 30_000 }).toBeDefined();
+
+      const data = findTurnError()!.data as { message?: string };
+      expect(data.message).toBe(
+        'The engine is currently overloaded, please try again later',
+      );
+      // The JSON error body carries no numeric code, so no rate-limit retry
+      // fires: the turn must fail after exactly one model request. The
+      // memory-selection side query also carries the marker text (it replays
+      // the prompt), so exclude it from the count the same way the fake
+      // server callback does.
+      const modelRequests = fakeServer.requests
+        .slice(requestStart)
+        .map((request) => JSON.stringify(request.body['messages'] ?? []))
+        .filter(
+          (messages) =>
+            messages.includes(marker) &&
+            !messages.includes('You are selecting memories'),
+        );
+      expect(modelRequests).toHaveLength(1);
+    } finally {
+      ac.abort();
+      await subscriber;
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 60_000);
+});
+
 describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
   it('publishes session_died after the qwen --acp child is SIGKILL-ed', async () => {
     const session = await client.createOrAttachSession({
@@ -554,18 +655,39 @@ describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
 
     const ac = new AbortController();
     const collected: DaemonEvent[] = [];
+    let consumerError: unknown;
+    let resolveSseOpen!: () => void;
+    let rejectSseOpen!: (err: unknown) => void;
+    const sseOpen = new Promise<void>((resolve, reject) => {
+      resolveSseOpen = resolve;
+      rejectSseOpen = reject;
+    });
     const consumer = (async () => {
       try {
-        for await (const e of sseFrames(session.sessionId, {
+        for await (const e of client.subscribeEvents(session.sessionId, {
           signal: ac.signal,
+          onSseStreamAccepted: () => resolveSseOpen(),
         })) {
           collected.push(e);
           if (e.type === 'session_died') break;
         }
-      } catch {
-        /* aborted */
+      } catch (err) {
+        // Before the stream opens this surfaces the real failure (e.g. a
+        // 404 for a dead session) through `await sseOpen` instead of
+        // hanging until the test timeout; once the promise has settled
+        // the reject is a no-op. A post-open transport failure would
+        // otherwise be discarded, so record it for the check below — but
+        // not the deliberate abort the happy path ends the stream with.
+        rejectSseOpen(err);
+        if (!ac.signal.aborted) consumerError = err;
       }
     })();
+
+    // Killing before the subscription is registered loses the event: the
+    // daemon removes the session from its maps when it publishes
+    // `session_died`, so a late connect 404s, and a fresh subscriber gets
+    // no replay without `Last-Event-ID`. Wait for the stream to open.
+    await sseOpen;
 
     // Kill the child outright.
     for (const pid of childPids) {
@@ -588,6 +710,17 @@ describePOSIX('qwen serve — child-crash recovery (real SIGKILL)', () => {
     await consumer;
 
     const died = collected.find((e) => e.type === 'session_died');
+    if (!died) {
+      // Fail with the real cause, not "expected undefined to be defined":
+      // a post-handshake transport failure was captured in the consumer,
+      // and anything else means the stream ended (or stayed silent)
+      // without the event.
+      const events = collected.map((e) => e.type).join(', ') || 'none';
+      throw (
+        consumerError ??
+        new Error(`SSE stream ended without session_died (events: ${events})`)
+      );
+    }
     expect(died).toBeDefined();
     expect((died?.data as { sessionId?: string })?.sessionId).toBe(
       session.sessionId,

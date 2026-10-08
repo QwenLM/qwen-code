@@ -213,11 +213,11 @@ describe('Local Control routes', () => {
     expect(response.body.urlRedacted).toBeUndefined();
   });
 
-  it('withholds the pairing secret from unauthenticated status callers (#9106)', async () => {
-    // On a no-token daemon any local process reaches this route
-    // unauthenticated; the pairing token (in `url`'s fragment, encoded in
-    // `qrText`) must not be served to it — that let a local process mint a
-    // LAN credential and pass the strict mutation surface.
+  it('withholds the pairing secret when operator authority is omitted', async () => {
+    // Isolated route mounts default trustedLoopbackMode to false. The pairing
+    // token (in `url`'s fragment and encoded in `qrText`) must remain redacted
+    // unless the mount explicitly supplies trusted authority or middleware
+    // verifies a listener credential.
     const url = 'http://192.168.1.10:4170/#token=abc123';
     const app = express();
     registerWorkspaceLocalControlRoutes(app, {
@@ -235,6 +235,26 @@ describe('Local Control routes', () => {
     expect(response.body.url).toBeUndefined();
     expect(response.body.qrText).toBeUndefined();
     expect(response.body.urlRedacted).toBe(true);
+  });
+
+  it('returns the pairing secret to a trusted-loopback primary caller', async () => {
+    const url = 'http://192.168.1.10:4170/#token=abc123';
+    const app = express();
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        status: vi.fn(() => ({ active: true, url })),
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({}),
+      trustedLoopbackMode: true,
+    });
+
+    const response = await request(app).get('/workspace/local-control');
+
+    expect(response.status).toBe(200);
+    expect(response.body.url).toBe(url);
+    expect(typeof response.body.qrText).toBe('string');
+    expect(response.body.urlRedacted).toBeUndefined();
   });
 
   it('still returns the full pairing payload to authenticated callers (#9106)', async () => {
@@ -281,5 +301,27 @@ describe('Local Control routes', () => {
     expect(writeStdoutLineSafe).toHaveBeenCalledWith(
       expect.stringContaining(url),
     );
+  });
+
+  it('returns a trusted-loopback enable secret without duplicate terminal output', async () => {
+    const url = 'http://192.168.1.10:4170/#token=abc123';
+    const app = express();
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        enable: vi.fn(async () => ({ active: true, url })),
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({}),
+      primaryBindHostname: '127.0.0.1',
+      trustedLoopbackMode: true,
+    });
+    vi.mocked(writeStdoutLineSafe).mockClear();
+
+    const response = await request(app).post('/workspace/local-control/enable');
+
+    expect(response.status).toBe(200);
+    expect(response.body.url).toBe(url);
+    expect(typeof response.body.qrText).toBe('string');
+    expect(writeStdoutLineSafe).not.toHaveBeenCalled();
   });
 });

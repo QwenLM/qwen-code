@@ -3,6 +3,10 @@ import type { TodoItem } from '../../adapters/types';
 import { TodoTimelineContext } from '../../WebShellContexts';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { useI18n } from '../../i18n';
+import {
+  useTranscriptDocumentExpanded,
+  useTranscriptRenderMode,
+} from '../../transcriptRenderMode';
 import flashStyles from '../MessageLocateFlash.module.css';
 import styles from './PlanMessage.module.css';
 
@@ -27,8 +31,11 @@ export const PlanMessage = memo(function PlanMessage({
   isLocateFlashing = false,
 }: PlanMessageProps) {
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
+  const documentExpanded = useTranscriptDocumentExpanded();
   const [expanded, setExpanded] = useState(false);
   if (todos.length === 0) return null;
+  const showFullList = documentMode ? documentExpanded : expanded;
 
   const total = todos.length;
   const completed = todos.filter((td) => td.status === 'completed').length;
@@ -39,22 +46,31 @@ export const PlanMessage = memo(function PlanMessage({
         isLocateFlashing ? ` ${flashStyles.flash}` : ''
       }`}
     >
-      <button
-        type="button"
-        className={styles.header}
-        onClick={() => setExpanded((value) => !value)}
-        aria-expanded={expanded}
-        title={expanded ? t('todo.collapse') : t('todo.expand')}
-      >
-        <span className={styles.chevron} aria-hidden="true">
-          {expanded ? '▾' : '▸'}
-        </span>
-        <span className={styles.title}>{t('plan.title')}</span>
-        <span className={styles.progress}>
-          {completed}/{total}
-        </span>
-      </button>
-      {expanded ? (
+      {documentMode ? (
+        <div className={styles.headerStatic}>
+          <span className={styles.title}>{t('plan.title')}</span>
+          <span className={styles.progress}>
+            {completed}/{total}
+          </span>
+        </div>
+      ) : (
+        <button
+          type="button"
+          className={styles.header}
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          title={expanded ? t('todo.collapse') : t('todo.expand')}
+        >
+          <span className={styles.chevron} aria-hidden="true">
+            {expanded ? '▾' : '▸'}
+          </span>
+          <span className={styles.title}>{t('plan.title')}</span>
+          <span className={styles.progress}>
+            {completed}/{total}
+          </span>
+        </button>
+      )}
+      {showFullList ? (
         <TodoFullList todos={todos} numbered />
       ) : (
         <PlanEventSummary id={id} todos={todos} />

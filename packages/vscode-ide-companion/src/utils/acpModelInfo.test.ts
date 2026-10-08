@@ -4,11 +4,43 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { invalidateModelCatalog } from '@qwen-code/qwen-code-core/models/model-catalog.js';
 import {
   extractModelInfoFromNewSessionResult,
   extractSessionModelState,
 } from './acpModelInfo.js';
+
+let tempDir: string;
+let previousHome: string | undefined;
+let previousSwitch: string | undefined;
+
+beforeAll(() => {
+  tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'acp-model-info-'));
+  previousHome = process.env['QWEN_HOME'];
+  previousSwitch = process.env['QWEN_CODE_MODELS_DEV'];
+  process.env['QWEN_HOME'] = tempDir;
+  delete process.env['QWEN_CODE_MODELS_DEV'];
+  invalidateModelCatalog();
+});
+
+afterAll(() => {
+  if (previousHome === undefined) {
+    delete process.env['QWEN_HOME'];
+  } else {
+    process.env['QWEN_HOME'] = previousHome;
+  }
+  if (previousSwitch === undefined) {
+    delete process.env['QWEN_CODE_MODELS_DEV'];
+  } else {
+    process.env['QWEN_CODE_MODELS_DEV'] = previousSwitch;
+  }
+  invalidateModelCatalog();
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
 
 describe('extractSessionModelState', () => {
   it('extracts full model state from NewSessionResponse.models', () => {
@@ -137,21 +169,21 @@ describe('extractSessionModelState', () => {
     expect(result?.availableModels).toHaveLength(0);
   });
 
-  it('derives contextLimit for known models when the ACP payload omits it', () => {
+  it('derives catalog contextLimit when the ACP payload omits it', () => {
     const result = extractSessionModelState({
       models: {
-        currentModelId: 'qwen3-max',
-        availableModels: [{ modelId: 'qwen3-max', name: 'Qwen3 Max' }],
+        currentModelId: 'gpt-4o',
+        availableModels: [{ modelId: 'gpt-4o', name: 'GPT-4o' }],
       },
     });
 
     expect(result).toEqual({
-      currentModelId: 'qwen3-max',
+      currentModelId: 'gpt-4o',
       availableModels: [
         {
-          modelId: 'qwen3-max',
-          name: 'Qwen3 Max',
-          _meta: { contextLimit: 262144 },
+          modelId: 'gpt-4o',
+          name: 'GPT-4o',
+          _meta: { contextLimit: 128000 },
         },
       ],
     });
@@ -226,19 +258,19 @@ describe('extractModelInfoFromNewSessionResult', () => {
     expect(extractModelInfoFromNewSessionResult(null)).toBeNull();
   });
 
-  it('derives contextLimit for known models when the payload has null metadata', () => {
+  it('derives catalog contextLimit when the payload has null metadata', () => {
     expect(
       extractModelInfoFromNewSessionResult({
         model: {
-          name: 'Qwen3 Max',
-          modelId: 'qwen3-max',
+          name: 'GPT-4o',
+          modelId: 'gpt-4o',
           _meta: null,
         },
       }),
     ).toEqual({
-      name: 'Qwen3 Max',
-      modelId: 'qwen3-max',
-      _meta: { contextLimit: 262144 },
+      name: 'GPT-4o',
+      modelId: 'gpt-4o',
+      _meta: { contextLimit: 128000 },
     });
   });
 

@@ -83,6 +83,7 @@ function assertDescriptorWireShape(
       (descriptor.kind === 'string' || descriptor.kind === 'secret')
     ) {
       allowedKeys.add('envResolvable');
+      allowedKeys.add('multiline');
     }
     if (descriptor.kind === 'number') {
       allowedKeys.add('exclusiveMinimum');

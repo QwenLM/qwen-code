@@ -2,7 +2,7 @@
 
 ## Overview
 
-`McpTransportPool` (`packages/core/src/tools/mcp-transport-pool.ts`) is the F2 (#4175 commit 5) workspace-scoped pool: multiple ACP sessions inside one runtime share one transport per unique `(serverName + configFingerprint)` tuple, instead of each spawning its own MCP child process. When pool mode is enabled, every started ACP child owns an independent pool (`QwenAgent.mcpPool`). Production attempts to preheat the primary child and retries on first use after failure; a trusted secondary starts its child on demand, while an untrusted secondary starts neither. The pool is constructed once at agent startup with the runtime's bootstrap `Config` and survives session lifecycles. Entries reference-count session attaches and close after a configurable grace period when the reference count reaches zero.
+`McpTransportPool` (`packages/core/src/tools/mcp-transport-pool.ts`) is the F2 (#4175 commit 5) workspace-scoped pool: multiple ACP sessions inside one runtime share one transport per unique `(serverName + configFingerprint)` tuple, instead of each spawning its own MCP child process. When pool mode is enabled, every started ACP child owns an independent pool (`QwenAgent.mcpPool`). Production attempts to preheat the trusted primary child for compatibility; trusted secondaries start on demand, and an untrusted secondary starts neither the child nor its pool. Legacy primary routes retain their existing compatibility behavior. The pool is constructed once at agent startup with the runtime's bootstrap `Config` and survives session lifecycles. Entries reference-count session attaches and close after a configurable grace period when the reference count reaches zero.
 
 It is the main mechanism that prevents a multi-session daemon from forking one copy of every MCP server per session.
 
@@ -313,9 +313,9 @@ ordering.
 ## Fingerprint and `canonicalOAuth` normalization
 
 The pool key comes from `fingerprint(cfg)` in `mcp-pool-key.ts`. The hash covers
-all transport-defining fields:
+all transport-defining and shared tool-snapshot fields:
 
-> `transport, command, args, cwd, env, url, httpUrl, tcp, headers, timeout, versionNegotiation, oauth`
+> `transport, command, args, cwd, env, url, httpUrl, tcp, headers, timeout, versionNegotiation, oauth, appResourceMaxBytes, appResourceTimeoutMs`
 
 Per-session filtering and metadata fields (`includeTools`, `excludeTools`,
 `trust`, `description`, `extensionName`, `discoveryTimeoutMs`) are excluded, so
@@ -335,6 +335,16 @@ Sorting `scopes` and `audiences` makes callsite order irrelevant. Explicit
 key does not include `discoveryTimeoutMs`; concurrent acquire calls with the
 same key but different timeouts are "first wins", matching the pre-F2
 per-session manager behavior.
+
+The App resource limits are the exception to that exclusion: they are consumed
+at discovery and stored in the shared tool snapshot without per-session
+re-projection, so they must be keyed — otherwise a second session would
+silently reuse the first session's limits. Any future field with the same
+lifecycle (consumed at discovery, never re-projected per session) belongs in
+the key even though it is not transport-defining. Both hash at their enforced
+(clamped, floored, defaulted) values — the same normalization the read site in
+`mcp-tool.ts` applies, shared via `mcp-app-resource-limits.ts` — so configs
+whose effective policy is byte-identical share one entry.
 
 `PoolEntry` keeps `cfg: MCPServerConfig` private. External code must use the
 `entry.transportKind` getter when it needs the transport family. That prevents

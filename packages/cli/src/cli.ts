@@ -14,6 +14,7 @@ import {
 } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
+import { FatalError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import {
   DEFAULT_COMMAND,
   DEFAULT_COMMAND_DESC,
@@ -22,6 +23,7 @@ import {
   TOP_LEVEL_HELP_OPTIONS,
   TOP_LEVEL_USAGE,
 } from './config/top-level-options.js';
+import { clearInheritedPeerMessagingEnv } from './peerMessaging/env.js';
 import { normalizeServeFastPathArgv } from './utils/serve-fast-path-argv.js';
 import { initStartupProfiler } from './utils/startupProfiler.js';
 import { initCpuProfiler } from './utils/cpuProfiler.js';
@@ -35,10 +37,23 @@ import {
 initStartupProfiler();
 initCpuProfiler();
 
-type BootstrapRoute = 'serve' | 'mcp' | 'help' | 'version' | 'default';
+type BootstrapRoute =
+  | 'serve'
+  | 'mcp'
+  | 'managed-runtime-worker'
+  | 'session-send-mcp'
+  | 'help'
+  | 'version'
+  | 'default';
 
 export const TOP_LEVEL_COMMANDS = [
+  ['agents <command>', 'Session agents: join a coordinator as a runtime'],
   ['auth', 'Configure authentication (removed)'],
+  [
+    'batch <command>',
+    'Run many independent requests through the DashScope Batch API',
+  ],
+  ['board <command>', 'Share work with other agents through a board'],
   ['channel <command>', 'Manage messaging channels (Telegram, Discord, etc.)'],
   ['extensions <command>', 'Manage Qwen Code extensions.'],
   ['hooks', 'Manage Qwen Code hooks (use /hooks in interactive mode).'],
@@ -46,6 +61,10 @@ export const TOP_LEVEL_COMMANDS = [
   [
     'review <command>',
     'Run a review non-interactively (`run`), plus the internal helpers used by the /review skill (PR worktree setup, context fetch, rules loading, presubmit checks, cleanup)',
+  ],
+  [
+    'sandbox [cmd...]',
+    'Inspect the sandbox backend, or run a command inside it',
   ],
   [
     'serve',
@@ -374,6 +393,14 @@ export function resolveBootstrapRoute(
   if (firstArg === 'mcp') {
     return 'mcp';
   }
+  if (firstArg === 'managed-runtime-worker') {
+    return 'managed-runtime-worker';
+  }
+  // The daemon spawns `agents session-send-mcp --url <endpoint>` per agent
+  // run; its stdout is an MCP stream, so it skips normal startup entirely.
+  if (firstArg === 'agents' && argv[1] === 'session-send-mcp') {
+    return 'session-send-mcp';
+  }
 
   return 'default';
 }
@@ -471,26 +498,54 @@ async function parseYargsCommand(
   parser: Argv,
   argv: readonly string[],
 ): Promise<void> {
-  await new Promise<void>((resolve) => {
-    parser.parse(
-      argv,
-      (error: Error | undefined, _argv: ArgumentsCamelCase, output: string) => {
-        if (output) {
-          writeStdoutLine(output);
-        }
-        if (error) {
-          writeStderrLine(error.message);
-          process.exitCode = 1;
-        }
-        resolve();
-      },
-    );
+  await new Promise<void>((resolve, reject) => {
+    void Promise.resolve(
+      parser.parse(
+        argv,
+        (
+          error: Error | undefined,
+          _argv: ArgumentsCamelCase,
+          output: string,
+        ) => {
+          if (error instanceof FatalError) {
+            reject(error);
+            return;
+          }
+          if (output) writeStdoutLine(output);
+          if (error) {
+            writeStderrLine(error.message);
+            process.exitCode = 1;
+          }
+          resolve();
+        },
+      ),
+    ).catch(reject);
   });
 }
 
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
+  // Bundles enter here directly; the npm wrapper dispatches before loading CLI.
+  if (rawArgv.length === 1 && rawArgv[0] === '--workspace-recovery-worker') {
+    const { runWorkspaceRecoveryWorker } = await import(
+      './serve/workspace-recovery-worker.js'
+    );
+    await runWorkspaceRecoveryWorker();
+    return;
+  }
+
+  // Before ANY route can start a child: an inherited messaging pair names
+  // an ancestor session's inbox plus a token that authenticates to it, and
+  // no route here consumes it — a session that binds its own inbox
+  // re-exports its own pair from PeerMessaging.start. Leaving it in place
+  // hands the capability to, among others, the npm lifecycle scripts of a
+  // managed update (which spawns with the full environment), letting
+  // third-party code inject into the running session. Same boundary and
+  // same reason as the guard-token scrub below; that one needs a serve
+  // carve-out, this one does not.
+  clearInheritedPeerMessagingEnv();
+
   const managedUpdateVersion =
     process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
   if (managedUpdateVersion) {
@@ -526,6 +581,36 @@ export async function runCliEntry(
   } else if (route === 'mcp') {
     await runMcpFastPath(argv);
     return;
+  } else if (route === 'managed-runtime-worker') {
+    const containerBoot =
+      argv.length === 3 && argv[1] === '--container-boot' ? argv[2] : undefined;
+    if (argv.length !== 1 && !containerBoot) {
+      writeStderrLine('Managed Runtime worker arguments are invalid.');
+      process.exitCode = 1;
+      return;
+    }
+    const { runManagedRuntimeAttestationWorker } = await import(
+      './serve/managed-runtime-attestation-worker.js'
+    );
+    await runManagedRuntimeAttestationWorker(containerBoot);
+    return;
+  } else if (route === 'session-send-mcp') {
+    // Nothing on this path may write to stdout (the MCP stream) or read
+    // settings: Codex starts MCP servers with a minimal environment.
+    const { readSessionSendMcpUrl } = await import(
+      './commands/agents/session-send-mcp.js'
+    );
+    const url = readSessionSendMcpUrl(argv.slice(2));
+    if (!url) {
+      writeStderrLine('Usage: qwen agents session-send-mcp --url <endpoint>');
+      process.exitCode = 1;
+      return;
+    }
+    const { runSessionSendMcp } = await import(
+      './commands/agents/session-send-mcp-server.js'
+    );
+    await runSessionSendMcp(url);
+    return;
   } else if (route === 'help') {
     await printTopLevelHelp();
     return;
@@ -538,6 +623,10 @@ export async function runCliEntry(
     : undefined;
   acpStartupProfiler?.initializeAcpStartupProfiler();
   acpStartupProfiler?.markAcpStartup('geminiImportStart');
+  // The bin launcher only enables the cache for its in-process fast paths;
+  // this route pays for compiling the whole CLI on every launch without it.
+  const { default: nodeModule } = await import('node:module');
+  nodeModule.enableCompileCache?.();
   const { main } = await import('./llm.js');
   acpStartupProfiler?.markAcpStartup('geminiImportEnd');
   await main();

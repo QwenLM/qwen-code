@@ -1,0 +1,656 @@
+.inspector {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  gap: 12px;
+  color: var(--foreground);
+}
+
+.inspector button[aria-disabled='true'] {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.inspector button:focus-visible,
+.inspector summary:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}
+
+.summary,
+.detail,
+.attention,
+.steps,
+.collapsible {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+}
+
+.summary {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 15px;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 18%);
+}
+
+.summaryHeading,
+.sectionHeading,
+.compactHeading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.summaryHeading > div {
+  display: grid;
+  gap: 3px;
+}
+
+/* Section labels name what follows; they are not decoration. Tracked-out
+   uppercase made every one of them shout over the content it introduces, so
+   they read as chrome. Sentence case at a muted weight puts the emphasis back
+   on the step title and the status beside it. Kept scoped to the heading's
+   inner div so the count beside it keeps its own tone. */
+.summaryHeading > div span,
+.sectionHeading > div > span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.summaryHeading strong {
+  font-size: 16px;
+}
+
+/* Completed-over-total is a reading of the progress bar directly beneath it,
+   and the status word sits to its left, so a third tinted surface said the
+   same thing a third time. The count keeps the tone as ink and drops the
+   pill. */
+.summaryCount {
+  color: var(--status-running-fg);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.summaryCount[data-status='attention'] {
+  color: var(--status-attention-fg);
+}
+
+.summaryCount[data-status='completed'] {
+  color: var(--status-done-fg);
+}
+
+.progress {
+  height: 5px;
+  margin-top: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--secondary);
+}
+
+.progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--status-done-fg);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .progress span {
+    transition: width 160ms ease;
+  }
+}
+
+.summaryMeta {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.expandButton {
+  display: flex;
+  width: 100%;
+  height: 38px;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--background);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.expandButton:hover {
+  background: var(--accent);
+}
+
+.expandButton svg {
+  width: 15px;
+  height: 15px;
+}
+
+.expandButton svg:last-child {
+  margin-left: auto;
+}
+
+.attention,
+.steps,
+.detail {
+  padding: 13px;
+}
+
+.compactHeading {
+  align-items: center;
+  margin-bottom: 9px;
+}
+
+/* preflight.css resets headings to `font: inherit`, so weight has to be
+   restated or every section title renders at body weight. */
+.compactHeading h2,
+.sectionHeading h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.compactHeading span {
+  display: grid;
+  min-width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--status-idle-fg);
+  background: var(--status-idle-bg);
+  font-size: 11px;
+}
+
+.attention > button,
+.stepList > button,
+.linkedAgents button,
+.deliverables button,
+.activityList > button,
+.activityList > div {
+  width: 100%;
+  border: 0;
+  background: transparent;
+}
+
+.attention > button {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 14px;
+  align-items: center;
+  gap: 8px;
+  padding: 9px;
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.attention > button:hover {
+  background: var(--status-attention-bg);
+}
+
+/* Hover and selection used to paint the same background, so moving the mouse
+   across the list erased any sign of which row was actually selected. The rail
+   is what marks selection; the tint is only feedback. */
+.attention > button[aria-pressed='true'] {
+  background: var(--status-attention-bg);
+  box-shadow: inset 2px 0 0 var(--status-attention-fg);
+}
+
+.attention svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* Two-class selector so this wins over the row's generic icon size above. */
+.attention .attentionGlyph {
+  width: 18px;
+  height: 18px;
+  justify-self: center;
+  color: var(--status-attention-fg);
+}
+
+.sectionHeading h2 {
+  margin-top: 4px;
+  line-height: 1.35;
+}
+
+.status {
+  flex: none;
+  padding: 4px 7px;
+  border-radius: 999px;
+  color: var(--status-idle-fg);
+  background: var(--status-idle-bg);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.status[data-status='running'],
+.status[data-status='in_progress'] {
+  color: var(--status-running-fg);
+  background: var(--status-running-bg);
+}
+
+.status[data-status='completed'] {
+  color: var(--status-done-fg);
+  background: var(--status-done-bg);
+}
+
+.status[data-status='paused'] {
+  color: var(--status-attention-fg);
+  background: var(--status-attention-bg);
+}
+
+.stepId {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--muted-foreground);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}
+
+.dependencies {
+  display: grid;
+  gap: 8px;
+  margin: 13px 0 0;
+}
+
+.dependencies div {
+  display: grid;
+  grid-template-columns: minmax(78px, auto) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.dependencies dt,
+.dependencies dd {
+  margin: 0;
+  font-size: 11px;
+}
+
+.dependencies dt {
+  color: var(--muted-foreground);
+}
+
+.dependencies dd {
+  overflow-wrap: anywhere;
+}
+
+/* A dependency is an edge in the graph beside it, so it is rendered as the
+   step it points at — number and title — and selects that step on click. The
+   previous comma-joined id list made the reader find the row by eye. */
+.dependencyList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* The chip's parent <li> is the flex item, and its default min-width: auto
+   floors it at the title's full nowrap width — the chip grew out of its
+   column and the title's ellipsis never engaged. The number badge is kept
+   out of the shrink by its own flex: none. */
+.dependencyList > li {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.dependencyLink {
+  display: flex;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 7px 3px 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  font-size: 11px;
+  text-align: left;
+}
+
+.dependencyLink > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dependencyLink:hover {
+  border-color: color-mix(in srgb, var(--agent-blue-500) 45%, var(--border));
+  background: var(--accent);
+}
+
+.dependencyNumber {
+  display: grid;
+  width: 16px;
+  height: 16px;
+  flex: none;
+  place-items: center;
+  border-radius: var(--radius-sm, 4px);
+  color: var(--muted-foreground);
+  background: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The summary beside the list reports the true total, so the preview cap
+   needs a way out of it rather than a silent truncation.
+
+   Specificity note, same class of collision as `.metrics` above: this button
+   is a DIRECT CHILD of `.activityList`, whose base rule
+   `.activityList > button` (0,1,1) declares the four-column activity grid
+   (`52px 26px minmax(0, 1fr) auto`) and `padding: 7px 4px`. A single-class
+   rule loses to it, and the label — a bare text run that Grid wraps into an
+   anonymous item — would auto-place into the 52px first column and wrap to
+   three or four lines with three empty columns beside it. So this rule
+   carries the same `.activityList >` prefix, and resets `display` and
+   `grid-template-columns` explicitly rather than relying on order. */
+.activityList > button.showAllActivity {
+  display: block;
+  grid-template-columns: none;
+  padding: 7px 8px;
+  border-radius: var(--radius-md);
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-size: 11px;
+  text-align: left;
+}
+
+.activityList > button.showAllActivity:hover {
+  color: var(--foreground);
+  background: var(--accent);
+}
+
+.linkedAgents {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.linkedAgents h3 {
+  margin: 0 0 7px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.linkedAgents button,
+.deliverables button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.itemText {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.linkedAgents .itemText {
+  flex: 1;
+}
+
+.linkedAgents button strong,
+.linkedAgents button small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.linkedAgents button strong {
+  font-size: 12px;
+}
+
+.linkedAgents button small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.linkedAgents button:not([aria-disabled='true']):hover,
+.deliverables button:not(:disabled):hover {
+  background: var(--accent);
+}
+
+.deliverables button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.linkedAgents svg,
+.deliverables svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.linkedAgents p,
+.activityList p,
+.deliverables p {
+  margin: 7px 0 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.stepList {
+  display: grid;
+  gap: 3px;
+}
+
+.stepList > button {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  text-align: left;
+  cursor: pointer;
+}
+
+.stepList > button:hover {
+  background: var(--accent);
+}
+
+.stepList > button[aria-pressed='true'] {
+  background: var(--accent);
+  box-shadow: inset 2px 0 0 var(--agent-blue-500);
+}
+
+.stepIndex {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.stepIndex[data-status='completed'] {
+  color: var(--status-done-fg);
+  border-color: color-mix(in srgb, var(--status-done-fg) 45%, var(--border));
+}
+
+.stepIndex[data-status='running'],
+.stepIndex[data-status='in_progress'] {
+  color: var(--status-running-fg);
+  border-color: color-mix(in srgb, var(--status-running-fg) 45%, var(--border));
+}
+
+.stepIndex[data-status='paused'] {
+  color: var(--status-attention-fg);
+  border-color: color-mix(
+    in srgb,
+    var(--status-attention-fg) 45%,
+    var(--border)
+  );
+}
+
+.stepList strong,
+.stepList small,
+.deliverables strong,
+.deliverables small,
+.activityList strong,
+.activityList small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stepList strong,
+.deliverables strong,
+.activityList strong {
+  font-size: 12px;
+}
+
+.stepList small,
+.deliverables small,
+.activityList small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+/* Runtime, tool calls and tokens are separate facts, so they are separate
+   elements with real spacing rather than one string glued with middle dots —
+   which also let them wrap as a unit and be read out as one run of text. */
+/* Specificity note: `.linkedAgents button small` (0,1,2) and
+   `.deliverables small` (0,1,1) both declare the single-line ellipsis shape
+   these rows use, so the wrapping metrics row has to out-specify them rather
+   than rely on source order. */
+.linkedAgents button small.metrics,
+.deliverables button small.metrics {
+  display: flex;
+  overflow: visible;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  white-space: normal;
+}
+
+.stateLabel {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.collapsible {
+  padding: 0 13px;
+}
+
+.collapsible summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 0;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.collapsible summary::-webkit-details-marker {
+  display: none;
+}
+
+.collapsible summary small {
+  color: var(--muted-foreground);
+}
+
+.activityList,
+.deliverables {
+  display: grid;
+  gap: 3px;
+  padding-bottom: 12px;
+}
+
+.activityList > button,
+.activityList > div {
+  display: grid;
+  grid-template-columns: 52px 26px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 4px;
+  border-radius: var(--radius-md);
+  text-align: left;
+}
+
+.activityList > button {
+  cursor: pointer;
+}
+
+.activityList > button:not([aria-disabled='true']):hover {
+  background: var(--accent);
+}
+
+.activityList time {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.activityAvatar {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: var(--radius-md);
+  color: var(--status-running-fg);
+  background: var(--status-running-bg);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.canvasHint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 11px;
+  border-radius: var(--radius-md);
+  color: var(--muted-foreground);
+  background: var(--muted);
+  font-size: 11px;
+}
+
+.canvasHint svg {
+  width: 14px;
+  height: 14px;
+}
+
+.empty {
+  display: grid;
+  min-height: 260px;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  color: var(--muted-foreground);
+  text-align: center;
+}
+
+.empty svg {
+  width: 28px;
+  height: 28px;
+}
+
+.empty strong {
+  color: var(--foreground);
+}
+
+.empty p {
+  max-width: 280px;
+  margin: 0;
+  font-size: 12px;
+}

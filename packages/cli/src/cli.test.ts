@@ -51,6 +51,21 @@ const mocks = vi.hoisted(() => ({
   mcpRemoveHandler: vi.fn(),
   getCliVersion: vi.fn(),
   installManagedNpmUpdate: vi.fn(),
+  runWorkspaceRecoveryWorker: vi.fn(),
+  runSessionSendMcp: vi.fn(),
+  runManagedRuntimeAttestationWorker: vi.fn(),
+}));
+
+vi.mock('./commands/agents/session-send-mcp-server.js', () => ({
+  runSessionSendMcp: mocks.runSessionSendMcp,
+}));
+
+vi.mock('./serve/workspace-recovery-worker.js', () => ({
+  runWorkspaceRecoveryWorker: mocks.runWorkspaceRecoveryWorker,
+}));
+
+vi.mock('./serve/managed-runtime-attestation-worker.js', () => ({
+  runManagedRuntimeAttestationWorker: mocks.runManagedRuntimeAttestationWorker,
 }));
 
 vi.mock('./llm.js', () => ({
@@ -119,12 +134,26 @@ vi.mock('./commands/mcp.js', () => ({
 }));
 
 describe('resolveBootstrapRoute', () => {
-  it('routes top-level help, version, serve, and mcp correctly', async () => {
+  it('routes top-level help, version, serve, mcp, and the Runtime worker correctly', async () => {
     expect(resolveBootstrapRoute(['--help'])).toBe('help');
     expect(resolveBootstrapRoute(['--version'])).toBe('version');
     expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('version');
     expect(resolveBootstrapRoute(['serve', '--help'])).toBe('serve');
     expect(resolveBootstrapRoute(['mcp', '--help'])).toBe('mcp');
+    expect(resolveBootstrapRoute(['managed-runtime-worker'])).toBe(
+      'managed-runtime-worker',
+    );
+    expect(
+      resolveBootstrapRoute([
+        'agents',
+        'session-send-mcp',
+        '--url',
+        'http://127.0.0.1:4170/x/send',
+      ]),
+    ).toBe('session-send-mcp');
+    expect(
+      resolveBootstrapRoute(['agents', 'join', 'https://hub/join/w']),
+    ).toBe('default');
   });
 
   it('keeps bundled entrypoint paths out of the route detection', async () => {
@@ -678,6 +707,8 @@ describe('runCliEntry', () => {
       process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'],
     QWEN_CODE_MANAGED_NPM_UPDATE_VERSION:
       process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'],
+    QWEN_CODE_MESSAGING_SOCKET: process.env['QWEN_CODE_MESSAGING_SOCKET'],
+    QWEN_CODE_MESSAGING_TOKEN: process.env['QWEN_CODE_MESSAGING_TOKEN'],
   };
 
   let stdout: string[];
@@ -727,6 +758,16 @@ describe('runCliEntry', () => {
       process.env['QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN'] =
         savedEnv.QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN;
     }
+    for (const name of [
+      'QWEN_CODE_MESSAGING_SOCKET',
+      'QWEN_CODE_MESSAGING_TOKEN',
+    ] as const) {
+      if (savedEnv[name] === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = savedEnv[name];
+      }
+    }
     vi.restoreAllMocks();
   });
 
@@ -738,6 +779,68 @@ describe('runCliEntry', () => {
     expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
     expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
+  });
+
+  it('runs private recovery before inherited updates or normal CLI startup', async () => {
+    process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] = '2.0.0';
+    await runCliEntry(['--workspace-recovery-worker']);
+    expect(mocks.runWorkspaceRecoveryWorker).toHaveBeenCalledOnce();
+    expect(mocks.installManagedNpmUpdate).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
+  });
+
+  it('serves session_send without normal startup or any stdout output', async () => {
+    await runCliEntry([
+      'agents',
+      'session-send-mcp',
+      '--url',
+      'http://127.0.0.1:4170/sessions/s/runs/r/send',
+    ]);
+
+    expect(mocks.runSessionSendMcp).toHaveBeenCalledWith(
+      'http://127.0.0.1:4170/sessions/s/runs/r/send',
+    );
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(stdout.join('')).toBe('');
+  });
+
+  it('refuses session-send-mcp without a URL, on stderr only', async () => {
+    await runCliEntry(['agents', 'session-send-mcp']);
+
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain('--url');
+    expect(stdout.join('')).toBe('');
+    expect(mocks.runSessionSendMcp).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['managed-runtime-worker', '--help'],
+    ['managed-runtime-worker', '--container-boot'],
+    ['managed-runtime-worker', '--container-boot', '/boot.json', 'extra'],
+    ['managed-runtime-worker', '/boot.json', '--container-boot'],
+  ])('rejects invalid hidden Runtime worker arguments: %j', async (...argv) => {
+    await runCliEntry(argv);
+
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain(
+      'Managed Runtime worker arguments are invalid.',
+    );
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.runManagedRuntimeAttestationWorker).not.toHaveBeenCalled();
+  });
+
+  it('passes the boot file to the container worker without starting the CLI', async () => {
+    await runCliEntry([
+      'managed-runtime-worker',
+      '--container-boot',
+      '/boot.json',
+    ]);
+    expect(mocks.runManagedRuntimeAttestationWorker).toHaveBeenCalledWith(
+      '/boot.json',
+    );
+    expect(mocks.main).not.toHaveBeenCalled();
   });
 
   it('runs a managed update worker without starting the CLI', async () => {
@@ -754,6 +857,40 @@ describe('runCliEntry', () => {
     expect(mocks.installManagedNpmUpdate).toHaveBeenCalledWith('2.0.0');
     expect(process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION']).toBeUndefined();
     expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('scrubs an inherited messaging pair before the managed update spawns npm', async () => {
+    // The pair names an ancestor session's inbox and authenticates to it.
+    // installManagedNpmUpdate spawns npm with the full environment, so a
+    // pair surviving to here reaches the installed package's lifecycle
+    // scripts — third-party code able to inject into the live session.
+    // This route never reaches main(), so the entry-level scrub is the
+    // only thing standing between them.
+    process.env['QWEN_CODE_MESSAGING_SOCKET'] = '/tmp/ancestor.sock';
+    process.env['QWEN_CODE_MESSAGING_TOKEN'] = 'ancestor-token';
+    process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] = '2.0.0';
+    mocks.installManagedNpmUpdate.mockImplementationOnce(async () => {
+      expect(process.env['QWEN_CODE_MESSAGING_SOCKET']).toBeUndefined();
+      expect(process.env['QWEN_CODE_MESSAGING_TOKEN']).toBeUndefined();
+    });
+
+    await runCliEntry([]);
+
+    expect(mocks.installManagedNpmUpdate).toHaveBeenCalledWith('2.0.0');
+  });
+
+  it('scrubs an inherited messaging pair on the fast paths that never reach main', async () => {
+    // serve and mcp dispatch without main(), and both hand the full
+    // environment to the children they start.
+    for (const argv of [['mcp'], ['serve']]) {
+      process.env['QWEN_CODE_MESSAGING_SOCKET'] = '/tmp/ancestor.sock';
+      process.env['QWEN_CODE_MESSAGING_TOKEN'] = 'ancestor-token';
+
+      await runCliEntry(argv);
+
+      expect(process.env['QWEN_CODE_MESSAGING_SOCKET']).toBeUndefined();
+      expect(process.env['QWEN_CODE_MESSAGING_TOKEN']).toBeUndefined();
+    }
   });
 
   it('falls back to getCliVersion when CLI_VERSION is unset', async () => {
@@ -795,7 +932,7 @@ describe('runCliEntry', () => {
       expect(helpText).toContain(`--${name}`);
     }
     expect(helpText).toContain(
-      '"openai", "anthropic", "qwen-oauth", "gemini", "vertex-ai"',
+      '"openai", "openai-responses", "anthropic", "qwen-oauth", "gemini", "vertex-ai"',
     );
     // The fast path mirrors config.ts and wraps help at the terminal width;
     // in a non-TTY (columns unset) that disables wrapping, so a description
@@ -868,6 +1005,16 @@ describe('runCliEntry', () => {
 
     expect(mocks.main).toHaveBeenCalledTimes(1);
     expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+  });
+
+  it('lets the entrypoint report a fatal MCP configuration failure once', async () => {
+    const error = new FatalError('Repair operator settings and restart.', 52);
+    mocks.mcpListHandler.mockRejectedValueOnce(error);
+    const stdout = vi.spyOn(process.stdout, 'write');
+    const stderr = vi.spyOn(process.stderr, 'write');
+    await expect(runCliEntry(['mcp', 'list'])).rejects.toBe(error);
+    expect(stdout).not.toHaveBeenCalled();
+    expect(stderr).not.toHaveBeenCalled();
   });
 
   it('fails MCP fast-path validation without loading the full CLI', async () => {
@@ -1165,7 +1312,10 @@ describe('bootstrap import boundaries', () => {
   it('uses the bootstrap file as the production bundle entry', () => {
     const source = readFileSync('../../esbuild.config.js', 'utf8');
 
-    expect(source).toContain("entryPoints: { cli: 'packages/cli/src/cli.ts' }");
+    expect(source).toContain("cli: 'packages/cli/src/cli.ts'");
+    expect(source).toContain(
+      "'execution-worker': 'packages/core/src/services/execution-worker-main.ts'",
+    );
   });
 
   it('keeps bootstrap fast paths in-process in the npm bin wrapper', () => {
@@ -1315,7 +1465,9 @@ describe('bootstrap import boundaries', () => {
         expect(JSON.parse(output)).toEqual({
           args: ['--prompt', 'a&b'],
           skip: 'true',
-          hasLauncherPid: true,
+          // Outside Windows the CLI runs inside the launcher process, so
+          // there is no separate launcher pid to wait for.
+          hasLauncherPid: false,
         });
       } finally {
         rmSync(tempDir, { recursive: true, force: true });
@@ -1687,12 +1839,16 @@ describe('bootstrap import boundaries', () => {
   it('keeps bootstrap top-level help commands aligned with config registrations', () => {
     const configSource = readFileSync('src/config/config.ts', 'utf8');
     const commandNameByIdentifier = new Map([
+      ['agentsCommand', 'agents'],
       ['authCommand', 'auth'],
+      ['batchCommand', 'batch'],
+      ['boardCommand', 'board'],
       ['channelCommand', 'channel'],
       ['extensionsCommand', 'extensions'],
       ['hooksCommand', 'hooks'],
       ['mcpCommand', 'mcp'],
       ['reviewCommand', 'review'],
+      ['sandboxCommand', 'sandbox'],
       ['serveCommand', 'serve'],
       ['sessionsCommand', 'sessions'],
       ['updateCommand', 'update'],
