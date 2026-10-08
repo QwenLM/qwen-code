@@ -66,6 +66,7 @@ import {
   type ManagedSessionSubject,
 } from './managed-session-records.js';
 import { readManagedBranchCheckpoint } from './managed-session-resources.js';
+import { readManagedMessageBody } from './managed-message-chunks.js';
 import {
   parseMcpConfiguration,
   parseMcpOperation,
@@ -2706,7 +2707,10 @@ export class LocalManagedSessionAuthority {
       carried.ref,
       `${event.kind} event ${event.eventId} ref`,
     );
-    const body = await store.read(ref).catch((cause: unknown) => {
+    const body = await readManagedMessageBody(
+      (bodyRef) => store.read(bodyRef),
+      ref,
+    ).catch((cause: unknown) => {
       throw new ManagedSessionRecordError(
         `${noun} is unreadable: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
