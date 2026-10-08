@@ -1755,6 +1755,38 @@ describe('isBelowCompactionWarn', () => {
   it('fails closed on a zero count, which means no report for the route', () => {
     expect(isBelowCompactionWarn(config, 0)).toBe(false);
   });
+
+  // The fake above reports exactly what the implementation falls back to —
+  // DEFAULT_TOKEN_LIMIT is 200_000, and computeThresholds already defaults an
+  // undefined pct to DEFAULT_PCT — so it cannot fail when a fallback is taken.
+  // These two cases use configs that differ from both fallbacks.
+  it('follows the config window, not the DEFAULT_TOKEN_LIMIT fallback', () => {
+    const config32k = {
+      getContentGeneratorConfig: () => ({ contextWindowSize: 32_000 }),
+      getAutoCompactThreshold: () => undefined,
+    } as unknown as Config;
+    expect(
+      isBelowCompactionWarn(config32k, computeThresholds(32_000).warn - 1),
+    ).toBe(true);
+    // Below the 200K tier but far above the 32K one: green only while the
+    // window comes from the config.
+    expect(
+      isBelowCompactionWarn(config32k, computeThresholds(200_000).warn - 1),
+    ).toBe(false);
+  });
+
+  it('follows an autoCompactThreshold override, not DEFAULT_PCT', () => {
+    const configHalf = {
+      getContentGeneratorConfig: () => ({ contextWindowSize: 200_000 }),
+      getAutoCompactThreshold: () => 0.5,
+    } as unknown as Config;
+    const overridden = computeThresholds(200_000, 0.5).warn; // 80_000
+    // Pins this case's own teeth: if DEFAULT_PCT ever moved to 0.5 the two
+    // tiers would coincide and the assertions below would stop discriminating.
+    expect(overridden).not.toBe(computeThresholds(200_000).warn); // 147_000
+    expect(isBelowCompactionWarn(configHalf, overridden - 1)).toBe(true);
+    expect(isBelowCompactionWarn(configHalf, overridden)).toBe(false);
+  });
 });
 
 describe('computeThresholds', () => {

@@ -217,8 +217,11 @@ at `a4568de26e49`. #13571 adds a default-off experiment instead:
 run that used a tool and saved nothing, only while every unprocessed entry fits
 half of the extractor's 40-entry tail and the prompt is below the compaction
 warning tier. An ACP session close flushes skipped turns within the remaining
-close budget. Compaction (which the warning-tier condition avoids), `/clear`,
-`/resume`, `/branch` and process exit do not flush: up to N skipped turns are
+close budget, but that flush is best-effort: the cache-safe slot it reads is
+process-global, so another session capturing the slot first drops it silently.
+Compaction (which the warning-tier condition avoids), `/clear`,
+`/resume`, `/branch`, process exit and a close flush that lost the shared
+cache-safe slot to another session do not flush: up to N skipped turns are
 lost there, and a switch drops both sessions' skip state. The window bound is
 checked at skip time only, so a long following turn can still push a skipped
 turn out of the tail. These losses are what the paired runs must measure before
