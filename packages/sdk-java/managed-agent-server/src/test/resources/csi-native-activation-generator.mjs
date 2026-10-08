@@ -75,7 +75,21 @@ const server = http.createServer(async (req, res) => {
     const prefix =
       '/internal/managed-session-store/v1/sessions/' +
       encodeURIComponent(input.sessionKey.sessionId);
+    if (!url.pathname.startsWith(prefix + '/'))
+      throw new Error('Foreign Session path');
     const suffix = url.pathname.slice(prefix.length);
+    const method = suffix.startsWith('/resources/')
+      ? 'GET'
+      : {
+          '/writers:acquire': 'POST',
+          '/writers:renew': 'POST',
+          '/writers:seal': 'POST',
+          '/restore': 'GET',
+          '/transactions': 'GET',
+          '/transactions:commit': 'POST',
+        }[suffix];
+    if (!method || req.method !== method)
+      throw new Error('Unsupported collector route');
     let answer;
     if (suffix === '/writers:acquire') {
       writerGeneration++;
@@ -214,118 +228,153 @@ try {
     leaseDurationMs: 300000,
     requestTimeoutMs: 10000,
   });
-  const journal = await stores.journalStore.open({
-    sessionKey: input.sessionKey,
-  });
-  const definitionRef = await stores.resourceStore.publish(
-    'managed-definition',
-    Buffer.from(
-      JSON.stringify({
-        engine: 'managed',
-        sessionId: input.sessionKey.sessionId,
-        toolProfile: 'csi-files-retirement/1',
-      }),
-    ),
-  );
-  const rootSnapshotRef = await stores.resourceStore.publish(
-    'managed-root',
-    Buffer.from(JSON.stringify({ cwd: input.cwd })),
-  );
-  const authority = await LocalManagedSessionAuthority.open({
-    journal,
-    resources: stores.resourceStore,
-    sessionKey: input.sessionKey,
-    cwd: input.cwd,
-    version: 'hosted-harness/1',
-    now,
-    create: { definitionRef, rootSnapshotRef, createdBy: 'hosted-harness' },
-  });
-  const first = await authority.installActivation({
-    activationId: randomUUID(),
-    workerId: contract.bootId,
-    leaseDurationMs: 60000,
-  });
-  const renewed = await authority.renewActivation({ leaseDurationMs: 90000 });
-  const initialCheckpoint = await createManagedHarnessHandle({
-    authority,
-    activation: first,
-  }).ensureCheckpoint();
-  const afterCheckpointRenewal = await authority.renewActivation({
-    leaseDurationMs: 90000,
-  });
-  async function submitInput(prompt) {
-    const promptId = randomUUID();
-    const bytes = Buffer.from(JSON.stringify(prompt));
-    const digest = hash(bytes);
-    const contentRef = await stores.resourceStore.publish(
-      'managed-input',
-      bytes,
+  if (input.conversation) {
+    const { generateNativeTextTurns } = await import(
+      './csi-native-text-turns.mjs'
     );
-    const admissionRef = await stores.resourceStore.publish(
-      'managed-admission',
-      Buffer.from(JSON.stringify({ promptId, digest: 'sha256:' + digest })),
+    const observations = await generateNativeTextTurns(
+      stores,
+      input,
+      contract,
+      evidence,
+      root,
     );
-    return authority.submitInput(
-      {
-        operation: 'submitInput',
-        commandId: promptId,
-        sessionKey: input.sessionKey,
-        contentDigest: digest,
+    await writeFile(
+      new URL('native-fixture.json', evidence),
+      JSON.stringify(
+        {
+          input,
+          writerId,
+          workerId: contract.bootId,
+          writerToken: token,
+          commits,
+          resources: [...resources.values()],
+          observations,
+          provenance: {
+            backend:
+              'owned HTTP collector; actual SQL admission is in the Java gate',
+            manufacturedNativeEvents: false,
+            privateExecuteHostedTurn: false,
+          },
+        },
+        null,
+        2,
+      ) + '\n',
+    );
+  } else {
+    const journal = await stores.journalStore.open({
+      sessionKey: input.sessionKey,
+    });
+    const definitionRef = await stores.resourceStore.publish(
+      'managed-definition',
+      Buffer.from(
+        JSON.stringify({
+          engine: 'managed',
+          sessionId: input.sessionKey.sessionId,
+          toolProfile: 'csi-files-retirement/1',
+        }),
+      ),
+    );
+    const rootSnapshotRef = await stores.resourceStore.publish(
+      'managed-root',
+      Buffer.from(JSON.stringify({ cwd: input.cwd })),
+    );
+    const authority = await LocalManagedSessionAuthority.open({
+      journal,
+      resources: stores.resourceStore,
+      sessionKey: input.sessionKey,
+      cwd: input.cwd,
+      version: 'hosted-harness/1',
+      now,
+      create: { definitionRef, rootSnapshotRef, createdBy: 'hosted-harness' },
+    });
+    const first = await authority.installActivation({
+      activationId: randomUUID(),
+      workerId: contract.bootId,
+      leaseDurationMs: 60000,
+    });
+    const renewed = await authority.renewActivation({ leaseDurationMs: 90000 });
+    const initialCheckpoint = await createManagedHarnessHandle({
+      authority,
+      activation: first,
+    }).ensureCheckpoint();
+    const afterCheckpointRenewal = await authority.renewActivation({
+      leaseDurationMs: 90000,
+    });
+    async function submitInput(prompt) {
+      const promptId = randomUUID();
+      const bytes = Buffer.from(JSON.stringify(prompt));
+      const digest = hash(bytes);
+      const contentRef = await stores.resourceStore.publish(
+        'managed-input',
+        bytes,
+      );
+      const admissionRef = await stores.resourceStore.publish(
+        'managed-admission',
+        Buffer.from(JSON.stringify({ promptId, digest: 'sha256:' + digest })),
+      );
+      return authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: promptId,
+          sessionKey: input.sessionKey,
+          contentDigest: digest,
+        },
+        {
+          inputId: promptId,
+          turnId: promptId,
+          source: 'hosted-harness',
+          contentRef,
+          admissionRef,
+          deadline: null,
+          wakeReason: 'input',
+        },
+      );
+    }
+    await submitInput([
+      { type: 'text', text: '原始输入\n' + '文'.repeat(5000) },
+      { type: 'text', text: 'second block' },
+    ]);
+    await authority.renewActivation({ leaseDurationMs: 90000 });
+    await submitInput([{ type: 'text', text: 'unsettled second input' }]);
+    const fixture = {
+      format: 'csi-native-activation-test-generator/1',
+      generatedAt: new Date().toISOString(),
+      input,
+      hostedContract: contract,
+      writerId,
+      workerId: contract.bootId,
+      writerToken: token,
+      first,
+      renewed,
+      initialCheckpoint,
+      afterCheckpointRenewal,
+      clock: {
+        initialClock,
+        finalClock: nativeClock,
+        clockCalls,
+        incrementMs: 1,
       },
-      {
-        inputId: promptId,
-        turnId: promptId,
-        source: 'hosted-harness',
-        contentRef,
-        admissionRef,
-        deadline: null,
-        wakeReason: 'input',
+      genesisDefinitionRef: definitionRef,
+      rootSnapshotRef,
+      commits,
+      resources: [...resources.values()],
+      rawRequestsBeforeCollectorCleanup: requests.slice(),
+      provenance: {
+        authorityModule: authorityModule.href,
+        httpAdapterModule: adapterModule.href,
+        hostedContractModule: hostedModule.href,
+        usesDefaultFetch: true,
+        usesRealOwnedLoopbackHttp: true,
+        backend: 'owned response collector only; not Java or SQL acceptance',
+        manufacturedJournalMarkerOrPositiveBody: false,
       },
+    };
+    await writeFile(
+      new URL('native-fixture.json', evidence),
+      JSON.stringify(fixture, null, 2) + '\n',
     );
   }
-  await submitInput([
-    { type: 'text', text: '原始输入\n' + '文'.repeat(5000) },
-    { type: 'text', text: 'second block' },
-  ]);
-  await authority.renewActivation({ leaseDurationMs: 90000 });
-  await submitInput([{ type: 'text', text: 'unsettled second input' }]);
-  const fixture = {
-    format: 'csi-native-activation-test-generator/1',
-    generatedAt: new Date().toISOString(),
-    input,
-    hostedContract: contract,
-    writerId,
-    workerId: contract.bootId,
-    writerToken: token,
-    first,
-    renewed,
-    initialCheckpoint,
-    afterCheckpointRenewal,
-    clock: {
-      initialClock,
-      finalClock: nativeClock,
-      clockCalls,
-      incrementMs: 1,
-    },
-    genesisDefinitionRef: definitionRef,
-    rootSnapshotRef,
-    commits,
-    resources: [...resources.values()],
-    rawRequestsBeforeCollectorCleanup: requests.slice(),
-    provenance: {
-      authorityModule: authorityModule.href,
-      httpAdapterModule: adapterModule.href,
-      hostedContractModule: hostedModule.href,
-      usesDefaultFetch: true,
-      usesRealOwnedLoopbackHttp: true,
-      backend: 'owned response collector only; not Java or SQL acceptance',
-      manufacturedJournalMarkerOrPositiveBody: false,
-    },
-  };
-  await writeFile(
-    new URL('native-fixture.json', evidence),
-    JSON.stringify(fixture, null, 2) + '\n',
-  );
   await stores.close();
   await writeFile(
     new URL('all-http-requests.json', evidence),
@@ -336,8 +385,6 @@ try {
       status: 'generated',
       fixture: new URL('native-fixture.json', evidence).pathname,
       operations: commits.map((x) => x.request.operation),
-      first,
-      renewed,
       writerId,
       workerId: contract.bootId,
       serverPort: address.port,

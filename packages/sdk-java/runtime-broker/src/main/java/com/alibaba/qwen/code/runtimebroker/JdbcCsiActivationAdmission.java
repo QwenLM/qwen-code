@@ -199,7 +199,7 @@ public final class JdbcCsiActivationAdmission {
         String digest = null;
         String lastUuid = null;
         CsiNativeActivationProof.Genesis genesis = null;
-        var prefix = new CsiNativeActivationProof.Prefix(null, null);
+        var prefix = CsiNativeActivationProof.Prefix.empty();
         CsiNativeActivationProof.Activation activation = null;
         while (true) {
             int count = 0;

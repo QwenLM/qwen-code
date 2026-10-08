@@ -7,6 +7,8 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.MathContext;
@@ -18,13 +20,15 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 
-/** Narrow original native activation, input/wake and initial checkpoint proof for CSI. */
+/** Original private CSI activation and bounded text conversation proof. */
 public final class CsiNativeActivationProof {
     private static final long MAX_SAFE = 9_007_199_254_740_990L;
     private static final Set<String> ENVELOPE = Set.of("uuid", "parentUuid", "sessionId", "timestamp",
@@ -52,7 +56,24 @@ public final class CsiNativeActivationProof {
             long leaseDurationMs, long expiresAt, long renewalSequence) {
     }
 
-    public record Prefix(String inputId, String checkpointResourceId) {
+    public record Input(String inputId, String text, String userMessageId, boolean noDeadline) {
+    }
+
+    public record Checkpoint(JsonNode ref, JsonNode state) {
+    }
+
+    public record Attempt(String attemptId, JsonNode routeRef, JsonNode checkpointRef, JsonNode route, String stage) {
+    }
+
+    public record Prefix(Input input, Checkpoint checkpoint, String lastMessageId, Attempt attempt,
+            boolean assistantCommitted, Set<String> usedIds) {
+        public static Prefix empty() {
+            return new Prefix(null, null, null, null, false, Set.of());
+        }
+
+        public String checkpointResourceId() {
+            return checkpoint == null ? null : id(checkpoint.ref(), "resourceId");
+        }
     }
 
     public static List<JsonNode> records(byte[] bytes) {
@@ -160,17 +181,292 @@ public final class CsiNativeActivationProof {
         require(activation != null && writerId.equals(activation.workerId())
                 && writerId.equals(text(metadata, "writerId"))
                 && number(metadata.get("writerGeneration")) == 1 && number(metadata.get("activationEpoch")) == 1);
-        if ("submitInput".equals(text(metadata, "operation"))) {
-            require(previous.inputId() == null);
-            return new Prefix(input(transaction, metadata, original, activation, previousSequence, resources),
-                    previous.checkpointResourceId());
-        }
-        require(previous.checkpointResourceId() == null);
-        return new Prefix(previous.inputId(), initialCheckpoint(transaction, metadata, original, writerId,
-                genesis, activation, previousSequence, resources));
+        return switch (text(metadata, "operation")) {
+            case "submitInput" -> {
+                require(previous.input() == null);
+                Input input = input(transaction, metadata, original, activation, previousSequence, resources);
+                yield new Prefix(input, previous.checkpoint(), previous.lastMessageId(), null, false,
+                        useId(previous, input.inputId()));
+            }
+            case "commitCheckpoint" -> {
+                require(previous.checkpoint() == null);
+                yield new Prefix(previous.input(), validatedInitialCheckpoint(transaction, metadata, original,
+                        writerId, genesis, activation, previousSequence, resources), previous.lastMessageId(),
+                        previous.attempt(), previous.assistantCommitted(), previous.usedIds());
+            }
+            case "commitMessage" -> message(transaction, metadata, original, genesis, activation,
+                    previousSequence, previous, resources);
+            case "hostedModelAttempt" -> attempt(transaction, metadata, original, activation,
+                    previousSequence, previous, resources);
+            case "settleTurn" -> settle(transaction, metadata, original, activation,
+                    previousSequence, previous, resources);
+            default -> throw invalid();
+        };
     }
 
-    private static String input(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
+    private static Set<String> useId(Prefix previous, String value) {
+        Set<String> ids = new HashSet<>(previous.usedIds());
+        require(ids.add(value));
+        return Set.copyOf(ids);
+    }
+
+    private static void conversation(Prefix previous) {
+        require(previous.input() != null && previous.input().noDeadline() && previous.checkpoint() != null);
+    }
+
+    private static JsonNode harnessEvent(JsonNode event, String kind, RuntimeProvisionRequest original,
+            Activation activation, long sequence) {
+        closed(event, Set.of("v", "sequence", "eventId", "sessionKey", "kind", "occurredAt", "subject", "payload"));
+        key(event.path("sessionKey"), original);
+        require(number(event.get("v")) == 1 && number(event.get("sequence")) == sequence
+                && kind.equals(text(event, "kind")) && time(event.get("occurredAt")) < activation.expiresAt());
+        JsonNode subject = event.path("subject");
+        closed(subject, Set.of("type", "scopeId", "activationId", "epoch"));
+        require("activation".equals(text(subject, "type"))
+                && activation.activationId().equals(id(subject, "scopeId"))
+                && activation.activationId().equals(id(subject, "activationId")) && number(subject.get("epoch")) == 1);
+        return event.path("payload");
+    }
+
+    private static Prefix message(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
+            Genesis genesis, Activation activation, long previousSequence, Prefix previous,
+            Function<JsonNode, byte[]> resources) {
+        conversation(previous);
+        require(transaction.events().size() == 1 && metadata.path("latestCheckpointResourceId").isNull()
+                && genesis.definitionDigest().equals(text(metadata, "contentDigest")));
+        JsonNode event = transaction.events().getFirst();
+        JsonNode payload = harnessEvent(event, "message.committed", original, activation, previousSequence + 1);
+        closed(payload, Set.of("messageId", "role", "contentRef", "parentMessageId"));
+        String messageId = id(payload, "messageId");
+        uuid(messageId);
+        require(("message:" + messageId).equals(id(event, "eventId"))
+                && ("recorder:" + messageId).equals(id(metadata, "commandId")));
+        JsonNode record = messageBody(payload.path("contentRef"), resources);
+        String role = text(payload, "role");
+        boolean user = "user".equals(role);
+        require(user || "assistant".equals(role));
+        Set<String> fields = new HashSet<>(Set.of("uuid", "parentUuid", "sessionId", "timestamp", "type", "cwd",
+                "version", "daemonPromptId", "message"));
+        if (!user) {
+            fields.add("model");
+        }
+        closed(record, fields);
+        chatRecord(record, original);
+        require(messageId.equals(id(record, "uuid")) && role.equals(text(record, "type"))
+                && previous.input().inputId().equals(id(record, "daemonPromptId"))
+                && Objects.equals(previous.lastMessageId(), nullableId(payload, "parentMessageId"))
+                && Objects.equals(previous.lastMessageId(), nullableId(record, "parentUuid")));
+        JsonNode body = record.path("message");
+        closed(body, Set.of("role", "parts"));
+        require((user ? "user" : "model").equals(text(body, "role"))
+                && body.path("parts").isArray() && !body.path("parts").isEmpty());
+        if (user) {
+            require(previous.input().userMessageId() == null && previous.attempt() == null
+                    && body.path("parts").size() == 1);
+            JsonNode part = body.path("parts").get(0);
+            closed(part, Set.of("text"));
+            require(part.path("text").isTextual() && previous.input().text().equals(part.path("text").textValue()));
+        } else {
+            require(previous.attempt() != null && "output_committed".equals(previous.attempt().stage())
+                    && !previous.assistantCommitted()
+                    && text(previous.attempt().route(), "model").equals(text(record, "model")));
+            for (JsonNode part : body.path("parts")) {
+                closed(part, part.has("thought") ? Set.of("text", "thought") : Set.of("text"));
+                require(part.path("text").isTextual() && (!part.has("thought") || part.path("thought").isBoolean()));
+            }
+        }
+        Input input = user ? new Input(previous.input().inputId(), previous.input().text(), messageId, true)
+                : previous.input();
+        return new Prefix(input, previous.checkpoint(), messageId, previous.attempt(), !user,
+                useId(previous, messageId));
+    }
+
+    private static JsonNode messageBody(JsonNode ref, Function<JsonNode, byte[]> resources) {
+        if ("managed-message".equals(ref.path("kind").textValue())) {
+            byte[] bytes = reference(ref, "managed-message", resources);
+            require(bytes.length <= 64 * 1024);
+            return readObject(bytes);
+        }
+        byte[] manifestBytes = reference(ref, "managed-message-chunks", resources);
+        require(manifestBytes.length <= 64 * 1024);
+        JsonNode manifest = readObject(manifestBytes);
+        closed(manifest, Set.of("parts"));
+        JsonNode parts = manifest.path("parts");
+        require(parts.isArray() && parts.size() > 1 && parts.size() <= 137);
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        Set<String> ids = new HashSet<>();
+        for (int index = 0; index < parts.size(); index++) {
+            JsonNode part = parts.get(index);
+            require(ids.add(id(part, "resourceId")));
+            byte[] content = reference(part, "managed-message-part", resources);
+            require(content.length > 0 && content.length <= 60 * 1024
+                    && (index == parts.size() - 1 || content.length == 60 * 1024)
+                    && bytes.size() + content.length <= 8 * 1024 * 1024);
+            bytes.writeBytes(content);
+        }
+        require(bytes.size() > 64 * 1024);
+        return readObject(bytes.toByteArray());
+    }
+
+    private static void chatRecord(JsonNode record, RuntimeProvisionRequest original) {
+        uuid(id(record, "uuid"));
+        require(original.getIsolationKey().equals(text(record, "sessionId"))
+                && original.getScope().getCanonicalCwd().equals(text(record, "cwd"))
+                && "hosted-harness/1".equals(text(record, "version")));
+        try {
+            Instant.parse(text(record, "timestamp"));
+        } catch (java.time.DateTimeException error) {
+            throw invalid();
+        }
+    }
+
+    private static String nullableId(JsonNode node, String field) {
+        require(node.has(field));
+        return node.path(field).isNull() ? null : id(node, field);
+    }
+
+    private static Prefix attempt(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
+            Activation activation, long previousSequence, Prefix previous, Function<JsonNode, byte[]> resources) {
+        conversation(previous);
+        require(previous.input().userMessageId() != null && !previous.assistantCommitted()
+                && transaction.events().size() == 1 && metadata.path("latestCheckpointResourceId").isNull());
+        JsonNode event = transaction.events().getFirst();
+        JsonNode payload = harnessEvent(event, "model.attempt", original, activation, previousSequence + 1);
+        closed(payload, Set.of("attemptId", "routeRef", "inputCheckpointRef", "state", "usageRef"));
+        String attemptId = id(payload, "attemptId");
+        String prefix = previous.input().inputId() + ":main:";
+        require(attemptId.startsWith(prefix));
+        uuid(attemptId.substring(prefix.length()));
+        String stage = text(payload, "state");
+        require((attemptId + ":" + stage).equals(id(event, "eventId"))
+                && (attemptId + ":" + stage).equals(id(metadata, "commandId")));
+        JsonNode routeRef = payload.path("routeRef");
+        JsonNode route = readObject(reference(routeRef, "managed-hosted-model-route", resources));
+        closed(route, Set.of("version", "turnId", "model", "budget"));
+        require(number(route.get("version")) == 1 && previous.input().inputId().equals(id(route, "turnId"))
+                && text(routeRef, "digest").equals(text(metadata, "contentDigest")));
+        text(route, "model");
+        JsonNode budget = route.path("budget");
+        closed(budget, Set.of("sessionId", "promptId", "budget", "outputTokensAtTurnStart"));
+        require(original.getIsolationKey().equals(text(budget, "sessionId"))
+                && previous.input().inputId().equals(id(budget, "promptId")) && budget.path("budget").isNull());
+        finite(budget.get("outputTokensAtTurnStart"));
+        JsonNode checkpointRef = payload.path("inputCheckpointRef");
+        require(canonical(checkpointRef).equals(canonical(previous.checkpoint().ref())));
+        require(canonical(readObject(reference(checkpointRef, "managed-checkpoint", resources)))
+                .equals(canonical(previous.checkpoint().state())));
+        Set<String> ids = previous.usedIds();
+        if ("started".equals(stage)) {
+            require(previous.attempt() == null && payload.path("usageRef").isNull());
+            ids = useId(previous, attemptId);
+        } else {
+            require(previous.attempt() != null && "started".equals(previous.attempt().stage())
+                    && attemptId.equals(previous.attempt().attemptId())
+                    && canonical(routeRef).equals(canonical(previous.attempt().routeRef()))
+                    && canonical(checkpointRef).equals(canonical(previous.attempt().checkpointRef()))
+                    && canonical(route).equals(canonical(previous.attempt().route()))
+                    && ("output_committed".equals(stage) || "abandoned".equals(stage)));
+            usage(readObject(reference(payload.path("usageRef"), "managed-hosted-model-usage", resources)), route, stage);
+        }
+        return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(),
+                new Attempt(attemptId, routeRef.deepCopy(), checkpointRef.deepCopy(), route.deepCopy(), stage), false, ids);
+    }
+
+    private static void usage(JsonNode usage, JsonNode route, String stage) {
+        closed(usage, Set.of("version", "turnId", "model", "attempts", "budget", "models"));
+        require(number(usage.get("version")) == 1 && id(route, "turnId").equals(id(usage, "turnId"))
+                && text(route, "model").equals(text(usage, "model"))
+                && canonical(route.path("budget")).equals(canonical(usage.path("budget")))
+                && usage.path("attempts").isArray()
+                && usage.path("attempts").size() == ("output_committed".equals(stage) ? 1 : 0));
+        for (JsonNode value : usage.path("attempts")) {
+            metrics(value, Set.of("promptTokenCount", "candidatesTokenCount", "thoughtsTokenCount",
+                    "totalTokenCount", "cachedContentTokenCount"));
+        }
+        JsonNode models = object(usage.path("models"));
+        models.fields().forEachRemaining(entry -> {
+            require(!entry.getKey().isEmpty() && entry.getKey().length() <= 4096);
+            JsonNode model = entry.getValue();
+            closed(model, Set.of("api", "tokens", "bySource"));
+            modelMetrics(model);
+            closed(model.path("bySource"), Set.of("main"));
+            JsonNode main = model.path("bySource").path("main");
+            closed(main, Set.of("api", "tokens"));
+            modelMetrics(main);
+        });
+    }
+
+    private static void modelMetrics(JsonNode node) {
+        metrics(node.path("api"), Set.of("totalRequests", "totalErrors", "totalLatencyMs"));
+        metrics(node.path("tokens"), Set.of("prompt", "candidates", "total", "cached", "thoughts"));
+    }
+
+    private static void metrics(JsonNode node, Set<String> fields) {
+        closed(node, fields);
+        fields.forEach(field -> finite(node.get(field)));
+    }
+
+    private static void finite(JsonNode node) {
+        require(node != null && node.isNumber() && Double.isFinite(node.doubleValue()));
+    }
+
+    private static Prefix settle(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
+            Activation activation, long previousSequence, Prefix previous, Function<JsonNode, byte[]> resources) {
+        conversation(previous);
+        require(previous.attempt() != null && transaction.events().size() == 2);
+        JsonNode event = transaction.events().getFirst();
+        JsonNode payload = harnessEvent(event, "turn.settled", original, activation, previousSequence + 1);
+        closed(payload, Set.of("turnId", "outcome", "stopReason", "resultRef", "usageRef", "pendingOwnersRef"));
+        String turnId = previous.input().inputId();
+        boolean completed = "output_committed".equals(previous.attempt().stage()) && previous.assistantCommitted();
+        require(completed || "abandoned".equals(previous.attempt().stage()) && !previous.assistantCommitted());
+        String outcome = completed ? "completed" : "error";
+        String stopReason = completed ? "end_turn" : "error";
+        require(turnId.equals(id(payload, "turnId")) && ("turn:" + turnId).equals(id(event, "eventId"))
+                && outcome.equals(text(payload, "outcome")) && stopReason.equals(text(payload, "stopReason")));
+        nullFields(payload, "usageRef", "pendingOwnersRef");
+        JsonNode ref = payload.path("resultRef");
+        JsonNode result = readObject(reference(ref, "managed-turn-result", resources));
+        closed(result, Set.of("uuid", "parentUuid", "sessionId", "timestamp", "type", "cwd", "version",
+                "subtype", "systemPayload"));
+        chatRecord(result, original);
+        require("system".equals(text(result, "type")) && "turn_result".equals(text(result, "subtype"))
+                && result.path("parentUuid").isNull() && ("recorder:" + id(result, "uuid"))
+                        .equals(id(metadata, "commandId")) && text(ref, "digest").equals(text(metadata, "contentDigest")));
+        JsonNode body = result.path("systemPayload");
+        closed(body, Set.of("promptId", "state", "stopReason", "endedAt"));
+        require(turnId.equals(id(body, "promptId")) && outcome.equals(text(body, "state"))
+                && stopReason.equals(text(body, "stopReason")));
+        time(body.get("endedAt"));
+        JsonNode checkpointEvent = transaction.events().getLast();
+        JsonNode checkpoint = harnessEvent(checkpointEvent, "checkpoint.committed", original, activation,
+                previousSequence + 2);
+        closed(checkpoint, Set.of("checkpointId", "coveredSequence", "previousCheckpointId", "stateRef", "boundary"));
+        String checkpointId = "ckpt-" + (previousSequence + 2);
+        String previousId = id(previous.checkpoint().state().path("identity"), "checkpointId");
+        require(checkpointId.equals(id(checkpointEvent, "eventId")) && checkpointId.equals(id(checkpoint, "checkpointId"))
+                && number(checkpoint.get("coveredSequence")) == previousSequence
+                && previousId.equals(id(checkpoint, "previousCheckpointId"))
+                && "turn_complete".equals(text(checkpoint, "boundary")));
+        JsonNode stateRef = checkpoint.path("stateRef");
+        JsonNode state = readObject(reference(stateRef, "managed-checkpoint", resources));
+        require(id(stateRef, "resourceId").equals(id(metadata, "latestCheckpointResourceId")));
+        ObjectNode expected = previous.checkpoint().state().deepCopy();
+        ObjectNode identity = (ObjectNode) expected.path("identity");
+        identity.put("checkpointId", checkpointId).put("coveredSequence", previousSequence)
+                .put("activationId", activation.activationId()).put("turnId", turnId).put("promptId", turnId)
+                .put("previousCheckpointId", previousId);
+        ((ObjectNode) expected.path("resume")).put("throughSequence", previousSequence);
+        require(number(state.path("identity").get("schemaVersion")) == 1
+                && number(state.path("identity").get("coveredSequence")) == previousSequence
+                && number(state.path("resume").get("throughSequence")) == previousSequence
+                && number(state.path("resume").get("initialTurn")) == 0
+                && canonical(expected).equals(canonical(state)));
+        return new Prefix(null, new Checkpoint(stateRef.deepCopy(), state.deepCopy()), previous.lastMessageId(),
+                null, false, useId(previous, id(result, "uuid")));
+    }
+
+    private static Input input(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
             Activation activation, long previousSequence, Function<JsonNode, byte[]> resources) {
         require(transaction.events().size() == 2 && metadata.path("latestCheckpointResourceId").isNull());
         JsonNode accepted = transaction.events().getFirst();
@@ -199,10 +495,12 @@ public final class CsiNativeActivationProof {
         require(inputBytes.length <= 64 * 1024 && sha256(inputBytes).equals(text(metadata, "contentDigest")));
         JsonNode blocks = readJson(inputBytes);
         require(blocks != null && blocks.isArray() && !blocks.isEmpty());
+        List<String> texts = new ArrayList<>();
         for (JsonNode block : blocks) {
             closed(block, Set.of("type", "text"));
             require("text".equals(text(block, "type")) && block.path("text").isTextual()
                     && !block.path("text").textValue().isEmpty());
+            texts.add(block.path("text").textValue());
         }
         byte[] admissionBytes = reference(payload.path("admissionRef"), "managed-admission", resources);
         require(admissionBytes.length <= 64 * 1024);
@@ -220,10 +518,17 @@ public final class CsiNativeActivationProof {
         JsonNode subject = wakePayload.path("subject");
         closed(subject, Set.of("type", "turnId"));
         require("turn".equals(text(subject, "type")) && inputId.equals(id(subject, "turnId")));
-        return inputId;
+        return new Input(inputId, String.join("\n", texts), null, payload.path("deadline").isNull());
     }
 
     public static String initialCheckpoint(Transaction transaction, JsonNode metadata,
+            RuntimeProvisionRequest original, String writerId, Genesis genesis, Activation activation,
+            long previousSequence, Function<JsonNode, byte[]> resources) {
+        return id(validatedInitialCheckpoint(transaction, metadata, original, writerId,
+                genesis, activation, previousSequence, resources).ref(), "resourceId");
+    }
+
+    private static Checkpoint validatedInitialCheckpoint(Transaction transaction, JsonNode metadata,
             RuntimeProvisionRequest original, String writerId, Genesis genesis, Activation activation,
             long previousSequence, Function<JsonNode, byte[]> resources) {
         require(activation != null && transaction.events().size() == 1
@@ -300,7 +605,7 @@ public final class CsiNativeActivationProof {
                 "childRunIds", "scopeLineage");
         var array = JSON.createArrayNode().add(event);
         require(sha256(canonical(array).getBytes(StandardCharsets.UTF_8)).equals(text(metadata, "eventsDigest")));
-        return id(ref, "resourceId");
+        return new Checkpoint(ref.deepCopy(), state.deepCopy());
     }
 
     private static void nullFields(JsonNode node, String... fields) {

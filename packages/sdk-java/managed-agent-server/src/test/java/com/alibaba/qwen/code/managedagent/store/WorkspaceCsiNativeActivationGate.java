@@ -39,6 +39,7 @@ import java.util.concurrent.TimeUnit;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -69,7 +70,7 @@ class WorkspaceCsiNativeActivationGate {
     Path directory;
 
     @BeforeEach
-    void setUp() throws Exception {
+    void setUp(TestInfo info) throws Exception {
         var source = new DriverManagerDataSource("jdbc:h2:mem:csi-native-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE", "sa", "");
         Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
@@ -108,11 +109,148 @@ class WorkspaceCsiNativeActivationGate {
         binding = bindings.compareAndSet(binding, binding.withAttestation(lease,
                 new RuntimeResourceHandle("kubernetes-workspace", 3, Map.of("podUid", "fixture-original")),
                 Instant.now(), Instant.now()));
-        generate();
+        generate(info.getTestMethod().orElseThrow().getName().startsWith("textConversation"));
         writerId = nativeFixture.path("writerId").textValue();
         token = nativeFixture.path("writerToken").textValue();
         transaction.execute(status -> journal.acquireWriter("tenant", sessionId, token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", writerId, 300_000L)));
+    }
+
+    @Test
+    void textConversationAcceptsFiveOriginalTurnsAndReplaysOldSettlementWithoutReleasingNewInput() throws Exception {
+        ready();
+        assertThat(nativeFixture.path("commits").size()).isEqualTo(33);
+        for (int index = 2; index <= 9; index++) {
+            assertThat(commit(index).replayed()).isFalse();
+        }
+        var before = allRows();
+        assertThat(commit(8).replayed()).isTrue();
+        assertThat(allRows()).isEqualTo(before);
+        assertThat(commit(10).replayed()).isFalse();
+        for (int index = 11; index < 32; index++) {
+            assertThat(commit(index).replayed()).isFalse();
+        }
+        assertThat(pin()).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT committed_sequence FROM qwen_managed_session_journal_head", Long.class))
+                .isEqualTo(41);
+        before = allRows();
+        for (int index = 0; index < 32; index++) {
+            assertThat(commit(index).replayed()).isTrue();
+        }
+        assertThat(allRows()).isEqualTo(before);
+        rejectedCommit((ObjectNode) nativeFixture.path("commits").get(32).path("request"));
+        assertThat(allRows()).isEqualTo(before);
+        assertThat(nativeFixture.path("observations").get(3).path("result").path("parts").get(0).path("thought").booleanValue())
+                .isTrue();
+        assertThat(admit("conversation-live")).isNotNull();
+    }
+
+    @Test
+    void textConversationDigestValidSemanticRefusalsRollbackAllTables() throws Exception {
+        ready();
+        commit(2);
+        commit(3);
+        var before = allRows();
+        for (String field : List.of("daemonPromptId", "parentUuid", "cwd", "version", "type")) {
+            rejectedCommit(changedConversationBody(4, "contentRef", body -> body.put(field, "foreign")));
+            assertThat(allRows()).as(field).isEqualTo(before);
+        }
+        commit(4);
+        before = allRows();
+        rejectedCommit(changedConversationBody(5, "routeRef", body -> body.put("turnId", "foreign")));
+        assertThat(allRows()).isEqualTo(before);
+        commit(5);
+        before = allRows();
+        rejectedCommit(changedConversationBody(6, "usageRef", body -> body.put("model", "foreign")));
+        assertThat(allRows()).isEqualTo(before);
+        commit(6);
+        before = allRows();
+        rejectedCommit(changedConversationBody(7, "contentRef", body -> body.put("model", "foreign")));
+        assertThat(allRows()).isEqualTo(before);
+        commit(7);
+        before = allRows();
+        rejectedCommit(changedConversationBody(8, "resultRef", body -> ((ObjectNode) body.path("systemPayload"))
+                .put("promptId", "foreign")));
+        assertThat(allRows()).isEqualTo(before);
+        for (String field : List.of("coveredSequence", "previousCheckpointId", "inputDigest")) {
+            rejectedCommit(changedConversationBody(8, "stateRef", body -> ((ObjectNode) body.path("identity"))
+                    .put(field, "foreign")));
+            assertThat(allRows()).as(field).isEqualTo(before);
+        }
+        rejectedCommit(changedConversationBody(8, "stateRef", body -> ((ObjectNode) body.path("resume").path("recording"))
+                .put("lastCompletedUuid", "invented")));
+        assertThat(allRows()).isEqualTo(before);
+        assertThat(commit(8).replayed()).isFalse();
+    }
+
+    @Test
+    void textConversationHistoryClosureCorruptionBlocksOldReplayAndLiveAdmission() throws Exception {
+        ready();
+        for (int index = 2; index < 32; index++) {
+            commit(index);
+        }
+        JsonNode part = nativeFixture.path("commits").get(27).path("request").path("resources").get(1);
+        String id = part.path("resourceId").textValue();
+        assertThat(part.path("kind").textValue()).isEqualTo("managed-message-part");
+        assertThat(jdbc.update("UPDATE qwen_managed_session_resource_ref SET journal_revision = 1 WHERE resource_id = ?",
+                id)).isEqualTo(1);
+        var before = allRows();
+        rejectedCommit((ObjectNode) nativeFixture.path("commits").get(8).path("request"));
+        assertThat(allRows()).isEqualTo(before);
+        rejected(() -> admit("conversation-corrupt"), "csi_original_activation_unavailable");
+        assertThat(allRows()).isEqualTo(before);
+    }
+
+    @Test
+    void textConversationDrainingAllowsOnlyExactReadonlyReplay() throws Exception {
+        ready();
+        for (int index = 2; index < 9; index++) {
+            commit(index);
+        }
+        retire();
+        var before = allRows();
+        assertThat(commit(8).replayed()).isTrue();
+        assertThat(allRows()).isEqualTo(before);
+        var next = JSON.treeToValue(nativeFixture.path("commits").get(9).path("request"),
+                ManagedSessionStoreModels.CommitTransactionRequest.class);
+        rejected(() -> transaction.execute(status -> journal.commit("tenant", sessionId, token, next)),
+                "runtime_admission_closed");
+        assertThat(allRows()).isEqualTo(before);
+    }
+
+    private Map<String, List<String>> allRows() {
+        Map<String, List<String>> rows = new TreeMap<>();
+        for (String table : jdbc.queryForList("SELECT table_name FROM information_schema.tables"
+                + " WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name", String.class)) {
+            rows.put(table, jdbc.queryForList("SELECT * FROM \"" + table + "\"").stream()
+                    .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
+        }
+        assertThat(rows).hasSize(53);
+        return rows;
+    }
+
+    private ObjectNode changedConversationBody(int index, String field,
+            java.util.function.Consumer<ObjectNode> change) throws Exception {
+        ObjectNode request = nativeFixture.path("commits").get(index).path("request").deepCopy();
+        var records = CsiNativeActivationProof.records(Base64.getDecoder().decode(request.path("recordBytesBase64").textValue()));
+        ObjectNode ref = (ObjectNode) records.get(field.equals("stateRef") ? 1 : 0).path("managedSession").path("payload").path(field);
+        ObjectNode resource = null;
+        for (JsonNode candidate : request.path("resources")) {
+            if (candidate.path("resourceId").equals(ref.path("resourceId"))) {
+                resource = (ObjectNode) candidate;
+            }
+        }
+        assertThat(resource).isNotNull();
+        ObjectNode body = (ObjectNode) JSON.readTree(Base64.getDecoder().decode(resource.path("bytesBase64").textValue()));
+        change.accept(body);
+        byte[] bytes = JSON.writeValueAsBytes(body);
+        String digest = CsiNativeActivationProof.sha256(bytes);
+        resource.put("bytesBase64", Base64.getEncoder().encodeToString(bytes)).put("byteLength", bytes.length).put("digest", digest);
+        ref.put("byteLength", bytes.length).put("digest", digest);
+        if (field.equals("routeRef") || field.equals("resultRef")) {
+            request.put("contentDigest", digest);
+        }
+        return resign(request, records);
     }
 
     @Test
@@ -891,11 +1029,14 @@ class WorkspaceCsiNativeActivationGate {
         return jdbc.queryForList("SELECT * FROM qwen_managed_session_journal_head");
     }
 
-    private void generate() throws Exception {
+    private void generate(boolean conversation) throws Exception {
         Path root = Path.of("../../..").toRealPath();
         Path input = directory.resolve("input.json");
         var value = JSON.createObjectNode().put("cwd", request.getScope().getCanonicalCwd())
                 .put("capabilityDigest", CsiFilesRetirementProfile.CAPABILITY_DIGEST);
+        if (conversation) {
+            value.put("conversation", true);
+        }
         value.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", "workspace").put("sessionId", sessionId);
         JSON.writeValue(input.toFile(), value);
         Path generator = directory.resolve("generator.mjs");
@@ -903,9 +1044,30 @@ class WorkspaceCsiNativeActivationGate {
             assertThat(stream).isNotNull();
             Files.copy(stream, generator);
         }
+        if (conversation) {
+            try (var stream = getClass().getResourceAsStream("/csi-native-text-turns.mjs")) {
+                assertThat(stream).isNotNull();
+                Files.copy(stream, directory.resolve("csi-native-text-turns.mjs"));
+            }
+        }
         Path log = directory.resolve("generator.log");
-        Process process = new ProcessBuilder("node", generator.toString(), input.toString(), directory.toString())
-                .directory(root.toFile()).redirectErrorStream(true).redirectOutput(log.toFile()).start();
+        var builder = new ProcessBuilder("node", generator.toString(), input.toString(), directory.toString())
+                .directory(root.toFile()).redirectErrorStream(true).redirectOutput(log.toFile());
+        if (conversation) {
+            Path settings = directory.resolve("settings");
+            Files.createDirectories(settings);
+            Files.writeString(directory.resolve("system.json"), "{\"$version\":4}");
+            Files.writeString(directory.resolve("defaults.json"), "{\"$version\":4}");
+            var env = builder.environment();
+            env.put("QWEN_HOME", settings.toString());
+            env.put("QWEN_RUNTIME_DIR", directory.resolve("runtime").toString());
+            env.put("QWEN_CODE_SYSTEM_SETTINGS_PATH", directory.resolve("system.json").toString());
+            env.put("QWEN_CODE_SYSTEM_DEFAULTS_PATH", directory.resolve("defaults.json").toString());
+            env.put("OPENAI_API_KEY", "owned-dummy-key");
+            env.put("OPENAI_MODEL", "owned-model");
+            env.remove("OPENAI_BASE_URL");
+        }
+        Process process = builder.start();
         try {
             assertThat(process.waitFor(30, TimeUnit.SECONDS)).as("native generator must finish").isTrue();
             assertThat(process.exitValue()).as(Files.readString(log)).isZero();
