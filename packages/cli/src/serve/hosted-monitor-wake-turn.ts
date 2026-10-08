@@ -68,7 +68,9 @@ export function createMonitorWakeRunTurn(params: {
    */
   readonly needsRecovery: (cause: unknown) => boolean;
   readonly writeStderr: (line: string) => void;
-}): (turn: HostedMonitorWakeTurn) => Promise<'settled' | 'busy'> {
+}): (
+  turn: HostedMonitorWakeTurn,
+) => Promise<'settled' | 'settled_incomplete' | 'busy'> {
   const { session } = params;
   return async (turn) => {
     if (params.busy() || session.blocked) return 'busy';
@@ -92,8 +94,13 @@ export function createMonitorWakeRunTurn(params: {
     if (params.busy() || session.blocked) return 'busy';
     const abort = new AbortController();
     session.active = { promptId: turn.turnId, digest: '', abort };
+    let turnResult: { systemPayload?: Record<string, unknown> } | null;
     try {
-      await params.executeHostedTurn(turn.turnId, turn.text, abort);
+      turnResult = (await params.executeHostedTurn(
+        turn.turnId,
+        turn.text,
+        abort,
+      )) as { systemPayload?: Record<string, unknown> } | null;
     } catch (cause) {
       if (params.needsRecovery(cause)) {
         // Something parked mid-turn: a later settle or takeover consumes
@@ -132,26 +139,41 @@ export function createMonitorWakeRunTurn(params: {
     } finally {
       session.active = undefined;
     }
-    return 'settled';
+    // A settled turn burns the input either way, so the pump still
+    // advances — but only a completed one proves the child result was
+    // delivered to the model: anything cancelled or errored answers
+    // 'settled_incomplete', which the consumption gate refuses.
+    return turnResult?.systemPayload?.['state'] === 'completed'
+      ? 'settled'
+      : 'settled_incomplete';
   };
 }
 
 /**
  * H4b: the wake turn marks the delivered child result consumed only when
- * the turn itself durably settled. {@link createMonitorWakeRunTurn}'s
+ * the turn itself completed. {@link createMonitorWakeRunTurn}'s
  * `'settled'` also answers the two blocked branches (a prior unfinished
  * attempt, a recovery-required error), where the Turn and its input
  * deliberately stay unsettled — those branches set `blocked`, which a
  * genuine settle never does, so the block flag is the witness that the
- * consumption must not commit.
+ * consumption must not commit. A cancelled or errored settle answers
+ * `'settled_incomplete'`: the pump advances past the burned input, the
+ * consumption gate does not fire, and the acceptance stays at
+ * `accepting` — owed evidence that a settled record, never a resend,
+ * reconciles.
  */
 export function withChildAgentConsumption(
-  runWakeTurn: (turn: HostedMonitorWakeTurn) => Promise<'settled' | 'busy'>,
+  runWakeTurn: (
+    turn: HostedMonitorWakeTurn,
+  ) => Promise<'settled' | 'settled_incomplete' | 'busy'>,
   session: {
     blocked: boolean;
     childAgents?: HostedChildAgentSession;
   },
-): (turn: HostedMonitorWakeTurn) => Promise<'settled' | 'busy'> {
+  writeStderr: (line: string) => void = () => {},
+): (
+  turn: HostedMonitorWakeTurn,
+) => Promise<'settled' | 'settled_incomplete' | 'busy'> {
   return async (turn) => {
     const outcome = await runWakeTurn(turn);
     if (
@@ -161,9 +183,20 @@ export function withChildAgentConsumption(
       turn.turnId.endsWith(':accept:notify') &&
       session.childAgents
     ) {
-      await session.childAgents.markConsumed(
-        turn.turnId.slice(0, -':accept:notify'.length),
-      );
+      try {
+        await session.childAgents.markConsumed(
+          turn.turnId.slice(0, -':accept:notify'.length),
+        );
+      } catch (cause) {
+        // The wake settled the input durably already: a rejected consume
+        // commit must never turn that completed turn into a Session
+        // block — the acceptance stays at `accepting`, owed evidence the
+        // relay's own deliver arm reconciles.
+        writeStderr(
+          'qwen serve: Hosted acceptance consumption faltered (owed evidence kept): ' +
+            String(cause),
+        );
+      }
     }
     return outcome;
   };

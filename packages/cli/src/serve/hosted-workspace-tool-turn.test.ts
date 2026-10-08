@@ -47,6 +47,7 @@ import {
   HOSTED_WORKSPACE_FILE_TOOLS,
   HOSTED_WORKSPACE_SHELL_TOOLS,
   HOSTED_INPUT_PREVIEW_TOOLS,
+  HOSTED_AGENT_TOOL,
   type HostedShellTurnOptions,
 } from './hosted-workspace-tool-turn.js';
 import { ManagedSessionConflictError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
@@ -3240,14 +3241,19 @@ it('asks before Shell in auto-edit mode and runs the edit when Shell is denied',
 it('admits exactly the declared native tools to the version 2 input preview', () => {
   // The Java reader admits a closed set. A name missing on either side degrades
   // to "Tool arguments are unavailable for this approval." with no error, so the
-  // set is pinned here and each name must still be a declared native tool.
+  // set is pinned here and each name must still be a declared native tool —
+  // the child launch declares through HOSTED_AGENT_TOOL, not the shell set.
   expect(HOSTED_INPUT_PREVIEW_TOOLS).toEqual([
     'read_file',
     'write_file',
     'edit',
     'run_shell_command',
+    'agent',
   ]);
-  const declared = HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name);
+  const declared = [
+    ...HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name),
+    HOSTED_AGENT_TOOL.name,
+  ];
   for (const name of HOSTED_INPUT_PREVIEW_TOOLS)
     expect(declared).toContain(name);
 });

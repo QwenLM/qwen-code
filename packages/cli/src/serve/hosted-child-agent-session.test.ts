@@ -437,9 +437,11 @@ describe('hosted child agent session (H4b)', () => {
         sessionKey,
       );
       await settleThroughAttach(children);
+      // The bound is pinned to the parent Session's durable inline limit:
+      // one byte over it already takes the named byte_limit refusal.
       await expect(
         children.settleCompleted('run-1', {
-          result: Buffer.alloc(256 * 1024 + 1, 65),
+          result: Buffer.alloc(64 * 1024 + 1, 65),
           receipt: Buffer.from('{}', 'utf8'),
         }),
       ).rejects.toThrow('byte_limit');

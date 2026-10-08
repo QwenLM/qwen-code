@@ -71,13 +71,14 @@ Each commit moves every state line at most one allowed step (the H0b successor r
 
 ## Quotas
 
-| Bound                           | Value                                                                                                                                                              | Refusal                                   |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------- |
-| Depth                           | 1 (contract cap 8)                                                                                                                                                 | launch tool error, `depth_limit`          |
-| Active children per owner scope | 4                                                                                                                                                                  | launch tool error, `count_limit`          |
-| Launch envelope                 | ≤ 32 KiB UTF-8 (description ≤ 512 bytes)                                                                                                                           | launch tool error, `byte_limit`           |
-| Relay attempts per child run    | bounded backoff, then `unknown`                                                                                                                                    | ledger classification, never rerun        |
-| Result copy                     | ≤ 256 KiB (larger results: refused with `byte_limit`, run `failed/quota_exceeded` — Artifact staging of larger outputs is follow-up O-slice work, not inline here) | `commitChildResult` refusal before settle |
+| Bound                           | Value                                                                                                                                                                                                                  | Refusal                                   |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| Depth                           | 1 (contract cap 8)                                                                                                                                                                                                     | launch tool error, `depth_limit`          |
+| Active children per owner scope | 4                                                                                                                                                                                                                      | launch tool error, `count_limit`          |
+| Launch envelope                 | ≤ 32 KiB UTF-8 (description ≤ 512 bytes)                                                                                                                                                                               | launch tool error, `byte_limit`           |
+| Relay attempts per child run    | bounded backoff, then `unknown`                                                                                                                                                                                        | ledger classification, never rerun        |
+| Result copy                     | ≤ 64 KiB, pinned to the parent Session's durable inline bound (larger results: refused with `byte_limit`, run `failed/quota_exceeded` — Artifact staging of larger outputs is follow-up O-slice work, not inline here) | `commitChildResult` refusal before settle |
+| Notification inline copy        | ≤ 64 KiB (escape-then-truncate with a marker; the full bytes stay on the acceptance record)                                                                                                                            | truncation, never refusal                 |
 
 ## Non-goals
 

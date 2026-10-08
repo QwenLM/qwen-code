@@ -67,7 +67,9 @@ export interface HostedMonitorWakeDeps {
    * The busy claim must be checked and taken synchronously at the top of
    * the call so a prompt route admission cannot interleave.
    */
-  runTurn(turn: HostedMonitorWakeTurn): Promise<'settled' | 'busy'>;
+  runTurn(
+    turn: HostedMonitorWakeTurn,
+  ): Promise<'settled' | 'settled_incomplete' | 'busy'>;
   /** A failure the pump itself cannot recover: the owner decides. */
   failed(cause: unknown): void;
 }

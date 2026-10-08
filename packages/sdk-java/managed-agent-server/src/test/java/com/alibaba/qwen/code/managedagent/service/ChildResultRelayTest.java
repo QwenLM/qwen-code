@@ -50,6 +50,7 @@ class ChildResultRelayTest {
     private static final class RecordingHarness implements HarnessConnector {
         final List<Map<String, Object>> operations = new CopyOnWriteArrayList<>();
         private boolean available = true;
+        volatile String refuseKind;
 
         @Override
         public boolean isAvailable() {
@@ -91,6 +92,8 @@ class ChildResultRelayTest {
         @Override
         public void runChildOperation(String tenantId, String sessionId,
                 Map<String, Object> body) {
+            if (refuseKind != null && refuseKind.equals(body.get("kind")))
+                throw new IllegalStateException("harness down");
             operations.add(Map.copyOf(body));
         }
     }
@@ -369,16 +372,89 @@ class ChildResultRelayTest {
                 CHILD, RUN);
     }
 
+    // R1-10/R1-11: the copy bound is the parent's durable inline limit —
+    // an over-bound result takes the quota refusal with its proven
+    // classification, and the child close lands before it, never after
+    // the classification.
     @Test
-    void persistentProbeFailuresBecomeUnknownNeverRerun() {
+    void anOverBoundResultSettlesQuotaWithItsClose() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null));
+        when(store.terminalResultText(TENANT, CHILD, "turn-1"))
+                .thenReturn("x".repeat(64 * 1024 + 1));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+        assertThat(harness.operations.get(0))
+                .containsEntry("stopReason", "quota_exceeded")
+                .containsEntry("reason", "byte_limit")
+                .containsEntry("started", true);
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+    }
+
+    // R1-12: a give-up owes the parent its settlement before the ledger
+    // retires — an attached child fails started, and the foreground
+    // waiter exits on that terminal record instead of polling forever.
+    @Test
+    void persistentProbeFailuresSettleFailedBeforeGivingUp() {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "binding", "owner", now + 30_000, 63, 0, null, now, now));
         when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
                 .thenReturn(null);
         relay.scan();
         assertThat(row.get().state()).isEqualTo("unknown");
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+        assertThat(harness.operations.get(0))
+                .containsEntry("stopReason", "child_failed")
+                .containsEntry("started", true);
         verify(store, atLeastOnce()).classify(any(RelayRow.class),
                 anyString(), anyString(), any(), anyLong());
+    }
+
+    // R1-12: a run whose creation never provably started takes the
+    // creation_failed pairing the validator requires, not a lie that it
+    // ran.
+    @Test
+    void anUnprovenCreationSettlesCreationFailedAtGiveUp() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
+                "creating", "owner", now + 30_000, 63, 0, null, now, now));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+        assertThat(harness.operations.get(0))
+                .containsEntry("stopReason", "creation_failed")
+                .containsEntry("started", false);
+    }
+
+    // R1-12: a refused settlement commit never blocks or widens the
+    // classification — the row still retires unknown.
+    @Test
+    void aRefusedGiveUpSettlementNeverLosesTheClassification() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 63, 0, null, now, now));
+        harness.refuseKind = "fail";
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
         assertThat(harness.operations).isEmpty();
+        verify(store, atLeastOnce()).classify(any(RelayRow.class),
+                anyString(), anyString(), any(), anyLong());
+    }
+
+    // R1-66: the relay's page of sequential harness calls must not ride
+    // the shared default scheduler — its pin is the annotation itself.
+    @Test
+    void scanRunsOnItsOwnScheduler() throws Exception {
+        var scheduled = ChildResultRelay.class.getMethod("scan")
+                .getAnnotation(
+                        org.springframework.scheduling.annotation.Scheduled.class);
+        assertThat(scheduled.scheduler()).isEqualTo("childRelayScheduler");
     }
 }

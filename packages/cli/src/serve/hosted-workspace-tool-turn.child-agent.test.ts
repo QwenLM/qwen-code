@@ -363,6 +363,53 @@ it('answers the tool arm from the committed acceptance, accepting it', async () 
   expect(consumption).toEqual([childRunId]);
 });
 
+// R1-61: an accepted result whose tool_result envelope passes the inline
+// bound still must answer — the parent folds it to the bound with the
+// truncation marker instead of entering recovery.
+it('degrades an oversized foreground answer to its truncation marker', async () => {
+  messageFitsInline.mockImplementation(
+    (_type, parts, _model) => JSON.stringify(parts).length < 65536,
+  );
+  const turn = createTurn();
+  const childRunId = 'prompt:call-1';
+  const driving = (async () => {
+    for (;;) {
+      if (children.record(childRunId) !== undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    await children.dispatchStarted(childRunId, {
+      dispatchId: 'dispatch-1',
+      runtime: { runtimeBindingId: 'binding-1', generation: '1' },
+    });
+    await children.attach(childRunId, '550e8400-e29b-41d4-a716-446655440001');
+    await children.settleCompleted(childRunId, {
+      result: Buffer.from('r'.repeat(64 * 1024), 'utf8'),
+      receipt: Buffer.from('{"outcome":"settled"}', 'utf8'),
+    });
+    await children.accept(childRunId);
+  })();
+  const responses = (
+    await Promise.all([
+      executeAgent(
+        turn,
+        call({
+          description: 'audit the diff',
+          prompt: 'review the change',
+          run_in_background: false,
+        }),
+      ),
+      driving,
+    ])
+  )[0];
+  expect(JSON.stringify(responses)).toContain(
+    'truncated: the full result is on the acceptance record',
+  );
+  expect(children.acceptance(childRunId)).toMatchObject({
+    parentExecutionCallId: childRunId,
+  });
+  expect(consumption).toEqual([childRunId]);
+});
+
 it('tells a failed child without waiting for an acceptance', async () => {
   const turn = createTurn();
   const childRunId = `prompt:call-1`;

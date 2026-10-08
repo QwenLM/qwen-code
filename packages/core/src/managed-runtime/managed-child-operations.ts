@@ -33,7 +33,11 @@ export const MANAGED_CHILD_LIMITS = Object.freeze({
   maxActivePerScope: 4,
   maxEnvelopeBytes: 32 * 1024,
   maxDescriptionBytes: 512,
-  maxResultBytes: 256 * 1024,
+  // The result copy is pinned to the parent Session's durable inline
+  // bound, never wider: a copy the resource store cannot inline takes the
+  // relay's quota refusal with its proven classification instead of a
+  // deterministic publish failure on every retry.
+  maxResultBytes: 64 * 1024,
 } as const);
 
 /** The only workspace isolation policy the first runtime slice admits. */

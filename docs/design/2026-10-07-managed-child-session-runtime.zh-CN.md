@@ -71,13 +71,14 @@ H4b 交付该流水线的 child-agent 部分:
 
 ## 配额
 
-| 界限                       | 取值                                                                                                                           | 拒绝方式                             |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------ |
-| Depth                      | 1(契约上限 8)                                                                                                                  | launch 工具错误,`depth_limit`        |
-| 每 owner scope 活动 child  | 4                                                                                                                              | launch 工具错误,`count_limit`        |
-| Launch envelope            | ≤ 32 KiB UTF-8(description ≤ 512 字节)                                                                                         | launch 工具错误,`byte_limit`         |
-| 每 child run 的 relay 尝试 | 有界退避,然后 `unknown`                                                                                                        | 台账分类,绝不重跑                    |
-| 结果复制                   | ≤ 256 KiB(更大结果以 `byte_limit` 拒绝,run 记 `failed/quota_exceeded`——更大输出的 Artifact 暂存属后续 O 切片工作,不在此处内联) | `commitChildResult` 在 settle 前拒绝 |
+| 界限                       | 取值                                                                                                                                                        | 拒绝方式                             |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| Depth                      | 1(契约上限 8)                                                                                                                                               | launch 工具错误,`depth_limit`        |
+| 每 owner scope 活动 child  | 4                                                                                                                                                           | launch 工具错误,`count_limit`        |
+| Launch envelope            | ≤ 32 KiB UTF-8(description ≤ 512 字节)                                                                                                                      | launch 工具错误,`byte_limit`         |
+| 每 child run 的 relay 尝试 | 有界退避,然后 `unknown`                                                                                                                                     | 台账分类,绝不重跑                    |
+| 结果复制                   | ≤ 64 KiB,与父 Session 持久内联上限钉齐(更大结果以 `byte_limit` 拒绝,run 记 `failed/quota_exceeded`——更大输出的 Artifact 暂存属后续 O 切片工作,不在此处内联) | `commitChildResult` 在 settle 前拒绝 |
+| 通知内联拷贝               | ≤ 64 KiB(先转义再带标记截断;全文字节留在 acceptance 记录上)                                                                                                 | 截断,绝不拒绝                        |
 
 ## 非目标
 

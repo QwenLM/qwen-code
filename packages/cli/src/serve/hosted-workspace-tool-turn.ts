@@ -364,6 +364,7 @@ export const HOSTED_INPUT_PREVIEW_TOOLS: readonly string[] = [
   'write_file',
   'edit',
   'run_shell_command',
+  'agent',
 ];
 
 /**
@@ -2714,17 +2715,41 @@ export class HostedWorkspaceToolTurn {
           const text = (
             await this.session.resources.read(acceptance.contentRef)
           ).toString('utf8');
-          const parts = convertToFunctionResponse(
+          const whole = convertToFunctionResponse(
             request.call.name,
             request.call.callId,
             [{ text }],
           );
-          if (!this.messageFitsInline('tool_result', parts, model))
+          let fitted = this.messageFitsInline('tool_result', whole, model)
+            ? whole
+            : undefined;
+          if (fitted === undefined) {
+            // The answer still must land: fold the accepted result down
+            // to the inline bound with its marker instead of parking the
+            // parent — the full bytes stay on the acceptance record. The
+            // fit predicate, not an estimate, measures the fold.
+            const marker =
+              '\n… (truncated: the full result is on the acceptance record)';
+            for (
+              let head = Math.floor(text.length / 2);
+              head > 0 && fitted === undefined;
+              head = Math.floor(head / 2)
+            ) {
+              const folded = convertToFunctionResponse(
+                request.call.name,
+                request.call.callId,
+                [{ text: text.slice(0, head) + marker }],
+              );
+              if (this.messageFitsInline('tool_result', folded, model))
+                fitted = folded;
+            }
+          }
+          if (fitted === undefined)
             throw new Error('Child agent result cannot be recorded.');
-          await this.commit('tool_result', parts, model);
+          await this.commit('tool_result', fitted, model);
           await children.markAccepted(childRunId);
           this.childConsumption(childRunId);
-          return parts;
+          return fitted;
         }
       }
       await new Promise((resolve) => setTimeout(resolve, 250));

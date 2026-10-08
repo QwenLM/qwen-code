@@ -15,6 +15,7 @@ import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.RelayRow;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 
@@ -36,7 +37,12 @@ public class ChildResultRelay {
     private static final Logger LOG = LoggerFactory
             .getLogger(ChildResultRelay.class);
     private static final int SCAN_LIMIT = 50;
-    private static final int MAX_RESULT_BYTES = 256 * 1024;
+    // The copy bound is the parent's durable inline bound, never wider: a
+    // result the resource store cannot inline gets the quota_exceeded /
+    // byte_limit refusal with its proven classification, instead of a
+    // deterministic 409 on every retry until the row gives up unknown.
+    private static final int MAX_RESULT_BYTES =
+            ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES;
     /** Bounded retries before a fact is declared unknown, never guessed. */
     private static final int MAX_ATTEMPTS = 64;
     private static final long LEASE_MS = 30_000;
@@ -77,7 +83,10 @@ public class ChildResultRelay {
         this.clock = clock;
     }
 
-    @Scheduled(fixedDelayString =
+    // Its own one-thread scheduler: the default taskScheduler also ticks
+    // every sibling recovery, and this scan's page of sequential harness
+    // calls would otherwise stall all of theirs behind one slow Session.
+    @Scheduled(scheduler = "childRelayScheduler", fixedDelayString =
             "${qwen.managed-agent.child-relay.scan-delay:2s}")
     public void scan() {
         if (broker == null) {
@@ -251,6 +260,11 @@ public class ChildResultRelay {
                     "child Turn settled without an assistant result");
         }
         if (text.getBytes(StandardCharsets.UTF_8).length > MAX_RESULT_BYTES) {
+            // The same done-arm debt as every sibling: the close lands
+            // before any classification — and before the fail commit that
+            // moves delivery to `cancelled` — so a faltered admission can
+            // never strand the child Session behind a terminal row.
+            closeFinishedChild(row, now);
             Map<String, Object> quota = new LinkedHashMap<>();
             quota.put("operationId", UUID.randomUUID().toString());
             quota.put("kind", "fail");
@@ -347,6 +361,14 @@ public class ChildResultRelay {
 
     private void defer(RelayRow row, RuntimeException error, long now) {
         if (row.attempts() + 1 >= MAX_ATTEMPTS) {
+            // A give-up still owes the parent its settlement: the
+            // foreground waiter only exits on a terminal run, and a run
+            // left mid-delivery squats one launch slot for the parent's
+            // lifetime. `creation_failed` pairs with the never-started
+            // proof (no answer and no lineage child); anything else
+            // honestly started. The classification never waits on the
+            // settle commit.
+            settleGaveUp(row);
             relayStore.classify(row, owner, "unknown", error.getMessage(), now);
             LOG.warn("child result relay gives up tenant={} parent={}"
                     + " run={} after={} failure={}", row.tenantId(),
@@ -358,6 +380,31 @@ public class ChildResultRelay {
                 1_000L * (1L << Math.min(row.attempts(), 8)));
         relayStore.defer(row, owner, now + delay, error.getMessage(),
                 now + LEASE_MS, now);
+    }
+
+    /** The give-up's parent-side settlement, best-effort: a refused commit
+     * is owed evidence that survives the row's owner, so it never blocks
+     * or widens the `unknown` classification that retires the ledger. */
+    private void settleGaveUp(RelayRow row) {
+        boolean started = row.childSessionId() != null
+                || relayStore.findLineageChild(row.tenantId(),
+                        row.parentSessionId(), row.childRunId()) != null;
+        Map<String, Object> fail = new LinkedHashMap<>();
+        fail.put("operationId", UUID.randomUUID().toString());
+        fail.put("kind", "fail");
+        fail.put("childRunId", row.childRunId());
+        fail.put("stopReason", started ? "child_failed" : "creation_failed");
+        fail.put("started", started);
+        try {
+            harness.runChildOperation(row.tenantId(), row.parentSessionId(),
+                    fail);
+        } catch (RuntimeException settlementError) {
+            LOG.warn("child result relay's give-up settlement failed"
+                            + " tenant={} parent={} run={} — the unknown"
+                            + " classification still lands; failure={}",
+                    row.tenantId(), row.parentSessionId(), row.childRunId(),
+                    settlementError.getMessage(), settlementError);
+        }
     }
 
     private JsonNode readJson(String content, String label) {

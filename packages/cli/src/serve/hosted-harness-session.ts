@@ -1780,10 +1780,21 @@ async function executeHostedTurn(
           session.childAgents &&
           session.childConsumption.size > 0
         ) {
-          const consumed = [...session.childConsumption].sort();
-          for (const childRunId of consumed) {
-            await session.childAgents.markConsumed(childRunId);
-            session.childConsumption.delete(childRunId);
+          // The settlement above is already durable: a rejected consume
+          // commit must not turn this completed turn into a reported
+          // failure. The failing id — and every id after it — stays owed
+          // for the next completed turn or recovery.
+          try {
+            const consumed = [...session.childConsumption].sort();
+            for (const childRunId of consumed) {
+              await session.childAgents.markConsumed(childRunId);
+              session.childConsumption.delete(childRunId);
+            }
+          } catch (cause) {
+            writeStderrLineSafe(
+              'qwen serve: Hosted acceptance consumption faltered (owed ids kept): ' +
+                String(cause),
+            );
           }
         }
       }),
@@ -2453,7 +2464,11 @@ export function registerHostedHarnessSessionRoutes(
             // H4b: the consumption commits follow the turn's real settle,
             // the acceptance's step before the run's, never before the
             // turn is real.
-            return withChildAgentConsumption(runWakeTurn, session);
+            return withChildAgentConsumption(
+              runWakeTurn,
+              session,
+              writeStderrLineSafe,
+            );
           })(),
           failed: (cause) => {
             session.blocked = true;
@@ -4114,10 +4129,21 @@ export function registerHostedHarnessSessionRoutes(
           session.childAgents &&
           session.childConsumption.size > 0
         ) {
-          const consumed = [...session.childConsumption].sort();
-          for (const childRunId of consumed) {
-            await session.childAgents.markConsumed(childRunId);
-            session.childConsumption.delete(childRunId);
+          // The settlement above is already durable: a rejected consume
+          // commit must not turn this completed turn into a reported
+          // failure. The failing id — and every id after it — stays owed
+          // for the next completed turn or recovery.
+          try {
+            const consumed = [...session.childConsumption].sort();
+            for (const childRunId of consumed) {
+              await session.childAgents.markConsumed(childRunId);
+              session.childConsumption.delete(childRunId);
+            }
+          } catch (cause) {
+            writeStderrLineSafe(
+              'qwen serve: Hosted acceptance consumption faltered (owed ids kept): ' +
+                String(cause),
+            );
           }
         }
       } catch (cause) {

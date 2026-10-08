@@ -56,12 +56,49 @@ describe('withChildAgentConsumption', () => {
   it('marks the result consumed after the wake turn settles durably', async () => {
     const { session, agents } = world();
     const turn = withChildAgentConsumption(
-      harness(session, async () => undefined),
+      harness(session, async () => ({
+        systemPayload: { state: 'completed' },
+      })),
       session,
     );
     await expect(turn(TURN)).resolves.toBe('settled');
     expect(agents.markConsumed).toHaveBeenCalledWith('run-1');
     expect(agents.markConsumed).toHaveBeenCalledTimes(1);
+  });
+
+  // R1-74: a cancelled or errored wake burns the input, so the pump still
+  // advances — but the acceptance stays at accepting: the consumption
+  // gate only fires for a turn that actually completed.
+  it('consumes nothing when the wake settles cancelled', async () => {
+    const { session, agents } = world();
+    const turn = withChildAgentConsumption(
+      harness(session, async () => ({
+        systemPayload: { state: 'cancelled' },
+      })),
+      session,
+    );
+    await expect(turn(TURN)).resolves.toBe('settled_incomplete');
+    expect(session.blocked).toBe(false);
+    expect(agents.markConsumed).not.toHaveBeenCalled();
+  });
+
+  // R1-4's sibling arm: a rejected consume commit must never turn the
+  // completed wake into a Session block — the acceptance stays owed and
+  // the refusal only logs.
+  it('isolates a rejected consume commit behind the settled wake', async () => {
+    const { session, agents } = world();
+    agents.markConsumed.mockRejectedValueOnce(new Error('store lost'));
+    const lines: string[] = [];
+    const turn = withChildAgentConsumption(
+      harness(session, async () => ({
+        systemPayload: { state: 'completed' },
+      })),
+      session,
+      (line) => lines.push(line),
+    );
+    await expect(turn(TURN)).resolves.toBe('settled');
+    expect(session.blocked).toBe(false);
+    expect(lines.join('\n')).toContain('consumption faltered');
   });
 
   it('consumes nothing when the helper parks the turn for recovery', async () => {
@@ -96,7 +133,9 @@ describe('withChildAgentConsumption', () => {
   it('never consumes a non-notification source or a plain answer', async () => {
     const { session, agents } = world();
     const turn = withChildAgentConsumption(
-      harness(session, async () => undefined),
+      harness(session, async () => ({
+        systemPayload: { state: 'completed' },
+      })),
       session,
     );
     await expect(turn({ ...TURN, source: 'monitor' })).resolves.toBe('settled');
