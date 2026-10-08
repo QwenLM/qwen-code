@@ -186,4 +186,28 @@ describe('resolveAgentPersona', () => {
       expect.arrayContaining([ToolNames.EDIT, ToolNames.SHELL]),
     );
   });
+
+  it('keeps every tool behind approval on the session surface', async () => {
+    // Plan §8-1: a session agent may use what the session offers; writes go
+    // through the session's ordinary approval flow rather than being removed.
+    // Only the thread tools stay out: there is no thread behind the session.
+    await seed([ALICE_WITH_DEFINITION]);
+    const { config } = makeConfig();
+
+    const result = await resolveAgentPersona(config, ALICE.id, {
+      surface: 'session',
+    });
+
+    expect(result.status).toBe('resolved');
+    if (result.status !== 'resolved') return;
+    expect(result.toolConfig.tools).toEqual(['*']);
+    expect(result.toolConfig.executionAllowedTools).toBeUndefined();
+    expect(result.toolConfig.disallowedTools ?? []).not.toContain(
+      ToolNames.EDIT,
+    );
+    expect(result.toolConfig.disallowedTools).toEqual(
+      expect.arrayContaining([...THREAD_TOOL_NAMES]),
+    );
+    expect(result.systemPrompt).toContain('@alice');
+  });
 });

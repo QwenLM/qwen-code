@@ -72,10 +72,15 @@ import {
 } from './managed-hook-record.js';
 import { parseChildRun } from './managed-child-run-record.js';
 import {
+  parseChannelDelivery,
+  parseChannelRoute,
+} from './managed-channel-record.js';
+import {
   parseChildAcceptance,
   type ChildAcceptance,
 } from './managed-child-acceptance-record.js';
 import {
+  ManagedSessionCommitRejectedError,
   managedSessionActivationStateFrom,
   managedSessionCommandKey,
   type ManagedSessionActivationState,
@@ -2093,6 +2098,17 @@ export class LocalManagedSessionAuthority {
         monitor.outputRef,
         monitor.lastObservationRef,
       ];
+    } else if (domain === 'channel_route') {
+      refs = [parseChannelRoute(record).policyRef];
+    } else if (domain === 'channel_delivery') {
+      const delivery = parseChannelDelivery(record);
+      refs = [
+        delivery.contentRef,
+        ...delivery.segments.flatMap((segment) => [
+          segment.contentRef,
+          segment.receipt?.proofRef ?? null,
+        ]),
+      ];
     }
     // Every read settles before a failure is reported, so none outlives
     // the commit or the open it belongs to.
@@ -2342,6 +2358,7 @@ export class LocalManagedSessionAuthority {
       await this.journal.appendTransaction(records);
       this.lastRecordUuid = final.uuid;
     } catch (cause) {
+      if (cause instanceof ManagedSessionCommitRejectedError) throw cause;
       // Records may already be on disk, so the sequences this transaction
       // claimed are spent whether or not the marker landed.
       this.writeFailure =
