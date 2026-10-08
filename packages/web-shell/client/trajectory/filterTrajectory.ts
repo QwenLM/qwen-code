@@ -118,7 +118,7 @@ export function buildTrajectorySearchIndex(
 ): TrajectorySearchIndex {
   let windowRemaining = WINDOW_BODY_LIMIT;
   let truncatedCount = 0;
-  const rows = trajectory.rows.map((row) => {
+  const rows = [...trajectory.rows].reverse().map((row) => {
     const fields: string[] = [];
     let truncated = false;
     let remaining = METADATA_LIMIT;
@@ -220,7 +220,6 @@ export function buildTrajectorySearchIndex(
                 'blob',
                 'inlineData',
                 'inline_data',
-                'resource',
                 'mimeType',
                 'mime_type',
               ].includes(key) ||
@@ -247,7 +246,7 @@ export function buildTrajectorySearchIndex(
       fields,
     };
   });
-  return { rows, truncatedCount };
+  return { rows: rows.reverse(), truncatedCount };
 }
 
 export function filterTrajectory(

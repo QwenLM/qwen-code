@@ -207,7 +207,7 @@ describe('filterTrajectory', () => {
     ).toEqual(['a']);
   });
 
-  it('extracts typed text and safe names, excluding binary/resource bodies', () => {
+  it('extracts typed text and resource names, excluding binary bodies', () => {
     const rawOutput = [
       { type: 'content', content: { type: 'text', text: 'visible-text' } },
       { type: 'image', data: 'secret-image', mimeType: 'image/png' },
@@ -215,7 +215,7 @@ describe('filterTrajectory', () => {
       {
         type: 'resource',
         name: 'safe-name',
-        resource: { text: 'secret-resource' },
+        resource: { text: 'inline-resource-text' },
       },
       { inlineData: { data: 'secret-inline' } },
       { mimeType: 'image/png', data: 'secret-mime' },
@@ -226,6 +226,7 @@ describe('filterTrajectory', () => {
     const rows = [tool('a', { rawOutput })];
     expect(matches(rows, { query: 'visible-text' })).toEqual(['a']);
     expect(matches(rows, { query: 'safe-name' })).toEqual(['a']);
+    expect(matches(rows, { query: 'inline-resource-text' })).toEqual(['a']);
     for (const query of ['secret', 'image/png', '115'])
       expect(matches(rows, { query })).toEqual([]);
     expect(buildTrajectorySearchIndex(trajectory(rows)).truncatedCount).toBe(0);
@@ -500,7 +501,7 @@ describe('buildTrajectorySearchIndex budgets', () => {
     expect(matches(rows, { query: 'body-tail' })).toEqual([]);
   });
 
-  it('allocates the window body budget in row order, retaining later metadata', () => {
+  it('allocates the window body budget newest-first', () => {
     const rows: TrajectoryRow[] = Array.from({ length: 256 }, (_, i) =>
       text(`m${i}`, 'x'.repeat(8192)),
     );
@@ -520,7 +521,74 @@ describe('buildTrajectorySearchIndex budgets', () => {
         type: 'all',
         status: 'all',
       }),
-    ).toEqual([]);
+    ).toEqual(['last']);
+  });
+
+  it('keeps recent output after window exhaustion and preserves source order', () => {
+    const rows = Array.from({ length: 600 }, (_, i) =>
+      tool(`older-${i}`, { rawOutput: 'x'.repeat(4096) }),
+    );
+    rows.push(tool('latest', { rawOutput: 'ECONNRESET at latest call' }));
+    const keys = rows.map((row) => row.key);
+    const filter: TrajectoryFilter = { query: '', type: 'all', status: 'all' };
+    Object.freeze(rows);
+    const index = buildTrajectorySearchIndex(trajectory(rows));
+    expect(index.rows.map((row) => row.key)).toEqual(keys);
+    expect(rows.map((row) => row.key)).toEqual(keys);
+    expect(filterTrajectory(index, { ...filter, query: 'econnreset' })).toEqual(
+      ['latest'],
+    );
+    expect(filterTrajectory(index, { ...filter, query: 'older-0' })).toEqual([
+      'older-0',
+    ]);
+    expect(index.rows[0].fields.some((field) => field.includes('xxxxx'))).toBe(
+      false,
+    );
+    expect(index.truncatedCount).toBeGreaterThan(0);
+    expect(filterTrajectory(index, filter)).toEqual(keys);
+  });
+
+  it('searches embedded resource text and URI through the content fallback', () => {
+    const rows = [
+      tool('a', {
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'resource',
+              resource: {
+                uri: 'file:///log',
+                text: 'request timeout',
+                mimeType: 'text/plain',
+              },
+            },
+          },
+        ],
+      }),
+    ];
+    expect(matches(rows, { query: 'timeout' })).toEqual(['a']);
+    expect(matches(rows, { query: 'file:///log' })).toEqual(['a']);
+    expect(matches(rows, { query: 'text/plain' })).toEqual([]);
+    expect(buildTrajectorySearchIndex(trajectory(rows)).truncatedCount).toBe(0);
+  });
+
+  it('keeps resource text bounded and excludes embedded binary payloads', () => {
+    const rows = [
+      tool('a', {
+        rawOutput: {
+          resource: {
+            uri: 'file:///log',
+            blob: 'secret-blob',
+            data: 'secret-data',
+            text: 'resource-front ' + 'x'.repeat(4096) + 'resource-tail',
+          },
+        },
+      }),
+    ];
+    expect(matches(rows, { query: 'resource-front' })).toEqual(['a']);
+    for (const query of ['resource-tail', 'secret-blob', 'secret-data'])
+      expect(matches(rows, { query })).toEqual([]);
+    expect(buildTrajectorySearchIndex(trajectory(rows)).truncatedCount).toBe(1);
   });
 
   it('limits input nodes without consuming output nodes', () => {
