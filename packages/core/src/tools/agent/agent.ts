@@ -4815,11 +4815,24 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // `<status>cancelled</status>` XML envelope; the foreground path
           // has no equivalent envelope, so the marker has to ride the
           // llmContent payload itself.
-          const partial = finalText || '(no partial result captured)';
+          // Through the same helper as the ERROR return above and the
+          // fall-through below. This is the third foreground incomplete-run
+          // return, and `truncateKeep: 'tail'` deletes the head of an oversized
+          // result first — which is exactly this marker, so concatenating
+          // unbounded left CANCELLED the lone return whose framing the
+          // scheduler strips (#13597). The empty-partial placeholder goes with
+          // it: announcing 'Partial result follows:' in front of a framework
+          // string promises agent output where there is none, which is what the
+          // fall-through already refuses to do.
           return {
             llmContent: [
               {
-                text: `Agent was cancelled by the user. Partial result follows:\n\n${partial}${wtSuffix}`,
+                text: composeIncompleteResult(
+                  'Agent was cancelled by the user.',
+                  'Partial result follows:',
+                  finalText,
+                  wtSuffix,
+                ),
               },
             ],
             returnDisplay: this.currentDisplay!,

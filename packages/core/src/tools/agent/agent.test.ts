@@ -5674,9 +5674,22 @@ describe('AgentTool', () => {
       );
     });
 
-    it.each([AgentTerminateMode.MAX_TURNS, AgentTerminateMode.ERROR])(
+    it.each([
+      // CANCELLED is the third foreground incomplete-run return. It keeps its own
+      // marker verbatim and must NOT be routed through `subagentTerminalReason`
+      // — the terminate-mode table above pins `lacks: ['terminate mode']` for it.
+      [
+        AgentTerminateMode.MAX_TURNS,
+        `Subagent did not complete (terminate mode: ${AgentTerminateMode.MAX_TURNS}).`,
+      ],
+      [
+        AgentTerminateMode.ERROR,
+        `Subagent did not complete (terminate mode: ${AgentTerminateMode.ERROR}).`,
+      ],
+      [AgentTerminateMode.CANCELLED, 'Agent was cancelled by the user.'],
+    ])(
       'foreground %s keeps its reason line inside the tool budget for a long partial',
-      async (mode) => {
+      async (mode, expectedHead) => {
         // AgentTool truncates tail-first at maxOutputChars, which deletes the
         // head — the reason line — of an oversized result. The composition
         // has to fit the budget itself and keep the partial's tail (#13597).
@@ -5687,11 +5700,7 @@ describe('AgentTool', () => {
         vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
         const text = textOf(await invoke(fg()).execute());
         expect(text.length).toBeLessThanOrEqual(agentTool.maxOutputChars);
-        expect(
-          text.startsWith(
-            `Subagent did not complete (terminate mode: ${mode}).`,
-          ),
-        ).toBe(true);
+        expect(text.startsWith(expectedHead)).toBe(true);
         expectText(text, ['[earlier output omitted]', 'TAIL-MARKER']);
       },
     );
