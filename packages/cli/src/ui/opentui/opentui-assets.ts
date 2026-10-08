@@ -33,7 +33,7 @@
 
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
-import { resolveBundleDir } from '@qwen-code/qwen-code-core';
+import { resolveBundleDir } from '@qwen-code/qwen-code-core/utils/bundlePaths.js';
 
 /** Directory name the bundle step writes the relocated assets into. */
 export const OPENTUI_ASSETS_DIRNAME = 'opentui-assets';

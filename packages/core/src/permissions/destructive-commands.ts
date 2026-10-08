@@ -114,6 +114,31 @@ export interface DestructiveCommandResult {
 const sessionCommitShas = new Set<string>();
 
 /**
+ * Bumped by every `clearSessionCommits()` so a writer that decided to
+ * register *before* a clear can tell that the registry it is about to
+ * write into is not the one it decided against.
+ *
+ * The deferred writer this exists for is the Ctrl+B promote path in
+ * `shell.ts`: it registers when the backgrounded child exits,
+ * arbitrarily later than the promote, and an approval-mode transition
+ * in between clears the registry on purpose (`Config.setApprovalMode`,
+ * whose stated contract is that exemptions must not carry across that
+ * boundary). Without a generation check the settle writes the exemption
+ * straight back.
+ *
+ * Deliberately not `Config.getApprovalModeRevision()`: that counter
+ * moves on every mode change, including the AUTO → PLAN → AUTO
+ * excursion `clearSessionCommits()` is explicitly gated off, so it
+ * would drop registrations the clear never touched.
+ */
+let sessionCommitGeneration = 0;
+
+/** The registry generation counter; see `sessionCommitGeneration`. */
+export function getSessionCommitGeneration(): number {
+  return sessionCommitGeneration;
+}
+
+/**
  * Register a commit SHA made by the agent during this session.
  * Used to allow `git commit --amend` when the target commit was made
  * by the agent in the current session.
@@ -143,9 +168,12 @@ export function isAmendOfSessionCommit(cwd: string): boolean {
 
 /**
  * Clear all session commit tracking. Called on session end or mode switch.
+ * Also bumps the generation counter, which is how a deferred writer
+ * learns that the registry it decided against no longer exists.
  */
 export function clearSessionCommits(): void {
   sessionCommitShas.clear();
+  sessionCommitGeneration++;
 }
 
 // ─── Main guard function ──────────────────────────────────────────────────

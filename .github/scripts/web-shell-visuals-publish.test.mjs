@@ -783,7 +783,6 @@ test('selectRenderShapingFiles keeps rendered .tsx/.css/.svg and drops logic/tes
   const { files, total } = selectRenderShapingFiles([
     'packages/web-shell/client/components/WelcomeScreen.tsx',
     'packages/web-shell/client/components/worktree.module.css',
-    'packages/webui/src/ui/button.tsx',
     'packages/web-shell/client/assets/icons/plan.svg',
     // Dropped: not a rendered extension...
     'packages/web-shell/client/hooks/useWorktree.ts',
@@ -804,9 +803,8 @@ test('selectRenderShapingFiles keeps rendered .tsx/.css/.svg and drops logic/tes
     'packages/web-shell/client/assets/icons/plan.svg',
     'packages/web-shell/client/components/WelcomeScreen.tsx',
     'packages/web-shell/client/components/worktree.module.css',
-    'packages/webui/src/ui/button.tsx',
   ]);
-  assert.equal(total, 4);
+  assert.equal(total, 3);
 });
 
 test('selectRenderShapingFiles caps the listed paths but reports the true total', () => {

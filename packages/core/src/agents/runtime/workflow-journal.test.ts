@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -115,6 +115,26 @@ describe('deriveAgentKey', () => {
 });
 
 describe('buildReplay', () => {
+  it.each(['started', 'failed'] as const)(
+    'invalidates old success on %s',
+    (type) => {
+      const replay = buildReplay([
+        { type: 'result', key: 'k', agentId: '1', result: 'stale' },
+        { type, key: 'k', agentId: '1' },
+      ]);
+      expect(replay.results.has('k')).toBe(false);
+    },
+  );
+
+  it('clears failure on a later successful null result', () => {
+    const replay = buildReplay([
+      { type: 'failed', key: 'k', agentId: '1' },
+      { type: 'result', key: 'k', agentId: '1', result: null },
+    ]);
+    expect(replay.failed.has('k')).toBe(false);
+    expect(replay.results.get('k')?.result).toBeNull();
+  });
+
   it('results last-write-wins; started entries accumulate', () => {
     const entries: JournalEntry[] = [
       { type: 'started', key: 'k1', agentId: '1' },
@@ -128,6 +148,43 @@ describe('buildReplay', () => {
     expect(replay.started.get('k1')).toHaveLength(2);
     expect(replay.started.get('k2')).toHaveLength(1);
     expect(replay.results.has('k2')).toBe(false); // started but never resulted
+    expect(replay.failed.size).toBe(0);
+  });
+
+  // The record that separates "this agent failed" from "the run stopped with
+  // this agent in flight". Both leave a `started` with no `result`; only the
+  // first leaves a `failed`.
+  it('uses the latest attempt to classify a key while retaining its result', () => {
+    const entries: JournalEntry[] = [
+      { type: 'started', key: 'k1', agentId: '1' },
+      { type: 'failed', key: 'k1', agentId: '1' },
+      { type: 'started', key: 'k1', agentId: '2' }, // retried on a resume
+      { type: 'result', key: 'k1', agentId: '2', result: 'recovered' },
+      { type: 'started', key: 'k2', agentId: '3' },
+      { type: 'failed', key: 'k2', agentId: '3' },
+    ];
+    const replay = buildReplay(entries);
+    // A later start supersedes the earlier failure classification. That
+    // attempt can succeed or remain interrupted, but it is no longer the
+    // failed attempt represented by the older record.
+    expect(replay.results.get('k1')?.result).toBe('recovered');
+    expect(replay.failed.has('k1')).toBe(false);
+    expect(replay.failed.has('k2')).toBe(true);
+    expect(replay.results.has('k2')).toBe(false);
+  });
+
+  // A journal written by a newer build must not break this one: unknown
+  // records are ignored, and everything else in the file still replays.
+  it('skips entry types it does not know', () => {
+    const entries = [
+      { type: 'started', key: 'k1', agentId: '1' },
+      { type: 'from-the-future', key: 'k1', agentId: '1' },
+      { type: 'result', key: 'k1', agentId: '1', result: 'ok' },
+    ] as unknown as JournalEntry[];
+    const replay = buildReplay(entries);
+    expect(replay.results.get('k1')?.result).toBe('ok');
+    expect(replay.started.get('k1')).toHaveLength(1);
+    expect(replay.failed.size).toBe(0);
   });
 });
 
@@ -137,7 +194,289 @@ describe('WorkflowJournal', () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wf-journal-'));
   });
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  async function loadedReplay(journal: WorkflowJournal) {
+    const loaded = await journal.load();
+    if (loaded.kind !== 'loaded') {
+      throw new Error(`expected a loaded journal, got ${loaded.kind}`);
+    }
+    return loaded.replay;
+  }
+
+  it('retains only prefix results and preserves all other records in order', async () => {
+    const journalPath = path.join(dir, 'journal.jsonl');
+    const records = [
+      { type: 'launched', version: 1 },
+      {
+        type: 'source',
+        version: 1,
+        sourceRef: { id: 'demo', revision: 'abc' },
+      },
+      { type: 'started', key: 'a', agentId: '1' },
+      { type: 'result', key: 'a', agentId: '1', result: null },
+      { type: 'result', key: 'b', agentId: '2', result: 'old' },
+      { type: 'future', payload: { retained: true } },
+      { type: 'failed', key: 'b', agentId: '2' },
+      { type: 'result', key: 'b', agentId: '2', result: 'older branch' },
+    ];
+    await fs.writeFile(
+      journalPath,
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+    const journal = new WorkflowJournal(journalPath, dir);
+    await journal.retainReplayPrefix(new Set(['a']));
+    const retained = (await fs.readFile(journalPath, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(retained).toEqual(
+      records.filter((r) => r.type !== 'result' || r.key === 'a'),
+    );
+    expect(
+      (await loadedReplay(new WorkflowJournal(journalPath, dir))).results.get(
+        'a',
+      )?.result,
+    ).toBeNull();
+    // The old reader also cannot find a removed suffix result.
+    expect(
+      retained.filter((r) => r.type === 'result').map((r) => r.key),
+    ).toEqual(['a']);
+    if (process.platform !== 'win32')
+      expect((await fs.stat(journalPath)).mode & 0o777).toBe(0o600);
+    expect(await fs.readdir(dir)).toEqual(['journal.jsonl']);
+  });
+
+  it('serializes append, prefix retention and subsequent append; freezes the prefix', async () => {
+    const journal = new WorkflowJournal(path.join(dir, 'journal.jsonl'), dir);
+    const first = journal.append({
+      type: 'result',
+      key: 'a',
+      agentId: '1',
+      result: 'old',
+    });
+    const keys = new Set<string>();
+    const barrier = journal.retainReplayPrefix(keys);
+    keys.add('a');
+    const last = journal.append({
+      type: 'result',
+      key: 'b',
+      agentId: '2',
+      result: 'new',
+    });
+    await journal.drain();
+    await Promise.all([first, barrier, last]);
+    expect([...(await loadedReplay(journal)).results.keys()]).toEqual(['b']);
+  });
+
+  it.each([
+    '{"type":"result","key":"a"',
+    '{"type":"launched","version":1}\ngarbage\n',
+    '{"type":"result","key":"a","agentId":"1"}\n',
+    '{"type":"started","key":1,"agentId":"1"}\n',
+    'null\n',
+  ])('refuses incomplete or invalid journal content: %s', async (content) => {
+    const journalPath = path.join(dir, 'journal.jsonl');
+    await fs.writeFile(journalPath, content);
+    const journal = new WorkflowJournal(journalPath, dir);
+    expect((await journal.load()).kind).toBe('unreadable');
+    await expect(journal.retainReplayPrefix(new Set())).rejects.toMatchObject({
+      __wfRunFailure: true,
+    });
+    expect(await fs.readFile(journalPath, 'utf8')).toBe(content);
+  });
+
+  it('accepts completely recovered glued records', async () => {
+    const journalPath = path.join(dir, 'journal.jsonl');
+    await fs.writeFile(
+      journalPath,
+      '{"type":"started","key":"a","agentId":"1"}{"type":"result","key":"a","agentId":"1","result":null}',
+    );
+    const journal = new WorkflowJournal(journalPath, dir);
+    expect((await loadedReplay(journal)).results.get('a')?.result).toBeNull();
+    await journal.retainReplayPrefix(new Set(['a']));
+    expect((await loadedReplay(journal)).results.size).toBe(1);
+  });
+
+  it('does not interpret disappearance after stat as an empty replay', async () => {
+    const journalPath = path.join(dir, 'journal.jsonl');
+    await fs.writeFile(journalPath, '');
+    vi.spyOn(fs, 'readFile').mockRejectedValueOnce(
+      Object.assign(new Error('gone'), { code: 'ENOENT' }),
+    );
+    expect((await new WorkflowJournal(journalPath, dir).load()).kind).toBe(
+      'unreadable',
+    );
+  });
+
+  it.each(['EIO', 'EXDEV'])(
+    'does not fall back after rename failure %s and poisons queued writes',
+    async (code) => {
+      const journalPath = path.join(dir, 'journal.jsonl');
+      const original =
+        '{"type":"result","key":"b","agentId":"1","result":"old"}\n';
+      await fs.writeFile(journalPath, original);
+      const journal = new WorkflowJournal(journalPath, dir);
+      vi.spyOn(fs, 'rename').mockRejectedValueOnce(
+        Object.assign(new Error('rename failed'), { code }),
+      );
+      const barrier = journal.retainReplayPrefix(new Set());
+      const append = journal.append({
+        type: 'started',
+        key: 'a',
+        agentId: '1',
+      });
+      const [failure, queued] = await Promise.allSettled([barrier, append]);
+      expect(failure).toMatchObject({
+        status: 'rejected',
+        reason: { __wfRunFailure: true },
+      });
+      expect(queued).toEqual(failure);
+      await expect(
+        journal.append({ type: 'failed', key: 'a', agentId: '1' }),
+      ).rejects.toMatchObject({ __wfRunFailure: true });
+      expect(await fs.readFile(journalPath, 'utf8')).toBe(original);
+      expect(await fs.readdir(dir)).toEqual(['journal.jsonl']);
+      vi.restoreAllMocks();
+      await new WorkflowJournal(journalPath, dir).retainReplayPrefix(new Set());
+      expect(
+        (await loadedReplay(new WorkflowJournal(journalPath, dir))).results
+          .size,
+      ).toBe(0);
+    },
+  );
+
+  it.each(['writeFile', 'sync'] as const)(
+    'preserves the original on temporary file %s failure',
+    async (method) => {
+      const journalPath = path.join(dir, 'journal.jsonl');
+      const original =
+        '{"type":"result","key":"a","agentId":"1","result":"old"}\n';
+      await fs.writeFile(journalPath, original);
+      const open = fs.open.bind(fs);
+      vi.spyOn(fs, 'open').mockImplementation(async (filePath, flags, mode) => {
+        const file = await open(filePath, flags, mode);
+        vi.spyOn(file, method).mockRejectedValueOnce(
+          new Error(`injected ${method} failure`),
+        );
+        return file;
+      });
+      const journal = new WorkflowJournal(journalPath, dir);
+      await expect(journal.retainReplayPrefix(new Set())).rejects.toMatchObject(
+        { __wfRunFailure: true },
+      );
+      expect(await fs.readFile(journalPath, 'utf8')).toBe(original);
+      expect(await fs.readdir(dir)).toEqual(['journal.jsonl']);
+    },
+  );
+
+  it('drain and queued append wait for the replacement to finish', async () => {
+    const journalPath = path.join(dir, 'journal.jsonl');
+    await fs.writeFile(
+      journalPath,
+      '{"type":"result","key":"a","agentId":"1","result":"old"}\n',
+    );
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered!: () => void;
+    const reachedRename = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const rename = fs.rename.bind(fs);
+    vi.spyOn(fs, 'rename').mockImplementationOnce(async (from, to) => {
+      entered();
+      await gate;
+      await rename(from, to);
+    });
+    const journal = new WorkflowJournal(journalPath, dir);
+    const barrier = journal.retainReplayPrefix(new Set());
+    const append = journal.append({
+      type: 'result',
+      key: 'b',
+      agentId: '2',
+      result: 'new',
+    });
+    let drained = false;
+    const drain = journal.drain().then(() => {
+      drained = true;
+    });
+    await reachedRename;
+    expect(drained).toBe(false);
+    expect((await loadedReplay(journal)).results.has('a')).toBe(true);
+    release();
+    await Promise.all([barrier, append, drain]);
+    expect([...(await loadedReplay(journal)).results.keys()]).toEqual(['b']);
+  });
+
+  it.skipIf(!process.getuid || !process.geteuid)(
+    'uses effective ownership when real and effective user IDs differ',
+    async () => {
+      const journalPath = path.join(dir, 'journal.jsonl');
+      await fs.writeFile(journalPath, '{"type":"launched","version":1}\n');
+      const stat = await fs.stat(journalPath);
+      const posixProcess = process as NodeJS.Process & {
+        getuid(): number;
+        geteuid(): number;
+      };
+      vi.spyOn(posixProcess, 'getuid').mockReturnValue(stat.uid + 1);
+      vi.spyOn(posixProcess, 'geteuid').mockReturnValue(stat.uid);
+      await expect(
+        new WorkflowJournal(journalPath, dir).retainReplayPrefix(new Set()),
+      ).resolves.toBeUndefined();
+    },
+  );
+
+  it.skipIf(!process.geteuid)(
+    'refuses replacement of a journal owned by another user',
+    async () => {
+      const journalPath = path.join(dir, 'journal.jsonl');
+      const original = '{"type":"launched","version":1}\n';
+      await fs.writeFile(journalPath, original);
+      const stat = await fs.stat(journalPath);
+      stat.uid = (process.geteuid?.() ?? 0) + 1;
+      vi.spyOn(fs, 'stat').mockResolvedValueOnce(stat);
+      const journal = new WorkflowJournal(journalPath, dir);
+      await expect(journal.retainReplayPrefix(new Set())).rejects.toMatchObject(
+        { cause: { message: 'Workflow journal is owned by another user.' } },
+      );
+      expect(await fs.readFile(journalPath, 'utf8')).toBe(original);
+      expect(await fs.readdir(dir)).toEqual(['journal.jsonl']);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked journal without changing the target',
+    async () => {
+      const target = path.join(dir, 'target.jsonl');
+      const original = '{"type":"launched","version":1}\n';
+      await fs.writeFile(target, original);
+      const journalPath = path.join(dir, 'journal.jsonl');
+      await fs.symlink(target, journalPath);
+      const journal = new WorkflowJournal(journalPath, dir);
+      expect((await journal.load()).kind).toBe('unreadable');
+      await expect(journal.retainReplayPrefix(new Set())).rejects.toMatchObject(
+        { __wfRunFailure: true },
+      );
+      expect(await fs.readFile(target, 'utf8')).toBe(original);
+      expect((await fs.lstat(journalPath)).isSymbolicLink()).toBe(true);
+    },
+  );
+
+  it('retains source validation errors without modifying the journal', async () => {
+    const journalPath = path.join(dir, 'journal.jsonl');
+    const original =
+      '{"type":"source","version":2,"sourceRef":{"id":"demo","revision":"abc"}}\n';
+    await fs.writeFile(journalPath, original);
+    const journal = new WorkflowJournal(journalPath, dir);
+    expect((await loadedReplay(journal)).sourceError).toBeDefined();
+    await expect(journal.retainReplayPrefix(new Set())).rejects.toMatchObject({
+      __wfRunFailure: true,
+    });
+    expect(await fs.readFile(journalPath, 'utf8')).toBe(original);
   });
 
   it('append then load round-trips entries', async () => {
@@ -149,9 +488,34 @@ describe('WorkflowJournal', () => {
       agentId: '1',
       result: { v: 9 },
     });
-    const replay = await j.load();
+    const replay = await loadedReplay(j);
     expect(replay.results.get('k1')?.result).toEqual({ v: 9 });
     expect(replay.started.get('k1')).toHaveLength(1);
+  });
+
+  it('round-trips a failed record through the file', async () => {
+    const j = new WorkflowJournal(path.join(dir, 'sub', 'journal.jsonl'));
+    await j.append({ type: 'started', key: 'k1', agentId: '1' });
+    await j.append({ type: 'failed', key: 'k1', agentId: '1' });
+
+    const replay = await loadedReplay(j);
+    expect(replay.failed.has('k1')).toBe(true);
+    expect(replay.results.has('k1')).toBe(false);
+    // The record is on disk in the same one-JSON-object-per-line shape as
+    // the others — this file is documented for humans to read.
+    const written = await fs.readFile(
+      path.join(dir, 'sub', 'journal.jsonl'),
+      'utf8',
+    );
+    expect(
+      written
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l)),
+    ).toEqual([
+      { type: 'started', key: 'k1', agentId: '1' },
+      { type: 'failed', key: 'k1', agentId: '1' },
+    ]);
   });
 
   it('drain waits for fire-and-forget appends', async () => {
@@ -166,16 +530,111 @@ describe('WorkflowJournal', () => {
 
     await j.drain();
 
-    const replay = await j.load();
+    const replay = await loadedReplay(j);
     expect(replay.started.get('k1')).toHaveLength(1);
     expect(replay.results.get('k1')?.result).toBe('done');
   });
 
-  it('load on a missing file returns empty maps', async () => {
+  // A resume has to tell these three apart: an empty journal belongs to a run
+  // with nothing cached yet, a missing one leaves nothing to resume, and an
+  // unreadable one must not pass for either.
+  it('reports a missing file as missing, not as an empty replay', async () => {
     const j = new WorkflowJournal(path.join(dir, 'nope.jsonl'));
-    const replay = await j.load();
+    await expect(j.load()).resolves.toEqual({ kind: 'missing' });
+  });
+
+  it('loads a file that exists and holds no entries', async () => {
+    const j = new WorkflowJournal(path.join(dir, 'sub', 'journal.jsonl'));
+    expect(await j.ensureExists()).toBe(true);
+    const replay = await loadedReplay(j);
     expect(replay.results.size).toBe(0);
     expect(replay.started.size).toBe(0);
+    expect(replay.failed.size).toBe(0);
+  });
+
+  it('reports a path that cannot be read as unreadable', async () => {
+    // A directory where the journal file should be: it is there, and it is
+    // not a journal.
+    const journalPath = path.join(dir, 'sub', 'journal.jsonl');
+    await fs.mkdir(journalPath, { recursive: true });
+    const loaded = await new WorkflowJournal(journalPath).load();
+    expect(loaded.kind).toBe('unreadable');
+    expect(loaded).toHaveProperty('reason', expect.stringMatching(/\S/));
+  });
+
+  it('records a launch as a line no replay reads', async () => {
+    const j = new WorkflowJournal(path.join(dir, 'sub', 'journal.jsonl'));
+    await j.markLaunched();
+    await j.append({ type: 'started', key: 'k1', agentId: '1' });
+
+    const written = (
+      await fs.readFile(path.join(dir, 'sub', 'journal.jsonl'), 'utf8')
+    )
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+    expect(written[0]).toEqual({ type: 'launched', version: 1 });
+    const replay = await loadedReplay(j);
+    expect(replay.started.get('k1')).toHaveLength(1);
+    expect(replay.results.size).toBe(0);
+    expect(replay.failed.size).toBe(0);
+  });
+
+  it('does not fail a launch whose record cannot be written', async () => {
+    // The parent of the run directory is a file, so the append cannot create
+    // the directory it needs.
+    const blocker = path.join(dir, 'blocker');
+    await fs.writeFile(blocker, '');
+    const j = new WorkflowJournal(path.join(blocker, 'run', 'journal.jsonl'));
+    await expect(j.markLaunched()).resolves.toBeUndefined();
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses symlinked roots and run directories',
+    async () => {
+      const outside = path.join(dir, 'outside');
+      await fs.mkdir(outside);
+      const rootLink = path.join(dir, 'root-link');
+      await fs.symlink(outside, rootLink, 'dir');
+      const rootJournal = new WorkflowJournal(
+        path.join(rootLink, 'wf_1', 'journal.jsonl'),
+        rootLink,
+      );
+      await expect(rootJournal.ensureExists()).resolves.toBe(false);
+
+      const root = path.join(dir, 'runs');
+      await fs.mkdir(root);
+      await fs.symlink(outside, path.join(root, 'wf_2'), 'dir');
+      const runJournal = new WorkflowJournal(
+        path.join(root, 'wf_2', 'journal.jsonl'),
+        root,
+      );
+      await expect(runJournal.ensureExists()).resolves.toBe(false);
+      await expect(fs.readdir(outside)).resolves.toEqual([]);
+    },
+  );
+
+  it('heals an existing journal mode to 0600', async () => {
+    if (process.platform === 'win32') return;
+    const journalPath = path.join(dir, 'wf_1', 'journal.jsonl');
+    await fs.mkdir(path.dirname(journalPath));
+    await fs.writeFile(journalPath, '{}\n', { mode: 0o644 });
+
+    await expect(
+      new WorkflowJournal(journalPath, dir).ensureExists(),
+    ).resolves.toBe(true);
+
+    expect((await fs.stat(journalPath)).mode & 0o777).toBe(0o600);
+  });
+
+  it('removes the empty run directory with a never-registered journal', async () => {
+    const journalPath = path.join(dir, 'wf_1', 'journal.jsonl');
+    const journal = new WorkflowJournal(journalPath, dir);
+    await expect(journal.ensureExists()).resolves.toBe(true);
+
+    await journal.remove();
+
+    await expect(fs.access(path.dirname(journalPath))).rejects.toThrow();
   });
 });
 
@@ -192,5 +651,75 @@ describe('deriveArgsSeed', () => {
     const k1 = deriveAgentKey(deriveArgsSeed({ topic: 'a' }), 'do x', {});
     const k2 = deriveAgentKey(deriveArgsSeed({ topic: 'b' }), 'do x', {});
     expect(k1).not.toBe(k2); // same prompt+opts, different args → different key
+  });
+});
+
+// A resume that changed how hard an agent thinks, or what it may call, has to
+// run that agent live. The sandbox normalizes spellings before the key is
+// derived; that half is pinned end to end in workflow-orchestrator.test.ts.
+describe('resume key for effort and disallowedTools', () => {
+  it('projects both into the canonical opts', () => {
+    expect(
+      canonicalizeAgentOpts({
+        label: 'ignored',
+        effort: 'high',
+        disallowedTools: ['run_shell_command', 'write_file'],
+      }),
+    ).toBe(
+      JSON.stringify({
+        disallowedTools: ['run_shell_command', 'write_file'],
+        effort: 'high',
+      }),
+    );
+  });
+
+  it('gives a different effort a different key', () => {
+    const low = deriveAgentKey('', 'review it', { effort: 'low' });
+    expect(low).not.toBe(deriveAgentKey('', 'review it', { effort: 'high' }));
+    expect(low).not.toBe(deriveAgentKey('', 'review it', {}));
+    expect(low).toBe(deriveAgentKey('', 'review it', { effort: 'low' }));
+  });
+
+  it('gives a different deny set a different key', () => {
+    expect(
+      deriveAgentKey('', 'scan', { disallowedTools: ['write_file'] }),
+    ).not.toBe(
+      deriveAgentKey('', 'scan', { disallowedTools: ['edit', 'write_file'] }),
+    );
+  });
+});
+
+// An allowlist changes what the agent may call. The sandbox folds built-in
+// spellings, order and duplicates before the key is derived (pinned in
+// workflow-sandbox.test.ts); what it leaves alone reaches the key as written.
+describe('resume key for tools', () => {
+  it('projects the allowlist into the canonical opts', () => {
+    expect(
+      canonicalizeAgentOpts({
+        label: 'ignored',
+        tools: ['read_file', 'run_shell_command'],
+      }),
+    ).toBe(JSON.stringify({ tools: ['read_file', 'run_shell_command'] }));
+  });
+
+  it('gives a different allowlist a different key', () => {
+    const narrow = deriveAgentKey('', 'scan', { tools: ['read_file'] });
+    expect(narrow).not.toBe(
+      deriveAgentKey('', 'scan', {
+        tools: ['read_file', 'run_shell_command'],
+      }),
+    );
+    expect(narrow).not.toBe(deriveAgentKey('', 'scan', {}));
+    expect(narrow).toBe(deriveAgentKey('', 'scan', { tools: ['read_file'] }));
+  });
+
+  // Two names that reach one MCP tool are not folded, so they are two keys.
+  // The skill says so; this keeps the sentence honest.
+  it('keys two spellings of one MCP tool apart', () => {
+    expect(
+      deriveAgentKey('', 'scan', { tools: ['mcp__warehouse__query'] }),
+    ).not.toBe(
+      deriveAgentKey('', 'scan', { tools: ['query (warehouse MCP Server)'] }),
+    );
   });
 });

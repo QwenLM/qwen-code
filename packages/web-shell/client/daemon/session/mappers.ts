@@ -5,6 +5,10 @@
  */
 
 import type { Dispatch, SetStateAction } from 'react';
+import {
+  getSessionUpdatePayload,
+  parseDaemonBackgroundTurn,
+} from '@qwen-code/sdk/daemon';
 import type {
   DaemonAvailableCommand,
   DaemonEvent,
@@ -188,6 +192,7 @@ export function mapReasoningControls(
       enabled: currentValue !== 'none',
       effort: 'default',
       efforts: [],
+      ...(reasoningMeta?.['canEnable'] === false ? { canEnable: false } : {}),
       ...(thinkingMandatory ? { canDisable: false } : {}),
     };
   }
@@ -204,6 +209,10 @@ export function mapReasoningControls(
     effort,
     efforts: effortValues,
     ...(defaultEffort ? { defaultEffort } : {}),
+    ...(reasoningMeta?.['canEnable'] === false ? { canEnable: false } : {}),
+    ...(reasoningMeta?.['enableValue'] === 'default'
+      ? { enableValue: 'default' as const }
+      : {}),
     ...(thinkingMandatory ? { canDisable: false } : {}),
   };
 }
@@ -317,6 +326,22 @@ export function updateConnectionFromDaemonEvent(
 ): void {
   if (event.type === 'session_update') {
     const update = getRecord(getRecord(event.data)?.['update']);
+    const meta = getRecord(update?.['_meta']);
+    const backgroundTurn = parseDaemonBackgroundTurn(meta?.['backgroundTurn']);
+    if (
+      backgroundTurn &&
+      meta?.['source'] === 'background_notification_turn_started'
+    ) {
+      setConnection((current) =>
+        current.finishedBackgroundTurnId === backgroundTurn.turnId
+          ? current
+          : {
+              ...current,
+              backgroundTurn,
+              backgroundTurnObservedAt: performance.now(),
+            },
+      );
+    }
     const tokenUsage = getUsageTokenUsage(update);
     if (tokenUsage) {
       setConnection((current) => ({
@@ -349,6 +374,22 @@ export function updateConnectionFromDaemonEvent(
   }
 
   switch (event.type) {
+    case 'turn_complete':
+    case 'turn_error': {
+      const promptId =
+        getString(getRecord(event.data), 'promptId') ?? event.promptId;
+      setConnection((current) =>
+        current.backgroundTurn?.turnId === promptId
+          ? {
+              ...current,
+              backgroundTurn: undefined,
+              finishedBackgroundTurnId: promptId,
+              backgroundTurnObservedAt: performance.now(),
+            }
+          : current,
+      );
+      break;
+    }
     case 'git_branch_changed': {
       const data = getRecord(event.data);
       const workspaceCwd = getString(data, 'workspaceCwd');
@@ -412,11 +453,28 @@ export function updateConnectionFromDaemonEvent(
       }
       break;
     }
+    case 'session_snapshot': {
+      const data = getRecord(event.data);
+      const mode = getString(data, 'currentApprovalMode');
+      if (mode)
+        setConnection((current) => ({
+          ...current,
+          currentMode: mode,
+          planExecutionMode:
+            mode === 'plan' ? getString(data, 'planExecutionMode') : undefined,
+        }));
+      break;
+    }
     case 'approval_mode_changed': {
       const data = getRecord(event.data);
       const mode = getString(data, 'next') ?? getString(data, 'mode');
       if (mode) {
-        setConnection((current) => ({ ...current, currentMode: mode }));
+        setConnection((current) => ({
+          ...current,
+          currentMode: mode,
+          planExecutionMode:
+            mode === 'plan' ? getString(data, 'planExecutionMode') : undefined,
+        }));
       }
       break;
     }
@@ -645,6 +703,10 @@ function getGoalState(
   const recordId = evidenceCursor?.['recordId'];
   const turnCount = getNumber(source, 'turnCount');
   const activeTimeMs = getNumber(source, 'activeTimeMs');
+  const tokensUsed = getNumber(source, 'tokensUsed');
+  const tokenBudget = getNumber(source, 'tokenBudget');
+  const turnBudget = getNumber(source, 'turnBudget');
+  const activeTimeBudgetMs = getNumber(source, 'activeTimeBudgetMs');
   const createdAt = getNumber(source, 'createdAt');
   const updatedAt = getNumber(source, 'updatedAt');
   if (
@@ -669,7 +731,9 @@ function getGoalState(
   const limitKind =
     limitKindRaw === 'evidence_catalog' ||
     limitKindRaw === 'checkpoint_request' ||
-    limitKindRaw === 'token_budget'
+    limitKindRaw === 'token_budget' ||
+    limitKindRaw === 'turn_budget' ||
+    limitKindRaw === 'time_budget'
       ? limitKindRaw
       : undefined;
   return {
@@ -683,6 +747,10 @@ function getGoalState(
       evidenceCursor: { recordId },
       turnCount,
       activeTimeMs,
+      ...(tokensUsed !== undefined ? { tokensUsed } : {}),
+      ...(tokenBudget !== undefined ? { tokenBudget } : {}),
+      ...(turnBudget !== undefined ? { turnBudget } : {}),
+      ...(activeTimeBudgetMs !== undefined ? { activeTimeBudgetMs } : {}),
       createdAt,
       updatedAt,
       ...(lastReason ? { lastReason } : {}),
@@ -703,6 +771,14 @@ export function getCurrentMode(
 ): string | undefined {
   const modes = getRecord(status?.state?.modes);
   return getString(modes, 'currentModeId') ?? getString(modes, 'currentMode');
+}
+
+export function getPlanExecutionMode(
+  status: DaemonSessionContextStatus | undefined,
+): string | undefined {
+  if (getCurrentMode(status) !== 'plan') return undefined;
+  const modes = getRecord(status?.state?.modes);
+  return getString(getRecord(modes?.['_meta']), 'planExecutionMode');
 }
 
 export function getCurrentModel(
@@ -747,7 +823,7 @@ export function getReplayTokenUsage(
     try {
       const event = events[i];
       if (event.type !== 'session_update') continue;
-      const update = getRecord(getRecord(event.data)?.['update']);
+      const update = getSessionUpdatePayload(event.data);
       const tokenUsage = getUsageTokenUsage(update);
       if (tokenUsage) return tokenUsage;
     } catch {

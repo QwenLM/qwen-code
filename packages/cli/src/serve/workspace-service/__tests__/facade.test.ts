@@ -5,14 +5,16 @@
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { promises as fs } from 'node:fs';
+import { promises as fs, writeFileSync } from 'node:fs';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
+import { atomicWriteFileSync as realAtomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import * as path from 'node:path';
 import * as os from 'node:os';
 
 // Mock @qwen-code/qwen-code-core to avoid the undici dependency chain.
 // This is required so @qwen-code/acp-bridge/status can load (it imports
 // SkillError from core).
-vi.mock('@qwen-code/qwen-code-core', () => {
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   class SkillError extends Error {
     code: string;
     constructor(message: string, code: string) {
@@ -64,6 +66,10 @@ vi.mock('@qwen-code/qwen-code-core', () => {
       STREAM_JSON: 'stream-json',
     },
     REASONING_EFFORT_TIERS: ['low', 'medium', 'high', 'xhigh', 'max'],
+    getGptReasoningCapabilities: vi.fn(() => undefined),
+    clampReasoningEffort: (
+      await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+    ).clampReasoningEffort,
     DEFAULT_STOP_HOOK_BLOCK_CAP: 5,
     DEFAULT_MAX_SUBAGENT_DEPTH: 5,
     DEFAULT_MAX_TOOL_CALLS_PER_TURN: 100,
@@ -73,6 +79,12 @@ vi.mock('@qwen-code/qwen-code-core', () => {
     DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD: 100_000,
     DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: 1024 * 1024,
     SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT: 100 * 1024 * 1024,
+    GOAL_MAX_TURNS_CAP: 10_000,
+    GOAL_MAX_ACTIVE_MINUTES_CAP: 10_080,
+    DEFAULT_WEB_SEARCH_TIMEOUT_MS: 120_000,
+    MAX_WEB_SEARCH_TIMEOUT_MS: 600_000,
+    DEFAULT_WEB_SEARCH_MAX_PER_SESSION: 200,
+    MAX_WEB_SEARCH_MAX_PER_SESSION: 10_000,
     DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES: ['.agentignore', '.aiignore'],
     QWEN_DIR: '.qwen',
     Storage,
@@ -109,14 +121,20 @@ import {
   SETTINGS_DIRECTORY_NAME,
 } from '../../../config/settings.js';
 import {
+  onTrustedFoldersChanged,
   resetTrustedFoldersForTesting,
   TRUSTED_FOLDERS_FILENAME,
   TrustLevel,
 } from '../../../config/trustedFolders.js';
+import {
+  evaluateDaemonWorkspaceTrust,
+  readDaemonTrustPolicySnapshot,
+} from '../../../config/daemon-trust-policy.js';
 import { WorkspaceVoiceError } from '../../../services/voice-service.js';
 import {
   WorkspacePermissionRulesSessionRequiredError,
   WorkspaceSettingsPartialPersistError,
+  WorkspaceTrustGrantIneffectiveError,
 } from '../types.js';
 import type {
   DaemonWorkspaceServiceDeps,
@@ -228,8 +246,10 @@ async function withIsolatedWorkspace<T>(
   resetHomeEnvBootstrapForTesting();
   resetTrustedFoldersForTesting();
   try {
+    vi.mocked(atomicWriteFileSync).mockImplementation(realAtomicWriteFileSync);
     return await fn({ home, workspace });
   } finally {
+    vi.mocked(atomicWriteFileSync).mockReset();
     await fs.rm(scratch, { recursive: true, force: true });
     if (originalQwenHome === undefined) {
       delete process.env['QWEN_HOME'];
@@ -608,6 +628,258 @@ describe('createDaemonWorkspaceService', () => {
           effective: { state: 'trusted', source: 'file' },
           explicitTrustLevel: TrustLevel.TRUST_FOLDER,
         });
+      });
+    });
+
+    it.each([false, true])(
+      'grantWorkspaceTrust persists trust (existing rule: %s)',
+      async (hasRule) => {
+        await withIsolatedWorkspace(async ({ home, workspace }) => {
+          await writeJson(path.join(home, 'settings.json'), {
+            security: { folderTrust: { enabled: true } },
+          });
+          if (hasRule) {
+            await writeJson(path.join(home, TRUSTED_FOLDERS_FILENAME), {
+              [workspace]: TrustLevel.DO_NOT_TRUST,
+            });
+          }
+          const svc = createDaemonWorkspaceService(
+            makeDeps({ boundWorkspace: workspace }),
+          );
+
+          await expect(
+            svc.getWorkspaceTrustStatus(makeCtx()),
+          ).resolves.toMatchObject({
+            effective: { state: hasRule ? 'untrusted' : 'unknown' },
+          });
+
+          await expect(
+            svc.grantWorkspaceTrust(makeCtx()),
+          ).resolves.toMatchObject({
+            v: 1,
+            workspaceCwd: workspace,
+            folderTrustEnabled: true,
+            effective: { state: 'trusted', source: 'file' },
+            explicitTrustLevel: TrustLevel.TRUST_FOLDER,
+          });
+          expect(
+            JSON.parse(
+              await fs.readFile(
+                path.join(home, TRUSTED_FOLDERS_FILENAME),
+                'utf8',
+              ),
+            ),
+          ).toEqual({ [workspace]: TrustLevel.TRUST_FOLDER });
+        });
+      },
+    );
+
+    it('grantWorkspaceTrust refuses when the written rule changes on disk', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          security: { folderTrust: { enabled: true } },
+        });
+        const trustFile = path.join(home, TRUSTED_FOLDERS_FILENAME);
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+        const unsubscribe = onTrustedFoldersChanged(() => {
+          writeFileSync(
+            trustFile,
+            JSON.stringify({ [workspace]: TrustLevel.DO_NOT_TRUST }),
+          );
+        });
+        try {
+          await expect(svc.grantWorkspaceTrust(makeCtx())).rejects.toThrow(
+            WorkspaceTrustGrantIneffectiveError,
+          );
+          expect(JSON.parse(await fs.readFile(trustFile, 'utf8'))).toEqual({
+            [workspace]: TrustLevel.DO_NOT_TRUST,
+          });
+        } finally {
+          unsubscribe();
+        }
+      });
+    });
+
+    it('grantWorkspaceTrust refuses when an alias-spelled DO_NOT_TRUST still wins', async () => {
+      // The grant writes its key but the evaluator resolves the same
+      // directory through the symlink alias and the equal-depth untrusted
+      // rule wins — answering success here would spin the panel to its
+      // deadline on a workspace that stays untrusted.
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          security: { folderTrust: { enabled: true } },
+        });
+        const alias = path.join(home, 'ws-alias');
+        await fs.symlink(workspace, alias);
+        await writeJson(path.join(home, TRUSTED_FOLDERS_FILENAME), {
+          [alias]: TrustLevel.DO_NOT_TRUST,
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+
+        await expect(svc.grantWorkspaceTrust(makeCtx())).rejects.toThrow(
+          WorkspaceTrustGrantIneffectiveError,
+        );
+        // The written key is durably recorded; the refusal is about the
+        // grant not taking effect, and the effective view stays untrusted.
+        await expect(
+          svc.getWorkspaceTrustStatus(makeCtx()),
+        ).resolves.toMatchObject({
+          effective: { state: 'untrusted' },
+        });
+      });
+    });
+
+    it('grantWorkspaceTrust refuses a reported deny when only workspace settings enable trust', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(workspace, '.qwen', 'settings.json'), {
+          security: { folderTrust: { enabled: true } },
+        });
+        const alias = path.join(home, 'ws-alias');
+        await fs.symlink(workspace, alias);
+        await writeJson(path.join(home, TRUSTED_FOLDERS_FILENAME), {
+          [alias]: TrustLevel.DO_NOT_TRUST,
+        });
+        const snapshot = await readDaemonTrustPolicySnapshot();
+        expect(snapshot.folderTrustEnabled).toBe(false);
+        const bootDecision = evaluateDaemonWorkspaceTrust(snapshot, workspace);
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            boundWorkspace: workspace,
+            isWorkspaceTrusted: () => bootDecision.targetTrusted,
+          }),
+        );
+
+        await expect(svc.grantWorkspaceTrust(makeCtx())).rejects.toThrow(
+          WorkspaceTrustGrantIneffectiveError,
+        );
+        await expect(
+          svc.getWorkspaceTrustStatus(makeCtx()),
+        ).resolves.toMatchObject({
+          effective: { state: 'untrusted', source: 'file' },
+        });
+      });
+    });
+
+    it('grantWorkspaceTrust accepts and preserves JSONC written after the cached load', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          security: { folderTrust: { enabled: true } },
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+        await svc.getWorkspaceTrustStatus(makeCtx());
+        const trustFile = path.join(home, TRUSTED_FOLDERS_FILENAME);
+        await fs.writeFile(
+          trustFile,
+          '{\n  // operator rule\n  "/other": "TRUST_FOLDER",\n}\n',
+        );
+
+        await expect(svc.grantWorkspaceTrust(makeCtx())).resolves.toMatchObject(
+          {
+            effective: { state: 'trusted', source: 'file' },
+          },
+        );
+        expect(await fs.readFile(trustFile, 'utf8')).toContain(
+          '// operator rule',
+        );
+        resetTrustedFoldersForTesting();
+        await expect(
+          svc.getWorkspaceTrustStatus(makeCtx()),
+        ).resolves.toMatchObject({
+          effective: { state: 'trusted', source: 'file' },
+        });
+      });
+    });
+
+    it.each([false, true])(
+      'grantWorkspaceTrust preserves a disk TRUST_PARENT rule (alias blocker: %s)',
+      async (hasBlocker) => {
+        await withIsolatedWorkspace(async ({ home, workspace }) => {
+          await writeJson(path.join(home, 'settings.json'), {
+            security: { folderTrust: { enabled: true } },
+          });
+          const svc = createDaemonWorkspaceService(
+            makeDeps({ boundWorkspace: workspace }),
+          );
+          await svc.getWorkspaceTrustStatus(makeCtx());
+          const alias = path.join(home, 'ws-alias');
+          await fs.symlink(workspace, alias);
+          const trustFile = path.join(home, TRUSTED_FOLDERS_FILENAME);
+          await writeJson(trustFile, {
+            [workspace]: TrustLevel.TRUST_PARENT,
+            ...(hasBlocker ? { [alias]: TrustLevel.DO_NOT_TRUST } : {}),
+          });
+
+          if (hasBlocker) {
+            await expect(svc.grantWorkspaceTrust(makeCtx())).rejects.toThrow(
+              WorkspaceTrustGrantIneffectiveError,
+            );
+          } else {
+            await expect(
+              svc.grantWorkspaceTrust(makeCtx()),
+            ).resolves.toMatchObject({
+              effective: { state: 'trusted' },
+            });
+          }
+          expect(
+            JSON.parse(await fs.readFile(trustFile, 'utf8'))[workspace],
+          ).toBe(TrustLevel.TRUST_PARENT);
+          const snapshot = await readDaemonTrustPolicySnapshot();
+          expect(
+            evaluateDaemonWorkspaceTrust(
+              snapshot,
+              path.join(path.dirname(workspace), 'sibling'),
+            ),
+          ).toMatchObject({ state: 'trusted', targetTrusted: true });
+        });
+      },
+    );
+
+    it('grantWorkspaceTrust replaces a current disk deny despite cached parent trust', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          security: { folderTrust: { enabled: true } },
+        });
+        const trustFile = path.join(home, TRUSTED_FOLDERS_FILENAME);
+        await writeJson(trustFile, { [workspace]: TrustLevel.TRUST_PARENT });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+        await svc.getWorkspaceTrustStatus(makeCtx());
+        await writeJson(trustFile, { [workspace]: TrustLevel.DO_NOT_TRUST });
+
+        await expect(svc.grantWorkspaceTrust(makeCtx())).resolves.toMatchObject(
+          {
+            effective: { state: 'trusted', source: 'file' },
+          },
+        );
+        expect(
+          JSON.parse(await fs.readFile(trustFile, 'utf8'))[workspace],
+        ).toBe(TrustLevel.TRUST_FOLDER);
+      });
+    });
+
+    it('grantWorkspaceTrust does not invent a precedence cause for a policy load error', async () => {
+      await withIsolatedWorkspace(async ({ home, workspace }) => {
+        await writeJson(path.join(home, 'settings.json'), {
+          security: { folderTrust: { enabled: true } },
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({ boundWorkspace: workspace }),
+        );
+        await svc.getWorkspaceTrustStatus(makeCtx());
+        await writeJson(path.join(home, TRUSTED_FOLDERS_FILENAME), {
+          [`/${'x'.repeat(1024 * 1024)}`]: TrustLevel.TRUST_FOLDER,
+        });
+
+        await expect(svc.grantWorkspaceTrust(makeCtx())).rejects.toThrow(
+          'Check the workspace trust status and trust policy before retrying.',
+        );
       });
     });
 
@@ -1089,6 +1361,82 @@ describe('createDaemonWorkspaceService', () => {
       expect(query).toHaveBeenCalledTimes(2);
     });
 
+    it('keeps legacy Skill delete authoritative to the live runtime inventory', async () => {
+      const queryWorkspaceStatus = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Extension Skill',
+            level: 'extension',
+            modelInvocable: true,
+          },
+        ],
+      });
+      const workspaceSkillsStatusProvider = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'User Skill',
+            level: 'user',
+            modelInvocable: true,
+            installedPath: '/tmp/.qwen/skills/review/SKILL.md',
+          },
+        ],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          workspaceSkillsStatusProvider,
+          boundWorkspace: '/ws',
+        }),
+      );
+
+      await expect(
+        svc.deleteWorkspaceSkill(makeCtx(), 'review', 'global'),
+      ).rejects.toMatchObject({ code: 'skill_not_managed' });
+      expect(workspaceSkillsStatusProvider).not.toHaveBeenCalled();
+    });
+
+    it('fails closed when config Skill enumeration is unavailable', async () => {
+      const invalidate = vi.fn();
+      const workspaceSkillsStatusProvider = Object.assign(
+        vi.fn().mockResolvedValue({
+          v: 1,
+          workspaceCwd: '/ws',
+          initialized: false,
+          skills: [],
+          errors: [{ kind: 'skills', status: 'error', error: 'boom' }],
+        }),
+        { invalidate },
+      );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          workspaceSkillsStatusProvider,
+          boundWorkspace: '/ws',
+        }),
+      );
+
+      await expect(
+        svc.deleteWorkspaceSkill(makeCtx(), 'review', 'global', {
+          refreshRuntime: false,
+        }),
+      ).rejects.toMatchObject({
+        code: 'skills_config_unavailable',
+        statusCode: 503,
+      });
+      expect(invalidate).toHaveBeenCalledWith('/ws');
+    });
+
     it('invalidateWorkspaceSkillsStatus drops the cached child skills answer', async () => {
       const liveStatus = {
         v: 1,
@@ -1136,6 +1484,42 @@ describe('createDaemonWorkspaceService', () => {
       const result = await svc.getWorkspaceSkillsStatus(makeCtx());
       expect(result.skills).toEqual([]);
       expect(workspaceSkillsStatusProvider).toHaveBeenCalledWith('/ws');
+    });
+
+    it('reuses the daemon-local config Skills inventory', async () => {
+      const invalidate = vi.fn();
+      const workspaceSkillsStatusProvider = Object.assign(
+        vi.fn().mockResolvedValue({
+          v: 1,
+          workspaceCwd: '/ws',
+          initialized: true,
+          skills: [],
+        }),
+        { invalidate },
+      );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ workspaceSkillsStatusProvider, boundWorkspace: '/ws' }),
+      );
+
+      await svc.getWorkspaceSkillsConfigStatus(makeCtx());
+
+      expect(invalidate).not.toHaveBeenCalled();
+      expect(workspaceSkillsStatusProvider).toHaveBeenCalledWith('/ws');
+    });
+
+    it('does not use config fallback for runtime Skills', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation((_method: string, idle: () => unknown) => idle());
+      const workspaceSkillsStatusProvider = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, workspaceSkillsStatusProvider }),
+      );
+
+      await expect(
+        svc.getWorkspaceSkillsRuntimeStatus(makeCtx()),
+      ).resolves.toMatchObject({ initialized: false, skills: [] });
+      expect(workspaceSkillsStatusProvider).not.toHaveBeenCalled();
     });
 
     it('getWorkspaceSkillsStatus falls back to the daemon-local provider when the child never answered', async () => {
@@ -1693,6 +2077,60 @@ describe('createDaemonWorkspaceService', () => {
           sessionsFailed: 0,
         }),
       );
+    });
+
+    it('leaves runtime refresh to the coordinator when requested', async () => {
+      const invalidate = vi.fn();
+      const invokeWorkspaceCommand = vi.fn();
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          workspaceSkillsStatusProvider: Object.assign(vi.fn(), { invalidate }),
+          persistDisabledSkills: vi.fn().mockResolvedValue({
+            changed: true,
+            disabled: ['review'],
+          }),
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillEnabled(makeCtx(), 'review', false, {
+          refreshRuntime: false,
+        }),
+      ).resolves.toMatchObject({ activation: 'reconciling' });
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+      expect(invalidate).toHaveBeenCalledWith('/workspace');
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            mutation: expect.objectContaining({ activation: 'reconciling' }),
+          }),
+        }),
+      );
+    });
+
+    it('reports a live no-op as applied without refreshing', async () => {
+      const invokeWorkspaceCommand = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          persistDisabledSkills: vi.fn().mockResolvedValue({
+            changed: false,
+            disabled: ['review'],
+          }),
+          invokeWorkspaceCommand,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillEnabled(makeCtx(), 'review', false, {
+          refreshRuntime: false,
+        }),
+      ).resolves.toMatchObject({ activation: 'applied' });
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
     });
 
     it('shares mutation ids within a request and renews them across requests', async () => {

@@ -1,17 +1,40 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
+import { LightbulbIcon, ThumbsDownIcon, ThumbsUpIcon } from 'lucide-react';
 import { Markdown } from './Markdown';
+import { TurnSources } from '../sources/TurnSources';
 import {
   useWebShellCustomization,
+  type WebShellAssistantFeedbackRating,
   type WebShellAssistantTurnFooterRenderInfo,
+  type WebShellSource,
 } from '../../customization';
 import { useI18n } from '../../i18n';
+import {
+  useTranscriptDocumentExpanded,
+  useTranscriptRenderMode,
+} from '../../transcriptRenderMode';
 import { formatTimestamp } from '../MessageTimestamp';
 import {
   warnClipboardWriteFailure,
   writeClipboardText,
 } from '../../utils/clipboard';
 import { useCopiedFlash } from '../../hooks/useCopiedFlash';
-import type { DaemonSessionGenerationEvent } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionGenerationEvent,
+  QwenAgentMessageMeta,
+} from '@qwen-code/sdk/daemon';
+import type { DaemonMessageAuthor } from '../../adapters/messageTypes';
+import { AuthorAvatar } from './AuthorAvatar';
+import { SquadTag } from './squad-tag';
+import { AgentMessageDetails, isBlankAgentText } from './agent-message-details';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import flashStyles from '../MessageLocateFlash.module.css';
@@ -19,30 +42,61 @@ import styles from './AssistantMessage.module.css';
 
 interface AssistantMessageProps {
   content: string;
+  author?: DaemonMessageAuthor;
+  /** A workspace agent's reply: its run status, error, steps and tokens. */
+  agentMessage?: QwenAgentMessageMeta;
   isStreaming?: boolean;
   timestamp?: number;
   onBranchSession?: () => void | Promise<void>;
   showFooterActions?: boolean;
   showBranchAction?: boolean;
+  /** Satisfied / not-satisfied marks are only offered when this is set. */
+  showAssistantFeedback?: boolean;
+  assistantFeedbackRating?: WebShellAssistantFeedbackRating;
+  onAssistantFeedbackRate?: (
+    rating: WebShellAssistantFeedbackRating | null,
+  ) => void;
   isLocateFlashing?: boolean;
   customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+  turnSources?: readonly WebShellSource[];
+  onSourceOpen?: (source: WebShellSource) => void;
 }
 
 export const AssistantMessage = memo(function AssistantMessage({
   content,
+  author,
+  agentMessage,
   isStreaming,
   timestamp,
   onBranchSession,
   showFooterActions = false,
   showBranchAction = false,
+  showAssistantFeedback = false,
+  assistantFeedbackRating,
+  onAssistantFeedbackRate,
   isLocateFlashing = false,
   customFooterInfo,
+  turnSources,
+  onSourceOpen,
 }: AssistantMessageProps) {
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const { renderAssistantTurnFooter } = useWebShellCustomization();
   const [copied, flashCopied] = useCopiedFlash();
   const [branchPending, setBranchPending] = useState(false);
-  const showFooter = !!content && !isStreaming && showFooterActions;
+  // An agent reply of only whitespace or invisible characters (a leader's
+  // U+200B, recorded before the daemon classified it) shows no bubble text;
+  // a squad leader's such reply is its `no_action` line.
+  const blankAgentReply =
+    agentMessage?.kind === 'agent_message' &&
+    !isStreaming &&
+    isBlankAgentText(content);
+  const showFooter =
+    !!content &&
+    !blankAgentReply &&
+    !isStreaming &&
+    (showFooterActions || (turnSources?.length ?? 0) > 0) &&
+    !documentMode;
   const customFooter = useMemo(
     () =>
       customFooterInfo
@@ -68,9 +122,85 @@ export const AssistantMessage = memo(function AssistantMessage({
       })
       .catch(warnClipboardWriteFailure);
   }, [content, flashCopied]);
+  // Clicking the lit icon clears the mark; clicking the other one switches it.
+  const handleFeedback = useCallback(
+    (
+      rating: WebShellAssistantFeedbackRating,
+      event: ReactMouseEvent<HTMLButtonElement>,
+    ) => {
+      if (!onAssistantFeedbackRate) return;
+      onAssistantFeedbackRate(
+        assistantFeedbackRating === rating ? null : rating,
+      );
+      // A pointer click leaves the button focused, and the row's
+      // `:focus-within` rule would then pin this hover-only row open after the
+      // pointer leaves. Keyboard activation reports detail 0, so it keeps focus
+      // and the row stays reachable from the keyboard.
+      if (event.detail > 0) event.currentTarget.blur();
+    },
+    [assistantFeedbackRating, onAssistantFeedbackRate],
+  );
+  const feedbackButtonClass = useCallback(
+    (rating: WebShellAssistantFeedbackRating) => {
+      const activeClass =
+        rating === 'up'
+          ? styles.feedbackButtonActiveUp
+          : styles.feedbackButtonActiveDown;
+      return `${styles.copyButton} ${styles.feedbackButton}${
+        assistantFeedbackRating === rating ? ` ${activeClass}` : ''
+      }`;
+    },
+    [assistantFeedbackRating],
+  );
+  const squadName =
+    agentMessage?.kind === 'agent_message'
+      ? agentMessage.author?.squadName
+      : undefined;
+  // The squad shown beside the author: the one it leads, or the one whose
+  // leader it answered as a member. Only the leader's counts for no_action.
+  const squadLabel =
+    squadName ??
+    (agentMessage?.kind === 'agent_message'
+      ? agentMessage.author?.memberSquadName
+      : undefined);
+  if (
+    agentMessage?.kind === 'agent_message' &&
+    (agentMessage.squadOutcome === 'no_action' ||
+      (blankAgentReply &&
+        !!squadName &&
+        (agentMessage.status ?? 'completed') === 'completed'))
+  ) {
+    // A squad leader that decided nothing was needed: one muted line, not a
+    // message: the squad's tag, then a plain sentence. The sentence is in the
+    // main dictionary so exported transcripts can show it (the collaboration
+    // dictionary is stubbed there).
+    const noActionKey = 'agentMessage.noAction';
+    const noActionLabel = t(noActionKey, {
+      name: author?.name ?? agentMessage.author?.name ?? '',
+    }).trim();
+    return (
+      <div
+        className={styles.squadNoAction}
+        data-squad-outcome="no_action"
+        role="note"
+      >
+        {squadName && <SquadTag name={squadName} />}
+        <span className={styles.squadNoActionText}>
+          {noActionLabel === noActionKey ? '—' : noActionLabel}
+        </span>
+      </div>
+    );
+  }
   return (
     <div className={styles.message}>
-      {content && (
+      {author && (
+        <div className={styles.author}>
+          <AuthorAvatar name={author.name} color={author.color} />
+          <span className={styles.authorName}>{author.name}</span>
+          {squadLabel && <SquadTag name={squadLabel} />}
+        </div>
+      )}
+      {content && !blankAgentReply && (
         <div
           className={`${styles.content}${
             isLocateFlashing ? ` ${flashStyles.flash}` : ''
@@ -85,21 +215,50 @@ export const AssistantMessage = memo(function AssistantMessage({
           </div>
         </div>
       )}
+      {agentMessage?.kind === 'agent_message' && (
+        <AgentMessageDetails meta={agentMessage} />
+      )}
       {customFooter && (
         <div className={styles.customFooter}>{customFooter}</div>
       )}
       {showFooter && (
         <div className={styles.messageFooter}>
-          <button
-            type="button"
-            className={styles.copyButton}
-            title={t('assistant.copy')}
-            aria-label={t('assistant.copy')}
-            onClick={handleCopy}
-          >
-            {copied ? <CheckIcon /> : <CopyIcon />}
-          </button>
-          {showBranchAction && onBranchSession && (
+          {showFooterActions && (
+            <button
+              type="button"
+              className={styles.copyButton}
+              title={t('assistant.copy')}
+              aria-label={t('assistant.copy')}
+              onClick={handleCopy}
+            >
+              {copied ? <CheckIcon /> : <CopyIcon />}
+            </button>
+          )}
+          {showFooterActions && showAssistantFeedback && (
+            <>
+              <button
+                type="button"
+                className={feedbackButtonClass('up')}
+                title={t('assistant.satisfied')}
+                aria-label={t('assistant.satisfied')}
+                aria-pressed={assistantFeedbackRating === 'up'}
+                onClick={(event) => handleFeedback('up', event)}
+              >
+                <ThumbsUpIcon />
+              </button>
+              <button
+                type="button"
+                className={feedbackButtonClass('down')}
+                title={t('assistant.dissatisfied')}
+                aria-label={t('assistant.dissatisfied')}
+                aria-pressed={assistantFeedbackRating === 'down'}
+                onClick={(event) => handleFeedback('down', event)}
+              >
+                <ThumbsDownIcon />
+              </button>
+            </>
+          )}
+          {showFooterActions && showBranchAction && onBranchSession && (
             <button
               type="button"
               className={styles.copyButton}
@@ -111,7 +270,10 @@ export const AssistantMessage = memo(function AssistantMessage({
               <BranchIcon />
             </button>
           )}
-          {timestamp !== undefined && (
+          {turnSources?.length ? (
+            <TurnSources sources={turnSources} onOpen={onSourceOpen} />
+          ) : null}
+          {showFooterActions && timestamp !== undefined && (
             <span className={styles.footerTime} aria-hidden="true">
               {formatTimestamp(timestamp)}
             </span>
@@ -190,6 +352,7 @@ function BranchIcon() {
 
 interface ThinkingMessageProps {
   content: string;
+  author?: DaemonMessageAuthor;
   isStreaming?: boolean;
   timestamp?: number;
   isLocateFlashing?: boolean;
@@ -226,8 +389,11 @@ function cacheThinkingTranslation(
 interface ThinkingSummaryHeaderProps {
   thinkingActive: boolean;
   thinkingExpanded: boolean;
+  documentMode: boolean;
   /** Pre-localized running/done label, including the elapsed duration. */
   summaryText: string;
+  /** Whose thought this is, in a transcript with several agents. */
+  authorName?: string;
   /**
    * Thought content for the zh-CN translate button. Omitted while streaming —
    * the button is hidden then — so streamed content growth does not defeat the
@@ -247,7 +413,9 @@ interface ThinkingSummaryHeaderProps {
 const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
   thinkingActive,
   thinkingExpanded,
+  documentMode,
   summaryText,
+  authorName,
   translateContent,
   showTranslateButton,
   generateContent,
@@ -260,20 +428,34 @@ const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
         thinkingExpanded ? ` ${styles.thinkingHeaderExpanded}` : ''
       }`}
       onClick={(event) => {
-        if (event.currentTarget.contains(event.target as Node)) {
+        if (
+          !documentMode &&
+          event.currentTarget.contains(event.target as Node)
+        ) {
           onToggle();
         }
       }}
     >
       <button
         type="button"
+        disabled={documentMode}
+        tabIndex={documentMode ? -1 : undefined}
         className={styles.thinkingSummary}
-        aria-expanded={thinkingExpanded}
-        title={thinkingExpanded ? t('thinking.collapse') : t('thinking.expand')}
+        aria-expanded={documentMode ? undefined : thinkingExpanded}
+        title={
+          documentMode
+            ? undefined
+            : thinkingExpanded
+              ? t('thinking.collapse')
+              : t('thinking.expand')
+        }
       >
         <span className={styles.thinkingSummaryIcon} aria-hidden="true">
           <ThinkingDoneIcon />
         </span>
+        {authorName && (
+          <span className={styles.thinkingAuthor}>{authorName}</span>
+        )}
         <span
           className={
             thinkingActive
@@ -307,13 +489,18 @@ const ThinkingSummaryHeader = memo(function ThinkingSummaryHeader({
 
 export const ThinkingMessage = memo(function ThinkingMessage({
   content,
+  author,
   isStreaming,
   timestamp,
   isLocateFlashing = false,
   generateContent,
 }: ThinkingMessageProps) {
   const { language, t } = useI18n();
+  const transcriptRenderMode = useTranscriptRenderMode();
+  const documentMode = transcriptRenderMode === 'document';
+  const documentExpanded = useTranscriptDocumentExpanded();
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
+  const showThinking = documentMode ? documentExpanded : thinkingExpanded;
   const thinkingActive = isStreaming === true;
   const startTimeRef = useRef(timestamp ?? Date.now());
   const sawActiveRef = useRef(thinkingActive);
@@ -357,8 +544,8 @@ export const ThinkingMessage = memo(function ThinkingMessage({
       : '';
 
   const handleToggle = useCallback(() => {
-    setThinkingExpanded((v) => !v);
-  }, []);
+    if (!documentMode) setThinkingExpanded((v) => !v);
+  }, [documentMode]);
 
   const summaryText = t(
     thinkingSummaryKey,
@@ -376,10 +563,13 @@ export const ThinkingMessage = memo(function ThinkingMessage({
           <div className={styles.thinkingBody}>
             <ThinkingSummaryHeader
               thinkingActive={thinkingActive}
-              thinkingExpanded={thinkingExpanded}
+              thinkingExpanded={showThinking}
+              documentMode={documentMode}
               summaryText={summaryText}
+              authorName={author?.name}
               translateContent={thinkingActive ? undefined : content}
               showTranslateButton={
+                !documentMode &&
                 language === 'zh-CN' &&
                 !thinkingActive &&
                 generateContent !== undefined
@@ -387,7 +577,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
               generateContent={generateContent}
               onToggle={handleToggle}
             />
-            {thinkingExpanded && (
+            {showThinking && (
               <div className={styles.thinkingExpandedClip}>
                 <div className={styles.thinkingExpandedInner}>
                   <div className={styles.thinkingExpandedWrap}>
@@ -411,12 +601,14 @@ interface ThinkingTranslateButtonProps {
   content: string;
   generateContent?: SessionContentGenerator;
   className?: string;
+  mode?: 'translate' | 'explain-shell';
 }
 
 export function ThinkingTranslateButton({
   content,
   generateContent,
   className,
+  mode = 'translate',
 }: ThinkingTranslateButtonProps) {
   const { language, t } = useI18n();
   const [translationOpen, setTranslationOpen] = useState(false);
@@ -436,7 +628,7 @@ export function ThinkingTranslateButton({
   const translate = useCallback(
     async (force = false) => {
       if (!generateContent || (translationLoading && !force)) return;
-      const cacheKey = `${language}:${content}`;
+      const cacheKey = `${mode}:${language}:${content}`;
       const cached = thinkingTranslationCache.get(cacheKey);
       if (cached && !force) {
         cacheThinkingTranslation(cacheKey, cached);
@@ -457,7 +649,10 @@ export function ThinkingTranslateButton({
       try {
         const targetLanguage =
           language === 'zh-CN' ? 'Simplified Chinese' : 'English';
-        const prompt = `Translate the following model reasoning into ${targetLanguage}. Preserve its meaning and Markdown formatting. Output only the translation.\n\n${content}`;
+        const prompt =
+          mode === 'explain-shell'
+            ? `Explain the following shell command in ${targetLanguage}. Describe what it does and call out any notable risks. Be concise and output only the explanation.\n\n\`\`\`shell\n${content}\n\`\`\``
+            : `Translate the following model reasoning into ${targetLanguage}. Preserve its meaning and Markdown formatting. Output only the translation.\n\n${content}`;
         for await (const event of generateContent(prompt, {
           signal: controller.signal,
         })) {
@@ -493,7 +688,7 @@ export function ThinkingTranslateButton({
         }
       }
     },
-    [content, generateContent, language, translationLoading],
+    [content, generateContent, language, mode, translationLoading],
   );
 
   const handleTranslationOpenChange = useCallback(
@@ -519,19 +714,45 @@ export function ThinkingTranslateButton({
         <button
           type="button"
           className={className}
-          title={t('thinking.translate')}
+          title={t(
+            mode === 'explain-shell'
+              ? 'approval.explain'
+              : 'thinking.translate',
+          )}
+          data-approval-shortcuts-ignore={
+            mode === 'explain-shell' && translationOpen ? '' : undefined
+          }
           onClick={(event) => event.stopPropagation()}
         >
-          {t('thinking.translate')}
+          {mode === 'explain-shell' && <LightbulbIcon aria-hidden="true" />}
+          {t(
+            mode === 'explain-shell'
+              ? 'approval.explain'
+              : 'thinking.translate',
+          )}
         </button>
       </PopoverTrigger>
-      <PopoverContent align="start" className={styles.translationPopover}>
+      <PopoverContent
+        align="start"
+        className={styles.translationPopover}
+        data-approval-shortcuts-ignore={
+          mode === 'explain-shell' ? '' : undefined
+        }
+      >
         <div className={styles.translationTitle}>
-          {t('thinking.translation')}
+          {t(
+            mode === 'explain-shell'
+              ? 'approval.explanation'
+              : 'thinking.translation',
+          )}
         </div>
         {translationError ? (
           <div className={styles.translationError}>
-            {t('thinking.translationFailed')}
+            {t(
+              mode === 'explain-shell'
+                ? 'approval.explanationFailed'
+                : 'thinking.translationFailed',
+            )}
           </div>
         ) : translation?.text ? (
           <div
@@ -539,7 +760,7 @@ export function ThinkingTranslateButton({
           >
             <Markdown
               content={translation.text}
-              source="thinking"
+              source={mode === 'explain-shell' ? 'assistant' : 'thinking'}
               isStreaming={translationLoading}
             />
           </div>
@@ -547,8 +768,12 @@ export function ThinkingTranslateButton({
           <div className={styles.translationPending}>
             {t(
               translationThinking
-                ? 'thinking.translationThinking'
-                : 'thinking.translating',
+                ? mode === 'explain-shell'
+                  ? 'approval.explanationThinking'
+                  : 'thinking.translationThinking'
+                : mode === 'explain-shell'
+                  ? 'approval.explaining'
+                  : 'thinking.translating',
             )}
           </div>
         )}
@@ -576,7 +801,11 @@ export function ThinkingTranslateButton({
               size="xs"
               onClick={() => void translate(true)}
             >
-              {t('thinking.retranslate')}
+              {t(
+                mode === 'explain-shell'
+                  ? 'approval.reExplain'
+                  : 'thinking.retranslate',
+              )}
             </Button>
             <Button
               type="button"

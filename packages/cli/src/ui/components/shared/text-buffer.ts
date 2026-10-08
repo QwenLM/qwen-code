@@ -161,7 +161,7 @@ export function __resetWordSegmenter(): void {
  * Returns an array of { start, end } where end is exclusive.
  * @param codePoints - Optional pre-computed code points array to avoid redundant toCodePoints calls.
  */
-function getWordBoundaries(
+export function getWordBoundaries(
   line: string,
   codePoints?: string[],
 ): Array<{ start: number; end: number }> {
@@ -299,7 +299,7 @@ function binarySearchCpIndex(cpToStrIdx: number[], target: number): number {
  * - Cursor inside a word → jump to that word's start
  * - Cursor exactly at a word's start → jump to previous word's start
  */
-function findPrevWordStart(
+export function findPrevWordStart(
   boundaries: Array<{ start: number; end: number }>,
   col: number,
 ): number | null {

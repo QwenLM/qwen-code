@@ -80,6 +80,7 @@ import {
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
 import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
+import { quitCommand } from '../commands/quitCommand.js';
 import {
   type ExtensionUpdateAction,
   type ExtensionUpdateStatus,
@@ -128,6 +129,7 @@ const BARE_SLASH_COMMANDS_HIDE_INVOCATION = new Set([
   'statusline',
 ]);
 const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
+const QUIT_COMMAND_NAMES = [quitCommand.name, ...(quitCommand.altNames ?? [])];
 
 function shouldHideSlashCommandInvocation(
   command: SlashCommand | undefined,
@@ -178,6 +180,7 @@ export interface SlashCommandProcessorActions {
   openStatusLineDialog: () => void;
   openModelDialog: (options?: {
     fastModelMode?: boolean;
+    advisorModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
     compactionModelMode?: boolean;
@@ -591,7 +594,7 @@ export const useSlashCommandProcessor = (
   );
 
   useEffect(() => {
-    if (!config) {
+    if (!config || config.getShellExecutionSandbox?.()) {
       return;
     }
 
@@ -878,6 +881,8 @@ export const useSlashCommandProcessor = (
       oneTimeShellAllowlist?: Set<string>,
       overwriteConfirmed?: boolean,
       existingInvocationItemId?: number,
+      // Identity shared by the invocation item and submitted prompt.
+      invocationPromptId?: string,
     ): Promise<SlashCommandProcessorResult | false> => {
       if (typeof rawQuery !== 'string') {
         return false;
@@ -891,11 +896,25 @@ export const useSlashCommandProcessor = (
         return false;
       }
 
-      const {
+      let {
         commandToExecute,
         args,
         canonicalPath: resolvedCommandPath,
       } = parseSlashCommand(trimmed, commands);
+
+      if (!commandToExecute) {
+        const fallback = parseSlashCommand(trimmed, [quitCommand]);
+        if (
+          fallback.commandToExecute &&
+          !(config?.getDisabledSlashCommands() ?? []).some((name) =>
+            QUIT_COMMAND_NAMES.includes(name.trim().toLowerCase()),
+          )
+        ) {
+          commandToExecute = fallback.commandToExecute;
+          args = fallback.args;
+          resolvedCommandPath = fallback.canonicalPath;
+        }
+      }
 
       const recordedItems: HistoryItemWithoutId[] = [];
       const recordItem = (item: HistoryItemWithoutId) => {
@@ -1041,7 +1060,10 @@ export const useSlashCommandProcessor = (
           // Mark as sent to model so chat recording and telemetry work correctly
           invocationSentToModel = true;
           if (invocationItemId !== undefined) {
-            updateItem(invocationItemId, { sentToModel: true });
+            updateItem(invocationItemId, {
+              sentToModel: true,
+              ...(invocationPromptId ? { promptId: invocationPromptId } : {}),
+            });
           }
 
           // Combine all content into a single submit_prompt
@@ -1230,6 +1252,9 @@ export const useSlashCommandProcessor = (
                         persistScope: result.persistScope,
                       });
                       return { type: 'handled' };
+                    case 'advisor-model':
+                      actions.openModelDialog({ advisorModelMode: true });
+                      return { type: 'handled' };
                     case 'voice-model':
                       actions.openModelDialog({
                         voiceModelMode: true,
@@ -1384,7 +1409,12 @@ export const useSlashCommandProcessor = (
                     // React applies this update asynchronously. No same-turn
                     // logic reads the UI history classification; rewind/resume
                     // consumers observe it after state has rendered.
-                    updateItem(invocationItemId, { sentToModel: true });
+                    updateItem(invocationItemId, {
+                      sentToModel: true,
+                      ...(invocationPromptId
+                        ? { promptId: invocationPromptId }
+                        : {}),
+                    });
                   }
                   recordSkillCommandInvocation(true);
                   void recordAutoSkillCommandUsage(config, commandToExecute);
@@ -1438,6 +1468,7 @@ export const useSlashCommandProcessor = (
                     new Set(approvedCommands),
                     undefined,
                     invocationItemId,
+                    invocationPromptId,
                   );
                 }
                 case 'confirm_action': {
@@ -1470,6 +1501,7 @@ export const useSlashCommandProcessor = (
                     undefined,
                     true,
                     invocationItemId,
+                    invocationPromptId,
                   );
                 }
                 case 'stream_messages': {

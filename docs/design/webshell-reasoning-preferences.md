@@ -39,8 +39,25 @@ owns preference writes and rollback across writable scopes; a failed write
 also restores the live overrides. Model reconciliation reuses the same reset
 operation. Requested persistence completes before the daemon reports success.
 
-Turning thinking off sends `none`. Turning it on again sends `default`, which
-removes `none` and uses the model default instead of restoring the old tier.
+Turning thinking off sends `none`. Turning it on sends the advertised default
+effort for a tiered model, or `default` for toggle-only models. A GPT raw
+request override that blocks configured tiers advertises `enableValue: 'default'`
+only when restoring the raw configuration can enable thinking and the model's
+configured reasoning default is not disabled. Otherwise, `canEnable: false`
+disables ON while retaining the saved preference, including for controls without
+a default tier or with only a toggle. OFF remains available while thinking is
+on. Explicit `default` commands remain
+resets, even for off defaults. Explicit tier choices remain strict and are never
+silently treated as reset commands.
+
+On Welcome, an on intent selected by the thinking switch belongs to the
+current model. Switching models discards that pending on intent and uses the
+target's existing preview and persisted preference. It neither saves the source
+model's tier nor resets the target's preference. Explicitly selected compatible
+tiers still migrate. Incompatible pending selections are discarded; model
+switching never synthesizes a reset from the source preview. Session
+reconciliation handles existing preferences. This distinction exists only in
+pending UI state; no new persisted setting is introduced.
 
 ## Capability reconciliation
 
@@ -52,8 +69,12 @@ Every model switch reconciles the stored selection against the target model:
 - a model without reasoning controls removes every explicit selection;
 - mandatory thinking removes `none`.
 
-There is no fallback or tier clamping at this layer. Once an incompatible
-selection is removed, switching back does not restore it.
+The built-in GPT capability fallback preserves a shared tier preference across
+model switches and clamps its effective tier at the request and display
+boundaries. A saved `none` also survives switching to a mandatory GPT model,
+where it is ignored. Explicit configured capabilities retain the reconciliation
+rules above. For other models, an incompatible removed selection does not return
+when switching back.
 
 Session-only ACP model changes clear incompatible live overrides without
 changing the shared stored preference. Only a persistent model selection may

@@ -19,6 +19,19 @@ This tool enables you to:
 pip install -r requirements.txt
 ```
 
+HTML export (`export-html-from-chatrecord-jsonl.js`) loads the export API from
+`@qwen-code/qwen-code/export`, which resolves from the repository's built
+`packages/cli/dist`. Before running the runner, build the repository once from
+its root:
+
+```bash
+npm install
+npm run build
+```
+
+Without the build, HTML artifacts are skipped with a warning while the run's
+prompt results and chat JSONL artifacts are still produced.
+
 ## Usage
 
 ```bash

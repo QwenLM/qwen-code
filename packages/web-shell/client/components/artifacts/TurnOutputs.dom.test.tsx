@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { WebShellCustomizationProvider } from '../../customization';
 import { act, StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -216,12 +217,11 @@ describe('TurnOutputs artifact downloads', () => {
 
     expect(readFileBytes).toHaveBeenCalledWith('reports/report.pdf', {
       offset: 0,
-      maxBytes: 100 * 1024,
+      maxBytes: 256 * 1024,
     });
     expect(click).toHaveBeenCalledOnce();
     expect(click.mock.instances[0]?.download).toBe('report.pdf');
     expect(createdBlobs[0]?.type).toBe('application/pdf');
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:artifact');
 
     act(() => root.unmount());
   });
@@ -273,7 +273,7 @@ describe('TurnOutputs artifact downloads', () => {
     expect(workspaceByCwd).toHaveBeenCalledWith('/secondary');
     expect(secondaryReadFileBytes).toHaveBeenCalledWith('report.txt', {
       offset: 0,
-      maxBytes: 100 * 1024,
+      maxBytes: 256 * 1024,
     });
     expect(readFileBytes).not.toHaveBeenCalled();
     expect(click).toHaveBeenCalledOnce();
@@ -378,7 +378,8 @@ describe('TurnOutputs artifact downloads', () => {
         .querySelector<HTMLButtonElement>('button[title="changed.ts"]')
         ?.click();
       container
-        .querySelector<HTMLButtonElement>('button[title="Secondary artifact"]')
+        .querySelector<HTMLElement>('[title="Secondary artifact"]')
+        ?.querySelector('button')
         ?.click();
       container
         .querySelector<HTMLButtonElement>('button[title="Secondary schedule"]')
@@ -618,7 +619,7 @@ describe('TurnOutputs artifact downloads', () => {
     expect(click).not.toHaveBeenCalled();
   });
 
-  it('disables Open for a missing workspace artifact and shows the recorded path', () => {
+  it('disables Open for a missing workspace artifact without showing its path', () => {
     const onOpenArtifact = vi.fn();
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -654,13 +655,138 @@ describe('TurnOutputs artifact downloads', () => {
       (button) => button.textContent?.trim() === 'Open',
     );
     expect(open?.disabled).toBe(true);
-    expect(container.textContent).toContain(
+    expect(open?.querySelector('svg')).not.toBeNull();
+    expect(container.textContent).not.toContain('w/agent/report.csv');
+    expect(open?.title).toBe('');
+    expect(open?.parentElement?.title).toBe(
       'File not found in the workspace · w/agent/report.csv',
     );
 
     act(() => open?.click());
     expect(onOpenArtifact).not.toHaveBeenCalled();
 
+    act(() => root.unmount());
+  });
+
+  it('opens a recorded link through the external opener instead of the panel', () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    const onOpenRequest = vi.fn();
+    const onOpenArtifact = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-link"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'recorded-link',
+                kind: 'link',
+                storage: 'external_url',
+                status: 'available',
+                title: 'Recorded link',
+                url: 'https://platform.example.com/detail?id=7',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onOpenRequest={onOpenRequest}
+            onReviewChanges={() => {}}
+            onOpenArtifact={onOpenArtifact}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    // The card keeps a single control: the address it opens.
+    expect(container.querySelectorAll('button, a')).toHaveLength(1);
+    const link = container.querySelector('a');
+    expect(link?.textContent?.trim()).toBe('Open');
+    expect(link?.getAttribute('href')).toBe(
+      'https://platform.example.com/detail?id=7',
+    );
+    expect(link?.getAttribute('target')).toBe('_blank');
+    expect(link?.getAttribute('rel')).toBe('noopener noreferrer');
+
+    act(() => {
+      link?.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }),
+      );
+    });
+    expect(invoke).toHaveBeenCalledWith('plugin:opener|open_url', {
+      url: 'https://platform.example.com/detail?id=7',
+    });
+    expect(onOpenRequest).not.toHaveBeenCalled();
+    expect(onOpenArtifact).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+    delete (window as { __TAURI__?: unknown }).__TAURI__;
+  });
+});
+
+describe('host artifact visibility', () => {
+  it('filters before counting and updates without mutating the source artifacts', () => {
+    const artifacts = Array.from({ length: 6 }, (_, i) => ({
+      id: `a${i}`,
+      title: `Report ${i}`,
+      kind: 'file',
+      storage: 'workspace',
+      status: 'available',
+      workspacePath: `/primary/report-${i}.txt`,
+    })) as DaemonSessionArtifact[];
+    const originalArtifacts = structuredClone(artifacts);
+    artifacts.forEach(Object.freeze);
+    Object.freeze(artifacts);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const filterArtifact = vi.fn(
+      (artifact: DaemonSessionArtifact) => Number(artifact.id.slice(1)) >= 2,
+    );
+    const render = (filter = filterArtifact) =>
+      act(() =>
+        root.render(
+          <I18nProvider language="en">
+            <WebShellCustomizationProvider value={{ filterArtifact: filter }}>
+              <TurnOutputs
+                turnId="turn-1"
+                sourceSessionId="session-1"
+                changes={[]}
+                artifacts={artifacts}
+                scheduledTasks={[]}
+                onReviewChanges={() => {}}
+                onOpenArtifact={() => {}}
+                onOpenScheduledTask={() => {}}
+              />
+            </WebShellCustomizationProvider>
+          </I18nProvider>,
+        ),
+      );
+    render();
+    expect(container.textContent).not.toContain('Report 0');
+    expect(container.textContent).toContain('Report 2');
+    expect(container.textContent).not.toContain('Report 5');
+    expect(filterArtifact).toHaveBeenCalledWith(artifacts[0], {
+      turnId: 'turn-1',
+      sourceSessionId: 'session-1',
+    });
+    const more = Array.from(container.querySelectorAll('button')).find(
+      (button) => /1.*more|more.*1/i.test(button.textContent ?? ''),
+    );
+    expect(more).toBeDefined();
+    act(() => more?.click());
+    expect(container.textContent).toContain('Report 5');
+    render(vi.fn(() => false));
+    expect(container.textContent).toBe('');
+    render();
+    expect(container.textContent).toContain('Report 2');
+    expect(artifacts).toEqual(originalArtifacts);
     act(() => root.unmount());
   });
 });

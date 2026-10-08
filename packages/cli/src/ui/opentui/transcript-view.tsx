@@ -17,14 +17,18 @@
  */
 
 import { useEffect, useState } from 'react';
-import { C, SYNTAX } from './theme.js';
+import { AgentStatus } from '@qwen-code/qwen-code-core';
+import { C, SYNTAX, SYNTAX_DIM, type Palette } from './theme.js';
 import {
   AnsiRows,
-  MESSAGE_ICON,
+  TOOL_CARD_DESCRIPTION_ROWS,
   TodoRows,
   assistantMessageMeta,
+  capToolCardDescription,
   hiddenLinesLabel,
+  hiddenTailLinesLabel,
   maxHistoryItemRows,
+  pendingCardMaxRows,
   selectionProps,
   STATUS_INDICATOR_WIDTH,
   tailWindow,
@@ -32,6 +36,7 @@ import {
   toolCardDescription,
   toolCardName,
   toolCardSummarySuffix,
+  toolCardText,
   toolStatusMeta,
   truncateResultDisplayChars,
   userMessageMeta,
@@ -42,21 +47,43 @@ import {
   type GoalCardColor,
   type LiveGoalLegacyData,
   type LiveHistoryItem,
+  type LiveThinkingItem,
   type LiveToolItem,
+  type LiveArenaSessionItem,
 } from './live-session-model.js';
 import { renderDiffBody } from './diff-render.js';
 import { assistantMarkdownForRender } from './markdown-heal.js';
-import { sanitizeTerminalText } from '../utils/textUtils.js';
+import { formatInlineToolArgsJson } from '../components/messages/ToolMessage.js';
+import {
+  getCachedStringWidth,
+  sanitizeTerminalText,
+} from '../utils/textUtils.js';
 import { getCompressionStatusText } from '../utils/compression-text.js';
 import { ICON } from '../constants.js';
+import { formatClockTime, formatDuration } from '../utils/formatters.js';
+import { getArenaStatusLabel } from '../utils/displayUtils.js';
+import type { ArenaAgentCardData } from '../types.js';
 
-const GOAL_COLOR: Record<GoalCardColor, string> = {
-  secondary: C.dim,
-  accent: C.accent,
-  warning: C.yellow,
-  error: C.red,
-  success: C.green,
-};
+/** ink HistoryItemDisplay picks between two hints by whether the card is
+ *  clickable; `ui.mouseTracking: false` hands the pointer back to the
+ *  terminal, so only the key hint is offered. */
+function expandHint(clickable: boolean): string {
+  return clickable ? 'click to expand' : 'ctrl+o to expand';
+}
+
+/** Keys, not colours: `C` is mutated in place when the theme is applied,
+ *  which happens after this module is imported. */
+const GOAL_COLOR_KEY = {
+  accent: 'accent',
+  warning: 'yellow',
+  error: 'red',
+  success: 'green',
+  secondary: 'dim',
+} as const satisfies Record<GoalCardColor, keyof Palette>;
+
+function goalColor(color: GoalCardColor): string {
+  return C[GOAL_COLOR_KEY[color]];
+}
 
 export interface TranscriptViewProps {
   items: readonly LiveHistoryItem[];
@@ -64,23 +91,86 @@ export interface TranscriptViewProps {
   availableWidth?: number;
   /** Terminal height; per-item row caps follow ink staticAreaMaxItemHeight. */
   availableTerminalHeight?: number;
+  /** ink's app-wide ctrl+O toggle: forces every committed thought open. */
+  thoughtsExpanded?: boolean;
+  /** `ui.showToolCallArgs`: ink draws each call's raw arguments on their own
+   * line under the card header. */
+  showToolCallArgs?: boolean;
+  /** `output.showTimestamps`: ink stamps `[HH:MM:SS]` above each assistant row. */
+  showTimestamps?: boolean;
+  /** `ui.showToolCallDetails`: false collapses every tool card to its header
+   * plus an expand hint, the way ink's CollapsibleToolGroupMessage does. */
+  showToolCallDetails?: boolean;
+  /** `ui.mouseTracking`: false means the renderer takes no pointer events, so
+   * the expand hints must not offer a click. */
+  mouseTracking?: boolean;
+  /** The call whose confirmation is on screen. ink's trailing marker points at
+   * the call the user can answer, and only the waiting queue knows which that
+   * is: a PreToolUse `ask` hook re-arms an already approved call by appending it
+   * *behind* another waiting call, while its card goes back to pending in place,
+   * so transcript order and queue order disagree. */
+  awaitingCallId?: string;
+}
+
+/** ink HistoryItemDisplay getHistoryItemMarginTop: conversation turns and the
+ * arena cards get a blank row above them, while status, tool and goal rows stay
+ * flush against whatever precedes them. `user` reaches the same total in ink by
+ * declaring the margin inside its own message component. `task` and `image`
+ * have no ink counterpart; both follow the tool rows they render beside. */
+function itemMarginTop(kind: LiveHistoryItem['kind']): number {
+  switch (kind) {
+    case 'user':
+    case 'assistant':
+    case 'thinking':
+    case 'user-shell':
+    case 'arena-agent':
+    case 'arena-session':
+      return 1;
+    default:
+      return 0;
+  }
 }
 
 export function OpenTuiTranscriptView({
   items,
   availableWidth = 80,
   availableTerminalHeight = 24,
+  thoughtsExpanded = false,
+  showToolCallArgs = false,
+  showTimestamps = false,
+  showToolCallDetails = true,
+  mouseTracking = true,
+  awaitingCallId,
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
+  const awaitingId = items.find(
+    (item) =>
+      item.kind === 'tool' &&
+      item.confirm === 'pending' &&
+      !item.done &&
+      item.id === awaitingCallId,
+  )?.id;
   return (
-    <box flexDirection="column">
+    <box flexDirection="column" marginLeft={2} marginRight={2}>
       {items.map((item) => (
-        <TranscriptItem
+        <box
           key={item.id}
-          item={item}
-          maxRows={maxRows}
-          width={availableWidth}
-        />
+          flexDirection="column"
+          marginTop={itemMarginTop(item.kind)}
+        >
+          <TranscriptItem
+            item={item}
+            maxRows={maxRows}
+            terminalHeight={availableTerminalHeight}
+            width={availableWidth}
+            thoughtsExpanded={thoughtsExpanded}
+            showToolCallArgs={showToolCallArgs}
+            showTimestamps={showTimestamps}
+            showToolCallDetails={showToolCallDetails}
+            mouseTracking={mouseTracking}
+            awaitingApproval={item.id === awaitingId}
+          />
+        </box>
       ))}
     </box>
   );
@@ -89,21 +179,59 @@ export function OpenTuiTranscriptView({
 function TranscriptItem({
   item,
   maxRows,
+  terminalHeight,
   width,
+  thoughtsExpanded,
+  showToolCallArgs,
+  showTimestamps,
+  showToolCallDetails,
+  mouseTracking,
+  awaitingApproval,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
+  terminalHeight: number;
   width: number;
+  thoughtsExpanded: boolean;
+  showToolCallArgs: boolean;
+  showTimestamps: boolean;
+  showToolCallDetails: boolean;
+  mouseTracking: boolean;
+  awaitingApproval: boolean;
 }) {
   switch (item.kind) {
     case 'user':
       return <UserRow text={item.text} />;
     case 'assistant':
-      return <AssistantRow text={item.text} streaming={item.streaming} />;
+      return (
+        <AssistantRow
+          text={item.text}
+          streaming={item.streaming}
+          timestamp={showTimestamps ? item.timestamp : undefined}
+        />
+      );
     case 'thinking':
-      return <ThinkingRow text={item.text} done={item.done} />;
+      return (
+        <ThinkingRow
+          item={item}
+          allExpanded={thoughtsExpanded}
+          mouseTracking={mouseTracking}
+        />
+      );
     case 'tool':
-      return <ToolCard item={item} maxRows={maxRows} width={width} />;
+      return (
+        <ToolCard
+          item={item}
+          maxRows={maxRows}
+          terminalHeight={terminalHeight}
+          width={width}
+          fullDetail={thoughtsExpanded}
+          showToolCallArgs={showToolCallArgs}
+          showToolCallDetails={showToolCallDetails}
+          mouseTracking={mouseTracking}
+          awaitingApproval={awaitingApproval}
+        />
+      );
     case 'task':
       return <TaskCard item={item} />;
     case 'image':
@@ -117,7 +245,9 @@ function TranscriptItem({
     case 'info':
       return (
         <box flexDirection="row">
-          <text fg={C.dim}>{`${MESSAGE_ICON.CIRCLE_FILLED} `}</text>
+          {/* A wrapped message would otherwise shrink the prefix and drop its
+              trailing space. */}
+          <text fg={C.dim} flexShrink={0}>{`${ICON.CIRCLE_FILLED} `}</text>
           <text fg={C.dim} {...selectionProps()}>
             {sanitizeTerminalText(item.text)}
           </text>
@@ -127,9 +257,12 @@ function TranscriptItem({
       return <ErrorRow text={item.text} hint={item.hint} />;
     case 'warning':
       return (
-        <text fg={C.yellow} {...selectionProps()}>
-          {sanitizeTerminalText(item.text)}
-        </text>
+        <box flexDirection="row">
+          <text fg={C.yellow} flexShrink={0}>{`${ICON.TRIANGLE} `}</text>
+          <text fg={C.yellow} {...selectionProps()}>
+            {sanitizeTerminalText(item.text)}
+          </text>
+        </box>
       );
     case 'retry':
       return (
@@ -145,6 +278,16 @@ function TranscriptItem({
       return <StopHookRow message={item.message} />;
     case 'goal':
       return <GoalCard item={item} />;
+    case 'away-recap':
+      return <AwayRecapRow text={item.text} />;
+    case 'user-shell':
+      return <UserShellRow text={item.text} />;
+    case 'advisor':
+      return <AdvisorRow text={item.text} model={item.model} />;
+    case 'arena-agent':
+      return <ArenaAgentRow agent={item.agent} />;
+    case 'arena-session':
+      return <ArenaSessionRow item={item} />;
     default: {
       const exhaustive: never = item;
       return exhaustive;
@@ -156,7 +299,11 @@ function UserRow({ text }: { text: string }) {
   const meta = userMessageMeta();
   return (
     <box flexDirection="row">
-      <text fg={meta.color}>{`${meta.glyph} `}</text>
+      {/* A trailing space in the glyph's own text node is squeezed out as soon
+          as the sibling needs the full width, so the gap is structural. */}
+      <box width={STATUS_INDICATOR_WIDTH}>
+        <text fg={meta.color}>{meta.glyph}</text>
+      </box>
       <text fg={meta.color} {...selectionProps()}>
         {sanitizeTerminalText(text)}
       </text>
@@ -167,17 +314,24 @@ function UserRow({ text }: { text: string }) {
 function AssistantRow({
   text,
   streaming,
+  timestamp,
 }: {
   text: string;
   streaming: boolean;
+  timestamp?: number;
 }) {
   const meta = assistantMessageMeta();
   const content = sanitizeTerminalText(
     assistantMarkdownForRender(text, streaming),
   );
-  return (
-    <box flexDirection="row">
-      <text fg={meta.color}>{`${meta.glyph} `}</text>
+  // The two shapes differ, and `output.showTimestamps` is a setting the dialog
+  // can flip mid-session: without keys the stamped branch's second child would
+  // reuse the unstamped one's and keep the flexGrow it was given (Decision 11).
+  const row = (
+    <box key="bare" flexDirection="row">
+      <box width={STATUS_INDICATOR_WIDTH}>
+        <text fg={meta.color}>{meta.glyph}</text>
+      </box>
       <box flexGrow={1}>
         <markdown
           content={content}
@@ -187,16 +341,40 @@ function AssistantRow({
       </box>
     </box>
   );
+  if (timestamp === undefined) return row;
+  return (
+    <box key="stamped" flexDirection="column">
+      <text fg={C.dim}>{formatClockTime(timestamp)}</text>
+      {row}
+    </box>
+  );
 }
 
-function ThinkingRow({ text, done }: { text: string; done: boolean }) {
-  const [expanded, setExpanded] = useState(false);
-  const meta = thinkingMeta(done, expanded, false);
+function ThinkingRow({
+  item,
+  allExpanded,
+  mouseTracking,
+}: {
+  item: LiveThinkingItem;
+  allExpanded: boolean;
+  mouseTracking: boolean;
+}) {
+  const [clickedOpen, setClickedOpen] = useState(false);
+  // ink resolves a thought as the global ctrl+O toggle or its own clicked-open
+  // head id, so switching the global back off leaves a hand-opened thought open.
+  const expanded = allExpanded || clickedOpen;
+  // A live thought has no stamped duration yet; ink re-derives the elapsed
+  // time on every render so the pending label carries it.
+  const durationMs =
+    item.durationMs ??
+    (item.startedAt === undefined ? undefined : Date.now() - item.startedAt);
+  const meta = thinkingMeta(item.done, expanded, durationMs, mouseTracking);
+  const body = item.text.trimEnd();
   return (
     <box
       flexDirection="column"
       onMouseUp={() => {
-        if (done) setExpanded((v) => !v);
+        if (item.done) setClickedOpen((v) => !v);
       }}
     >
       <box flexDirection="row">
@@ -205,10 +383,18 @@ function ThinkingRow({ text, done }: { text: string; done: boolean }) {
           {meta.hint ? ` ${meta.hint}` : ''}
         </text>
       </box>
-      {!meta.collapsed && text ? (
-        <text fg={C.dim} attributes={4} {...selectionProps()}>
-          {sanitizeTerminalText(text)}
-        </text>
+      {!meta.collapsed && body ? (
+        <box flexDirection="row">
+          <box width={STATUS_INDICATOR_WIDTH} />
+          <box flexGrow={1}>
+            <markdown
+              content={sanitizeTerminalText(body)}
+              syntaxStyle={SYNTAX_DIM}
+              streaming={!item.done}
+              fg={C.dim}
+            />
+          </box>
+        </box>
       ) : null}
     </box>
   );
@@ -217,42 +403,141 @@ function ThinkingRow({ text, done }: { text: string; done: boolean }) {
 function ToolCard({
   item,
   maxRows,
+  terminalHeight,
   width,
+  fullDetail,
+  showToolCallArgs,
+  showToolCallDetails,
+  mouseTracking,
+  awaitingApproval,
 }: {
   item: LiveToolItem;
   maxRows: number;
+  terminalHeight: number;
   width: number;
+  fullDetail: boolean;
+  showToolCallArgs: boolean;
+  showToolCallDetails: boolean;
+  mouseTracking: boolean;
+  awaitingApproval: boolean;
 }) {
+  const [clickedOpen, setClickedOpen] = useState(false);
   const status = toolStatusMeta(item);
   const name = toolCardName(item.tool);
+  // ink's CollapsibleToolGroupMessage keeps a call open while it needs an
+  // answer: the card is the only surface carrying the payload being approved.
+  const collapsed =
+    !showToolCallDetails &&
+    !clickedOpen &&
+    !fullDetail &&
+    item.confirm !== 'pending';
   const description =
     item.description ?? toolCardDescription(item.tool, item.args);
+  // Measure on the same basis the render uses: a live description (e.g. a
+  // shell command) can carry newlines that each become a physical row while
+  // costing zero columns in the cap math, so fold them first like the
+  // fallback path does (R6-2).
+  const text = toolCardText(description);
+  // The description stays visible while a call awaits approval: an MCP
+  // confirmation body shows only the server and tool names, so the card is
+  // the only surface carrying the arguments (R5-9) — the settled 5-row cap
+  // would hide the tail of exactly the payload being approved. The pending
+  // budget stays viewport- and payload-aware (pendingCardMaxRows): the
+  // confirmation renders in flow below the transcript, and a hook-forced
+  // confirmation renders this same payload in its body, so the card must
+  // yield rows for it or ctrl-s expansion pushes the options off screen.
+  const cap = capToolCardDescription(
+    text,
+    name,
+    width,
+    item.confirm === 'pending' && !item.done
+      ? pendingCardMaxRows(terminalHeight, getCachedStringWidth(text), width)
+      : TOOL_CARD_DESCRIPTION_ROWS,
+  );
   const suffix = toolCardSummarySuffix(item.done, item.summary);
+  // ink measures the args row against the header's own inner width (the status
+  // glyph's columns are not available to it), so the wrapped-row cap bounds
+  // what actually reaches the screen.
+  const innerWidth = width - STATUS_INDICATOR_WIDTH;
+  const argsRow =
+    showToolCallArgs && item.args
+      ? formatInlineToolArgsJson(
+          item.args,
+          description,
+          fullDetail,
+          innerWidth > 0 ? innerWidth : undefined,
+        )
+      : undefined;
+  // Both states share one tree shape. @opentui/react never clears a prop that a
+  // re-render drops, so a collapsed branch of its own shape would leave its
+  // glyph box's width stuck on the reconciled header row and clip the title.
   return (
     <box flexDirection="column">
-      <box flexDirection="row">
+      <box
+        flexDirection="row"
+        onMouseUp={() => {
+          if (collapsed) setClickedOpen(true);
+        }}
+      >
         <box width={STATUS_INDICATOR_WIDTH}>
-          <text
-            fg={status.color}
-            attributes={(status.strikethrough ? 128 : 0) | 1}
-          >
+          <text fg={status.color} attributes={status.strikethrough ? 128 : 0}>
             {status.glyph}
           </text>
         </box>
-        <text fg={C.text} attributes={status.strikethrough ? 129 : 1}>
-          {name}
-        </text>
-        {description ? (
-          <text fg={C.dim} {...selectionProps()}>
-            {` ${sanitizeTerminalText(description)}`}
+        {collapsed ? (
+          <>
+            <text
+              key="name"
+              fg={C.text}
+              attributes={status.strikethrough ? 129 : 1}
+            >
+              {name}
+            </text>
+            <text
+              key="hint"
+              fg={C.dim}
+            >{` · ${expandHint(mouseTracking)}`}</text>
+          </>
+        ) : (
+          // ink wraps the name and the description as one block, so the
+          // continuation rows align under the name and the trailing arrow ends
+          // up after the last character. Separate flex siblings cannot do
+          // that: they also drop the description's leading space.
+          <text key="header" flexGrow={1} {...selectionProps()}>
+            <span fg={C.text} attributes={status.strikethrough ? 129 : 1}>
+              {name}
+            </span>
+            {cap.description ? (
+              <span fg={C.dim}>
+                {` ${sanitizeTerminalText(cap.description)}`}
+              </span>
+            ) : null}
+            {suffix ? (
+              <span fg={C.dim}>{sanitizeTerminalText(suffix)}</span>
+            ) : null}
+            {awaitingApproval ? (
+              // ink's TrailingIndicator: a primary-coloured arrow at the end of
+              // the awaiting call's own row, not a row of its own.
+              <span fg={C.text}>{' ←'}</span>
+            ) : null}
           </text>
-        ) : null}
-        {suffix ? <text fg={C.dim}>{sanitizeTerminalText(suffix)}</text> : null}
+        )}
       </box>
-      {item.confirm === 'pending' && !item.done ? (
-        <text fg={C.yellow}> (awaiting approval)</text>
-      ) : null}
-      <ToolCardBody item={item} maxRows={maxRows} width={width} />
+      {collapsed ? null : (
+        <>
+          {cap.hiddenRows > 0 && (
+            <text fg={C.dim}>{hiddenTailLinesLabel(cap.hiddenRows)}</text>
+          )}
+          {argsRow ? (
+            <box paddingLeft={STATUS_INDICATOR_WIDTH}>
+              <text fg={C.dim} {...selectionProps()}>
+                {argsRow}
+              </text>
+            </box>
+          ) : null}
+          <ToolCardBody item={item} maxRows={maxRows} width={width} />
+        </>
+      )}
     </box>
   );
 }
@@ -282,6 +567,26 @@ function ToolCardBody({
           totalLines={item.ansi.totalLines}
           totalBytes={item.ansi.totalBytes}
         />
+      </box>
+    );
+  }
+  if (item.subagentSummary) {
+    const summary = item.subagentSummary;
+    const toneColor =
+      summary.tone === 'success'
+        ? C.green
+        : summary.tone === 'error'
+          ? C.red
+          : C.yellow;
+    return (
+      <box paddingLeft={STATUS_INDICATOR_WIDTH + 1} flexDirection="row">
+        <text fg={toneColor}>{`${summary.glyph} `}</text>
+        <text fg={C.text} attributes={1}>
+          {sanitizeTerminalText(summary.prefix)}
+        </text>
+        <text fg={C.dim} {...selectionProps()}>
+          {sanitizeTerminalText(truncateResultDisplayChars(summary.rest))}
+        </text>
       </box>
     );
   }
@@ -334,8 +639,8 @@ function TaskCard({
   return (
     <box flexDirection="column">
       <box flexDirection="row">
-        <text fg={item.done ? C.green : C.text} attributes={1}>
-          {item.done ? TOOL_GLYPH_DONE : TOOL_GLYPH_RUNNING}
+        <text fg={C.text} attributes={1}>
+          {TOOL_GLYPH_RUNNING}
         </text>
         <text fg={C.text} attributes={1}>
           {` ${sanitizeTerminalText(item.name)}`}
@@ -343,7 +648,6 @@ function TaskCard({
         {item.description ? (
           <text fg={C.dim}> {sanitizeTerminalText(item.description)}</text>
         ) : null}
-        {item.stats ? <text fg={C.dim}>{` · ${item.stats}`}</text> : null}
       </box>
       {item.progress.map((line, i) => (
         <text key={`${i}`} fg={C.dim} {...selectionProps()}>
@@ -354,7 +658,6 @@ function TaskCard({
   );
 }
 
-const TOOL_GLYPH_DONE = ICON.CHECK;
 const TOOL_GLYPH_RUNNING = ICON.CIRCLE_LEFT_HALF;
 
 function CompactionRow({
@@ -385,18 +688,17 @@ function CompactionRow({
 
 function ErrorRow({ text, hint }: { text: string; hint?: string }) {
   return (
-    <box flexDirection="column">
-      <box flexDirection="row">
-        <text fg={C.red}>{`${ICON.CROSS} `}</text>
-        <text fg={C.red} {...selectionProps()}>
-          {sanitizeTerminalText(text)}
-        </text>
-      </box>
-      {hint ? (
-        <text fg={C.accent} {...selectionProps()}>
-          {sanitizeTerminalText(hint)}
-        </text>
-      ) : null}
+    <box flexDirection="row">
+      {/* ink's error prefix is a literal ✕, not the shared ICON.CROSS. */}
+      <text fg={C.red} flexShrink={0}>
+        {'✕ '}
+      </text>
+      <text fg={C.red} {...selectionProps()}>
+        {sanitizeTerminalText(text)}
+        {hint ? (
+          <span fg={C.dim}>{` (${sanitizeTerminalText(hint)})`}</span>
+        ) : null}
+      </text>
     </box>
   );
 }
@@ -461,7 +763,7 @@ function GoalCard({
   if (view.state === 'cleared') {
     return <text fg={C.dim}>Goal cleared</text>;
   }
-  const color = GOAL_COLOR[view.color];
+  const color = goalColor(view.color);
   return (
     <box flexDirection="column">
       <box flexDirection="row">
@@ -498,7 +800,7 @@ function LegacyGoalCard({ legacy }: { legacy: LiveGoalLegacyData }) {
       </box>
     );
   }
-  const color = GOAL_COLOR[view.color];
+  const color = goalColor(view.color);
   return (
     <box flexDirection="column">
       <box flexDirection="row">
@@ -510,6 +812,261 @@ function LegacyGoalCard({ legacy }: { legacy: LiveGoalLegacyData }) {
       <text fg={C.dim}>{`  ${sanitizeTerminalText(view.condition)}`}</text>
       {view.lastCheck ? (
         <text fg={C.dim}>{`  ${sanitizeTerminalText(view.lastCheck)}`}</text>
+      ) : null}
+    </box>
+  );
+}
+
+// ink AwayRecapMessage parity: `※` gutter + "recap:" label, all dim; the
+// recap scrolls with the conversation instead of pinning above the input.
+function AwayRecapRow({ text }: { text: string }) {
+  return (
+    <box flexDirection="row">
+      <text fg={C.dim} flexShrink={0}>{`${ICON.REFERENCE} `}</text>
+      <text fg={C.dim} attributes={1} flexShrink={0}>
+        {'recap: '}
+      </text>
+      <text fg={C.dim} attributes={4} {...selectionProps()}>
+        {sanitizeTerminalText(text)}
+      </text>
+    </box>
+  );
+}
+
+// ink UserShellMessage parity: `$ ` prefix (ink's link color → accent) +
+// the command text in the primary color.
+function UserShellRow({ text }: { text: string }) {
+  return (
+    <box flexDirection="row">
+      <text fg={C.accent}>{'$ '}</text>
+      <text fg={C.text} {...selectionProps()}>
+        {sanitizeTerminalText(text)}
+      </text>
+    </box>
+  );
+}
+
+// ink AdvisorMessage parity: `/advisor · model` header + the review body as
+// markdown. The ink card's border is dropped — the transcript's other cards
+// separate with indentation, not boxes.
+function AdvisorRow({ text, model }: { text: string; model: string }) {
+  return (
+    <box flexDirection="column">
+      <box flexDirection="row">
+        <text fg={C.accent} attributes={1}>
+          {'/advisor'}
+        </text>
+        <text fg={C.accent}>{` · ${sanitizeTerminalText(model)}`}</text>
+      </box>
+      <box paddingLeft={2}>
+        <markdown
+          content={sanitizeTerminalText(text)}
+          syntaxStyle={SYNTAX}
+          streaming={false}
+        />
+      </box>
+    </box>
+  );
+}
+
+// ink getArenaStatusLabel colors mapped onto the live palette (the helper
+// returns ink theme hexes, which would not track the OpenTUI theme swap).
+function arenaStatusColor(status: AgentStatus): string {
+  switch (status) {
+    case AgentStatus.IDLE:
+    case AgentStatus.COMPLETED:
+      return C.green;
+    case AgentStatus.CANCELLED:
+      return C.yellow;
+    case AgentStatus.FAILED:
+      return C.red;
+    default:
+      return C.dim;
+  }
+}
+
+// ink ArenaAgentCard parity: status line + tokens + tool calls (+ error).
+function ArenaAgentRow({ agent }: { agent: ArenaAgentCardData }) {
+  const { icon, text } = getArenaStatusLabel(agent.status);
+  const failed = agent.failedToolCalls > 0;
+  return (
+    <box flexDirection="column">
+      <text fg={arenaStatusColor(agent.status)}>
+        {`${icon} ${sanitizeTerminalText(agent.label)} · ${text} · ${formatDuration(agent.durationMs)}`}
+      </text>
+      <text fg={C.dim}>
+        {`  Tokens: ${agent.totalTokens.toLocaleString()} (in ${agent.inputTokens.toLocaleString()}, out ${agent.outputTokens.toLocaleString()})`}
+      </text>
+      <text fg={C.dim}>
+        {`  Tool Calls: ${agent.toolCalls}`}
+        {failed ? ' (' : null}
+        {failed ? (
+          <span fg={C.green}>{`✓ ${agent.successfulToolCalls}`}</span>
+        ) : null}
+        {failed ? (
+          <span fg={C.red}>{` ✕ ${agent.failedToolCalls}`}</span>
+        ) : null}
+        {failed ? ')' : null}
+      </text>
+      {agent.error ? (
+        <text fg={C.red}>{`  ${sanitizeTerminalText(agent.error)}`}</text>
+      ) : null}
+    </box>
+  );
+}
+
+// ink ArenaSessionCard parity, mirrored helpers (the ink component keeps
+// them module-private): diff counts, file lists, and the common/label-only
+// file groups compared across agents.
+function arenaDiffStats(agent: ArenaAgentCardData): {
+  additions: number;
+  deletions: number;
+} {
+  if (agent.diffSummary) {
+    return {
+      additions: agent.diffSummary.additions,
+      deletions: agent.diffSummary.deletions,
+    };
+  }
+  if (!agent.diff) return { additions: 0, deletions: 0 };
+  let additions = 0;
+  let deletions = 0;
+  for (const line of agent.diff.split('\n')) {
+    if (line.startsWith('+') && !line.startsWith('+++')) additions++;
+    else if (line.startsWith('-') && !line.startsWith('---')) deletions++;
+  }
+  return { additions, deletions };
+}
+
+function arenaAgentFiles(agent: ArenaAgentCardData): string[] {
+  return (
+    agent.modifiedFiles ?? agent.diffSummary?.files.map((f) => f.path) ?? []
+  );
+}
+
+const ARENA_MAX_FILE_ITEMS = 4;
+
+function arenaFileList(files: string[]): string {
+  if (files.length === 0) return 'none';
+  const visible = files.slice(0, ARENA_MAX_FILE_ITEMS);
+  const suffix =
+    files.length > ARENA_MAX_FILE_ITEMS
+      ? `, +${files.length - ARENA_MAX_FILE_ITEMS} more`
+      : '';
+  return `${visible.join(', ')}${suffix}`;
+}
+
+function arenaFileGroups(
+  agents: ArenaAgentCardData[],
+): Array<{ label: string; files: string[] }> {
+  const counts = new Map<string, number>();
+  for (const agent of agents) {
+    for (const file of new Set(arenaAgentFiles(agent))) {
+      counts.set(file, (counts.get(file) ?? 0) + 1);
+    }
+  }
+  const common = [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([file]) => file)
+    .sort();
+  const groups = [{ label: 'common', files: common }];
+  for (const agent of agents) {
+    const unique = arenaAgentFiles(agent)
+      .filter((file) => counts.get(file) === 1)
+      .sort();
+    if (unique.length > 0) {
+      groups.push({ label: `${agent.label}-only`, files: unique });
+    }
+  }
+  return groups;
+}
+
+function ArenaSessionRow({ item }: { item: LiveArenaSessionItem }) {
+  const { sessionStatus, agents } = item;
+  const comparing = sessionStatus === 'idle' || sessionStatus === 'completed';
+  const title = comparing
+    ? 'Arena Comparison Summary'
+    : sessionStatus === 'cancelled'
+      ? 'Arena Cancelled'
+      : 'Arena Failed';
+  const branch = (index: number, total: number) =>
+    index === total - 1 ? '└─' : '├─';
+  return (
+    <box flexDirection="column">
+      <text fg={C.text} attributes={1}>
+        {title}
+      </text>
+      {comparing ? (
+        <>
+          <text fg={C.text} attributes={1}>
+            {'Status Summary:'}
+          </text>
+          {agents.map((agent, index) => {
+            const { text } = getArenaStatusLabel(agent.status);
+            return (
+              <text key={agent.label} fg={C.dim}>
+                {`  ${branch(index, agents.length)} ${sanitizeTerminalText(agent.label)}: `}
+                <span fg={arenaStatusColor(agent.status)}>{text}</span>
+              </text>
+            );
+          })}
+          <text fg={C.text} attributes={1}>
+            {'Files Modified:'}
+          </text>
+          {arenaFileGroups(agents).map((group, index, groups) => (
+            <text key={group.label} fg={C.dim}>
+              {`  ${branch(index, groups.length)} ${sanitizeTerminalText(group.label)}: `}
+              <span fg={C.text}>
+                {sanitizeTerminalText(arenaFileList(group.files))}
+              </span>
+            </text>
+          ))}
+          <text fg={C.text} attributes={1}>
+            {'Approach Summary:'}
+          </text>
+          {agents.map((agent, index) => {
+            const stats = arenaDiffStats(agent);
+            const files = arenaAgentFiles(agent).length;
+            const summary =
+              agent.approachSummary ?? 'No approach summary available.';
+            return (
+              <text key={agent.label} fg={C.text}>
+                {`  ${branch(index, agents.length)} ${sanitizeTerminalText(agent.label)}: ${sanitizeTerminalText(summary)} `}
+                <span fg={C.dim}>
+                  {`(${files} ${files === 1 ? 'file' : 'files'}, `}
+                </span>
+                <span fg={C.green}>{`+${stats.additions}`}</span>
+                <span fg={C.dim}> </span>
+                <span fg={C.red}>{`-${stats.deletions}`}</span>
+                <span fg={C.dim}>{' lines, '}</span>
+                <span fg={C.accent}>{agent.toolCalls}</span>
+                <span fg={C.dim}>
+                  {agent.toolCalls === 1 ? ' tool call)' : ' tool calls)'}
+                </span>
+              </text>
+            );
+          })}
+          <text fg={C.text} attributes={1}>
+            {'Token Efficiency:'}
+          </text>
+          {agents.map((agent, index) => (
+            <text key={agent.label} fg={C.dim}>
+              {`  ${branch(index, agents.length)} ${sanitizeTerminalText(agent.label)}: `}
+              <span fg={C.text}>
+                {`${agent.outputTokens.toLocaleString()} tokens · runtime ${formatDuration(agent.durationMs)}`}
+              </span>
+            </text>
+          ))}
+        </>
+      ) : null}
+      {comparing ? (
+        <text fg={C.dim}>
+          {'Run '}
+          <span fg={C.accent}>{'/arena select'}</span>
+          {sessionStatus === 'idle'
+            ? ' to view detailed diff or pick a winner.'
+            : ' to pick a winner.'}
+        </text>
       ) : null}
     </box>
   );

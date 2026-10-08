@@ -137,11 +137,11 @@ export default {
   'Search:': 'Поиск:',
   'type to filter…': 'введите для фильтрации…',
   'No skills are currently available.': 'Сейчас навыков нет.',
-  'All available skills are locked at a higher scope (see below).':
-    'Все доступные навыки заблокированы на более высоком уровне (см. ниже).',
   'No skills match the search.': 'Нет навыков, соответствующих поиску.',
-  'Locked by higher-scope settings (cannot toggle here):':
-    'Заблокированы настройками более высокого уровня (здесь переключить нельзя):',
+  'Locked by settings entries you cannot toggle here:':
+    'Заблокированы записями настроек (здесь переключить нельзя):',
+  '{{count}} locked not shown':
+    'Не показано заблокированных навыков: {{count}}',
   'higher scope': 'более высокий уровень',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [заблокировано: {{scope}}]',
@@ -194,6 +194,8 @@ export default {
     'Откат не затрагивает файлы, отредактированные вручную или с помощью shell-команд.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Не удаётся откатиться к сжатому ходу. Попробуйте более недавний ход.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    'Не удаётся откатить диалог к этому ходу: он больше не соответствует истории модели (например, после повторной попытки). Попробуйте более недавний ход.',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'Восстановление файлов недоступно для этого хода (нет записанных изменений или ход был до текущей сессии).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -429,6 +431,7 @@ export default {
   'Hide Window Title': 'Скрыть заголовок окна',
   'Show Status in Title': 'Показывать статус в заголовке',
   'Hide Tips': 'Скрыть подсказки',
+  'Show Tool Call Arguments': 'Показывать аргументы вызовов инструментов',
   'Show Line Numbers in Code': 'Показывать номера строк в коде',
   'Show Citations': 'Показывать цитаты',
   'Custom Witty Phrases': 'Пользовательские остроумные фразы',
@@ -577,6 +580,10 @@ export default {
     'Это расширение установит следующие навыки:',
   'This extension will install the following subagents:':
     'Это расширение установит следующие подагенты:',
+  'This extension will install the following workflows (JavaScript scripts that can start subagents):':
+    'Это расширение установит следующие рабочие процессы (скрипты JavaScript, которые могут запускать подагентов):',
+  'These workflow scripts changed since the installed version: {{names}}.':
+    'Эти скрипты рабочих процессов изменились по сравнению с установленной версией: {{names}}.',
   'Installation cancelled for "{{name}}".': 'Установка "{{name}}" отменена.',
   'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
     'Вы устанавливаете расширение от {{originSource}}. Некоторые функции могут работать не идеально с Qwen Code.',
@@ -641,6 +648,7 @@ export default {
   'Context files:': 'Контекстные файлы:',
   'Skills:': 'Навыки:',
   'Agents:': 'Агенты:',
+  'Workflows:': 'Рабочие процессы:',
   'MCP servers:': 'MCP servers:',
   'Link extension failed to install.':
     'Не удалось установить связанное расширение.',
@@ -739,6 +747,12 @@ export default {
   '{{count}} hooks configured': '{{count}} хуков настроено',
   'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
     'Это меню только для чтения. Чтобы добавить или изменить хуки, отредактируйте settings.json напрямую или спросите Qwen Code.',
+  'Reopen this menu to reload hook definitions.':
+    'Откройте это меню повторно, чтобы перезагрузить определения хуков.',
+  'Hook controls and HTTP security settings require a restart.':
+    'Изменения параметров управления хуками и настроек безопасности HTTP требуют перезапуска.',
+  'Failed to reload hook definitions: {{error}}':
+    'Не удалось перезагрузить определения хуков: {{error}}',
   'Enter to select · Esc to cancel': 'Enter для выбора · Esc для отмены',
   // Hooks - Detail Step
   'Exit codes:': 'Коды выхода:',
@@ -810,8 +824,8 @@ export default {
     'Ввод в команду — это JSON с tool_name, tool_input, tool_use_id, error, error_type, is_interrupt и is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Ввод в команду — это JSON с сообщением уведомления и типом.',
-  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
-    'Ввод команды — JSON с полем "prompt" (текущий промпт, отправляемый модели) и необязательным "submitted_prompt" (текстовая проекция поддерживаемого интерактивного TUI).',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the text projection captured at a supported submission boundary).':
+    'Ввод команды — JSON с полем "prompt" (текущий промпт, отправляемый модели) и необязательным "submitted_prompt" (текстовая проекция, захваченная на поддерживаемой границе отправки).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Ввод в команду — это JSON с command_name, command_args и развернутым текстом промпта.',
   'Input to command is JSON with session start source.':
@@ -1116,6 +1130,11 @@ export default {
   'Clear Authentication': 'Очистить аутентификацию',
   disabled: 'отключен',
   enabled: 'включен',
+  'disabled (bare mode)': 'отключен (минимальный режим)',
+  'disabled (safe mode)': 'отключен (безопасный режим)',
+  'disabled (disableAllHooks)': 'отключен (disableAllHooks)',
+  'disabled (folder not trusted)': 'отключен (папка не доверенная)',
+  'disabled (turned off for this session)': 'отключен (выключен в этой сессии)',
   'Server:': 'Сервер:',
   Reconnect: 'Переподключить',
   'View tools': 'Просмотреть инструменты',
@@ -1482,6 +1501,11 @@ export default {
   'No tasks currently running': 'Нет запущенных задач',
   'No entry to show.': 'Нет записи для отображения.',
   'needs approval': 'требует подтверждения',
+  'Large workflow': 'Большой workflow',
+  'Large workflow: {{agents}} agents scheduled (warning threshold {{cap}}).':
+    'Большой workflow: запланировано агентов: {{agents}} (порог предупреждения {{cap}}).',
+  'Large workflow: ~{{tokens}} output tokens projected (warning threshold {{cap}}).':
+    'Большой workflow: ожидается ~{{tokens}} выходных токенов (порог предупреждения {{cap}}).',
   'rejected — edit config to re-approve':
     'отклонено — измените конфигурацию для повторного подтверждения',
   'Background agent needs approval': 'Фоновый агент требует подтверждения',
@@ -1781,6 +1805,10 @@ export default {
     'Контекст превышает лимит! Используйте /compress или /clear для уменьшения.',
   'No API response yet. Send a message to see actual usage.':
     'Пока нет ответа от API. Отправьте сообщение, чтобы увидеть фактическое использование.',
+  'Estimated usage, including the conversation':
+    'Оценка использования с учётом беседы',
+  'No provider usage yet. These are local estimates, including the conversation.':
+    'Данных об использовании от провайдера пока нет. Это локальные оценки с учётом беседы.',
   'Estimated pre-conversation overhead':
     'Оценочные накладные расходы перед беседой',
   'Context window': 'Контекстное окно',
@@ -1795,6 +1823,9 @@ export default {
   'Memory files': 'Файлы памяти',
   Skills: 'Навыки',
   Messages: 'Сообщения',
+  'Startup context': 'Стартовый контекст',
+  Unattributed: 'Не распределено',
+  'Cached prefix': 'Кэшированный префикс',
   'Run /context detail for per-item breakdown.':
     'Выполните /context detail для детализации по элементам.',
   active: 'активно',
@@ -2227,6 +2258,8 @@ export default {
   '{{count}} skills': '{{count}} skills',
   '{{count}} agent': '{{count}} agent',
   '{{count}} agents': '{{count}} agents',
+  '{{count}} workflow': '{{count}} workflow',
+  '{{count}} workflows': '{{count}} workflows',
   '{{count}} hook': '{{count}} hook',
   '{{count}} hooks': '{{count}} hooks',
   '{{count}} extension MCP server': '{{count}} extension MCP server',

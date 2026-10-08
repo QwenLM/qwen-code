@@ -71,6 +71,15 @@ export function extractTodosFromToolCall(
     return todos.length > 0 || isTodoTool ? todos : undefined;
   }
 
+  const args = getRecord(tool.args);
+  const argsEntries = Array.isArray(args?.['entries'])
+    ? args['entries']
+    : undefined;
+  if (argsEntries) {
+    const todos = parseTodoItemsFromEntries(argsEntries);
+    return todos.length > 0 || isTodoTool ? todos : undefined;
+  }
+
   const outputTodos = getTodoArray(rawOutput);
   if (outputTodos) {
     const todos = parseTodoItemsFromEntries(outputTodos);

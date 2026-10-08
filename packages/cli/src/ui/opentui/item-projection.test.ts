@@ -22,6 +22,7 @@ import {
   projectContextUsage,
   projectDoctor,
   projectExtensionsList,
+  projectItemToStreamEvent,
   projectMcpStatus,
   projectModelStats,
   projectQuit,
@@ -31,9 +32,14 @@ import {
   projectSummary,
   projectToolStats,
   projectToolsList,
+  type ItemProjectionContext,
 } from './item-projection.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import type {
+  ContextCategoryBreakdown,
+  HistoryItemWithoutId,
+} from '../types.js';
 
 // R1-93 tests the cached-items upgrade from the DISCONNECTED base state;
 // the real registry reports unknown servers as disconnected anyway, but the
@@ -168,9 +174,49 @@ describe('projectSummary', () => {
   });
 });
 
+/**
+ * Pins the producer's arithmetic on a fixture, so editing one row cannot leave
+ * behind a payload no producer can emit (#12235 R2-7). `ui/types.ts` documents
+ * both identities: the category rows — including the `unattributed` residual,
+ * excluding `cachedTokens`, which is an annotation spanning several categories
+ * — account for the request, and `freeSpace` is what is left of the window
+ * after that content and the autocompact buffer. With no provider total the
+ * estimated rows are themselves the content total, so the free-space identity
+ * keys on the rows instead of on `totalTokens`.
+ */
+function expectCoherentBreakdown(item: {
+  totalTokens: number;
+  contextWindowSize: number;
+  breakdown: Partial<ContextCategoryBreakdown>;
+}): void {
+  const { breakdown } = item;
+  const rows =
+    (breakdown.systemPrompt ?? 0) +
+    (breakdown.builtinTools ?? 0) +
+    (breakdown.mcpTools ?? 0) +
+    (breakdown.memoryFiles ?? 0) +
+    (breakdown.skills ?? 0) +
+    (breakdown.startupContext ?? 0) +
+    (breakdown.messages ?? 0) +
+    (breakdown.unattributed ?? 0);
+  const hasProviderTotal = item.totalTokens > 0;
+  if (hasProviderTotal) {
+    expect(rows).toBe(item.totalTokens);
+  }
+  // The producer clamps at 0, so an over-full window reports no free space.
+  expect(breakdown.freeSpace).toBe(
+    Math.max(
+      0,
+      item.contextWindowSize -
+        (hasProviderTotal ? item.totalTokens : rows) -
+        (breakdown.autocompactBuffer ?? 0),
+    ),
+  );
+}
+
 describe('projectContextUsage', () => {
   it('prints the usage table with categories', () => {
-    const text = projectContextUsage({
+    const item = {
       modelName: 'qwen3-max',
       totalTokens: 5000,
       contextWindowSize: 100000,
@@ -186,7 +232,9 @@ describe('projectContextUsage', () => {
       },
       isEstimated: false,
       showDetails: false,
-    });
+    };
+    const text = projectContextUsage(item);
+    expectCoherentBreakdown(item);
     expect(text).toContain('Context Usage');
     expect(text).toContain('Model: qwen3-max Context window: 100.0k tokens');
     expect(text).toContain('█ Used 5.0k tokens (5.0%)');
@@ -194,6 +242,129 @@ describe('projectContextUsage', () => {
     expect(text).toContain('Run /context detail for per-item breakdown.');
     // MCP tools row is skipped at zero.
     expect(text).not.toContain('MCP tools');
+    // Parity with views/ContextUsage (#12033): the three optional rows are
+    // absent from this breakdown, so none of them may render. `totalTokens` is
+    // nonzero on purpose — `Cached prefix` and `Unattributed` are total-gated,
+    // so at 0 they cannot render with or without their own guard, and only the
+    // widened `startupContext` skip would be witnessed. This is also the shape
+    // of an older daemon payload; the pre-first-turn view is pinned below.
+    expect(text).not.toContain('Cached prefix');
+    expect(text).not.toContain('Startup context');
+    expect(text).not.toContain('Unattributed');
+  });
+
+  it('prints the cached prefix, startup context and unattributed rows when present (#12033)', () => {
+    const item = {
+      modelName: 'qwen3-max',
+      totalTokens: 5000,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        // Rows sum to totalTokens, freeSpace is window − total − buffer, and
+        // the cached prefix is part of the total (ui/types.ts invariant).
+        messages: 900,
+        freeSpace: 94000,
+        autocompactBuffer: 1000,
+        startupContext: 1200,
+        unattributed: 900,
+        cachedTokens: 3000,
+      },
+      isEstimated: false,
+      showDetails: false,
+    };
+    const text = projectContextUsage(item);
+    expectCoherentBreakdown(item);
+    expect(text).toContain('█ Cached prefix 3.0k tokens (3.0%)');
+    expect(text).toContain('█ Startup context 1.2k tokens (1.2%)');
+    expect(text).toContain('█ Unattributed 900 tokens (0.9%)');
+  });
+
+  it('renders the pre-first-turn estimate: startup context shown, no messages yet (#12235)', () => {
+    // The producer's shape before any request: no provider total, a nonzero
+    // startup prelude, and no conversation. `Startup context` is the one
+    // optional row that is not total-gated.
+    const item = {
+      modelName: 'qwen3-max',
+      totalTokens: 0,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 300,
+        startupContext: 1200,
+        messages: 0,
+        freeSpace: 95500,
+        autocompactBuffer: 1000,
+      },
+      isEstimated: true,
+      showDetails: false,
+    };
+    const text = projectContextUsage(item);
+    expectCoherentBreakdown(item);
+    expect(text).toContain('No API response yet.');
+    expect(text).toContain('█ Startup context 1.2k tokens (1.2%)');
+    expect(text).not.toContain('Messages');
+  });
+
+  it('shows an estimated history as messages when the provider total is gone (#12235)', () => {
+    // After `/model`, `/restore` or a resume the provider total is 0 while the
+    // history is intact; that estimate drives the tier, so it must be visible.
+    const item = {
+      modelName: 'qwen3-max',
+      totalTokens: 0,
+      contextWindowSize: 100000,
+      breakdown: {
+        systemPrompt: 1000,
+        builtinTools: 800,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        messages: 40000,
+        freeSpace: 57000,
+        autocompactBuffer: 1000,
+      },
+      isEstimated: true,
+      showDetails: false,
+    };
+    const text = projectContextUsage(item);
+    expectCoherentBreakdown(item);
+    expect(text).toContain('█ Messages 40.0k tokens (40.0%)');
+    expect(text).toContain('Estimated usage, including the conversation');
+    expect(text).not.toContain('No API response yet.');
+    expect(text).not.toContain('pre-conversation');
+  });
+
+  it('heads the categories with "Usage by category" only when a provider total exists (#12606)', () => {
+    // Parity of views/ContextUsage and the text panel: without a provider
+    // total the estimate caption heads the rows, with or without a history.
+    const breakdown = {
+      systemPrompt: 1000,
+      builtinTools: 800,
+      mcpTools: 0,
+      memoryFiles: 200,
+      skills: 0,
+      freeSpace: 57000,
+      autocompactBuffer: 1000,
+    };
+    const project = (totalTokens: number, messages: number) =>
+      projectContextUsage({
+        modelName: 'qwen3-max',
+        totalTokens,
+        contextWindowSize: 100000,
+        breakdown: { ...breakdown, messages },
+        isEstimated: totalTokens <= 0,
+        showDetails: false,
+      });
+
+    expect(project(0, 0)).not.toContain('Usage by category');
+    expect(project(0, 40000)).not.toContain('Usage by category');
+    expect(project(42000, 40000)).toContain('Usage by category');
   });
 
   it('shows the no-API-response notice before the first turn', () => {
@@ -277,6 +448,32 @@ describe('projectContextUsage', () => {
     expect(unloadedIdx).toBeGreaterThan(loadedIdx);
     expect(text).toContain('+400 body');
     expect(text).not.toContain('Run /context detail');
+  });
+
+  it('orders skill rows by size whether `loaded` is false or absent (#12235)', () => {
+    // `loaded?: boolean` is optional on the wire type, so a payload from an
+    // older daemon omits it. Absent and `false` are the same state — not
+    // loaded — so the pair must order by token cost, not by payload order.
+    const small = { name: 'small-skill', tokens: 10, loaded: false };
+    const big = { name: 'big-skill', tokens: 50 };
+    for (const skills of [
+      [small, big],
+      [big, small],
+    ]) {
+      const text = projectContextUsage({
+        modelName: 'm',
+        totalTokens: 5000,
+        contextWindowSize: 100000,
+        breakdown: {},
+        isEstimated: false,
+        showDetails: true,
+        skills,
+      });
+      expect(text).toContain('big-skill');
+      expect(text.indexOf('big-skill')).toBeLessThan(
+        text.indexOf('small-skill'),
+      );
+    }
   });
 });
 
@@ -689,5 +886,224 @@ describe('dispatcher coverage for compression/stats items (R1-7)', () => {
     );
     expect(statsText).toContain('Session Stats');
     expect(statsText).toContain('Session duration: 9m');
+  });
+});
+
+describe('projectItemToStreamEvent (U-28 project-on-write)', () => {
+  const ctx: ItemProjectionContext = {};
+
+  it('projects the invocation echo as an unsent user row', () => {
+    expect(
+      projectItemToStreamEvent(
+        { type: 'user', text: '/stats', sentToModel: false },
+        ctx,
+      ),
+    ).toEqual({ type: 'user', text: '/stats', sentToModel: false });
+    expect(
+      projectItemToStreamEvent(
+        { type: 'user', text: 'x', sentToModel: false, promptId: 'p1' },
+        ctx,
+      ),
+    ).toEqual({ type: 'user', text: 'x', sentToModel: false, promptId: 'p1' });
+  });
+
+  it("keeps the info row's link footer (InfoMessage parity)", () => {
+    expect(
+      projectItemToStreamEvent({ type: 'info', text: 'Report filed.' }, ctx),
+    ).toEqual({ type: 'info', text: 'Report filed.' });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'info',
+          text: 'Report filed.',
+          linkUrl: 'https://example.com/1',
+          linkText: 'issue',
+        },
+        ctx,
+      ),
+    ).toEqual({
+      type: 'info',
+      text: 'Report filed.\nissue: https://example.com/1',
+    });
+  });
+
+  it('maps warning/success/error onto their live kinds', () => {
+    expect(
+      projectItemToStreamEvent({ type: 'warning', text: 'w' }, ctx),
+    ).toEqual({ type: 'warning', text: 'w' });
+    // Documented divergence: ink's green SuccessMessage renders as the info
+    // row — the live model has no success kind (arenaCommand is the producer).
+    expect(
+      projectItemToStreamEvent({ type: 'success', text: 's' }, ctx),
+    ).toEqual({ type: 'info', text: 's' });
+    expect(
+      projectItemToStreamEvent({ type: 'error', text: 'e', hint: 'h' }, ctx),
+    ).toEqual({ type: 'error', text: 'e', hint: 'h' });
+  });
+
+  it('maps the goal pair onto the live-model card kinds', () => {
+    const snapshot = { id: 'g1' } as never;
+    expect(
+      projectItemToStreamEvent(
+        { type: 'goal_state', snapshot, cause: 'create' },
+        ctx,
+      ),
+    ).toEqual({ type: 'goal', snapshot, cause: 'create' });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'goal_status',
+          kind: 'set',
+          condition: 'tests pass',
+          iterations: 2,
+          durationMs: 100,
+          lastReason: 'still failing',
+        },
+        ctx,
+      ),
+    ).toEqual({
+      type: 'goal-legacy',
+      kind: 'set',
+      condition: 'tests pass',
+      iterations: 2,
+      durationMs: 100,
+      lastReason: 'still failing',
+    });
+  });
+
+  it('maps the stop-hook pair and redacts the blocked prompt', () => {
+    expect(
+      projectItemToStreamEvent(
+        { type: 'stop_hook_system_message', message: 'Stop says: no' },
+        ctx,
+      ),
+    ).toEqual({ type: 'stop-hook-message', message: 'Stop says: no' });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'stop_hook_loop',
+          iterationCount: 1,
+          stopHookCount: 2,
+          reasons: ['a', 'b'],
+        },
+        ctx,
+      ),
+    ).toEqual({
+      type: 'info',
+      text: 'Ran 2 stop hooks\n  ⎿  Stop hook error: b',
+    });
+    const blocked = projectItemToStreamEvent(
+      {
+        type: 'user_prompt_submit_blocked',
+        reason: 'denied',
+        originalPrompt: 'sk-abcdefghijklmnopqrstuvw run',
+      },
+      ctx,
+    );
+    expect(blocked?.type).toBe('warning');
+    const blockedText = (blocked as { text: string }).text;
+    expect(blockedText).toContain(
+      '✕ UserPromptSubmit operation blocked by hook:\ndenied',
+    );
+    expect(blockedText).not.toContain('sk-abcdefghijklmnopqrstuvw');
+  });
+
+  it('routes the special kinds through projectSpecialItemText as info rows', () => {
+    expect(
+      projectItemToStreamEvent({ type: 'about', systemInfo: {} as never }, ctx),
+    ).toEqual({ type: 'info', text: expect.stringContaining('Status') });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'compression',
+          compression: {
+            isPending: true,
+            originalTokenCount: null,
+            newTokenCount: null,
+            compressionStatus: null,
+          },
+        },
+        ctx,
+      ),
+    ).toEqual({ type: 'info', text: 'Compressing chat history' });
+    expect(
+      projectItemToStreamEvent({ type: 'stats', duration: '9m' }, ctx)?.type,
+    ).toBe('info');
+  });
+
+  it('no-ops stream-duplicated kinds and kinds with no row shape here', () => {
+    const noOps = [
+      { type: 'tool_group', tools: [] },
+      { type: 'retry_countdown', attempt: 1 },
+      { type: 'vision_notice', text: 'n' },
+      { type: 'gemini', text: 'g' },
+      { type: 'gemini_content', text: 'g' },
+      { type: 'gemini_thought', text: 'g' },
+      { type: 'gemini_thought_content', text: 'g' },
+      { type: 'help', timestamp: new Date() },
+      { type: 'notification', text: 'n' },
+      { type: 'tool_use_summary', text: 't' },
+      { type: 'diff_stats', text: 'd' },
+    ] as unknown as HistoryItemWithoutId[];
+    for (const item of noOps) {
+      expect(projectItemToStreamEvent(item, ctx)).toBeNull();
+    }
+  });
+
+  it('carries the user_shell command row structurally (U-33)', () => {
+    expect(
+      projectItemToStreamEvent({ type: 'user_shell', text: 'ls -la' }, ctx),
+    ).toEqual({ type: 'user-shell', text: 'ls -la' });
+  });
+
+  it('carries the four dedicated-component kinds structurally (U-34)', () => {
+    expect(
+      projectItemToStreamEvent(
+        { type: 'away_recap', text: ' Recap body ' },
+        ctx,
+      ),
+    ).toEqual({ type: 'away-recap', text: ' Recap body ' });
+    expect(
+      projectItemToStreamEvent(
+        { type: 'advisor', text: 'Looks good', model: 'qwen3-max' },
+        ctx,
+      ),
+    ).toEqual({ type: 'advisor', text: 'Looks good', model: 'qwen3-max' });
+    const agent = {
+      label: 'left',
+      status: 'completed',
+      durationMs: 1200,
+      totalTokens: 10,
+      inputTokens: 4,
+      outputTokens: 6,
+      toolCalls: 2,
+      successfulToolCalls: 2,
+      failedToolCalls: 0,
+      rounds: 1,
+    };
+    expect(
+      projectItemToStreamEvent(
+        { type: 'arena_agent_complete', agent } as never,
+        ctx,
+      ),
+    ).toEqual({ type: 'arena-agent', agent });
+    expect(
+      projectItemToStreamEvent(
+        {
+          type: 'arena_session_complete',
+          sessionStatus: 'completed',
+          task: 'do it',
+          totalDurationMs: 2000,
+          agents: [agent],
+        } as never,
+        ctx,
+      ),
+    ).toEqual({
+      type: 'arena-session',
+      sessionStatus: 'completed',
+      task: 'do it',
+      totalDurationMs: 2000,
+      agents: [agent],
+    });
   });
 });

@@ -31,6 +31,7 @@ afterEach(() => {
   container?.remove();
   container = null;
   root = null;
+  vi.useRealTimers();
 });
 
 function mount(
@@ -143,6 +144,24 @@ describe('ChatContextHeader', () => {
     ).toBeNull();
   });
 
+  it('opens context usage independently of token usage', () => {
+    const onOpenContextUsage = vi.fn();
+    const onOpenTokenUsage = vi.fn();
+    const view = mount({ onOpenContextUsage, onOpenTokenUsage });
+    act(() => {
+      view
+        .querySelector<HTMLButtonElement>('[aria-label="Context Usage"]')!
+        .click();
+    });
+    expect(onOpenContextUsage).toHaveBeenCalledOnce();
+    expect(onOpenTokenUsage).not.toHaveBeenCalled();
+  });
+
+  it('hides context usage when its callback is omitted', () => {
+    const view = mount({ onOpenTokenUsage: vi.fn() });
+    expect(view.querySelector('[aria-label="Context Usage"]')).toBeNull();
+  });
+
   it('shows the Local Control QR entry ahead of the other actions', () => {
     const view = mount({
       rightPanelAvailable: true,
@@ -157,5 +176,35 @@ describe('ChatContextHeader', () => {
       'Toggle environment information',
       'Toggle right panel',
     ]);
+  });
+
+  it.each([
+    [
+      { workspaceName: 'api', workspacePath: '/work/api' },
+      'Workspace: api',
+      'api/work/api',
+    ],
+    [{ workspaceName: 'api' }, 'Workspace: api', 'api'],
+    [{}, 'No workspace', 'No workspace'],
+  ])('reveals the workspace details on hover: %j', (props, label, text) => {
+    vi.useFakeTimers();
+    const view = mount(props);
+    const icon = view.querySelector<HTMLElement>(
+      '[data-testid="chat-header-workspace"]',
+    )!;
+    expect(icon.getAttribute('aria-label')).toBe(label);
+    expect(icon.querySelector('.lucide-folder-closed')).not.toBeNull();
+    expect(document.querySelector('[role="tooltip"]')).toBeNull();
+    act(() => {
+      icon.dispatchEvent(new Event('pointermove', { bubbles: true }));
+      vi.advanceTimersByTime(300);
+    });
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe(text);
+  });
+
+  it('keeps the workspace icon out of the clickable actions', () => {
+    const view = mount({ workspaceName: 'api', workspacePath: '/work/api' });
+
+    expect(view.querySelectorAll('button')).toHaveLength(1);
   });
 });

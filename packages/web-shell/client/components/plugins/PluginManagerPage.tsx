@@ -53,6 +53,10 @@ export function PluginManagerPage({
     )?.cwd ??
     workspaces.find((entry) => entry.primary && entry.trusted)?.cwd ??
     workspaces.find((entry) => entry.trusted)?.cwd;
+  const splitSkillsRuntimeAvailable =
+    workspace.capabilities?.features?.includes(
+      'workspace_skills_config_runtime',
+    ) === true;
   const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState(
     () => defaultWorkspaceCwd,
   );
@@ -89,7 +93,9 @@ export function PluginManagerPage({
   };
 
   const workspaceSelect = (disabled: boolean) =>
-    activeTab === 'mcp' && workspaces.length > 1 ? (
+    (activeTab === 'mcp' ||
+      (activeTab === 'skills' && splitSkillsRuntimeAvailable)) &&
+    workspaces.length > 1 ? (
       <Select
         value={selectedWorkspaceCwd}
         disabled={disabled}
@@ -144,10 +150,16 @@ export function PluginManagerPage({
           />
         ) : activeTab === 'skills' ? (
           <SkillsManagerPage
-            key={`skills-${pageRevision}`}
+            key={`skills-${pageRevision}-${selectedWorkspaceCwd ?? ''}`}
             onClose={onClose}
             onUseSkill={onUseSkill}
             embedded={embedded}
+            workspaceCwd={
+              splitSkillsRuntimeAvailable
+                ? selectedWorkspaceCwd
+                : workspace.workspaceCwd
+            }
+            workspaceControl={workspaceSelect(true)}
           />
         ) : activeTab === 'agents' ? (
           <AgentsManagerPage

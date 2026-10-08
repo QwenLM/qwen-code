@@ -1228,7 +1228,7 @@ extern "C" {
     fn CGEventSetLocation(event: *mut std::ffi::c_void, x: f64, y: f64);
 }
 
-fn parse_modifier_flags(modifiers: &[&str]) -> CGEventFlags {
+pub(super) fn parse_modifier_flags(modifiers: &[&str]) -> CGEventFlags {
     let mut flags = CGEventFlags::CGEventFlagNull;
     for m in modifiers {
         match m.to_lowercase().as_str() {

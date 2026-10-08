@@ -65,6 +65,7 @@ export {
   type ServePreflightCell,
   type ServePreflightKind,
   type ServeSessionContextStatus,
+  type ServeSessionResourcesStatus,
   type ServeSessionAgentTaskStatus,
   type ServeSessionMonitorTaskStatus,
   type ServeSessionProcessTaskLifecycleStatus,

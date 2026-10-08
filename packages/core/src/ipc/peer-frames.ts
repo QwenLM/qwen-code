@@ -20,9 +20,21 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import type { PeerDropReason } from './peer-admission.js';
 
 /** Bumped only for a breaking change to the frame shape. */
 export const PEER_FRAME_VERSION = 1;
+
+/**
+ * Most ids one `dropped` receipt may list beyond the one it is addressed
+ * for.
+ *
+ * A receipt that folds a burst has to name what it stands for, but the
+ * list is written by the receiver from ids a *sender* chose, so it needs a
+ * ceiling like every other peer-supplied array. A sender that lost more
+ * than this many in one batch learns the count from its own ledger.
+ */
+export const MAX_DROPPED_MSG_IDS = 256;
 
 /**
  * Longest single line accepted before the connection is dropped.
@@ -45,7 +57,15 @@ export type PeerMessagePriority = 'now' | 'next';
 /** Terminal states a sent message can reach on the receiving side. */
 export type PeerDeliveryStatus =
   | 'held'
+  /** A person reviewed the message and declined it. */
   | 'denied'
+  /**
+   * The receiving session's policy turns peer messages away, so no
+   * person ever saw this one. Distinct from `denied`, which is a
+   * decision: a sender that is refused should stop rather than wait for
+   * a review that will not happen.
+   */
+  | 'refused'
   | 'expired'
   | 'delivered'
   /**
@@ -53,7 +73,20 @@ export type PeerDeliveryStatus =
    * directory was stale (the address changed hands, or the peer ran
    * /clear). Distinct from `denied` — nobody decided anything.
    */
-  | 'misaddressed';
+  | 'misaddressed'
+  /**
+   * The receiver's inbox turned the message away before any policy or
+   * person saw it: the sender outran its rate limit, repeated its
+   * previous message, or the inbox had no room to queue it. `dropReason`
+   * says which, and one receipt may stand for several messages — the
+   * rest are named in `droppedMsgIds`.
+   *
+   * Distinct from `refused`, which is a standing policy, and from
+   * `expired`, which is a decision that never came: this one says the
+   * message never entered the queue at all and re-sending it now would
+   * meet the same wall.
+   */
+  | 'dropped';
 
 export interface PeerUserFrame {
   msgV: number;
@@ -100,6 +133,15 @@ export interface PeerControlFrame {
   origMsgId: string;
   from?: string;
   reason?: string;
+  /** Which wall the message met. Only meaningful with `status: 'dropped'`. */
+  dropReason?: PeerDropReason;
+  /**
+   * Further messages this receipt settles, beyond `origMsgId`. A burst of
+   * drops from one sender is answered with one receipt rather than one
+   * each, so the sender can move every message it lost to a terminal
+   * state from a single frame. Only meaningful with `status: 'dropped'`.
+   */
+  droppedMsgIds?: string[];
 }
 
 export type PeerFrame = PeerUserFrame | PeerControlFrame;
@@ -122,6 +164,19 @@ export type PeerFrame = PeerUserFrame | PeerControlFrame;
 const MSG_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 /**
+ * Largest authentication token retained from an untrusted peer frame.
+ *
+ * A real token is 64 hex characters, and a sender's own inbox refuses a
+ * presented token over 256, so a longer one cannot authenticate anything
+ * and holding it would let a peer choose how many bytes a waiting receipt
+ * pins. It is dropped where the token would be *retained* rather than at
+ * the parser: the message itself may be perfectly ordinary, and refusing
+ * to deliver it over a field that only routes the answer would lose a
+ * message in order to bound a buffer.
+ */
+export const MAX_RETAINED_REPLY_TOKEN_CHARS = 256;
+
+/**
  * The one handle form every id comparison and display uses: dashes
  * stripped, case folded. `/peers` resolution prints and matches handles in
  * this form, so the gate's duplicate guard must compare ids in it too —
@@ -138,6 +193,43 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * True for an id that could name a real message on this wire — the same
+ * test the frame's own `msgId` passes, applied to the ids a `dropped`
+ * receipt folds in. One definition, so a form the parser would refuse at
+ * the top of a frame cannot arrive inside one.
+ */
+function isAddressableMsgId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    MSG_ID_RE.test(value) &&
+    canonicalizeMsgId(value) !== 'all'
+  );
+}
+
+/** The `dropReason` on a control frame, or undefined for anything else. */
+function optionalDropReason(value: unknown): PeerDropReason | undefined {
+  return value === 'rate-limited' ||
+    value === 'duplicate' ||
+    value === 'queue-full'
+    ? value
+    : undefined;
+}
+
+/**
+ * The ids a `dropped` receipt folds in: well-formed ones only, capped.
+ *
+ * Written by the receiver but drawn from what senders put on the wire, so
+ * it is checked here like every other array that crosses a process
+ * boundary. A malformed entry is skipped rather than failing the frame —
+ * the receipt still settles every id it got right.
+ */
+function parseDroppedMsgIds(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const ids = value.filter(isAddressableMsgId).slice(0, MAX_DROPPED_MSG_IDS);
+  return ids.length > 0 ? ids : undefined;
 }
 
 /**
@@ -159,11 +251,10 @@ export function parsePeerFrame(line: string): PeerFrame | null {
   const msgV = parsed['msgV'];
   if (typeof msgV !== 'number' || msgV > PEER_FRAME_VERSION) return null;
 
+  // `all` is reserved at the wire boundary: `/peers` intercepts the bulk
+  // keyword before it ever resolves an id.
   const msgId = parsed['msgId'];
-  if (typeof msgId !== 'string' || !MSG_ID_RE.test(msgId)) return null;
-  // Reserved at the wire boundary: `/peers` intercepts the `all` keyword
-  // before it ever resolves an id.
-  if (canonicalizeMsgId(msgId) === 'all') return null;
+  if (!isAddressableMsgId(msgId)) return null;
 
   if (parsed['type'] === 'user') {
     const message = parsed['message'];
@@ -198,14 +289,28 @@ export function parsePeerFrame(line: string): PeerFrame | null {
     if (
       status !== 'held' &&
       status !== 'denied' &&
+      status !== 'refused' &&
       status !== 'expired' &&
       status !== 'delivered' &&
-      status !== 'misaddressed'
+      status !== 'misaddressed' &&
+      status !== 'dropped'
     ) {
       return null;
     }
     const origMsgId = parsed['origMsgId'];
     if (typeof origMsgId !== 'string' || origMsgId.length === 0) return null;
+
+    // Only a drop carries these. Reading them off any other status would
+    // let a peer attach a list of ids to, say, a `delivered` receipt and
+    // settle messages the receipt says nothing about.
+    const dropReason =
+      status === 'dropped'
+        ? optionalDropReason(parsed['dropReason'])
+        : undefined;
+    const droppedMsgIds =
+      status === 'dropped'
+        ? parseDroppedMsgIds(parsed['droppedMsgIds'])
+        : undefined;
 
     return {
       msgV,
@@ -216,6 +321,8 @@ export function parsePeerFrame(line: string): PeerFrame | null {
       origMsgId,
       from: optionalString(parsed['from']),
       reason: optionalString(parsed['reason']),
+      ...(dropReason !== undefined ? { dropReason } : {}),
+      ...(droppedMsgIds !== undefined ? { droppedMsgIds } : {}),
     };
   }
 
@@ -267,14 +374,40 @@ export function describeDeliveryStatus(status: PeerDeliveryStatus): string {
       return 'Your message is held for the recipient user to review before it reaches their Qwen Code session.';
     case 'denied':
       return 'The recipient declined your message; it was not delivered.';
+    case 'refused':
+      return "The recipient session does not accept messages from other sessions, so nobody saw this one. Don't re-send it; reach that session's user another way.";
     case 'expired':
       return 'Your held message expired without a decision and was not delivered.';
     case 'delivered':
       return 'Your message was released to the recipient session.';
     case 'misaddressed':
       return 'That address now belongs to a different session than the one you addressed; it was not delivered. List the agents again before re-sending.';
+    case 'dropped':
+      return "Your message was dropped at the recipient's inbox before anyone saw it: sent too fast, a repeat of your previous message, or the inbox queue was full. Treat it as unsent; fold what still matters into one later message rather than re-sending.";
     default: {
       const exhaustive: never = status;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * The half-sentence that names which wall a dropped message met.
+ *
+ * Written to sit inside the sending session's own transcript line, where
+ * the surrounding sentence already says the message was dropped — so this
+ * is a cause, not a sentence of its own.
+ */
+export function describeDropReason(reason: PeerDropReason): string {
+  switch (reason) {
+    case 'rate-limited':
+      return 'you sent faster than that session accepts';
+    case 'duplicate':
+      return 'it repeated your previous message';
+    case 'queue-full':
+      return 'its queue of undelivered peer messages was full';
+    default: {
+      const exhaustive: never = reason;
       return exhaustive;
     }
   }
@@ -315,6 +448,8 @@ export function buildDeliveryStatusFrame(fields: {
   status: PeerDeliveryStatus;
   origMsgId: string;
   from?: string;
+  dropReason?: PeerDropReason;
+  droppedMsgIds?: string[];
 }): PeerControlFrame {
   return {
     msgV: PEER_FRAME_VERSION,
@@ -325,5 +460,13 @@ export function buildDeliveryStatusFrame(fields: {
     origMsgId: fields.origMsgId,
     ...(fields.from !== undefined ? { from: fields.from } : {}),
     reason: describeDeliveryStatus(fields.status),
+    ...(fields.dropReason !== undefined
+      ? { dropReason: fields.dropReason }
+      : {}),
+    // An empty list is left off rather than sent as `[]`: the field means
+    // "these ids too", and there are none.
+    ...(fields.droppedMsgIds !== undefined && fields.droppedMsgIds.length > 0
+      ? { droppedMsgIds: fields.droppedMsgIds.slice(0, MAX_DROPPED_MSG_IDS) }
+      : {}),
   };
 }

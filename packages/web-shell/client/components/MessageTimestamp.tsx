@@ -1,14 +1,17 @@
 import { useCallback, type ReactNode } from 'react';
+import { WrenchIcon } from 'lucide-react';
 import {
   warnClipboardWriteFailure,
   writeClipboardText,
 } from '../utils/clipboard';
+import { useTranscriptRenderMode } from '../transcriptRenderMode';
 import { useCopiedFlash } from '../hooks/useCopiedFlash';
 import styles from './MessageTimestamp.module.css';
 
 interface MessageTimestampProps {
   /** Wall-clock epoch ms of the message; omitted for synthetic messages. */
   timestamp?: number;
+  hideTimestamp?: boolean;
   children: ReactNode;
   /** When true, show the timestamp permanently at bottom-right instead of hover tooltip. */
   chatMode?: boolean;
@@ -16,6 +19,12 @@ interface MessageTimestampProps {
   toolGroupSpacing?: boolean;
   copyText?: string;
   copyTitle?: string;
+  /** When set, render an edit action after the copy button. */
+  onEdit?: () => void;
+  editTitle?: string;
+  /** When set, render an action that opens this turn's tool-call list. */
+  onOpenTurnCalls?: () => void;
+  turnCallsTitle?: string;
 }
 
 /**
@@ -24,12 +33,18 @@ interface MessageTimestampProps {
  */
 export function MessageTimestamp({
   timestamp,
+  hideTimestamp = false,
   children,
   chatMode = false,
   toolGroupSpacing = false,
   copyText,
   copyTitle = 'Copy',
+  onEdit,
+  editTitle = 'Edit',
+  onOpenTurnCalls,
+  turnCallsTitle = 'View tool calls',
 }: MessageTimestampProps) {
+  const documentMode = useTranscriptRenderMode() === 'document';
   const [copied, flashCopied] = useCopiedFlash();
   const handleCopy = useCallback(() => {
     if (!copyText) return;
@@ -39,7 +54,14 @@ export function MessageTimestamp({
       })
       .catch(warnClipboardWriteFailure);
   }, [copyText, flashCopied]);
-  if (timestamp === undefined && !copyText && !toolGroupSpacing) {
+  if (documentMode) return <>{children}</>;
+  if (
+    timestamp === undefined &&
+    !copyText &&
+    !toolGroupSpacing &&
+    !onEdit &&
+    !onOpenTurnCalls
+  ) {
     return <>{children}</>;
   }
   const copyButton = copyText ? (
@@ -53,16 +75,40 @@ export function MessageTimestamp({
       {copied ? <CheckIcon /> : <CopyIcon />}
     </button>
   ) : null;
+  const editButton = onEdit ? (
+    <button
+      type="button"
+      className={styles.copyButton}
+      title={editTitle}
+      aria-label={editTitle}
+      onClick={onEdit}
+    >
+      <PencilIcon />
+    </button>
+  ) : null;
+  const turnCallsButton = onOpenTurnCalls ? (
+    <button
+      type="button"
+      className={styles.copyButton}
+      title={turnCallsTitle}
+      aria-label={turnCallsTitle}
+      onClick={onOpenTurnCalls}
+    >
+      <WrenchIcon strokeWidth={1.6} aria-hidden="true" />
+    </button>
+  ) : null;
   const rowClassName = chatMode
     ? styles.chatRow
     : toolGroupSpacing
       ? `${styles.row} ${styles.toolGroupSpacing}`
       : styles.row;
-  if (timestamp === undefined) {
+  if (timestamp === undefined || hideTimestamp) {
     return (
       <div className={rowClassName}>
         {children}
         {copyButton}
+        {turnCallsButton}
+        {editButton}
       </div>
     );
   }
@@ -75,6 +121,8 @@ export function MessageTimestamp({
             {formatTimestamp(timestamp)}
           </span>
           {copyButton}
+          {turnCallsButton}
+          {editButton}
         </span>
       ) : (
         <span className={styles.tip} aria-hidden="true">
@@ -120,6 +168,21 @@ function CheckIcon() {
         strokeLinecap="round"
         strokeLinejoin="round"
         strokeWidth="1.6"
+      />
+    </svg>
+  );
+}
+
+function PencilIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M11.1 2.6a1.4 1.4 0 0 1 2 2l-7.2 7.2-2.7.7.7-2.7 7.2-7.2Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.3"
       />
     </svg>
   );

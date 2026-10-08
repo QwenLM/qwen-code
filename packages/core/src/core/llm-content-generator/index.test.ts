@@ -61,6 +61,7 @@ describe('createLlmContentGenerator', () => {
         }),
       }),
       config,
+      mockConfig,
     );
   });
 
@@ -82,6 +83,7 @@ describe('createLlmContentGenerator', () => {
         }),
       }),
       config,
+      mockConfig,
     );
     expect(vi.mocked(LlmContentGenerator).mock.calls[0]?.[0]).not.toEqual(
       expect.objectContaining({

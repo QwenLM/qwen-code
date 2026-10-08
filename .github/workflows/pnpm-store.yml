@@ -1,0 +1,56 @@
+# Populates the shared pnpm store that qwen-triage.yml's verify and
+# tmux-testing lanes restore read-only (actions/cache/restore). Without
+# this producer every restore is a guaranteed miss and `pnpm install` in
+# those lanes downloads every package from the registry.
+name: 'pnpm store producer'
+
+on:
+  push:
+    branches: ['main']
+    paths: ['pnpm-lock.yaml']
+  workflow_dispatch:
+
+permissions:
+  actions: 'write'
+  contents: 'read'
+
+defaults:
+  run:
+    shell: 'bash'
+
+jobs:
+  save:
+    name: 'Save pnpm store'
+    # Share the verify/tmux consumers' runs-on + container (qwen-triage.yml).
+    # actions/cache scopes an entry by a hash of the literal cache path plus
+    # the compression method, so a producer on ubuntu-latest (host path,
+    # zstd) can never be restored by a consumer in node:22-bookworm
+    # (container path, gzip); matching both by construction is what makes the
+    # restore hit. node:22-bookworm ships git, so checkout needs no setup.
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    container:
+      image: 'node:22-bookworm'
+      # Match the host runner UID/GID so bind-mounted files stay writable.
+      options: '--init --user node'
+    # This producer always cold-downloads -- RUNNER_TEMP is fresh per job and
+    # there is no cache/restore step here -- so its cost is a full registry
+    # fetch every time, and on the shared pool that is what varies. Under npm,
+    # 22 green runs took 4.5-11.8 min and five more were cancelled at the old
+    # 15-minute cap; 30 covers the same ~4x contention factor measured on the
+    # pool's other install steps.
+    timeout-minutes: 30
+    steps:
+      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          fetch-depth: 1
+
+      # --ignore-scripts: only the store is saved, and no lifecycle script
+      # writes to it.
+      - name: 'Populate pnpm store'
+        run: 'corepack pnpm install --frozen-lockfile --ignore-scripts --reporter=append-only --store-dir "$RUNNER_TEMP/pnpm-store"'
+
+      - name: 'Save pnpm store'
+        uses: 'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '${{ runner.temp }}/pnpm-store'
+          key: "pnpm-store-triage-${{ hashFiles('pnpm-lock.yaml') }}"

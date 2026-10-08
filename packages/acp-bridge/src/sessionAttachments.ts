@@ -9,6 +9,16 @@ import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
 import { getSpecificMimeType } from '@qwen-code/qwen-code-core';
+import {
+  SessionAttachmentUploads,
+  SessionAttachmentUploadError,
+} from './session-attachment-uploads.js';
+import type { SessionAttachmentUploadMetadata } from './session-attachment-uploads.js';
+export {
+  SESSION_ATTACHMENT_CHUNK_BYTES,
+  SessionAttachmentUploadError,
+  type SessionAttachmentUploadMetadata,
+} from './session-attachment-uploads.js';
 
 export const SESSION_ATTACHMENT_MAX_ITEM_BYTES = 8 * 1024 * 1024;
 const SESSION_ATTACHMENT_MAX_NAME_BYTES = 255;
@@ -326,13 +336,39 @@ export function withAttachmentDegradationMarker<
   ];
 }
 
+function validateAttachmentName(mimeType: string, name?: string): string {
+  const isImage = isSupportedImageMimeType(mimeType);
+  const safeName = safeAttachmentName(
+    name ?? (isImage ? imageName(mimeType) : ''),
+  );
+  if (!safeName) {
+    throw new TypeError('Session attachment name is invalid');
+  }
+  const storedMimeType = mimeTypeForName(safeName);
+  if (
+    (isImage && storedMimeType !== mimeType) ||
+    (isSupportedImageMimeType(storedMimeType) && !isImage)
+  ) {
+    throw new TypeError('Attachment name and Content-Type do not match');
+  }
+  return safeName;
+}
+
 export class SessionAttachmentStore {
+  private readonly uploads = new SessionAttachmentUploads();
+  private publication = Promise.resolve();
+  private readerBatch?: {
+    previous: Promise<void>;
+    release: () => void;
+    count: number;
+  };
   private directoryPromise?: Promise<string>;
   private readonly persistentDirectory?: string;
   private readonly persistentFallbackDirectory?: string;
   private activeDirectory?: string;
   private pendingItems = 0;
   private readonly pendingNames = new Map<string, number>();
+  private readonly queuedNames = new Map<string, number>();
   private readonly removingNames = new Set<string>();
   private readonly pendingDrainWaiters: Array<() => void> = [];
   private readonly copyDrainWaiters: Array<() => void> = [];
@@ -358,25 +394,112 @@ export class SessionAttachmentStore {
     }
   }
 
+  createUpload(metadata: SessionAttachmentUploadMetadata, clientId?: string) {
+    if (this.closed || this.closing)
+      throw new Error('Session attachment store is closed');
+    if (this.copying) throw new Error('Session attachments are being copied');
+    const name = validateAttachmentName(metadata.mimeType, metadata.name);
+    if (!Number.isSafeInteger(metadata.size) || metadata.size < 0) {
+      throw new TypeError('Attachment size must be a non-negative integer');
+    }
+    if (metadata.size > SESSION_ATTACHMENT_MAX_ITEM_BYTES) {
+      throw new RangeError('Session attachment must be at most 8 MiB');
+    }
+    if (metadata.size === 0 && isSupportedImageMimeType(metadata.mimeType)) {
+      throw new TypeError('Image attachments cannot be empty');
+    }
+    return this.uploads.create({ ...metadata, name }, clientId);
+  }
+
+  appendUpload(id: string, offset: number, data: Buffer, clientId?: string) {
+    return this.uploads.append(id, offset, data, clientId);
+  }
+
+  completeUpload(
+    id: string,
+    clientId: string | undefined,
+    assertCanCommit: () => void,
+  ) {
+    const assertAvailable = () => {
+      if (this.closed || this.closing) {
+        throw new SessionAttachmentUploadError(
+          404,
+          'attachment_upload_not_found',
+          'Attachment upload is unavailable',
+        );
+      }
+      if (this.copying) {
+        throw new SessionAttachmentUploadError(
+          503,
+          'attachment_upload_store_busy',
+          'Session attachments are being copied',
+        );
+      }
+    };
+    return this.uploads.complete(
+      id,
+      clientId,
+      (data, metadata, assertActive) => {
+        assertAvailable();
+        return this.putAttachment(
+          data,
+          metadata.mimeType,
+          metadata.name,
+          () => {
+            assertActive();
+            assertCanCommit();
+          },
+        );
+      },
+    );
+  }
+
+  cancelUpload(id: string, clientId?: string): void {
+    this.uploads.cancel(id, clientId);
+  }
+
+  cancelClientUploads(clientId: string): void {
+    this.uploads.cancelClient(clientId);
+  }
+
+  private acquirePublication(): Promise<() => void> {
+    this.readerBatch = undefined;
+    const previous = this.publication;
+    let release!: () => void;
+    this.publication = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return previous.then(() => release);
+  }
+
+  private acquireReadPublication(): Promise<() => void> {
+    let batch = this.readerBatch;
+    if (!batch) {
+      const previous = this.publication;
+      let release!: () => void;
+      this.publication = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      batch = { previous, release, count: 0 };
+      this.readerBatch = batch;
+    }
+    batch.count += 1;
+    return batch.previous.then(() => () => {
+      if (--batch.count === 0) {
+        if (this.readerBatch === batch) this.readerBatch = undefined;
+        batch.release();
+      }
+    });
+  }
+
   async putAttachment(
     data: Uint8Array,
     mimeType: string,
     name?: string,
+    assertCanCommit?: () => void,
   ): Promise<SessionAttachmentReference> {
     const isImage = isSupportedImageMimeType(mimeType);
-    const safeName = safeAttachmentName(
-      name ?? (isImage ? imageName(mimeType) : ''),
-    );
-    if (!safeName) {
-      throw new TypeError('Session attachment name is invalid');
-    }
-    const storedMimeType = mimeTypeForName(safeName);
-    if (
-      (isImage && storedMimeType !== mimeType) ||
-      (isSupportedImageMimeType(storedMimeType) && !isImage)
-    ) {
-      throw new TypeError('Attachment name and Content-Type do not match');
-    }
+    const safeName = validateAttachmentName(mimeType, name);
     if (this.closed || this.closing) {
       throw new Error('Session attachment store is closed');
     }
@@ -390,11 +513,15 @@ export class SessionAttachmentStore {
       );
     }
     let filePath: string | undefined;
-    let pendingName: string | undefined = safeName;
+    let pendingName: string | undefined;
     let removeFileOnFailure = false;
     this.pendingItems += 1;
-    this.reservePendingName(safeName);
+    this.queuedNames.set(safeName, (this.queuedNames.get(safeName) ?? 0) + 1);
+    const releasePublication = await this.acquirePublication();
     try {
+      if (this.closed || this.closing)
+        throw new Error('Session attachment store is closed');
+      assertCanCommit?.();
       const directory = await this.directory();
       let suffix = 0;
       for (;;) {
@@ -402,7 +529,10 @@ export class SessionAttachmentStore {
         if (safeAttachmentName(candidateName) !== candidateName) {
           throw new TypeError('Session attachment name is invalid');
         }
-        if (this.removingNames.has(candidateName)) {
+        if (
+          this.removingNames.has(candidateName) ||
+          statSizeStrict(path.join(directory, candidateName)) !== undefined
+        ) {
           suffix += 1;
           continue;
         }
@@ -423,6 +553,9 @@ export class SessionAttachmentStore {
           this.reservePendingName(candidateName);
           pendingName = candidateName;
         }
+        if (this.closed || this.closing)
+          throw new Error('Session attachment store is closed');
+        assertCanCommit?.();
         filePath = path.join(directory, candidateName);
         removeFileOnFailure = true;
         try {
@@ -440,6 +573,7 @@ export class SessionAttachmentStore {
       if (this.closed || this.closing) {
         throw new Error('Session attachment store is closed');
       }
+      assertCanCommit?.();
       const name = path.basename(filePath);
       const storedMimeType = mimeTypeForName(name);
       const reference = {
@@ -453,11 +587,32 @@ export class SessionAttachmentStore {
       return reference;
     } catch (error) {
       if (removeFileOnFailure && filePath) {
-        await fs.rm(filePath, { force: true }).catch(() => {});
+        await fs.rm(filePath, { force: true }).catch(() => {
+          // Keep failed cleanup hidden for the lifetime of this store.
+          pendingName = undefined;
+        });
+      }
+      if (
+        assertCanCommit &&
+        error instanceof Error &&
+        'code' in error &&
+        typeof error.code === 'string' &&
+        /^E[A-Z]+$/.test(error.code)
+      ) {
+        throw new SessionAttachmentUploadError(
+          500,
+          'attachment_upload_storage_failed',
+          'Could not store attachment',
+          error,
+        );
       }
       throw error;
     } finally {
       if (pendingName) this.releasePendingName(pendingName);
+      const queued = this.queuedNames.get(safeName)!;
+      if (queued === 1) this.queuedNames.delete(safeName);
+      else this.queuedNames.set(safeName, queued - 1);
+      releasePublication();
       if (!this.closed) {
         this.pendingItems -= 1;
         if (this.pendingItems === 0) {
@@ -587,8 +742,20 @@ export class SessionAttachmentStore {
   async read(
     attachmentId: string,
   ): Promise<{ data: Buffer; mimeType: string } | undefined> {
+    const releasePublication = await this.acquireReadPublication();
+    try {
+      return await this.readPublished(attachmentId);
+    } finally {
+      releasePublication();
+    }
+  }
+
+  private async readPublished(
+    attachmentId: string,
+  ): Promise<{ data: Buffer; mimeType: string } | undefined> {
     const name = safeAttachmentName(attachmentId);
-    if (!name || name !== attachmentId) return undefined;
+    if (!name || name !== attachmentId || this.pendingNames.has(name))
+      return undefined;
     let primary: { data: Buffer; mimeType: string } | undefined;
     try {
       primary = await this.tryRead(await this.peekDirectory(), name);
@@ -616,6 +783,71 @@ export class SessionAttachmentStore {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
       throw error;
     }
+  }
+
+  async list(): Promise<SessionAttachmentReference[]> {
+    const found: Array<{
+      reference: SessionAttachmentReference;
+      mtimeMs: number;
+    }> = [];
+    const directories = [
+      this.persistentDirectory ?? this.activeDirectory,
+      this.persistentFallbackDirectory,
+    ].filter((directory): directory is string => Boolean(directory));
+    const foundNames = new Set<string>();
+    let directoryRead = false;
+    let directoryError: unknown;
+    for (const directory of directories) {
+      let entries;
+      try {
+        entries = await fs.readdir(directory, { withFileTypes: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          directoryError ??= error;
+        }
+        continue;
+      }
+      directoryRead = true;
+      for (const entry of entries) {
+        if (
+          !entry.isFile() ||
+          this.pendingNames.has(entry.name) ||
+          this.removingNames.has(entry.name) ||
+          foundNames.has(entry.name)
+        ) {
+          continue;
+        }
+        const name = safeAttachmentName(entry.name);
+        if (!name || name !== entry.name) continue;
+        try {
+          const stat = await fs.stat(path.join(directory, entry.name));
+          const mimeType = mimeTypeForName(entry.name);
+          found.push({
+            reference: {
+              type: isSupportedImageMimeType(mimeType) ? 'image' : 'resource',
+              attachmentId: entry.name,
+              mimeType,
+              size: stat.size,
+            },
+            mtimeMs: stat.mtimeMs,
+          });
+          foundNames.add(entry.name);
+        } catch {
+          // A file that vanished between readdir and stat is not an attachment.
+        }
+      }
+    }
+    if (!directoryRead && directoryError !== undefined) {
+      throw directoryError;
+    }
+    // Files are written once (flag 'wx'), so mtime is the upload time; stable
+    // order for the attachments panel is upload order, name as tiebreaker.
+    found.sort(
+      (a, b) =>
+        a.mtimeMs - b.mtimeMs ||
+        a.reference.attachmentId.localeCompare(b.reference.attachmentId),
+    );
+    return found.map(({ reference }) => reference);
   }
 
   async copyFrom(source: SessionAttachmentStore): Promise<void> {
@@ -717,6 +949,7 @@ export class SessionAttachmentStore {
       name !== attachmentId ||
       this.copying ||
       this.pendingNames.has(name) ||
+      this.queuedNames.has(name) ||
       this.removingNames.has(name)
     ) {
       return false;
@@ -776,11 +1009,11 @@ export class SessionAttachmentStore {
 
   async close(): Promise<void> {
     this.closing = true;
+    this.uploads.close();
     await this.waitForCopy();
     if (this.closed) return;
     this.closed = true;
     this.pendingItems = 0;
-    this.pendingNames.clear();
     this.resolvePendingDrainWaiters();
     if (this.persistentDirectory || !this.directoryPromise) return;
     const directory = await this.directoryPromise.catch(() => undefined);
@@ -791,12 +1024,12 @@ export class SessionAttachmentStore {
   async delete(options: { assertCanCommit?: () => void } = {}): Promise<void> {
     options.assertCanCommit?.();
     this.closing = true;
+    this.uploads.close();
     await this.waitForCopy();
     options.assertCanCommit?.();
     if (!this.closed) {
       this.closed = true;
       this.pendingItems = 0;
-      this.pendingNames.clear();
       this.resolvePendingDrainWaiters();
     }
     // Fallback removal is best-effort here (unlike remove()): the caller
@@ -896,7 +1129,14 @@ export class SessionAttachmentStore {
     const name = safeAttachmentName(id);
     let size: number | undefined;
     const directory = this.persistentDirectory ?? this.activeDirectory;
-    if (name && name === id && directory) {
+    if (
+      name &&
+      name === id &&
+      directory &&
+      !this.closed &&
+      !this.closing &&
+      !this.pendingNames.has(name)
+    ) {
       size = statSize(path.join(directory, name));
       if (size === undefined && this.persistentFallbackDirectory) {
         size = statSize(path.join(this.persistentFallbackDirectory, name));

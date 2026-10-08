@@ -19,6 +19,7 @@ export default defineConfig({
         ? [
             ...configDefaults.exclude,
             'scripts/tests/e2e-shard-retry.test.js',
+            'scripts/tests/security-checks-audit-retry.test.js',
             'scripts/tests/pr-self-report-label.test.js',
             // Bash-driven workflow suites cannot run on Windows; pure
             // YAML-parse workflow suites still do.
@@ -27,6 +28,11 @@ export default defineConfig({
           ]
         : [...configDefaults.exclude],
     setupFiles: ['scripts/tests/test-setup.ts'],
+    // Several suites spawn the real `corepack pnpm`; on a cold per-run cache
+    // every worker would download the pinned pnpm concurrently, and a losing
+    // install poisons the shared cache for the rest of the run (#12436).
+    // Warm it once here, before any worker forks.
+    globalSetup: ['scripts/tests/corepack-warmup.js'],
     // Several tests in install-script.test.js shell out to `node` to run
     // create-standalone-package.js, which on Windows runs a full
     // tar+gzip pass under antivirus inspection. Real runtimes observed on
@@ -41,7 +47,12 @@ export default defineConfig({
     // and acp-serve-boundary-guard.test.js — neither of them slow, both past
     // 30s under contention. Per-test `vi.setConfig` does not help: these
     // cases register their timeout at collection, before it runs.
-    testTimeout: Number(process.env['QWEN_SCRIPTS_TEST_TIMEOUT_MS'] ?? 90_000),
+    // `||`, not `??`: `??` only catches `undefined`, and the value this repo
+    // actually plants is `''` — that is what `${{ cond && 'x' || '' }}` renders
+    // when the condition is false. `Number('')` is 0, and vitest reads 0 as
+    // "no timeout at all", so the empty spelling would silently disarm every
+    // ceiling in this suite. `NaN` from a typo falls back the same way.
+    testTimeout: Number(process.env['QWEN_SCRIPTS_TEST_TIMEOUT_MS']) || 90_000,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov'],

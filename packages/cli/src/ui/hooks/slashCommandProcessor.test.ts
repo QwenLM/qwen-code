@@ -106,7 +106,9 @@ vi.mock('../../services/McpPromptLoader.js', () => ({
 }));
 
 vi.mock('../contexts/SessionContext.js', () => ({
-  useSessionStats: vi.fn(() => ({ stats: {} })),
+  useSessionStats: vi.fn(() => ({
+    stats: { sessionStartTime: new Date(0) },
+  })),
 }));
 
 const { mockRunExitCleanup } = vi.hoisted(() => ({
@@ -220,6 +222,7 @@ describe('useSlashCommandProcessor', () => {
     mockOpenMemoryDialog.mockClear();
     mockFireUserPromptExpansionEvent.mockResolvedValue(undefined);
     vi.mocked(refreshExtensionContentRuntime).mockResolvedValue(undefined);
+    mockConfig.getDisabledSlashCommands = vi.fn().mockReturnValue([]);
     mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
     mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
     mockConfig.getHookSystem = vi.fn().mockReturnValue({
@@ -237,8 +240,13 @@ describe('useSlashCommandProcessor', () => {
     settings: LoadedSettings = mockSettings,
     extensionRefreshState?: ExtensionRefreshState,
     isIdleRef = { current: true },
+    builtinCommandsPromise?: Promise<readonly SlashCommand[]>,
   ) => {
-    mockBuiltinLoadCommands.mockResolvedValue(Object.freeze(builtinCommands));
+    if (builtinCommandsPromise) {
+      mockBuiltinLoadCommands.mockReturnValue(builtinCommandsPromise);
+    } else {
+      mockBuiltinLoadCommands.mockResolvedValue(Object.freeze(builtinCommands));
+    }
     mockFileLoadCommands.mockResolvedValue(Object.freeze(fileCommands));
     mockMcpLoadCommands.mockResolvedValue(Object.freeze(mcpCommands));
 
@@ -383,6 +391,65 @@ describe('useSlashCommandProcessor', () => {
   });
 
   describe('Command Execution Logic', () => {
+    it.each(['/quit', '/exit'])(
+      'should handle %s while slash commands are still loading',
+      async (input) => {
+        const commandsNeverLoad = new Promise<readonly SlashCommand[]>(
+          () => undefined,
+        );
+        const result = setupProcessorHook(
+          [],
+          [],
+          [],
+          vi.fn(),
+          mockSettings,
+          undefined,
+          { current: true },
+          commandsNeverLoad,
+        );
+
+        await act(async () => {
+          await result.current.handleSlashCommand(input);
+        });
+
+        expect(mockSetQuittingMessages).toHaveBeenCalledWith([
+          expect.objectContaining({ type: 'user', text: '/quit' }),
+          expect.objectContaining({ type: 'quit' }),
+        ]);
+        expect(mockAddItem).not.toHaveBeenCalledWith(
+          expect.objectContaining({ text: `Unknown command: ${input}` }),
+          expect.any(Number),
+        );
+      },
+    );
+
+    it('should respect disabled commands while slash commands are loading', async () => {
+      mockConfig.getDisabledSlashCommands = vi.fn().mockReturnValue(['exit']);
+      const commandsNeverLoad = new Promise<readonly SlashCommand[]>(
+        () => undefined,
+      );
+      const result = setupProcessorHook(
+        [],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: true },
+        commandsNeverLoad,
+      );
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/quit');
+      });
+
+      expect(mockSetQuittingMessages).not.toHaveBeenCalled();
+      expect(mockAddItem).toHaveBeenLastCalledWith(
+        { type: MessageType.ERROR, text: 'Unknown command: /quit' },
+        expect.any(Number),
+      );
+    });
+
     it('should display an error for an unknown command', async () => {
       const result = setupProcessorHook();
       await waitFor(() => expect(result.current.slashCommands).toBeDefined());
@@ -1553,6 +1620,46 @@ describe('useSlashCommandProcessor', () => {
       });
     });
 
+    it('echoes the minted prompt id onto the invocation item when submitting', async () => {
+      // The send path marks the API entry with the turn's minted id; the
+      // invocation item must wear the same id, or rewind finds no identity on
+      // the rendered turn and falls back to positional order.
+      const fileCommand = createTestCommand(
+        {
+          name: 'filecmd',
+          description: 'A command from a file',
+          action: async () => ({
+            type: 'submit_prompt',
+            content: [{ text: 'The actual prompt from the TOML file.' }],
+          }),
+        },
+        CommandKind.FILE,
+      );
+
+      const result = setupProcessorHook([], [fileCommand]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand(
+          '/filecmd',
+          undefined,
+          undefined,
+          undefined,
+          'test-session########7',
+        );
+      });
+
+      expect(actionResult).toEqual({
+        type: 'submit_prompt',
+        content: [{ text: 'The actual prompt from the TOML file.' }],
+      });
+      expect(mockUpdateItem).toHaveBeenCalledWith(1, {
+        sentToModel: true,
+        promptId: 'test-session########7',
+      });
+    });
+
     it('classifies a hidden invocation as model-sent when it submits a prompt', async () => {
       const command = createTestCommand({
         name: 'status',
@@ -2063,7 +2170,13 @@ describe('useSlashCommandProcessor', () => {
       await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
 
       act(() => {
-        result.current.handleSlashCommand('/shellcmd');
+        result.current.handleSlashCommand(
+          '/shellcmd',
+          undefined,
+          undefined,
+          undefined,
+          'test-session########7',
+        );
       });
       await waitFor(() => {
         expect(result.current.shellConfirmationRequest).not.toBeNull();
@@ -2083,7 +2196,10 @@ describe('useSlashCommandProcessor', () => {
         ([item]) => item.type === MessageType.USER && item.text === '/shellcmd',
       );
       expect(userInvocationCalls).toHaveLength(1);
-      expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
+      expect(mockUpdateItem).toHaveBeenCalledWith(1, {
+        sentToModel: true,
+        promptId: 'test-session########7',
+      });
 
       const recorder = mockConfig.getChatRecordingService() as unknown as {
         recordSlashCommand: ReturnType<typeof vi.fn>;
@@ -2118,7 +2234,13 @@ describe('useSlashCommandProcessor', () => {
       await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
 
       act(() => {
-        result.current.handleSlashCommand('/actioncmd');
+        result.current.handleSlashCommand(
+          '/actioncmd',
+          undefined,
+          undefined,
+          undefined,
+          'test-session########8',
+        );
       });
       await waitFor(() => {
         expect(result.current.confirmationRequest).not.toBeNull();
@@ -2136,7 +2258,10 @@ describe('useSlashCommandProcessor', () => {
           item.type === MessageType.USER && item.text === '/actioncmd',
       );
       expect(userInvocationCalls).toHaveLength(1);
-      expect(mockUpdateItem).toHaveBeenCalledWith(1, { sentToModel: true });
+      expect(mockUpdateItem).toHaveBeenCalledWith(1, {
+        sentToModel: true,
+        promptId: 'test-session########8',
+      });
 
       const recorder = mockConfig.getChatRecordingService() as unknown as {
         recordSlashCommand: ReturnType<typeof vi.fn>;

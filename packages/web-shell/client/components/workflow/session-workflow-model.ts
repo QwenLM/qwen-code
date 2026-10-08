@@ -5,19 +5,36 @@ import type {
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { isSubAgentToolCall } from '../../adapters/toolClassification';
 import {
-  getActiveAgents,
-  getPlanNodeState,
-  nestedTasksForTool,
+  createTaskExecutionIndex,
+  getActiveAgentsFromIndex,
+  getPlanNodeStateFromIndex,
+  nestedTasksFromIndex,
+  todoIdOf,
   type PlanNodeStatus,
-} from '../messages/PlanExecutionView';
+  type TaskExecutionIndex,
+} from '../messages/taskExecutionIndex';
 
 export interface SessionWorkflowProjection {
+  /**
+   * The task execution index this projection was built from, so a surface
+   * rendering per-tool live status (the graph's executions) reuses the one
+   * build instead of raising its own.
+   */
+  taskIndex: TaskExecutionIndex;
   todosById: ReadonlyMap<string, TodoItem>;
   toolsByTaskId: ReadonlyMap<string, ACPToolCall>;
   toolsByTodo: ReadonlyMap<string, readonly ACPToolCall[]>;
+  /** Tool calls whose `todo_id` is missing or points outside the plan. */
+  unassignedTools: readonly ACPToolCall[];
   agentToolsByTodo: ReadonlyMap<string, readonly ACPToolCall[]>;
   tasksByTool: ReadonlyMap<ACPToolCall, DaemonSessionAgentTaskStatus>;
   states: ReadonlyMap<string, { status: PlanNodeStatus; attention: boolean }>;
+  /**
+   * Steps each step unblocks. Derived here so the inspector does not rescan
+   * every todo's `blockedBy` to answer the same question the graph already
+   * answers for its edges.
+   */
+  dependentsByTodo: ReadonlyMap<string, readonly TodoItem[]>;
   attentionTodos: readonly TodoItem[];
   activeAgents: readonly DaemonSessionAgentTaskStatus[];
   activity: readonly DaemonSessionAgentTaskStatus[];
@@ -31,22 +48,23 @@ export interface SessionWorkflowProjection {
   taskStatusTone: 'attention' | 'running' | 'completed' | 'waiting';
 }
 
-export function workflowTodoId(tool: ACPToolCall): string | undefined {
-  const value = tool.args?.todo_id;
-  return typeof value === 'string' && value ? value : undefined;
-}
-
+/**
+ * Index lookup in place of a linear scan per tool. `rootByToolCallId` holds
+ * exactly the parent-less agent tasks keyed by `toolUseId`, and
+ * `childrenByParentId` preserves task order within a parent, so both branches
+ * return what the previous `tasks.find` over the whole list returned.
+ */
 function taskForTool(
   tool: ACPToolCall,
-  tasks: readonly DaemonSessionTaskStatus[],
+  taskIndex: TaskExecutionIndex,
   parentAgentId: string | undefined,
 ): DaemonSessionAgentTaskStatus | undefined {
-  return tasks.find(
-    (task): task is DaemonSessionAgentTaskStatus =>
-      task.kind === 'agent' &&
-      task.toolUseId === tool.callId &&
-      (task.parentAgentId ?? undefined) === parentAgentId,
-  );
+  if (parentAgentId === undefined) {
+    return taskIndex.rootByToolCallId.get(tool.callId);
+  }
+  return taskIndex.childrenByParentId
+    .get(parentAgentId)
+    ?.find((task) => task.toolUseId === tool.callId);
 }
 
 function flattenTools(tools: readonly ACPToolCall[]): ACPToolCall[] {
@@ -61,13 +79,13 @@ function flattenTools(tools: readonly ACPToolCall[]): ACPToolCall[] {
 
 function linkedAgentTasks(
   tools: readonly ACPToolCall[],
-  tasks: readonly DaemonSessionTaskStatus[],
+  taskIndex: TaskExecutionIndex,
 ): DaemonSessionAgentTaskStatus[] {
   const linked = new Map<string, DaemonSessionAgentTaskStatus>();
   for (const tool of tools) {
-    const root = taskForTool(tool, tasks, undefined);
+    const root = taskForTool(tool, taskIndex, undefined);
     if (root) linked.set(root.id, root);
-    for (const { task } of nestedTasksForTool(tool, tasks)) {
+    for (const { task } of nestedTasksFromIndex(tool, taskIndex)) {
       linked.set(task.id, task);
     }
   }
@@ -76,7 +94,7 @@ function linkedAgentTasks(
 
 function linkAgentTools(
   tools: readonly ACPToolCall[],
-  tasks: readonly DaemonSessionTaskStatus[],
+  taskIndex: TaskExecutionIndex,
 ): {
   toolsByTaskId: Map<string, ACPToolCall>;
   tasksByTool: Map<ACPToolCall, DaemonSessionAgentTaskStatus>;
@@ -85,7 +103,7 @@ function linkAgentTools(
   const tasksByTool = new Map<ACPToolCall, DaemonSessionAgentTaskStatus>();
   const visit = (tool: ACPToolCall, parentAgentId: string | undefined) => {
     const task = isSubAgentToolCall(tool)
-      ? taskForTool(tool, tasks, parentAgentId)
+      ? taskForTool(tool, taskIndex, parentAgentId)
       : undefined;
     if (task) {
       toolsByTaskId.set(task.id, tool);
@@ -104,12 +122,23 @@ export function buildSessionWorkflowProjection(
   tools: readonly ACPToolCall[],
   tasks: readonly DaemonSessionTaskStatus[],
 ): SessionWorkflowProjection {
+  // Built once and threaded through. Every helper below used to rebuild it —
+  // `getPlanNodeState` per todo, `nestedTasksForTool` per tool — which made
+  // the projection O((todos + tools) x tasks) for an index that only ever
+  // depends on `tasks`.
+  const taskIndex = createTaskExecutionIndex(tasks);
   const todosById = new Map(todos.map((todo) => [todo.id, todo]));
   const toolsByTodo = new Map<string, ACPToolCall[]>();
   const agentToolsByTodo = new Map<string, ACPToolCall[]>();
+  const unassignedTools: ACPToolCall[] = [];
   for (const tool of tools) {
-    const todoId = workflowTodoId(tool);
-    if (!todoId) continue;
+    const todoId = todoIdOf(tool);
+    if (!todoId || !todosById.has(todoId)) {
+      // The graph renders these in its unassigned bucket; derived here so
+      // the shared projection and the graph agree on one grouping walk.
+      unassignedTools.push(tool);
+      continue;
+    }
     const group = toolsByTodo.get(todoId) ?? [];
     group.push(tool);
     toolsByTodo.set(todoId, group);
@@ -124,12 +153,26 @@ export function buildSessionWorkflowProjection(
   const states = new Map(
     todos.map((todo) => [
       todo.id,
-      getPlanNodeState(todo, todosById, toolsByTodo.get(todo.id) ?? [], tasks),
+      getPlanNodeStateFromIndex(
+        todo,
+        todosById,
+        toolsByTodo.get(todo.id) ?? [],
+        taskIndex,
+      ),
     ]),
   );
-  const { toolsByTaskId, tasksByTool } = linkAgentTools(tools, tasks);
+  const dependentsByTodo = new Map<string, TodoItem[]>();
+  for (const todo of todos) {
+    for (const dependencyId of new Set(todo.blockedBy ?? [])) {
+      if (dependencyId === todo.id || !todosById.has(dependencyId)) continue;
+      const dependents = dependentsByTodo.get(dependencyId) ?? [];
+      dependents.push(todo);
+      dependentsByTodo.set(dependencyId, dependents);
+    }
+  }
+  const { toolsByTaskId, tasksByTool } = linkAgentTools(tools, taskIndex);
   const linkedAgents = new Map(
-    linkedAgentTasks(tools, tasks).map((task) => [task.id, task]),
+    linkedAgentTasks(tools, taskIndex).map((task) => [task.id, task]),
   );
   for (const task of tasksByTool.values()) linkedAgents.set(task.id, task);
   const agents = [...linkedAgents.values()];
@@ -138,7 +181,7 @@ export function buildSessionWorkflowProjection(
   // fallback for in-flight tool calls with no live daemon task), so the
   // inspector summary and the strip report the same "Active agents" count
   // for the same session instead of live-only vs fallback divergence.
-  const activeAgents = getActiveAgents(tools, tasks);
+  const activeAgents = getActiveAgentsFromIndex(tools, taskIndex);
   const completedCount = todos.filter(
     (todo) => todo.status === 'completed',
   ).length;
@@ -166,12 +209,15 @@ export function buildSessionWorkflowProjection(
           : 'waiting';
 
   return {
+    taskIndex,
     todosById,
     toolsByTaskId,
     toolsByTodo,
+    unassignedTools,
     agentToolsByTodo,
     tasksByTool,
     states,
+    dependentsByTodo,
     attentionTodos,
     activeAgents,
     activity: [...agents].sort((a, b) => b.startTime - a.startTime),
@@ -227,9 +273,11 @@ export function workflowInitials(value: string): string {
   );
 }
 
-export function workflowClock(timestamp?: number): string {
+export function workflowClock(timestamp?: number, language?: string): string {
   if (!timestamp) return '--:--';
-  return new Date(timestamp).toLocaleTimeString([], {
+  // The app's language, not the browser's: a zh UI in an en browser rendered
+  // its activity timestamps in the browser's convention.
+  return new Date(timestamp).toLocaleTimeString(language ? [language] : [], {
     hour: '2-digit',
     minute: '2-digit',
   });

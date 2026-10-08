@@ -53,6 +53,10 @@ export function validateVersion(version, format, name) {
 /**
  * Check whether an error from `gh release view` indicates the release
  * simply doesn't exist (as opposed to an unexpected failure).
+ *
+ * Copied verbatim into `scripts/assert-release-version.mjs`, which the
+ * release workflow checks out on its own and so cannot import this file.
+ * Change both together; `scripts/tests/release-workflow.test.js` pins it.
  */
 export function isExpectedMissingGitHubRelease(error) {
   const stderr = error.stderr?.toString() ?? '';

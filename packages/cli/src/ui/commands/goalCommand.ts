@@ -12,6 +12,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   emptyGoalSnapshot,
+  GOAL_PAUSE_REASON_COMMAND,
   GoalPersistenceUnavailableError,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -181,7 +182,13 @@ export const goalCommand: SlashCommand = {
               objective: operation.objective,
               ...version,
             }
-          : { action: operation.kind, ...version };
+          : operation.kind === 'pause'
+            ? {
+                action: 'pause',
+                ...version,
+                reason: GOAL_PAUSE_REASON_COMMAND,
+              }
+            : { action: operation.kind, ...version };
       return goalControl(
         operation,
         await runtime.dispatch(request),

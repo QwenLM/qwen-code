@@ -35,6 +35,28 @@ vi.mock('node:os', () => ({
   userInfo: vi.fn(() => ({ username: 'test-user' })),
 }));
 
+/** Bearer credentials; the token carries `expiresAt` only when given. */
+const bearer = ({
+  serverName,
+  accessToken,
+  updatedAt = Date.now(),
+  ...token
+}: {
+  serverName: string;
+  accessToken: string;
+  updatedAt?: number;
+  expiresAt?: number;
+}): OAuthCredentials => ({
+  serverName,
+  token: { accessToken, tokenType: 'Bearer', ...token },
+  updatedAt,
+});
+
+const ENCRYPTED = /^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/;
+const WRITE_OPTIONS = { mode: 0o600, forceMode: true, noFollow: true };
+const qwenDir = path.join('/home/test', '.qwen');
+const tokenFile = path.join(qwenDir, 'mcp-oauth-tokens-v2.json');
+
 describe('FileTokenStorage', () => {
   let storage: FileTokenStorage;
   const mockFs = fs as unknown as {
@@ -43,14 +65,27 @@ describe('FileTokenStorage', () => {
     unlink: ReturnType<typeof vi.fn>;
     mkdir: ReturnType<typeof vi.fn>;
   };
-  const existingCredentials: OAuthCredentials = {
+  const existingCredentials = bearer({
     serverName: 'existing-server',
-    token: {
-      accessToken: 'existing-token',
-      tokenType: 'Bearer',
-    },
+    accessToken: 'existing-token',
     updatedAt: Date.now() - 10000,
-  };
+  });
+
+  /** The file holds `data`, encrypted by this storage. */
+  const mockFile = (data: object) =>
+    mockFs.readFile.mockResolvedValue(storage['encrypt'](JSON.stringify(data)));
+
+  /** The decrypted JSON of the first atomic write. */
+  const firstWrite = () =>
+    JSON.parse(
+      storage['decrypt'](vi.mocked(atomicWriteFile).mock.calls[0][1] as string),
+    );
+
+  const expectQwenDirCreated = () =>
+    expect(mockFs.mkdir).toHaveBeenCalledWith(qwenDir, {
+      recursive: true,
+      mode: 0o700,
+    });
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -71,40 +106,25 @@ describe('FileTokenStorage', () => {
     });
 
     it('should return null for expired tokens', async () => {
-      const credentials: OAuthCredentials = {
-        serverName: 'test-server',
-        token: {
+      mockFile({
+        'test-server': bearer({
+          serverName: 'test-server',
           accessToken: 'access-token',
-          tokenType: 'Bearer',
           expiresAt: Date.now() - 3600000,
-        },
-        updatedAt: Date.now(),
-      };
-
-      const encryptedData = storage['encrypt'](
-        JSON.stringify({ 'test-server': credentials }),
-      );
-      mockFs.readFile.mockResolvedValue(encryptedData);
+        }),
+      });
 
       const result = await storage.getCredentials('test-server');
       expect(result).toBeNull();
     });
 
     it('should return credentials for valid tokens', async () => {
-      const credentials: OAuthCredentials = {
+      const credentials = bearer({
         serverName: 'test-server',
-        token: {
-          accessToken: 'access-token',
-          tokenType: 'Bearer',
-          expiresAt: Date.now() + 3600000,
-        },
-        updatedAt: Date.now(),
-      };
-
-      const encryptedData = storage['encrypt'](
-        JSON.stringify({ 'test-server': credentials }),
-      );
-      mockFs.readFile.mockResolvedValue(encryptedData);
+        accessToken: 'access-token',
+        expiresAt: Date.now() + 3600000,
+      });
+      mockFile({ 'test-server': credentials });
 
       const result = await storage.getCredentials('test-server');
       expect(result).toEqual(credentials);
@@ -125,27 +145,17 @@ describe('FileTokenStorage', () => {
       mockFs.mkdir.mockResolvedValue(undefined);
       vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
 
-      const credentials: OAuthCredentials = {
+      const credentials = bearer({
         serverName: 'test-server',
-        token: {
-          accessToken: 'access-token',
-          tokenType: 'Bearer',
-        },
+        accessToken: 'access-token',
         updatedAt: Date.now() - 10000,
-      };
-
+      });
       await storage.setCredentials(credentials);
 
-      expect(mockFs.mkdir).toHaveBeenCalledWith(
-        path.join('/home/test', '.qwen'),
-        { recursive: true, mode: 0o700 },
-      );
+      expectQwenDirCreated();
       expect(atomicWriteFile).toHaveBeenCalled();
 
-      const writeCall = vi.mocked(atomicWriteFile).mock.calls[0];
-      const decrypted = storage['decrypt'](writeCall[1] as string);
-      const saved = JSON.parse(decrypted);
-
+      const saved = firstWrite();
       expect(Object.keys(saved)).toEqual(['test-server']);
       expect(saved['test-server']).toEqual({
         ...credentials,
@@ -154,77 +164,43 @@ describe('FileTokenStorage', () => {
     });
 
     it('should save credentials with encryption', async () => {
-      const encryptedData = storage['encrypt'](
-        JSON.stringify({ 'existing-server': existingCredentials }),
-      );
-      mockFs.readFile.mockResolvedValue(encryptedData);
+      mockFile({ 'existing-server': existingCredentials });
       mockFs.mkdir.mockResolvedValue(undefined);
       vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
 
-      const credentials: OAuthCredentials = {
-        serverName: 'test-server',
-        token: {
-          accessToken: 'access-token',
-          tokenType: 'Bearer',
-        },
-        updatedAt: Date.now(),
-      };
-
-      await storage.setCredentials(credentials);
-
-      expect(mockFs.mkdir).toHaveBeenCalledWith(
-        path.join('/home/test', '.qwen'),
-        { recursive: true, mode: 0o700 },
+      await storage.setCredentials(
+        bearer({ serverName: 'test-server', accessToken: 'access-token' }),
       );
+
+      expectQwenDirCreated();
       expect(atomicWriteFile).toHaveBeenCalled();
 
       const writeCall = vi.mocked(atomicWriteFile).mock.calls[0];
-      expect(writeCall[1]).toMatch(/^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/);
-      expect(writeCall[2]).toEqual({
-        mode: 0o600,
-        forceMode: true,
-        noFollow: true,
-      });
+      expect(writeCall[1]).toMatch(ENCRYPTED);
+      expect(writeCall[2]).toEqual(WRITE_OPTIONS);
     });
 
     it('should update existing credentials', async () => {
-      const encryptedData = storage['encrypt'](
-        JSON.stringify({ 'existing-server': existingCredentials }),
-      );
-      mockFs.readFile.mockResolvedValue(encryptedData);
+      mockFile({ 'existing-server': existingCredentials });
       vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
 
-      const newCredentials: OAuthCredentials = {
-        serverName: 'test-server',
-        token: {
-          accessToken: 'new-token',
-          tokenType: 'Bearer',
-        },
-        updatedAt: Date.now(),
-      };
-
-      await storage.setCredentials(newCredentials);
+      await storage.setCredentials(
+        bearer({ serverName: 'test-server', accessToken: 'new-token' }),
+      );
 
       expect(atomicWriteFile).toHaveBeenCalled();
-      const writeCall = vi.mocked(atomicWriteFile).mock.calls[0];
-      const decrypted = storage['decrypt'](writeCall[1] as string);
-      const saved = JSON.parse(decrypted);
-
+      const saved = firstWrite();
       expect(saved['existing-server']).toEqual(existingCredentials);
       expect(saved['test-server'].token.accessToken).toBe('new-token');
     });
 
-    // saveTokens has no try/catch around atomicWriteFile, so disk
-    // failures (ENOSPC, EROFS, EPERM) propagate to setCredentials
-    // callers. A regression that silently swallowed the failure or
-    // left the in-memory token map out of sync with disk would have
-    // gone undetected — sibling sharedTokenManager.test.ts got the
-    // same regression test in round 1.
+    // saveTokens has no try/catch around atomicWriteFile, so disk failures
+    // (ENOSPC, EROFS, EPERM) propagate to setCredentials callers. A
+    // regression that silently swallowed the failure or left the in-memory
+    // token map out of sync with disk would have gone undetected — sibling
+    // sharedTokenManager.test.ts got the same regression test in round 1.
     it('should propagate atomicWriteFile failures', async () => {
-      const encryptedData = storage['encrypt'](
-        JSON.stringify({ 'existing-server': existingCredentials }),
-      );
-      mockFs.readFile.mockResolvedValue(encryptedData);
+      mockFile({ 'existing-server': existingCredentials });
       mockFs.mkdir.mockResolvedValue(undefined);
       vi.mocked(atomicWriteFile).mockRejectedValueOnce(
         Object.assign(new Error('ENOSPC: no space left on device'), {
@@ -233,11 +209,9 @@ describe('FileTokenStorage', () => {
       );
 
       await expect(
-        storage.setCredentials({
-          serverName: 'test-server',
-          token: { accessToken: 'tok', tokenType: 'Bearer' },
-          updatedAt: Date.now(),
-        }),
+        storage.setCredentials(
+          bearer({ serverName: 'test-server', accessToken: 'tok' }),
+        ),
       ).rejects.toThrow(/ENOSPC/);
     });
   });
@@ -252,51 +226,28 @@ describe('FileTokenStorage', () => {
     });
 
     it('should delete file when last credential is removed', async () => {
-      const credentials: OAuthCredentials = {
-        serverName: 'test-server',
-        token: {
+      mockFile({
+        'test-server': bearer({
+          serverName: 'test-server',
           accessToken: 'access-token',
-          tokenType: 'Bearer',
-        },
-        updatedAt: Date.now(),
-      };
-
-      const encryptedData = storage['encrypt'](
-        JSON.stringify({ 'test-server': credentials }),
-      );
-      mockFs.readFile.mockResolvedValue(encryptedData);
+        }),
+      });
       mockFs.unlink.mockResolvedValue(undefined);
 
       await storage.deleteCredentials('test-server');
 
-      expect(mockFs.unlink).toHaveBeenCalledWith(
-        path.join('/home/test', '.qwen', 'mcp-oauth-tokens-v2.json'),
-      );
+      expect(mockFs.unlink).toHaveBeenCalledWith(tokenFile);
     });
 
     it('should update file when other credentials remain', async () => {
-      const credentials1: OAuthCredentials = {
-        serverName: 'server1',
-        token: {
-          accessToken: 'token1',
-          tokenType: 'Bearer',
-        },
-        updatedAt: Date.now(),
-      };
-
-      const credentials2: OAuthCredentials = {
+      const credentials2 = bearer({
         serverName: 'server2',
-        token: {
-          accessToken: 'token2',
-          tokenType: 'Bearer',
-        },
-        updatedAt: Date.now(),
-      };
-
-      const encryptedData = storage['encrypt'](
-        JSON.stringify({ server1: credentials1, server2: credentials2 }),
-      );
-      mockFs.readFile.mockResolvedValue(encryptedData);
+        accessToken: 'token2',
+      });
+      mockFile({
+        server1: bearer({ serverName: 'server1', accessToken: 'token1' }),
+        server2: credentials2,
+      });
       vi.mocked(atomicWriteFile).mockResolvedValue(undefined);
 
       await storage.deleteCredentials('server1');
@@ -304,29 +255,16 @@ describe('FileTokenStorage', () => {
       expect(atomicWriteFile).toHaveBeenCalled();
       expect(mockFs.unlink).not.toHaveBeenCalled();
 
-      const writeCall = vi.mocked(atomicWriteFile).mock.calls[0];
-      const decrypted = storage['decrypt'](writeCall[1] as string);
-      const saved = JSON.parse(decrypted);
-
+      const saved = firstWrite();
       expect(saved['server1']).toBeUndefined();
       expect(saved['server2']).toEqual(credentials2);
     });
 
     it('should propagate atomicWriteFile failures', async () => {
-      const credentials1: OAuthCredentials = {
-        serverName: 'server1',
-        token: { accessToken: 'token1', tokenType: 'Bearer' },
-        updatedAt: Date.now(),
-      };
-      const credentials2: OAuthCredentials = {
-        serverName: 'server2',
-        token: { accessToken: 'token2', tokenType: 'Bearer' },
-        updatedAt: Date.now(),
-      };
-      const encryptedData = storage['encrypt'](
-        JSON.stringify({ server1: credentials1, server2: credentials2 }),
-      );
-      mockFs.readFile.mockResolvedValue(encryptedData);
+      mockFile({
+        server1: bearer({ serverName: 'server1', accessToken: 'token1' }),
+        server2: bearer({ serverName: 'server2', accessToken: 'token2' }),
+      });
       vi.mocked(atomicWriteFile).mockRejectedValueOnce(
         Object.assign(new Error('EROFS: read-only file system'), {
           code: 'EROFS',
@@ -349,21 +287,10 @@ describe('FileTokenStorage', () => {
     });
 
     it('should return list of server names', async () => {
-      const credentials: Record<string, OAuthCredentials> = {
-        server1: {
-          serverName: 'server1',
-          token: { accessToken: 'token1', tokenType: 'Bearer' },
-          updatedAt: Date.now(),
-        },
-        server2: {
-          serverName: 'server2',
-          token: { accessToken: 'token2', tokenType: 'Bearer' },
-          updatedAt: Date.now(),
-        },
-      };
-
-      const encryptedData = storage['encrypt'](JSON.stringify(credentials));
-      mockFs.readFile.mockResolvedValue(encryptedData);
+      mockFile({
+        server1: bearer({ serverName: 'server1', accessToken: 'token1' }),
+        server2: bearer({ serverName: 'server2', accessToken: 'token2' }),
+      });
 
       const result = await storage.listServers();
       expect(result).toEqual(['server1', 'server2']);
@@ -373,12 +300,8 @@ describe('FileTokenStorage', () => {
   describe('clearAll', () => {
     it('should delete the token file', async () => {
       mockFs.unlink.mockResolvedValue(undefined);
-
       await storage.clearAll();
-
-      expect(mockFs.unlink).toHaveBeenCalledWith(
-        path.join('/home/test', '.qwen', 'mcp-oauth-tokens-v2.json'),
-      );
+      expect(mockFs.unlink).toHaveBeenCalledWith(tokenFile);
     });
 
     it('should not throw when file does not exist', async () => {
@@ -396,7 +319,7 @@ describe('FileTokenStorage', () => {
 
       expect(decrypted).toBe(original);
       expect(encrypted).not.toBe(original);
-      expect(encrypted).toMatch(/^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/);
+      expect(encrypted).toMatch(ENCRYPTED);
     });
 
     it('should produce different encrypted output each time', () => {
@@ -417,11 +340,7 @@ describe('FileTokenStorage', () => {
   });
 
   describe('secret storage', () => {
-    const secretFilePath = path.join(
-      '/home/test',
-      '.qwen',
-      'extension-secrets-v1.json',
-    );
+    const secretFilePath = path.join(qwenDir, 'extension-secrets-v1.json');
 
     beforeEach(() => {
       mockFs.mkdir.mockResolvedValue(undefined);
@@ -448,25 +367,16 @@ describe('FileTokenStorage', () => {
       const [writtenPath, writtenData, writeOptions] =
         vi.mocked(atomicWriteFile).mock.calls[0];
       expect(writtenPath).toBe(secretFilePath);
-      expect(writtenData).toMatch(/^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/);
-      expect(writeOptions).toEqual({
-        mode: 0o600,
-        forceMode: true,
-        noFollow: true,
-      });
-      expect(JSON.parse(storage['decrypt'](writtenData as string))).toEqual({
-        'test-storage': { API_KEY: 'sk-123' },
-      });
+      expect(writtenData).toMatch(ENCRYPTED);
+      expect(writeOptions).toEqual(WRITE_OPTIONS);
+      expect(firstWrite()).toEqual({ 'test-storage': { API_KEY: 'sk-123' } });
     });
 
     it('reads back a stored secret and ignores other keys and services', async () => {
-      const encrypted = storage['encrypt'](
-        JSON.stringify({
-          'test-storage': { API_KEY: 'sk-123' },
-          'other-service': { API_KEY: 'sk-other' },
-        }),
-      );
-      mockFs.readFile.mockResolvedValue(encrypted);
+      mockFile({
+        'test-storage': { API_KEY: 'sk-123' },
+        'other-service': { API_KEY: 'sk-other' },
+      });
 
       await expect(storage.getSecret('API_KEY')).resolves.toBe('sk-123');
       await expect(storage.getSecret('MISSING')).resolves.toBeNull();
@@ -474,16 +384,12 @@ describe('FileTokenStorage', () => {
     });
 
     it('deletes a secret and drops the now-empty service bucket', async () => {
-      const encrypted = storage['encrypt'](
-        JSON.stringify({ 'test-storage': { API_KEY: 'sk-123' } }),
-      );
-      mockFs.readFile.mockResolvedValue(encrypted);
+      mockFile({ 'test-storage': { API_KEY: 'sk-123' } });
 
       await storage.deleteSecret('API_KEY');
 
       expect(atomicWriteFile).toHaveBeenCalledTimes(1);
-      const [, writtenData] = vi.mocked(atomicWriteFile).mock.calls[0];
-      expect(JSON.parse(storage['decrypt'](writtenData as string))).toEqual({});
+      expect(firstWrite()).toEqual({});
     });
 
     it('deleting a missing secret is a no-op (no write, no throw)', async () => {

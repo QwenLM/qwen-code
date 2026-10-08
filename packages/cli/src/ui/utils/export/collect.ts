@@ -4,11 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isShellResultDisplay } from '@qwen-code/qwen-code-core/shellResult';
 import { randomUUID } from 'node:crypto';
-import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
+import type {
+  ChatRecord,
+  Config,
+  GoalStateRecordPayloadV2,
+} from '@qwen-code/qwen-code-core';
+import { parseGoalStateRecordPayloadV2 } from '@qwen-code/qwen-code-core/goals/goal-reducer.js';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { SessionContext } from '../../../acp-integration/session/types.js';
 import type { SessionUpdate, ToolCall } from '@agentclientprotocol/sdk';
+import {
+  parseQwenAgentMessageMeta,
+  QWEN_AGENT_MESSAGE_META_KEY,
+} from '@qwen-code/sdk/daemon';
 import { HistoryReplayer } from '../../../acp-integration/session/history-replayer.js';
 import { getExplicitToolResultCallId } from '../../../utils/chat-record-tool-call-id.js';
 import type {
@@ -16,6 +26,7 @@ import type {
   ExportMessage,
   ExportSessionData,
   ExportMetadata,
+  ExportMessageAuthor,
   ExportToolRegistry,
 } from './types.js';
 
@@ -125,7 +136,12 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
   };
 
   for (const record of records) {
-    if (record.type !== 'tool_result' || !record.toolCallResult) continue;
+    if (
+      record.type !== 'tool_result' ||
+      record.subtype === 'code_mode_tool_result' ||
+      !record.toolCallResult
+    )
+      continue;
 
     const toolName = extractToolNameFromRecord(record);
     const callId = getExplicitToolResultCallId(record);
@@ -341,7 +357,7 @@ function createExportSessionConfig(config: ExportConfig): Config {
 /**
  * Extract session metadata from ChatRecords.
  */
-async function extractMetadata(
+export async function collectSessionMetadata(
   conversation: {
     sessionId: string;
     startTime: string;
@@ -407,6 +423,47 @@ async function extractMetadata(
   };
 }
 
+interface GoalStateExportRecord {
+  index: number;
+  uuid: string;
+  timestamp: string;
+  payload: GoalStateRecordPayloadV2;
+}
+
+/**
+ * The replayer turns a `goal_state` record into a text-less card update and
+ * drops the bookkeeping ones, so neither reaches the export through
+ * `sendUpdate`. They are read from the records instead and slotted in by
+ * record position.
+ */
+function indexGoalStateRecords(records: ChatRecord[]): {
+  positions: Map<string, number>;
+  goalStates: GoalStateExportRecord[];
+} {
+  const positions = new Map<string, number>();
+  const goalStates: GoalStateExportRecord[] = [];
+  records.forEach((record, index) => {
+    positions.set(record.uuid, index);
+    if (record.type !== 'system' || record.subtype !== 'goal_state') return;
+    const payload = parseGoalStateRecordPayloadV2(record.systemPayload);
+    if (!payload) return;
+    goalStates.push({
+      index,
+      uuid: record.uuid,
+      timestamp: record.timestamp,
+      payload,
+    });
+  });
+  return { positions, goalStates };
+}
+
+function describeGoalState(payload: GoalStateRecordPayloadV2): string {
+  const goal = payload.snapshot.goal;
+  if (!goal) return `Goal ${payload.cause}`;
+  const reason = goal.lastReason ? `: ${goal.lastReason}` : '';
+  return `Goal ${payload.cause} (${goal.status}, turn ${goal.turnCount})${reason}`;
+}
+
 /**
  * Export session context that captures session updates into export messages.
  * Implements SessionContext to work with HistoryReplayer.
@@ -419,22 +476,35 @@ class ExportSessionContext implements SessionContext {
     type: 'user' | 'assistant';
     role: 'user' | 'assistant' | 'thinking';
     parts: Array<{ text: string }>;
-    timestamp: number;
+    sourceUuid?: string;
+    sourceTimestamp?: string;
     usageMetadata?: GenerateContentResponseUsageMetadata;
+    author?: ExportMessageAuthor;
   } | null = null;
   private activeRecordId: string | null = null;
   private activeRecordTimestamp: string | null = null;
   private toolCallMap: Map<string, ExportMessage['toolCall']> = new Map();
+  private readonly recordPositions: Map<string, number>;
+  private readonly pendingGoalStates: GoalStateExportRecord[];
 
-  constructor(sessionId: string, config: ExportConfig) {
+  constructor(sessionId: string, config: ExportConfig, records: ChatRecord[]) {
     this.sessionId = sessionId;
     this.config = createExportSessionConfig(config);
+    const { positions, goalStates } = indexGoalStateRecords(records);
+    this.recordPositions = positions;
+    this.pendingGoalStates = goalStates;
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
     switch (update.sessionUpdate) {
       case 'user_message_chunk':
-        this.handleMessageChunk('user', update.content);
+        this.handleMessageChunk(
+          'user',
+          update.content,
+          'user',
+          undefined,
+          agentAuthorOf(update._meta),
+        );
         break;
       case 'agent_message_chunk': {
         // Extract usageMetadata from _meta if available
@@ -464,6 +534,7 @@ class ExportSessionContext implements SessionContext {
           update.content,
           'assistant',
           usageMetadata,
+          agentAuthorOf(update._meta),
         );
         break;
       }
@@ -488,8 +559,43 @@ class ExportSessionContext implements SessionContext {
   }
 
   setActiveRecordId(recordId: string | null, timestamp?: string): void {
+    const position =
+      recordId === null ? undefined : this.recordPositions.get(recordId);
+    if (position !== undefined) this.emitGoalStatesBefore(position);
     this.activeRecordId = recordId;
     this.activeRecordTimestamp = timestamp ?? null;
+  }
+
+  /**
+   * Writes the Goal transitions journaled before `position`. A transition
+   * waits for the next record so the `/goal …` line replayed from its own
+   * record lands ahead of it. The buffered message is flushed before the
+   * transition card, using a fresh uuid only when that buffer came from the
+   * transition itself.
+   */
+  private emitGoalStatesBefore(position: number): void {
+    while (
+      this.pendingGoalStates.length > 0 &&
+      this.pendingGoalStates[0]!.index < position
+    ) {
+      const { uuid, timestamp, payload } = this.pendingGoalStates.shift()!;
+      // The buffered text may have been replayed from this very record (its
+      // `/goal …` line). The record's uuid belongs to the transition, which
+      // is what a snapshot's record references resolve to, so the text does
+      // not take it as well.
+      this.flushCurrentMessage(this.currentMessage?.sourceUuid === uuid);
+      this.messages.push({
+        uuid,
+        sessionId: this.sessionId,
+        timestamp,
+        type: 'system',
+        message: {
+          role: 'system',
+          parts: [{ text: describeGoalState(payload) }],
+        },
+        goalState: payload,
+      });
+    }
   }
 
   private getMessageTimestamp(): string {
@@ -505,25 +611,31 @@ class ExportSessionContext implements SessionContext {
     content: { type: string; text?: string },
     messageRole: 'user' | 'assistant' | 'thinking' = role,
     usageMetadata?: GenerateContentResponseUsageMetadata,
+    author?: ExportMessageAuthor,
   ): void {
     if (content.type !== 'text' || !content.text) return;
 
-    // If we're starting a new message type, flush the previous one
-    if (
-      this.currentMessage &&
-      (this.currentMessage.type !== role ||
-        this.currentMessage.role !== messageRole)
-    ) {
+    // A new message type, or another author (an agent's reply never merges
+    // into the session's own text, nor into another reply): flush first.
+    const sameMessage =
+      this.currentMessage !== null &&
+      this.currentMessage.type === role &&
+      this.currentMessage.role === messageRole &&
+      this.currentMessage.author?.name === author?.name &&
+      (!author ||
+        this.currentMessage.sourceUuid === (this.activeRecordId ?? undefined));
+    if (this.currentMessage && !sameMessage) {
       this.flushCurrentMessage();
     }
 
     // Add to current message or create new one
-    if (
-      this.currentMessage &&
-      this.currentMessage.type === role &&
-      this.currentMessage.role === messageRole
-    ) {
+    if (this.currentMessage && sameMessage) {
       this.currentMessage.parts.push({ text: content.text });
+      // Keep the first source uuid for merged messages, but use the timestamp
+      // of the latest record that contributed text to the buffer.
+      if (this.activeRecordTimestamp) {
+        this.currentMessage.sourceTimestamp = this.activeRecordTimestamp;
+      }
       // Merge usageMetadata if provided (for assistant messages)
       if (usageMetadata && role === 'assistant') {
         this.currentMessage.usageMetadata = usageMetadata;
@@ -533,8 +645,10 @@ class ExportSessionContext implements SessionContext {
         type: role,
         role: messageRole,
         parts: [{ text: content.text }],
-        timestamp: Date.now(),
+        sourceUuid: this.activeRecordId ?? undefined,
+        sourceTimestamp: this.activeRecordTimestamp ?? undefined,
         ...(usageMetadata && role === 'assistant' ? { usageMetadata } : {}),
+        ...(author ? { author } : {}),
       };
     }
   }
@@ -547,6 +661,9 @@ class ExportSessionContext implements SessionContext {
         typeof update.title === 'string' ? update.title : update.title || '',
       status: update.status || 'pending',
       rawInput: update.rawInput as string | object | undefined,
+      ...(isShellResultDisplay(update.rawOutput)
+        ? { rawOutput: update.rawOutput }
+        : {}),
       locations: update.locations,
       timestamp: Date.now(),
     };
@@ -570,12 +687,15 @@ class ExportSessionContext implements SessionContext {
     title?: string | null;
     content?: Array<{ type: string; [key: string]: unknown }> | null;
     kind?: string | null;
+    rawOutput?: unknown;
   }): void {
     const toolCall = this.toolCallMap.get(update.toolCallId);
     if (toolCall) {
       // Update the tool call in place
       if (update.status) toolCall.status = update.status;
       if (update.content) toolCall.content = update.content;
+      if (isShellResultDisplay(update.rawOutput))
+        toolCall.rawOutput = update.rawOutput;
       if (update.title)
         toolCall.title = typeof update.title === 'string' ? update.title : '';
     }
@@ -632,20 +752,34 @@ class ExportSessionContext implements SessionContext {
     });
   }
 
-  private flushCurrentMessage(): void {
+  private flushCurrentMessage(freshUuid = false): void {
     if (!this.currentMessage) return;
 
-    const uuid = this.getMessageUuid();
+    // Identity belongs to the record the message was buffered from, captured
+    // when the buffer was created: resolving it here would read whichever
+    // record is active by the time the buffer is flushed. A Goal transition is
+    // the exception: text replayed from the transition's own record keeps that
+    // record's timestamp but not its uuid, so a snapshot's record references
+    // resolve to the transition alone.
+    const uuid = freshUuid
+      ? randomUUID()
+      : (this.currentMessage.sourceUuid ?? this.getMessageUuid());
+    const timestamp =
+      this.currentMessage.sourceTimestamp ?? this.getMessageTimestamp();
     const exportMessage: ExportMessage = {
       uuid,
       sessionId: this.sessionId,
-      timestamp: this.getMessageTimestamp(),
+      timestamp,
       type: this.currentMessage.type,
       message: {
         role: this.currentMessage.role,
         parts: this.currentMessage.parts,
       },
     };
+
+    if (this.currentMessage.author) {
+      exportMessage.author = this.currentMessage.author;
+    }
 
     // Add usageMetadata for assistant messages
     if (
@@ -661,12 +795,26 @@ class ExportSessionContext implements SessionContext {
   }
 
   flushMessages(): void {
+    this.emitGoalStatesBefore(Number.POSITIVE_INFINITY);
     this.flushCurrentMessage();
   }
 
   getMessages(): ExportMessage[] {
     return this.messages;
   }
+}
+
+/**
+ * The workspace agent behind a replayed `agent_message` / `agent_mention`
+ * update (`_meta.qwenAgentMessage.author`), when there is one.
+ */
+function agentAuthorOf(meta: unknown): ExportMessageAuthor | undefined {
+  if (!meta || typeof meta !== 'object') return undefined;
+  const parsed = parseQwenAgentMessageMeta(
+    (meta as Record<string, unknown>)[QWEN_AGENT_MESSAGE_META_KEY],
+  );
+  const name = parsed?.author?.name.trim();
+  return name ? { name } : undefined;
 }
 
 /**
@@ -685,6 +833,7 @@ export async function collectSessionData(
   const exportContext = new ExportSessionContext(
     conversation.sessionId,
     config,
+    conversation.messages,
   );
 
   // Create history replayer with export context
@@ -700,7 +849,7 @@ export async function collectSessionData(
   const messages = exportContext.getMessages();
 
   // Extract metadata from conversation
-  const metadata = await extractMetadata(conversation, config);
+  const metadata = await collectSessionMetadata(conversation, config);
 
   return {
     sessionId: conversation.sessionId,

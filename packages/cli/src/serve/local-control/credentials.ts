@@ -4,8 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { ListenerIdentity } from './listener-identity.js';
+
+export interface DesktopRelayCredentialClaim {
+  acpPath: string;
+  sessionId: string;
+}
 
 /**
  * What the auth middleware needs from a credential source. Kept separate from
@@ -15,6 +20,10 @@ import type { ListenerIdentity } from './listener-identity.js';
 export interface ListenerScopedCredentials {
   isOpen(listener: ListenerIdentity): boolean;
   verify(credentials: string, listener: ListenerIdentity): boolean;
+  consumeDesktopRelayCredential?(
+    credential: string,
+    acpPath: string,
+  ): DesktopRelayCredentialClaim | undefined;
 }
 
 /**
@@ -31,6 +40,7 @@ export interface ListenerScopedCredentials {
  * | ------------- | ---------------- | ---------------------- |
  * | runtime token | accepted         | **rejected**           |
  * | pairing token | **rejected**     | accepted               |
+ * | Web Shell device token | accepted | **rejected**           |
  *
  * Both rejections matter. Rejecting the runtime token on the LAN is the
  * invariant the Rust proxy enforced explicitly. Rejecting the pairing token on
@@ -41,6 +51,11 @@ export class CredentialStore implements ListenerScopedCredentials {
   #runtime: Buffer | undefined;
   /** Pairing id → sha256 of the pairing secret. */
   readonly #pairing = new Map<string, Buffer>();
+  readonly #webShell = new Set<Buffer>();
+  readonly #desktopRelay = new Map<
+    string,
+    DesktopRelayCredentialClaim & { expiresAt: number }
+  >();
 
   constructor(runtimeToken?: string) {
     this.#runtime = hashToken(runtimeToken);
@@ -52,6 +67,43 @@ export class CredentialStore implements ListenerScopedCredentials {
 
   revokePairingToken(id: string): boolean {
     return this.#pairing.delete(id);
+  }
+
+  addWebShellToken(token: string): boolean {
+    if (this.#webShell.size >= 128) return false;
+    this.#webShell.add(createHash('sha256').update(token, 'utf8').digest());
+    return true;
+  }
+
+  createDesktopRelayCredential(
+    claim: DesktopRelayCredentialClaim,
+  ): string | undefined {
+    const now = Date.now();
+    for (const [digest, entry] of this.#desktopRelay) {
+      if (entry.expiresAt <= now) this.#desktopRelay.delete(digest);
+    }
+    if (this.#desktopRelay.size >= 128) return undefined;
+
+    const credential = randomBytes(32).toString('base64url');
+    this.#desktopRelay.set(digestToken(credential), {
+      ...claim,
+      expiresAt: now + 120_000,
+    });
+    return credential;
+  }
+
+  consumeDesktopRelayCredential(
+    credential: string,
+    acpPath: string,
+  ): DesktopRelayCredentialClaim | undefined {
+    const digest = digestToken(credential);
+    const claim = this.#desktopRelay.get(digest);
+    if (!claim) return undefined;
+    this.#desktopRelay.delete(digest);
+    if (claim.expiresAt <= Date.now() || claim.acpPath !== acpPath) {
+      return undefined;
+    }
+    return { acpPath: claim.acpPath, sessionId: claim.sessionId };
   }
 
   /**
@@ -83,7 +135,13 @@ export class CredentialStore implements ListenerScopedCredentials {
       }
       return matched;
     }
-    return this.#runtime !== undefined && equalDigest(candidate, this.#runtime);
+    if (this.#runtime !== undefined && equalDigest(candidate, this.#runtime)) {
+      matched = true;
+    }
+    for (const expected of this.#webShell) {
+      if (equalDigest(candidate, expected)) matched = true;
+    }
+    return matched;
   }
 }
 
@@ -120,6 +178,10 @@ function hashToken(token: string | undefined): Buffer | undefined {
   return token === undefined || token === ''
     ? undefined
     : createHash('sha256').update(token, 'utf8').digest();
+}
+
+function digestToken(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('hex');
 }
 
 /**

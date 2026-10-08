@@ -14,6 +14,8 @@ import {
   getAllMemoryFilenames,
   writeWorkspaceContextFile,
 } from '@qwen-code/qwen-code-core';
+import { detectBOM } from '@qwen-code/qwen-code-core/utils/fileUtils.js';
+import { openNoFollow } from '@qwen-code/qwen-code-core/noFollowOpen';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debug-mode.js';
 import type { WorkspaceEventBridge } from './acp-session-bridge.js';
@@ -30,6 +32,8 @@ import {
   sendGenerationClosedError,
 } from './workspace-route-runtime.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
+import { FsError } from './fs/errors.js';
+import { resolveWithinWorkspace } from './fs/paths.js';
 
 /**
  * Issue #4175 PR 16: workspace memory CRUD routes.
@@ -39,6 +43,9 @@ import type { WorkspaceRegistry } from './workspace-registry.js';
  * plus the user's `~/.qwen/` global. Read-only; returns
  * `initialized: false` and an empty `files` list when no files exist
  * (no synthetic 500s, mirroring PR 12's read-only routes).
+ * `?content=true` also returns each file's text, which is how a client
+ * reads the global file: it lives outside the bound workspace, so the
+ * sandboxed `GET /file` refuses it, yet `POST` below can replace it.
  *
  * `POST /workspace/memory` accepts `{ scope, content, mode }` and
  * forwards to `writeWorkspaceContextFile`. Strict mutation gate; on
@@ -192,13 +199,15 @@ export function mountWorkspaceMemoryRoutes(
   app: Application,
   deps: WorkspaceMemoryRouteDeps,
 ): void {
-  app.get('/workspace/memory', async (_req, res) => {
+  app.get('/workspace/memory', async (req, res) => {
     const assertGenerationOpen = captureOpenGeneration(deps, res);
     if (!assertGenerationOpen) return;
     if (!requireTrustedWorkspace(deps, res)) return;
     try {
       const collectStatus = deps.collectStatus ?? collectWorkspaceMemoryStatus;
-      const status = await collectStatus(deps.boundWorkspace);
+      const status = await collectStatus(deps.boundWorkspace, {
+        includeContent: req.query['content'] === 'true',
+      });
       assertGenerationOpen();
       res.status(200).json(status);
     } catch (err) {
@@ -359,7 +368,9 @@ export function mountWorkspaceQualifiedMemoryRoutes(
     if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
     try {
       const collectStatus = deps.collectStatus ?? collectWorkspaceMemoryStatus;
-      const status = await collectStatus(runtime.workspaceCwd);
+      const status = await collectStatus(runtime.workspaceCwd, {
+        includeContent: req.query['content'] === 'true',
+      });
       runtime.generationGuard?.assertOpen();
       res.status(200).json(status);
     } catch (err) {
@@ -483,6 +494,22 @@ interface DiscoveredFile {
   absolutePath: string;
   scope: ServeContextFileScope;
   bytes: number;
+  content?: string;
+  truncated?: boolean;
+}
+
+export interface CollectWorkspaceMemoryStatusOptions {
+  /**
+   * Read each discovered file's text, capped at the write route's
+   * byte limit. A file that fails to read keeps its entry without
+   * `content` and adds a cell to `errors[]`. `content` is also
+   * omitted (without an error cell) when the on-disk bytes are not
+   * valid BOM-free UTF-8 — a lossy decode is never served as
+   * replaceable text — and a read whose byte count differs from the
+   * earlier `stat` is flagged `truncated` with no `content` (torn
+   * read racing a concurrent write).
+   */
+  includeContent?: boolean;
 }
 
 /**
@@ -501,6 +528,7 @@ interface DiscoveredFile {
  */
 export async function collectWorkspaceMemoryStatus(
   boundWorkspace: string,
+  options: CollectWorkspaceMemoryStatusOptions = {},
 ): Promise<ServeWorkspaceMemoryStatus> {
   const filenames = new Set(getAllMemoryFilenames());
   const files: DiscoveredFile[] = [];
@@ -542,6 +570,28 @@ export async function collectWorkspaceMemoryStatus(
     return createIdleWorkspaceMemoryStatus(boundWorkspace);
   }
 
+  if (options.includeContent) {
+    for (const file of files) {
+      try {
+        Object.assign(
+          file,
+          await readMemoryFileContent(
+            file.absolutePath,
+            file.bytes,
+            file.scope === 'workspace' ? boundWorkspace : globalDir,
+          ),
+        );
+      } catch (err) {
+        errors.push({
+          kind: 'memory_file',
+          status: 'error',
+          error: err instanceof Error ? err.message : String(err),
+          hint: file.absolutePath,
+        });
+      }
+    }
+  }
+
   const totalBytes = files.reduce((acc, f) => acc + f.bytes, 0);
   const result: ServeWorkspaceMemoryStatus = {
     v: STATUS_SCHEMA_VERSION,
@@ -553,6 +603,8 @@ export async function collectWorkspaceMemoryStatus(
         path: f.absolutePath,
         scope: f.scope,
         bytes: f.bytes,
+        ...(f.content !== undefined ? { content: f.content } : {}),
+        ...(f.truncated ? { truncated: true } : {}),
       }),
     ),
     totalBytes,
@@ -605,6 +657,89 @@ async function walkWorkspaceForMemory(
     }
   }
   return out;
+}
+
+/**
+ * Read one memory file for the `?content=true` response. The web-shell
+ * memory panel treats any non-`truncated` `content` as the file's full
+ * text and may `mode:'replace'` the file from it (an unconditional
+ * `fs.writeFile` with no backup), so this read must be lossless or
+ * honest — never serve bytes the panel could mistake for the original:
+ *
+ * - Resolve within the file's own scope and bind the bounded read to one
+ *   regular-file descriptor. A changed path, size, or modification time
+ *   makes the snapshot unsafe to replace: flag `truncated` and omit text.
+ * - Bytes that are not valid BOM-free UTF-8 (GBK, Shift_JIS, UTF-16 from
+ *   PowerShell `>` redirection, BOM'd UTF-8) cannot round-trip through
+ *   a replace write: omit `content` so the client's fallback path takes
+ *   over instead of saving a lossy decode back over the original bytes.
+ */
+async function readMemoryFileContent(
+  filePath: string,
+  expectedBytes: number,
+  scopeRoot: string,
+): Promise<{ content?: string; truncated?: boolean }> {
+  const resolved = await resolveWithinWorkspace(filePath, scopeRoot, 'read');
+  const before = await fs.lstat(resolved);
+  if (!before.isFile()) {
+    throw new FsError('parse_error', `path is not a regular file: ${filePath}`);
+  }
+  const handle = await openNoFollow(resolved);
+  try {
+    const opened = await handle.stat();
+    if (
+      !opened.isFile() ||
+      opened.dev !== before.dev ||
+      opened.ino !== before.ino ||
+      opened.size !== expectedBytes
+    ) {
+      return { truncated: true };
+    }
+    const buffer = Buffer.alloc(
+      Math.min(opened.size, MAX_MEMORY_CONTENT_BYTES + 1),
+    );
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const chunk = await handle.read(
+        buffer,
+        bytesRead,
+        buffer.length - bytesRead,
+        bytesRead,
+      );
+      if (chunk.bytesRead === 0) break;
+      bytesRead += chunk.bytesRead;
+    }
+    const after = await handle.stat();
+    const current = await resolveWithinWorkspace(filePath, scopeRoot, 'read');
+    const currentStat = await fs.lstat(current);
+    if (
+      bytesRead !== buffer.length ||
+      after.size !== opened.size ||
+      after.mtimeMs !== opened.mtimeMs ||
+      current !== resolved ||
+      currentStat.dev !== opened.dev ||
+      currentStat.ino !== opened.ino ||
+      currentStat.size !== opened.size ||
+      currentStat.mtimeMs !== opened.mtimeMs
+    ) {
+      return { truncated: true };
+    }
+    const truncated = opened.size > MAX_MEMORY_CONTENT_BYTES;
+    const slice = buffer.subarray(0, MAX_MEMORY_CONTENT_BYTES);
+    if (detectBOM(slice)) return { truncated };
+    try {
+      return {
+        content: new TextDecoder('utf-8', { fatal: true }).decode(slice, {
+          stream: truncated,
+        }),
+        truncated,
+      };
+    } catch {
+      return { truncated };
+    }
+  } finally {
+    await handle.close();
+  }
 }
 
 function isEnoent(err: unknown): boolean {

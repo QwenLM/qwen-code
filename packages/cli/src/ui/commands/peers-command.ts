@@ -17,10 +17,23 @@
 import {
   canonicalizeMsgId,
   describeHoldCause,
+  describePeerInboxFailure,
   flattenPeerLabel,
+  getLastPeerInboxFailure,
   type HeldMessage,
+  listPeerControllers,
+  type PeerControllerRecord,
+  removePeerController,
 } from '@qwen-code/qwen-code-core';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
+import {
+  crossSessionMessagingOffScope,
+  type CrossSessionMessagingOffScope,
+  crossSessionMessagingSuppression,
+  type CrossSessionMessagingSuppression,
+  isCrossSessionMessagingActive,
+  isCrossSessionMessagingEnabled,
+} from '../../peerMessaging/enabled.js';
 import { t } from '../../i18n/index.js';
 import { CommandKind } from './types.js';
 
@@ -59,24 +72,77 @@ function preview(text: string, max = 100): string {
   return oneLine.length > max ? `${oneLine.slice(0, max - 1)}…` : oneLine;
 }
 
-export function formatHeldList(held: readonly HeldMessage[]): string {
+/**
+ * How much of a message's hold is left, in words.
+ *
+ * The sender is waiting on this decision and stops waiting when the hold
+ * runs out, so the listing has to say how long the user has — a review
+ * screen that hides its own deadline invites decisions that arrive too
+ * late to mean anything. Rounded up, so "1 minute left" never means
+ * "already gone", and floored at "less than a minute" rather than
+ * counting seconds nobody can act on.
+ */
+function describeRemaining(
+  entry: HeldMessage,
+  expiryMs: number | null,
+): string {
+  if (expiryMs === null) return '';
+  // Aged the way the gate ages it: `InboundGate.ageOf` takes the larger
+  // of the wall-clock and monotonic elapsed times, so reading the wall
+  // clock alone here would promise time the gate will not grant. After a
+  // backward NTP correction four minutes into a five-minute hold the
+  // gate expires the message in about a minute while a wall-only
+  // reading prints "61 minutes left".
+  const wallAge = Date.now() - entry.heldAt;
+  const age =
+    entry.monotonicAt === undefined
+      ? wallAge
+      : Math.max(wallAge, performance.now() - entry.monotonicAt);
+  const remaining = expiryMs - age;
+  if (remaining <= 0) return ', expiring now';
+  const minutes = Math.ceil(remaining / 60_000);
+  return remaining < 60_000
+    ? ', less than a minute left'
+    : `, ${minutes} minute${minutes === 1 ? '' : 's'} left`;
+}
+
+export function formatHeldList(
+  held: readonly HeldMessage[],
+  /**
+   * How long the given message has left, asked per message: each is
+   * judged on the lifetime configured for the session it is addressed
+   * to, and the countdown shown has to be the one that will happen.
+   */
+  expiryFor: (entry: HeldMessage) => number | null = () => null,
+): string {
   if (held.length === 0) return 'No messages from other sessions are waiting.';
 
   const lines = held.map((entry) => {
     // Every field below is peer-controlled, and this is the screen where
     // the user decides untrusted messages: a forged listing line or a
     // terminal-rewriting ESC sequence here spoofs the review itself.
-    const peerLabel = flattenPeerLabel(
-      entry.frame.fromName ??
-        entry.frame.from ??
-        (entry.selfSent ? 'this session' : 'unknown session'),
-    );
-    const who = `${entry.selfSent ? '[own process]' : '[peer]'} ${peerLabel}`;
+    // A controller is named by the label its user gave it, never by the
+    // frame's `fromName`: this is the screen where a grant is judged, and
+    // a sender that could choose that string could dress itself as one.
+    const peerLabel = entry.controller
+      ? flattenPeerLabel(entry.controller.label)
+      : flattenPeerLabel(
+          entry.frame.fromName ??
+            entry.frame.from ??
+            (entry.selfSent ? 'this session' : 'unknown session'),
+        );
+    const origin = entry.controller
+      ? '[controller]'
+      : entry.selfSent
+        ? '[own process]'
+        : '[peer]';
+    const who = `${origin} ${peerLabel}`;
     const handle = flattenPeerLabel(displayHandle(entry, held));
     return (
       `  ${handle}  ${who}\n` +
       `      ${preview(entry.frame.message.content)}\n` +
-      `      held because ${describeHoldCause(entry.cause)}`
+      `      held because ${describeHoldCause(entry.cause, entry.policyScope)}` +
+      describeRemaining(entry, expiryFor(entry))
     );
   });
 
@@ -122,35 +188,185 @@ export function resolveHeld(
   return { kind: 'one', msgId: matches[0]!.frame.msgId };
 }
 
+/**
+ * Read the grants, reporting a failure as a line rather than throwing:
+ * a listing that cannot be produced is information, and `/peers` has
+ * nowhere to throw to.
+ */
+async function listControllers(): Promise<
+  PeerControllerRecord[] | { error: string }
+> {
+  try {
+    return await listPeerControllers();
+  } catch (error) {
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export function formatControllerList(
+  controllers: PeerControllerRecord[] | { error: string },
+): string {
+  if (!Array.isArray(controllers)) {
+    return `Could not read the trusted controllers: ${controllers.error}`;
+  }
+  if (controllers.length === 0) {
+    return (
+      'No trusted controllers. Without an explicit "accept" setting, a message that asserts no review class is held for your review, except one from a process this session started, which is always accepted. A sender\'s own review-class claim is not authenticated; set agents.crossSessionInbound to "hold" to review every inbound message.\n' +
+      'Add one with: qwen sessions controllers add --label <name>'
+    );
+  }
+  const lines = controllers.map(
+    (record) =>
+      `  ${record.id}  ${flattenPeerLabel(record.label)}  added ${formatCreated(
+        record.createdAt,
+      )}`,
+  );
+  return [
+    `${controllers.length} trusted controller${
+      controllers.length === 1 ? '' : 's'
+    }. Messages presenting one of these tokens are delivered without per-message review unless crossSessionInbound is "hold" or "refuse". A process this session started is always accepted; other senders' review-class claims are not authenticated, so set crossSessionInbound to "hold" to review every inbound message:`,
+    ...lines,
+    '',
+    'Revoke with /peers revoke <id>.',
+  ].join('\n');
+}
+
+function formatCreated(createdAt: number): string {
+  const date = new Date(createdAt);
+  return Number.isNaN(date.getTime())
+    ? 'unknown'
+    : date.toISOString().replace('T', ' ').slice(0, 16);
+}
+
 export const peersCommand: SlashCommand = {
   name: 'peers',
   kind: CommandKind.BUILT_IN,
   get description() {
     return t(
-      'Review messages held from other Qwen Code sessions (accept | deny)',
+      'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)',
     );
   },
   action: async (context, args): Promise<SlashCommandActionReturn> => {
+    const [verb, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+
+    // Controller grants live in the Qwen home, independently of whether
+    // this session managed to start a peer inbox.
+    if (verb === 'controllers') {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: formatControllerList(await listControllers()),
+      };
+    }
+
+    if (verb === 'revoke') {
+      const id = rest[0];
+      if (id === undefined) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content:
+            'Which controller? Use /peers revoke <id> — /peers controllers lists the ids.',
+        };
+      }
+      let removed: PeerControllerRecord | null;
+      try {
+        removed = await removePeerController(id);
+      } catch (error) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: `Could not revoke that controller: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        };
+      }
+      if (!removed) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: `No controller has the id "${flattenPeerLabel(id)}". Run /peers controllers to see them.`,
+        };
+      }
+      const forgotten =
+        context.services.peerMessaging?.forgetController(removed.id) ?? 0;
+      const backlog =
+        forgotten === 0
+          ? 'No held messages in this session used that grant.'
+          : `${forgotten} held message${forgotten === 1 ? '' : 's'} from it ${
+              forgotten === 1 ? 'remains' : 'remain'
+            } parked for review as ${
+              forgotten === 1
+                ? 'an ordinary peer message'
+                : 'ordinary peer messages'
+            }.`;
+      return {
+        type: 'message',
+        messageType: 'info',
+        content:
+          `Revoked the controller "${flattenPeerLabel(removed.label)}" (${removed.id}). ` +
+          `Running sessions revalidate active connections, and new connections can no longer use its token. ${backlog}`,
+      };
+    }
+
     const peerMessaging = context.services.peerMessaging;
     if (!peerMessaging) {
       // Absent for two different reasons, and telling a user to enable a
       // setting they already enabled sends them nowhere: the inbox is also
       // absent when the session failed to register or the socket failed to
       // bind (path too long, unwritable runtime dir).
-      const enabled =
-        context.services.settings?.merged?.agents?.crossSessionMessaging ===
-        true;
+      const settings = context.services.settings;
+      const runtime = context.services.config;
+      // The setting is not the whole gate: `--bare` and `--safe-mode` turn
+      // messaging off for the session whatever it says, and the same
+      // predicate is what interactive startup binds the inbox on. Reading
+      // the setting alone would call a deliberately off session "on, no
+      // inbox" and hand it a bind failure to explain.
+      if (!isCrossSessionMessagingActive(settings?.merged, runtime)) {
+        // Name every cause that actually fired instead of guessing: a
+        // suppression is a startup flag no settings edit can undo, while the
+        // setting being off has a scope-shaped remedy. When both are in
+        // force, naming only the flag sends the user to a restart that
+        // leaves messaging off and never names the cause that outlives it.
+        const suppression = crossSessionMessagingSuppression(runtime);
+        const offScope = settings
+          ? crossSessionMessagingOffScope(settings)
+          : undefined;
+        const off = describeMessagingOff(offScope);
+        let content: string;
+        if (!suppression) {
+          content = off;
+        } else if (isCrossSessionMessagingEnabled(settings?.merged)) {
+          content = describeMessagingSuppressed(suppression);
+        } else {
+          // The setting leads: it is the cause a settings edit can fix.
+          content = `${off} ${describeSuppressionAlso(suppression)}`;
+        }
+        return { type: 'message', messageType: 'info', content };
+      }
+      const failure = getLastPeerInboxFailure();
+      // A platform with no inbox transport is not a fault in this session,
+      // and the switch is on by default, so most people who see this never
+      // turned anything on: say what is true, as information, without the
+      // failure's own advice to disable a setting they never enabled.
+      if (failure?.cause === 'unsupported_platform') {
+        return {
+          type: 'message',
+          messageType: 'info',
+          content:
+            'Cross-session messaging is not available on this platform, so this session has no inbox and other sessions cannot reach it.',
+        };
+      }
       return {
         type: 'message',
-        messageType: enabled ? 'error' : 'info',
-        content: enabled
-          ? 'Cross-session messaging is on, but this session has no inbox: it either failed to register in the session registry or failed to bind its socket. Re-run with DEBUG=1 to see the bind error.'
-          : 'Cross-session messaging is off. Enable it with "agents.crossSessionMessaging": true in settings.json, then restart.',
+        messageType: 'error',
+        content: failure
+          ? `Cross-session messaging is on, but this session has no inbox — it failed to bind its socket: ${describePeerInboxFailure(failure)}`
+          : 'Cross-session messaging is on, but this session has no inbox: it failed to register in the session registry, or the inbox is still starting. Re-run with DEBUG=1 to see the registration error.',
       };
     }
 
     const held = peerMessaging.getHeld();
-    const [verb, ...rest] = args.trim().split(/\s+/).filter(Boolean);
 
     if (verb === undefined || verb === 'list') {
       // Decisions bind to this listing: record exactly which messages
@@ -160,7 +376,9 @@ export const peersCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: formatHeldList(held),
+        content: formatHeldList(held, (entry) =>
+          peerMessaging.getHeldExpiryMs(entry.frame.toSessionId),
+        ),
       };
     }
 
@@ -168,7 +386,7 @@ export const peersCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: `Unknown subcommand "${verb}". Use /peers, /peers accept <id|all>, or /peers deny <id|all>.`,
+        content: `Unknown subcommand "${verb}". Use /peers, /peers accept <id|all>, /peers deny <id|all>, /peers controllers, or /peers revoke <id>.`,
       };
     }
 
@@ -212,10 +430,19 @@ export const peersCommand: SlashCommand = {
       const ids = held.map((entry) => entry.frame.msgId);
       let count = 0;
       let failed = 0;
+      // Counted separately, never folded into `failed`: a message that
+      // expired is settled and its sender already has an `expired`
+      // receipt, while a failed release is still waiting. `getHeld()`
+      // does not sweep, so a listing can show entries as "expiring now"
+      // and the first `decide()` then sweeps the whole overdue backlog --
+      // which makes every remaining id come back 'gone'. Without this the
+      // user reads "Released 0 messages." and is told nothing at all.
+      let gone = 0;
       for (const msgId of ids) {
         const outcome = peerMessaging.decide(msgId, decision);
         if (outcome === 'done') count += 1;
         else if (outcome === 'failed') failed += 1;
+        else if (outcome === 'gone') gone += 1;
       }
       // The user now knows what remains; bind later decisions to it.
       peerMessaging.recordHeldListing(peerMessaging.getHeld());
@@ -230,6 +457,9 @@ export const peersCommand: SlashCommand = {
             ? ` ${failed} could not be delivered and ${
                 failed === 1 ? 'is' : 'are'
               } still waiting — try again once the session catches up.`
+            : '') +
+          (gone > 0
+            ? ` ${gone} had already expired or been decided — run /peers to see what is waiting now.`
             : ''),
       };
     }
@@ -266,7 +496,7 @@ export const peersCommand: SlashCommand = {
         type: 'message',
         messageType: 'error',
         content:
-          'The session could not take the message just now — its input queue is full. It is still waiting; try again in a moment.',
+          'The session could not take the message just now — its input queue is full, or it could not confirm it still holds the session. It is still waiting; try again in a moment.',
       };
     }
 
@@ -280,3 +510,76 @@ export const peersCommand: SlashCommand = {
     };
   },
 };
+
+/**
+ * Why messaging is off, with the remedy that works for the scope that
+ * turned it off. Never states the value itself: anything but `true` or an
+ * unset key reads as off, so "set to false" would be a claim about a file
+ * the user may open and find something else in.
+ */
+function describeMessagingOff(
+  scope: CrossSessionMessagingOffScope | undefined,
+): string {
+  switch (scope) {
+    case 'workspace':
+      return 'Cross-session messaging is off: this repository\'s .qwen/settings.json turns "agents.crossSessionMessaging" off. A workspace may only make that setting stricter, so your user settings cannot turn it back on here. Remove the entry from that file, then restart.';
+    case 'system':
+      return 'Cross-session messaging is off: system settings set "agents.crossSessionMessaging", and system settings override every other scope. Whoever manages them can remove the entry.';
+    case 'system-defaults':
+      return 'Cross-session messaging is off: the system defaults turn "agents.crossSessionMessaging" off. Set it to true in your user settings, then restart.';
+    case 'user':
+      return 'Cross-session messaging is off: your user settings turn "agents.crossSessionMessaging" off (only true, or leaving it unset, turns it on). Remove that entry, then restart.';
+    default:
+      return 'Cross-session messaging is off because of the "agents.crossSessionMessaging" setting (only true, or leaving it unset, turns it on). Remove that entry, then restart.';
+  }
+}
+
+/**
+ * The user-visible name of each suppression, with both channels that reach
+ * it: the flag and the environment variable are named together because a
+ * user who only set the latter would otherwise not recognize the cause.
+ */
+const SUPPRESSION_PROSE = {
+  'safe-mode': {
+    mode: 'safe mode',
+    channels: '--safe-mode, or QWEN_CODE_SAFE_MODE',
+    effect: 'which closes the surfaces other processes can reach',
+  },
+  bare: {
+    mode: 'bare mode',
+    channels: '--bare, or QWEN_CODE_SIMPLE',
+    effect: 'which skips implicit startup work',
+  },
+} as const;
+
+/**
+ * Why a session whose setting is on still has no inbox: a startup flag
+ * closed the surface, and no settings edit can undo it.
+ *
+ * Kept apart from {@link describeMessagingOff} rather than folded into its
+ * scope union: that one answers "which settings file turned it off", and a
+ * startup flag is not a file.
+ */
+function describeMessagingSuppressed(
+  suppression: CrossSessionMessagingSuppression,
+): string {
+  const { mode, channels, effect } = SUPPRESSION_PROSE[suppression];
+  return `Cross-session messaging is off: this session runs in ${mode} (${channels}), ${effect}. The "agents.crossSessionMessaging" setting cannot turn it back on; restart without ${mode}.`;
+}
+
+/**
+ * The same suppression as a *second* cause, for a session whose setting is
+ * off too — a follow-on sentence, not another {@link describeMessagingOff}
+ * lead-in.
+ *
+ * Its remedy has to differ from the single-cause one: "restart without the
+ * flag" is precisely the restart that leaves this user with messaging still
+ * off, because their own settings entry is the cause that survives it. So
+ * the sentence says both fixes are needed instead of naming one.
+ */
+function describeSuppressionAlso(
+  suppression: CrossSessionMessagingSuppression,
+): string {
+  const { mode, channels, effect } = SUPPRESSION_PROSE[suppression];
+  return `This session also runs in ${mode} (${channels}), ${effect}, so fixing the setting alone will not bring messaging back: restart without ${mode} as well.`;
+}

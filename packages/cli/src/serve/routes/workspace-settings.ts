@@ -6,6 +6,7 @@
 
 import type { Application, Request, Response } from 'express';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
+import { ModelsConfig } from '@qwen-code/qwen-code-core/models/modelsConfig.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   redactMcpServersSetting,
@@ -21,17 +22,27 @@ import {
   getNestedProperty,
   getSettingDefinition,
   validateSettingValue,
+  WORKSPACE_RESTRICTED_ROOT_SETTINGS,
   WORKSPACE_RESTRICTED_SETTING_KEYS,
 } from '../../config/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
+  isAuxModelSelectorSettingKey,
+  publicAuxModelSelectorValue,
+} from '../../utils/aux-model-selector.js';
+import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import {
+  ACP_ROUTE_ID_PREFIX,
+  parseAcpModelOption,
+  resolveAcpFastModelSelector,
+} from '../../utils/acpModelUtils.js';
 
 const TUI_ONLY_SETTINGS = new Set([
   'general.vimMode',
@@ -41,6 +52,7 @@ const TUI_ONLY_SETTINGS = new Set([
   'general.outputLanguage',
   'ide.enabled',
   'ui.showLineNumbers',
+  'ui.showToolCallArgs',
   'ui.renderMode',
   'ui.useTerminalBuffer',
   'ui.mouseTracking',
@@ -50,12 +62,15 @@ const TUI_ONLY_SETTINGS = new Set([
   'ui.enableWelcomeBack',
 ]);
 
-// `voiceModel` is `showInDialog: false` (so not in the dialog allowlist), but
-// the Web Shell `/model --voice` picker needs to read + persist it; the daemon
+// `voiceModel`, `imageModel`, and `advisorModel` are `showInDialog: false` (so
+// not in the dialog allowlist), but the Web Shell settings panel still renders
+// their rows and needs to read + persist them; for `voiceModel` the daemon
 // `/voice/stream` then reads it back via `loadSettings`.
 const WEB_SHELL_SETTINGS = new Set([
   'ui.compactMode',
   'voiceModel',
+  'imageModel',
+  'advisorModel',
   'mcpServers',
 ]);
 
@@ -105,6 +120,12 @@ interface SettingsResponse {
 
 const SECURITY_SENSITIVE_SETTINGS = new Set(['tools.approvalMode']);
 
+/** Both restriction lists, for the membership test the write guard needs. */
+const WORKSPACE_RESTRICTED_KEYS = new Set<string>([
+  ...WORKSPACE_RESTRICTED_SETTING_KEYS,
+  ...WORKSPACE_RESTRICTED_ROOT_SETTINGS,
+]);
+
 /**
  * Refuse a workspace-scope write of a setting the merge strips anyway.
  *
@@ -127,16 +148,19 @@ function rejectWorkspaceRestrictedWrite(
   scope: string,
   key: string,
 ): boolean {
-  if (scope !== 'workspace' || !WORKSPACE_RESTRICTED_SETTING_KEYS.includes(key))
-    return false;
-  res.status(400).json({
-    error: `Setting "${key}" is not honored from workspace scope; set it at user scope instead`,
-    code: 'workspace_restricted_setting',
-  });
-  return true;
+  if (scope !== 'workspace') return false;
+  if (WORKSPACE_RESTRICTED_KEYS.has(key)) {
+    res.status(400).json({
+      error: `Setting "${key}" is not honored from workspace scope; set it at user scope instead`,
+      code: 'workspace_restricted_setting',
+    });
+    return true;
+  }
+  return false;
 }
 
-function getAllowedKeys(includeLiveVoice = false): Set<string> {
+/** Keys the daemon may serve to Web Shell clients; exported for tests. */
+export function getAllowedKeys(includeLiveVoice = false): Set<string> {
   const keys = new Set(
     getDialogSettingKeys().filter(
       (k) => !TUI_ONLY_SETTINGS.has(k) && !SECURITY_SENSITIVE_SETTINGS.has(k),
@@ -179,8 +203,14 @@ function buildSettingsResponse(
       key,
     );
 
+    // Aux-model selectors persist as `authType:id\0baseUrl`; the suffix can
+    // embed userinfo credentials, so the served value is the scrubbed one.
     const publicValue = (value: unknown) =>
-      key === 'mcpServers' ? redactMcpServersSetting(value) : value;
+      key === 'mcpServers'
+        ? redactMcpServersSetting(value)
+        : typeof value === 'string' && isAuxModelSelectorSettingKey(key)
+          ? publicAuxModelSelectorValue(value)
+          : value;
     const effective = LIVE_MANAGED_SETTINGS.has(key)
       ? (userVal ?? def.default)
       : (mergedEffective ?? def.default);
@@ -234,7 +264,40 @@ export function prepareSettingWrite(
   workspaceTrusted = true,
 ): { persistedValue: unknown; publicValue: unknown } {
   if (key !== 'mcpServers') {
-    return { persistedValue: value, publicValue: value };
+    let persistedValue = value;
+    if (
+      key === 'fastModel' &&
+      typeof value === 'string' &&
+      (value.startsWith(ACP_ROUTE_ID_PREFIX) ||
+        parseAcpModelOption(value).authType)
+    ) {
+      const { merged } = loadSettings(workspace, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: !workspaceTrusted,
+        workspaceTrusted,
+      });
+      const models = new ModelsConfig({
+        modelProvidersConfig: merged.modelProviders,
+        providerProtocolConfig: merged.providerProtocol,
+      });
+      persistedValue = resolveAcpFastModelSelector(
+        value,
+        models.getAllConfiguredModels(),
+      );
+      if (persistedValue === null) {
+        throw new Error('Fast model ACP route is unavailable');
+      }
+    }
+    return {
+      persistedValue,
+      // Aux-model selectors persist with their endpoint suffix (runtime
+      // routing resolves against it), but the value answered to and
+      // broadcast to clients must not carry userinfo credentials.
+      publicValue:
+        typeof persistedValue === 'string' && isAuxModelSelectorSettingKey(key)
+          ? publicAuxModelSelectorValue(persistedValue)
+          : persistedValue,
+    };
   }
   const existing =
     loadSettings(workspace, {
@@ -346,6 +409,9 @@ export interface WorkspaceSettingsRouteDeps {
     value: unknown,
     assertGenerationOpen?: () => void,
   ) => Promise<void>;
+  syncImageModel?: (
+    scope: SettingScope,
+  ) => Promise<{ status: 'applied' | 'deferred' | 'failed' }>;
   updateSessionWorkflow: (enabled: boolean) => Promise<unknown>;
   /**
    * Fan a user-scope Session Workflow write out to the non-primary workspace
@@ -694,11 +760,28 @@ export function registerWorkspaceSettingsRoutes(
       }
       if (writeOutcome !== 'ok') return;
 
+      let imageSyncFailed = false;
+      if (key === 'imageModel') {
+        try {
+          imageSyncFailed =
+            !deps.syncImageModel ||
+            (await deps.syncImageModel(settingScope)).status === 'failed';
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          imageSyncFailed = true;
+        }
+        try {
+          assertGenerationOpen();
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          throw error;
+        }
+      }
       res.status(200).json({
         key,
         scope,
         value: publicValue,
-        requiresRestart: def.requiresRestart,
+        requiresRestart: def.requiresRestart || imageSyncFailed,
       });
     },
   );
@@ -891,7 +974,10 @@ export function registerWorkspaceQualifiedSettingsRoutes(
             if (sendGenerationClosedError(res, err)) return 'unchanged_failure';
             throw err;
           }
-          if (key === 'experimental.sessionWorkflow') {
+          if (
+            key === 'experimental.sessionWorkflow' &&
+            !runtime.routeFileSystemFactory?.sshWorkspace
+          ) {
             if (
               !(await updateLiveSessionWorkflow(
                 (enabled) =>
@@ -943,11 +1029,32 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         ...(clientId ? { originatorClientId: clientId } : {}),
       });
       if (writeOutcome !== 'ok') return;
+      let imageSyncFailed = false;
+      if (key === 'imageModel') {
+        try {
+          imageSyncFailed =
+            (
+              await runtime.workspaceService.reloadModelProviders({
+                route: 'POST /workspaces/:workspace/settings imageModel',
+                workspaceCwd: runtime.workspaceCwd,
+              })
+            ).status === 'failed';
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          imageSyncFailed = true;
+        }
+        try {
+          assertGenerationOpen();
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          throw error;
+        }
+      }
       res.status(200).json({
         key,
         scope,
         value: publicValue,
-        requiresRestart: def.requiresRestart,
+        requiresRestart: def.requiresRestart || imageSyncFailed,
       });
     },
   );

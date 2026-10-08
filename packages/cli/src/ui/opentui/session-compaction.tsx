@@ -15,9 +15,9 @@
  */
 
 import { useEffect, useState } from 'react';
-import { CompressionStatus } from '@qwen-code/qwen-code-core';
+import { CompressionStatus } from '@qwen-code/qwen-code-core/core/turn.js';
 import { t } from '../../i18n/index.js';
-import { ICON } from '../constants.js';
+import { ICON, SPINNER_FRAMES, SPINNER_INTERVAL_MS } from '../constants.js';
 import { C } from './theme.js';
 
 export interface CompactionViewProps {
@@ -97,9 +97,6 @@ export function compactionView(props: CompactionViewProps): CompactionView {
     iconGlyph: ICON.DIAMOND,
   };
 }
-
-const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-const SPINNER_INTERVAL_MS = 80;
 
 /** The compaction history row: spinner (pending) or diamond, then the text. */
 export function CompressionNotice(props: { view: CompactionView }) {

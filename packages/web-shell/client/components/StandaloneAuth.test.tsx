@@ -1,0 +1,1106 @@
+// @vitest-environment jsdom
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import { StandaloneAuth } from './StandaloneAuth';
+import AppStyles from '../App.module.css';
+import { getDaemonToken, persistDaemonToken } from '../config/daemon';
+import { confirmDaemonTarget, isKnownDaemonTarget } from '../config/daemon';
+import type { WebShellLanguage } from '../i18n';
+import type { WebShellTheme } from '../themeContext';
+
+let container: HTMLDivElement;
+let root: Root;
+beforeEach(() => {
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+});
+afterEach(() => {
+  act(() => root.unmount());
+  container.remove();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+  sessionStorage.clear();
+  localStorage.clear();
+  window.history.replaceState(null, '', '/');
+});
+async function mount(
+  initialToken?: string,
+  language?: WebShellLanguage,
+  theme?: WebShellTheme,
+  invalidTarget?: boolean,
+  initialAddress?: string,
+  onChangeTarget?: (
+    daemonOrigin: string,
+    token?: string,
+    options?: {
+      continueFlow?: 'workspace' | 'connection';
+    },
+  ) => boolean | void,
+  pairingFailed?: boolean,
+) {
+  await act(async () =>
+    root.render(
+      <StandaloneAuth
+        baseUrl="http://daemon.test"
+        initialToken={initialToken}
+        language={language}
+        theme={theme}
+        invalidTarget={invalidTarget}
+        initialAddress={initialAddress}
+        onChangeTarget={onChangeTarget}
+        pairingFailed={pairingFailed}
+      >
+        {(token) => <p>Connected {token}</p>}
+      </StandaloneAuth>,
+    ),
+  );
+}
+
+it('shows a recoverable pairing failure without probing or caching the invitation', async () => {
+  vi.stubGlobal('fetch', vi.fn());
+  await act(async () =>
+    root.render(
+      <StandaloneAuth
+        baseUrl="http://daemon.test"
+        pairingFailed
+        language="zh-CN"
+      >
+        {() => <p>Connected</p>}
+      </StandaloneAuth>,
+    ),
+  );
+  expect(container.textContent).toContain('请扫描新的二维码');
+  expect(fetch).not.toHaveBeenCalled();
+  expect(tokenInput()).not.toBeNull();
+  // Entering a token is the pending step on the rescan screen: the field owns
+  // focus, and the button offers a first Connect — not a Retry of a probe
+  // that never ran — and is enabled although no probe is in flight.
+  expect(document.activeElement).toBe(tokenInput());
+  expect(submitButton().textContent).toBe('连接');
+  expect(submitButton().disabled).toBe(false);
+
+  // Recovery is the point of the `attempt === 0` escape hatch: a manual
+  // Connect after a failed pairing must issue the probe.
+  vi.mocked(fetch).mockResolvedValue(stubResponse({ status: 200 }));
+  await act(submitForm);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetch.mock.calls[0][0]).toBe('http://daemon.test/capabilities');
+  expect(container.textContent).toContain('Connected');
+});
+
+it('keeps the rescan copy when an empty submit is rejected after a failed pairing', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    true,
+  );
+  expect(container.textContent).toContain('Scan a fresh QR code');
+
+  await act(submitForm);
+
+  // The empty submit's 401 must not swap the rescan instruction for the
+  // terminal-token copy a phone user cannot act on.
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(container.textContent).toContain('Scan a fresh QR code');
+  expect(container.textContent).not.toContain(
+    'Enter the bearer token from the daemon terminal.',
+  );
+});
+
+it('keeps the token copy when a hand-typed token is rejected after a failed pairing', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    true,
+  );
+  act(() => {
+    const input = tokenInput();
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'typo-token');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(submitForm);
+
+  // A rejected hand-typed credential is a token problem, not a QR problem:
+  // the rescan copy belongs to the boot credential the screen started with,
+  // and the rejected value stays editable.
+  expect(container.textContent).toContain('Invalid or expired token');
+  expect(container.textContent).not.toContain('Pairing failed');
+  expect(tokenInput().value).toBe('typo-token');
+});
+
+// The untrusted-target warning is the stronger state: an attacker-supplied
+// pairing fragment must not replace it with copy that asks for a token.
+it('warns about an unconfirmed target even when pairing failed', async () => {
+  const fetch = vi.fn().mockResolvedValue(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await act(async () =>
+    root.render(
+      <StandaloneAuth
+        baseUrl="http://daemon.test"
+        unconfirmedTarget
+        pairingFailed
+      >
+        {(token) => <p>Connected {token}</p>}
+      </StandaloneAuth>,
+    ),
+  );
+  expect(container.textContent).toContain('has not connected to before');
+  expect(container.textContent).not.toContain('Pairing failed');
+  // The trust decision is pending, so no field may pre-commit focus.
+  expect(document.activeElement).not.toBe(tokenInput());
+  expect(document.activeElement).not.toBe(addressInput());
+  expect(fetch).not.toHaveBeenCalled();
+});
+function stubResponse({
+  status,
+  retryAfter,
+  body,
+}: {
+  status: number;
+  retryAfter?: string;
+  body?: unknown;
+}) {
+  return {
+    status,
+    ok: status >= 200 && status < 300,
+    headers: new Headers(retryAfter ? { 'Retry-After': retryAfter } : {}),
+    json: async () => {
+      if (body === undefined) throw new Error('no body');
+      return body;
+    },
+  };
+}
+/** A fetch that only ever settles when the probe's own signal aborts it. */
+function hangingFetch() {
+  return vi.fn(
+    (_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () =>
+          reject(new Error('The user aborted a request.')),
+        );
+      }),
+  );
+}
+function submitButton() {
+  return container.querySelector('button')!;
+}
+function addressInput() {
+  return container.querySelector<HTMLInputElement>('#daemon-address')!;
+}
+function tokenInput() {
+  return container.querySelector<HTMLInputElement>('#daemon-bearer-token')!;
+}
+// Rendered outside the form, so it is the button whose label is copy.local.
+function localButton() {
+  return Array.from(container.querySelectorAll('button')).find(
+    (button) => button.textContent === 'Return to local workspaces',
+  )!;
+}
+async function submitForm() {
+  container
+    .querySelector('form')!
+    .dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+}
+it('retries with the typed token, stores it per tab, and creates no connection', async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 401 }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount('wrong');
+  expect(container.textContent).toContain('Invalid or expired');
+  expect(tokenInput().type).toBe('password');
+  act(() => {
+    const input = tokenInput();
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'good');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(submitForm);
+  expect(container.textContent).toContain('Connected good');
+  expect(getDaemonToken('http://daemon.test')).toBe('good');
+  expect(sessionStorage.getItem('qwen-daemon-token:http://daemon.test')).toBe(
+    'good',
+  );
+  expect(localStorage.getItem('qwen-remote-connections')).toBeNull();
+  expect(fetch.mock.calls[1][1].headers).toEqual({
+    Authorization: 'Bearer good',
+  });
+});
+it('clears a rejected stored token after tokenless access succeeds', async () => {
+  persistDaemonToken('wrong', 'http://daemon.test');
+  vi.stubGlobal(
+    'fetch',
+    vi
+      .fn()
+      .mockResolvedValueOnce(stubResponse({ status: 401 }))
+      .mockResolvedValueOnce(stubResponse({ status: 200 })),
+  );
+  await mount('wrong');
+  await act(submitForm);
+  expect(container.textContent).toContain('Connected');
+  expect(getDaemonToken('http://daemon.test')).toBeUndefined();
+});
+it('reports an invalid daemon target without contacting another daemon', async () => {
+  const fetch = vi.fn();
+  vi.stubGlobal('fetch', fetch);
+  await mount(undefined, undefined, undefined, true, 'not-a-url');
+  expect(container.textContent).toContain('Invalid daemon address');
+  expect(container.querySelector('form')).not.toBeNull();
+  // `type="url"` plus an un-opted-out form would let native constraint
+  // validation swallow the submit for a bare `IP:port`, so the copy above is
+  // unreachable in a real browser unless noValidate is set.
+  expect(container.querySelector('form')!.noValidate).toBe(true);
+  expect(addressInput().value).toBe('not-a-url');
+  expect(fetch).not.toHaveBeenCalled();
+});
+
+it('focuses the address field for an invalid target even when pairing failed', async () => {
+  const fetch = vi.fn();
+  vi.stubGlobal('fetch', fetch);
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    true,
+    'not-a-url',
+    undefined,
+    true,
+  );
+  expect(container.textContent).toContain('Invalid daemon address');
+  // The copy asks for a corrected address; the later token-field autoFocus
+  // must not win over the address field's.
+  expect(document.activeElement).toBe(addressInput());
+  expect(fetch).not.toHaveBeenCalled();
+});
+it('lets an invalid target be replaced from the connection form', async () => {
+  const fetch = vi.fn();
+  const onChangeTarget = vi.fn();
+  vi.stubGlobal('fetch', fetch);
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    true,
+    'not-a-url',
+    onChangeTarget,
+  );
+  act(() => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(addressInput(), 'http://remote.example:4170/');
+    addressInput().dispatchEvent(new Event('input', { bubbles: true }));
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(tokenInput(), 'remote-token');
+    tokenInput().dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(submitForm);
+  expect(onChangeTarget).toHaveBeenCalledWith(
+    'http://remote.example:4170',
+    'remote-token',
+  );
+  expect(fetch).not.toHaveBeenCalled();
+});
+it('preserves remote-add continuation when correcting the daemon target', async () => {
+  window.history.replaceState(null, '', '/?addRemoteWorkspace=browse');
+  vi.stubGlobal('fetch', hangingFetch());
+  const onChangeTarget = vi.fn();
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    false,
+    'http://replacement.example:4170',
+    onChangeTarget,
+  );
+
+  expect(container.textContent).toContain('Cancel adding workspace');
+  await act(submitForm);
+  expect(onChangeTarget).toHaveBeenCalledWith(
+    'http://replacement.example:4170',
+    undefined,
+    { continueFlow: 'workspace' },
+  );
+});
+it('preserves connection-add verification when correcting the daemon target', async () => {
+  window.history.replaceState(null, '', '/?addRemoteConnection=verify');
+  vi.stubGlobal('fetch', hangingFetch());
+  const onChangeTarget = vi.fn();
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    false,
+    'http://replacement.example:4170',
+    onChangeTarget,
+  );
+
+  expect(container.textContent).toContain('Cancel adding connection');
+  await act(submitForm);
+  expect(onChangeTarget).toHaveBeenCalledWith(
+    'http://replacement.example:4170',
+    undefined,
+    { continueFlow: 'connection' },
+  );
+});
+it('asks before probing a daemon this browser has not connected to', async () => {
+  const fetch = vi.fn().mockResolvedValue(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await act(async () =>
+    root.render(
+      <StandaloneAuth baseUrl="http://daemon.test" unconfirmedTarget>
+        {(token) => <p>Connected {token}</p>}
+      </StandaloneAuth>,
+    ),
+  );
+  expect(container.textContent).toContain('has not connected to before');
+  expect(container.textContent).toContain('http://daemon.test');
+  expect(container.textContent).toContain('sent to the address shown above');
+  expect(submitButton().textContent).toBe('Connect');
+  expect(submitButton().disabled).toBe(false);
+  expect(fetch).not.toHaveBeenCalled();
+
+  await act(submitForm);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(fetch.mock.calls[0][0]).toBe('http://daemon.test/capabilities');
+  expect(container.textContent).toContain('Connected');
+});
+it.each(['queued retry', 'in-flight response'])(
+  'retires the old target on address editing with a %s',
+  async (phase) => {
+    vi.useFakeTimers();
+    let finishProbe:
+      | ((response: ReturnType<typeof stubResponse>) => void)
+      | undefined;
+    const fetch = vi.fn().mockResolvedValue(stubResponse({ status: 200 }));
+    if (phase === 'queued retry') {
+      fetch.mockRejectedValueOnce(new Error('Failed to fetch'));
+    } else {
+      fetch.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finishProbe = resolve;
+          }),
+      );
+    }
+    const onChangeTarget = vi.fn();
+    vi.stubGlobal('fetch', fetch);
+    await mount(
+      'boot-secret',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      onChangeTarget,
+    );
+    const signal = fetch.mock.calls[0][1].signal as AbortSignal;
+
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(addressInput(), window.location.origin);
+      addressInput().dispatchEvent(new Event('input', { bubbles: true }));
+      finishProbe?.(stubResponse({ status: 200 }));
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(12_000);
+    });
+
+    expect(signal.aborted).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain('Connection paused');
+    expect(container.textContent).toContain(window.location.origin);
+    expect(container.textContent).not.toContain('Connected boot-secret');
+    expect(tokenInput().value).toBe('');
+    expect(
+      sessionStorage.getItem('qwen-daemon-token:http://daemon.test'),
+    ).toBeNull();
+    expect(sessionStorage.getItem('qwen-daemon-target-confirmed')).toBeNull();
+    expect(onChangeTarget).not.toHaveBeenCalled();
+
+    await act(submitForm);
+    expect(onChangeTarget).toHaveBeenCalledWith(
+      window.location.origin,
+      undefined,
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
+  },
+);
+// "Return to local workspaces" retires the target exactly the way editing the
+// address does, so it has to retire the probe loop too: assigning a new URL does
+// not stop the JS event loop, and the document stays live until the navigation
+// commits. A retry firing inside that window re-probes the daemon being left —
+// carrying its stored bearer token — and can mount the whole app on it.
+it('retires the probe loop when returning to local workspaces', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockRejectedValueOnce(new Error('Failed to fetch'))
+    .mockResolvedValue(stubResponse({ status: 200 }));
+  const onChangeTarget = vi.fn();
+  vi.stubGlobal('fetch', fetch);
+  await mount(
+    'boot-secret',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    onChangeTarget,
+  );
+  const signal = fetch.mock.calls[0][1].signal as AbortSignal;
+  // The boot probe rejected, so a retry is queued against the target being left.
+  expect(fetch).toHaveBeenCalledTimes(1);
+
+  await act(async () => {
+    localButton().click();
+  });
+  await act(async () => {
+    vi.advanceTimersByTime(12_000);
+  });
+
+  expect(signal.aborted).toBe(true);
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(onChangeTarget).toHaveBeenCalledWith(window.location.origin);
+  expect(container.textContent).not.toContain('Connected boot-secret');
+});
+it('distinguishes policy rejection from authentication failure', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 403 })),
+  );
+  await mount();
+  expect(container.textContent).toContain('Origin or Host policy');
+  expect(addressInput().value).toBe('http://daemon.test');
+});
+it('keeps tokenless loopback access working', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 200 })),
+  );
+  await mount();
+  expect(container.textContent).toBe('Connected ');
+});
+it('times out a hung probe and re-probes without a click', async () => {
+  vi.useFakeTimers();
+  const fetch = hangingFetch();
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    vi.advanceTimersByTime(9_000);
+  });
+  expect(container.textContent).toContain('Connecting');
+  await act(async () => {
+    vi.advanceTimersByTime(1_000);
+  });
+  expect(container.textContent).toContain('Cannot reach the daemon');
+  expect(submitButton().disabled).toBe(false);
+  await act(async () => {
+    vi.advanceTimersByTime(2_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+it('aborts the in-flight probe when the user submits again', async () => {
+  const fetch = hangingFetch();
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  const first = fetch.mock.calls[0]?.[1]?.signal as AbortSignal;
+  await act(submitForm);
+  expect(first.aborted).toBe(true);
+  expect(fetch).toHaveBeenCalledTimes(2);
+  // The superseded probe must not report its own abort as a failure.
+  expect(container.textContent).toContain('Connecting');
+});
+it('waits out a cold start advertised by Retry-After', async () => {
+  vi.useFakeTimers();
+  const cold = stubResponse({ status: 503, retryAfter: '1' });
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(cold)
+    .mockResolvedValueOnce(cold)
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Daemon is starting');
+  await act(async () => {
+    vi.advanceTimersByTime(1_000);
+  });
+  // Still cold: the scheduled retry keeps going until the daemon answers.
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(container.textContent).toContain('Daemon is starting');
+  await act(async () => {
+    vi.advanceTimersByTime(1_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(3);
+  expect(container.textContent).toBe('Connected ');
+});
+it('reports a permanent startup failure and stops probing', async () => {
+  vi.useFakeTimers();
+  const fetch = vi.fn().mockResolvedValue(
+    stubResponse({
+      status: 503,
+      body: { code: 'daemon_runtime_failed', error: 'boom' },
+    }),
+  );
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Daemon failed to start. boom');
+  expect(submitButton().disabled).toBe(false);
+  await act(async () => {
+    vi.advanceTimersByTime(60_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+it('re-probes by itself after a network error', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockRejectedValueOnce(new Error('Failed to fetch'))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Cannot reach the daemon');
+  await act(async () => {
+    vi.advanceTimersByTime(2_000);
+  });
+  expect(container.textContent).toBe('Connected ');
+});
+it('renders the zh-CN copy for an invalid token', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount('wrong', 'zh-CN');
+  expect(container.textContent).toContain('连接到 Qwen Code');
+  expect(container.textContent).toContain('令牌无效或已过期');
+  expect(container.textContent).not.toContain('Invalid or expired');
+  // The token-safety hint is the only in-UI warning distinguishing the real
+  // gate from a look-alike page; pin it per language.
+  expect(container.textContent).toContain('完整访问权限');
+});
+
+it('probes the daemon capabilities endpoint', async () => {
+  const fetch = vi.fn().mockResolvedValue(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(fetch.mock.calls[0][0]).toBe('http://daemon.test/capabilities');
+});
+
+it('auto-retries a generic 5xx and then mounts', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 500 }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Daemon is not ready. Retrying…');
+  await act(async () => {
+    vi.advanceTimersByTime(2_000);
+  });
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('honors Retry-After on rate limiting without claiming a cold start', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 429, retryAfter: '1' }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Daemon is not ready. Retrying…');
+  expect(container.textContent).not.toContain('Daemon is starting…');
+  await act(async () => {
+    vi.advanceTimersByTime(1_000);
+  });
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('parses an HTTP-date Retry-After', async () => {
+  vi.useFakeTimers();
+  const when = new Date(Date.now() + 1_000).toUTCString();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503, retryAfter: when }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Daemon is starting…');
+  await act(async () => {
+    vi.advanceTimersByTime(1_500);
+  });
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('clamps an outsized Retry-After to the retry ceiling', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503, retryAfter: '3600' }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Daemon is starting…');
+  await act(async () => {
+    vi.advanceTimersByTime(29_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    vi.advanceTimersByTime(1_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('floors a zero Retry-After at one second', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503, retryAfter: '0' }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  await act(async () => {
+    vi.advanceTimersByTime(999);
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    vi.advanceTimersByTime(1);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('floors an already-past HTTP-date Retry-After', async () => {
+  vi.useFakeTimers();
+  const past = new Date(Date.now() - 60_000).toUTCString();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503, retryAfter: past }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  await act(async () => {
+    vi.advanceTimersByTime(1_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('falls back to the fixed delay for an unparsable Retry-After', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503, retryAfter: 'soon' }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  await act(async () => {
+    vi.advanceTimersByTime(1_999);
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    vi.advanceTimersByTime(1);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('leaves the submit button enabled once the token form is up', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount();
+  expect(tokenInput()).not.toBeNull();
+  expect(submitButton().disabled).toBe(false);
+  expect(container.textContent).toContain('grants full access to the daemon');
+});
+
+it('resets the live region when a retry probe starts', async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 401 }))
+    .mockImplementation(hangingFetch());
+  vi.stubGlobal('fetch', fetch);
+  await mount('wrong');
+  expect(container.textContent).toContain('Invalid or expired');
+  act(() => {
+    const input = tokenInput();
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'good');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(submitForm);
+  // The operator must see the submit accepted, not the stale 401 copy, for
+  // the whole in-flight probe.
+  const live = container.querySelector('[role="status"]');
+  expect(live?.textContent).toContain('Connecting');
+  expect(live?.textContent).not.toContain('Invalid or expired');
+});
+
+it('keeps a manually typed token after a rejected submit', async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 401 }))
+    .mockResolvedValueOnce(stubResponse({ status: 401 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  act(() => {
+    const input = tokenInput();
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'typo-token');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(submitForm);
+  expect(container.textContent).toContain('Invalid or expired');
+  // Only a rejected initial credential is cleared; a typo the operator just
+  // made must stay editable instead of vanishing behind the masked input.
+  expect(tokenInput().value).toBe('typo-token');
+});
+
+it('treats a bare 503 without the failure code as transient', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503, body: { code: 'x' } }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  await act(async () => {
+    vi.advanceTimersByTime(2_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('clears a rejected stored credential instead of pre-filling it', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount('stale-token');
+  expect(container.querySelector('input[type="password"]')?.value).toBe('');
+  expect(container.textContent).toContain('Invalid or expired');
+});
+
+it('keeps a token typed during an automatic retry when that retry is rejected', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503 }))
+    .mockResolvedValueOnce(stubResponse({ status: 401 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount('stale-token');
+  // A transient 503 arms a retry and leaves the field editable for the whole
+  // window, so the operator can type before the next probe settles.
+  expect(fetch).toHaveBeenCalledTimes(1);
+  act(() => {
+    const input = tokenInput();
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'fresh-token');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(async () => {
+    vi.advanceTimersByTime(2_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  // The retry re-probes the credential the gate started with, so the 401 is a
+  // verdict about that one — never about the value just typed.
+  for (const call of fetch.mock.calls) {
+    expect((call[1] as RequestInit).headers).toEqual({
+      Authorization: 'Bearer stale-token',
+    });
+  }
+  expect(tokenInput().value).toBe('fresh-token');
+});
+
+it('scopes and themes the gate root like the app root', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount();
+  const gate = container.querySelector('[data-web-shell-gate]');
+  expect(gate).not.toBeNull();
+  expect(gate?.hasAttribute('data-web-shell-root')).toBe(true);
+  expect(gate?.hasAttribute('data-web-shell-shadcn')).toBe(true);
+  expect(gate?.classList.contains('dark')).toBe(true);
+  expect(gate?.classList.contains(AppStyles.themeDark)).toBe(true);
+});
+
+it('applies the light palette when requested', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount(undefined, 'en', 'light');
+  const gate = container.querySelector('[data-web-shell-gate]');
+  expect(gate?.classList.contains('dark')).toBe(false);
+  expect(gate?.classList.contains(AppStyles.themeLight)).toBe(true);
+});
+
+it('keeps the transient status and an enabled button during automatic retries', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503, retryAfter: '1' }))
+    .mockImplementation(hangingFetch());
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Daemon is starting');
+  // Mid-cycle: the automatic probe is in flight, but the transient copy and
+  // the button stay put — a manual retry can always jump the queue, and a
+  // screen reader is not re-announced once per cycle.
+  await act(async () => {
+    vi.advanceTimersByTime(1_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  const live = container.querySelector('[role="status"]');
+  expect(live?.textContent).toContain('Daemon is starting');
+  expect(submitButton().disabled).toBe(false);
+});
+
+it('clamps an HTTP-date Retry-After to the ceiling too', async () => {
+  vi.useFakeTimers();
+  const when = new Date(Date.now() + 3_600_000).toUTCString();
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 503, retryAfter: when }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  await act(async () => {
+    vi.advanceTimersByTime(29_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    vi.advanceTimersByTime(1_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(container.textContent).toBe('Connected ');
+});
+
+it('treats a failed runtime as permanent even with Retry-After attached', async () => {
+  vi.useFakeTimers();
+  const fetch = vi.fn().mockResolvedValue(
+    stubResponse({
+      status: 503,
+      retryAfter: '5',
+      body: { code: 'daemon_runtime_failed', error: 'boom' },
+    }),
+  );
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Daemon failed to start. boom');
+  expect(container.textContent).not.toContain('Connected ');
+  await act(async () => {
+    vi.advanceTimersByTime(60_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it.each([401, 403])('never auto-retries a %i answer', async (status) => {
+  vi.useFakeTimers();
+  const fetch = vi.fn().mockResolvedValue(stubResponse({ status }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  await act(async () => {
+    vi.advanceTimersByTime(60_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
+
+it('asks a first-visit operator to enter the token, not correct an invalid one', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount();
+  expect(container.textContent).toContain(
+    'Enter the bearer token from the daemon terminal.',
+  );
+  expect(container.textContent).not.toContain('Invalid or expired');
+  expect(container.textContent).not.toContain('Connected ');
+  // The destination is on screen — the only in-UI cue distinguishing this
+  // gate from a look-alike page asking for the same credential.
+  expect(container.textContent).toContain('http://daemon.test');
+});
+
+it('asks a first-visit zh-CN operator for the bearer token', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await mount(undefined, 'zh-CN');
+  // The shared prefix appears in both zh messages, so key on the tail.
+  expect(container.textContent).toContain('bearer token');
+  expect(container.textContent).not.toContain('令牌无效或已过期');
+});
+
+it('trims a whitespace-padded typed token before probing and persisting', async () => {
+  const fetch = vi
+    .fn()
+    .mockResolvedValueOnce(stubResponse({ status: 401 }))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  act(() => {
+    const input = tokenInput();
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, '  padded-token  ');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(submitForm);
+  expect(container.textContent).toContain('Connected padded-token');
+  expect(sessionStorage.getItem('qwen-daemon-token:http://daemon.test')).toBe(
+    'padded-token',
+  );
+  expect(fetch.mock.calls[1][1].headers).toEqual({
+    Authorization: 'Bearer padded-token',
+  });
+});
+
+it('lets a manual retry supersede an armed auto-retry', async () => {
+  vi.useFakeTimers();
+  const fetch = vi
+    .fn()
+    .mockRejectedValueOnce(new Error('Failed to fetch'))
+    .mockResolvedValueOnce(stubResponse({ status: 200 }));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('Cannot reach the daemon');
+  // The auto-retry is armed for 2 s; a manual submit inside that window
+  // supersedes it, so exactly one more probe fires.
+  await act(submitForm);
+  expect(container.textContent).toBe('Connected ');
+  await act(async () => {
+    vi.advanceTimersByTime(60_000);
+  });
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+it('remembers the confirmed target for a reload without mounting the sidebar', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 200 })),
+  );
+  await mount();
+  expect(isKnownDaemonTarget('http://daemon.test')).toBe(true);
+});
+
+it('updates the token destination hint when a local address is edited', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn().mockResolvedValue(stubResponse({ status: 401 })),
+  );
+  await act(async () =>
+    root.render(
+      <StandaloneAuth baseUrl={window.location.origin}>
+        {() => <p>Connected</p>}
+      </StandaloneAuth>,
+    ),
+  );
+  expect(container.textContent).not.toContain(
+    'sent to the address shown above',
+  );
+  act(() => {
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(addressInput(), 'https://remote.example');
+    addressInput().dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  expect(container.textContent).toContain('sent to the address shown above');
+  expect(
+    container.querySelector('[data-slot="card-description"]')?.textContent,
+  ).toBe('https://remote.example');
+});
+
+it('offers cross-origin diagnostics without treating network failures as permanent policy errors', async () => {
+  vi.useFakeTimers();
+  const fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+  vi.stubGlobal('fetch', fetch);
+  await mount();
+  expect(container.textContent).toContain('--allow-origin');
+  expect(container.textContent).toContain('network');
+  await act(async () => vi.advanceTimersByTimeAsync(2_000));
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+it('remembers only the selected daemon in the current tab across reload checks', async () => {
+  sessionStorage.clear();
+  expect(isKnownDaemonTarget('https://remote.example')).toBe(false);
+  confirmDaemonTarget('https://remote.example');
+  expect(isKnownDaemonTarget('https://remote.example')).toBe(true);
+  expect(isKnownDaemonTarget('https://remote.example')).toBe(true);
+  expect(isKnownDaemonTarget('https://other.example')).toBe(false);
+  confirmDaemonTarget('https://other.example');
+  expect(isKnownDaemonTarget('https://remote.example')).toBe(false);
+  sessionStorage.clear();
+});
+
+// A switch whose credential cannot ride along is refused, and the gate has to
+// say so: the screen would otherwise sit unchanged and read as a no-op.
+it('reports a refused target switch', async () => {
+  vi.stubGlobal('fetch', hangingFetch());
+  const onChangeTarget = vi.fn(() => false);
+  await mount(
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    onChangeTarget,
+  );
+  act(() => {
+    const input = addressInput();
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )!.set!.call(input, 'https://other.example:4170');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await act(submitForm);
+  expect(onChangeTarget).toHaveBeenCalledWith(
+    'https://other.example:4170',
+    undefined,
+  );
+  expect(container.textContent).toContain('could not be carried');
+});

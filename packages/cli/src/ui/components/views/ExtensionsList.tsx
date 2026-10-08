@@ -7,10 +7,8 @@
 import { Box, Text } from 'ink';
 import { useUIState } from '../../contexts/UIStateContext.js';
 import { ExtensionUpdateState } from '../../state/extensions.js';
-import {
-  createDebugLogger,
-  getExtensionDisplayName,
-} from '@qwen-code/qwen-code-core';
+import { getExtensionDisplayName } from '@qwen-code/qwen-code-core/extension/i18n.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { getCurrentLanguage } from '../../../i18n/index.js';
 
 const debugLogger = createDebugLogger('EXTENSIONS_LIST');

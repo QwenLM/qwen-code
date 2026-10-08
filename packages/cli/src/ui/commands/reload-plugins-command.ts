@@ -41,6 +41,11 @@ export function formatReloadPluginsSummary(summary: ReloadPluginsSummary) {
     ),
     summaryCountTerm(summary.skillCount, '{{count}} skill', '{{count}} skills'),
     summaryCountTerm(summary.agentCount, '{{count}} agent', '{{count}} agents'),
+    summaryCountTerm(
+      summary.workflowCount,
+      '{{count}} workflow',
+      '{{count}} workflows',
+    ),
     summaryCountTerm(summary.hookCount, '{{count}} hook', '{{count}} hooks'),
     summaryCountTerm(
       summary.mcpServerCount,

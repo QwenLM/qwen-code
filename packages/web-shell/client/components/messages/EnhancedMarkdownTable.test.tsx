@@ -4,6 +4,7 @@ import { StrictMode, act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider, type WebShellLanguage } from '../../i18n';
 import { WebShellPortalRootContext } from '../../portalRoot';
+import { InteractionBlockContext } from '../../interactionBlockContext';
 import { immediateClipboardWrite } from '../../test/reactHarness';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 
@@ -51,6 +52,7 @@ function renderTableContent(
   children: ReactNode,
   language: WebShellLanguage = 'en',
   fallback?: ReactNode,
+  options?: { shadowPortal?: boolean },
 ): HTMLElement {
   const container = document.createElement('div');
   const appRoot = document.createElement('div');
@@ -59,7 +61,15 @@ function renderTableContent(
   portalRoot.dataset.webShellPortalRoot = '';
   portalRoot.dataset.webShellShadcn = '';
   document.body.appendChild(container);
-  container.append(appRoot, portalRoot);
+  if (options?.shadowPortal) {
+    // `shadowDom: true` resolves to `portals: true`, and App.tsx then appends
+    // the portal root to `host.attachShadow(...)` instead of the app tree.
+    const host = document.createElement('div');
+    container.append(appRoot, host);
+    host.attachShadow({ mode: 'open' }).appendChild(portalRoot);
+  } else {
+    container.append(appRoot, portalRoot);
+  }
   const root = createRoot(appRoot);
   act(() => {
     root.render(
@@ -76,7 +86,10 @@ function renderTableContent(
   return container;
 }
 
-function renderTable(language: WebShellLanguage = 'en'): HTMLElement {
+function renderTable(
+  language: WebShellLanguage = 'en',
+  options?: { shadowPortal?: boolean },
+): HTMLElement {
   return renderTableContent(
     [
       <thead key="head">
@@ -101,6 +114,8 @@ function renderTable(language: WebShellLanguage = 'en'): HTMLElement {
       </tbody>,
     ],
     language,
+    undefined,
+    options,
   );
 }
 
@@ -241,6 +256,16 @@ function toggleDetailColumn(container: HTMLElement, columnLabel: string): void {
 
 function cellDialog(): HTMLElement | null {
   return document.querySelector<HTMLElement>('[role="dialog"]');
+}
+
+function shadowPortalRoot(container: HTMLElement): HTMLElement {
+  const host = [...container.children].find((child) => child.shadowRoot);
+  expect(host).not.toBeUndefined();
+  const portalRoot = host!.shadowRoot!.querySelector<HTMLElement>(
+    '[data-web-shell-portal-root]',
+  );
+  expect(portalRoot).not.toBeNull();
+  return portalRoot!;
 }
 
 function textButtonContaining(
@@ -467,6 +492,176 @@ function touchEvent(
 }
 
 describe('EnhancedMarkdownTable', () => {
+  it('preserves table state and scroll position through fullscreen and restores focus', async () => {
+    const container = renderTable();
+    click(button(container, 'Sort by Score'));
+    selectValue(button(container, 'Table density'), 'compact');
+    click(button(container, 'View details for row 1'));
+    const scroller = container.querySelector<HTMLElement>('[tabindex="0"]')!;
+    scroller.scrollTop = 80;
+    scroller.scrollLeft = 120;
+    click(button(container, 'Fullscreen'));
+
+    const dialog = container.querySelector<HTMLElement>('[role="dialog"]')!;
+    expect(dialog.closest('[data-web-shell-portal-root]')).not.toBeNull();
+    expect(container.querySelectorAll('table')).toHaveLength(1);
+    expect(button(dialog, 'Sort by Score, ascending')).toBeTruthy();
+    expect(button(dialog, 'Table density').textContent).toContain('Compact');
+    expect(dialog.textContent).toContain('Row details');
+    const fullscreenScroller =
+      dialog.querySelector<HTMLElement>('[tabindex="0"]')!;
+    expect(fullscreenScroller.scrollTop).toBe(80);
+    expect(fullscreenScroller.scrollLeft).toBe(120);
+    fullscreenScroller.scrollTop = 160;
+    click(button(dialog, 'Exit fullscreen'));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(button(container, 'Sort by Score, ascending')).toBeTruthy();
+    expect(button(container, 'Table density').textContent).toContain('Compact');
+    expect(container.textContent).toContain('Row details');
+    expect(
+      container.querySelector<HTMLElement>('[tabindex="0"]')!.scrollTop,
+    ).toBe(160);
+    expect(
+      container.querySelector<HTMLElement>('[tabindex="0"]')!.scrollLeft,
+    ).toBe(120);
+    expect(document.activeElement).toBe(button(container, 'Fullscreen'));
+  });
+
+  it('dismisses nested cell details and column menus before exiting fullscreen', () => {
+    const container = renderTable();
+    const escape = () =>
+      act(() => {
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            bubbles: true,
+            cancelable: true,
+            key: 'Escape',
+          }),
+        );
+      });
+    click(button(container, 'Fullscreen'));
+    doubleClick(dataCell(container, 0, 0));
+    expect(container.querySelectorAll('[role="dialog"]')).toHaveLength(2);
+    escape();
+    expect(container.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+    expect(button(container, 'Exit fullscreen')).toBeTruthy();
+
+    openColumnMenu(container, 'Team');
+    expect(container.querySelector('[role="menu"]')).not.toBeNull();
+    escape();
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+    expect(button(container, 'Exit fullscreen')).toBeTruthy();
+    escape();
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('uses the scoped shadow portal for fullscreen', () => {
+    const container = renderTable('zh-CN', { shadowPortal: true });
+    click(button(container, '全屏'));
+    const portalRoot = shadowPortalRoot(container);
+    expect(portalRoot.querySelector('[role="dialog"] table')).not.toBeNull();
+    expect(container.querySelector('table')).toBeNull();
+    const cell = dataCell(portalRoot, 0, 0);
+    dragCells(cell, cell);
+    act(() => {
+      cell.dispatchEvent(
+        new MouseEvent('mousedown', { bubbles: true, composed: true }),
+      );
+      window.dispatchEvent(new MouseEvent('mouseup'));
+    });
+    expect(cell.className).toContain('selectedCell');
+    click(button(portalRoot, '退出全屏'));
+    expect(portalRoot.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.querySelector('table')).not.toBeNull();
+  });
+
+  it('blocks chat interactions during fullscreen and releases on unmount', () => {
+    const release = vi.fn();
+    const register = vi.fn(() => release);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() =>
+      root.render(
+        <InteractionBlockContext.Provider value={register}>
+          <I18nProvider language="en">
+            <EnhancedMarkdownTable>
+              <thead>
+                <tr>
+                  <th>Team</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Alpha</td>
+                </tr>
+              </tbody>
+            </EnhancedMarkdownTable>
+          </I18nProvider>
+        </InteractionBlockContext.Provider>,
+      ),
+    );
+    click(button(container, 'Fullscreen'));
+    expect(register).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    act(() => root.render(null));
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('hit-tests touch selection inside the fullscreen shadow root', () => {
+    const container = renderTable('en', { shadowPortal: true });
+    click(button(container, 'Fullscreen'));
+    const portalRoot = shadowPortalRoot(container);
+    const first = dataCell(portalRoot, 0, 0);
+    const last = dataCell(portalRoot, 1, 1);
+    const elementFromPoint = vi.fn(() => last);
+    Object.defineProperty(portalRoot.getRootNode(), 'elementFromPoint', {
+      configurable: true,
+      value: elementFromPoint,
+    });
+    act(() => {
+      first.dispatchEvent(
+        touchEvent('touchstart', [{ clientX: 10, clientY: 10 }]),
+      );
+      first.dispatchEvent(
+        touchEvent('touchmove', [{ clientX: 20, clientY: 20 }]),
+      );
+      first.dispatchEvent(touchEvent('touchend', []));
+    });
+    expect(elementFromPoint).toHaveBeenCalledWith(20, 20);
+    expect(last.className).toContain('selectedCell');
+    expect(portalRoot.textContent).toContain('Selected 4');
+  });
+
+  it('restores the fullscreen scroller focus after closing shadow cell details', async () => {
+    const container = renderTable('en', { shadowPortal: true });
+    click(button(container, 'Fullscreen'));
+    const portalRoot = shadowPortalRoot(container);
+    const root = portalRoot.getRootNode() as ShadowRoot;
+    const scroller = portalRoot.querySelector<HTMLElement>('[tabindex="0"]')!;
+    act(() => scroller.focus());
+    doubleClick(dataCell(portalRoot, 0, 0));
+    expect(portalRoot.querySelectorAll('[role="dialog"]')).toHaveLength(2);
+    await act(async () => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          bubbles: true,
+          cancelable: true,
+          key: 'Escape',
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(portalRoot.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+    expect(root.activeElement).toBe(scroller);
+  });
+
   it('sorts numeric columns from header clicks', () => {
     const container = renderTable();
 
@@ -837,6 +1032,169 @@ describe('EnhancedMarkdownTable', () => {
     expect(dialog).not.toBeNull();
     expect(dialog?.textContent).toContain('Current field value');
     expect(dialog?.textContent).toContain('Alpha');
+  });
+
+  it('scopes select-all in the cell value dialog to the value box', () => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+
+    const dialog = cellDialog();
+    expect(dialog).not.toBeNull();
+    const valueBox = [...dialog!.querySelectorAll('div')].find(
+      (element) => element.textContent === 'Alpha',
+    );
+    expect(valueBox).not.toBeUndefined();
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'a',
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      dialog!.dispatchEvent(event);
+    });
+
+    // Without scoping, the keystroke reaches the document and the browser
+    // selects the whole page instead of the value the dialog is showing.
+    expect(event.defaultPrevented).toBe(true);
+    const selection = document.getSelection();
+    expect(selection?.rangeCount).toBe(1);
+    const range = selection!.getRangeAt(0);
+    expect(range.commonAncestorContainer === valueBox).toBe(true);
+    expect(selection?.toString()).toBe('Alpha');
+  });
+
+  it('scopes select-all in the cell value dialog with Ctrl+A', () => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+
+    const dialog = cellDialog();
+    const event = new KeyboardEvent('keydown', {
+      key: 'a',
+      code: 'KeyA',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      dialog!.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.getSelection()?.toString()).toBe('Alpha');
+  });
+
+  it('scopes select-all when the keyboard layout reports a non-Latin key', () => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+
+    const dialog = cellDialog();
+    // A Cyrillic layout reports the physical A key as 'ф', while the browser's
+    // own select-all still fires, so matching `key` alone would leave the
+    // keystroke unscoped.
+    const event = new KeyboardEvent('keydown', {
+      key: '\u0444',
+      code: 'KeyA',
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      dialog!.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.getSelection()?.toString()).toBe('Alpha');
+  });
+
+  it('scopes select-all when the key value is uppercase on a non-KeyA code', () => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+
+    const dialog = cellDialog();
+    // AZERTY puts the `a` character on physical `KeyQ`, and Caps Lock makes it
+    // uppercase, so neither the code clause nor a strict `=== 'a'` would match.
+    const event = new KeyboardEvent('keydown', {
+      key: 'A',
+      code: 'KeyQ',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      dialog!.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.getSelection()?.toString()).toBe('Alpha');
+  });
+
+  it('leaves select-all to the browser when the dialog is inside a shadow root', () => {
+    const container = renderTable('en', { shadowPortal: true });
+
+    // A selection made before the dialog opened, to show it survives.
+    const outside = dataCell(container, 2, 0);
+    const selection = document.getSelection()!;
+    const outsideRange = document.createRange();
+    outsideRange.selectNodeContents(outside);
+    selection.addRange(outsideRange);
+    expect(selection.toString()).toBe('Gamma');
+
+    doubleClick(dataCell(container, 0, 0));
+
+    const portalRoot = shadowPortalRoot(container);
+    const dialog = portalRoot.querySelector<HTMLElement>('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'a',
+      code: 'KeyA',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      dialog!.dispatchEvent(event);
+    });
+
+    // Engines that follow the Selection spec drop a range rooted in a
+    // ShadowRoot, so scoping here would consume the keystroke and select
+    // nothing. The browser default is left in place instead.
+    expect(event.defaultPrevented).toBe(false);
+    expect(selection.rangeCount).toBe(1);
+    expect(selection.toString()).toBe('Gamma');
+  });
+
+  // Every chord the dialog must not claim: a bare key, the two select-all
+  // chords that Shift or Alt turn into something the browser or host page
+  // owns, and a modified key that is not A.
+  it.each([
+    ['a bare a', { key: 'a', code: 'KeyA' }],
+    ['Ctrl+Shift+A', { key: 'A', code: 'KeyA', ctrlKey: true, shiftKey: true }],
+    ['Ctrl+Alt+A', { key: 'a', code: 'KeyA', ctrlKey: true, altKey: true }],
+    ['Ctrl+C', { key: 'c', code: 'KeyC', ctrlKey: true }],
+  ])('leaves %s to the dialog', (_name, init) => {
+    const container = renderTable();
+
+    doubleClick(dataCell(container, 0, 0));
+
+    const dialog = cellDialog();
+    const event = new KeyboardEvent('keydown', {
+      ...init,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      dialog!.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.getSelection()?.toString()).toBe('');
   });
 
   it('mounts the cell value dialog in the Web Shell portal root', () => {

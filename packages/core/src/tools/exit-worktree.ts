@@ -17,7 +17,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import {
   GitWorktreeService,
-  readWorktreeSessionMarker,
+  readWorktreeSessionMarkerOutcome,
   worktreeBranchForSlug,
 } from '../services/gitWorktreeService.js';
 import {
@@ -236,12 +236,31 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     //    those as "owner unknown" and allow removal (matches prior
     //    behaviour) but log so operators can see when the guard is
     //    bypassed.
-    const owner = await readWorktreeSessionMarker(worktreePath);
+    const markerOutcome = await readWorktreeSessionMarkerOutcome(worktreePath);
     const currentSessionId = this.config.getSessionId();
+    if (markerOutcome.state === 'inconclusive') {
+      // The marker changed identity (or vanished) mid-read — a concurrent
+      // ownership transfer is in flight. Refuse rather than read that as
+      // "no marker": removal is destructive and the owner is unknown.
+      return errorResult(
+        `Refusing to remove worktree "${this.params.name}" — its session ` +
+          `ownership marker could not be read conclusively (it changed ` +
+          `while being read). Retry, or remove it manually with ` +
+          `\`git worktree remove ${worktreePath}\`.`,
+      );
+    }
+    const owner =
+      markerOutcome.state === 'owned' ? markerOutcome.sessionId : null;
     if (owner !== null && owner !== currentSessionId) {
       currentWorktreeSession ??= await this.readCurrentWorktreeSession();
+      // A sidecar carrying `supersededBy` is proof the marker is *not* stale:
+      // the worktree-reset transfer deliberately retains the superseded
+      // sidecar with the same slug and path, so without this term the hatch
+      // below collapses to `ownerActive` and a resumed superseded session
+      // drops the checkout (and branch) the replacement now owns.
       const currentSessionOwnsPath =
         currentWorktreeSession?.slug === this.params.name &&
+        currentWorktreeSession.supersededBy === undefined &&
         samePath(currentWorktreeSession.worktreePath, worktreePath);
       const ownerActive = await isSessionRuntimeActive(
         owner,

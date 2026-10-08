@@ -1,11 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as os from 'node:os';
+import { CHANNEL_WORKER_KILL_GRACE_MS } from '@qwen-code/acp-bridge/channelControlTimeouts';
 
 const mockCanonicalizeWorkspace = vi.hoisted(() => vi.fn((p: string) => p));
 const mockLoadChannelsConfig = vi.hoisted(() => vi.fn());
 const mockLoadChannelsFromExtensions = vi.hoisted(() => vi.fn());
 const mockParseConfiguredChannels = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
+const mockResolveChannelLocale = vi.hoisted(() =>
+  vi.fn((value: unknown) => (value === 'Chinese' ? 'zh' : 'en')),
+);
 const mockReadChannelMemory = vi.hoisted(() => vi.fn());
 const mockGetChannelMemoryRevision = vi.hoisted(() => vi.fn());
 const mockListChannelMemoryEntries = vi.hoisted(() => vi.fn());
@@ -57,6 +61,7 @@ const mockLoadSettings = vi.hoisted(() =>
       merged: {
         proxy?: string;
         experimental?: { cron?: boolean };
+        general?: { language?: string };
       };
     } => ({
       merged: { proxy: 'http://settings-proxy:8080' },
@@ -123,6 +128,7 @@ const mockDefaultDaemonClient = vi.hoisted(() =>
 const mockDefaultDaemonSessionClient = vi.hoisted(() => ({
   createOrAttach: vi.fn(),
   resume: vi.fn(),
+  resetWorktree: vi.fn(),
 }));
 
 const mockBridgeStart = vi.hoisted(() => vi.fn());
@@ -267,6 +273,7 @@ vi.mock('./runtime.js', () => ({
   registerPermissionRelay: mockRegisterPermissionRelay,
   registerSessionCleanup: mockRegisterSessionCleanup,
   registerToolCallDispatch: mockRegisterToolCallDispatch,
+  resolveChannelLocale: mockResolveChannelLocale,
   selectFirstModel: mockSelectFirstModel,
   sessionsPath: mockSessionsPath,
 }));
@@ -362,6 +369,15 @@ function createSdk() {
     }),
     resume: vi.fn().mockResolvedValue({
       sessionId: 'loaded-session',
+      workspaceCwd: '/workspace',
+      prompt: vi.fn(),
+      events: vi.fn(),
+      cancel: vi.fn(),
+      setModel: vi.fn(),
+      respondToPermission: vi.fn(),
+    }),
+    resetWorktree: vi.fn().mockResolvedValue({
+      sessionId: 'reset-session',
       workspaceCwd: '/workspace',
       prompt: vi.fn(),
       events: vi.fn(),
@@ -551,6 +567,62 @@ describe('createDaemonSessionFactory', () => {
       },
       'qwen-channel-worker',
     );
+  });
+
+  it('forwards worktree isolation only while creating a session', async () => {
+    const sdk = createSdk();
+    const factory = createDaemonSessionFactory({
+      client: sdk.client,
+      DaemonSessionClient: sdk.DaemonSessionClient,
+      clientId: 'qwen-channel-worker',
+    });
+
+    await factory({ workspaceCwd: '/workspace', worktree: {} });
+    await factory({
+      workspaceCwd: '/workspace',
+      sessionId: 'existing-session',
+      worktree: {},
+    });
+
+    expect(sdk.DaemonSessionClient.createOrAttach).toHaveBeenCalledWith(
+      sdk.client,
+      expect.objectContaining({ worktree: {} }),
+      'qwen-channel-worker',
+    );
+    expect(sdk.DaemonSessionClient.resume).toHaveBeenCalledWith(
+      sdk.client,
+      'existing-session',
+      expect.not.objectContaining({ worktree: expect.anything() }),
+      'qwen-channel-worker',
+    );
+  });
+
+  it('routes worktree resets through resetWorktree', async () => {
+    const sdk = createSdk();
+    const factory = createDaemonSessionFactory({
+      client: sdk.client,
+      DaemonSessionClient: sdk.DaemonSessionClient,
+      clientId: 'qwen-channel-worker',
+    });
+
+    await factory({
+      workspaceCwd: '/workspace',
+      sourceId: 'dingtalk-main',
+      worktreeReset: { sessionId: 'old-session' },
+    });
+
+    expect(sdk.DaemonSessionClient.resetWorktree).toHaveBeenCalledWith(
+      sdk.client,
+      'old-session',
+      {
+        workspaceCwd: '/workspace',
+        sessionScope: 'thread',
+        sourceType: 'channel',
+        sourceId: 'dingtalk-main',
+      },
+    );
+    expect(sdk.DaemonSessionClient.createOrAttach).not.toHaveBeenCalled();
+    expect(sdk.DaemonSessionClient.resume).not.toHaveBeenCalled();
   });
 });
 
@@ -946,8 +1018,14 @@ describe('runChannelDaemonWorker', () => {
   it('starts selected channels through a daemon-backed bridge facade', async () => {
     const sdk = createSdk();
     const ready = vi.fn();
-    const settings = { merged: { proxy: 'http://settings-proxy:8080' } };
+    const settings = {
+      merged: {
+        proxy: 'http://settings-proxy:8080',
+        general: { language: 'en' },
+      },
+    };
     mockLoadSettings.mockReturnValueOnce(settings);
+    vi.stubEnv('QWEN_CODE_LANG', 'zh');
 
     const handle = await runChannelDaemonWorker({
       daemonUrl: 'http://127.0.0.1:4170',
@@ -1006,6 +1084,7 @@ describe('runChannelDaemonWorker', () => {
         },
         stateDir:
           '/tmp/qwen/channels/daemon/workspace-hash/instances/telegram-hash',
+        displayLanguage: 'zh',
       }),
     );
     expect(mockDaemonChannelStateDir).toHaveBeenCalledWith(
@@ -1148,6 +1227,88 @@ describe('runChannelDaemonWorker', () => {
     );
   });
 
+  it('waits for channel disconnect drains before stopping the bridge', async () => {
+    const sdk = createSdk();
+    let releaseDrain!: () => void;
+    const drain = new Promise<void>((resolve) => {
+      releaseDrain = resolve;
+    });
+    const disconnect = vi.fn();
+    const channel = {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect,
+      waitForDisconnect: vi.fn(() => {
+        expect(disconnect).toHaveBeenCalledOnce();
+        return drain;
+      }),
+      name: 'telegram',
+      runLoopPrompt: vi.fn().mockResolvedValue('done'),
+      validateWebhookTask: vi.fn(),
+    };
+    mockCreateChannel.mockReturnValueOnce(channel);
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    const closing = handle.close();
+    await vi.waitFor(() =>
+      expect(channel.waitForDisconnect).toHaveBeenCalled(),
+    );
+    expect(channel.disconnect).toHaveBeenCalledOnce();
+    expect(channel.disconnect.mock.invocationCallOrder[0]).toBeLessThan(
+      channel.waitForDisconnect.mock.invocationCallOrder[0]!,
+    );
+    expect(mockBridgeStop).not.toHaveBeenCalled();
+
+    releaseDrain();
+    await closing;
+
+    expect(mockBridgeStop).toHaveBeenCalledOnce();
+  });
+
+  it('continues shutdown when a channel disconnect drain never settles', async () => {
+    vi.useFakeTimers();
+    try {
+      const sdk = createSdk();
+      const disconnect = vi.fn();
+      const waitForDisconnect = vi.fn(() => new Promise<void>(() => {}));
+      mockCreateChannel.mockReturnValueOnce({
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect,
+        waitForDisconnect,
+        name: 'telegram',
+        runLoopPrompt: vi.fn().mockResolvedValue('done'),
+        validateWebhookTask: vi.fn(),
+      });
+      const handle = await runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      });
+
+      const closing = handle.close();
+      await vi.advanceTimersByTimeAsync(7_999);
+      expect(waitForDisconnect).toHaveBeenCalledOnce();
+      expect(mockBridgeStop).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      await closing;
+
+      expect(mockWriteStderrLineSafe).toHaveBeenCalledWith(
+        '[Channel] disconnect drain exceeded 8000ms; continuing worker shutdown.',
+      );
+      expect(mockBridgeStop).toHaveBeenCalledOnce();
+      expect(mockRouterDispose).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('starts named sessions with per-channel state and no loop controller', async () => {
     const sdk = createSdk();
     mockParseConfiguredChannels.mockResolvedValueOnce([
@@ -1184,6 +1345,28 @@ describe('runChannelDaemonWorker', () => {
     );
     expect(mockCreateChannel.mock.calls[0]![3]).not.toHaveProperty(
       'loopController',
+    );
+
+    await handle.close();
+  });
+
+  it('passes the default Chinese language to daemon-managed channels', async () => {
+    const sdk = createSdk();
+    mockLoadSettings.mockReturnValueOnce({
+      merged: { general: { language: 'Chinese' } },
+    });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      daemonToken: 'secret-token',
+      promptAuthorization: 'worker-prompt-token',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockCreateChannel.mock.calls[0]?.[3]).toEqual(
+      expect.objectContaining({ locale: 'zh' }),
     );
 
     await handle.close();
@@ -1578,6 +1761,43 @@ describe('runChannelDaemonWorker', () => {
 
     expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
       expect.objectContaining({ sessionPermissionVote: false }),
+    );
+  });
+
+  it('enables worktree persistence only when the daemon advertises it', async () => {
+    const sdk = createSdk();
+    sdk.client.capabilities.mockResolvedValueOnce({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['session_worktree_persistence_v1'],
+      modelServices: [],
+      workspaceCwd: '/workspace',
+    });
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionWorktreePersistence: true }),
+    );
+  });
+
+  it('keeps worktree persistence off when the daemon omits the capability', async () => {
+    const sdk = createSdk();
+
+    await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    expect(mockDaemonChannelBridge).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionWorktreePersistence: false }),
     );
   });
 
@@ -2041,6 +2261,75 @@ describe('runChannelDaemonWorker', () => {
     expect(mockBridgeStop).toHaveBeenCalled();
   });
 
+  it('waits for a failed adapter to drain during startup rollback', async () => {
+    const sdk = createSdk();
+    let releaseDrain!: () => void;
+    const drain = new Promise<void>((resolve) => {
+      releaseDrain = resolve;
+    });
+    const disconnect = vi.fn();
+    const waitForDisconnect = vi.fn(() => {
+      expect(disconnect).toHaveBeenCalled();
+      return drain;
+    });
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockRejectedValue(new Error('connect boom')),
+      disconnect,
+      waitForDisconnect,
+      name: 'telegram',
+    });
+
+    const starting = runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    const rejection = starting.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(waitForDisconnect).toHaveBeenCalled());
+
+    expect(mockBridgeStop).not.toHaveBeenCalled();
+
+    releaseDrain();
+    expect(await rejection).toEqual(
+      expect.objectContaining({ message: 'No channels connected.' }),
+    );
+
+    expect(mockBridgeStop).toHaveBeenCalledOnce();
+  });
+
+  it('continues startup rollback when a disconnect drain never settles', async () => {
+    vi.useFakeTimers();
+    try {
+      const sdk = createSdk();
+      const disconnect = vi.fn();
+      const waitForDisconnect = vi.fn(() => new Promise<void>(() => {}));
+      mockCreateChannel.mockResolvedValueOnce({
+        connect: vi.fn().mockRejectedValue(new Error('connect boom')),
+        disconnect,
+        waitForDisconnect,
+        name: 'telegram',
+      });
+
+      const rejection = runChannelDaemonWorker({
+        daemonUrl: 'http://127.0.0.1:4170',
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        loadDaemonSdk: async () => sdk,
+      }).catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(CHANNEL_WORKER_KILL_GRACE_MS - 1);
+
+      expect(await rejection).toEqual(
+        expect.objectContaining({ message: 'No channels connected.' }),
+      );
+      expect(waitForDisconnect).toHaveBeenCalledOnce();
+      expect(mockBridgeStop).toHaveBeenCalledOnce();
+      expect(mockRouterDispose).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('waits for each startup failure report before connecting the next channel', async () => {
     const sdk = createSdk();
     let acknowledge!: () => void;
@@ -2416,6 +2705,50 @@ describe('runChannelDaemonWorker', () => {
     await expect(handle.close()).rejects.toThrow('stop boom');
     expect(mockRouterDispose).toHaveBeenCalled();
     expect(mockRouterClearAll).not.toHaveBeenCalled();
+  });
+
+  it('waits for asynchronous channel cleanup before closing', async () => {
+    const sdk = createSdk();
+    let finishDisconnect!: () => void;
+    // disconnectChannels discards the disconnect() return value and awaits
+    // only waitForDisconnect, so the pending promise must hang off that hook
+    // for the test to detect a regression that closes before the drain.
+    const disconnect = vi.fn();
+    const waitForDisconnect = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishDisconnect = resolve;
+        }),
+    );
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect,
+      waitForDisconnect,
+      name: 'telegram',
+    });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+    let closed = false;
+    const closing = handle.close().then(() => {
+      closed = true;
+    });
+
+    await vi.waitFor(() => expect(disconnect).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(waitForDisconnect).toHaveBeenCalledOnce());
+    // Let a real macrotask elapse: if close did not await the drain, it
+    // would have settled by now.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(closed).toBe(false);
+
+    finishDisconnect();
+    await closing;
+
+    expect(closed).toBe(true);
   });
 
   it('runs webhook tasks on the matching channel handle', async () => {
@@ -3851,15 +4184,20 @@ describe('daemonWorkerCommand', () => {
     const exit = mockProcessExitNoThrow();
     const send = vi.fn();
     const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    const delayed = new Promise<void>((resolve) => {
+      setTimeout(resolve, 5_000);
+    });
     const never = new Promise<void>(() => undefined);
-    const disconnect = vi.fn().mockResolvedValue(undefined);
+    const disconnect = vi.fn();
+    const waitForDisconnect = vi.fn(() => never);
     mockCreateChannel.mockResolvedValueOnce({
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect,
+      waitForDisconnect,
       name: 'telegram',
       validateWebhookTask: vi.fn(),
-      runWebhookTask: vi.fn(() => never),
-      deliverProactive: vi.fn(() => never),
+      runWebhookTask: vi.fn(() => delayed),
+      deliverProactive: vi.fn(() => delayed),
     });
     vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
     vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
@@ -3900,10 +4238,14 @@ describe('daemonWorkerCommand', () => {
       );
 
       process.emit('SIGTERM', 'SIGTERM');
-      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(7_999);
+      expect(mockBridgeStop).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
       await handler;
 
       expect(disconnect).toHaveBeenCalledOnce();
+      expect(waitForDisconnect).toHaveBeenCalledOnce();
       expect(exit).toHaveBeenCalledWith(0);
     } finally {
       restoreSend();
