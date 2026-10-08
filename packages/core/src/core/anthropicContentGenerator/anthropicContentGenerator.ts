@@ -773,21 +773,27 @@ export class AnthropicContentGenerator implements ContentGenerator {
     //                    ArenaManager / forkedAgent).
     const deepseekThinkingOn = isDeepSeek && !!thinking;
     const stripAssistantThinking = isDeepSeek && !thinking;
+    // Proxy-hosted Claude: a non-DeepSeek backend on a non-native base URL.
+    // Its wire shape is Anthropic's, while its history may carry thinking
+    // blocks recorded by another provider without a signature.
+    const isProxyHostedClaude =
+      !isDeepSeek && !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
     const dropUnsignedAssistantThinking =
-      !isDeepSeek &&
+      isProxyHostedClaude &&
       !!thinking &&
-      this.modelSupportsAdaptiveThinking(true) &&
-      !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
-    // Strict Anthropic-compatible proxies (SGLang, llama.cpp, vLLM) reject
-    // a `thinking` block with no `signature` field at all (HTTP 400, e.g.
-    // SGLang `thinking.signature`) while accepting an empty signature,
-    // unlike Claude 4.6+ (where `dropUnsignedAssistantThinking` above
-    // applies) and the native API (whose history is left untouched).
+      this.modelSupportsAdaptiveThinking(true);
+    // Strict Anthropic-compatible proxies (SGLang, llama.cpp, vLLM) reject a
+    // `thinking` block with no `signature` field at all (HTTP 400, e.g.
+    // SGLang `thinking.signature`) while accepting an empty signature. The
+    // repaired blocks come from HISTORY, not the outgoing request, so this is
+    // deliberately not gated on `thinking`: the #11772 consumers (auto-memory
+    // extraction, prompt suggestions, skill review) fork with
+    // `includeThoughts: false` and still replay unsigned blocks. On Claude
+    // 4.6+ through a proxy, `dropUnsignedAssistantThinking` runs after this
+    // fill and reads `signature: ''` as unsigned, so that quadrant keeps its
+    // drop-only wire shape; the native API's history is left untouched.
     // https://github.com/QwenLM/qwen-code/issues/11772
-    const fillUnsignedThinkingSignature =
-      !isDeepSeek &&
-      !!thinking &&
-      !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
+    const fillUnsignedThinkingSignature = isProxyHostedClaude;
     // Opus/Sonnet 4.6+ and every 5.x family reject a request whose final
     // message has role 'assistant' ("assistant message prefill") with a
     // hard 400 — per Anthropic's own migration guidance this is a
@@ -824,8 +830,10 @@ export class AnthropicContentGenerator implements ContentGenerator {
       request,
       {
         // DeepSeek normalization and injection run together. Proxy-hosted
-        // Claude uses the separate unsigned-thinking cleanup below because an
-        // empty string cannot replace Claude's opaque signature.
+        // Claude gets two passes of its own: every non-4.6 model fills
+        // `signature: ''` (strict serde only requires the key to be present),
+        // while 4.6+ adaptive models drop unsigned blocks, since an empty
+        // string cannot stand in for the native API's opaque signature.
         normalizeAssistantThinkingSignature: deepseekThinkingOn,
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
         dropUnsignedAssistantThinking,

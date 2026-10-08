@@ -110,9 +110,13 @@ export interface ConvertLlmRequestToAnthropicOptions {
    * the non-DeepSeek Anthropic-compatible proxy quadrant: strict backends
    * (SGLang, llama.cpp, vLLM) reject a `thinking` block that carries no
    * `signature` field at all (HTTP 400, e.g. SGLang `thinking.signature`)
-   * while accepting an empty signature, unlike Claude 4.6+ where
-   * `dropUnsignedAssistantThinking` applies instead. The caller gates this
-   * off native base URLs so native API history is left untouched.
+   * while accepting an empty signature. The repaired blocks come from
+   * history, so the caller does not gate this on the outgoing `thinking`
+   * parameter. On Claude 4.6+ through a proxy,
+   * `dropUnsignedAssistantThinking` runs after this fill and still deletes
+   * the filled blocks, so that quadrant keeps its drop-only wire shape.
+   * The caller also gates this off native base URLs so native API history is
+   * left untouched.
    * https://github.com/QwenLM/qwen-code/issues/11772
    */
   fillUnsignedThinkingSignature?: boolean;
@@ -654,7 +658,8 @@ export class AnthropicContentConverter {
               // unsigned (never attach the foreign payload as a signature) so
               // `stripThinkingFromAssistantMessages` removes it under
               // `stripAssistantThinking` and `fillMissingThinkingSignatures`
-              // fills `signature: ''` under DeepSeek normalization.
+              // fills `signature: ''` under DeepSeek normalization or on
+              // proxy-hosted Claude.
               if (demoteForeignThoughtToText) {
                 dropThinkingBlock = true;
                 if (part.text) {
