@@ -1174,6 +1174,9 @@ const EN: Messages = {
   'daemon.connection.add': 'Add connection',
   'daemon.connection.saved': 'Connected computers',
   'daemon.connection.forget': (v) => `Forget ${v?.address}`,
+  'workspaceHost.local': 'Local',
+  'workspaceHost.remote': 'Remote',
+  'workspaceHost.openHost': (v) => `Open ${v?.host ?? ''}`,
   'daemon.connection.invalid': 'Enter a valid HTTP or HTTPS origin.',
   'daemon.connection.notReady':
     'The daemon did not accept the connection; the stored credential was left unchanged.',
@@ -5429,6 +5432,9 @@ const ZH: Messages = {
   'daemon.connection.add': '添加连接',
   'daemon.connection.saved': '已连接的计算机',
   'daemon.connection.forget': (v) => `移除 ${v?.address}`,
+  'workspaceHost.local': '本地',
+  'workspaceHost.remote': '远程',
+  'workspaceHost.openHost': (v) => `打开 ${v?.host ?? ''}`,
   'daemon.connection.invalid': '请输入有效的 HTTP 或 HTTPS origin。',
   'daemon.connection.notReady': 'Daemon 未接受该连接，已保存的凭据未被修改。',
   'daemon.connection.authFailed':
