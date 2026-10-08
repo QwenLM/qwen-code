@@ -25,8 +25,9 @@ task opts into this local setup, which can finish before the extension connects.
 The SDK checks the actual connection and protocol instead of reading Chrome's
 extension preferences.
 
-If the extension does not connect, ask the user to open Chrome and check the
-extension in the intended profile. It installs from the Chrome Web Store:
+If the extension does not connect on macOS or Linux, ask the user to open Chrome
+and check the extension in the intended profile. It installs from the Chrome Web
+Store:
 https://chromewebstore.google.com/detail/qwen-code/hdhmmjclhibojdddmancfgbkleahfaph
 
 If the store reports it is not available in the user's region, they can build
