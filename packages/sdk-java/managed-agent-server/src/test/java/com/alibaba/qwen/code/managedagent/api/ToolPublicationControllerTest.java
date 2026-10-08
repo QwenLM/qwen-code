@@ -51,6 +51,45 @@ class ToolPublicationControllerTest {
         }
     }
 
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"resource", "seal", "prefix", "finish"})
+    void allProducerRoutesForwardAsyncCapabilityAndCompletedReplays(String route) throws Exception {
+        var properties = new ManagedAgentProperties();
+        properties.getToolPublication().setEntryConcurrency(1);
+        properties.getToolPublication().setAsyncVerificationEnabled(true);
+        var data = mock(ToolPublicationDataStore.class);
+        var controller = new ToolPublicationController(mock(ToolPublicationStore.class), data,
+                mock(ToolPublicationAdmissionStore.class), properties);
+        var result = new ObjectMapper().createObjectNode().put("state", "PENDING");
+        when(data.publishResource(any(), eq("publication"), eq("token"), eq("operation"),
+                eq("content:test"), eq("managed-tool-result-content"), any(), eq(true))).thenReturn(result);
+        when(data.seal(any(), eq("publication"), eq("token"), eq("operation"), eq("stdout"),
+                eq(1), eq(1L), eq("digest"), eq(true))).thenReturn(result);
+        when(data.prefix(any(), eq("publication"), eq("token"), eq("operation"), eq("stdout"), eq(true)))
+                .thenReturn(result);
+        when(data.finish(any(), eq("publication"), eq("token"), eq("operation"), any(), eq(true)))
+                .thenReturn(result);
+        for (String state : new String[] {"PENDING", "SUCCEEDED"}) {
+            result.put("state", state);
+            var request = new MockHttpServletRequest();
+            request.addHeader(ToolPublicationController.ASYNC_HEADER, "1");
+            request.setContent("{\"segmentCount\":1,\"byteLength\":1,\"digest\":\"digest\"}"
+                    .getBytes(StandardCharsets.UTF_8));
+            var tenant = new TenantContext("tenant", null);
+            var response = switch (route) {
+                case "resource" -> controller.resource(tenant, "session", "publication", "managed-tool-result-content",
+                        "content:test", "workspace", "token", "operation", request);
+                case "seal" -> controller.seal(tenant, "session", "publication", "stdout", "workspace", "token", "operation", request);
+                case "prefix" -> controller.prefix(tenant, "session", "publication", "stdout", "workspace", "token", "operation", "1");
+                case "finish" -> controller.finish(tenant, "session", "publication", "workspace", "token", "operation", request);
+                default -> throw new AssertionError(route);
+            };
+            assertThat(response.getStatusCode().value()).isEqualTo(state.equals("PENDING") ? 202 : 200);
+            assertThat(response.getBody()).isSameAs(result);
+            assertThat(response.getHeaders().getCacheControl()).isEqualTo("no-store");
+        }
+    }
+
     @Test
     void rejectsCoercedOrOverflowedRangeNumbersBeforeReading() throws Exception {
         ManagedAgentProperties properties = new ManagedAgentProperties();

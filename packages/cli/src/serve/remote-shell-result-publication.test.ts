@@ -203,6 +203,50 @@ describe('remote Shell result publication', () => {
     },
   );
 
+  it.each([
+    undefined,
+    {},
+    { code: 'internal_error' },
+    { status: 503 },
+    { status: 503, code: '' },
+    { status: 503.5, code: 'internal_error' },
+  ])('rejects malformed FAILED without retrying: %j', async (error) => {
+    let posts = 0;
+    let polls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: URL) => {
+        expect(url.pathname.endsWith('/recover')).toBe(false);
+        if (!url.pathname.includes('/operations/')) {
+          posts++;
+          return new Response(JSON.stringify({ state: 'PENDING' }), {
+            status: 202,
+          });
+        }
+        polls++;
+        return new Response(JSON.stringify({ state: 'FAILED', error }));
+      }),
+    );
+    const publisher = new RemoteShellResultPublisher();
+    publisher.install(installation, boot);
+    const { sink } = await publisher.prepare(request);
+    const store = Reflect.get(sink, 'store') as ToolResultSegmentStore;
+    await expect(
+      store.publish({
+        captureId: 'capture-a',
+        streamId: 'stdout',
+        ordinal: 0,
+        bytes: Buffer.from('original'),
+      }),
+    ).rejects.toThrow(
+      error === undefined
+        ? 'Publication record is invalid.'
+        : 'Invalid publication failure response.',
+    );
+    expect(posts).toBe(1);
+    expect(polls).toBe(1);
+  });
+
   it('keeps an installed grant blocked before any capture or tool starts', () => {
     const publisher = new RemoteShellResultPublisher();
     const resolver = vi.fn(async () => undefined);

@@ -270,7 +270,7 @@ public final class ToolPublicationDataStore {
 
     private JsonNode submitVerification(JsonNode key, String publicationId, String token,
             String operationId, String slot, String digest, ObjectNode inputs, String kind,
-            byte[] bytes, boolean asynchronous) {
+            byte[] bytes, String payloadDigest, boolean asynchronous) {
         if (verificationTask.get() != null) {
             return null;
         }
@@ -307,7 +307,7 @@ public final class ToolPublicationDataStore {
             JsonNode receipt;
             if ("terminal".equals(slot)) {
                 FinishClaim claim = beginFinish(key, scope, publicationId, token, operationId,
-                        bytes.length, ToolPublicationContract.sha256(bytes), true);
+                        bytes.length, payloadDigest, true);
                 epoch = claim.epoch();
                 objectKey = claim.objectKey();
                 receipt = claim.receipt();
@@ -317,7 +317,7 @@ public final class ToolPublicationDataStore {
                 receipt = claim.receipt();
             } else {
                 Candidate claim = claim(key, scope, publicationId, token, operationId, slot, kind,
-                        bytes.length, ToolPublicationContract.sha256(bytes), true);
+                        bytes.length, payloadDigest, true);
                 epoch = claim.epoch();
                 objectKey = claim.objectKey();
                 receipt = claim.receipt();
@@ -369,14 +369,16 @@ public final class ToolPublicationDataStore {
                 + " FROM qwen_tool_publication_operation WHERE execution_mode = 'ASYNC' AND state = 'PENDING'"
                 + " AND verification_ready = TRUE AND verification_next_at <= CURRENT_TIMESTAMP(6)"
                 + " ORDER BY verification_next_at, scope_key, publication_id, operation_id LIMIT 32");
+        boolean processed = false;
         for (var candidate : candidates) {
             String scope = (String) candidate.get("scope_key");
             String publicationId = (String) candidate.get("publication_id");
             String operationId = (String) candidate.get("operation_id");
-            JsonNode inputs = ToolPublicationContract.readJson(
-                    ((String) candidate.get("verification_request_json")).getBytes(StandardCharsets.UTF_8));
             VerificationTask task;
             try {
+                Object encoded = candidate.get("verification_request_json");
+                require(encoded instanceof String, "Missing verification inputs");
+                JsonNode inputs = ToolPublicationContract.readJson(((String) encoded).getBytes(StandardCharsets.UTF_8));
                 task = transactions.execute(status -> {
                     var authorization = grants.producerVerificationBindingLocked(scope, publicationId,
                             text(inputs, "bindingDigest"), text(inputs, "tokenHash"));
@@ -413,16 +415,12 @@ public final class ToolPublicationDataStore {
                             + " WHERE scope_key = ? AND publication_id = ? AND operation_id = ?",
                             Timestamp.class, scope, publicationId, operationId);
                     return new VerificationTask(scope, publicationId, operationId, row.slot(), epoch,
-                            authorization.binding().path("sessionKey"), inputs, created);
+                            authorization.binding().path("sessionKey"), inputs, Math.max(0, current.getTime() - created.getTime()));
                 });
             } catch (RuntimeException error) {
-                ApiException failure = permanentVerificationFailure(error);
-                if (failure == null) {
-                    throw error;
-                }
-                failUnclaimedVerification(scope, publicationId, operationId,
-                        ((Number) candidate.get("claim_epoch")).longValue(), failure);
-                return true;
+                processed |= deferOrFailUnclaimedVerification(scope, publicationId, operationId,
+                        ((Number) candidate.get("claim_epoch")).longValue(), error);
+                continue;
             }
             if (task == null) {
                 continue;
@@ -432,8 +430,7 @@ public final class ToolPublicationDataStore {
             try {
                 verifyOperation(task);
                 LOG.info("Tool publication verified operation={} queueMillis={} verificationMillis={}",
-                        operationId, Math.max(0, System.currentTimeMillis() - task.created().getTime()
-                                - TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)),
+                        operationId, task.queueMillis(),
                         TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started));
             } catch (RuntimeException error) {
                 deferOrFailVerification(task, error);
@@ -442,7 +439,7 @@ public final class ToolPublicationDataStore {
             }
             return true;
         }
-        return false;
+        return processed;
     }
 
     private void verifyOperation(VerificationTask task) {
@@ -457,9 +454,9 @@ public final class ToolPublicationDataStore {
             Stored stored = stored(task.scope(), task.publicationId(), slot).getFirst();
             require("CANDIDATE".equals(stored.state()) && task.operationId().equals(stored.operationId()),
                     "Verification candidate changed");
-            byte[] inline = jdbc.queryForObject("SELECT inline_bytes FROM qwen_tool_publication_object"
+            byte[] inline = stored.objectKey() == null ? jdbc.queryForObject("SELECT inline_bytes FROM qwen_tool_publication_object"
                     + " WHERE scope_key = ? AND publication_id = ? AND slot_key = ?", byte[].class,
-                    task.scope(), task.publicationId(), slot);
+                    task.scope(), task.publicationId(), slot) : null;
             if ("terminal".equals(slot)) {
                 byte[] bytes = inline;
                 if (stored.objectKey() != null) {
@@ -539,23 +536,35 @@ public final class ToolPublicationDataStore {
         return null;
     }
 
-    private void failUnclaimedVerification(String scope, String publicationId, String operationId,
-            long epoch, ApiException failure) {
-        transactions.executeWithoutResult(status -> {
+    private boolean deferOrFailUnclaimedVerification(String scope, String publicationId, String operationId,
+            long epoch, RuntimeException error) {
+        return Boolean.TRUE.equals(transactions.execute(status -> {
             retention.lockRetainedPublication(scope, publicationId);
             var rows = operation(scope, publicationId, operationId, true);
             Timestamp current = now();
             if (rows.size() != 1 || !"PENDING".equals(rows.getFirst().state()) || !rows.getFirst().asynchronous()
                     || rows.getFirst().epoch() != epoch || !rows.getFirst().ready() || rows.getFirst().claimUntil() != null
                     && rows.getFirst().claimUntil().after(current)) {
-                return;
+                return false;
             }
             if (!rows.getFirst().deadline().after(current)) {
                 expireVerification(scope, publicationId, operationId);
-            } else {
-                recordVerificationFailure(scope, publicationId, operationId, failure);
+                return false;
             }
-        });
+            Timestamp due = jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation"
+                    + " WHERE scope_key = ? AND publication_id = ? AND operation_id = ?",
+                    Timestamp.class, scope, publicationId, operationId);
+            if (due == null || due.after(current)) {
+                return false;
+            }
+            ApiException failure = permanentVerificationFailure(error);
+            if (failure != null) {
+                recordVerificationFailure(scope, publicationId, operationId, failure);
+            } else {
+                deferVerification(scope, publicationId, operationId, current, rows.getFirst().deadline(), error);
+            }
+            return true;
+        }));
     }
 
     private void deferOrFailVerification(VerificationTask task, RuntimeException error) {
@@ -571,21 +580,26 @@ public final class ToolPublicationDataStore {
                 expireVerification(task.scope(), task.publicationId(), task.operationId());
                 return;
             }
-            if (rows.getFirst().claimUntil() == null || !rows.getFirst().claimUntil().after(current)) {
-                return;
-            }
+            boolean liveClaim = rows.getFirst().claimUntil() != null && rows.getFirst().claimUntil().after(current);
             ApiException failure = permanentVerificationFailure(error);
-            if (failure != null && !List.of("managed_tool_publication_busy", "managed_tool_publication_claim_lost",
+            if (liveClaim && failure != null && !List.of("managed_tool_publication_busy", "managed_tool_publication_claim_lost",
                     "managed_tool_publication_claim_expired", "managed_tool_publication_operation_expired")
                     .contains(failure.getCode())) {
                 recordVerificationFailure(task.scope(), task.publicationId(), task.operationId(), failure);
             } else {
-                jdbc.update("UPDATE qwen_tool_publication_operation SET claim_owner = NULL, claim_until = NULL,"
-                                + " verification_next_at = ? WHERE scope_key = ? AND publication_id = ? AND operation_id = ?",
-                        new Timestamp(current.getTime() + 1000), task.scope(), task.publicationId(), task.operationId());
-                LOG.info("Tool publication verification retry operation={}", task.operationId());
+                deferVerification(task.scope(), task.publicationId(), task.operationId(), current,
+                        rows.getFirst().deadline(), error);
             }
         });
+    }
+
+    private void deferVerification(String scope, String publicationId, String operationId,
+            Timestamp current, Timestamp deadline, RuntimeException error) {
+        jdbc.update("UPDATE qwen_tool_publication_operation SET claim_owner = NULL, claim_until = NULL,"
+                        + " verification_next_at = ? WHERE scope_key = ? AND publication_id = ? AND operation_id = ?",
+                new Timestamp(Math.min(current.getTime() + 1000, deadline.getTime())), scope, publicationId, operationId);
+        LOG.info("Tool publication verification retry scope={} operation={} cause={}",
+                scope, operationId, error.getClass().getSimpleName());
     }
 
     private void recordVerificationFailure(String scope, String publicationId, String operationId, ApiException failure) {
@@ -662,7 +676,7 @@ public final class ToolPublicationDataStore {
                 .add(byteLength).add(digest).toString());
         JsonNode accepted = submitVerification(key, publicationId, token, operationId, slot, requestDigest,
                 JSON.createObjectNode().put("segmentCount", segmentCount).put("byteLength", byteLength)
-                        .put("digest", digest), null, null, asynchronous);
+                        .put("digest", digest), null, null, null, asynchronous);
         if (accepted != null) {
             return accepted;
         }
@@ -733,7 +747,7 @@ public final class ToolPublicationDataStore {
         String slot = "prefix:" + streamId;
         String requestDigest = hash(slot);
         JsonNode accepted = submitVerification(key, publicationId, token, operationId, slot, requestDigest,
-                JSON.createObjectNode(), null, null, asynchronous);
+                JSON.createObjectNode(), null, null, null, asynchronous);
         if (accepted != null) {
             return accepted;
         }
@@ -1164,7 +1178,7 @@ public final class ToolPublicationDataStore {
         String digest = ToolPublicationContract.sha256(bytes);
         String scope = scope(key);
         JsonNode accepted = submitVerification(key, publicationId, token, operationId, "terminal",
-                requestDigest("terminal", bytes.length, digest), JSON.createObjectNode(), null, bytes, asynchronous);
+                requestDigest("terminal", bytes.length, digest), JSON.createObjectNode(), null, bytes, digest, asynchronous);
         if (accepted != null) {
             return accepted;
         }
@@ -1707,7 +1721,7 @@ public final class ToolPublicationDataStore {
                 HttpStatus.BAD_REQUEST, "managed_tool_result_digest_mismatch", "Publication digest mismatch");
         String scope = scope(key);
         JsonNode accepted = submitVerification(key, publicationId, token, operationId, slot,
-                requestDigest(slot, bytes.length, digest), JSON.createObjectNode(), kind, bytes, asynchronous);
+                requestDigest(slot, bytes.length, digest), JSON.createObjectNode(), kind, bytes, digest, asynchronous);
         if (accepted != null) {
             return accepted;
         }
@@ -2517,7 +2531,7 @@ public final class ToolPublicationDataStore {
     private record Submission(long epoch, String objectKey, JsonNode response) {}
 
     private record VerificationTask(String scope, String publicationId, String operationId, String slot,
-            long epoch, JsonNode key, JsonNode inputs, Timestamp created) {}
+            long epoch, JsonNode key, JsonNode inputs, long queueMillis) {}
 
     private record Candidate(String objectKey, String resourceId, long epoch, JsonNode receipt) {
     }

@@ -138,6 +138,7 @@ public class ToolPublicationConfiguration {
         return builder.poolSize(1).threadNamePrefix("managed-tool-verification-scan-").build();
     }
 
+    // Rollback disables new async admission; accepted operations must still drain.
     @Bean(destroyMethod = "close")
     public ToolPublicationVerifier toolPublicationVerifier(ToolPublicationDataStore data,
             ManagedAgentProperties properties) {

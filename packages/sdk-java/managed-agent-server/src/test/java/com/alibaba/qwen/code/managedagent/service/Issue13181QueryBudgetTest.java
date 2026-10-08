@@ -84,8 +84,8 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  *       window, not per delivered event.</li>
  *   <li>listPublicSessions / listWebShellSessions assemble a page from a
  *       fixed number of grouped batch queries.</li>
- *   <li>Tool-publication authorization reads the activation state from the
- *       journal head when journal-head-authorization is enabled (the flag
+ *   <li>Tool-publication authorization, async heartbeats, and status polling
+ *       read the activation state from the journal head when journal-head-authorization is enabled (the flag
  *       ships false), rescanning the journal only for pre-migration heads
  *       (and backfilling them).</li>
  * </ol>
@@ -1048,6 +1048,44 @@ class Issue13181QueryBudgetTest {
         assertThat(fixture.ledger.count("update qwen_tool_publication_operation set claim_until")).isGreaterThanOrEqualTo(2);
         assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx")).isZero();
         assertThat(fixture.ledger.count("from qwen_managed_session_journal_head", "for update")).isPositive();
+    }
+
+    @Test
+    void frequentReadsDoNotRenewBeforeTheHeartbeatIntervalOrFetchInlineBytes() {
+        Fixture fixture = new Fixture();
+        PublicationFixture publication = publicationFixture(fixture);
+        byte[] bytes = new byte[1024];
+        var reads = new java.util.concurrent.atomic.AtomicInteger();
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override public void putIfAbsent(String key, byte[] input) {}
+            @Override public InputStream open(String key) { return open(key, () -> {}); }
+            @Override public InputStream open(String key, Runnable guard) {
+                return new ByteArrayInputStream(bytes) {
+                    @Override public synchronized int read(byte[] buffer, int offset, int length) {
+                        guard.run();
+                        reads.incrementAndGet();
+                        return super.read(buffer, offset, Math.min(length, 1));
+                    }
+                };
+            }
+            @Override public void requireUnversioned() {}
+        };
+        // A five-minute lease gives a 100-second interval, well beyond this bounded read.
+        ToolPublicationDataStore data = new ToolPublicationDataStore(fixture.jdbc, fixture.manager,
+                publication.store(), publication.sessions(), bucket, Duration.ofMinutes(10), Duration.ofMinutes(5),
+                new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
+        data.publishSegment(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-fast-read",
+                "stdout", 0, bytes, null, true);
+        fixture.ledger.reset();
+        try (var verifier = new ToolPublicationVerifier(data, 1)) {
+            assertThat(verifier.runOnce()).isTrue();
+        }
+        assertThat(data.operationStatus(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-fast-read")
+                .path("state").asText()).isEqualTo("SUCCEEDED");
+        assertThat(reads).hasValueGreaterThan(1000);
+        assertThat(fixture.ledger.count("update qwen_tool_publication_operation set claim_until")).isZero();
+        assertThat(fixture.ledger.count("select inline_bytes from qwen_tool_publication_object")).isZero();
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx")).isZero();
     }
 
     @Test

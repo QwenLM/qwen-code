@@ -66,8 +66,12 @@ public class ToolPublicationAsyncVerificationTest {
     }
 
     private ToolPublicationDataStore replacement() {
+        return replacement(Duration.ofSeconds(10), Duration.ofSeconds(2));
+    }
+
+    private ToolPublicationDataStore replacement(Duration operationTimeout, Duration claimTimeout) {
         return new ToolPublicationDataStore(fixture.jdbc, fixture.manager, fixture.store, fixture.sessions, bucket,
-                Duration.ofSeconds(10), Duration.ofSeconds(2),
+                operationTimeout, claimTimeout,
                 new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
     }
 
@@ -148,11 +152,49 @@ public class ToolPublicationAsyncVerificationTest {
         var other = new ToolPublicationDataStore(fixture.jdbc, fixture.manager, grants, fixture.sessions, bucket,
                 Duration.ofSeconds(10), Duration.ofSeconds(2),
                 new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
-        assertThatThrownBy(other::verifyNextOperation).isInstanceOf(IllegalStateException.class)
-                .hasMessage("Runtime credential key is unavailable").hasNoCause();
+        assertThat(other.verifyNextOperation()).isTrue();
+        assertThat(other.verifyNextOperation()).isFalse();
         assertThat(status("csi").path("state").asText()).isEqualTo("PENDING");
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at > CURRENT_TIMESTAMP(6)"
+                + " FROM qwen_tool_publication_operation", Boolean.class)).isTrue();
+        assertThat(fixture.jdbc.queryForObject("SELECT active_operation_id FROM qwen_tool_publication", String.class))
+                .isEqualTo("csi");
+        due("csi");
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("csi").path("state").asText()).isEqualTo("SUCCEEDED");
+    }
+
+    @Test
+    void unavailableReplicaKeyDoesNotKeepAnExpiredCandidateDue() {
+        DataSource source = acceptCsiOperation();
+        var bindings = new JdbcRuntimeBindingRepository(source,
+                new AesGcmSecretProtector("other-replica-key", new byte[32]));
+        var grants = new ToolPublicationStore(fixture.jdbc, fixture.manager, fixture.sessions, fixture.executions,
+                bindings, new ToolPublicationStore.Capacity(1024, 1024, 1024, 10), true);
+        var other = new ToolPublicationDataStore(fixture.jdbc, fixture.manager, grants, fixture.sessions, bucket,
+                Duration.ofSeconds(10), Duration.ofSeconds(2),
+                new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
+        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET deadline = ?",
+                Timestamp.valueOf("2000-01-01 00:00:00"));
+        assertThat(other.verifyNextOperation()).isFalse();
+        assertThat(status("csi").path("state").asText()).isEqualTo("EXPIRED");
+        assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
+                Timestamp.class)).isNull();
+        assertThat(fixture.jdbc.queryForObject("SELECT active_operation_id FROM qwen_tool_publication", String.class)).isNull();
+        assertThat(bucket.opens).hasValue(0);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"null", "{"})
+    void malformedCandidateInputsFailWithoutEscapingTheScan(String encoded) {
+        publish("bad-inputs", 0, "bytes");
+        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET verification_request_json = ?",
+                encoded.equals("null") ? null : encoded);
+        assertThat(data.verifyNextOperation()).isTrue();
+        assertThat(status("bad-inputs").path("state").asText()).isEqualTo("FAILED");
+        assertThat(status("bad-inputs").path("error").path("code").asText()).isEqualTo("invalid_request");
+        assertThat(data.verifyNextOperation()).isFalse();
+        assertThat(bucket.opens).hasValue(0);
     }
 
     @ParameterizedTest
@@ -193,6 +235,59 @@ public class ToolPublicationAsyncVerificationTest {
             assertThat(data.finished(key, "pub-1", WRITER_TOKEN).path("terminal").path("digest").asText())
                     .isEqualTo(ToolPublicationContract.sha256(terminal(kind.startsWith("object") ? 70000 : 10)));
         }
+    }
+
+    @org.springframework.context.annotation.Configuration
+    @org.springframework.scheduling.annotation.EnableScheduling
+    @org.springframework.boot.context.properties.EnableConfigurationProperties(
+            com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
+    static class SchedulingHarness {}
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void springSchedulingDrainsAcceptedWorkEvenWithAdmissionDisabled(boolean asyncEnabled) {
+        publish("restart", 0, "bytes");
+        new org.springframework.boot.test.context.runner.ApplicationContextRunner()
+                .withUserConfiguration(SchedulingHarness.class,
+                        com.alibaba.qwen.code.managedagent.config.ToolPublicationConfiguration.class)
+                .withPropertyValues("qwen.managed-agent.tool-publication.enabled=true",
+                        "qwen.managed-agent.tool-publication.async-verification-enabled=" + asyncEnabled,
+                        "qwen.managed-agent.tool-publication.journal-head-authorization=true",
+                        "qwen.managed-agent.tool-publication.execution-bytes=104857600",
+                        "qwen.managed-agent.tool-publication.session-bytes=104857600",
+                        "qwen.managed-agent.tool-publication.tenant-bytes=104857600",
+                        "qwen.managed-agent.tool-publication.active-captures=10",
+                        "qwen.managed-agent.tool-publication.entry-concurrency=2",
+                        "qwen.managed-agent.tool-publication.operation-timeout=10s",
+                        "qwen.managed-agent.tool-publication.claim-timeout=2s",
+                        "qwen.managed-agent.tool-publication.max-verification-timeout=25m",
+                        "qwen.managed-agent.tool-publication.verification-bytes-per-second=16777216")
+                .withBean(org.springframework.jdbc.core.JdbcTemplate.class, () -> fixture.jdbc)
+                .withBean(PlatformTransactionManager.class, () -> fixture.manager)
+                .withBean(WriterCredentialPolicy.class, WriterCredentialPolicy::unbound)
+                .withBean(ManagedSessionStore.class, () -> fixture.sessions)
+                .withBean(com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository.class, () -> fixture.executions)
+                .withBean(com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class, () -> fixture.bindings)
+                .withBean(org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder.class,
+                        org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder::new)
+                .withBean(org.springframework.beans.factory.config.BeanFactoryPostProcessor.class, () -> beanFactory -> {
+                    ((org.springframework.beans.factory.support.AbstractBeanDefinition)
+                            beanFactory.getBeanDefinition("toolPublicationOss"))
+                            .setInstanceSupplier(() -> org.mockito.Mockito.mock(com.aliyun.oss.OSS.class));
+                    ((org.springframework.beans.factory.support.AbstractBeanDefinition)
+                            beanFactory.getBeanDefinition("toolPublicationObjects")).setInstanceSupplier(() -> bucket);
+                })
+                .run(context -> {
+                    assertThat(context).hasNotFailed().hasSingleBean(ToolPublicationVerifier.class)
+                            .hasSingleBean(ToolPublicationDataStore.class);
+                    var settings = context.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
+                            .getToolPublication();
+                    assertThat(settings.isAsyncVerificationEnabled()).isEqualTo(asyncEnabled);
+                    assertThat(settings.isJournalHeadAuthorization()).isTrue();
+                    assertThat(settings.getVerificationConcurrency()).isEqualTo(2);
+                    await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                            assertThat(status("restart").path("state").asText()).isEqualTo("SUCCEEDED"));
+                });
     }
 
     @Test
@@ -273,6 +368,7 @@ public class ToolPublicationAsyncVerificationTest {
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
             assertThat(status("prefix").path("state").asText()).isEqualTo("PENDING");
+            assertThat(verifier.runOnce()).isFalse();
             assertThatThrownBy(() -> publish("next", 1, "later"))
                     .isInstanceOf(ApiException.class).hasMessageContaining("busy");
             due("prefix");
@@ -291,6 +387,8 @@ public class ToolPublicationAsyncVerificationTest {
         }
         assertThat(status("bad").path("state").asText()).isEqualTo("FAILED");
         assertThat(status("bad").path("error").path("code").asText()).isEqualTo("invalid_request");
+        assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
+                .isEqualTo("QUARANTINED");
         fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET deadline = ?",
                 Timestamp.valueOf("2000-01-01 00:00:00"));
         assertThat(status("bad").path("state").asText()).isEqualTo("FAILED");
@@ -300,6 +398,42 @@ public class ToolPublicationAsyncVerificationTest {
         assertThat(bucket.puts).hasValue(1);
         assertThat(fixture.jdbc.queryForObject("SELECT capture_used_bytes FROM qwen_tool_publication", Long.class))
                 .isEqualTo(5);
+    }
+
+    @Test
+    void permanentFailureReleasesItsSlotBeforeItsDeadline() {
+        publish("denied", 0, "bytes");
+        bucket.readFailure = new com.aliyun.oss.OSSException("denied", "AccessDenied", "request", "host", "bucket", "key", "resource");
+        assertThat(data.verifyNextOperation()).isTrue();
+        assertThat(status("denied").path("state").asText()).isEqualTo("FAILED");
+        assertThat(publish("next", 1, "later").path("state").asText()).isEqualTo("PENDING");
+        assertThat(data.verifyNextOperation()).isTrue();
+        assertThat(status("next").path("state").asText()).isEqualTo("SUCCEEDED");
+        assertThat(status("denied").path("state").asText()).isEqualTo("FAILED");
+    }
+
+    @Test
+    void expiredAttemptDefersInsteadOfImmediatelyReclaiming() throws Exception {
+        publish("retry", 0, "bytes");
+        bucket.blockOpen = 1;
+        bucket.failRead = true;
+        try (var verifier = manualVerifier(data); var worker = Executors.newSingleThreadExecutor()) {
+            var attempt = worker.submit(verifier::runOnce);
+            assertThat(bucket.readStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET claim_until = ?, verification_next_at = ?",
+                    Timestamp.valueOf("2000-01-01 00:00:00"), Timestamp.valueOf("2000-01-01 00:00:00"));
+            bucket.readRelease.countDown();
+            assertThat(attempt.get(5, TimeUnit.SECONDS)).isTrue();
+            assertThat(status("retry").path("state").asText()).isEqualTo("PENDING");
+            assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at > CURRENT_TIMESTAMP(6)"
+                    + " FROM qwen_tool_publication_operation", Boolean.class)).isTrue();
+            assertThat(verifier.runOnce()).isFalse();
+            assertThatThrownBy(() -> publish("next", 1, "later")).hasMessageContaining("busy");
+            due("retry");
+            assertThat(verifier.runOnce()).isTrue();
+        }
+        assertThat(status("retry").path("state").asText()).isEqualTo("SUCCEEDED");
+        assertThat(bucket.puts).hasValue(1);
     }
 
     @Test
@@ -327,6 +461,8 @@ public class ToolPublicationAsyncVerificationTest {
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isFalse();
             assertThat(status("expired").path("state").asText()).isEqualTo("EXPIRED");
+            assertThat(fixture.jdbc.queryForObject("SELECT verification_next_at FROM qwen_tool_publication_operation",
+                    Timestamp.class)).isNull();
             data.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "expired");
             assertThat(status("expired").path("state").asText()).isEqualTo("PENDING");
             assertThat(verifier.runOnce()).isTrue();
@@ -362,13 +498,18 @@ public class ToolPublicationAsyncVerificationTest {
 
     @Test
     void leaseTakeoverFencesLateCorruptionAndCompletion() throws Exception {
+        data = replacement(Duration.ofMinutes(2), Duration.ofMinutes(1));
         publish("takeover", 0, "bytes");
         bucket.blockOpen = 1;
-        try (var first = manualVerifier(data); var second = manualVerifier(replacement());
+        try (var first = manualVerifier(data); var second = manualVerifier(replacement(Duration.ofMinutes(2), Duration.ofMinutes(1)));
                 var workers = Executors.newSingleThreadExecutor()) {
             var old = workers.submit(first::runOnce);
             assertThat(bucket.readStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            long firstEpoch = fixture.jdbc.queryForObject("SELECT claim_epoch FROM qwen_tool_publication_operation", Long.class);
+            due("takeover");
             assertThat(second.runOnce()).isFalse();
+            assertThat(fixture.jdbc.queryForObject("SELECT claim_epoch FROM qwen_tool_publication_operation", Long.class))
+                    .isEqualTo(firstEpoch);
             fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET claim_until = ?, verification_next_at = ?",
                     Timestamp.valueOf("2000-01-01 00:00:00"), Timestamp.valueOf("2000-01-01 00:00:00"));
             assertThat(second.runOnce()).isTrue();
@@ -382,6 +523,37 @@ public class ToolPublicationAsyncVerificationTest {
         assertThat(status("takeover").path("state").asText()).isEqualTo("SUCCEEDED");
         assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
                 .isEqualTo("VERIFIED");
+    }
+
+    @Test
+    void staleCorruptReadCannotQuarantineTheSuccessorsCandidate() throws Exception {
+        data = replacement(Duration.ofMinutes(2), Duration.ofMinutes(1));
+        publish("takeover", 0, "bytes");
+        bucket.blockOpen = 1;
+        bucket.corruptBlockedRead = true;
+        bucket.blockSuccessor = true;
+        try (var first = manualVerifier(data); var second = manualVerifier(replacement(Duration.ofMinutes(2), Duration.ofMinutes(1)));
+                var workers = Executors.newFixedThreadPool(2)) {
+            var old = workers.submit(first::runOnce);
+            assertThat(bucket.readStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET claim_until = ?, verification_next_at = ?",
+                    Timestamp.valueOf("2000-01-01 00:00:00"), Timestamp.valueOf("2000-01-01 00:00:00"));
+            var successor = workers.submit(second::runOnce);
+            try {
+                assertThat(bucket.successorStarted.await(5, TimeUnit.SECONDS)).isTrue();
+                bucket.readRelease.countDown();
+                assertThat(old.get(5, TimeUnit.SECONDS)).isTrue();
+                assertThat(status("takeover").path("state").asText()).isEqualTo("PENDING");
+                assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
+                        .isEqualTo("CANDIDATE");
+                assertThat(fixture.jdbc.queryForObject("SELECT quarantined FROM qwen_tool_publication", Boolean.class)).isFalse();
+            } finally {
+                bucket.readRelease.countDown();
+                bucket.successorRelease.countDown();
+            }
+            assertThat(successor.get(5, TimeUnit.SECONDS)).isTrue();
+        }
+        assertThat(status("takeover").path("state").asText()).isEqualTo("SUCCEEDED");
     }
 
     @Test
@@ -587,6 +759,10 @@ public class ToolPublicationAsyncVerificationTest {
         private final CountDownLatch putRelease = new CountDownLatch(1);
         private final CountDownLatch readStarted = new CountDownLatch(1);
         private final CountDownLatch readRelease = new CountDownLatch(1);
+        private final CountDownLatch successorStarted = new CountDownLatch(1);
+        private final CountDownLatch successorRelease = new CountDownLatch(1);
+        private boolean corruptBlockedRead;
+        private boolean blockSuccessor;
         private boolean blockPut;
         private int blockOpen;
         private boolean failRead;
@@ -611,9 +787,18 @@ public class ToolPublicationAsyncVerificationTest {
         @Override
         public InputStream open(String objectKey) {
             assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
-            if (opens.incrementAndGet() == blockOpen) {
+            int read = opens.incrementAndGet();
+            byte[] bytes = objects.get(objectKey);
+            if (read == blockOpen) {
+                if (corruptBlockedRead) {
+                    bytes = bytes.clone();
+                    bytes[0] = 'x';
+                }
                 readStarted.countDown();
                 await(readRelease);
+            } else if (blockSuccessor && read == 2) {
+                successorStarted.countDown();
+                await(successorRelease);
             }
             if (failRead) {
                 failRead = false;
@@ -624,7 +809,7 @@ public class ToolPublicationAsyncVerificationTest {
                 readFailure = null;
                 throw failure;
             }
-            return new ByteArrayInputStream(objects.get(objectKey));
+            return new ByteArrayInputStream(bytes);
         }
 
         @Override

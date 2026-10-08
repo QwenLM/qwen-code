@@ -93,6 +93,11 @@ without raw storage messages or credentials.
 Accepted tasks whose original CSI binding was released or whose CSI authority
 was fenced fail permanently and leave the queue. Replica credential-key and SQL
 failures remain retryable, rather than being mistaken for lost runtime identity.
+Candidate-local input or authorization errors are isolated: an unclaimed task is
+failed, deferred for one second, or expired under its unchanged epoch before the
+scan continues to later candidates. A failed SQL transition aborts that scan.
+Before the deadline, an expired attempt may only defer under the same epoch; it
+cannot publish failure or quarantine. Retry times are capped at the deadline.
 Integrity quarantine and all
 success/failure writes require the current live epoch. A stale worker cannot
 overwrite a successor's outcome. Read leases, retirement, unresolved PUTs,
@@ -110,8 +115,10 @@ candidate/quarantined object protection, and GC quota accounting remain intact.
    server binaries; keep journal-head authorization enabled during drainage.
 
 Record queue wait, verification duration, retries, failures, and expiration in
-safe structured logs. Treat the configured throughput budget and concurrency as
-operational limits, not a promise that all requests finish faster end to end.
+safe structured logs. Queue wait uses database timestamps; verification duration
+uses the monotonic process clock. Retry logs identify the scope and operation
+with the exception class only. Treat the configured throughput budget and
+concurrency as operational limits, not a promise that all requests finish faster end to end.
 
 ## Validation and acceptance
 
