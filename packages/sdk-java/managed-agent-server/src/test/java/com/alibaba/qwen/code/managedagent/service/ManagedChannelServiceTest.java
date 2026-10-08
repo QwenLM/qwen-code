@@ -355,6 +355,36 @@ class ManagedChannelServiceTest {
     }
 
     @Test
+    void keepsADeterministicHarnessFourHundredAsFourHundred() {
+        // A deterministic input refusal is not a server failure: widening
+        // the hop's 400 to 503 would hide it from the adapter's
+        // permanent-refusal branch, so the classification must survive.
+        com.alibaba.qwen.code.daemon.DaemonHttpException refused =
+                org.mockito.Mockito.mock(
+                        com.alibaba.qwen.code.daemon.DaemonHttpException.class);
+        org.mockito.Mockito.when(refused.getStatusCode()).thenReturn(400);
+        org.mockito.Mockito.when(refused.getResponseBody())
+                .thenReturn("{\"error\":{\"code\":\"invalid_channel_operation\"}}");
+        harness.submitErrors.add(refused);
+        assertThatThrownBy(() -> service.submitInbound(TENANT, channel,
+                event(1, "1700:98", "hello")))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus())
+                            .isEqualTo(org.springframework.http.HttpStatus
+                                    .BAD_REQUEST);
+                    assertThat(error.getCode())
+                            .isEqualTo("invalid_channel_operation");
+                });
+        // The ingress row stays staged for no second drive: the adapter
+        // treats this class as final.
+        assertThat(jdbc.queryForObject("SELECT state FROM"
+                        + " qwen_managed_channel_route WHERE tenant_id = ?"
+                        + " AND channel_instance_id = '" + channel + "'"
+                        + " AND platform_event_id = '1700:98'", String.class,
+                TENANT)).isEqualTo("staged");
+    }
+
+    @Test
     void translatesADaemonGenerationFailureIntoTheRetryableEnvelope() {
         // A generation clash at the Hosted Harness is a transient daemon
         // failure, not an HTTP answer: the adapter still takes the same
@@ -674,6 +704,8 @@ class ManagedChannelServiceTest {
         boolean loseClaimAnswerOnce;
         boolean loseReceiptAnswerOnce;
         boolean throwDaemonOnceOnSubmit;
+        java.util.Queue<com.alibaba.qwen.code.daemon.DaemonException>
+                submitErrors = new java.util.ArrayDeque<>();
 
         RecordingHarness(Projection projection) {
             this.projection = projection;
@@ -727,6 +759,9 @@ class ManagedChannelServiceTest {
             String deliveryId = String.valueOf(body.get("deliveryId"));
             switch (kind) {
                 case "submit_input" -> {
+                    if (!submitErrors.isEmpty()) {
+                        throw submitErrors.poll();
+                    }
                     if (throwDaemonOnceOnSubmit) {
                         throwDaemonOnceOnSubmit = false;
                         throw new com.alibaba.qwen.code.daemon.DaemonException(

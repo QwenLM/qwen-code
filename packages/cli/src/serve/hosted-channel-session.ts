@@ -396,8 +396,25 @@ export class HostedChannelSession {
     // resource must satisfy the inline bound itself, or a long answer
     // would fail the publish before the truncation plan could truncate it.
     const segmentPlan = planChannelSegments(text);
+    // And the envelope bound is measured on the serialized reply: JSON
+    // escaping can push an escape-heavy answer past the inline limit even
+    // after the raw text truncated at the segment bound.
+    let replyText = segmentPlan.join('');
+    let fitted = replyText.length === 0;
+    for (let attempt = 0; attempt < 4 && !fitted; attempt++) {
+      const candidate = encodeChannelReply({
+        text: replyText,
+        replyContext: envelope.replyContext,
+      });
+      if (candidate.byteLength <= MANAGED_CHANNEL_LIMITS.maxEnvelopeBytes) {
+        fitted = true;
+        break;
+      }
+      replyText = replyText.slice(0, Math.floor(replyText.length / 2));
+    }
+    if (replyText.length === 0) return undefined;
     const reply: ChannelReply = {
-      text: segmentPlan.join(''),
+      text: replyText,
       replyContext: envelope.replyContext,
     };
     const contentRef = await this.store.resources.publish(
@@ -410,7 +427,7 @@ export class HostedChannelSession {
         segmentId: `${deliveryId}:${ordinal}`,
         contentRef: await this.store.resources.publish(
           CHANNEL_RESOURCE_KINDS.segment,
-          Buffer.from(part, 'utf8'),
+          Buffer.from(ordinal === 0 ? replyText : part, 'utf8'),
         ),
       });
     }

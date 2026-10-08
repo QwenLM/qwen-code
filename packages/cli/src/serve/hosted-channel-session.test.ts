@@ -16,6 +16,7 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import {
   channelInputId,
   channelRouteId,
+  encodeChannelReply,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-channel-operations.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 import {
@@ -531,6 +532,25 @@ describe('HostedChannelSession outbound', () => {
       expect(claimed.reply.text.length).toBeLessThanOrEqual(48 * 1024);
       expect(claimed.segments).toHaveLength(1);
       expect(claimed.segments[0]!.text).toBe(claimed.reply.text);
+    });
+  });
+
+  it('plans an escape-heavy reply the serialized envelope bound can take', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (channels, authority) => {
+      const inputId = (await channels.submitInput(inbound())).inputId;
+      // Newlines and quotes double in the reply's JSON: a 48 KiB raw plan
+      // serializes to about 96 KiB — past the inline envelope bound.
+      settleTurn(harness, inputId, '\n"'.repeat(60_000));
+      await settleInJournal(authority, inputId);
+      const planned = (await channels.planReply(inputId))!;
+      const claimed = await channels.claim(planned.deliveryId);
+      expect(encodeChannelReply(claimed.reply).byteLength).toBeLessThanOrEqual(
+        64 * 1024,
+      );
+      expect(claimed.segments).toHaveLength(1);
+      expect(claimed.segments[0]!.text).toBe(claimed.reply.text);
+      expect(claimed.reply.text.length).toBeLessThan(48 * 1024);
     });
   });
 

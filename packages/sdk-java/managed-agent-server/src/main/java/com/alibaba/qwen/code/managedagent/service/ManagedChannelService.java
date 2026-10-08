@@ -739,8 +739,13 @@ public class ManagedChannelService {
                 }
             }
         }
-        return new ApiException(http.getStatusCode() == 409
-                ? HttpStatus.CONFLICT : HttpStatus.SERVICE_UNAVAILABLE, code,
+        // A 400 is a deterministic verdict, not a server failure: the
+        // adapter's permanent-refusal branch can only recognize it when
+        // the classification survives the hop — never widen it to 503.
+        HttpStatus status = http.getStatusCode() == 409 ? HttpStatus.CONFLICT
+                : http.getStatusCode() == 400 ? HttpStatus.BAD_REQUEST
+                        : HttpStatus.SERVICE_UNAVAILABLE;
+        return new ApiException(status, code,
                 "The Hosted Harness refused the channel operation.");
     }
 

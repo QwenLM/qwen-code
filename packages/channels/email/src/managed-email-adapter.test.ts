@@ -84,17 +84,30 @@ class FakeControlPlane implements ManagedChannelControlPlane {
   outbox: ManagedClaimedDelivery[] = [];
   failSubmits = 0;
   refuseSubmitsWithStatus = 0;
+  failRegisters = 0;
+  submitErrors: Array<{ status: number; code?: string }> = [];
   submitAttempts = 0;
   disconnected = false;
 
   async register(request: { accountGeneration: number }) {
     this.registrations.push({ accountGeneration: request.accountGeneration });
+    if (this.failRegisters > 0) {
+      this.failRegisters -= 1;
+      throw new Error('ECONNRESET');
+    }
   }
   async disconnect() {
     this.disconnected = true;
   }
   async submitInbound(event: ManagedInboundEvent) {
     this.submitAttempts += 1;
+    if (this.submitErrors.length > 0) {
+      const failure = this.submitErrors.shift()!;
+      throw Object.assign(new Error(`HTTP ${failure.status}`), {
+        status: failure.status,
+        code: failure.code,
+      });
+    }
     const key = `${event.accountGeneration}:${event.platformEventId}`;
     if (this.refuseSubmitsWithStatus) {
       // A deterministic refusal: nothing was admitted.
@@ -353,6 +366,85 @@ describe('managed email inbound', () => {
     expect(plane.events).toHaveLength(0);
     expect(state(adapter).pending).toEqual([]);
     await adapter.disconnect();
+  });
+
+  it('re-drives a failed re-register on the next poll, never skipping new mail', async () => {
+    const adapter = make();
+    await adapter.connect();
+    append(raw('before', 'epoch one'));
+    await adapter.tick();
+    expect(plane.events).toHaveLength(1);
+    // The mailbox re-keys, and the generation-2 registration dies on the
+    // wire once. The next polls must re-register, not let the new epoch's
+    // mail hit an unregistered generation.
+    plane.failRegisters = 1;
+    box.epoch = 2n;
+    box.messages.clear();
+    box.next = 1;
+    await expect(adapter.tick()).rejects.toThrow();
+    expect(plane.registrations).toEqual([
+      { accountGeneration: 1 },
+      { accountGeneration: 2 },
+    ]);
+    append(raw('after', 'epoch two mail'));
+    await adapter.tick();
+    await adapter.tick();
+    expect(plane.registrations).toEqual([
+      { accountGeneration: 1 },
+      { accountGeneration: 2 },
+      { accountGeneration: 2 },
+    ]);
+    expect(plane.events.at(-1)).toMatchObject({
+      accountGeneration: 2,
+      text: 'epoch two mail',
+    });
+  });
+
+  it('re-registers when the control plane forgot the generation, keeping the mail', async () => {
+    const adapter = make();
+    await adapter.connect();
+    plane.submitErrors = [
+      { status: 409, code: 'channel_generation_unregistered' },
+    ];
+    append(raw('waiting', 'register forgot'));
+    await adapter.tick();
+    // The event stays claimed, and the lost registration — not the
+    // message — is what the next poll re-drives.
+    expect(state(adapter).pending).toHaveLength(1);
+    expect(plane.registrations).toEqual([{ accountGeneration: 1 }]);
+    await adapter.tick();
+    expect(plane.registrations).toEqual([
+      { accountGeneration: 1 },
+      { accountGeneration: 1 },
+    ]);
+    expect(state(adapter).pending).toEqual([]);
+    expect(plane.events.at(-1)).toMatchObject({ text: 'register forgot' });
+  });
+
+  it('truncates to the wire text bound even when the adapter setting is wider', async () => {
+    const adapter = make({ maxTextLength: 40_000 });
+    await adapter.connect();
+    append(raw('wide', 'x'.repeat(33_000)));
+    await adapter.tick();
+    expect(plane.events).toHaveLength(1);
+    expect(plane.events[0]!.text.length).toBeLessThanOrEqual(32_000);
+  });
+
+  it('rebuilds a pending event only while it still fits the current message bound', async () => {
+    const adapter = make();
+    await adapter.connect();
+    plane.failSubmits = 1;
+    append(raw('big', 'x'.repeat(9_000)));
+    await adapter.tick();
+    expect(state(adapter).pending).toHaveLength(1);
+    await adapter.disconnect();
+    // The operator shrank the bound before the restart: the in-flight
+    // event can no longer meet the size gate its first drive passed.
+    const restarted = make({ maxMessageBytes: 2_000 });
+    await restarted.connect();
+    await restarted.tick();
+    expect(state(restarted).pending).toEqual([]);
+    expect(plane.submitAttempts).toBe(1);
   });
 
   it('rolls the account generation on a mailbox epoch change and drops the old in-flight claims visibly', async () => {

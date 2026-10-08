@@ -126,6 +126,14 @@ const SUBMIT_RETRY_MS = 5_000;
  */
 const MAX_UPLOAD_ATTACHMENT_BYTES = 1_500_000;
 
+/**
+ * The wire's text bound (the Jakarta `@Size` and `maxTextChars` agree).
+ * The adapter's own `maxTextLength` truncates first but never widens past
+ * the wire: a configured 40,000 meets the same deterministic 400 a
+ * 32,001 does, so the clamp caps at what the wire admits.
+ */
+const MAX_WIRE_TEXT_CHARS = 32_000;
+
 export class ManagedEmailAdapter {
   readonly settings: EmailSettings;
   readonly policy: ManagedChannelPolicy;
@@ -142,6 +150,12 @@ export class ManagedEmailAdapter {
   private running = false;
   private abort = new AbortController();
   private loop?: Promise<void>;
+  /**
+   * The account generation the control plane last acknowledged. An event
+   * whose generation is not registered there is a poll-level registration
+   * claim — re-register, then re-drive — never a per-message drop.
+   */
+  private registeredGeneration?: number;
 
   constructor(options: ManagedEmailAdapterOptions) {
     this.settings = emailSettings(options.config);
@@ -203,15 +217,11 @@ export class ManagedEmailAdapter {
       this.smtp = await this.deps.createSmtp(this.settings);
       this.abort = new AbortController();
       this.running = true;
+      this.registeredGeneration = undefined;
       await this.openMailbox();
       if (!this.running)
         throw new Error('Managed email adapter stopped during connection.');
-      await this.controlPlane.register({
-        platform: 'email',
-        accountId: this.settings.address,
-        accountGeneration: this.state!.generation,
-        policy: this.policy,
-      });
+      await this.ensureRegistered(this.state!);
       // Segments sent before a crash took their receipt: the provider may
       // hold them, so each is reported unknown — never sent again.
       await this.reportOrphanedOutbound();
@@ -282,12 +292,25 @@ export class ManagedEmailAdapter {
         recent: [],
       };
       this.persist();
+      await this.ensureRegistered(this.state);
+    }
+  }
+
+  private async ensureRegistered(state: ManagedEmailState): Promise<void> {
+    if (this.registeredGeneration === state.generation) return;
+    try {
       await this.controlPlane.register({
         platform: 'email',
         accountId: this.settings.address,
-        accountGeneration: this.state.generation,
+        accountGeneration: state.generation,
         policy: this.policy,
       });
+      this.registeredGeneration = state.generation;
+    } catch (error) {
+      this.log(
+        `Managed email register of generation ${state.generation} did not answer; the next poll re-drives it: ${String(error)}`,
+      );
+      throw error;
     }
   }
 
@@ -340,6 +363,9 @@ export class ManagedEmailAdapter {
       await this.openMailbox();
       return;
     }
+    // Registration first: an event whose generation the control plane
+    // never admitted is re-driven only once the server knows the account.
+    await this.ensureRegistered(state);
     // In-flight events first: an admission whose answer was lost is
     // re-driven before any new mail, so the journal sees them in order.
     await this.resubmitPending();
@@ -491,7 +517,10 @@ export class ManagedEmailAdapter {
       state.routes,
       this.store.directory,
     );
-    const text = boundedText(mail.text ?? '', this.settings.maxTextLength);
+    const text = boundedText(
+      mail.text ?? '',
+      Math.min(this.settings.maxTextLength, MAX_WIRE_TEXT_CHARS),
+    );
     const attachments = mail.attachments
       .slice(0, 16)
       .filter(
@@ -566,7 +595,16 @@ export class ManagedEmailAdapter {
       }
     } catch (error) {
       const status = (error as { status?: unknown }).status;
+      const code = (error as { code?: unknown }).code;
       if (
+        status === 404 ||
+        (status === 409 && code === 'channel_generation_unregistered')
+      ) {
+        // The server lost our registration (a restart, a wipe): that is a
+        // poll-level claim — re-register before the next drive, never a
+        // per-message drop.
+        this.registeredGeneration = 0;
+      } else if (
         typeof status === 'number' &&
         (status === 400 || status === 403 || status === 409)
       ) {
@@ -574,8 +612,8 @@ export class ManagedEmailAdapter {
         // dead route or generation): re-driving the identical event can
         // never converge, and a claim that outlives the pending limit
         // would stall the whole mailbox, so the event is dropped visibly
-        // instead. Everything else — a lost answer, a reset listener, a
-        // vanished registration the next connect restores — re-drives.
+        // instead. Everything else — a lost answer, a reset listener — is
+        // re-driven.
         this.log(
           `Managed email admission of ${event.platformEventId} was refused (${status}); the message is skipped.`,
         );
@@ -634,7 +672,13 @@ export class ManagedEmailAdapter {
       { source: { start: 0, maxLength: this.settings.maxMessageBytes + 1 } },
       { uid: true },
     );
-    if (!source || source.uid !== uid || !source.source) return undefined;
+    if (
+      !source ||
+      source.uid !== uid ||
+      !source.source ||
+      source.source.length > this.settings.maxMessageBytes
+    )
+      return undefined;
     const mail = await this.parsed(source.source);
     const sender = acceptedHeaderSender(mail, this.settings.address);
     if (!sender) return undefined;
@@ -675,7 +719,10 @@ export class ManagedEmailAdapter {
       chatId: sender,
       threadId: route.threadId,
       subject: route.subject,
-      text: boundedText(mail.text ?? '', this.settings.maxTextLength),
+      text: boundedText(
+        mail.text ?? '',
+        Math.min(this.settings.maxTextLength, MAX_WIRE_TEXT_CHARS),
+      ),
       attachments: mail.attachments
         .slice(0, 16)
         .filter(
