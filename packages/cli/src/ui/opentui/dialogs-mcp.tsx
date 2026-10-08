@@ -30,6 +30,7 @@ import {
   dialogContentWidth,
 } from './dialogs-shared.js';
 import {
+  clipToRows,
   findNextEnabledIndex,
   followScrollOffset,
   wrappedRows,
@@ -1046,9 +1047,10 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
                   <text fg={row.red ? C.red : C.text}>{row.label}</text>
                 </box>
                 <text fg={row.red ? C.red : C.text}>
-                  {clipToWidth(
+                  {clipToRows(
                     sanitizeTerminalLine(row.value),
-                    detailValueWidth * chargedRows,
+                    detailValueWidth,
+                    chargedRows,
                   )}
                 </text>
               </box>

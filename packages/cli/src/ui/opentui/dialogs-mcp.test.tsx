@@ -100,6 +100,7 @@ import {
   type McpServerInfo,
   type McpToolInfo,
 } from './dialogs-mcp.js';
+import { wrappedRows } from './dialogs-core.js';
 
 function baseKeyEvent(overrides: Record<string, unknown> = {}) {
   return {
@@ -398,13 +399,18 @@ describe('OpenTuiMcpDialog list windows', () => {
     );
     await press('return'); // server list → server detail
 
-    // The error's leading rows paint, clipped to the four rows it is
-    // charged (six-row window less the spacer and the action row).
+    // The error's leading rows paint, clipped to the three rows it is
+    // charged (the six-row window less the spacer and the two action rows).
     expect(screen.getByText(/Failed to parse:/)).toBeTruthy();
     const text = document.body.textContent ?? '';
     expect(text.includes('e'.repeat(500))).toBe(false);
     // The action row below the error still paints.
     expect(screen.getByText('Disable')).toBeTruthy();
+    // The clip pays rows, not columns: a bare column clip lets greedy word
+    // wrap leave the row the long token starts partly empty, so the painted
+    // value wraps into one more row than the three it is charged.
+    const painted = screen.getByText(/Failed to parse:/).textContent ?? '';
+    expect(wrappedRows(painted, 72)).toBeLessThanOrEqual(3);
   });
 
   it('refuses the resource list keys at a zero-row window', async () => {

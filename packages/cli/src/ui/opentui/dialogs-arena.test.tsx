@@ -379,6 +379,58 @@ describe('OpenTuiArenaDialog select pane charging', () => {
     expect(screen.queryByText('model-a3')).toBeNull();
   });
 
+  it('clips the preview pane to the rows the region leaves', async () => {
+    // The pane's rows were charged against the list window but the pane
+    // itself painted unbounded: a long approachSummary grew the
+    // unshrinkable frame past a sixteen-row region (12 chrome + 9 preview
+    // rows into 16). The pane clips its runs to the region's leftover —
+    // margin, title and two approach rows — and drops the runs that no
+    // longer fit.
+    const longApproachManager = {
+      getAgentStates: () =>
+        [0, 1].map((i) => ({
+          agentId: `a${i}`,
+          model: { modelId: `model-a${i}` },
+          status: AgentStatus.COMPLETED,
+          stats: { durationMs: 1000, outputTokens: 42 },
+        })),
+      getResult: () => ({
+        task: 'task',
+        agents: [0, 1].map((i) => ({
+          agentId: `a${i}`,
+          model: { modelId: `model-a${i}` },
+          approachSummary: 'w'.repeat(320),
+          stats: { outputTokens: 42, durationMs: 1000, toolCalls: 1 },
+          diffSummary: { additions: 1, deletions: 0, files: [] },
+        })),
+      }),
+    };
+    const longApproachConfig = {
+      getArenaManager: () => longApproachManager,
+    } as unknown as Config;
+    render(
+      <OpenTuiArenaDialog
+        mode="select"
+        config={longApproachConfig}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={16}
+      />,
+    );
+
+    await press('p');
+    expect(screen.getByText(/Quick Preview · model-a0/)).toBeTruthy();
+    const text = document.body.textContent ?? '';
+    // Two approach rows at the run's seventy-eight columns, not the five
+    // rows the 320-column run wraps into unclipped.
+    expect(text.includes('w'.repeat(156))).toBe(true);
+    expect(text.includes('w'.repeat(157))).toBe(false);
+    // The leftover rows are spent on the approach; the files and metrics
+    // runs stay unpainted rather than growing the frame past the region.
+    expect(screen.queryByText('Major files:')).toBeNull();
+    expect(screen.queryByText('Metrics:')).toBeNull();
+  });
+
   it('caps the detailed diff at the rows the region leaves and pays its chrome', async () => {
     // The diff pane pays its margin and title (2) plus as many lines as fit:
     // the list yields its zero-row floor, so six of forty lines paint with a

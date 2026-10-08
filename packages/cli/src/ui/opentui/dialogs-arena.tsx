@@ -39,6 +39,7 @@ import { formatDuration } from '../utils/formatters.js';
 import { getArenaStatusLabel } from '../utils/displayUtils.js';
 import { toOriginalKey } from './key-map.js';
 import {
+  clipToRows,
   findNextEnabledIndex,
   getSelectionScrollOffset,
   wrappedRows,
@@ -642,31 +643,70 @@ function formatFileList(files: string[]): string {
   return `${visible.join(', ')}${suffix}`;
 }
 
+interface AgentPreviewRun {
+  label: string;
+  value: string;
+}
+
+interface ClippedAgentPreview {
+  title: string;
+  runs: AgentPreviewRun[];
+  /** The rows the clipped pane paints: its margin and title, then the runs. */
+  rows: number;
+}
+
 /**
- * The rows AgentPreview paints: its margin and title, then each content run
- * measured at the width the run's box actually gets — the pane is indented
- * two columns and each value starts after its label, so a value wraps within
- * what the label leaves.
+ * The preview pane's runs, clipped so the pane's row count never exceeds
+ * `rowBudget`: the pane's rows come out of the list's window, and the
+ * approach run — LLM-generated, with no length bound — can otherwise grow
+ * the unshrinkable frame past the clipped region. Runs clip in paint order
+ * (the unbounded approach first), and a run the budget can no longer pay
+ * does not paint at all. Each run is clipped and re-measured at the width
+ * its box actually gets — the pane is indented two columns and each value
+ * starts after its label. Undefined when the budget cannot pay the pane's
+ * own margin and title.
  */
-function measureAgentPreviewRows(
+function clipAgentPreview(
   result: ArenaAgentResult,
   frameContentWidth: number,
-): number {
-  const runWidth = Math.max(1, frameContentWidth - 2);
-  const approach = result.approachSummary ?? 'No approach summary available.';
-  const files = formatFileList(
-    (result.diffSummary?.files ?? []).map((f) => f.path),
-  );
-  const metrics = `${result.stats.outputTokens.toLocaleString()} tokens · ${formatDuration(result.stats.durationMs)} · ${result.stats.toolCalls} tools`;
-  const run = (label: string, value: string) =>
-    wrappedRows(value, Math.max(1, runWidth - getCachedStringWidth(label)));
-  return (
-    wrappedRows(`Quick Preview · ${result.model.modelId}`, frameContentWidth) +
-    1 + // the pane's marginTop
-    run('Approach: ', approach) +
-    run('Major files: ', files) +
-    run('Metrics: ', metrics)
-  );
+  rowBudget: number | undefined,
+): ClippedAgentPreview | undefined {
+  const title = `Quick Preview · ${result.model.modelId}`;
+  const naturalRuns: AgentPreviewRun[] = [
+    {
+      label: 'Approach: ',
+      value: result.approachSummary ?? 'No approach summary available.',
+    },
+    {
+      label: 'Major files: ',
+      value: formatFileList(
+        (result.diffSummary?.files ?? []).map((f) => f.path),
+      ),
+    },
+    {
+      label: 'Metrics: ',
+      value: `${result.stats.outputTokens.toLocaleString()} tokens · ${formatDuration(result.stats.durationMs)} · ${result.stats.toolCalls} tools`,
+    },
+  ];
+  const runWidth = (label: string) =>
+    Math.max(1, frameContentWidth - 2 - getCachedStringWidth(label));
+  // The pane's marginTop plus the row(s) its title wraps into.
+  const chrome = 1 + wrappedRows(title, frameContentWidth);
+  if (rowBudget !== undefined && rowBudget < chrome) return undefined;
+  let remaining =
+    rowBudget === undefined ? Number.MAX_SAFE_INTEGER : rowBudget - chrome;
+  const runs: AgentPreviewRun[] = [];
+  let rows = chrome;
+  for (const run of naturalRuns) {
+    if (remaining < 1) break;
+    const width = runWidth(run.label);
+    const value = clipToRows(run.value, width, remaining);
+    const paid = wrappedRows(value, width);
+    runs.push({ label: run.label, value });
+    rows += paid;
+    remaining -= paid;
+  }
+  return { title, runs, rows };
 }
 
 /**
@@ -685,29 +725,18 @@ function cappedDiffLines(
   ];
 }
 
-function AgentPreview({ result }: { result: ArenaAgentResult }) {
-  const files = result.diffSummary?.files ?? [];
+function AgentPreview({ preview }: { preview: ClippedAgentPreview }) {
   return (
     <box marginTop={1} flexDirection="column">
       <text fg={C.text} attributes={1}>
-        {`Quick Preview · ${result.model.modelId}`}
+        {preview.title}
       </text>
-      <box marginLeft={2} flexDirection="row">
-        <text fg={C.dim}>{'Approach: '}</text>
-        <text fg={C.text}>
-          {result.approachSummary ?? 'No approach summary available.'}
-        </text>
-      </box>
-      <box marginLeft={2} flexDirection="row">
-        <text fg={C.dim}>{'Major files: '}</text>
-        <text fg={C.text}>{formatFileList(files.map((f) => f.path))}</text>
-      </box>
-      <box marginLeft={2} flexDirection="row">
-        <text fg={C.dim}>{'Metrics: '}</text>
-        <text
-          fg={C.text}
-        >{`${result.stats.outputTokens.toLocaleString()} tokens · ${formatDuration(result.stats.durationMs)} · ${result.stats.toolCalls} tools`}</text>
-      </box>
+      {preview.runs.map((run) => (
+        <box key={run.label} marginLeft={2} flexDirection="row">
+          <text fg={C.dim}>{run.label}</text>
+          <text fg={C.text}>{run.value}</text>
+        </box>
+      ))}
     </box>
   );
 }
@@ -893,16 +922,22 @@ function ArenaSelect({
   // An open pane's rows come out of the list's window: the frame is
   // unshrinkable inside the clipped region, so a pane added on top of a full
   // window grows the frame past the region and the clip takes the pane the
-  // user opened it to read. The preview's runs are measured at the width
-  // they paint in (they word-wrap); the detailed diff gets a line cap from
-  // what the list's zero-row floor leaves, because its 181-line ceiling can
-  // never fit a region.
-  const previewRows =
-    showPreview && selectedResult
-      ? measureAgentPreviewRows(selectedResult, frameContentWidth)
-      : 0;
+  // user opened it to read. Both panes cap to what the region leaves: the
+  // preview clips its runs to the leftover rows (reserving the diff pane's
+  // two chrome rows when both are open), and the detailed diff gets a line
+  // cap from what the list's zero-row floor leaves, because its 181-line
+  // ceiling can never fit a region.
   const diffOpen = Boolean(showDetailedDiff && selectedResult);
   const diffLines = diffOpen ? visibleDiffLines(selectedResult?.diff) : [];
+  const previewBudget =
+    regionHeight === undefined
+      ? undefined
+      : Math.max(0, regionHeight - 12 - (diffOpen ? 2 : 0));
+  const preview =
+    showPreview && selectedResult
+      ? clipAgentPreview(selectedResult, frameContentWidth, previewBudget)
+      : undefined;
+  const previewRows = preview?.rows ?? 0;
   let agentWindowRows: number;
   let diffLineCap: number | undefined;
   if (regionHeight === undefined) {
@@ -1062,9 +1097,7 @@ function ArenaSelect({
             );
           })}
       </box>
-      {showPreview && selectedResult && (
-        <AgentPreview result={selectedResult} />
-      )}
+      {preview && <AgentPreview preview={preview} />}
       {showDetailedDiff && selectedResult && (
         <AgentDetailedDiff
           result={selectedResult}

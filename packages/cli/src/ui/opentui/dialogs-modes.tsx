@@ -214,7 +214,11 @@ function noticeRows(text: string | null, contentWidth: number): number {
  * The rows a non-truncating DialogTitle paints: the subtitle is an adjacent
  * run that wraps within the columns the title leaves, and the row box is as
  * tall as the taller of the two — so the budget pays the measured maximum,
- * not a flat row.
+ * not a flat row. When the two runs overflow the row together the renderer
+ * shrinks both, so the split charge is bounded by the runs wrapped as one
+ * (plus the partial row each shrunken box can waste): an unbounded remainder
+ * charge counts a one-column leftover a dozen rows the box never paints, and
+ * the chrome alone can then outgrow the region.
  */
 function dialogTitleRows(
   title: string,
@@ -224,13 +228,12 @@ function dialogTitleRows(
   const titleRun = `> ${title} `;
   const titleRowCount = wrappedRows(titleRun, contentWidth);
   if (!subtitle) return titleRowCount;
-  return Math.max(
-    titleRowCount,
-    wrappedRows(
-      subtitle,
-      Math.max(1, contentWidth - getCachedStringWidth(titleRun)),
-    ),
+  const splitRows = wrappedRows(
+    subtitle,
+    Math.max(1, contentWidth - getCachedStringWidth(titleRun)),
   );
+  const ceiling = wrappedRows(`${titleRun}${subtitle}`, contentWidth) + 1;
+  return Math.min(Math.max(titleRowCount, splitRows), ceiling);
 }
 
 /**

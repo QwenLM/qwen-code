@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { getCachedStringWidth, toCodePoints } from '../utils/textUtils.js';
+import {
+  clipToWidth,
+  getCachedStringWidth,
+  toCodePoints,
+} from '../utils/textUtils.js';
 
 /**
  * Pure dialog machinery for the OpenTUI dialog family (PR1 slice 3).
@@ -132,6 +136,24 @@ export function wrappedRows(text: string, width: number): number {
     rows += lineRows;
   }
   return rows;
+}
+
+/**
+ * The longest prefix of `text` whose word wrap at `width` columns pays at
+ * most `rows` rows. A column clip alone under-pays: greedy word wrap leaves
+ * the row a long token starts on partly empty, so `width * rows` columns can
+ * wrap into `rows + 1` rows. The column budget walks down until the measured
+ * rows fit; at zero the empty string still costs the one row an emptied
+ * value pays, so callers must not ask for zero rows.
+ */
+export function clipToRows(text: string, width: number, rows: number): string {
+  let budget = width * rows;
+  let clipped = clipToWidth(text, budget);
+  while (budget > 0 && wrappedRows(clipped, width) > rows) {
+    budget -= 1;
+    clipped = clipToWidth(text, budget);
+  }
+  return clipped;
 }
 
 // The renderer's own width table paints the warning sign in one column where

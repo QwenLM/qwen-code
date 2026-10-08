@@ -1073,6 +1073,26 @@ describe('OpenTuiOutputStyleDialog', () => {
     expect(queryRow('Concise — ')).toBeNull();
   });
 
+  it('bounds the title charge the same way at a thirty-column terminal', async () => {
+    // The subtitle-remainder charge wedged /output-style the same way:
+    // fifteen chrome rows against a fourteen-row region paid the catalog no
+    // row at all.
+    mocks.state.width = 30;
+    const harness = createHarness();
+    render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+        availableTerminalHeight={14}
+      />,
+    );
+
+    await waitFor(() => expect(queryRow('default — ')).not.toBeNull());
+    expect(queryRow('Concise — ')).not.toBeNull();
+  });
+
   it('pays both catalog rows a twelve-row region fits at full width', async () => {
     // At width 100 the title needs its margin row only and the footer hint
     // fits one row, so the true chrome is 4 + 2 + 2 = 8 and region twelve
@@ -1575,7 +1595,10 @@ describe('OpenTuiEffortDialog', () => {
     mocks.state.width = 100;
   });
 
-  function renderEffortDialog(reasoningEffort: string | undefined) {
+  function renderEffortDialog(
+    reasoningEffort: string | undefined,
+    availableTerminalHeight?: number,
+  ) {
     const setValue = vi.fn();
     const notify = vi.fn();
     let applied = reasoningEffort;
@@ -1604,6 +1627,7 @@ describe('OpenTuiEffortDialog', () => {
         settings={settings}
         onClose={vi.fn()}
         notify={notify}
+        availableTerminalHeight={availableTerminalHeight}
       />,
     );
     return { setValue, setReasoningEffort, notify };
@@ -1677,6 +1701,20 @@ describe('OpenTuiEffortDialog', () => {
     expect(
       screen.getByText('(applied across all providers; clamped per model)'),
     ).not.toBeNull();
+  });
+
+  it('bounds the title charge at the width the two runs shrink into', () => {
+    // At a thirty-column terminal the title run and its subtitle overflow
+    // the row together and the renderer shrinks both; charging the subtitle
+    // the one-column remainder instead counted seventeen title rows, the
+    // chrome outgrew a twenty-row region, the window paid zero rows and
+    // Enter committed nothing.
+    mocks.state.width = 30;
+    const harness = renderEffortDialog(undefined, 20);
+
+    expect(queryRow('high — ')).not.toBeNull();
+    press('return');
+    expect(harness.setReasoningEffort).toHaveBeenCalledWith('high');
   });
 });
 
