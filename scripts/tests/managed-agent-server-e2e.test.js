@@ -660,8 +660,9 @@ describe('managed-agent-server e2e runner', () => {
     ).rejects.toThrow(/exited early/);
   });
 
-  // A rejecting-then-hanging predicate must surface the real error, not the
-  // synthetic stall metadata the race rejects with on later iterations.
+  // A rejecting-then-hanging predicate must keep both facts: the deadline
+  // found the hang, so the older real error is named as predating the stall
+  // rather than posing as the state the deadline saw.
   it('waitUntil keeps a real predicate error when a later iteration stalls', async () => {
     const { waitUntil } = loadWaitUntil();
     let calls = 0;
@@ -673,6 +674,23 @@ describe('managed-agent-server e2e runner', () => {
               new Error('fetch failed', { cause: new Error('ECONNREFUSED') }),
             )
           : new Promise(() => {}),
+      300,
+    ).catch((error) => error);
+    expect(failure.message).toContain(
+      'predicate stalled; last error before the stall: ECONNREFUSED',
+    );
+  });
+
+  // The stall wording is earned by a stalled final poll: a predicate that
+  // answers every poll with the same real error must not acquire it.
+  it('waitUntil names no stall when the error is the deadline state', async () => {
+    const { waitUntil } = loadWaitUntil();
+    const failure = await waitUntil(
+      'probe',
+      () =>
+        Promise.reject(
+          new Error('fetch failed', { cause: new Error('ECONNREFUSED') }),
+        ),
       300,
     ).catch((error) => error);
     expect(failure.message).toContain('ECONNREFUSED');
@@ -763,18 +781,19 @@ describe('managed-agent-server e2e runner', () => {
     // The base's eager prints were multi-line calls, so a single-line
     // negative pin is true of base and head alike and can never fire: pin
     // the deferred assignment on every mode branch, and that no success
-    // payload is printed eagerly. The freeze arm's wake record is a
-    // mid-run diagnostic with no sessionId key, so the payload shape —
-    // not any console.log(JSON.stringify( spelling — is what must not
-    // print inside the try.
+    // payload is printed eagerly. The freeze arm's wake record reads as a
+    // pass line on stdout too, so it defers the same way — no eager
+    // console.log of a JSON payload remains inside the try at all.
     expect(source.match(/resultJson = JSON\.stringify\(/g)).toHaveLength(4);
-    expect(source).not.toMatch(
-      /console\.log\(\s*JSON\.stringify\(\s*\{\s*(?:model,\s*)?sessionId/,
+    expect(source.match(/fencedWriterJson = JSON\.stringify\(/g)).toHaveLength(
+      1,
     );
+    expect(source).not.toMatch(/console\.log\(\s*JSON\.stringify\(/);
     // No gate typechecks scripts/ (tsx strips types unchecked), so the
     // module-scope binding the deferred print reads is pinned by text:
     // dropped, the print below throws ReferenceError on the success path.
     expect(source).toMatch(/^let resultJson: string \| undefined;$/m);
+    expect(source).toMatch(/^let fencedWriterJson: string \| undefined;$/m);
     // The behavioural tests inject the signal through this harness's
     // synthesized setter, so the production link — the runner's own
     // handleSignal assigning the module-scope receivedSignal the guards
@@ -805,6 +824,13 @@ describe('managed-agent-server e2e runner', () => {
       print,
       'the success payload must print only after both exit guards',
     ).toBeGreaterThan(signalThrow);
+    // The freeze arm's wake record follows the main result, restoring the
+    // base's ordering, and sits behind the same two guards.
+    const wakePrint = source.indexOf('console.log(fencedWriterJson)');
+    expect(
+      wakePrint,
+      'the freeze wake record must print only after the main result',
+    ).toBeGreaterThan(print);
   });
 
   // A timed-out spawn sets error and leaves status null with empty stderr,

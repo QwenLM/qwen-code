@@ -365,8 +365,10 @@ npm run dev:managed-agent
 # Once per clone, and re-run after pulling changes to qwencode/runtime-broker (~12 s):
 mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
 mvn -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
-# One-time, on a fresh MySQL 8 (creates the database and user the URL names):
-mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; CREATE USER 'qwen'@'127.0.0.1' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'127.0.0.1';"
+# One-time, on a fresh MySQL 8 (creates the database and user the URL names;
+# the performance_schema SELECT covers Flyway's boot probe — without it the
+# probe is denied (ERROR 1142) and startup stops at 'foreign_key_checks'):
+mysql -u root -e "CREATE DATABASE qwen_managed_agent CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER 'qwen'@'localhost' IDENTIFIED BY 'replace-me'; CREATE USER 'qwen'@'127.0.0.1' IDENTIFIED BY 'replace-me'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'localhost'; GRANT ALL ON qwen_managed_agent.* TO 'qwen'@'127.0.0.1'; GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'localhost'; GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'127.0.0.1';"
 # (official MySQL images enable skip-name-resolve, so 'qwen'@'localhost' alone never
 #  matches TCP clients; a containerized MySQL sees the gateway address — grant at
 #  'qwen'@'%' or the container-visible host instead)
@@ -877,6 +879,12 @@ docker run -p 8080:8080 \
 
 or the deliberately unauthenticated
 `-e QWEN_MANAGED_AGENT_AUTH_ALLOW_INSECURE_BIND=true` override.
+
+The `qwen` user the recipe names needs the grants from the Full WebShell
+entry's MySQL one-liner — including `SELECT` on
+`performance_schema.user_variables_by_thread`, granted at the
+container-visible host — or Flyway's boot probe is denied (`ERROR 1142`)
+and startup stops.
 
 Publishing the API needs no Runtime Broker face: the broker ships disabled
 by default, and a non-loopback broker bind is a separate opt-in — the broker

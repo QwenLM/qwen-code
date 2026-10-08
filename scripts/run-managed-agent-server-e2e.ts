@@ -573,6 +573,7 @@ async function waitUntil(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
+  let lastErrorPredatesStall = false;
   // Identity, not text: matching the rendered message would let a reworded
   // sentinel silently invert the error precedence in the catch below.
   const stall = new Error(`${name} predicate stalled`);
@@ -609,14 +610,16 @@ async function waitUntil(
     } catch (error) {
       // Prefer the cause an undici fetch rejection carries (its own message
       // is "fetch failed"). A real predicate error wins over the synthetic
-      // stall, which is timing metadata recorded only when nothing better
-      // was seen.
+      // stall; when the stall is what the deadline found, the older error
+      // is reported as predating it instead of posing as the final state.
       if (error instanceof Error && error.cause instanceof Error) {
         lastError = error.cause;
       } else if (error !== stall) {
         lastError = error;
       } else if (lastError === undefined) {
         lastError = error;
+      } else {
+        lastErrorPredatesStall = true;
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -633,6 +636,9 @@ async function waitUntil(
     } catch {
       cause = `: ${String(lastError)}`;
     }
+  }
+  if (lastErrorPredatesStall) {
+    cause = `: predicate stalled; last error before the stall${cause}`;
   }
   throw new Error(
     `${name} did not become ready${cause}\n${child?.log() ?? ''}`,
@@ -916,6 +922,9 @@ let dumpPort: number | undefined;
 // the post-finally throws, so an interrupt can never put a clean pass
 // on stdout for a run the operator explicitly stopped.
 let resultJson: string | undefined;
+// The freeze arm's wake record reads as a pass line too, so it defers the
+// same way and prints after the main result, as in the base's ordering.
+let fencedWriterJson: string | undefined;
 try {
   const harnessToken = randomBytes(24).toString('base64url');
   const brokerToken = randomBytes(24).toString('base64url');
@@ -2012,18 +2021,16 @@ try {
             `Frozen former Harness mutated the takeover after waking: head=${headBeforeWake}->${headAfterWake} oldWriterTx=${oldGenerationTxBeforeWake}->${oldGenerationTxAfterWake} boot=${replacementBootId}->${bootAfterWake} text=${JSON.stringify(visibleText)}->${JSON.stringify(awakeText)} terminals=${terminalCount}->${awakeTerminalCount}`,
           );
         }
-        console.log(
-          JSON.stringify(
-            {
-              fencedFormerWriter: true,
-              journalHead: headAfterWake,
-              oldGenerationTx: oldGenerationTxAfterWake,
-              harnessBootId: bootAfterWake,
-              visibleText: awakeText,
-            },
-            null,
-            2,
-          ),
+        fencedWriterJson = JSON.stringify(
+          {
+            fencedFormerWriter: true,
+            journalHead: headAfterWake,
+            oldGenerationTx: oldGenerationTxAfterWake,
+            harnessBootId: bootAfterWake,
+            visibleText: awakeText,
+          },
+          null,
+          2,
         );
       }
     } else {
@@ -2403,4 +2410,7 @@ if (failure) throw failure;
 // payload stays a variable until both guards have run, so the decision
 // precedes the record.
 if (receivedSignal) throw new Error(`Interrupted by ${receivedSignal}`);
-if (resultJson !== undefined) console.log(resultJson);
+if (resultJson !== undefined) {
+  console.log(resultJson);
+  if (fencedWriterJson !== undefined) console.log(fencedWriterJson);
+}
