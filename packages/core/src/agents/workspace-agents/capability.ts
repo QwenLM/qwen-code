@@ -11,6 +11,7 @@ import {
   type ToolInvocationGuard,
 } from '../../core/tool-invocation-guard.js';
 import { ToolNames } from '../../tools/tool-names.js';
+import { matchesToolPattern } from '../../permissions/rule-parser.js';
 
 export type AgentToolClassification = 'allow' | 'deny' | 'thread';
 
@@ -187,6 +188,92 @@ export function createAgentToolInvocationGuard(
       return {
         allowed: false,
         reason: `Tool "${context.toolName}" is outside this subsystem read-only capability boundary.`,
+      };
+    }
+    return { allowed: true };
+  };
+}
+
+/**
+ * Tool configuration for an agent session started by the session-agents
+ * orchestrator (`agents/session-agents`).
+ *
+ * Product decision 2026-10-05 (session-multi-agent design §8-1): such an agent may use every tool
+ * the session offers; writes and command execution are not removed but go
+ * through the session's ordinary approval flow, which the orchestrator relays
+ * to the chat session. So there is no read-only ceiling here. A linked
+ * definition may still narrow the surface; that narrowing is kept.
+ * Thread tools are never offered: there is no thread behind such a session.
+ */
+export function buildSessionAgentToolConfig(
+  definition?: ToolConfig,
+): ToolConfig {
+  const threadTools = new Set<string>(THREAD_TOOL_NAMES);
+  const definitionNames = definition?.tools.map((tool) =>
+    typeof tool === 'string' ? tool : tool.name,
+  );
+  let executionAllowedTools: string[] | undefined;
+  if (definitionNames !== undefined && !definitionNames.includes('*')) {
+    executionAllowedTools = definitionNames.filter(
+      (name): name is string =>
+        typeof name === 'string' && !threadTools.has(name),
+    );
+  }
+  if (definition?.executionAllowedTools !== undefined) {
+    const executable = new Set(definition.executionAllowedTools);
+    executionAllowedTools = (
+      executionAllowedTools ?? definition.executionAllowedTools
+    ).filter((name) => executable.has(name) && !threadTools.has(name));
+  }
+  return {
+    tools: definition?.tools ?? ['*'],
+    ...(executionAllowedTools !== undefined ? { executionAllowedTools } : {}),
+    disallowedTools: Array.from(
+      new Set([...(definition?.disallowedTools ?? []), ...THREAD_TOOL_NAMES]),
+    ),
+  };
+}
+
+/**
+ * The guard for a session-agents agent session: the upstream guard, the
+ * definition's execution allowlist when it has one, its `disallowedTools`,
+ * and no thread tools.
+ * Unlike {@link createAgentToolInvocationGuard} there is no read-only
+ * classification; writes go through the session's approval flow, which
+ * always asks: `Config.markSessionAgentSession` pins such a session to
+ * `default` approval and refuses YOLO / auto-edit / auto for it later.
+ *
+ * `disallowedTools` is matched like AgentCore's blocklist
+ * ({@link matchesToolPattern}: exact names, and `mcp__server` patterns), but
+ * without the registry's alias / MCP-identity channel, which the guard
+ * context does not carry: an MCP tool denied only by an alias is not caught.
+ */
+export function createSessionAgentToolInvocationGuard(
+  upstream?: ToolInvocationGuard,
+  executionAllowedTools?: ReadonlySet<string>,
+  disallowedTools?: readonly string[],
+): ToolInvocationGuard {
+  const threadTools = new Set<string>(THREAD_TOOL_NAMES);
+  return async (context) => {
+    if (upstream) {
+      const upstreamDecision = await evaluateToolInvocationGuard(
+        upstream,
+        context,
+      );
+      if (!upstreamDecision.allowed) return upstreamDecision;
+    }
+    if (
+      threadTools.has(context.toolName) ||
+      (executionAllowedTools !== undefined &&
+        !executionAllowedTools.has(context.toolName)) ||
+      (disallowedTools?.some((pattern) =>
+        matchesToolPattern(pattern, context.toolName),
+      ) ??
+        false)
+    ) {
+      return {
+        allowed: false,
+        reason: `Tool "${context.toolName}" is not available to this agent.`,
       };
     }
     return { allowed: true };

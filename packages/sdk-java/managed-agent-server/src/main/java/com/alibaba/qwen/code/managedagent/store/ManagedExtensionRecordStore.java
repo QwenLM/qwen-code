@@ -307,6 +307,107 @@ public class ManagedExtensionRecordStore {
         return new ApplyResult(receipts, lastActivation);
     }
 
+    boolean hasNewLifecycleDispatch(String tenantId, String sessionId, byte[] bytes,
+            Function<String, StoredResource> resources) {
+        boolean dispatch = false;
+        var revisions = new java.util.HashMap<String, JsonNode>();
+        for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
+            JsonNode parsed = parse(line);
+            if (parsed == null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
+                        "Record line is not a JSON object the Session authority can read.");
+            }
+            JsonNode event = parsed.path("managedSession");
+            JsonNode payload = event.path("payload");
+            if ("input.accepted".equals(event.path("kind").asText())
+                    || "tool.intent".equals(event.path("kind").asText())) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+            }
+            if ("model.attempt".equals(event.path("kind").asText())
+                    && "started".equals(payload.path("state").asText())) {
+                dispatch = true;
+            }
+            if (!"domain.committed".equals(event.path("kind").asText())) {
+                continue;
+            }
+            String domain = payload.path("domain").asText();
+            if (!List.of("hook_execution", "hook_registration").contains(domain)) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+            }
+            JsonNode next = readBody(resources.apply(payload.path("recordRef").path("resourceId").asText()));
+            JsonNode previous = previousLifecycleRecord(tenantId, sessionId, domain, next, revisions);
+            if (requiresLifecycleDispatch(previous, next)) {
+                dispatch = true;
+            }
+        }
+        return dispatch;
+    }
+
+    void requireLifecycleSettlement(String tenantId, String sessionId, byte[] bytes,
+            Function<String, StoredResource> resources) {
+        var revisions = new java.util.HashMap<String, JsonNode>();
+        for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
+            JsonNode parsed = parse(line);
+            if (parsed == null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
+                        "Record line is not a JSON object the Session authority can read.");
+            }
+            JsonNode event = parsed.path("managedSession");
+            String kind = event.path("kind").asText();
+            JsonNode payload = event.path("payload");
+            if ("input.accepted".equals(kind) || "tool.intent".equals(kind)
+                    || "model.attempt".equals(kind) && "started".equals(payload.path("state").asText())) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+            }
+            if (!"domain.committed".equals(kind)) {
+                continue;
+            }
+            String domain = payload.path("domain").asText();
+            if (!List.of("hook_execution", "hook_registration").contains(domain)) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+            }
+            JsonNode next = readBody(resources.apply(payload.path("recordRef").path("resourceId").asText()));
+            JsonNode previous = previousLifecycleRecord(tenantId, sessionId, domain, next, revisions);
+            if (previous == null || requiresLifecycleDispatch(previous, next)) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+            }
+        }
+    }
+
+    private JsonNode previousLifecycleRecord(String tenantId, String sessionId, String domain, JsonNode next,
+            java.util.Map<String, JsonNode> revisions) {
+        String id = next.path("hook_execution".equals(domain) ? "hookExecutionId" : "registrationId").asText();
+        String key = domain + ":" + id;
+        JsonNode previous = revisions.get(key);
+        if (previous == null) {
+            previous = jdbc.queryForList("SELECT record_resource_id FROM qwen_managed_session_extension_record"
+                + " WHERE session_scope_key = ? AND record_key = ? AND tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?",
+                String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedExtensionProjection.recordKey(sessionId, domain, id), tenantId, sessionId, domain, id).stream().map(resource -> {
+                    JsonNode record = readBody(readResource(tenantId, sessionId, resource));
+                    ManagedExtensionProjection.RECORD_BODIES.get(domain).require().accept(record);
+                    return record;
+                }).findFirst().orElse(null);
+        }
+        revisions.put(key, next);
+        return previous;
+    }
+
+    private boolean requiresLifecycleDispatch(JsonNode previous, JsonNode next) {
+        if (previous == null) {
+            return "dispatch_started".equals(next.path("run").path("execution").asText());
+        }
+        JsonNode before = previous.path("run");
+        JsonNode after = next.path("run");
+        String execution = before.path("execution").asText();
+        if (!List.of("", "intent").contains(execution) && !before.path("runtime").equals(after.path("runtime"))) {
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+        }
+        return "intent".equals(execution) && !List.of("intent", "not_started_proven").contains(after.path("execution").asText());
+    }
+
     public TaskPage listTasks(String tenantId, String sessionId,
             Long beforeCreatedAt, String beforeTaskId, int limit) {
         List<Object> arguments = new ArrayList<>();
