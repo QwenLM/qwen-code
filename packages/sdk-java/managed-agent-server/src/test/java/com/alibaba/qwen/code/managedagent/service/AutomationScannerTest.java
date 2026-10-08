@@ -864,11 +864,13 @@ class AutomationScannerTest {
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("automation_operation_unknown"));
-        // The answer never arrived: the mirror still reads the chain live.
+        // The answer never arrived: the mirror still reads the chain live,
+        // and the pre-relay claim is the request's own unanswered binding.
         assertThat(
                 ledger.findSchedule(tenant, created.id()).orElseThrow().state())
                 .isEqualTo(AutomationLedgerStore.STATE_LIVE);
-        assertThat(ledger.findCommand(tenant, keyR)).isEmpty();
+        assertThat(ledger.findCommand(tenant, keyR).orElseThrow().resultJson())
+                .isEmpty();
         // The retry re-sends the same derived operationId and answers the
         // cancel revision the first attempt committed.
         var retried = service.retire(tenant, ACTOR, created.id(), keyR);
@@ -911,7 +913,9 @@ class AutomationScannerTest {
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("automation_operation_unknown"));
-        assertThat(ledger.findCommand(tenant, keyU)).isEmpty();
+        // The pre-relay claim survived the lost answer, still unanswered.
+        assertThat(ledger.findCommand(tenant, keyU).orElseThrow().resultJson())
+                .isEmpty();
         // Another request moves the definition to revision 2; the retry of
         // the no-op honor answers the revision-1 result it committed.
         AutomationDefinitionRequest requestB = new AutomationDefinitionRequest(
@@ -952,14 +956,15 @@ class AutomationScannerTest {
                 .isInstanceOfSatisfying(ApiException.class, error ->
                         assertThat(error.getCode())
                                 .isEqualTo("automation_operation_unknown"));
-        // The same key against another target conflicts at the Harness and
-        // the ledger never retires that definition's mirror.
+        // The same key against another target is a different request: the
+        // first attempt's claim refuses it at the identity layer, and the
+        // ledger never retires that definition's mirror.
         assertThatThrownBy(
                 () -> service.retire(tenant, ACTOR, second.id(), key))
                 .isInstanceOfSatisfying(ApiException.class, error -> {
                     assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
                     assertThat(error.getCode())
-                            .isEqualTo("automation_operation_conflict");
+                            .isEqualTo("idempotency_conflict");
                 });
         assertThat(ledger.findSchedule(tenant, second.id()).orElseThrow()
                 .state()).isEqualTo(AutomationLedgerStore.STATE_LIVE);
@@ -1330,6 +1335,53 @@ class AutomationScannerTest {
         assertThat(fake.operations).noneMatch(operation -> "define_schedule"
                 .equals(operation.get("kind")));
         assertThat(ledger.findSchedule(tenant, scheduleId)).isEmpty();
+    }
+
+    @Test
+    void anOwnersSettleIsGuardedAtIdentityAndCompletion() {
+        String key = "claim-" + UUID.randomUUID();
+        String scheduleId = ManagedAutomationService.scheduleIdFor(tenant,
+                key);
+        ledger.claimCommand(new AutomationLedgerStore.CommandRow(tenant, key,
+                ACTOR, "digest-c", scheduleId, ""), clock.get());
+        assertThat(ledger.settleCommand(tenant, key, "digest-c", ACTOR,
+                "{\"id\":\"" + scheduleId + "\"}")).isTrue();
+        // A late different request writes nothing into this row, and the
+        // completed result itself is frozen.
+        assertThat(ledger.settleCommand(tenant, key, "digest-u", ACTOR,
+                "{\"id\":\"other\"}")).isFalse();
+        assertThat(ledger.settleCommand(tenant, key, "digest-c", ACTOR,
+                "{\"id\":\"again\"}")).isFalse();
+        assertThat(ledger.findCommand(tenant, key).orElseThrow().resultJson())
+                .contains(scheduleId)
+                .doesNotContain("other");
+    }
+
+    @Test
+    void aDefinitiveRefusalReleasesTheClaimSoAFixedRetrySucceeds() {
+        String key = "fix-" + UUID.randomUUID();
+        // The mode gate refuses per_run: a definitive 4xx, nothing
+        // committed on the Harness.
+        assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
+                new AutomationDefinitionRequest(sessionId, "Goal",
+                        "0 2 * * *", "UTC", "Run it.", "per_run", null, null,
+                        null, true)))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("automation_mode_disabled");
+                });
+        // The refusal committed nothing, so the claim went back: the key
+        // is the caller's again, not a conflict against its own request.
+        assertThat(ledger.findCommand(tenant, key)).isEmpty();
+        var fixed = service.create(tenant, ACTOR, key,
+                new AutomationDefinitionRequest(sessionId, "Goal",
+                        "0 2 * * *", "UTC", "Run it.", null, null, null, null,
+                        true));
+        assertThat(fixed.replayed()).isFalse();
+        assertThat(fixed.body().id())
+                .isEqualTo(ManagedAutomationService.scheduleIdFor(tenant,
+                        key));
     }
 
     @Test

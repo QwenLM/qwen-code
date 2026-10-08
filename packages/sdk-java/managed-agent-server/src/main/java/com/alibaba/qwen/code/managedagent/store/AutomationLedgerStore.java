@@ -589,13 +589,35 @@ public class AutomationLedgerStore {
                 command.requestDigest(), command.scheduleId(), now) == 1;
     }
 
-    /** Fills in the answer of a claim made earlier; false when none is. */
+    /**
+     * Fills in the answer of a claim, guarded both ways: only the row's
+     * own request writes its answer, and only while it stays unanswered —
+     * a late re-driven mutation can neither steal another request's row
+     * nor overwrite a completed result.
+     */
     public boolean settleCommand(String tenantId, String idempotencyKey,
-            String resultJson) {
+            String requestDigest, String actorId, String resultJson) {
         return jdbc.update("UPDATE qwen_managed_automation_command"
                 + " SET result_json = ?"
-                + " WHERE tenant_id = ? AND idempotency_key = ?", resultJson,
-                tenantId, idempotencyKey) > 0;
+                + " WHERE tenant_id = ? AND idempotency_key = ?"
+                + " AND request_digest = ? AND actor_id = ?"
+                + " AND result_json = ''", resultJson, tenantId,
+                idempotencyKey, requestDigest, actorId) > 0;
+    }
+
+    /**
+     * Releases a claim whose operation the Harness definitively refused:
+     * a 4xx answer commits nothing, so the key goes back to its owner
+     * rather than burning it — guarded the same way, so only the claim's
+     * own unanswered row is ever removed.
+     */
+    public boolean releaseCommand(String tenantId, String idempotencyKey,
+            String requestDigest, String actorId) {
+        return jdbc.update("DELETE FROM qwen_managed_automation_command"
+                + " WHERE tenant_id = ? AND idempotency_key = ?"
+                + " AND request_digest = ? AND actor_id = ?"
+                + " AND result_json = ''", tenantId, idempotencyKey,
+                requestDigest, actorId) > 0;
     }
 
     // --- Session store reads ---

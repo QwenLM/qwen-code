@@ -163,7 +163,8 @@ public class ManagedAutomationService {
             }
         }
         Map<String, Object> answer = define(session, actorId, scheduleId,
-                definition, operationIdFor(tenantId, idempotencyKey));
+                definition, operationIdFor(tenantId, idempotencyKey),
+                idempotencyKey, requestDigest);
         PublicAutomation created = mirror(session, actorId, answer);
         remember(tenantId, actorId, idempotencyKey, requestDigest, scheduleId,
                 created);
@@ -198,8 +199,22 @@ public class ManagedAutomationService {
                     "session_id cannot change after creation.");
         }
         requireEnabled();
+        // Claim before the relay, as create does: the row binds this
+        // request before its side effect, and only this digest settles it.
+        boolean claimed = ledger.claimCommand(new CommandRow(tenantId,
+                idempotencyKey, actorId, requestDigest, automationId, ""),
+                clock.get());
+        if (!claimed) {
+            Optional<Result<PublicAutomation>> concurrent = replay(tenantId,
+                    actorId, idempotencyKey, requestDigest,
+                    PublicAutomation.class);
+            if (concurrent.isPresent()) {
+                return concurrent.get();
+            }
+        }
         Map<String, Object> answer = define(session, actorId, automationId,
-                definition, operationIdFor(tenantId, idempotencyKey));
+                definition, operationIdFor(tenantId, idempotencyKey),
+                idempotencyKey, requestDigest);
         PublicAutomation revised = mirror(session, actorId, answer);
         remember(tenantId, actorId, idempotencyKey, requestDigest,
                 automationId, revised);
@@ -222,6 +237,19 @@ public class ManagedAutomationService {
         SessionRecord session = requireCreatorSession(tenantId, actorId,
                 row.sessionId());
         requireEnabled();
+        // The same pre-relay claim create uses: a late or re-driven
+        // request meets the binding, and only the owner settles it.
+        boolean claimed = ledger.claimCommand(new CommandRow(tenantId,
+                idempotencyKey, actorId, requestDigest, automationId, ""),
+                clock.get());
+        if (!claimed) {
+            Optional<Result<PublicAutomation>> concurrent = replay(tenantId,
+                    actorId, idempotencyKey, requestDigest,
+                    PublicAutomation.class);
+            if (concurrent.isPresent()) {
+                return concurrent.get();
+            }
+        }
         if (!AutomationLedgerStore.STATE_LIVE.equals(row.state())) {
             // Retiring a retired definition is its own replay.
             PublicAutomation already = publicAutomation(row);
@@ -233,7 +261,8 @@ public class ManagedAutomationService {
         body.put("operationId", operationIdFor(tenantId, idempotencyKey));
         body.put("kind", "retire_schedule");
         body.put("scheduleId", automationId);
-        Map<String, Object> answer = relay(tenantId, session.sessionId(), body);
+        Map<String, Object> answer = relayClaimed(tenantId, idempotencyKey,
+                requestDigest, actorId, session, body);
         PublicAutomation retired = mirror(session, actorId, answer);
         ledger.retire(tenantId, automationId, clock.get());
         remember(tenantId, actorId, idempotencyKey, requestDigest,
@@ -377,13 +406,34 @@ public class ManagedAutomationService {
 
     private Map<String, Object> define(SessionRecord session, String actorId,
             String scheduleId, Map<String, Object> definition,
-            String operationId) {
+            String operationId, String idempotencyKey, String requestDigest) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("operationId", operationId);
         body.put("kind", "define_schedule");
         body.put("scheduleId", scheduleId);
         body.put("definition", definition);
-        return relay(session.tenantId(), session.sessionId(), body);
+        return relayClaimed(session.tenantId(), idempotencyKey, requestDigest,
+                actorId, session, body);
+    }
+
+    /**
+     * The relay of a claimed mutation. A definitive refusal committed
+     * nothing on the Harness — the funnel validates before it commits —
+     * so the claim goes back instead of burning the key on a request the
+     * caller may fix and re-send.
+     */
+    private Map<String, Object> relayClaimed(String tenantId,
+            String idempotencyKey, String requestDigest, String actorId,
+            SessionRecord session, Map<String, Object> body) {
+        try {
+            return relay(session.tenantId(), session.sessionId(), body);
+        } catch (ApiException refusal) {
+            if (refusal.getStatus().is4xxClientError()) {
+                ledger.releaseCommand(tenantId, idempotencyKey, requestDigest,
+                        actorId);
+            }
+            throw refusal;
+        }
     }
 
     /** The operation answer's replay mark, carried through to the caller. */
@@ -684,7 +734,8 @@ public class ManagedAutomationService {
             Object result) {
         try {
             String json = mapper.writeValueAsString(result);
-            if (!ledger.settleCommand(tenantId, idempotencyKey, json)) {
+            if (!ledger.settleCommand(tenantId, idempotencyKey, requestDigest,
+                    actorId, json)) {
                 ledger.recordCommand(new CommandRow(tenantId, idempotencyKey,
                         actorId, requestDigest, scheduleId, json),
                         clock.get());
