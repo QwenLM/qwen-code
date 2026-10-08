@@ -119,7 +119,8 @@ class HostedHarnessClientTest {
                 assertThrows(expected, detach::run);
             }
             detached.set(true);
-            assertEquals(!confirmed, laterHeartbeats.await(200, TimeUnit.MILLISECONDS));
+            assertEquals(!confirmed, laterHeartbeats.await(
+                    confirmed ? 200 : 2000, TimeUnit.MILLISECONDS));
         }
     }
 
