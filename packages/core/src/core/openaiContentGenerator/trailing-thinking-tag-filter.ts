@@ -109,6 +109,10 @@ export class TrailingThinkingTagFilter {
 
     const result = this.pending;
     this.pending = '';
+    // This release hands back a region the latch above never saw (the eligible
+    // branch only sees `prefix`), so a complete closer here has to arm it too:
+    // otherwise the same bytes keep or lose their final closer by framing.
+    this.literalContent ||= CLOSING_TAG_INLINE.test(this.emittedTail + result);
     this.hasVisibleText ||= /\S/.test(result);
     this.noteReleased(result);
     return result;

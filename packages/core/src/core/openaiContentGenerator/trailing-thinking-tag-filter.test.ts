@@ -72,6 +72,21 @@ describe('TrailingThinkingTagFilter', () => {
     );
   });
 
+  it('carries a literal marker across three or more parse calls', () => {
+    // The marker window is only consulted when the marker itself is split;
+    // a two-piece split still lands inside one window here.
+    const text = 'Use:\n<textarea>\n</thinking>';
+    expect(run(['Use:\n<text', 'area', '>\n</thinking>'])).toBe(text);
+    expect(run(byChar(text))).toBe(text);
+  });
+
+  it('releases an incomplete trailing fragment on a normal finish', () => {
+    // A gateway finishing a cut stream, or a model emitting a truncated
+    // closer: `</thi` is not a closer, so it is not a leak.
+    expect(run(['Answer.\n</thi'])).toBe('Answer.\n</thi');
+    expect(run(['Answer.\n</th', 'i'])).toBe('Answer.\n</thi');
+  });
+
   it('treats an earlier closing tag as literal content', () => {
     expect(run(['The closer is </thinking>.\nAgain:\n</thinking>'])).toBe(
       'The closer is </thinking>.\nAgain:\n</thinking>',
@@ -131,6 +146,7 @@ describe('TrailingThinkingTagFilter', () => {
     const inputs = [
       '\n</thinking>\n</thinking>',
       '</thinking>\nAnswer.\n</thinking>',
+      '\n</thinking>\n\nAnswer.\n</thinking>',
       '<!-- </thinking> -->\nTail.\n</thinking>',
       'First the closer:\n</thinking>\nthen again:\n</thinking>',
       'Answer.\n</thinking>',
