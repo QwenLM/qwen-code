@@ -8,8 +8,10 @@ import { describe, expect, it } from 'vitest';
 import { ToolNames } from '../../tools/tool-names.js';
 import {
   buildAgentToolConfig,
+  buildSessionAgentToolConfig,
   classifyAgentTool,
   createAgentToolInvocationGuard,
+  createSessionAgentToolInvocationGuard,
   THREAD_TOOL_NAMES,
   AGENT_TOOL_CLASSIFICATION,
 } from './capability.js';
@@ -73,6 +75,82 @@ describe('agent capability boundary', () => {
     expect(narrowed.executionAllowedTools).toEqual(narrowed.tools);
     expect(narrowed.disallowedTools).not.toContain('thread_post');
     expect(narrowed.disallowedTools).toContain(ToolNames.READ_FILE);
+  });
+
+  it('gives a session agent every tool but the thread tools unless a definition narrows it', () => {
+    expect(buildSessionAgentToolConfig()).toEqual({
+      tools: ['*'],
+      disallowedTools: [...THREAD_TOOL_NAMES],
+    });
+    expect(
+      buildSessionAgentToolConfig({
+        tools: [ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.THREAD_POST],
+        executionAllowedTools: [ToolNames.READ_FILE, ToolNames.SHELL],
+        disallowedTools: [ToolNames.SHELL, ToolNames.SHELL],
+      }),
+    ).toEqual({
+      tools: [ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.THREAD_POST],
+      executionAllowedTools: [ToolNames.READ_FILE],
+      disallowedTools: [ToolNames.SHELL, ...THREAD_TOOL_NAMES],
+    });
+  });
+
+  it('lets a session agent call writes unless its allowlist excludes them, never thread tools', async () => {
+    const base = {
+      callId: 'call-1',
+      signal: new AbortController().signal,
+      args: {},
+      cwd: process.cwd(),
+    };
+    await expect(
+      createSessionAgentToolInvocationGuard()({
+        ...base,
+        toolName: ToolNames.EDIT,
+      }),
+    ).resolves.toEqual({ allowed: true });
+    await expect(
+      createSessionAgentToolInvocationGuard()({
+        ...base,
+        toolName: ToolNames.THREAD_POST,
+      }),
+    ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+    await expect(
+      createSessionAgentToolInvocationGuard(
+        undefined,
+        new Set([ToolNames.READ_FILE]),
+      )({ ...base, toolName: ToolNames.EDIT }),
+    ).resolves.toEqual(expect.objectContaining({ allowed: false }));
+  });
+
+  it("denies a session agent its definition's disallowedTools", async () => {
+    const base = {
+      callId: 'call-1',
+      signal: new AbortController().signal,
+      args: {},
+      cwd: process.cwd(),
+    };
+    // A deny-only definition: every tool but write_file and one MCP server.
+    const config = buildSessionAgentToolConfig({
+      tools: ['*'],
+      disallowedTools: [ToolNames.WRITE_FILE, 'mcp__secrets'],
+    });
+    expect(config.executionAllowedTools).toBeUndefined();
+    const guard = createSessionAgentToolInvocationGuard(
+      undefined,
+      undefined,
+      config.disallowedTools,
+    );
+    for (const [toolName, allowed] of [
+      [ToolNames.WRITE_FILE, false],
+      ['mcp__secrets__read', false],
+      [ToolNames.READ_FILE, true],
+      [ToolNames.EDIT, true],
+      ['mcp__other__read', true],
+    ] as const) {
+      await expect(guard({ ...base, toolName })).resolves.toEqual(
+        expect.objectContaining({ allowed }),
+      );
+    }
   });
 
   it('enforces the boundary at invocation time', async () => {

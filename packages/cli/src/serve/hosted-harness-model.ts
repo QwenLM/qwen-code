@@ -53,8 +53,11 @@ export interface HostedHarnessModelResult {
 
 export interface HostedHarnessTextDeltas {
   delta(text: string): Promise<void>;
-  /** Whether the current model message already published durable text. */
-  published(): boolean;
+  /**
+   * Retract the current message's published deltas so a restarted attempt
+   * replaces them; a no-op when nothing is published (#13319).
+   */
+  retract(): Promise<void>;
 }
 
 export async function runHostedHarnessTextTurn(input: {
@@ -74,6 +77,7 @@ export async function runHostedHarnessTextTurn(input: {
     Partial<
       Pick<HostedWorkspaceToolTurn, 'resumeHookResults' | 'hookStopReason'>
     >;
+  workspaceContext?: { read(): string | undefined };
   textDeltas?: HostedHarnessTextDeltas;
 }): Promise<HostedHarnessModelResult> {
   const settings = loadSettings(input.cwd, {
@@ -282,6 +286,10 @@ export async function runHostedHarnessTextTurn(input: {
     if (registry.getFunctionDeclarations().length !== 0) {
       throw new Error('Hosted Harness cannot advertise local tools.');
     }
+    // Safe mode stays on; the Session's Workspace instructions arrive through
+    // the context slot instead of the Harness host's filesystem. The loop below
+    // injects them before the first request too.
+    let injectedContext: string | undefined;
     const historyRecords = input.resumeFromToolResults
       ? input.history.slice(
           0,
@@ -337,6 +345,14 @@ export async function runHostedHarnessTextTurn(input: {
       (await input.hooks?.wasStopBlocked(input.promptId)) ?? false;
     for (let round = 0; round < 16; round++) {
       input.signal.throwIfAborted();
+      const contextAvailable = input.workspaceContext?.read();
+      if (contextAvailable && contextAvailable !== injectedContext) {
+        // setUserMemory alone never reaches the wire: the system instruction
+        // was assembled during initialize() and is cached on the chat.
+        config.setUserMemory(contextAvailable);
+        await client.refreshSystemInstruction();
+        injectedContext = contextAvailable;
+      }
       if (input.hooks?.hasPendingOperations)
         throw new HostedHookRecoveryRequiredError();
       if (input.toolTurn?.hookStopReason) {
@@ -371,6 +387,10 @@ export async function runHostedHarnessTextTurn(input: {
               round === 0 && !input.resumeFromToolResults
                 ? SendMessageType.UserQuery
                 : SendMessageType.ToolResult,
+            // Published deltas cannot be un-glued after the fact: a cut that
+            // already delivered content replays the request, and the RETRY
+            // handling below retracts the orphaned prefix (#13319).
+            retractDeliveredOutputOnRetry: true,
           },
         )) {
           if (event.type === LlmEventType.Content) {
@@ -382,19 +402,14 @@ export async function runHostedHarnessTextTurn(input: {
           } else if (event.type === LlmEventType.Retry) {
             calls = [];
             if (!event.isContinuation) {
-              if (textDeltas?.published()) {
-                throw new Error(
-                  'Hosted Harness cannot retract a published model attempt.',
-                );
-              }
+              // A restarted attempt replaces what the failed one published:
+              // retract the orphaned prefix from the durable feed before the
+              // replay's own deltas arrive (#13319).
+              await textDeltas?.retract();
               text = '';
             }
           } else if (event.type === LlmEventType.ModelFallback) {
-            if (textDeltas?.published()) {
-              throw new Error(
-                'Hosted Harness cannot retract a published model attempt.',
-              );
-            }
+            await textDeltas?.retract();
             calls = [];
             text = '';
           } else if (

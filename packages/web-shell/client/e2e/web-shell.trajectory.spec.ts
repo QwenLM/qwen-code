@@ -880,6 +880,12 @@ test.describe('trajectory panel', () => {
         const before = await target.boundingBox();
         const gridBefore = await grid.boundingBox();
         const point = await centreOf(target);
+        // WheelEvent.clientX uses integer CSS pixels in Chromium. Track the
+        // domain point at that coordinate, not the span's fractional centre.
+        point.x = Math.floor(point.x);
+        const domain = page.getByTestId('trajectory-domain');
+        const domainBefore = (await domain.boundingBox())!;
+        const anchor = (point.x - domainBefore.x) / domainBefore.width;
 
         await page.mouse.move(point.x, point.y);
         // Three turns of 600px: exp(-2.7), about 15× the length per pixel.
@@ -893,6 +899,11 @@ test.describe('trajectory panel', () => {
         // The span that was under the pointer is still under it.
         expect(after.x).toBeLessThanOrEqual(point.x);
         expect(after.x + after.width).toBeGreaterThanOrEqual(point.x);
+        const domainAfter = (await domain.boundingBox())!;
+        // The same time coordinate stays under the actual pointer.
+        expect(
+          Math.abs(domainAfter.x + anchor * domainAfter.width - point.x),
+        ).toBeLessThanOrEqual(2);
         await expectValueAtTrackEnd(page);
         // Zooming happens inside the strip: nothing below it moves.
         expect(

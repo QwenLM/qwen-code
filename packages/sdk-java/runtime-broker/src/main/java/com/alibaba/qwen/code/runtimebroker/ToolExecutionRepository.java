@@ -41,6 +41,14 @@ public interface ToolExecutionRepository {
     ToolExecutionRecord requestCancel(String executionCallId,
             long expectedVersion);
 
+    /** Evidence settlement of a PREPARED execution that was never
+     * dispatched: the background-process row's physical end arrives
+     * through the owner, never through a dispatch claim. Requires the
+     * immutable identity, the current version and state PREPARED; returns
+     * null when already terminal or the guard mismatches. */
+    ToolExecutionRecord settlePrepared(ToolExecutionRecord expected,
+            Map<String, Object> result, Instant settlementTime);
+
     /** Settles an UNKNOWN execution through recovery reconciliation. Requires
      * the immutable identity, the current version and state UNKNOWN, but no
      * dispatch claim: a takeover-fenced record's claim is expired by
@@ -60,10 +68,43 @@ public interface ToolExecutionRepository {
     List<ToolExecutionRecord> findUnsettled(RuntimeSessionRecord session,
             String afterExecutionCallId, int limit);
 
+    /** Non-terminal background-process ledger rows belonging to this exact
+     * Session and binding generation, ordered by execution ID hash — the
+     * same ownership fence as {@link #findUnsettled}, but found by dispatch
+     * mode and non-terminal state instead of a dispatch state, because the
+     * background {@code :process} row stays PREPARED between admission and
+     * the process's physical end. At most 100 rows per page, and a short
+     * page means the scan is exhausted; the exclusive cursor is an
+     * execution ID, including one already settled. */
+    List<ToolExecutionRecord> findBackgroundProcesses(RuntimeSessionRecord session,
+            String afterExecutionCallId, int limit);
+
+    /**
+     * At most 100 executions in any state for this exact binding generation,
+     * across all Sessions, ordered by execution ID hash. The exclusive cursor
+     * is an execution ID and need not remain in any particular state.
+     * A null cursor starts the scan; limit must be in [1, 100]. Cursor and
+     * returned execution IDs must be well-formed text for unambiguous hashing.
+     * This inventory is not a snapshot or proof that physical writers stopped.
+     * Custom repositories must implement it before supporting retirement.
+     */
+    default List<ToolExecutionRecord> findByBinding(String bindingId,
+            long runtimeGeneration, String afterExecutionCallId, int limit) {
+        throw new UnsupportedOperationException(
+                "Binding execution inventory is unavailable");
+    }
+
     boolean hasActiveByRuntimeSession(String runtimeSessionId);
 
     boolean hasActiveByRuntimeSession(String bindingId, long runtimeGeneration,
             String runtimeSessionId);
+
+    /** Like {@link #hasActiveByRuntimeSession(String, long, String)}, but
+     * skipping the named executions: the release drain asks whether anything
+     * but the Session's own background processes still runs. */
+    boolean hasActiveByRuntimeSession(String bindingId, long runtimeGeneration,
+            String runtimeSessionId,
+            java.util.Set<String> excludingExecutionCallIds);
 
     /** Any nonterminal execution still points at this binding generation.
      * UNKNOWN counts as active; terminal uncertainty is not physical stop proof. */

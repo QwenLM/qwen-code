@@ -367,6 +367,7 @@ export class ManagedContextInstallations {
   async install(
     body: unknown,
     verify: (binding: ManagedContextBinding) => Promise<boolean>,
+    canRecord: () => boolean = () => true,
   ): Promise<ManagedContextOutcome<ManagedContextReceipt>> {
     const request = this.#read(body);
     if ('status' in request) {
@@ -376,17 +377,28 @@ export class ManagedContextInstallations {
     if (earlier) {
       return earlier;
     }
+    if (!canRecord()) return CONTEXT_UNAVAILABLE;
     const verified = await verify(request.binding);
     // Another installation may have been recorded during the verification.
     return (
       this.#match(request) ??
-      (verified ? this.#record(request) : CONTEXT_UNAVAILABLE)
+      (verified && canRecord() ? this.#record(request) : CONTEXT_UNAVAILABLE)
     );
   }
 
   /** The binding installed for a Session, if any. */
   installed(sessionId: string): ManagedContextBinding | undefined {
     return this.#sessions.get(sessionId)?.binding;
+  }
+
+  /**
+   * Every installed Session's id and binding. The file-tool boundary check
+   * reads it to tell "inside a sibling Session" from "inside the mount".
+   */
+  bindings(): ReadonlyArray<readonly [string, ManagedContextBinding]> {
+    return [...this.#sessions.entries()].map(
+      ([sessionId, request]) => [sessionId, request.binding] as const,
+    );
   }
 
   /** Steps 1 to 3: the shape, the digest and the Workspace part. */

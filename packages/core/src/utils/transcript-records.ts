@@ -149,8 +149,11 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'goal_state',
   'goal_runtime',
   'goal_turn_end',
+  'code_mode_tool_result',
   'turn_result',
   'user_text_elements',
+  'agent_mention',
+  'agent_message',
   ...ARTIFACT_RECORD_SUBTYPES,
   ...MANAGED_SESSION_RECORD_SUBTYPES,
 ]);

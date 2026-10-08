@@ -813,6 +813,33 @@ describe('auto-memory topic scanning', () => {
     );
   });
 
+  it('drops a selected memory that changes while its body is read', async () => {
+    const filePath = getAutoMemoryFilePath(projectRoot, 'context.md');
+    const content =
+      '---\ntype: project\nname: Context\ndescription: Project context\n---\nbody';
+    await fs.writeFile(filePath, content, 'utf-8');
+    const [doc] = await scanAutoMemoryTopicDocuments(projectRoot);
+    const readFile = fs.readFile;
+    const read = vi
+      .spyOn(fs, 'readFile')
+      .mockImplementationOnce(async (...args) => {
+        await fs.writeFile(
+          filePath,
+          content.replace('body', 'updated'),
+          'utf-8',
+        );
+        const changedAt = new Date(doc!.mtimeMs + 1_000);
+        await fs.utimes(filePath, changedAt, changedAt);
+        return readFile(...args);
+      });
+
+    try {
+      await expect(rereadAutoMemoryDocument(doc!)).resolves.toBeNull();
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   it('rejects a memory replaced by an outside symlink after scanning', async () => {
     const filePath = getAutoMemoryFilePath(
       projectRoot,

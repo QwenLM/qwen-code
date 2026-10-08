@@ -1,3 +1,4 @@
+import type { components } from './generated/managed-agent-api';
 import type { ManagedToolResultReader } from './managed-tool-result-types';
 
 export type ManagedAgentSessionPhase =
@@ -68,6 +69,12 @@ export interface ManagedAgentSessionEvent {
   sessionId: string;
   turnId: string;
   data?: unknown;
+  /**
+   * Projected from a durable snapshot item rather than a raw event. The
+   * server can retract its items (reconciliation), after which these
+   * projections must not survive a resync.
+   */
+  assembledFromItem?: boolean;
 }
 
 export interface ManagedAgentSessionTranscript {
@@ -102,6 +109,7 @@ export interface ManagedAgentPendingAction {
   policyRevision: string;
   expiresAt: number;
   options: Array<{ id: string; label: string }>;
+  inputPreview?: components['schemas']['WebShellActionInputPreview'];
 }
 
 export interface ManagedAgentProvider {
@@ -178,7 +186,16 @@ export interface ManagedAgentProvider {
   ): Promise<void>;
   subscribeEvents(
     sessionId: string,
-    options: ManagedAgentRequestOptions & { lastEventId?: number },
+    options: ManagedAgentRequestOptions & {
+      lastEventId?: number;
+      /**
+       * Called once the stream connection has been (re-)established. An
+       * established stream can stay silent indefinitely — heartbeats are
+       * not events — so this is the only liveness signal that does not
+       * depend on stream activity.
+       */
+      onEstablished?(): void;
+    },
   ): AsyncIterable<ManagedAgentSessionEvent>;
 }
 

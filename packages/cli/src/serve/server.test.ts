@@ -752,6 +752,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_display_name',
   'workspace_qualified_rest_core',
   'extension_management_v2',
+  'extension_list_details',
   'extension_state',
   'extension_git_credentials',
   'extension_local_path_install',
@@ -786,7 +787,11 @@ const EXPECTED_REGISTERED_FEATURES = [
   // stage1 order.
   ...EXPECTED_STAGE1_FEATURES.flatMap((feature) => {
     if (feature === 'session_create') {
-      return [feature, 'hosted_harness_private_v1'];
+      return [
+        feature,
+        'hosted_harness_private_v1',
+        'managed_session_journal_delta_v1',
+      ];
     }
     if (feature === 'workspace_skills') {
       return [feature, 'workspace_skills_config_runtime'];
@@ -841,6 +846,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_display_name' &&
       f !== 'workspace_qualified_rest_core' &&
       f !== 'extension_management_v2' &&
+      f !== 'extension_list_details' &&
       f !== 'extension_state' &&
       f !== 'extension_git_credentials' &&
       f !== 'extension_local_path_install' &&
@@ -860,6 +866,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_voice',
   'workspace_voice_transcription',
   'workspace_trust',
+  'workspace_trust_grant',
   'workspace_trust_hot_reload',
   'workspace_init',
   'workspace_github_setup',
@@ -894,6 +901,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'channel_reload',
   'channel_control',
   'channel_management',
+  'channel_delete_config_loss_convergence',
   'workspace_channel_observed_contacts',
   'multi_workspace_sessions',
   'multi_workspace_session_rewind',
@@ -912,6 +920,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_qualified_voice',
   'workspace_qualified_memory',
   'extension_management_v2',
+  'extension_list_details',
   'extension_state',
   'extension_git_credentials',
   'extension_local_path_install',
@@ -3492,7 +3501,10 @@ describe('createServeApp', () => {
       // predicate must be false, otherwise the tag would fail the
       // "default-off" property baseline tags get for free.
       for (const [feature, predicate] of CONDITIONAL_SERVE_FEATURES) {
-        if (feature === 'hosted_harness_private_v1') {
+        if (
+          feature === 'hosted_harness_private_v1' ||
+          feature === 'managed_session_journal_delta_v1'
+        ) {
           expect(predicate({ hostedHarness: true })).toBe(true);
           expect(predicate({ hostedHarness: false })).toBe(false);
           expect(predicate({})).toBe(false);
@@ -3769,7 +3781,10 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'channel_management') {
+        if (
+          feature === 'channel_management' ||
+          feature === 'channel_delete_config_loss_convergence'
+        ) {
           expect(predicate({ channelManagementAvailable: true })).toBe(true);
           expect(predicate({ channelManagementAvailable: false })).toBe(false);
           expect(predicate({})).toBe(false);
@@ -3996,7 +4011,10 @@ describe('createServeApp', () => {
           );
           continue;
         }
-        if (feature === 'workspace_trust_hot_reload') {
+        if (
+          feature === 'workspace_trust_hot_reload' ||
+          feature === 'workspace_trust_grant'
+        ) {
           expect(predicate({ workspaceTrustHotReloadAvailable: true })).toBe(
             true,
           );
@@ -4549,6 +4567,7 @@ describe('createServeApp', () => {
     it.each([
       '/plugins',
       '/channels',
+      '/live',
       '/scheduled-tasks',
       '/goals',
       '/settings',
@@ -5318,6 +5337,7 @@ describe('createServeApp', () => {
         'agent_collaboration_v1',
       );
       expect(app.locals['stopWorkspaceAgentRecovery']).toBeUndefined();
+      expect(app.locals['stopSessionAgentOrchestrators']).toBeUndefined();
 
       const primary = capabilities.body.workspaces.find(
         (workspace: { primary?: boolean }) => workspace.primary,
@@ -5394,6 +5414,11 @@ describe('createServeApp', () => {
       } finally {
         (
           app?.locals['stopWorkspaceAgentRecovery'] as (() => void) | undefined
+        )?.();
+        (
+          app?.locals['stopSessionAgentOrchestrators'] as
+            | (() => void)
+            | undefined
         )?.();
         restoreEnv('QWEN_HOME', previousQwenHome);
         resetHomeEnvBootstrapForTesting();
@@ -44933,7 +44958,12 @@ describe('Live conversation runtime lifecycle', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send(action.body);
         expect(rejected.status).toBe(400);
-        expect(rejected.body.code).toBe('unsupported_action');
+        expect(rejected.body).toEqual({
+          error: 'This action is not supported in a standalone session.',
+          code: 'unsupported_action',
+          sessionId,
+          route: `POST /session/:id/${action.route}`,
+        });
         expect(action.callCount()).toBe(callsBefore);
       }
 
