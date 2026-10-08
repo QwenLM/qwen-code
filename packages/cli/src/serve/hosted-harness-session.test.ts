@@ -37,6 +37,8 @@ import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-co
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { ManagedSessionStoreHttpError } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
+import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import { parseToolResultManifestBytes } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type {
@@ -61,6 +63,7 @@ import {
   attributeShellReceipts,
   registerHostedHarnessSessionRoutes,
   settleCancelledHookTurn,
+  settleCrashedWakeTurnAftermath,
 } from './hosted-harness-session.js';
 import {
   HostedHookRecoveryRequiredError,
@@ -1960,6 +1963,721 @@ describe('Hosted Harness no-tool session', () => {
       await managed.close().catch(() => undefined);
     }
   }
+
+  // A prewrite whose automation wake turn crashed inside its Runtime call:
+  // exactly what a Harness kill mid-execution leaves durable — the
+  // committed input, the turn's user record, the dispatch's tool.intent,
+  // and an await_runtime checkpoint pinning this turn.
+  async function prewriteAutomationParkedWakeSession(): Promise<string> {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const journalStore = new LocalJsonlManagedSessionJournalStore({
+      runtimeBaseDir: state.root,
+      sessionId: SESSION_ID,
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+    });
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: state.root,
+      sessionKey: key,
+    });
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore,
+      resourceStore: resources,
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              sessionId: SESSION_ID,
+              toolProfile: 'hosted-workspace-shell/1',
+              hookCatalog: hookPin,
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from(JSON.stringify({ cwd: state.root })),
+        ),
+        createdBy: 'hosted-harness',
+      },
+    });
+    try {
+      // The baseline goes down first: with any continuation content but
+      // no checkpoint the authority restores blocked (missing_checkpoint),
+      // so the turn's before_model lands before the automation records.
+      const handle = createManagedHarnessHandle(managed);
+      await handle.ensureRunnable();
+      const automations = new HostedAutomationSession(
+        {
+          authority: managed.authority,
+          resources: managed.resources,
+          sink: managed.sink,
+        },
+        key,
+      );
+      await automations.define({
+        scheduleId: AUTOMATION_ID,
+        operationId: randomUUID(),
+        definition: automationDefinition,
+      });
+      const fired = await automations.fire({
+        scheduleId: AUTOMATION_ID,
+        definitionRevision: 1,
+        occurrenceKey: AUTOMATION_SLOT,
+        trigger: 'scheduled',
+        firedAt: Date.parse('2026-03-08T07:00:05Z'),
+      });
+      const inputId = fired.inputId;
+      // The attempt the owner died inside: prompt, intent, checkpoint.
+      await managed.sink.write({
+        uuid: randomUUID(),
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: state.root,
+        version: 'hosted-harness/1',
+        daemonPromptId: inputId,
+        message: { role: 'user', parts: [{ text: 'queued' }] },
+      } as never);
+      const argsRef = await resources.publish(
+        'managed-tool-input',
+        Buffer.from(
+          JSON.stringify({
+            harnessSessionId: SESSION_ID,
+            runtimeSessionId: 'rt-wake-1',
+          }),
+        ),
+      );
+      const toolDefinitionRef = await resources.publish(
+        'managed-tool-definition',
+        Buffer.from('{}'),
+      );
+      await managed.authority.appendExecutionEvent(
+        {
+          operation: 'recordToolIntent',
+          commandId: `intent:${inputId}`,
+          sessionKey: key,
+          contentDigest: 'b'.repeat(64),
+        },
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: `intent:${inputId}`,
+          sessionKey: key,
+          kind: 'tool.intent',
+          occurredAt: Date.now(),
+          subject: {
+            type: 'activation',
+            scopeId: managed.activation.activationId,
+            ...managed.activation,
+          },
+          payload: {
+            executionCallId: 'ex-wake-1',
+            batchId: 'batch-wake-1',
+            ordinal: 0,
+            toolDefinitionRef,
+            argsRef,
+            outcomeSource: 'runtime',
+          },
+        }),
+        { class: 'harness', activation: managed.activation },
+      );
+      await handle.commitAwaitRuntimeBatch(
+        [
+          {
+            functionCallId: 'fc-wake-1',
+            toolName: 'read_file',
+            executionCallId: 'ex-wake-1',
+            invocationBindingId: 'bind-wake-1',
+            capabilityVersion: 'cap-1',
+            policyVersion: 'pol-1',
+            mediaVersion: null,
+            modelMessageId: 'msg-wake-1',
+            partIndex: 0,
+            ordinal: 0,
+            inputDigest: 'c'.repeat(64),
+            progressCursor: null,
+            attemptId: 'att-wake-1',
+            routeRef: await resources.publish(
+              'managed-route',
+              Buffer.from('{"model":"qwen3-coder-plus"}'),
+            ),
+          },
+        ],
+        { turnId: inputId, promptId: inputId },
+      );
+      return inputId;
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  }
+
+  // The Broker answers each status poll once in the order given: TypeError
+  // entries throw, then {@link mockRepairBroker.unlatch} lets the rest
+  // play out, so a wedge and its recovery share one fixture run.
+  function mockRepairBroker() {
+    mockBrokerBroker();
+    const repair = {
+      script: [] as Array<{ state: 'running' } | { state: 'settled' }>,
+      latched: true,
+      unlatch: () => {
+        repair.latched = false;
+      },
+    };
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+      () => {
+        if (repair.latched) {
+          return Promise.reject(
+            new TypeError('Runtime Broker status lost to a 503'),
+          );
+        }
+        const next = repair.script.shift() ?? { state: 'settled' as const };
+        return Promise.resolve(next as never);
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    return repair;
+  }
+
+  it('keeps a turn that ended unanswered out of the next wake turn history', async () => {
+    await prewriteAutomationSession();
+    const server = await app();
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    state.model.mockImplementationOnce(() => {
+      throw new Error('model exploded');
+    });
+    // The first run fails from its turn's own error.
+    await vi.waitFor(
+      async () => {
+        const replayed = await authorize(
+          supertest(server).post(
+            `/session/${SESSION_ID}/automations/operations`,
+          ),
+        ).send({ operationId: randomUUID(), ...fireBody() });
+        expect(replayed.status).toBe(202);
+        expect(replayed.body.run.state).toBe('failed');
+        expect(replayed.body.run.execution).toBe('settled');
+      },
+      { timeout: 10_000 },
+    );
+    const exploded = automationRunId(AUTOMATION_ID, AUTOMATION_SLOT);
+    // The next occurrence's wake turn never receives the exploded turn's
+    // prompt: what ended without an answer is over.
+    state.model.mockClear();
+    const slot = 'schedule:2026-03-08T11:00:00Z';
+    const fired = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
+    ).send({ operationId: randomUUID(), ...fireBody(1, slot) });
+    expect(fired.status).toBe(202);
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalled(), {
+      timeout: 10_000,
+    });
+    const modelInput = state.model.mock.calls.at(-1)![0] as {
+      promptId?: string;
+      history?: Array<{ type?: string; daemonPromptId?: string }>;
+    };
+    expect(modelInput.promptId).toBe(
+      `${automationRunId(AUTOMATION_ID, slot)}:input`,
+    );
+    expect(
+      (modelInput.history ?? []).some(
+        (entry) =>
+          entry.type === 'user' && entry.daemonPromptId === `${exploded}:input`,
+      ),
+    ).toBe(false);
+    // Let the second run reach its own settle before the teardown.
+    await vi.waitFor(
+      async () => {
+        const replayed = await authorize(
+          supertest(server).post(
+            `/session/${SESSION_ID}/automations/operations`,
+          ),
+        ).send({ operationId: randomUUID(), ...fireBody(1, slot) });
+        expect(replayed.status).toBe(202);
+        expect(replayed.body.run.state).toBe('settled');
+      },
+      { timeout: 15_000 },
+    );
+    await vi.waitFor(
+      async () => {
+        const closed = await headers(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        );
+        expect(closed.status).toBe(204);
+      },
+      { timeout: 15_000 },
+    );
+  }, 45_000);
+
+  it('retries the crashed input consume against a transient transcript conflict', async () => {
+    const inputId = await prewriteAutomationCrashedTurnSession();
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      }),
+    });
+    try {
+      // One moved-journal conflict on the first consume attempt, then the
+      // writer owns the transcript again: the attempt is a retry, never a
+      // drop, or every later reload re-classifies the same crash.
+      const originalWrite = ManagedSessionRecordSink.prototype.write;
+      let thrown = 0;
+      vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+        function (this: ManagedSessionRecordSink, record) {
+          if (
+            record.type === 'system' &&
+            record.subtype === 'turn_result' &&
+            thrown === 0
+          ) {
+            thrown += 1;
+            throw new SessionTranscriptChangedError();
+          }
+          return originalWrite.call(this, record);
+        },
+      );
+      const session = {
+        managed,
+        automations: new HostedAutomationSession(
+          {
+            authority: managed.authority,
+            resources: managed.resources,
+            sink: managed.sink,
+          },
+          key,
+        ),
+      } as never;
+      const aftermath = await settleCrashedWakeTurnAftermath({
+        session,
+        sessionId: SESSION_ID,
+        cwd: state.root,
+        brokerOptions: undefined,
+        turnId: inputId,
+      });
+      expect(aftermath).toBe('settled');
+      expect(thrown).toBe(1);
+      const automations = new HostedAutomationSession(
+        {
+          authority: managed.authority,
+          resources: managed.resources,
+          sink: managed.sink,
+        },
+        key,
+      );
+      const run = automations
+        .runs()
+        .find((each) => each.occurrenceKey === AUTOMATION_SLOT);
+      expect(run?.run.state).toBe('failed');
+      expect(run?.run.execution).toBe('outcome_unknown');
+      const journal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        key,
+      );
+      expect(
+        journal.events.some(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === inputId,
+        ),
+      ).toBe(true);
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  });
+
+  it('settles the parked runtime after a broker fault, releasing its lease and unblocking', async () => {
+    const inputId = await prewriteAutomationParkedWakeSession();
+    const repair = mockRepairBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    const slot = 'schedule:2026-03-08T11:00:00Z';
+    // The classification's own block is the verified starting point, not
+    // a race against it.
+    await vi.waitFor(
+      async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: 15_000 },
+    );
+    // While the Broker keeps faulting, the crash's aftermath stays
+    // pending: the Session holds its block rather than letting a fire run
+    // against an unsettled park.
+    await vi.waitFor(
+      async () => {
+        const refused = await authorize(
+          supertest(server).post(
+            `/session/${SESSION_ID}/automations/operations`,
+          ),
+        ).send({ operationId: randomUUID(), ...fireBody(1, slot) });
+        expect(refused.status).toBe(409);
+        expect(refused.body.code).toBe('hosted_session_blocked');
+      },
+      { timeout: 15_000 },
+    );
+    repair.unlatch();
+    // The pump's blocked cycle retries the same settle: the parked
+    // execution is cancelled durably, the wake session's lease goes back,
+    // the input is consumed, and the Session takes the next fire in
+    // process.
+    repair.script.push({ state: 'running' }, { state: 'settled' });
+    await vi.waitFor(
+      async () => {
+        const accepted = await authorize(
+          supertest(server).post(
+            `/session/${SESSION_ID}/automations/operations`,
+          ),
+        ).send({ operationId: randomUUID(), ...fireBody(1, slot) });
+        expect(accepted.status).toBe(202);
+      },
+      { timeout: 15_000 },
+    );
+    expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalled();
+    await vi.waitFor(
+      async () => {
+        const replayed = await authorize(
+          supertest(server).post(
+            `/session/${SESSION_ID}/automations/operations`,
+          ),
+        ).send({ operationId: randomUUID(), ...fireBody(1, slot) });
+        expect(replayed.status).toBe(202);
+        expect(replayed.body.run.state).toBe('settled');
+      },
+      { timeout: 15_000 },
+    );
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const journal = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      key,
+    );
+    expect(
+      journal.events.some(
+        (event) =>
+          event.kind === 'turn.settled' && event.payload['turnId'] === inputId,
+      ),
+    ).toBe(true);
+    await vi.waitFor(
+      async () => {
+        const replayed = await authorize(
+          supertest(server).post(
+            `/session/${SESSION_ID}/automations/operations`,
+          ),
+        ).send({ operationId: randomUUID(), ...fireBody() });
+        expect(replayed.status).toBe(202);
+        expect(replayed.body.run.state).toBe('failed');
+        expect(replayed.body.run.execution).toBe('outcome_unknown');
+      },
+      { timeout: 15_000 },
+    );
+    const zombieRun = automationRunId(AUTOMATION_ID, slot);
+    expect(
+      journal.events
+        .filter(
+          (event) =>
+            event.kind === 'domain.committed' &&
+            String(event.payload['operationId']).startsWith(`${zombieRun}:`),
+        )
+        .map((event) => event.payload['operationId']),
+    ).toEqual([`${zombieRun}:1`, `${zombieRun}:2`, `${zombieRun}:3`]);
+    await vi.waitFor(
+      async () => {
+        const closed = await headers(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        );
+        expect(closed.status).toBe(204);
+      },
+      { timeout: 15_000 },
+    );
+    // The parked call's cancelled tool_result is durably paired with its
+    // call, and the checkpoint left await_runtime for good.
+    const reopened = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      }),
+    });
+    try {
+      const projected = await reopened.sink.project();
+      const cancelled = projected.filter(
+        (entry) =>
+          entry.type === 'tool_result' &&
+          entry.daemonPromptId === inputId &&
+          (entry.message?.parts ?? []).some(
+            (part) =>
+              part.functionResponse?.response?.['executionStatus'] ===
+              'cancelled',
+          ),
+      );
+      expect(cancelled).toHaveLength(1);
+      const checkpoint =
+        await createManagedHarnessHandle(reopened).ensureRunnable();
+      expect(checkpoint.continuation.phase).not.toBe('await_runtime');
+    } finally {
+      await reopened.close().catch(() => undefined);
+    }
+  }, 45_000);
+
+  it('repairs through the reconcile route while blocked, and reports once consumed', async () => {
+    await prewriteAutomationParkedWakeSession();
+    mockBrokerBroker();
+    // A settled execution stops nothing; only the consume hangs, until
+    // the test lets go: the aftermath is provably in flight when the
+    // first reconcile answers.
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'settled',
+    } as never);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    const originalWrite = ManagedSessionRecordSink.prototype.write;
+    let releaseConsume!: () => void;
+    let consumeEntered!: () => void;
+    const consuming = new Promise<void>((resolve) => {
+      releaseConsume = resolve;
+    });
+    const entered = new Promise<void>((resolve) => {
+      consumeEntered = resolve;
+    });
+    vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+      function (this: ManagedSessionRecordSink, record) {
+        if (record.type === 'system' && record.subtype === 'turn_result') {
+          consumeEntered();
+          return consuming.then(() => originalWrite.call(this, record));
+        }
+        return originalWrite.call(this, record);
+      },
+    );
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    const reconcile = () =>
+      authorize(
+        supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
+      ).send({
+        operationId: randomUUID(),
+        kind: 'reconcile_run',
+        scheduleId: AUTOMATION_ID,
+        occurrenceKey: AUTOMATION_SLOT,
+      });
+    await entered;
+    // The pump's own aftermath is mid-flight: the route reports instead
+    // of competing for the checkpoint.
+    const during = await reconcile();
+    expect(during.status).toBe(202);
+    expect(during.body.repaired).toBe(false);
+    releaseConsume();
+    await vi.waitFor(
+      async () => {
+        const after = await reconcile();
+        expect(after.status).toBe(202);
+        expect(after.body.run.state).toBe('failed');
+        expect(after.body.run.execution).toBe('outcome_unknown');
+      },
+      { timeout: 15_000 },
+    );
+    await vi.waitFor(
+      async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 15_000 },
+    );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  }, 45_000);
+
+  it('treats a reconcile over a consumed crash as a settled-run replay', async () => {
+    await prewriteAutomationSession();
+    const server = await app();
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    const reconcile = () =>
+      authorize(
+        supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
+      ).send({
+        operationId: randomUUID(),
+        kind: 'reconcile_run',
+        scheduleId: AUTOMATION_ID,
+        occurrenceKey: AUTOMATION_SLOT,
+      });
+    state.model.mockImplementationOnce(() => {
+      throw new Error('model exploded');
+    });
+    // The aftermath — here performed by the pump's own cycle, the same
+    // one the route drives when it is first — answers through the run.
+    await vi.waitFor(
+      async () => {
+        const replayed = await authorize(
+          supertest(server).post(
+            `/session/${SESSION_ID}/automations/operations`,
+          ),
+        ).send({ operationId: randomUUID(), ...fireBody() });
+        expect(replayed.status).toBe(202);
+        expect(replayed.body.run.state).toBe('failed');
+        expect(replayed.body.run.execution).toBe('settled');
+      },
+      { timeout: 15_000 },
+    );
+    // Nothing of the crash is pending once settled and consumed: the
+    // reconcile is a report of the settled run, not another repair.
+    const replay = await reconcile();
+    expect(replay.status).toBe(202);
+    expect(replay.body.repaired).toBe(false);
+    expect(replay.body.run.state).toBe('failed');
+    expect(replay.body.run.execution).toBe('settled');
+    const journal = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+    );
+    const crashed = automationRunId(AUTOMATION_ID, AUTOMATION_SLOT);
+    expect(
+      journal.events
+        .filter(
+          (event) =>
+            event.kind === 'domain.committed' &&
+            String(event.payload['operationId']).startsWith(`${crashed}:`),
+        )
+        .map((event) => event.payload['operationId']),
+    ).toEqual([`${crashed}:1`, `${crashed}:2`, `${crashed}:3`]);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  }, 45_000);
+
+  it('refuses a prompt while a wake park is still unsettled, retriably', async () => {
+    await prewriteAutomationParkedWakeSession();
+    const repair = mockRepairBroker();
+    // The first projection the wake classification reads after the load
+    // hangs until the test lets go: only the prompt route's own
+    // checkpoint probe may answer this refusal, never the pump's later
+    // classification (which would also refuse, from a shadowing cause).
+    const originalProject = ManagedSessionRecordSink.prototype.project;
+    let afterLoad = false;
+    let hanging = false;
+    let releaseClassify!: () => void;
+    const classifyGate = new Promise<void>((resolve) => {
+      releaseClassify = resolve;
+    });
+    vi.spyOn(ManagedSessionRecordSink.prototype, 'project').mockImplementation(
+      function (this: ManagedSessionRecordSink) {
+        if (afterLoad && !hanging) {
+          hanging = true;
+          return classifyGate.then(() => originalProject.call(this));
+        }
+        return originalProject.call(this);
+      },
+    );
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    afterLoad = true;
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    const prompt = [{ type: 'text', text: 'hello' }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    const refused = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    ).send({
+      prompt,
+      promptId: randomUUID(),
+      payloadDigest,
+    });
+    // The coordinator's pre-admission budget retries exactly this code.
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    // Nothing was admitted: the checkpoint probe, not the admission path,
+    // held the line.
+    const journal = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+    );
+    expect(
+      journal.events.some(
+        (event) =>
+          event.kind === 'input.accepted' &&
+          event.payload['source'] === 'hosted-harness',
+      ),
+    ).toBe(false);
+    releaseClassify();
+    repair.unlatch();
+    await vi.waitFor(
+      async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 15_000 },
+    );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  }, 45_000);
 
   it('reopens over a queued automation input as idle and runs it', async () => {
     // The Harness died between the dispatch and the turn: the input sits

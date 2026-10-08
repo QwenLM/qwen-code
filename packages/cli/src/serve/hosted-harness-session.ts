@@ -123,6 +123,7 @@ import {
 import { HostedTextDeltaStream } from './hosted-text-deltas.js';
 import {
   isDurableBlockedVerdict,
+  originalRuntimeBroker,
   recoverHostedRuntimeTurn,
   settleParkedTurnCancelled,
   stopParkedRuntimeExecutions,
@@ -240,6 +241,12 @@ interface HostedSession {
   /** Fetched Workspace instructions; undefined until the first fetch. */
   workspaceContext?: string;
   monitorWake?: HostedMonitorWakeScheduler;
+  /** The shared aftermath of a wake turn that died inside its attempt:
+   * settles its run, its parked Runtime executions and the consume write,
+   * retry-safe across passes. Wired where the wake pump is installed, so
+   * the pump's recovery branch, its blocked retry and the reconcile route
+   * all run the same one — serialized per Session behind its own guard. */
+  wakeAftermath?: (turnId: string) => Promise<'settled' | 'pending'>;
   /** A recovery load acquired the Runtime Session for this promptId. On
    * the cancellation path, only the terminal success route and session
    * teardown hand it back; retry-inviting refusals deliberately leave it
@@ -408,6 +415,190 @@ function acceptedInputSequence(
       sequence = event.sequence;
   }
   return sequence;
+}
+
+/**
+ * The prompts whose turns settled without an answer (`error` or
+ * `cancelled`). Turn results are `turn.settled` journal events, not
+ * projected messages, so they never reach any record-based exclusion in
+ * the model runner: the history is filtered against the journal here —
+ * what ended without an answer is over, and its instruction never merges
+ * into a later turn the way a crashing text turn's naked user record
+ * otherwise would (the no-toolProfile path's older design already did
+ * this; tool-profile Sessions now follow it).
+ */
+function unansweredPrompts(session: HostedSession): Set<string> {
+  const authority = session.managed.authority;
+  const prompts = new Set<string>();
+  for (const event of authority.eventsInSequenceRange(
+    1,
+    authority.committedSequence,
+  )) {
+    if (
+      event.kind === 'turn.settled' &&
+      (event.payload['outcome'] === 'error' ||
+        event.payload['outcome'] === 'cancelled')
+    ) {
+      const turnId = event.payload['turnId'];
+      if (typeof turnId === 'string') prompts.add(turnId);
+    }
+  }
+  return prompts;
+}
+
+/** The oldest pending wake input (monitor or automation), as the pump's
+ * own read order sees it. */
+function firstPendingWakeInput(session: HostedSession) {
+  const authority = session.managed.authority;
+  return pendingSessionInputs(
+    authority.eventsInSequenceRange(1, authority.committedSequence),
+  ).find(
+    (input) =>
+      input.source === 'monitor' || input.source === AUTOMATION_INPUT_SOURCE,
+  );
+}
+
+/**
+ * Whether a still-pending wake input holds the Session's checkpoint
+ * parked at `await_runtime` with in-progress Runtime executions: the
+ * crash residue that makes every later turn die at "not a model-start
+ * phase" until its aftermath runs. A queued input can never match (its
+ * turnId only reaches the checkpoint once an attempt runs), so the read
+ * alone is proof enough.
+ */
+async function hasPendingWakePark(session: HostedSession): Promise<boolean> {
+  const authority = session.managed.authority;
+  const pending = new Set(
+    pendingSessionInputs(
+      authority.eventsInSequenceRange(1, authority.committedSequence),
+    )
+      .filter(
+        (input) =>
+          input.source === 'monitor' ||
+          input.source === AUTOMATION_INPUT_SOURCE,
+      )
+      .map((input) => input.turnId),
+  );
+  if (pending.size === 0) return false;
+  const authorization = await authority.harnessRunAuthorization();
+  if (authorization.status !== 'runnable') return false;
+  const parked = authorization.checkpoint.identity.turnId;
+  if (parked === null || !pending.has(parked)) {
+    return false;
+  }
+  return (authorization.checkpoint.tools?.items ?? []).some(
+    (item) => item.state === 'in_progress' && item.outcomeSource === 'runtime',
+  );
+}
+
+/**
+ * The full aftermath of a wake turn that died inside its attempt, keyed
+ * on the journal and the checkpoint — never on which settle ran before it:
+ * its run fails with the execution unknown, a checkpoint parked at
+ * `await_runtime` stops its Runtime executions and commits their results
+ * cancelled, the wake session hands the Workspace lease back, and only
+ * then the input's own `turn_result` consumes it, so a reload can never
+ * re-classify the same crash. Retry-safe: every step reads the durable
+ * state first, so a pass whose predecessor died halfway does only what
+ * remains, and a surplus lease release is the idempotent direction — the
+ * Broker answers an already-released session as released, while a skipped
+ * release keeps the Workspace mount for every Session on it. 'pending'
+ * means something could not be proved settled: the caller keeps what
+ * blocks later turns rather than letting one run against the park.
+ */
+export async function settleCrashedWakeTurnAftermath(params: {
+  session: HostedSession;
+  sessionId: string;
+  cwd: string;
+  brokerOptions: HostedWorkspaceBrokerOptions | undefined;
+  turnId: string;
+}): Promise<'settled' | 'pending'> {
+  const { session, sessionId, cwd, brokerOptions, turnId } = params;
+  try {
+    // Only the aftermath of a turn that demonstrably died inside an
+    // attempt: a queued input owes no recovery, and settling it now
+    // would kill work that never ran.
+    if (!wakeHasPriorAttempt(await session.managed.sink.project(), turnId)) {
+      return 'pending';
+    }
+    await session.automations?.settleRunFailedUnknown(turnId);
+    if (brokerOptions !== undefined) {
+      const authorization =
+        await session.managed.authority.harnessRunAuthorization();
+      if (
+        authorization.status === 'runnable' &&
+        authorization.checkpoint.identity.turnId === turnId
+      ) {
+        const items = authorization.checkpoint.tools?.items ?? [];
+        const runtimeItems = items.filter(
+          (item) => item.outcomeSource === 'runtime',
+        );
+        let broker: HostedWorkspaceBroker | undefined;
+        if (runtimeItems.some((item) => item.state === 'in_progress')) {
+          broker = await stopParkedRuntimeExecutions({
+            session: session.managed,
+            promptId: turnId,
+            brokerOptions,
+          });
+          await settleParkedTurnCancelled({
+            session: session.managed,
+            sessionId,
+            cwd,
+            promptId: turnId,
+          });
+        }
+        // Release on every pass: the journal cannot say whether an
+        // earlier pass's release landed after the checkpoint moved on.
+        if (runtimeItems.length > 0) {
+          broker ??= await originalRuntimeBroker(
+            session.managed,
+            turnId,
+            items,
+            brokerOptions,
+          );
+          await broker.release();
+        }
+      }
+    }
+    // Consume the crashed input: until its turnId settles, every reload
+    // re-classifies it as recovery and re-blocks the Session over the
+    // same crash (the journal-filter rule in the history builders then
+    // keeps its prompt out of later turns). A concurrent route claim can
+    // move the journal mid-write: the transcript-changed failure of one
+    // attempt is a retry, not a drop, or the re-block loop this consumes
+    // would come back.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        await session.managed.sink.write({
+          uuid: randomUUID(),
+          parentUuid: null,
+          sessionId,
+          timestamp: new Date().toISOString(),
+          type: 'system',
+          cwd,
+          version: 'hosted-harness/1',
+          subtype: 'turn_result',
+          systemPayload: {
+            promptId: turnId,
+            state: 'error',
+            stopReason: 'error',
+            endedAt: Date.now(),
+          },
+        });
+        break;
+      } catch (cause) {
+        if (!(cause instanceof SessionTranscriptChangedError)) throw cause;
+        if (attempt === 2) throw cause;
+        await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+      }
+    }
+    return 'settled';
+  } catch (cause) {
+    writeStderrLineSafe(
+      `qwen serve: Hosted wake turn ${turnId} aftermath could not be settled: ${String(cause)}`,
+    );
+    return 'pending';
+  }
 }
 
 // H3: a monitor notification input is never a parked Turn — the wake pump
@@ -1662,13 +1853,23 @@ async function executeHostedTurn(
             .filter((event) => event.kind === 'turn.settled')
             .map((event) => event.payload['turnId']),
         );
-        const history = session.toolProfile
-          ? projected.filter(
-              (entry) =>
-                settledPrompts.has(entry.daemonPromptId) ||
-                (resumeFromToolResults && entry.daemonPromptId === promptId),
-            )
-          : projected;
+        const unanswered = unansweredPrompts(session);
+        const history = (
+          session.toolProfile
+            ? projected.filter(
+                (entry) =>
+                  settledPrompts.has(entry.daemonPromptId) ||
+                  (resumeFromToolResults && entry.daemonPromptId === promptId),
+              )
+            : projected
+        ).filter(
+          (entry) =>
+            !(
+              entry.type === 'user' &&
+              entry.daemonPromptId !== undefined &&
+              unanswered.has(entry.daemonPromptId)
+            ),
+        );
         let parentUuid = projected.at(-1)?.uuid ?? null;
         if (!resumeFromToolResults) {
           const user = record(session, sessionId, 'user', parentUuid, {
@@ -2409,6 +2610,25 @@ export function registerHostedHarnessSessionRoutes(
           session.managed.authority.currentActivation?.phase !== 'active' ||
           (session.mcp?.hasPendingOperations() ?? false) ||
           (session.hooks?.hasPendingOperations ?? false);
+        // The one aftermath of a wake turn that died inside its attempt,
+        // serialized per Session: the pump's recovery branch, its blocked
+        // retry cycle and the reconcile route may all want it at once.
+        let wakeAftermathInFlight = false;
+        const wakeAftermath = (session.wakeAftermath = async (turnId) => {
+          if (wakeAftermathInFlight) return 'pending';
+          wakeAftermathInFlight = true;
+          try {
+            return await settleCrashedWakeTurnAftermath({
+              session,
+              sessionId,
+              cwd,
+              brokerOptions,
+              turnId,
+            });
+          } finally {
+            wakeAftermathInFlight = false;
+          }
+        });
         session.monitorWake = new HostedMonitorWakeScheduler({
           next: async () => {
             // The whole committed prefix, not a bounded page: a notification
@@ -2486,124 +2706,39 @@ export function registerHostedHarnessSessionRoutes(
                   await settleAutomation(turn.turnId);
                 throw cause;
               }
-              if (turn.source === AUTOMATION_INPUT_SOURCE) {
-                if (outcome === 'recovery') {
-                  // The turn stopped in a way the journal proves neither
-                  // way (a Harness crash inside it, or a prior attempt the
-                  // pump must not re-drive): the run fails, its execution
-                  // outcome unknown — or its definition never fires again.
-                  try {
-                    const settled =
-                      await session.automations?.settleRunFailedUnknown(
-                        turn.turnId,
-                      );
-                    if (settled !== undefined) {
-                      // A crash inside a Runtime call parked the turn at
-                      // await_runtime: stop its executions, settle them
-                      // cancelled, advance the checkpoint out of
-                      // await_runtime, and give the wake session's lease
-                      // back — as a cancelled takeover does. Without this
-                      // every later turn refuses ("await_runtime is not a
-                      // model-start phase") and the Workspace mount stays
-                      // held for every Session on it. The Session unblocks
-                      // only once that residue is provably gone.
-                      let runtimePending = false;
-                      if (brokerOptions) {
-                        try {
-                          const authorization =
-                            await session.managed.authority.harnessRunAuthorization();
-                          runtimePending =
-                            authorization.status === 'runnable' &&
-                            authorization.checkpoint.identity.turnId ===
-                              turn.turnId &&
-                            (authorization.checkpoint.tools?.items ?? []).some(
-                              (item) =>
-                                item.state === 'in_progress' &&
-                                item.outcomeSource === 'runtime',
-                            );
-                          if (
-                            authorization.status === 'runnable' &&
-                            runtimePending
-                          ) {
-                            const broker = await stopParkedRuntimeExecutions({
-                              session: session.managed,
-                              promptId: turn.turnId,
-                              brokerOptions,
-                            });
-                            await settleParkedTurnCancelled({
-                              session: session.managed,
-                              sessionId,
-                              cwd: session.cwd,
-                              promptId: turn.turnId,
-                            });
-                            await broker.release();
-                            runtimePending = false;
-                          }
-                        } catch (cause) {
-                          // The park could not be proved settled: keep the
-                          // block rather than let a fire run against it.
-                          runtimePending = true;
-                          writeStderrLineSafe(
-                            `qwen serve: Hosted automation run of turn ${turn.turnId} could not recover the parked runtime: ${String(cause)}`,
-                          );
-                        }
-                      }
-                      // Consume the crashed input too: until its turnId
-                      // settles, every reload re-classifies it as recovery
-                      // and re-blocks the Session over the same crash (the
-                      // history-assembly rule in the model runner then keeps
-                      // its prompt out of later turns). A concurrent route
-                      // claim can move the journal mid-write: the
-                      // transcript-changed failure of one attempt is a
-                      // retry, not a drop, or the re-block loop this
-                      // consumes would come back.
-                      for (let attempt = 0; attempt < 3; attempt += 1) {
-                        try {
-                          await session.managed.sink.write({
-                            uuid: randomUUID(),
-                            parentUuid: null,
-                            sessionId,
-                            timestamp: new Date().toISOString(),
-                            type: 'system',
-                            cwd: session.cwd,
-                            version: 'hosted-harness/1',
-                            subtype: 'turn_result',
-                            systemPayload: {
-                              promptId: turn.turnId,
-                              state: 'error',
-                              stopReason: 'error',
-                              endedAt: Date.now(),
-                            },
-                          });
-                          break;
-                        } catch (cause) {
-                          if (!(cause instanceof SessionTranscriptChangedError))
-                            throw cause;
-                          if (attempt === 2) throw cause;
-                          await new Promise((resolve) =>
-                            setTimeout(resolve, 50 * (attempt + 1)),
-                          );
-                        }
-                      }
-                      // Nothing of this crash is left to settle: the pump
-                      // continues with the next input at once rather than
-                      // waiting on the reload only a restart would bring.
-                      if (!runtimePending) {
-                        session.blocked = false;
-                      }
-                    }
-                  } catch (cause) {
-                    writeStderrLineSafe(
-                      `qwen serve: Hosted automation run of turn ${turn.turnId} could not be settled failed/unknown: ${String(cause)}`,
-                    );
-                  }
-                } else if (outcome === 'settled') {
-                  await settleAutomation(turn.turnId);
+              if (outcome === 'recovery') {
+                // The aftermath is keyed on the journal and the
+                // checkpoint, not on which settle ran: an earlier pass
+                // (or an earlier load) may have finished any prefix of
+                // it. A settled aftermath lifts the block in-process, so
+                // the pump continues with the next input at once; a
+                // pending one keeps block and input in place, and the
+                // blocked pump cycle below — or the next load, whose
+                // classification runs the same branch — retries it.
+                const aftermath = await wakeAftermath(turn.turnId);
+                if (aftermath === 'settled') {
+                  session.blocked = false;
                 }
+              }
+              if (
+                turn.source === AUTOMATION_INPUT_SOURCE &&
+                outcome === 'settled'
+              ) {
+                await settleAutomation(turn.turnId);
               }
               return outcome;
             };
           })(),
+          recoverBlocked: async () => {
+            // A block with no crash residue (an MCP/Hook wait mid-
+            // renewal) no-ops at the aftermath gates; anything else
+            // already carries its own retry.
+            if (!session.blocked || wakeBusy()) return;
+            const first = firstPendingWakeInput(session);
+            if (first === undefined) return;
+            const aftermath = await wakeAftermath(first.turnId);
+            if (aftermath === 'settled') session.blocked = false;
+          },
           failed: (cause) => {
             session.blocked = true;
             writeStderrLineSafe(
@@ -3246,7 +3381,7 @@ export function registerHostedHarnessSessionRoutes(
     }
   });
 
-  app.post('/session/:id/prompt', (req, res) => {
+  app.post('/session/:id/prompt', async (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (session.mcpClosing) return error(res, 409, 'hosted_session_closing');
@@ -3393,6 +3528,27 @@ export function registerHostedHarnessSessionRoutes(
     // (R11-1); a session-scope refusal must never mint that proof.
     if (unsettledInputs(session).size !== 0)
       return error(res, 409, 'hosted_turn_recovery_required');
+    // A wake turn a crash left parked at await_runtime — not yet settled
+    // by the pump behind this load — kills an admitted prompt at "not a
+    // model-start phase", post-admission, where the coordinator cannot
+    // retry it. Refuse here, pre-admission and with the same retriable
+    // code the blocked arm answers: the Turn's retry budget outlasts the
+    // pump's recovery cycle (~its retry cadence). Queued wake inputs
+    // never match the checkpoint's turnId, so queuing is untouched.
+    if (brokerOptions !== undefined) {
+      try {
+        if (await hasPendingWakePark(session)) {
+          return error(res, 409, 'hosted_turn_recovery_required');
+        }
+      } catch (cause) {
+        // The probe could not prove the checkpoint free: refuse retriably
+        // rather than admit against a park it read nothing about.
+        writeStderrLineSafe(
+          `qwen serve: Hosted prompt of session ${req.params['id']} could not probe a wake park: ${String(cause)}`,
+        );
+        return error(res, 409, 'hosted_turn_recovery_required');
+      }
+    }
     const abort = new AbortController();
     const deadline =
       deadlineMs === undefined ? null : Date.now() + (deadlineMs as number);
@@ -4086,10 +4242,16 @@ export function registerHostedHarnessSessionRoutes(
           throw new Error('Recovered Runtime turn has no journaled tool call.');
         }
         const parkedRound = new Set(turnRecords.slice(lastCallIndex + 1));
+        const unanswered = unansweredPrompts(session);
         const history = projected.filter(
           (entry) =>
-            settledPrompts.has(entry.daemonPromptId) ||
-            (entry.daemonPromptId === promptId && !parkedRound.has(entry)),
+            (settledPrompts.has(entry.daemonPromptId) ||
+              (entry.daemonPromptId === promptId && !parkedRound.has(entry))) &&
+            !(
+              entry.type === 'user' &&
+              entry.daemonPromptId !== undefined &&
+              unanswered.has(entry.daemonPromptId)
+            ),
         );
         const resumeParts = turnRecords
           .slice(lastCallIndex + 1)
@@ -5022,6 +5184,68 @@ export function registerHostedHarnessSessionRoutes(
             run: runSummary(fired.run),
             inputId: fired.inputId,
             replayed: fired.replayed,
+          };
+          break;
+        }
+        case 'reconcile_run': {
+          const occurrenceKey = body?.['occurrenceKey'];
+          if (
+            typeof occurrenceKey !== 'string' ||
+            occurrenceKey.length < 1 ||
+            occurrenceKey.length > 512
+          ) {
+            return error(res, 400, 'invalid_automation_operation');
+          }
+          // The control plane's answer to a run whose Harness died mid-
+          // turn with nothing left to load the Session (an overlap `skip`
+          // definition skips every later slot): this route's own load is
+          // what lets the crash be classified at all, so it must not sit
+          // behind the blocked guard — it is how the block ends. The
+          // aftermath settles the crashed run, the parked executions and
+          // the lease, then consumes the input; a live turn owns the
+          // pump slot instead, and the answer reports rather than
+          // touches it.
+          let repaired = false;
+          if (
+            session.wakeAftermath !== undefined &&
+            session.active === undefined &&
+            !session.mcpBusy &&
+            !session.mcpRecovering &&
+            !session.hooksBusy &&
+            !session.mcpClosing
+          ) {
+            // Claim the turn slot for the repair, exactly like a turn
+            // start: the pump reads it as busy instead of beginning the
+            // pending input mid-aftermath, which is the one way this
+            // route could settle a run out from under a live turn.
+            session.active = {
+              promptId: `wake-reconcile:${operationId}`,
+              digest: '',
+              abort: new AbortController(),
+            };
+            try {
+              const first = firstPendingWakeInput(session);
+              if (first !== undefined) {
+                const aftermath = await session.wakeAftermath(first.turnId);
+                if (aftermath === 'settled') {
+                  session.blocked = false;
+                  repaired = true;
+                }
+              }
+            } finally {
+              session.active = undefined;
+            }
+          }
+          const reconciled = automations
+            .runs()
+            .find(
+              (each) =>
+                each.automationRunId ===
+                automationRunId(scheduleId, occurrenceKey as string),
+            );
+          result = {
+            run: reconciled === undefined ? null : runSummary(reconciled),
+            repaired,
           };
           break;
         }

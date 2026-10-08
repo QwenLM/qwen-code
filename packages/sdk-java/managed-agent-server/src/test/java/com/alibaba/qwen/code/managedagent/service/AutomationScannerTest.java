@@ -100,7 +100,9 @@ class AutomationScannerTest {
         // the current method's fake's fires.
         for (String table : List.of("qwen_managed_automation_occurrence",
                 "qwen_managed_automation_schedule",
-                "qwen_managed_automation_command")) {
+                "qwen_managed_automation_command",
+                "qwen_managed_session_extension_record",
+                "qwen_managed_session_resource")) {
             jdbc.update("DELETE FROM " + table
                     + " WHERE tenant_id LIKE 'tenant-automation-%'");
         }
@@ -1207,6 +1209,102 @@ class AutomationScannerTest {
         assertThat(fake.firedOccurrences()).containsExactly(
                 "schedule:2026-06-01T10:01:00Z",
                 "schedule:2026-06-01T10:02:00Z");
+    }
+
+    @Test
+    void aWedgedRunIsReconciledAndTheSlotThatAskedFires() {
+        PublicAutomation automation = define("* * * * *", "skip", "none", null,
+                true);
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        // The run is live and its wake turn healthy: the refusal stands,
+        // and the reconcile the decision asked reports that, untouched.
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+                tenant, automation.id(), "schedule:2026-06-01T10:02:00Z")
+                .orElseThrow();
+        assertThat(skipped.outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+        assertThat(skipped.reason()).isEqualTo(AutomationScanner.REASON_OVERLAP);
+        assertThat(fake.operations.stream()
+                .filter(operation -> "reconcile_run"
+                        .equals(operation.get("kind")))
+                .map(operation -> String.valueOf(
+                        operation.get("occurrenceKey"))))
+                .containsExactly("schedule:2026-06-01T10:01:00Z");
+        // The Harness died inside that wake turn, and nothing else ever
+        // loads the Session under overlap skip: the next decision's
+        // reconcile settles the crashed run — and the very slot that
+        // asked fires instead of being recorded skipped forever.
+        fake.crashedRuns.add(AutomationLedgerStore.automationRunId(
+                automation.id(), "schedule:2026-06-01T10:01:00Z"));
+        clock.set(T0 + 3 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(fake.firedOccurrences()).containsExactly(
+                "schedule:2026-06-01T10:01:00Z",
+                "schedule:2026-06-01T10:03:00Z");
+    }
+
+    @Test
+    void anUnansweredReconcileKeepsTheRefusalAndTheNextSlotRetries() {
+        PublicAutomation automation = define("* * * * *", "skip", "none", null,
+                true);
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        // The reconcile's own answer is lost: the refusal it stood behind
+        // is the accurate record — the decision is skipped, never deferred
+        // into unknown nor fired on a guess.
+        fake.failNextReconcile = AutomationHarnessFake.refusal(503,
+                "automation_operation_failed");
+        fake.crashedRuns.add(AutomationLedgerStore.automationRunId(
+                automation.id(), "schedule:2026-06-01T10:01:00Z"));
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+                tenant, automation.id(), "schedule:2026-06-01T10:02:00Z")
+                .orElseThrow();
+        assertThat(skipped.outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+        assertThat(skipped.reason()).isEqualTo(AutomationScanner.REASON_OVERLAP);
+        // The re-drive repairs the run the fault swallowed, and clears the
+        // slot that asked.
+        fake.crashedRuns.add(AutomationLedgerStore.automationRunId(
+                automation.id(), "schedule:2026-06-01T10:01:00Z"));
+        clock.set(T0 + 3 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(fake.firedOccurrences()).containsExactly(
+                "schedule:2026-06-01T10:01:00Z",
+                "schedule:2026-06-01T10:03:00Z");
+    }
+
+    @Test
+    void anOpenTurnBlocksFiresWithoutAskingForAReconcile() {
+        PublicAutomation automation = define("* * * * *", "skip", "none", null,
+                true);
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        // The overlap a waiting Turn makes is its own lane with its own
+        // takeover: no reconcile goes out for it.
+        jdbc.update("INSERT INTO managed_agent_turn (tenant_id, session_id,"
+                        + " turn_id, prompt_id, input_json, payload_digest,"
+                        + " status, created_at, updated_at, completed_at)"
+                        + " VALUES (?, ?, 'turn-open-reconcile',"
+                        + " 'prompt-open-reconcile', '[]', 'digest', 'RUNNING',"
+                        + " 1000, 1000, NULL)",
+                tenant, sessionId);
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+                tenant, automation.id(), "schedule:2026-06-01T10:02:00Z")
+                .orElseThrow();
+        assertThat(skipped.outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+        assertThat(skipped.reason()).isEqualTo(AutomationScanner.REASON_OVERLAP);
+        assertThat(fake.operations.stream()).noneMatch(
+                operation -> "reconcile_run".equals(operation.get("kind")));
+        jdbc.update("DELETE FROM managed_agent_turn WHERE tenant_id = ?"
+                + " AND turn_id = 'turn-open-reconcile'", tenant);
     }
 
     @Test

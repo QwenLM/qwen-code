@@ -70,6 +70,17 @@ export interface HostedMonitorWakeDeps {
   ): Promise<'settled' | 'busy' | 'recovery'>;
   /** A failure the pump itself cannot recover: the owner decides. */
   failed(cause: unknown): void;
+  /**
+   * A Session blocked on a crash whose settle could not finish — its
+   * parked Runtime executions, the wake session's lease, the consume
+   * write — re-arms forever with no other kick source. While present,
+   * each blocked pump pass lets the owner retry that settle once, before
+   * re-arming: the state is re-read after it, so a settle that landed
+   * lets this very pass run the inputs it freed. Must not throw; a
+   * failure leaves the state blocked and the retry falls to the next
+   * pass (or to a load, which runs the same settle from the journal).
+   */
+  recoverBlocked?(): Promise<void>;
 }
 
 export class HostedMonitorWakeScheduler {
@@ -98,7 +109,16 @@ export class HostedMonitorWakeScheduler {
     }
     this.inFlight = true;
     void this.pump()
-      .catch((cause: unknown) => this.deps.failed(cause))
+      .catch((cause: unknown) => {
+        this.deps.failed(cause);
+        // A pass that dies while its owner is blocked — a crash residue's
+        // settle meeting a transient fault — must not take the reminders
+        // with it: the blocked cycle re-arms itself, or only a reload
+        // would ever run the same settle again.
+        if (!this.closed && this.deps.state() === 'blocked') {
+          this.armRetry();
+        }
+      })
       .finally(() => {
         this.inFlight = false;
         if (this.pendingKick && !this.closed) {
@@ -124,10 +144,19 @@ export class HostedMonitorWakeScheduler {
       const state = this.deps.state();
       // A transiently blocked Session — an MCP or Hook operation in
       // flight, or an activation that has not come up yet — has no other
-      // kick source, so the reminder arms its own retry here too.
+      // kick source, so the reminder arms its own retry here too. A
+      // crash-blocked one gets its settle retried first: when it lands,
+      // this same pass runs what it freed instead of waiting a cycle.
       if (state === 'blocked') {
-        this.armRetry();
-        return;
+        if (this.deps.recoverBlocked === undefined) {
+          this.armRetry();
+          return;
+        }
+        await this.deps.recoverBlocked();
+        if (this.deps.state() === 'blocked') {
+          this.armRetry();
+          return;
+        }
       }
       const next = await this.deps.next();
       if (next === undefined) return;
@@ -142,12 +171,18 @@ export class HostedMonitorWakeScheduler {
       // runTurn must have consumed the input: re-reading the journal is
       // the only honest check, and consuming is what lets the next
       // notification's turn begin. When the owner's own settle path went
-      // blocked meanwhile, that accurate blocked is where this pump stops;
-      // anything else that leaves the input in place is a programming
-      // error and is thrown.
+      // blocked meanwhile — a crash residue its consume write could not
+      // finish — that accurate blocked is where this pump stops: it keeps
+      // its own reminder armed, so the settle is retried instead of
+      // waiting for a reload or another caller to kick. Anything else
+      // that leaves the input in place is a programming error and is
+      // thrown.
       const again = await this.deps.next();
       if (again?.turnId === next.turnId) {
-        if (this.deps.state() === 'blocked') return;
+        if (this.deps.state() === 'blocked') {
+          this.armRetry();
+          return;
+        }
         throw new Error(
           `Monitor wake turn ${next.turnId} did not consume its input.`,
         );

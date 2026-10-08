@@ -513,6 +513,23 @@ public class AutomationLedgerStore {
         return count == null ? 0 : count;
     }
 
+    /**
+     * The fired occurrences whose run keeps the overlap admission closed:
+     * the same set {@link #countActive} counts behind {@code firing}
+     * claims, named with their run ids so the scanner can ask the Harness
+     * to reconcile the ones its wake turn died on (oldest first, bounded,
+     * so one decision's reconcile fan-out stays small).
+     */
+    public List<OccurrenceView> findBlockingRuns(String tenantId,
+            String scheduleId, int limit) {
+        return jdbc.query(OCCURRENCE_WITH_RUN
+                        + " AND o.outcome = ? AND (r.task_state IS NULL"
+                        + " OR r.task_state NOT IN"
+                        + " ('completed', 'failed', 'cancelled'))"
+                        + " ORDER BY o.created_at, o.occurrence_key LIMIT ?",
+                OCCURRENCE_VIEW, tenantId, scheduleId, OUTCOME_FIRED, limit);
+    }
+
     /** Whether a public Turn of the Session has not ended yet. */
     public boolean hasOpenTurn(String tenantId, String sessionId) {
         return !jdbc.queryForList("SELECT 1 FROM managed_agent_turn"

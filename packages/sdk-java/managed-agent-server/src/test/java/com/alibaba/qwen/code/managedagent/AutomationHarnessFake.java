@@ -6,23 +6,26 @@ import java.lang.reflect.Constructor;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
- * H6b: a Hosted Harness automation funnel in memory, answering the three
+ * H6b: a Hosted Harness automation funnel in memory, answering the
  * automation operations the way {@code hosted-automation-session.ts} does —
  * append-only definition revisions with a content digest, an unchanged
  * definition answered as a replay, a retired chain refusing everything, a
- * run derived from its occurrence and answered again on a second fire, and
- * a stale definition revision refused. A mutation re-relayed under the
- * same operationId is answered with its originally committed revision:
- * the journal holds the operation, so a control plane retry after a lost
- * answer never rewrites a newer one. Refusals are the daemon's own HTTP
- * exception with the code the hosted route answers, so the control plane's
- * translation is exercised as in production.
+ * run derived from its occurrence and answered again on a second fire, a
+ * reconcile that repairs a crashed wake turn's run and reports the rest
+ * untouched, and a stale definition revision refused. A mutation re-relayed
+ * under the same operationId is answered with its originally committed
+ * revision: the journal holds the operation, so a control plane retry after
+ * a lost answer never rewrites a newer one. Refusals are the daemon's own
+ * HTTP exception with the code the hosted route answers, so the control
+ * plane's translation is exercised as in production.
  */
 public final class AutomationHarnessFake {
     public final List<Map<String, Object>> operations = new ArrayList<>();
@@ -36,6 +39,14 @@ public final class AutomationHarnessFake {
     public volatile RuntimeException failNextFire;
     /** A test seam: the next fire_run commits its run, then loses its answer. */
     public volatile RuntimeException failAfterNextFireCommit;
+    /**
+     * A test seam: runs of this set answer a reconcile as repaired (their
+     * wake turn crashed and the aftermath settles them `failed`), all
+     * others report untouched as the route does over a live turn.
+     */
+    public final Set<String> crashedRuns = new HashSet<>();
+    /** A test seam: thrown once by the next reconcile_run, then cleared. */
+    public volatile RuntimeException failNextReconcile;
     /**
      * A test seam: the next define_schedule commits (its operation, too)
      * and then has its answer lost once.
@@ -219,6 +230,30 @@ public final class AutomationHarnessFake {
                 result.put("inputId", AutomationLedgerStore
                         .automationInputId(runId));
                 result.put("replayed", false);
+            }
+            case "reconcile_run" -> {
+                RuntimeException failure = failNextReconcile;
+                if (failure != null) {
+                    failNextReconcile = null;
+                    throw failure;
+                }
+                String occurrenceKey = String.valueOf(body.get("occurrenceKey"));
+                String runId = AutomationLedgerStore.automationRunId(scheduleId,
+                        occurrenceKey);
+                Map<String, Object> run = runs.get(sessionId + "|" + runId);
+                boolean repaired = false;
+                if (run != null && crashedRuns.remove(runId)) {
+                    // The crashed wake turn's aftermath, in the route's own
+                    // words: the run settles failed with its execution
+                    // unknown, its parked executions cancel, its lease
+                    // comes back.
+                    run.put("state", "failed");
+                    run.put("execution", "outcome_unknown");
+                    repaired = true;
+                }
+                result.put("run", run == null ? null
+                        : new LinkedHashMap<>(run));
+                result.put("repaired", repaired);
             }
             default -> throw refusal(400, "invalid_automation_operation");
         }

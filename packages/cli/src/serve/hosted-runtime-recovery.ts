@@ -137,7 +137,7 @@ function isTransientStoreBlock(
   );
 }
 
-async function originalRuntimeBroker(
+export async function originalRuntimeBroker(
   session: ManagedSession,
   promptId: string,
   items: readonly HarnessToolItem[],

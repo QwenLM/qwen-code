@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.OccurrenceRow;
+import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.OccurrenceView;
 import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.ScheduleRow;
 import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.StaleMirror;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -46,6 +47,8 @@ public class AutomationScanner {
     private static final int MIRROR_LIMIT = 200;
     /** Re-drives of one claim before its answer is recorded unknown. */
     static final int MAX_FIRE_ATTEMPTS = 64;
+    /** Blocking runs one decision asks the Harness to reconcile at most. */
+    static final int MAX_RECONCILE_RUNS = 5;
     public static final String TRIGGER_SCHEDULED = "scheduled";
     public static final String TRIGGER_MANUAL = "manual";
     public static final String TRIGGER_CATCH_UP = "catch_up";
@@ -307,6 +310,25 @@ public class AutomationScanner {
             return false;
         }
         String refusal = admissionRefusal(row);
+        if ((REASON_OVERLAP.equals(refusal) || REASON_COUNT_LIMIT
+                .equals(refusal)) && !store.hasOpenTurn(row.tenantId(),
+                row.sessionId())) {
+            // A run stuck with its Harness dead holds this refusal — and
+            // its wake turn's parked lease on the Workspace — for as long
+            // as no fire or Turn loads the Session: under overlap `skip`
+            // nothing ever will. Ask the Harness to reconcile the blocking
+            // runs first: a live one answers unchanged and the refusal
+            // stands; a crashed one settles and frees the slot chain and
+            // the lease. The mirror's correction rides the event stream
+            // the reconcile just re-armed, so this decision prices the
+            // count off the answers.
+            Set<String> resolved = reconcileBlockingRuns(row);
+            if (!resolved.isEmpty()) {
+                refusal = countRefusal(row,
+                        store.countActive(row.tenantId(), row.scheduleId())
+                                - resolved.size());
+            }
+        }
         if (refusal != null) {
             record(row, fence, key, slot, trigger,
                     AutomationLedgerStore.OUTCOME_SKIPPED, refusal, now);
@@ -326,6 +348,57 @@ public class AutomationScanner {
         }
     }
 
+    /**
+     * The blocking occurrences of a count-based refusal, reconciled with
+     * the Harness: for each it loads its Session — the wake pump's crash
+     * classification and aftermath run there — and answers whether the
+     * crashed wake turn's run settled, its park cleared and its lease
+     * came back. A live run reports untouched; an unanswered reconcile
+     * keeps the refusal and the next due slot retries. The occurrence
+     * keys whose runs this pass provably unblocked.
+     */
+    private Set<String> reconcileBlockingRuns(ScheduleRow row) {
+        Set<String> resolved = new HashSet<>();
+        for (OccurrenceView blocking : store.findBlockingRuns(row.tenantId(),
+                row.scheduleId(), MAX_RECONCILE_RUNS)) {
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("operationId", UUID.randomUUID().toString());
+            body.put("kind", "reconcile_run");
+            body.put("scheduleId", row.scheduleId());
+            body.put("occurrenceKey", blocking.occurrence().occurrenceKey());
+            try {
+                Map<String, Object> answer = harness.runAutomationOperation(
+                        row.tenantId(), row.sessionId(), body);
+                Object run = answer.get("run");
+                boolean unblocked = Boolean.TRUE
+                        .equals(answer.get("repaired"));
+                if (!unblocked) {
+                    // The route answers the run in the journal's own
+                    // vocabulary; `settled` is its `completed`.
+                    String state = run instanceof Map<?, ?> summary
+                            ? String.valueOf(summary.get("state"))
+                            : null;
+                    unblocked = "settled".equals(state)
+                            || "completed".equals(state)
+                            || "failed".equals(state)
+                            || "cancelled".equals(state);
+                }
+                if (unblocked) {
+                    resolved.add(blocking.occurrence().occurrenceKey());
+                }
+            } catch (RuntimeException error) {
+                // An unanswered reconcile tries nothing further this
+                // decision: the refusal it stood behind is the accurate
+                // record, and the next due slot re-drives the repair.
+                LOG.warn("automation reconcile failed tenant={} schedule={}"
+                        + " occurrence={} failure={}", row.tenantId(),
+                        row.scheduleId(), blocking.occurrence()
+                                .occurrenceKey(), error.getMessage());
+            }
+        }
+        return resolved;
+    }
+
     /** Why a due occurrence may not fire now, or null when it may. */
     public String admissionRefusal(ScheduleRow row) {
         if (!"ACTIVE".equals(store.sessionStatus(row.tenantId(),
@@ -340,7 +413,12 @@ public class AutomationScanner {
         if (store.hasOpenTurn(row.tenantId(), row.sessionId())) {
             return REASON_OVERLAP;
         }
-        int active = store.countActive(row.tenantId(), row.scheduleId());
+        return countRefusal(row,
+                store.countActive(row.tenantId(), row.scheduleId()));
+    }
+
+    /** The count-based arm of the admission, priced against {@code active}. */
+    private String countRefusal(ScheduleRow row, int active) {
         return switch (row.overlap()) {
             case "queue_one" -> active < 2 ? null : REASON_OVERLAP;
             case "allow" -> active < settings.getConcurrency() ? null

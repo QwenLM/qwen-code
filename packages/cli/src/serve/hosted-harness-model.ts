@@ -51,39 +51,6 @@ export interface HostedHarnessModelResult {
   model: string;
 }
 
-/**
- * The user records whose turns ended without an answer stay out of later
- * history entirely: a Harness crash inside the turn (settled as an error)
- * or a close-path settle represents no live work for the model, so the
- * next turn's prompt never meets the crashed instruction again.
- */
-export function excludeTerminallyEndedUserRecords(
-  historyRecords: readonly ChatRecord[],
-): ChatRecord[] {
-  const terminallyEnded = new Set<string>();
-  for (const record of historyRecords) {
-    if (record.type !== 'system' || record.subtype !== 'turn_result') continue;
-    const payload = record.systemPayload as
-      | { promptId?: unknown; state?: unknown }
-      | undefined;
-    if (
-      typeof payload?.promptId === 'string' &&
-      (payload.state === 'error' || payload.state === 'cancelled')
-    ) {
-      terminallyEnded.add(payload.promptId);
-    }
-  }
-  if (terminallyEnded.size === 0) return [...historyRecords];
-  return historyRecords.filter(
-    (record) =>
-      !(
-        record.type === 'user' &&
-        record.daemonPromptId !== undefined &&
-        terminallyEnded.has(record.daemonPromptId)
-      ),
-  );
-}
-
 export interface HostedHarnessTextDeltas {
   delta(text: string): Promise<void>;
   /**
@@ -330,9 +297,7 @@ export async function runHostedHarnessTextTurn(input: {
             1,
         )
       : input.history;
-    const history: Content[] = excludeTerminallyEndedUserRecords(
-      historyRecords,
-    ).flatMap((record) => {
+    const history: Content[] = historyRecords.flatMap((record) => {
       if (
         (record.type === 'user' ||
           record.type === 'assistant' ||
