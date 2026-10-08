@@ -245,6 +245,10 @@ class QwenHostedHarnessConnectorTest {
         assertThatThrownBy(() -> connector.cancelManagedRuntime("tenant-a", SESSION_ID,
                 "prompt", "checkpoint", "activation"))
                 .hasMessageContaining("requires persisted default or auto-edit");
+        assertThatThrownBy(() -> connector.resolveAction("tenant-a", SESSION_ID, "action",
+                new ObjectMapper().createObjectNode().put("optionId", "allow")
+                        .put("inputRevision", 1L).put("policyRevision", "hosted-tool-approval/1")))
+                .hasMessageContaining("requires persisted default or auto-edit");
         verifyNoInteractions(client);
     }
 
@@ -508,8 +512,9 @@ class QwenHostedHarnessConnectorTest {
                 .hasMessage("Hosted Workspace files are disabled");
     }
 
-    @Test
-    void resolvesActionsThroughAuthorizedColdAndCachedWorkspaceAttachments() {
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-shell/1"})
+    void resolvesActionsThroughAuthorizedColdAndCachedWorkspaceAttachments(String profile) {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
         HarnessSessionRef attached = mock(HarnessSessionRef.class);
@@ -521,7 +526,8 @@ class QwenHostedHarnessConnectorTest {
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                 new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
-                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "yolo", "hosted-workspace-files/1");
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1),
+                "hosted-workspace-shell/1".equals(profile) ? "default" : "yolo", profile);
         AgentStateStore sessions = mock(AgentStateStore.class);
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
@@ -530,6 +536,7 @@ class QwenHostedHarnessConnectorTest {
         when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
         ManagedAgentProperties properties = properties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
+        assertThat(properties.getHarness().isWorkspaceShellEnabled()).isFalse();
         QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
         ReflectionTestUtils.setField(connector, "client", client);
         String actionId = "tool_approval_" + "a".repeat(32);
@@ -553,7 +560,7 @@ class QwenHostedHarnessConnectorTest {
         verify(client, times(2)).loadSession(loads.capture());
         for (LoadHarnessSession load : loads.getAllValues()) {
             Map<String, Object> wire = ReflectionTestUtils.invokeMethod(load, "toJson");
-            assertThat(wire).containsEntry("toolProfile", "hosted-workspace-files/1")
+            assertThat(wire).containsEntry("toolProfile", profile)
                     .containsEntry("passiveManagedRuntimeRecovery", true);
             assertThat(wire.get("managedSessionStore").toString())
                     .contains("tenantId=tenant-a", "workspaceId=selected-workspace")

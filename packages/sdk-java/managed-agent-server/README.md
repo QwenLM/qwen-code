@@ -475,10 +475,16 @@ Existing Sessions keep their stored profile and approval mode.
 
 Disabling only the Shell flag refuses fresh Turns on existing Shell Sessions
 with `409 workspace_unavailable`; original idempotency keys, accepted approval
-responses, cancellation and settlement remain supported. Files Sessions retain
-their existing behavior. Shell Session responses add `foreground_shell` (public)
-or `foregroundShell` (WebShell); false disables sending without disabling
-accepted cancellation. Files and unbound Sessions omit the field.
+responses, cancellation and settlement remain supported while Workspace files
+remain enabled and persisted approval remains `default` or `auto-edit`. Files-off
+or invalid approval can refuse attachment; neither case is bypassed by a
+capability. Files Sessions retain their existing behavior. Shell Session responses
+add `foreground_shell` (public) or `foregroundShell` (WebShell); false disables
+fresh sending. Files and unbound Sessions omit the field, with no schema default.
+`workspaceTurns` expresses creator/grant permission, not sufficient Shell Turn
+admission: fresh sending also requires `foregroundShell=true`. Controlled W2 cwd
+changes do not execute Shell and retain their own files, actor, path and
+context-revision admission; the Shell flag is not a general Session freeze.
 
 Shell close/archive/unarchive/delete remain unavailable, and are refused before
 creating a lifecycle operation. Existing G3 recovery refusals remain in force;
@@ -511,9 +517,13 @@ The approval mode is pinned at Session creation and must be confirmed by the
 Harness on creation and load.
 
 Submit `agent_id: "qwen-code"`, the existing `workspace` selection and `input`
-through `POST /v1/agents/sessions`. The server chooses the fixed
-`hosted-workspace-files/1` private profile and uses the persisted Workspace ID
-for the Session Store. Public callers cannot choose the profile. Configure the
+through `POST /v1/agents/sessions`. The server persists
+`hosted-workspace-shell/1` with mandatory `default`/`auto-edit` approval when the
+Shell deployment opt-in is enabled, otherwise `hosted-workspace-files/1` with the
+configured file approval mode. This also applies to empty bound creation. The
+Session Store uses the persisted Workspace ID; public callers cannot choose the
+profile. W1c offline migration remains files/1-only and refuses persisted Shell
+definitions with `migration_profile_unsupported`. Configure the
 Harness's deployment-owned `--managed-runtime-broker-url` and
 `--managed-runtime-broker-token` options to reach this Broker. A repeated creation key returns
 the original Session/Turn; changed input conflicts. Disabling the opt-in refuses
@@ -531,7 +541,8 @@ cancel rule below. Workspace close follows
 its separate close capability and lifecycle admission. Archive, delete and
 unarchive follow their separate retention capabilities after reliable Workspace
 close. Controlled cwd changes ship below (W2); broad Workspace capability
-advertisement remains gated. Shell and in-flight recovery are separate slices.
+advertisement remains gated. Foreground Shell admission ships as described above;
+background Shell, Monitor and complete in-flight recovery remain separate slices.
 The existing `EmbeddedRuntimeBroker` is used through production configuration;
 no direct store admission or test Broker replacement is needed.
 

@@ -71,6 +71,58 @@ class WorkspaceSessionRetentionTest {
     @Autowired SessionLifecycleCoordinator lifecycle;
 
     @ParameterizedTest
+    @ValueSource(strings = {"ACTIVE", "CLOSED", "ARCHIVED"})
+    void shellCapabilitiesAndLifecycleStayDisabledDespiteCloseSupportAndProof(String state) throws Exception {
+        String tenant = tenant();
+        String session = closed(tenant, true);
+        assertThat(runtime.supportsWorkspaceClose()).isTrue();
+        assertThat(store.workspaceFilesEnabled()).isTrue();
+        assertThat(store.workspaceShellEnabled()).isFalse();
+        request(get(PUBLIC + session), tenant, "owner", null)
+                .andExpect(jsonPath("$.capabilities.session_close").value(true))
+                .andExpect(jsonPath("$.capabilities.session_archive").value(true))
+                .andExpect(jsonPath("$.capabilities.session_unarchive").value(true))
+                .andExpect(jsonPath("$.capabilities.session_delete").value(true));
+        int operations = jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session);
+        int commands = jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session);
+        jdbc.update("UPDATE managed_agent_session SET tool_profile = 'hosted-workspace-shell/1', approval_mode = 'default', status = ?"
+                + " WHERE tenant_id = ? AND session_id = ?", state, tenant, session);
+        request(get(PUBLIC + session), tenant, "owner", null)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.capabilities.foreground_shell").hasJsonPath())
+                .andExpect(jsonPath("$.capabilities.foreground_shell").value(false))
+                .andExpect(jsonPath("$.capabilities.session_close").value(false))
+                .andExpect(jsonPath("$.capabilities.session_archive").value(false))
+                .andExpect(jsonPath("$.capabilities.session_unarchive").value(false))
+                .andExpect(jsonPath("$.capabilities.session_delete").value(false));
+        request(post(WEB + "/sessions/get").contentType(MediaType.APPLICATION_JSON)
+                .content(mapper.writeValueAsString(java.util.Map.of("sessionId", session))), tenant, "owner", null)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.capabilities.foregroundShell").hasJsonPath())
+                .andExpect(jsonPath("$.capabilities.foregroundShell").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionClose").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionArchive").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionUnarchive").value(false))
+                .andExpect(jsonPath("$.capabilities.sessionDelete").value(false));
+        for (String operation : new String[] {"close", "archive", "unarchive", "delete"}) {
+            web(operation, tenant, session, "owner", "shell-" + operation)
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
+            var mutation = "delete".equals(operation) ? delete(PUBLIC + session) : post(PUBLIC + session + "/" + operation);
+            request(mutation, tenant, "owner", "shell-public-" + operation)
+                    .andExpect(status().isConflict())
+                    .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session)).isEqualTo(operations);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session)).isEqualTo(commands);
+        assertThat(runtime.calls.get(session)).isEqualTo(1);
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/2"})
     void archivesAndUnarchivesAcrossSurfacesWithoutReopeningOrRepeatingCleanup(String profile) throws Exception {
         String tenant = tenant();

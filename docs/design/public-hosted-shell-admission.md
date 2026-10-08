@@ -41,9 +41,13 @@ With Shell disabled, existing Shell Sessions reject fresh Turns with
 `409 workspace_unavailable`. Authorization still runs first. Both the service
 replay probe and the locked Store command probe precede the new Shell gate;
 original idempotency keys replay without accepting new work. The Store gate
-is authoritative. Accepted work, approval decisions, cancellation and settlement
-remain available when the Shell flag is off; the shared Connector attachment
-and continuation paths do not use this deployment gate.
+is authoritative. Disabling only the Shell flag preserves accepted work,
+approval decisions, cancellation and settlement while Workspace files remain
+enabled and persisted approval remains `default` or `auto-edit`. Files-off or
+invalid approval can refuse attachment; the shared Connector does not bypass
+those guards. Controlled W2 cwd changes do not execute Shell and retain their
+own files, actor, path and context-revision admission. The Shell flag is not a
+general Session freeze.
 
 ## Persisted approval and recovery
 
@@ -63,13 +67,16 @@ without verified recovery. This change does not promise full owner takeover.
 ## Capabilities and lifecycle
 
 Add optional public `foreground_shell` and WebShell `foregroundShell`. Files
-and unbound responses omit them. Stored Shell Sessions return true only when
+and unbound responses omit them, without a schema default. Stored Shell Sessions return true only when
 mandatory approval and deployment admission are valid; disabled Shell Sessions
 return false. This explicit false is necessary to distinguish an existing Shell
 Session from a files Session without exposing a caller-selectable profile.
-`workspaceTurns` continues to express the existing creator/grant permission,
-so WebShell can disable fresh sending while retaining cancellation of accepted
-work. Upstream creator-only cancellation remains independent of fresh-creation
+`workspaceTurns` continues to express the existing creator/grant permission;
+it can remain true when Shell admission is off and is not sufficient Turn
+admission. Shell fresh sending also requires `foregroundShell=true`. Disabling
+only Shell admission retains accepted cancellation under the prerequisites above;
+false caused by files-off or invalid approval does not guarantee cancellation.
+The `actions` capability likewise does not override attachment or response guards. Upstream creator-only cancellation remains independent of fresh-creation
 grants, and its dedicated cached attachment path performs the same persisted
 Shell approval validation. Older clients remain protected by the transactional admission gate.
 
@@ -77,8 +84,8 @@ Shell close, archive, unarchive and delete capabilities are false. Fresh backend
 lifecycle requests are rejected before an operation or command is created,
 including seeded CLOSED/ARCHIVED Shell records. Existing command replay keeps
 its original result. Existing non-Shell lifecycle declarations and L2 behavior are unchanged;
-this does not certify files/2 L3 support. Turn cancellation remains
-supported; it is distinct from Session lifecycle.
+this does not certify files/2 L3 support. Turn cancellation is distinct from
+Session lifecycle and retains its authorization, attachment and recovery guards.
 
 ## Changes by component
 
@@ -100,6 +107,18 @@ frozen metadata and profile, flag changes, replay, fresh rejection, ACLs and
 zero lifecycle operations. Connector tests exercise create/load/cached/recovery
 validation with zero Harness calls for invalid modes and file YOLO controls.
 WebShell adapter tests prove disabled sending retains active cancellation.
+Both wire surfaces pin explicit false for flag-off Shell and omission for files
+and unbound Sessions. Lifecycle negatives use close-capable Runtime support and
+a completed files close receipt before switching the stored profile to Shell,
+so a missing Shell exclusion cannot pass through an unavailable Runtime fixture.
+Connector coverage includes cold and cached action responses with Shell disabled
+and rejects invalid persisted approval before any Harness call. Cancellation
+asserts its durable CANCELLING state and coordinator dispatch. A requested Action
+on a bound Shell/default Session with files enabled and Shell disabled must commit
+a matching decision receipt, complete the response operation and replay across
+surfaces after a lost answer with one delivery. This H2/MockMvc test uses a
+simulated Harness decision and does not prove real Shell execution or a deployment
+restart.
 
 Real Java/Broker/Session Store/Harness tests must prove public Shell Allow has
 one side effect, Deny has none, and lost response/retry does not execute twice.

@@ -34,8 +34,10 @@ profile 与审批模式写入已有创建事务。它们是服务端决策，不
 关闭 Shell 后，既有 Shell Session 的新 Turn 返回 `409 workspace_unavailable`。
 先执行授权，再进行 Service 重放探测；持有 Session 行锁的 Store 也先探测旧命令，
 再执行 Shell 新准入门禁。原幂等键可以重放，不接受新工作，Store 为最终准入权威。
-关闭开关后，已接受回合的审批、取消与收尾仍可运行，共用 Connector 的 attachment
-和 continuation 路径不使用此部署门禁。
+仅关闭 Shell 开关时，只要 Workspace files 仍开启且持久化审批仍为 `default` 或
+`auto-edit`，已接受回合的审批、取消与收尾仍可运行。files-off 或无效审批可以拒绝
+attachment，共用 Connector 不绕过这些守卫。W2 cwd 变更不执行 Shell，保留其已有
+files、actor、路径及 context revision 准入；Shell 开关不代表整个 Session 冻结。
 
 ## 持久化审批与恢复
 
@@ -52,17 +54,20 @@ owner takeover。
 ## 能力与生命周期
 
 增加可选公开字段 `foreground_shell` 与 WebShell 字段 `foregroundShell`。
-files 和非绑定响应省略该字段。持久化 Shell Session 仅在强制审批及部署准入有效时
+files 和非绑定响应省略该字段，schema 不设置默认值。持久化 Shell Session 仅在强制审批及部署准入有效时
 返回 true，禁用时返回 false。显式 false 让客户端区分既有 Shell 与 files Session，
-无需开放 profile 选择。`workspaceTurns` 继续表达已有 creator/grant 权限，使
-WebShell 禁止新发送时仍可取消已接受回合。保留上游与新创建授权分开的 creator-only
+无需开放 profile 选择。`workspaceTurns` 继续表达已有 creator/grant 权限；关闭
+Shell 准入时仍可为 true，不能单独证明 Turn 可提交。Shell 新发送还要求
+`foregroundShell=true`。仅关闭 Shell 时，满足上述前提的已接受取消仍受支持；
+files-off 或无效审批导致的 false 不保证取消可用。`actions` 能力同样不覆盖 attachment
+或响应守卫。保留上游与新创建授权分开的 creator-only
 取消规则，其独立缓存 attachment 路径执行同一持久化 Shell 审批校验。旧客户端由事务内门禁保护。
 
 Shell 的 close、archive、unarchive、delete 能力均为 false。新的后端生命周期请求
 在创建 operation 或 command 前拒绝，包含人工构造的 CLOSED/ARCHIVED Shell
 记录。既有命令重放保留原结果。非 Shell 生命周期声明与 L2 行为不变，不据此证明
-files/2 的 L3 支持。Turn 取消仍支持，与 Session
-生命周期分开。
+files/2 的 L3 支持。Turn 取消与 Session 生命周期分开，保留其授权、attachment 和
+恢复守卫。
 
 ## 分层改动
 
@@ -82,6 +87,14 @@ files/2 的 L3 支持。Turn 取消仍支持，与 Session
 输入创建、metadata/profile 冻结、开关变化、重放、新请求拒绝、ACL 及零生命周期
 operation。Connector 覆盖 create/load/缓存/recovery 的校验，无效模式的 Harness
 调用为零，并保留 files YOLO 对照。WebShell adapter 证明禁用发送仍可取消活动回合。
+两种 wire 响应断言关 Shell 时显式 false，files 和非绑定时省略字段。生命周期负例
+先取得 files 成功关闭回执并提供支持关闭的 Runtime，再将持久化 profile 改为 Shell，
+避免因 Runtime 不可用而使遗漏 Shell 排除的错误仍通过测试。Connector 覆盖关 Shell
+时冷和缓存 attachment 的审批响应，无效持久化审批在任何 Harness 调用前拒绝。
+取消测试断言持久化 CANCELLING 状态及 coordinator 派发。绑定 Shell/default 的
+Session 在 files 开启、Shell 关闭时，requested Action 必须提交匹配的 decision
+receipt、完成 response operation，并在丢失响应后跨表面重放且仅一次 delivery。
+该 H2/MockMvc 测试模拟 Harness 决策，不证明真实 Shell 执行或完整部署重启。
 
 真实 Java/Broker/Session Store/Harness 测试须证明公开 Shell Allow 仅一次副作用、
 Deny 零副作用、丢失响应与重试不重复执行。冷 attachment 保持 profile 和审批。

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -181,7 +182,10 @@ class ManagedWorkspaceAdmissionTest {
         assertThat(capabilities.sessionClose()).isFalse();
         assertThat(capabilities.sessionDelete()).isFalse();
         var cancellation = transaction.execute(status -> stopped.cancelTurn(tenant, "actor-a", "cancel", session, original.turnId()));
-        assertThat(cancellation).isNotNull();
+        assertThat(cancellation.turnId()).isEqualTo(original.turnId());
+        assertThat(jdbc.queryForObject("SELECT status FROM managed_agent_turn WHERE tenant_id = ? AND turn_id = ?",
+                String.class, tenant, original.turnId())).isEqualTo("CANCELLING");
+        verify(coordinator).cancel(tenant, session, original.turnId());
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_turn WHERE tenant_id = ? AND session_id = ?",
                 Integer.class, tenant, session)).isEqualTo(1);
         for (String state : List.of("ACTIVE", "CLOSED", "ARCHIVED")) {
