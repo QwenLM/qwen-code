@@ -19,10 +19,6 @@ import {
   useWorkspaceActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
-  COLLABORATION_SOURCE,
-  useProjectConversations,
-} from '../workspace-agents/useProjectConversations';
-import {
   STANDALONE_SESSIONS_CAPABILITY,
   type DaemonSessionGroup,
   type DaemonSessionGroupColor,
@@ -104,6 +100,10 @@ import {
 import { formatDateTime } from '../../utils/formatDateTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { useWorkspaceRemoval } from '../workspaces/useWorkspaceRemoval';
+import {
+  OtherHostProjects,
+  WorkspaceHostHeading,
+} from '../workspaces/WorkspaceHostProjects';
 import { WorkspaceRemovalDialog } from '../workspaces/WorkspaceRemovalDialog';
 import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
 import { WorkspaceMenu, type WorkspaceMenuActions } from './WorkspaceMenu';
@@ -429,8 +429,6 @@ export interface WebShellSidebarWorkspaceOverviewOptions {
 export type { WorkspaceManagementTarget, WorkspaceOverviewItem };
 
 interface WebShellSidebarProps {
-  selectedCollaborationId?: string;
-  onOpenCollaboration?: (id: string, cwd: string) => void;
   collapsed: boolean;
   layout?: 'single' | 'rail';
   activePage?: string;
@@ -438,7 +436,7 @@ interface WebShellSidebarProps {
   onOpenHome?: () => void;
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
-  onOpenAgents?: (view?: 'agents' | 'tasks' | 'runtime') => void;
+  onOpenAgents?: (view?: 'agents' | 'squads' | 'runtime') => void;
   onOpenPlugins: () => void;
   onOpenChannels: () => void;
   onOpenLive?: () => void;
@@ -999,8 +997,6 @@ function SidebarSessionSurface({
 }
 
 export function WebShellSidebar({
-  selectedCollaborationId,
-  onOpenCollaboration,
   collapsed,
   layout = 'single',
   activePage = 'home',
@@ -1942,16 +1938,6 @@ export function WebShellSidebar({
   const projectWorkspaces = useMemo(
     () => displayedWorkspaces.filter((entry) => entry.kind !== 'live'),
     [displayedWorkspaces],
-  );
-  const projectConversations = useProjectConversations(
-    projectWorkspaces
-      .filter((ws) => ws.primary || ws.trusted)
-      .map((ws) => ws.cwd),
-  );
-  const collaborationSessions = useMemo(
-    () =>
-      selectedSessionSource === 'channel' ? [] : projectConversations.sessions,
-    [selectedSessionSource, projectConversations.sessions],
   );
   const resolveSessionWorkspaceScope = useCallback(
     (session: DaemonSessionSummary): SessionWorkspaceScope => {
@@ -4075,18 +4061,13 @@ export function WebShellSidebar({
   const searchedSessions = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     // Keep the daemon catalog order: the organized bucketing below relies on
-    // it (pinned rows sort first there). Collaboration sessions append after
-    // it; the flat view re-sorts by recency on its own, so no sort here.
-    const sourceScopedSessions = [
-      ...sessions
-        .map(applyOptimisticPin)
-        .filter((session) =>
-          matchesSessionSource(session, selectedSessionSource),
-        ),
-      ...collaborationSessions.filter(
-        (session) => session.workspaceCwd === primaryWorkspaceCwd,
-      ),
-    ];
+    // it (pinned rows sort first there); the flat view re-sorts by recency on
+    // its own, so no sort here.
+    const sourceScopedSessions = sessions
+      .map(applyOptimisticPin)
+      .filter((session) =>
+        matchesSessionSource(session, selectedSessionSource),
+      );
     if (!query) return sourceScopedSessions;
     const localMatches = sourceScopedSessions.filter((session) => {
       const label = getSessionLabel(session).toLowerCase();
@@ -4108,8 +4089,6 @@ export function WebShellSidebar({
   }, [
     applyOptimisticPin,
     contentSearchHits,
-    collaborationSessions,
-    primaryWorkspaceCwd,
     searchQuery,
     selectedSessionSource,
     sessions,
@@ -4561,42 +4540,6 @@ export function WebShellSidebar({
           : undefined,
         standalone,
       } = options;
-      if (session.sourceType === COLLABORATION_SOURCE) {
-        return (
-          <button
-            key={session.sessionId}
-            type="button"
-            className={cx(
-              styles.sessionRow,
-              'w-full min-h-8 border-0 bg-transparent text-sm',
-              selectedCollaborationId === session.sourceId &&
-                styles.currentSession,
-            )}
-            aria-current={
-              selectedCollaborationId === session.sourceId ? 'page' : undefined
-            }
-            title={session.displayName}
-            onClick={() => {
-              if (session.sourceId)
-                onOpenCollaboration?.(session.sourceId, session.workspaceCwd);
-            }}
-          >
-            <span className={styles.sessionStatusSlot}>
-              {session.hasActivePrompt && (
-                <span
-                  className={cx(
-                    styles.sessionStatusDot,
-                    styles.sessionStatusDotRunning,
-                  )}
-                />
-              )}
-            </span>
-            <span className="min-w-0 flex-1 truncate text-left">
-              {session.displayName}
-            </span>
-          </button>
-        );
-      }
       const sessionIdentity = getIdentityForSession(session);
       const liveStarting =
         livePresence?.state === 'starting' &&
@@ -5250,8 +5193,6 @@ export function WebShellSidebar({
     },
     [
       busySessionIds,
-      selectedCollaborationId,
-      onOpenCollaboration,
       canDeleteSession,
       canShowDeleteSession,
       canOrganizeSession,
@@ -6753,13 +6694,6 @@ export function WebShellSidebar({
                     )}
                   </>
                 )}
-              {!liveView && projectConversations.error && (
-                <p role="status" className={styles.notice}>
-                  {t('collab.sidebar.loadFailed', {
-                    name: projectConversations.error,
-                  })}
-                </p>
-              )}
               {!liveView && !hideProjectHeader && (
                 <div className={styles.projectsHeader}>
                   <button
@@ -6854,6 +6788,7 @@ export function WebShellSidebar({
                 </div>
               )}
               <div hidden={liveView || !projectsExpanded}>
+                {!hideProjectHeader && <WorkspaceHostHeading />}
                 <div className={styles.workspacePicker}>
                   <div className={styles.workspaceList}>
                     {standaloneSessionsVisible &&
@@ -6904,9 +6839,6 @@ export function WebShellSidebar({
                       <Fragment key={ws.id}>
                         <WorkspaceSection
                           workspace={ws}
-                          additionalSessions={collaborationSessions.filter(
-                            (session) => session.workspaceCwd === ws.cwd,
-                          )}
                           remote={!isPageOriginDaemon(workspace.baseUrl)}
                           renderHeader={
                             lockedWorkspaceCwd && lockedWorkspaceOptions?.render
@@ -7280,6 +7212,7 @@ export function WebShellSidebar({
                     ))}
                   </div>
                 </div>
+                {!hideProjectHeader && <OtherHostProjects />}
               </div>
               {!liveView && archivedSection}
             </SidebarSessionSurface>

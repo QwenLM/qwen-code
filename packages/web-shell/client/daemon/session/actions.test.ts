@@ -5351,6 +5351,51 @@ describe('createDaemonSessionActions', () => {
     expect(onPromptRemoved).toHaveBeenCalledWith(session, 'prompt-1');
   });
 
+  it('does not admit a queued prompt cancelled while its upload response was in flight', async () => {
+    const upload = createDeferred<{
+      type: 'image';
+      attachmentId: string;
+      mimeType: string;
+      size: number;
+    }>();
+    const controller = new AbortController();
+    const session = createMockSession('session-a');
+    session.uploadAttachment.mockReturnValueOnce(upload.promise);
+    const { actions, store } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+    const onAdmissionStarted = vi.fn();
+    const result = actions.submitPrompt('', {
+      signal: controller.signal,
+      optimisticUserMessage: false,
+      onAdmissionStarted,
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+    const rejected = result.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(session.uploadAttachment).toHaveBeenCalled());
+    controller.abort();
+    upload.resolve({
+      type: 'image',
+      attachmentId: 'cancelled-upload',
+      mimeType: 'image/png',
+      size: 3,
+    });
+    expect(await rejected).toMatchObject({ name: 'AbortError' });
+    expect(session.removeAttachment).toHaveBeenCalledWith('cancelled-upload');
+    expect(session.submitPrompt).not.toHaveBeenCalled();
+    expect(onAdmissionStarted).not.toHaveBeenCalled();
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
+  });
+
   it('keeps uploaded attachments when the admitted prompt already started', async () => {
     const controller = new AbortController();
     const session = createMockSession('session-a');

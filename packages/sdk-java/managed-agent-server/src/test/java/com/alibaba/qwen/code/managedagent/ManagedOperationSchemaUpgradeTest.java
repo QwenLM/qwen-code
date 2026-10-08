@@ -55,13 +55,22 @@ class ManagedOperationSchemaUpgradeTest {
                     assertThat(operation.targetCwdRelative()).isNull();
                     assertThat(operation.expectedContextRevision()).isNull();
                     assertThat(operation.resultContextRevision()).isNull();
+                    assertThat(operation.lifecycleProtocolVersion()).isZero();
                 });
 
         // After the upgrade the same reads work unchanged.
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
         assertThat(store.findOperation("t", "s", "op-1")).isPresent()
+                .hasValueSatisfying(operation -> {
+                    assertThat(operation.expectedContextRevision()).isNull();
+                    assertThat(operation.lifecycleProtocolVersion()).isZero();
+                });
+        jdbc.update("UPDATE managed_agent_operation"
+                + " SET lifecycle_protocol_version = 1"
+                + " WHERE tenant_id = 't' AND operation_id = 'op-1'");
+        assertThat(store.findOperation("t", "s", "op-1")).isPresent()
                 .hasValueSatisfying(operation ->
-                    assertThat(operation.expectedContextRevision()).isNull());
+                    assertThat(operation.lifecycleProtocolVersion()).isEqualTo(1));
     }
 }
