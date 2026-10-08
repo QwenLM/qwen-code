@@ -19,7 +19,6 @@ import {
   normalizeToolResultCallId,
   persistAndTruncateToolResult,
 } from './truncation.js';
-import { getFunctionResponseParts } from '../services/compactionInputSlimming.js';
 import { canonicalToolName, ToolNames } from './tool-names.js';
 
 const debugLogger = createDebugLogger('TOOL_RESPONSE_FINALIZER');
@@ -109,21 +108,25 @@ function isBudgetExemptOutputName(name: string | undefined): boolean {
 }
 
 /**
- * Whether `enforceFunctionResponseBudget` can shorten this part. Exempt tools
- * keep their output verbatim and media is not text, so a caller that charges a
- * batch of results against a token headroom has to count those parts as input
- * instead of assuming the budget covers them.
+ * Whether `enforceFunctionResponseBudget` shortens text in this part. Mirrors
+ * `collectTextSlots`, so a caller that charges a batch of results against a
+ * token headroom holds out exactly the text the budget will not shorten:
+ * exempt output, empty output, and nested media (which is not text) have to be
+ * counted as input instead.
+ *
+ * An `error` field is budgeted for any entry `collectTextSlots` does not skip
+ * whole; the entry-level exemption skips it along with the rest, and this
+ * predicate is only ever reached for the synthetic batch entry, which does not
+ * match that exemption.
  */
 export function isBudgetShrinkablePart(part: Part): boolean {
   const response = part.functionResponse;
   if (!response) return false;
-  if ((getFunctionResponseParts(part)?.length ?? 0) > 0) return false;
-  // collectTextSlots budgets an `error` field unconditionally - the exemption
-  // only ever protected `output` - so a part carrying one IS shrinkable even
-  // when its tool is exempt.
-  if (typeof response.response?.['error'] === 'string') return true;
+  const payload = response.response;
+  if (typeof payload?.['error'] === 'string') return true;
   if (isBudgetExemptOutputName(response.name)) return false;
-  return typeof response.response?.['output'] === 'string';
+  const output = payload?.['output'];
+  return typeof output === 'string' && output.length > 0;
 }
 
 function collectTextSlots(

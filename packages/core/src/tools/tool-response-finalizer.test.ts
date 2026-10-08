@@ -12,6 +12,7 @@ import { ToolNames } from './tool-names.js';
 import {
   enforceFunctionResponseBudget,
   finalizeToolResponses,
+  isBudgetShrinkablePart,
   toolResponseTextLength,
   type ToolResponseBudgetEntry,
 } from './tool-response-finalizer.js';
@@ -757,5 +758,46 @@ describe('tool response finalization', () => {
 
     expect(output.startsWith(reminder)).toBe(true);
     expect(output.length).toBeLessThanOrEqual(reminder.length + 2 + 100);
+  });
+
+  it('treats nested media as part of a result the budget still shortens', () => {
+    // `collectTextSlots` budgets the `output` string beside nested media, so a
+    // caller charging a batch against a token headroom must not classify that
+    // text as unshrinkable while the budget cuts it anyway.
+    const mediaResult: Part = {
+      functionResponse: {
+        id: 'media-result',
+        name: 'read_file',
+        response: { output: 'x'.repeat(20_000) },
+        parts: [{ inlineData: { mimeType: 'image/png', data: 'BASE64' } }],
+      },
+    };
+
+    expect(isBudgetShrinkablePart(mediaResult)).toBe(true);
+    expect(
+      isBudgetShrinkablePart(
+        fnResponse('search_memory', { output: 'm'.repeat(100) }, 'mem'),
+      ),
+    ).toBe(false);
+    expect(
+      isBudgetShrinkablePart(fnResponse('shell', { output: '' }, 'empty')),
+    ).toBe(false);
+
+    const [guarded] = enforceFunctionResponseBudget(
+      [
+        {
+          callId: 'send-boundary',
+          toolName: 'tool-response-batch',
+          responseParts: [mediaResult],
+        },
+      ],
+      1_000,
+    );
+    const output = guarded.responseParts[0].functionResponse?.response?.[
+      'output'
+    ] as string;
+
+    expect(output.length).toBe(1_000);
+    expect(guarded.responseParts[0].functionResponse?.parts).toHaveLength(1);
   });
 });

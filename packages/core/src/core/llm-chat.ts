@@ -2215,10 +2215,11 @@ export class LlmChat {
    * This chat's last successful usage report, kept only to size the next
    * send's tool results (#2566): the route it came from, its prompt+output
    * tokens and the exact history it covered, and consumed by every dispatch.
-   * A stale anchor is rejected by the route key and by the history
-   * length/identity-prefix predicate, so the clear sites below are an
-   * optimisation rather than the safety net — a history rewrite that keeps
-   * element identity has to stay rejected by that predicate.
+   * The route key and the history length/identity-prefix predicate reject an
+   * anchor whose history moved out from under it; the clears at
+   * `setLastPromptTokenCount` and at dispatch are load-bearing instead, because
+   * neither touches the history that predicate compares. An identity-preserving
+   * rewrite of covered history is not rejected by it either.
    */
   private toolBudgetUsageAnchor?: {
     routeKey: string;
@@ -3137,7 +3138,7 @@ export class LlmChat {
       const pressureBudget = this.pressureToolOutputBudget(
         userContent,
         requestRouteKey,
-        cgConfigForThresholds?.contextWindowSize ?? DEFAULT_TOKEN_LIMIT,
+        contextWindowForClamp,
       );
       const toolOutputBudget =
         batchBudget !== undefined && !Number.isFinite(batchBudget)
@@ -3162,6 +3163,14 @@ export class LlmChat {
             `Tool response send guard reduced an unfinalized batch to ${toolOutputBudget} characters.`,
           );
           userContent = { ...userContent, parts: guarded.responseParts };
+          // The cut is what goes into durable history, so anything asserting
+          // those results are still resident has to be told — the same
+          // invalidation `tryCompress` does for the same reason.
+          this.config.getFileReadCache().clear();
+          clearLoadedSkillTracking(
+            this.config.getToolRegistry(),
+            'send-boundary tool-output shrink',
+          );
         }
       }
 
@@ -5621,18 +5630,21 @@ export class LlmChat {
       !anchor.history.every((content, index) => content === this.history[index])
     )
       return undefined;
-    // Only the results this budget can actually shorten are held out of the
-    // estimate: exempt tools keep their output and media is not text, so that
-    // text travels whole on top of the budget and has to be charged to the
-    // headroom.
+    // Only the text this budget can actually shorten is held out of the
+    // estimate; everything else is input the budget leaves alone and has to be
+    // charged to the headroom. A result carrying media keeps its text (which
+    // the budget does shorten), but its media payload is charged here, since
+    // the budget never touches it.
     const shrinkableParts = userContent.parts.filter(isBudgetShrinkablePart);
     if (shrinkableParts.length === 0) return undefined;
     const newUnshrinkableContent: Content[] = [
       ...this.history.slice(anchor.history.length),
       {
         ...userContent,
-        parts: userContent.parts.filter(
-          (part) => !isBudgetShrinkablePart(part),
+        parts: userContent.parts.flatMap((part) =>
+          isBudgetShrinkablePart(part)
+            ? (getFunctionResponseParts(part) ?? [])
+            : [part],
         ),
       },
     ];

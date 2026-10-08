@@ -11974,6 +11974,56 @@ describe('LlmChat', async () => {
       ).toBe(true);
     });
 
+    it('counts a result carrying media against the per-result floor', async () => {
+      await reportUsage(NEAR_AUTO);
+      await sendDrain(
+        [
+          {
+            functionResponse: {
+              id: 'media-result',
+              name: 'read_file',
+              response: { output: 'x'.repeat(20_000) },
+              parts: [
+                { inlineData: { mimeType: 'image/png', data: 'BASE64' } },
+              ],
+            },
+          },
+          result(),
+        ],
+        'second',
+      );
+      // Only the media payload is charged to the headroom: the text beside it is
+      // shortened like any other result, so both results keep the floor.
+      expect(resultChars(1)).toBe(8_000);
+      expect(resultOutputs(1).map((output) => output.length)).toEqual([
+        4_000, 4_000,
+      ]);
+    });
+
+    it('invalidates the file read cache when the send guard cuts the batch', async () => {
+      const clear = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        clear,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+      await reportUsage(NEAR_AUTO);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBeLessThan(20_000);
+      // The cut is what lands in durable history, so a cached "already read"
+      // verdict for those results would be false.
+      expect(clear).toHaveBeenCalled();
+    });
+
+    it('leaves the file read cache alone when the guard cuts nothing', async () => {
+      const clear = vi.fn();
+      vi.mocked(mockConfig.getFileReadCache).mockReturnValue({
+        clear,
+      } as unknown as ReturnType<Config['getFileReadCache']>);
+      await reportUsage(500_000);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBe(20_000);
+      expect(clear).not.toHaveBeenCalled();
+    });
+
     it('charges exempt tool output to the headroom instead of shrinking around it', async () => {
       await reportUsage(NEAR_AUTO);
       await sendDrain(
