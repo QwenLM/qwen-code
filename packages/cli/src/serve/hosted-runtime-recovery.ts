@@ -25,6 +25,10 @@ import {
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
 import { truncateHostedGlobResponse } from './hosted-workspace-tool-turn.js';
+import {
+  endHostedAction,
+  readHostedActionOptions,
+} from './hosted-tool-approval.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   commitHostedFileHistory,
@@ -447,10 +451,14 @@ async function answerAbandonedTurnCalls(input: {
  * every reachable checkpoint — a retry whose first attempt already left
  * the wait included — or the terminal record strands the marker at
  * `before_model`, where no load can ever clear it. A Turn parked in
- * `await_action` is held while its approval stays `requested`, so the
- * resolve route stays usable; once the durable Action decides, the wait
- * is advanced and the abandoned calls answered before the terminal
- * record lands. The returned Broker releases after the caller's terminal
+ * `await_action` is held while its approval stays `requested` and its
+ * deadline lives — the interrupted owner's expiry timer died with it, so
+ * an unanswered ask whose deadline passed is expired here before the same
+ * ending. Once the durable Action is final, the wait is advanced, the
+ * abandoned calls answered, and the turn's Workspace acquisition (its
+ * promptId-named runtime session) handed back with the verdict, or every
+ * later tool call in the Workspace waits behind a dead holder (F9). The
+ * returned Broker releases after the caller's terminal
  * record is durable, never before. Throws with nothing settled when the
  * stop cannot be proven, leaving the Turn to the recovery fleet; a
  * checkpoint the authorization could not verify (a faulting Store read
@@ -491,20 +499,46 @@ export async function settleInterruptedTurnRuntime(input: {
         requestId === undefined
           ? undefined
           : input.session.authority.action(requestId);
-      if (action === undefined || action.state === 'requested')
-        return { kind: 'held' };
+      if (action === undefined) return { kind: 'held' };
+      let finalState = action.state;
+      if (action.state === 'requested') {
+        // The interrupted owner's expiry timer died with it, so an
+        // unanswered ask must expire here — the pump's slow re-derive is
+        // then the owner that observes it. A still-live deadline holds.
+        const options = await readHostedActionOptions(input.session, action);
+        if (Date.now() < options.expiresAt) return { kind: 'held' };
+        await endHostedAction(
+          input.session,
+          action.requestId,
+          'expired',
+          () => !input.session.authority.writesStopped,
+        );
+        finalState =
+          input.session.authority.action(action.requestId)?.state ?? 'expired';
+      }
+      if (finalState === 'requested') return { kind: 'held' };
       // The final Action outlives the owner that died asking: advance the
       // wait the way the close path does, then answer every call the
       // model is still owed — a dangling functionCall makes the resumed
-      // thread a malformed request the provider rejects.
+      // thread a malformed request the provider rejects. And the turn
+      // acquired its Workspace (runtime session plus execution lease)
+      // before it asked: hand that acquisition back exactly like the
+      // await_runtime arm, or every later tool call in the Workspace
+      // waits behind a dead holder (R6/F9).
       await createManagedHarnessHandle(input.session).resolveDurableWait();
       await answerAbandonedTurnCalls({
         session: input.session,
         sessionId: input.sessionId,
         cwd: input.cwd,
         promptId: input.promptId,
-        message: `the approval ended ${action.state} after the Harness that asked was interrupted`,
+        message: `the approval ended ${finalState} after the Harness that asked was interrupted`,
       });
+      if (input.brokerOptions !== undefined)
+        broker = new HostedWorkspaceBroker(
+          input.brokerOptions,
+          input.session.authority.sessionHeader.sessionKey,
+          input.promptId,
+        );
     }
     if (phase === 'await_runtime') {
       // Symmetric with the continue/cancel routes: without the tool

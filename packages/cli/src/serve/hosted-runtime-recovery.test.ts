@@ -291,7 +291,9 @@ describe('recoverHostedRuntimeTurn', () => {
    */
   const ACTION_ID = '77777777-7777-4777-8777-777777777777';
 
-  async function parkAtAwaitAction(): Promise<ManagedSession> {
+  async function parkAtAwaitAction(
+    expiresAt = Date.now() + 3_600_000,
+  ): Promise<ManagedSession> {
     const session = await open('boot-1', true);
     const harness = createManagedHarnessHandle(session);
     await harness.ensureRunnable();
@@ -324,7 +326,20 @@ describe('recoverHostedRuntimeTurn', () => {
         source: 'tool_call',
         optionsRef: await session.resources.publish(
           'managed-approval',
-          Buffer.from('[{"id":"allow"},{"id":"deny"}]', 'utf8'),
+          Buffer.from(
+            JSON.stringify({
+              v: 1,
+              requestId: ACTION_ID,
+              turnId: PROMPT_ID,
+              functionCallId: 'call-1',
+              toolName: 'write_file',
+              policyRevision: 'pol-1',
+              inputRevision: 1,
+              createdAt: expiresAt - 20_000,
+              expiresAt,
+              options: [{ id: 'allow' }, { id: 'deny' }],
+            }),
+          ),
         ),
         inputRevision: 'rev-1',
         invocationRef: await session.resources.publish(
@@ -1497,16 +1512,21 @@ describe('recoverHostedRuntimeTurn', () => {
           pendingUndo: null,
         });
         await endAction(replacement, state);
-        await expect(
-          settleInterruptedTurnRuntime({
-            session: replacement,
-            sessionId: SESSION_ID,
-            cwd: root,
-            promptId: PROMPT_ID,
-            brokerOptions,
-            toolProfile: true,
-          }),
-        ).resolves.toEqual({ kind: 'ready' });
+        const runtime = await settleInterruptedTurnRuntime({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          toolProfile: true,
+        });
+        expect(runtime.kind).toBe('ready');
+        if (runtime.kind !== 'ready')
+          throw new Error('expected a ready verdict');
+        // F9: the turn acquired its Workspace before it asked — the
+        // verdict hands its promptId-named runtime session back for the
+        // caller to release, exactly like the await_runtime arm.
+        expect(runtime.broker?.runtimeSessionId).toBe(PROMPT_ID);
         expect(status).not.toHaveBeenCalled();
         // The durable wait moved past await_action into a phase the
         // terminal record can advance from.
@@ -1551,6 +1571,63 @@ describe('recoverHostedRuntimeTurn', () => {
       }
     },
   );
+
+  it('expires an unanswered approval the interrupted owner stopped timing', async () => {
+    // R6 P1: the original waiter's expiry timer died with the Harness, so
+    // a still-requested Action whose durable deadline already passed must
+    // expire here — a still-live deadline keeps holding.
+    await parkAtAwaitAction(Date.now() - 1_000);
+    const replacement = await open('boot-2', false);
+    try {
+      const runtime = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: true,
+      });
+      expect(runtime.kind).toBe('ready');
+      expect(replacement.authority.action(ACTION_ID)?.state).toBe('expired');
+      if (runtime.kind !== 'ready') throw new Error('expected a ready verdict');
+      expect(runtime.broker?.runtimeSessionId).toBe(PROMPT_ID);
+      // The abandoned call meets the same cancelled response the other
+      // endings write.
+      const response = (await replacement.sink.project())
+        .filter(
+          (entry) =>
+            entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+        )
+        .flatMap((entry) => entry.message?.parts ?? [])
+        .map((part) => part.functionResponse)
+        .find(Boolean);
+      expect(response?.response).toMatchObject({
+        executionStatus: 'cancelled',
+      });
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('holds an unanswered approval whose deadline still lives', async () => {
+    await parkAtAwaitAction(Date.now() + 3_600_000);
+    const replacement = await open('boot-2', false);
+    try {
+      await expect(
+        settleInterruptedTurnRuntime({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          toolProfile: true,
+        }),
+      ).resolves.toEqual({ kind: 'held' });
+      expect(replacement.authority.action(ACTION_ID)?.state).toBe('requested');
+    } finally {
+      await replacement.close();
+    }
+  });
 
   it('clears the pending marker on a retry that already left the wait', async () => {
     // First attempt stopped and settled the executions, then died before
