@@ -76,7 +76,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns and cancel its running Turns under the same opt-in, and may rename the Session, while the creator currently holds Workspace read and create grants on a registry row whose state is ACTIVE and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.32). The per-caller workspaceTurns capability on this surface advertises the same rule. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
+        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns and cancel its running Turns under the same opt-in, and may rename the Session, while the creator currently holds Workspace read and create grants on a registry row whose state is ACTIVE and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; archive and unarchive follow retention capabilities after reliable Workspace close; delete supports either L3 idle ACTIVE files Sessions or L2 CLOSED/ARCHIVED Sessions; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.32). The per-caller workspaceTurns capability on this surface advertises the same rule. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
         post: operations["webShellCreateSession"];
         delete?: never;
         options?: never;
@@ -226,7 +226,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Uses the same close admission, creator authorization and durable cleanup semantics as the public close route. sessionClose describes deployment support; it does not grant actor authorization. */
+        /** @description Uses the same close admission, creator authorization and durable cleanup semantics as the public close route. sessionClose describes deployment support; it does not grant actor authorization. New L3 Workspace close operations run SessionEnd only, retain data, and finish after durable effects verification and original Runtime stop. SessionDelete is reserved for ACTIVE delete. Missing protocol support rejects new admission; previously admitted operations retain their saved protocol. Unknown outcomes remain recovery_blocked. */
         post: operations["closeWebShellSession"];
         delete?: never;
         options?: never;
@@ -260,7 +260,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Workspace-bound delete accepts only closed or archived Sessions with completed reliable-close evidence and the creator with current read access. Active deletion returns 409 session_state_conflict. Completion atomically retires private recovery/publication access with the tombstone, operation receipt and terminal event; it calls neither Harness nor Runtime and erases no shared Workspace files or backup bytes. Operations remain readable under current read grants; the same authorized actor/key can replay after deletion. A readable non-creator returns 403; missing close evidence returns 409 workspace_unavailable. */
+        /** @description Workspace-bound ACTIVE deletion supports idle hosted-workspace-files/1 Sessions when L3 lifecycle protocol and reliable Runtime stop are available. Only the creator with current read access may admit it; accepted, running, cancelling or approval-waiting Turns return 409 turn_active. Admission persists a lifecycle-only execution fence and a versioned actor-scoped operation. SessionEnd settles before SessionDelete; committed Hook results are verified in Session Store and saved before permanent draining, attachment cleanup and original worker stop. Unknown outcomes or missing original stop evidence remain recovery_blocked and are never replayed on a replacement worker. CLOSED/ARCHIVED deletion retains L2: completed reliable-close evidence is required and no Harness or Hook is invoked. Completion atomically commits retirement, tombstone, receipt and terminal event, retaining shared Workspace files and neighboring holders. Authorized same-actor/key replays return the original operation, including after deletion; readable non-creators return 403. Missing lifecycle capability or close evidence returns 409 workspace_unavailable. */
         post: operations["deleteWebShellSession"];
         delete?: never;
         options?: never;
@@ -552,7 +552,7 @@ export interface components {
              */
             sessionUnarchive?: boolean;
             /**
-             * @description Optional support for this retention operation. For a Workspace-bound Session requires completed reliable-close evidence; authorization and source-state validation still apply.
+             * @description Optional support capability. ACTIVE Workspace files Sessions require L3 lifecycle protocol and reliable original Runtime stop; CLOSED/ARCHIVED Sessions use independent L2 close evidence. Current creator/read authorization and idle/source-state admission checks still apply. The aggregate session lifecycle capability is unchanged.
              * @default false
              */
             sessionDelete?: boolean;

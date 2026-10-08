@@ -523,6 +523,7 @@ describe('buildTrajectory', () => {
         'background_notification',
         'cron',
         'mid_turn_message_injected',
+        'agent_mention',
       ]) {
         const { turns, rows } = buildTrajectory([
           block(textBlock('user')),
