@@ -753,7 +753,17 @@ export class HostedHookSession {
         // so give every pending record one status poll before refusing.
         // Otherwise a live Session would reject every later turn until a
         // DELETE-path drain reconciled it.
-        await this.reconcileUnsettled(signal);
+        try {
+          await this.reconcileUnsettled(signal);
+        } catch (cause) {
+          if (signal.aborted) throw cause;
+          // A failed poll is not a definite turn error: the re-check below
+          // is the fence, and only its typed refusal may reach the caller
+          // while a record's outcome is still unknown.
+          writeStderrLineSafe(
+            `qwen serve: Hook reconcile before dispatch failed: ${String(cause)}`,
+          );
+        }
         if (this.hasPendingOperations)
           throw new HostedHookRecoveryRequiredError();
       }
@@ -1675,14 +1685,20 @@ export class HostedHookSession {
   async close(): Promise<void> {
     await this.drain();
     await this.releaseEarlierOwners();
+    // A recovered earlier owner goes through the same absorbing release as
+    // any other: its hold fence is recorded, not thrown, so one refused
+    // release neither escapes close() as a raw Broker refusal nor strands
+    // every owner behind it in the map.
+    for (const id of [...this.recoveredBrokers.keys()])
+      await this.releaseOwner(id);
+    this.recoveredBrokers.clear();
     // An earlier owner still fenced keeps its Runtime owner attached, so a
     // DELETE that answered 204 here would drop the only state that could ever
-    // retry that release. Report recovery required before releasing anything
-    // else: the Session stays attached with its own Runtime owner, so a later
+    // retry that release. The check sits below the loop: a fence recorded by
+    // it must still be named. Report recovery required before releasing the
+    // Session's own owner: the Session stays attached with it, so a later
     // turn can still run and retry the fenced release.
     if (this.fencedOwners.size > 0) throw new HostedHookRecoveryRequiredError();
-    for (const broker of this.recoveredBrokers.values()) await broker.release();
-    this.recoveredBrokers.clear();
     if (this.ownsBroker && this.broker.runtime) {
       try {
         await this.broker.release();

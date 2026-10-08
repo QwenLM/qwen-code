@@ -245,7 +245,10 @@ recovery-required condition rather than a bare Broker refusal, so DELETE and
 detach report the retained hold and keep the Session attached and retryable
 instead of deleting it. A Hook Session that shares the MCP owner does not
 release that broker; its release is answered by the MCP session and still
-reports the generic close failure.
+reports the generic close failure. Earlier owners recovered from Hook records
+remain that Hook Session's to release in the shared shape too: a hold fence
+from one is absorbed, reported, and retried on later turns, and close names
+the Hook recovery-required condition after attempting every remaining owner.
 
 Workspace Write/Edit backups and explicit rewind share the Session's Hook Runtime
 owner, while snapshots retain the actual prompt identity. Acknowledged async Hooks

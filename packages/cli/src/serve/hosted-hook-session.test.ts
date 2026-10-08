@@ -1499,6 +1499,66 @@ it('stops reconciling fences as soon as the firing turn aborts', async () => {
   expect(statusPolls).toBe(1);
 });
 
+it('keeps the typed recovery refusal when the fence reconcile loses its settle write', async () => {
+  const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl');
+  const originalControl = control.getMockImplementation()!;
+  control.mockImplementation(async function (
+    this: HostedWorkspaceBroker,
+    operation,
+  ) {
+    if (operation.kind === 'hook-execute') {
+      requests.push(operation);
+      return {
+        operationId: operation.operationId,
+        state: 'settled',
+        error: { code: 'managed_hook_module_evaluation_timeout' },
+      };
+    }
+    return originalControl.call(this, operation);
+  });
+  await expect(
+    hooks.fire(HookEventName.PreToolUse, 'call-1', {}, signal()),
+  ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+  expect(hooks.hasPendingOperations).toBe(true);
+  const fencedId = session.authority
+    .extensionRecordsInDomain('hook_execution')
+    .find(
+      (entry) =>
+        entry.recordId.startsWith('hook-') &&
+        !entry.recordId.startsWith('hook-plan-'),
+    )!.recordId;
+  // The Runtime republished the fenced result, so the turn-path reconcile
+  // settles it — but the durable write inside that settle fails transiently.
+  // A generic failure must not escape fire() while the fence stands: the
+  // turn's Hook outcome is still unknown, not a definite error.
+  replies.set(fencedId, {
+    operationId: fencedId,
+    state: 'settled',
+    result: { success: true, outcome: 'success', duration: 0 },
+  });
+  vi.spyOn(session.resources, 'publish').mockRejectedValueOnce(
+    new Error('resource store gone'),
+  );
+  const log = vi
+    .spyOn(stdio, 'writeStderrLineSafe')
+    .mockImplementation(() => {});
+  await expect(
+    hooks.fire(HookEventName.PreToolUse, 'call-2', {}, signal()),
+  ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+  // The fence still stands (the settle never committed), the failure was
+  // reported on the daemon's default channel, and nothing dispatched.
+  expect(hooks.hasPendingOperations).toBe(true);
+  expect(log.mock.calls.flat().join('\n')).toContain('resource store gone');
+  expect(
+    parseHookExecution(
+      session.authority.extensionRecord('hook_execution', fencedId)!.record,
+    ).resultRef,
+  ).toBeNull();
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(1);
+});
+
 it('never tombstones a healthy in-flight async Hook reconciling an unrelated fence', async () => {
   catalog = { ...catalog, hooks: [{ ...catalog.hooks[0], async: true }] };
   const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl');
@@ -2200,6 +2260,102 @@ it('leaves a shared MCP broker for its owner to release', async () => {
   release.mockClear();
   await linked.close();
   expect(release).not.toHaveBeenCalled();
+});
+
+it('names a hold-fenced recovered owner on close in the shared-broker shape', async () => {
+  // An acknowledged async Hook on an earlier owner: its occurrence marker
+  // settles at admission, so the pending gate never counts it, but its child
+  // keeps running at the Runtime — a record a restored Session's close
+  // reconciles through a recovered broker.
+  catalog = { ...catalog, hooks: [{ ...catalog.hooks[0], async: true }] };
+  const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl');
+  const originalControl = control.getMockImplementation()!;
+  control.mockImplementation(async function (
+    this: HostedWorkspaceBroker,
+    operation,
+  ) {
+    if (operation.kind === 'hook-execute') {
+      requests.push(operation);
+      const running: ManagedHookOperationView = {
+        operationId: operation.operationId,
+        state: 'running',
+      };
+      replies.set(operation.operationId, running);
+      return running;
+    }
+    return originalControl.call(this, operation);
+  });
+  await hooks.fire(HookEventName.PreToolUse, 'async-a', {}, signal());
+  const ownerA = hooks.broker.runtimeSessionId;
+  const executed = () =>
+    requests.filter((request) => request.kind === 'hook-execute');
+  const childA = executed()[0]!.operationId;
+  // A second load activation owns the next record: a fence the pending gate
+  // counts, still on its own earlier owner.
+  await reopenSession();
+  const second = new HostedHookSession(options, session, pin);
+  control.mockImplementation(async function (
+    this: HostedWorkspaceBroker,
+    operation,
+  ) {
+    if (operation.kind === 'hook-execute') {
+      requests.push(operation);
+      return {
+        operationId: operation.operationId,
+        state: 'settled',
+        error: { code: 'managed_hook_module_evaluation_timeout' },
+      };
+    }
+    return originalControl.call(this, operation);
+  });
+  await expect(
+    second.fire(HookEventName.PreToolUse, 'call-b', {}, signal()),
+  ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+  const ownerB = second.broker.runtimeSessionId;
+  const childB = executed().at(-1)!.operationId;
+  expect(ownerB).not.toBe(ownerA);
+  // The shared-broker shape: the Hook session never releases the MCP broker,
+  // so the recovered earlier owners its records name are the only releases
+  // close() performs — and they need the same refusal handling.
+  const shared = new HostedWorkspaceBroker(
+    options,
+    session.authority.sessionHeader.sessionKey,
+    'mcp-shared',
+  );
+  const linked = new HostedHookSession(options, session, pin, shared);
+  // Both records settle when close()'s drain polls them…
+  for (const id of [childA, childB])
+    replies.set(id, {
+      operationId: id,
+      state: 'settled',
+      result: { success: true, outcome: 'success', duration: 0 },
+    });
+  // …but the first recovered owner's release is hold-fenced.
+  const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+  release.mockClear();
+  release.mockImplementation(async function (this: HostedWorkspaceBroker) {
+    if (this.runtimeSessionId === ownerA)
+      throw new HostedWorkspaceBrokerRejection(
+        409,
+        'managed_runtime_owner_hold_pending',
+      );
+  });
+  vi.spyOn(stdio, 'writeStderrLineSafe').mockImplementation(() => {});
+  await expect(linked.close()).rejects.toBeInstanceOf(
+    HostedHookRecoveryRequiredError,
+  );
+  // The fence was absorbed and named — not leaked as a raw Broker refusal —
+  // the owner behind it in the map was still released, and the shared MCP
+  // broker was not touched.
+  expect(released()).toEqual([ownerA, ownerB]);
+  // Settle confirmation for the abandoned child's detached poll loop: its
+  // writer is gone, so completion shows as the poll count freezing.
+  const statusPolls = () =>
+    requests.filter((request) => request.kind === 'hook-status').length;
+  await delay(250);
+  const stopped = statusPolls();
+  await delay(250);
+  expect(statusPolls()).toBe(stopped);
 });
 
 it('requires increasing revisions within each catalog namespace', async () => {

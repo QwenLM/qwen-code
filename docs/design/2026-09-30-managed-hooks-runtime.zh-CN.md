@@ -178,7 +178,10 @@ owner 而让健康的活回合失败。拥有自己 Runtime owner 的 Hook Sessi
 无论被围闭的是它自己还是此前 owner，都以 Hook recovery-required 条件作答，而不是
 抛出裸 Broker 拒绝——于是 DELETE 与 detach 会指明被保留的 hold，并保持 Session
 处于 attached、可重试状态，而不是把它删除。与 MCP 共用 owner 的 Hook Session
-不释放该 broker，其释放由 MCP session 作答，仍报告通用的 close 失败。
+不释放该 broker，其释放由 MCP session 作答，仍报告通用的 close 失败。在该共用形态下，
+从 Hook 记录恢复的此前 owner 仍由该 Hook Session 负责释放：其中某个 owner 的 hold
+围闭同样被吸收、上报并在后续回合重试，close 在尝遍其余 owner 之后以 Hook
+recovery-required 条件作答。
 
 Workspace 的 Write/Edit 备份和显式撤销共用 Session 的 Hook Runtime owner，
 快照仍保存真实 prompt 身份。已确认准入的 async Hook 可以与 history bind、prepare
