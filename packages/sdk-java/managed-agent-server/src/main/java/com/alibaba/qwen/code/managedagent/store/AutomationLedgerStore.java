@@ -572,6 +572,32 @@ public class AutomationLedgerStore {
                 command.scheduleId(), command.resultJson(), now);
     }
 
+    /**
+     * Claims (tenant, key) for one request before any side effect: the
+     * primary key arbitrates, so only one concurrent or retried caller
+     * owns the identity; the row's empty result marks it unanswered. A
+     * claim whose requester dies mid-flight stays durable, which is what
+     * lets a different request under the same key conflict instead of
+     * repeating the side effect.
+     */
+    public boolean claimCommand(CommandRow command, long now) {
+        return jdbc.update("INSERT IGNORE INTO qwen_managed_automation_command"
+                + " (tenant_id, idempotency_key, actor_id, request_digest,"
+                + " schedule_id, result_json, created_at)"
+                + " VALUES (?, ?, ?, ?, ?, '', ?)", command.tenantId(),
+                command.idempotencyKey(), command.actorId(),
+                command.requestDigest(), command.scheduleId(), now) == 1;
+    }
+
+    /** Fills in the answer of a claim made earlier; false when none is. */
+    public boolean settleCommand(String tenantId, String idempotencyKey,
+            String resultJson) {
+        return jdbc.update("UPDATE qwen_managed_automation_command"
+                + " SET result_json = ?"
+                + " WHERE tenant_id = ? AND idempotency_key = ?", resultJson,
+                tenantId, idempotencyKey) > 0;
+    }
+
     // --- Session store reads ---
 
     public String sessionStatus(String tenantId, String sessionId) {

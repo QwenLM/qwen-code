@@ -147,6 +147,21 @@ public class ManagedAutomationService {
                     "automation_operation_conflict",
                     "The Idempotency-Key already landed on another Session.");
         }
+        // Claim the identity before any side effect: the row is durable
+        // from here on, so a lost answer or a concurrent request under
+        // the same key meets this binding instead of committing twice. A
+        // claim already held by the identical request is its own redrive.
+        boolean claimed = ledger.claimCommand(new CommandRow(tenantId,
+                idempotencyKey, actorId, requestDigest, scheduleId, ""),
+                clock.get());
+        if (!claimed) {
+            Optional<Result<PublicAutomation>> concurrent = replay(tenantId,
+                    actorId, idempotencyKey, requestDigest,
+                    PublicAutomation.class);
+            if (concurrent.isPresent()) {
+                return concurrent.get();
+            }
+        }
         Map<String, Object> answer = define(session, actorId, scheduleId,
                 definition, operationIdFor(tenantId, idempotencyKey));
         PublicAutomation created = mirror(session, actorId, answer);
@@ -650,6 +665,11 @@ public class ManagedAutomationService {
             throw new ApiException(HttpStatus.CONFLICT, "idempotency_conflict",
                     "The idempotency key was reused with different content.");
         }
+        if (command.get().resultJson().isEmpty()) {
+            // Claimed before any side effect but not yet answered: the
+            // same request lets its operation re-drive instead.
+            return Optional.empty();
+        }
         try {
             return Optional.of(new Result<>(mapper.readValue(
                     command.get().resultJson(), type), true));
@@ -663,9 +683,12 @@ public class ManagedAutomationService {
             String idempotencyKey, String requestDigest, String scheduleId,
             Object result) {
         try {
-            ledger.recordCommand(new CommandRow(tenantId, idempotencyKey,
-                    actorId, requestDigest, scheduleId,
-                    mapper.writeValueAsString(result)), clock.get());
+            String json = mapper.writeValueAsString(result);
+            if (!ledger.settleCommand(tenantId, idempotencyKey, json)) {
+                ledger.recordCommand(new CommandRow(tenantId, idempotencyKey,
+                        actorId, requestDigest, scheduleId, json),
+                        clock.get());
+            }
         } catch (JsonProcessingException error) {
             throw new IllegalStateException("automation result is unwritable",
                     error);

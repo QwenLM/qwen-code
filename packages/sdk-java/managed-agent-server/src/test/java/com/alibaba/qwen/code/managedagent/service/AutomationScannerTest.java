@@ -757,8 +757,8 @@ class AutomationScannerTest {
         String keyA = "lost-" + UUID.randomUUID();
         String automationId = ManagedAutomationService.scheduleIdFor(tenant,
                 keyA);
-        // The Harness commits revision 1, but the answer never arrives: no
-        // command row and no mirror.
+        // The Harness commits revision 1, but the answer never arrives:
+        // the pre-relay claim is the only ledger trace, and no mirror.
         fake.failAfterNextDefineCommit = new DaemonException("connection lost");
         assertThatThrownBy(() -> service.create(tenant, ACTOR, keyA, requestA))
                 .isInstanceOfSatisfying(ApiException.class, error -> {
@@ -767,7 +767,9 @@ class AutomationScannerTest {
                     assertThat(error.getCode())
                             .isEqualTo("automation_operation_unknown");
                 });
-        assertThat(ledger.findCommand(tenant, keyA)).isEmpty();
+        AutomationLedgerStore.CommandRow claim = ledger
+                .findCommand(tenant, keyA).orElseThrow();
+        assertThat(claim.resultJson()).isEmpty();
         assertThat(ledger.findSchedule(tenant, automationId)).isEmpty();
         // The committed record reaches the record store out of band (the
         // projection of the Session store), and the next scanner tick
@@ -1258,6 +1260,76 @@ class AutomationScannerTest {
         ScheduleRow mirror = ledger.findSchedule(tenant, first.id())
                 .orElseThrow();
         assertThat(mirror.sessionId()).isEqualTo(sessionId);
+    }
+
+    @Test
+    void aLostAnswerCreateStillBindsTheKeySoAnotherRequestConflicts() {
+        String keyA = "lost-" + UUID.randomUUID();
+        String scheduleId = ManagedAutomationService.scheduleIdFor(tenant,
+                keyA);
+        AutomationDefinitionRequest requestA = new AutomationDefinitionRequest(
+                sessionId, "Goal", "0 2 * * *", "UTC", "Run it.", null, null,
+                null, null, null);
+        // The post-commit answer is lost: the claim is durable, mirror and
+        // answer are not — the window a mirror check could never cover.
+        fake.failAfterNextDefineCommit = new DaemonException("connection lost");
+        assertThatThrownBy(() -> service.create(tenant, ACTOR, keyA, requestA))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode())
+                                .isEqualTo("automation_operation_unknown"));
+        assertThat(ledger.findSchedule(tenant, scheduleId)).isEmpty();
+        assertThat(fake.scheduleOf(sessionId, scheduleId)).isNotNull();
+        // A different request under the same key meets the claim, not a
+        // second commit — whatever Session it names.
+        String otherSession = sessions.createWorkspaceSession(tenant, ACTOR,
+                "create-" + UUID.randomUUID(), "qwen-code", null, "Other",
+                Map.of(), List.of(), new WorkspaceSelection(WORKSPACE, "."))
+                .sessionId();
+        jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE'"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant,
+                otherSession);
+        assertThatThrownBy(() -> service.create(tenant, ACTOR, keyA,
+                new AutomationDefinitionRequest(otherSession, "Goal 2",
+                        "15 3 * * *", "UTC", "Run that.", null, null, null,
+                        null, null)))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("idempotency_conflict");
+                });
+        assertThat(fake.scheduleOf(otherSession, scheduleId)).isNull();
+        // The request that owns the claim redrives: the Harness replays
+        // its committed revision, the mirror and the answer follow.
+        var retried = service.create(tenant, ACTOR, keyA, requestA);
+        assertThat(retried.replayed()).isTrue();
+        assertThat(retried.body().id()).isEqualTo(scheduleId);
+        assertThat(ledger.findSchedule(tenant, scheduleId).orElseThrow()
+                .sessionId()).isEqualTo(sessionId);
+        assertThat(ledger.findCommand(tenant, keyA).orElseThrow().resultJson())
+                .isNotEmpty();
+    }
+
+    @Test
+    void aConcurrentClaimUnderTheSameKeyConflictsBeforeAnySideEffect() {
+        String key = "race-" + UUID.randomUUID();
+        String scheduleId = ManagedAutomationService.scheduleIdFor(tenant,
+                key);
+        // A foreign request's claim already holds the key mid-flight:
+        // this one never reaches the Harness and mirrors nothing.
+        ledger.claimCommand(new AutomationLedgerStore.CommandRow(tenant, key,
+                ACTOR, "deadbeef", scheduleId, ""), clock.get());
+        assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
+                new AutomationDefinitionRequest(sessionId, "Goal",
+                        "0 2 * * *", "UTC", "Run it.", null, null, null, null,
+                        null)))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("idempotency_conflict");
+                });
+        assertThat(fake.operations).noneMatch(operation -> "define_schedule"
+                .equals(operation.get("kind")));
+        assertThat(ledger.findSchedule(tenant, scheduleId)).isEmpty();
     }
 
     @Test
