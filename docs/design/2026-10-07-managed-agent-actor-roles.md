@@ -13,7 +13,7 @@ Verified at `main` = `ac497aeed9` (one commit past the `b585508733` baseline the
 issue names; the delta is a TUI change outside this module).
 
 Status: slice A (#13543) lands the registry and its gates over today's
-admission. The V52 storage in D2/D3 lands with slice B (#13544) and the
+admission. The V53 storage in D2/D3 lands with slice B (#13544) and the
 enforcement in D4/D7 with slice C (#13545); until those merge, their sections
 describe planned changes, not the tree.
 
@@ -111,7 +111,7 @@ of actors the server cannot enumerate; the blocking behaviours are defined by
 who shares the _Workspace binding_. Not tenant-keyed: it cannot express
 "reader on A, operator on B".
 
-Concretely, migration V52 replaces the two booleans with one column:
+Concretely, migration V53 replaces the two booleans with one column:
 
 ```sql
 ALTER TABLE managed_workspace_access
@@ -166,7 +166,7 @@ appears in this slice (section 7).
 
 ### D3 — the Session record keeps an owner, defaulting to its creator
 
-V52 also adds `managed_agent_session.owner_actor_key VARBINARY(2048) NULL`
+V53 also adds `managed_agent_session.owner_actor_key VARBINARY(2048) NULL`
 and backfills it from `creator_actor_key`. Three identity facts stay
 deliberately separate:
 
@@ -181,7 +181,7 @@ deliberately separate:
 
 `managed_workspace_create_command` remains what it is — an idempotency-command
 record whose `actor_id` belongs to the idempotency domain, not to
-authorization. After V52 the authorization reads of it (the NULL-creator
+authorization. After V53 the authorization reads of it (the NULL-creator
 fallbacks in `requireOwner` / `requireWorkspaceCreator`) survive only for
 sessions created before V40; new sessions always carry creator and owner.
 
@@ -286,7 +286,7 @@ file-scope disjointness, not topic:
 | Slice                              | Content                                                                                                                                                                                                                                             | Touches                                                                                                                          |
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | **A — registry + gate (R2 first)** | `SurfaceRegistry` over today's rules, correspondence gate, acceptance probes, parity assertions, bilingual route matrix in this doc                                                                                                                 | new test-tree files only: `api/SurfaceRegistry.java`, the gate and its negative twin, the acceptance probes; no production edits |
-| **B — role storage (R1 storage)**  | V52 migration + backfill, `WorkspaceAccess` rename, registry store reads re-derivd from `role`, `owner_actor_key` column + write at creation, fixture INSERT updates (~24 sites), migration-shape tests                                             | `store/**`, `runtime-broker` enum, `db/migration`, test fixtures; no admission-decision change                                   |
+| **B — role storage (R1 storage)**  | V53 migration + backfill, `WorkspaceAccess` rename, registry store reads re-derivd from `role`, `owner_actor_key` column + write at creation, fixture INSERT updates (~24 sites), migration-shape tests                                             | `store/**`, `runtime-broker` enum, `db/migration`, test fixtures; no admission-decision change                                   |
 | **C — enforcement (R1)**           | the three creator helpers re-pointed at role/owner, refusal-code normalisation, Action respond opens to OPERATOR, WebShell capabilities by role, registry rule flips, probe expectation flips, contract v1.34 + OpenAPI text, contract-test updates | `service/**`, `store/**` checks, controllers, contract, A's enum + tests                                                         |
 
 A ∥ B is safe: disjoint files (A adds; B edits store-side). C is serial after
@@ -296,8 +296,8 @@ raced. C closes #13535; A and B reference it.
 
 ## 5. Migration and compatibility
 
-- V52 follows the established single-version doctrine (stop old servers
-  before the migration; no `outOfOrder`). Taking V52 requires renumbering any
+- V53 follows the established single-version doctrine (stop old servers
+  before the migration; no `outOfOrder`). Taking V53 requires renumbering any
   open branch's later migration; `scripts/check-flyway-migrations.js` already
   gates numbering across both migration locations.
 - Contract v1.34 records: the role vocabulary, OPERATOR admission for the
@@ -338,7 +338,7 @@ Same as the issue's, plus the explicit deferrals named there:
   untyped, and on a registered route nothing mounts — a committed negative
   test keeps proving both; probes pin today's statuses per rule class on
   public, WebShell and internal routes.
-- Slice B: migration-shape test applying V52 over V47 fixtures asserts the
+- Slice B: migration-shape test applying V53 over V47 fixtures asserts the
   backfill (can_create → OPERATOR, can_read-only → READER, owner := creator);
   the full existing suite stays green untouched except fixture INSERTs —
   that is the behaviour-invisibility proof.
