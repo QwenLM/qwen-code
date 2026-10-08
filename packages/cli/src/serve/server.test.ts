@@ -903,6 +903,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_display_name',
   'scratch_workspace_registration',
   'workspace_runtime_removal',
+  'workspace_pinning',
   'native_directory_picker',
   'workspace_runtime',
   'workspace_runtime_stop',
