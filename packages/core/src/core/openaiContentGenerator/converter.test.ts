@@ -441,16 +441,20 @@ describe('OpenAIContentConverter', () => {
       expect(partsOf(response)).toEqual([{ text: 'Answer.' }]);
     });
 
-    it('preserves a closing tag when the provider reports truncation', () => {
-      const stream = contentOnlyStream();
-      const first = send(stream, { content: 'Answer.\n</think>' });
-      const last = finishStream(stream, 'length');
-      expect(
-        [...(partsOf(first) ?? []), ...(partsOf(last) ?? [])]
-          .map((part) => part.text ?? '')
-          .join(''),
-      ).toBe('Answer.\n</think>');
-    });
+    it.each(['length', 'content_filter', 'an_unmapped_reason'])(
+      'preserves a closing tag when the provider reports %s',
+      (finishReason) => {
+        const stream = contentOnlyStream();
+        const first = send(stream, { content: 'Answer.\n</think>' });
+        const last = finishStream(stream, finishReason);
+        expect(
+          [...(partsOf(first) ?? []), ...(partsOf(last) ?? [])]
+            .map((part) => part.text ?? '')
+            .join(''),
+        ).toBe('Answer.\n</think>');
+        expect((stream as RequestContext).protocolTagSanitized).toBeUndefined();
+      },
+    );
 
     it('also filters a normally completed nonstreaming prose suffix', () => {
       const response = converter.convertOpenAIResponseToLlm(

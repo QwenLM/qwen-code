@@ -2850,10 +2850,11 @@ describe('ContentGenerationPipeline', () => {
       }));
 
     it('leaves the chunk-converter stub unimplemented for later tests', () => {
-      // Placed after both real-converter cases: the module-level stub must be
-      // back at its factory default (a bare `vi.fn()`), or every later test in
-      // this file silently runs real chunk conversion wherever it streamed one
-      // chunk more than it queued `mockReturnValueOnce` responses for.
+      // Placed after every real-converter case above: the module-level stub
+      // must be back at its factory default (a bare `vi.fn()`), or every later
+      // test in this file silently runs real chunk conversion wherever it
+      // streamed one chunk more than it queued `mockReturnValueOnce` responses
+      // for.
       expect(
         vi
           .mocked(OpenAIContentConverter.convertOpenAIChunkToLlm)
