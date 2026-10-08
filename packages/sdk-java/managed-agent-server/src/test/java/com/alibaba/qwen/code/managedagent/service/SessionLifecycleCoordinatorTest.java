@@ -606,12 +606,14 @@ class SessionLifecycleCoordinatorTest {
                         tagged);
                 assertThat(tagged).containsEntry("authority", Map.of(
                         "operationId", lifecycleWorld.operation,
-                        "claimGeneration", lifecycleRecord.claimGeneration()));
+                        "claimGeneration", lifecycleRecord.claimGeneration(),
+                        "kind", "delete"));
                 assertThat(harness.operations)
                         .extracting(op -> op.get("authority"))
                         .containsExactly(null, Map.of("operationId",
                                 lifecycleWorld.operation, "claimGeneration",
-                                lifecycleRecord.claimGeneration()));
+                                lifecycleRecord.claimGeneration(), "kind",
+                                "delete"));
             } finally {
                 coordinator.stopRenewals();
             }

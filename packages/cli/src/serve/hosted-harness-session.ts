@@ -3097,23 +3097,29 @@ export function registerHostedHarnessSessionRoutes(
         ) {
           // Closing work means lifecycle admission, so the parent's own
           // child cleanup presents the matching lifecycle claim instead:
-          // the store itself verifies the operation id and claim
-          // generation named by the call. No valid claim present reverts
-          // to the exact ordinary refusal of before; a refused claim
-          // answers as conflict, never a silent pass.
+          // the store itself verifies the operation id, claim generation
+          // and lifecycle kind named by the call. The shared client keeps
+          // the claim only for the evaluation — every outcome restores
+          // the prior stamped authority, so a rejected or stale one never
+          // hides the next request's own claim. No valid claim present
+          // reverts to the exact ordinary refusal of before; a refused
+          // claim answers as conflict, never a silent pass.
           const claim = object(object(req.body)?.['authority']);
           if (
             typeof claim?.['operationId'] !== 'string' ||
-            typeof claim['claimGeneration'] !== 'number'
+            typeof claim['claimGeneration'] !== 'number' ||
+            (claim['kind'] !== 'close' && claim['kind'] !== 'delete')
           )
             return ordinaryAuthorizationError(res, cause);
+          const authority = {
+            operationId: claim['operationId'] as string,
+            claimGeneration: claim['claimGeneration'] as number,
+          };
+          const kind = claim['kind'] as 'close' | 'delete';
+          const previousAuthority = session.lifecycle;
           try {
-            const authority = {
-              operationId: claim['operationId'] as string,
-              claimGeneration: claim['claimGeneration'] as number,
-            };
             session.stores!.setLifecycleAuthority(authority);
-            await session.stores!.authorizeLifecycle();
+            await session.stores!.authorizeLifecycle(kind);
           } catch (lifecycleCause) {
             if (
               lifecycleCause instanceof ManagedSessionStoreHttpError &&
@@ -3121,6 +3127,8 @@ export function registerHostedHarnessSessionRoutes(
             )
               return error(res, 409, 'hosted_lifecycle_operation_conflict');
             return ordinaryAuthorizationError(res, lifecycleCause);
+          } finally {
+            session.stores!.setLifecycleAuthority(previousAuthority);
           }
           return next();
         }

@@ -2201,17 +2201,19 @@ describe('Hosted Harness no-tool session', () => {
     expect(active.status).toBe(409);
     expect(active.body.code).toBe('hosted_lifecycle_operation_active');
     expect(state.authorizeLifecycle).not.toHaveBeenCalled();
-    // The matching lifecycle claim: authorized through its own gate.
-    await operation({
+    // The matching lifecycle claim: authorized through its own gate,
+    // carrying the lifecycle kind the fence phase requires (the
+    // pre-effects evaluation never asks for DRAINING).
+    const first = await operation({
       kind: 'cancel',
-      authority: { operationId: 'close-1', claimGeneration: 7 },
-    }).expect(202);
-    expect(state.authorizeLifecycle).toHaveBeenCalledTimes(1);
-    expect(state.setLifecycleAuthority).toHaveBeenLastCalledWith({
-      operationId: 'close-1',
-      claimGeneration: 7,
+      authority: { operationId: 'close-1', claimGeneration: 7, kind: 'close' },
     });
-    // A claim the gate itself refuses: conflict, never a silent pass.
+    expect(first.status).toBe(202);
+    expect(state.authorizeLifecycle).toHaveBeenCalledTimes(1);
+    expect(state.authorizeLifecycle).toHaveBeenLastCalledWith('close');
+    // A claim the gate itself refuses: conflict, never a silent pass —
+    // and the shared client authority is restored, so a fresh valid
+    // claim can still be evaluated on the next request.
     state.authorizeLifecycle.mockRejectedValueOnce(
       new ManagedSessionStoreHttpError(
         409,
@@ -2220,12 +2222,20 @@ describe('Hosted Harness no-tool session', () => {
       ),
     );
     const conflict = await operation({
-      kind: 'close_scope',
-      started: true,
-      authority: { operationId: 'close-1', claimGeneration: 7 },
+      kind: 'cancel',
+      authority: { operationId: 'close-1', claimGeneration: 7, kind: 'close' },
     });
     expect(conflict.status).toBe(409);
     expect(conflict.body.code).toBe('hosted_lifecycle_operation_conflict');
+    expect(state.setLifecycleAuthority).toHaveBeenLastCalledWith(undefined);
+    // The very next valid claim evaluates independently of that refusal:
+    // it is passed its own lifecycle kind and gets its own gate answer.
+    await operation({
+      kind: 'cancel',
+      authority: { operationId: 'close-2', claimGeneration: 8, kind: 'delete' },
+    }).expect(202);
+    expect(state.authorizeLifecycle).toHaveBeenCalledTimes(3);
+    expect(state.authorizeLifecycle).toHaveBeenLastCalledWith('delete');
     log.mockRestore();
     state.authorizeOrdinary.mockReset();
     state.authorizeOrdinary.mockResolvedValue(undefined);

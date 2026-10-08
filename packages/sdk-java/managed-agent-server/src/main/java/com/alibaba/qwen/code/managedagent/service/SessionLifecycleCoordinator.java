@@ -605,17 +605,19 @@ public class SessionLifecycleCoordinator {
 
     /** A lifecycle-protocol parent owns the journal its child updates
      * live under: the operation's own claim (operationId +
-     * claimGeneration) tags every child operation so the
-     * LIFECYCLE_ONLY fence recognizes its own cleanup instead of
-     * mistaking it for foreign ordinary work. Ordinary parents keep the
-     * ordinary admission exactly as before. Package-visible so tests pin
-     * the tagging contract directly. */
+     * claimGeneration + the lifecycle kind) tags every child operation so
+     * the LIFECYCLE_ONLY fence recognizes its own pre-effects cleanup
+     * instead of mistaking it for foreign ordinary work. Ordinary parents
+     * keep the ordinary admission exactly as before. Package-visible so
+     * tests pin the tagging contract directly. */
     void runLifecycleChildOperation(OperationRecord parent,
             Map<String, Object> childBody) {
         if (parent.lifecycleProtocolVersion() == 1) {
             childBody.put("authority", Map.of(
                     "operationId", parent.operationId(),
-                    "claimGeneration", parent.claimGeneration()));
+                    "claimGeneration", parent.claimGeneration(),
+                    "kind", parent.kind() == OperationKind.CLOSE
+                            ? "close" : "delete"));
         }
         harness.runChildOperation(parent.tenantId(), parent.sessionId(),
                 childBody);
