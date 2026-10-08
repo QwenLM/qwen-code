@@ -118,6 +118,18 @@ describe('e2e workflow', () => {
       );
     });
 
+    it('limits image cleanup to less than the build-lock wait', () => {
+      const pruneMinutes = Number(
+        e2eRunScript.match(/^\s*timeout (\d+)m docker image prune /m)?.[1],
+      );
+      const lockWaitSeconds = Number(
+        e2eRunScript.match(/flock --wait (\d+) 7/)?.[1],
+      );
+
+      expect(pruneMinutes).toBeGreaterThan(0);
+      expect(pruneMinutes * 60).toBeLessThan(lockWaitSeconds);
+    });
+
     it('reuses a commit-qualified image', () => {
       expect(runStep.env.BUILD_SANDBOX_FLAGS).toContain(
         'org.qwen-code.ci.sandbox=true',
