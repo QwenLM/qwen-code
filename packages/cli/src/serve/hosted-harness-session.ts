@@ -1624,7 +1624,7 @@ export function registerHostedHarnessSessionRoutes(
   contract: HostedHarnessContract,
   cwd: string,
   brokerOptions?: HostedWorkspaceBrokerOptions,
-): void {
+): { owns: (id: string) => boolean } {
   const sessions = new Map<string, HostedSession>();
   const opening = new Set<string>();
   const epoch = contract.bootId.replaceAll('-', '_');
@@ -4508,4 +4508,10 @@ export function registerHostedHarnessSessionRoutes(
   app.delete('/session/:id', (req, res) => {
     void close(req, res, true);
   });
+  return {
+    owns: (id) =>
+      [...sessions.keys(), ...opening].some(
+        (candidate) => candidate.toLowerCase() === id.toLowerCase(),
+      ),
+  };
 }

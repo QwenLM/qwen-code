@@ -203,6 +203,7 @@ import {
 } from './hosted-harness-contract.js';
 import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
+import { registerHostedCsiSessionRoutes } from './hosted-csi-session.js';
 import {
   registerWorkspacePermissionsRoutes,
   registerWorkspaceQualifiedPermissionsRoutes,
@@ -2501,17 +2502,31 @@ export function createServeApp(
       ? createHostedHarnessContract(opts.hostedHarnessCapabilityDigest!)
       : undefined;
   installHostedHarnessContractMiddleware(app, hostedHarness);
+  let stopHostedCsiSessions: (() => Promise<void>) | undefined;
   if (hostedHarness) {
-    registerHostedHarnessSessionRoutes(
-      app,
-      hostedHarness,
-      primaryBoundWorkspace,
+    const broker =
       opts.managedRuntimeBrokerUrl && opts.managedRuntimeBrokerToken
         ? {
             baseUrl: opts.managedRuntimeBrokerUrl,
             token: opts.managedRuntimeBrokerToken,
           }
-        : undefined,
+        : undefined;
+    if (opts.hostedCsiSessionStoreUrl && broker) {
+      const privateSessions = registerHostedCsiSessionRoutes(
+        app,
+        hostedHarness,
+        opts.hostedCsiSessionStoreUrl,
+        broker,
+        (id) => ordinary.owns(id),
+      );
+      stopHostedCsiSessions = privateSessions.stopLocal;
+      app.locals['stopHostedCsiSessions'] = stopHostedCsiSessions;
+    }
+    const ordinary = registerHostedHarnessSessionRoutes(
+      app,
+      hostedHarness,
+      primaryBoundWorkspace,
+      broker,
     );
     app.use((req, res, next) => {
       if (req.path === '/capabilities' || req.path === '/health') next();
@@ -4218,6 +4233,7 @@ export function createServeApp(
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
       const pendingDrains = [
+        stopHostedCsiSessions?.() ?? Promise.resolve(),
         (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)(),
         workspaceManagementHandle.sealAndWait(),
         (

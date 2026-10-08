@@ -1578,6 +1578,57 @@ describe('HTTP Managed Session store', () => {
     expect(server.sealCount).toBe(1);
   });
 
+  it('stops locally by joining renewal without sealing or losing staged resources', async () => {
+    vi.useFakeTimers();
+    const server = new FakeManagedSessionStore();
+    let finishRenewal!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finishRenewal = resolve;
+    });
+    const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+      const response = await server.fetch(input, init);
+      if (requestUrl(input).endsWith('/writers:renew')) await gate;
+      return response;
+    });
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      leaseDurationMs: 1000,
+      fetchFn,
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      const bytes = Buffer.from('{"retained":true}');
+      const ref = await stores.resourceStore.publish('managed-input', bytes);
+      await vi.advanceTimersByTimeAsync(500);
+      let joined = false;
+      const stopped = stores.stopLocal().then(() => {
+        joined = true;
+      });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(joined).toBe(false);
+      finishRenewal();
+      await stopped;
+      await vi.advanceTimersByTimeAsync(5000);
+      await expect(stores.assertWritable()).rejects.toThrow('locally stopped');
+      await expect(stores.close()).rejects.toThrow('locally stopped');
+      expect(
+        fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/writers:renew'),
+        ),
+      ).toHaveLength(1);
+      expect(server.sealCount).toBe(0);
+      expect(await stores.resourceStore.read(ref)).toEqual(bytes);
+    } finally {
+      finishRenewal();
+      await stores.stopLocal();
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
+  });
+
   it('does not restart renewal while an in-flight renewal races sealing', async () => {
     vi.useFakeTimers();
     const server = new FakeManagedSessionStore();

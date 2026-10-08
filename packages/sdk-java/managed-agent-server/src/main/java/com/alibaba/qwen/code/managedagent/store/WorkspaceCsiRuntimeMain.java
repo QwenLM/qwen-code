@@ -66,6 +66,10 @@ public final class WorkspaceCsiRuntimeMain {
     }
 
     static void run(String[] args) throws Exception {
+        if (args.length == 3 && "text".equals(args[0])) {
+            WorkspaceCsiHostedMain.run(args);
+            return;
+        }
         if (args.length != 3 || !"serve".equals(args[0])) {
             throw new IllegalArgumentException("Usage: serve <reviewed-runtime-json> <port>");
         }
@@ -133,7 +137,7 @@ public final class WorkspaceCsiRuntimeMain {
         }
     }
 
-    private static String required(String name) {
+    static String required(String name) {
         String value = System.getenv(name);
         if (value == null || value.isBlank()) {
             throw new IllegalStateException("Required private CSI operator setting is unavailable");

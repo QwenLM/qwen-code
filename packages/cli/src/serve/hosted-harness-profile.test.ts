@@ -35,6 +35,48 @@ describe('Hosted Harness profile', () => {
     ).not.toThrow();
   });
 
+  it('pins the private store only with an authenticated Hosted Broker', () => {
+    const privateOptions = {
+      ...options,
+      profile: 'hosted-harness' as const,
+      token: 'harness-secret',
+      serveWebShell: false,
+      hostedHarnessCapabilityDigest: `sha256:${'a'.repeat(64)}`,
+      managedRuntimeBrokerUrl: 'http://127.0.0.1:8080',
+      managedRuntimeBrokerToken: 'broker-secret',
+      hostedCsiSessionStoreUrl:
+        'http://127.0.0.1:8081/internal/managed-session-store/v1',
+    };
+    expect(() => validateHostedHarnessProfile(privateOptions)).not.toThrow();
+    for (const url of [
+      'http://store.example/v1',
+      'https://u:p@store.example/v1',
+      'https://store.example/v1?q=1',
+      'https://store.example/v1#f',
+      'file:///store',
+    ]) {
+      expect(() =>
+        validateHostedHarnessProfile({
+          ...privateOptions,
+          hostedCsiSessionStoreUrl: url,
+        }),
+      ).toThrow();
+    }
+    expect(() =>
+      validateHostedHarnessProfile({
+        ...privateOptions,
+        managedRuntimeBrokerUrl: undefined,
+        managedRuntimeBrokerToken: undefined,
+      }),
+    ).toThrow('requires the original Runtime Broker');
+    expect(() =>
+      validateHostedHarnessProfile({
+        ...options,
+        hostedCsiSessionStoreUrl: privateOptions.hostedCsiSessionStoreUrl,
+      }),
+    ).toThrow('require --profile hosted-harness');
+  });
+
   it.each([
     { hostname: '0.0.0.0', error: 'loopback' },
     { mode: 'native' as const, error: '--http-bridge' },
