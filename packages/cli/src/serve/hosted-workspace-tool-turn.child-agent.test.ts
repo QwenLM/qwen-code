@@ -485,6 +485,68 @@ it('a cancelled turn abandons the answer but never the committed child', async (
   expect(record.run.execution).toBe('intent');
 });
 
+// The batch sibling of the same rule: an abandoned foreground wait hands
+// control back to the batch loop, which used to admit every call queued
+// behind it. After the abort, the loop's next admission must refuse —
+// the first child stands documented, the queued one never started.
+it('a cancelled turn never admits children queued behind its abandoned wait', async () => {
+  const turn = createTurn();
+  const abort = new AbortController();
+  setTimeout(() => abort.abort(), 200);
+  const batch = await turn.execute(
+    [
+      call(
+        {
+          description: 'first child',
+          prompt: 'review a',
+          run_in_background: false,
+        },
+        'call-1',
+      ),
+      call(
+        {
+          description: 'second child',
+          prompt: 'review b',
+          run_in_background: false,
+        },
+        'call-2',
+      ),
+    ],
+    [
+      {
+        functionCall: {
+          id: 'call-1',
+          name: 'agent',
+          args: {
+            description: 'first child',
+            prompt: 'review a',
+            run_in_background: false,
+          },
+        },
+      },
+      {
+        functionCall: {
+          id: 'call-2',
+          name: 'agent',
+          args: {
+            description: 'second child',
+            prompt: 'review b',
+            run_in_background: false,
+          },
+        },
+      },
+    ],
+    'model',
+    abort.signal,
+  );
+  const text = JSON.stringify(batch);
+  expect(text).toContain('cancelled');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    1,
+  );
+  expect(children.record('prompt:call-2')).toBeUndefined();
+});
+
 it('replays a re-driven batch into the original record, never a second one', async () => {
   const first = createTurn();
   await executeAgent(

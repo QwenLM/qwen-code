@@ -2603,6 +2603,20 @@ export class HostedWorkspaceToolTurn {
     model: string,
     signal: AbortSignal,
   ): Promise<Part[]> {
+    // A cancelled turn admits nothing further: keeping an already-launched
+    // child running is documented, but a batch that re-enters here after
+    // its abort (a sibling's abandoned wait returned control) must not
+    // stamp a new child the cancelled turn never started.
+    if (signal.aborted) {
+      const skipped = convertToFunctionErrorResponse(
+        request.call.name,
+        request.call.callId,
+        [],
+        'The turn was cancelled before this child agent was admitted.',
+      );
+      await this.commit('tool_result', skipped, model);
+      return skipped;
+    }
     const children = this.childAgents!;
     const authority = this.session.authority;
     const key = authority.sessionHeader.sessionKey;
