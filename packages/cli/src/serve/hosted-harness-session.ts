@@ -3740,6 +3740,11 @@ export function registerHostedHarnessSessionRoutes(
         return error(res, 409, 'hosted_turn_recovery_required');
       }
     }
+    // The probe returned to the event loop: the wake pump may have
+    // claimed the turn slot meanwhile (it re-reads busy after its own
+    // awaits). Re-read before claiming — this pair is what makes the
+    // check-then-claim above atomic again.
+    if (session.active) return error(res, 409, 'hosted_turn_active');
     const abort = new AbortController();
     const deadline =
       deadlineMs === undefined ? null : Date.now() + (deadlineMs as number);
