@@ -24,8 +24,10 @@ class ManagedMcpRecordContractTest {
             String domain = fixture.get("domain").textValue();
             String id = fixture.get("id").textValue();
             var body = ManagedExtensionProjection.RECORD_BODIES.get(domain);
-            assertNull(body.taskKind());
             JsonNode record = merge(fixtures.get("templates").get(domain), fixture.get("patch"));
+            // Probe with the record, not an empty node: a mapping that
+            // read the record could answer null for the empty one.
+            assertNull(body.taskKindOf().apply(record), id);
             if (fixture.get("valid").booleanValue()) {
                 body.require().accept(record);
             } else {

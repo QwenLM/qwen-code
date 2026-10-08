@@ -7,9 +7,10 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../../config/storage.js';
 import { createAssignedThread, postMessage } from './thread-actions.js';
+import { finishRunInTransaction } from './run-lifecycle.js';
 import {
   AGENT_HOST_REMOVED,
   AGENT_PROGRAM_UNAVAILABLE,
@@ -23,12 +24,17 @@ import {
 } from './host-lease.js';
 import {
   authenticateAgentHost,
+  getAgentsFilePath,
+  getAgentHostsFilePath,
+  readAgentHosts,
+  heartbeatAgentHost,
   createThread,
   enrollAgentHost,
   issueAgentHostEnrollment,
   readThread,
   readWorkspaceAgents,
   updateWorkspaceAgents,
+  withAgentStoreTransaction,
   writeThread,
 } from './store.js';
 import {
@@ -37,6 +43,21 @@ import {
   type ThreadRun,
   type WorkspaceAgent,
 } from './types.js';
+
+const renameFailure = vi.hoisted(() => ({
+  path: undefined as string | undefined,
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    rename: async (...args: Parameters<typeof actual.rename>) => {
+      if (args[1] === renameFailure.path)
+        throw new Error('binding write failed');
+      return actual.rename(...args);
+    },
+  };
+});
 
 const PROJECT_ROOT = '/host-lease-test';
 const T0 = 1_000_000;
@@ -248,9 +269,11 @@ describe('leases', () => {
         close: { kind: 'review' as const, summary: 'Marker read.' },
         tokens: 1_050,
       };
+      const reclaimed = await readThread(PROJECT_ROOT, threadId);
       await expect(
         applyHostRunResult(PROJECT_ROOT, { ...firstIdentity, ...result }, at),
       ).resolves.toMatchObject({ ok: false });
+      expect(await readThread(PROJECT_ROOT, threadId)).toEqual(reclaimed);
       await expect(
         applyHostRunResult(
           PROJECT_ROOT,
@@ -350,6 +373,258 @@ describe('leases', () => {
         .find((message) => message.id === followup.message.id)
         ?.outcomes.find((outcome) => outcome.targetAgentId === agent.id)?.runId,
     ).toBe(successor?.id);
+  });
+});
+
+describe('Host result receipts', () => {
+  it.each([0, 1_050])(
+    'recognizes only an accepted exact retry with %i tokens',
+    async (tokens) => {
+      const mine = await host('mine', ['qwen']);
+      await placeAgent([mine]);
+      const threadId = await seedQueued();
+      const assignment = (await pickupRunForHost(PROJECT_ROOT, mine, T0))!;
+      const input = {
+        threadId,
+        runId: assignment.runId,
+        hostId: mine,
+        leaseId: assignment.lease.leaseId,
+        attempt: assignment.attempt,
+        status: 'completed' as const,
+        close: { kind: 'review' as const, summary: 'Accepted answer.' },
+        tokens,
+      };
+      await expect(
+        applyHostRunResult(PROJECT_ROOT, input, T0 + 1),
+      ).resolves.toMatchObject({
+        ok: true,
+        value: { alreadyApplied: false },
+      });
+      const accepted = (await readThread(PROJECT_ROOT, threadId))!;
+      expect(accepted.tokensUsed).toBe(tokens);
+      expect(accepted.runs[0].hostResultReceipt).toMatchObject({
+        attempt: assignment.attempt,
+        leaseId: assignment.lease.leaseId,
+      });
+      await expect(
+        applyHostRunResult(
+          PROJECT_ROOT,
+          {
+            ...input,
+            close: { summary: input.close.summary, kind: input.close.kind },
+          },
+          T0 + DEFAULT_RUN_LEASE_MS + 1,
+        ),
+      ).resolves.toMatchObject({
+        ok: true,
+        value: { alreadyApplied: true },
+      });
+      await expect(
+        applyHostRunResult(
+          PROJECT_ROOT,
+          {
+            ...input,
+            close: { kind: 'review', summary: 'Different answer.' },
+            tokens: tokens + 1,
+          },
+          T0 + DEFAULT_RUN_LEASE_MS + 2,
+        ),
+      ).resolves.toEqual({ ok: false, reason: 'stale_lease' });
+      expect(await readThread(PROJECT_ROOT, threadId)).toEqual(accepted);
+    },
+  );
+
+  it('refuses a retry that differs in any one receipt term', async () => {
+    const mine = await host('mine', ['qwen']);
+    await placeAgent([mine]);
+    const threadId = await seedQueued();
+    const assignment = (await pickupRunForHost(PROJECT_ROOT, mine, T0))!;
+    const input = {
+      threadId,
+      runId: assignment.runId,
+      hostId: mine,
+      leaseId: assignment.lease.leaseId,
+      attempt: assignment.attempt,
+      status: 'completed' as const,
+      close: { kind: 'review' as const, summary: 'Accepted answer.' },
+      tokens: 1_050,
+    };
+    await expect(
+      applyHostRunResult(PROJECT_ROOT, input, T0 + 1),
+    ).resolves.toMatchObject({ ok: true, value: { alreadyApplied: false } });
+    const accepted = (await readThread(PROJECT_ROOT, threadId))!;
+    // One field per re-post. The identity fields are matched before the digest
+    // is compared, so these are the terms only the digest can tell apart.
+    const variants = [
+      { ...input, status: 'failed' as const },
+      { ...input, error: 'Different error.' },
+      { ...input, tokens: 1_051 },
+      { ...input, close: { kind: 'review' as const, summary: 'Different.' } },
+      {
+        ...input,
+        close: { kind: 'blocked' as const, question: input.close.summary },
+      },
+    ];
+    for (const variant of variants) {
+      await expect(
+        applyHostRunResult(
+          PROJECT_ROOT,
+          variant,
+          T0 + DEFAULT_RUN_LEASE_MS + 2,
+        ),
+      ).resolves.toEqual({ ok: false, reason: 'stale_lease' });
+      expect(await readThread(PROJECT_ROOT, threadId)).toEqual(accepted);
+    }
+  });
+
+  it('acks no receipt for a result that a cancellation discarded', async () => {
+    const mine = await host('mine', ['qwen']);
+    await placeAgent([mine]);
+    const threadId = await seedQueued();
+    const assignment = (await pickupRunForHost(PROJECT_ROOT, mine, T0))!;
+    const input = {
+      threadId,
+      runId: assignment.runId,
+      hostId: mine,
+      leaseId: assignment.lease.leaseId,
+      attempt: assignment.attempt,
+      status: 'completed' as const,
+      close: { kind: 'review' as const, summary: 'Never posted.' },
+      tokens: 1_050,
+    };
+    // A cancel keeps the lease, so the Host's result still arrives inside its
+    // window. Settlement overrides the status to `cancelled` and the closing
+    // tool is skipped, because only a `running` run posts its answer, so the
+    // summary never reaches the thread.
+    await withAgentStoreTransaction(PROJECT_ROOT, async (transaction) => {
+      const current = (await transaction.readThread(threadId))!;
+      await transaction.writeThread({
+        ...current,
+        runs: current.runs.map((run) => ({ ...run, status: 'cancelling' })),
+      });
+    });
+
+    await expect(
+      applyHostRunResult(PROJECT_ROOT, input, T0 + 1),
+    ).resolves.toMatchObject({ ok: true, value: { alreadyApplied: false } });
+    const cancelled = (await readThread(PROJECT_ROOT, threadId))!;
+    expect(cancelled.runs[0]?.status).toBe('cancelled');
+    expect(cancelled.runs[0]?.hostResultReceipt).toBeUndefined();
+    expect(cancelled.messages.map((message) => message.text)).not.toContain(
+      'Never posted.',
+    );
+
+    // An exact re-post is the retry a Host makes when the first response was
+    // lost. It must not be told its discarded answer was applied.
+    await expect(
+      applyHostRunResult(PROJECT_ROOT, input, T0 + 2),
+    ).resolves.toEqual({ ok: false, reason: 'stale_lease' });
+    expect((await readThread(PROJECT_ROOT, threadId))?.tokensUsed).toBe(1_050);
+  });
+
+  it.each(['recovery', 'cancellation'] as const)(
+    'refuses late usage after %s without moving the ledger',
+    async (reason) => {
+      const mine = await host('mine', ['qwen']);
+      await placeAgent([mine]);
+      const parent = await createThread(PROJECT_ROOT, { title: 'Parent' });
+      const child = await createThread(PROJECT_ROOT, {
+        title: 'Child',
+        parentThreadId: parent.id,
+      });
+      await writeThread(PROJECT_ROOT, {
+        ...child,
+        status: 'in_progress',
+        runs: [queuedRun()],
+      });
+      const now = Date.now();
+      const assignment = (await pickupRunForHost(PROJECT_ROOT, mine, now))!;
+      const identity = {
+        threadId: child.id,
+        runId: assignment.runId,
+        hostId: mine,
+        leaseId: assignment.lease.leaseId,
+        attempt: assignment.attempt,
+      };
+      await reportHostRunProgress(PROJECT_ROOT, {
+        ...identity,
+        sequence: 1,
+        stage: 'thinking',
+        detail: '',
+        tokens: 100,
+      });
+      const terminal = await withAgentStoreTransaction(
+        PROJECT_ROOT,
+        async (transaction) => {
+          if (reason === 'cancellation') {
+            const current = (await transaction.readThread(child.id))!;
+            await transaction.writeThread({
+              ...current,
+              runs: current.runs.map((run) => ({
+                ...run,
+                status: 'cancelling',
+              })),
+            });
+          }
+          return finishRunInTransaction(transaction, {
+            threadId: child.id,
+            runId: assignment.runId,
+            outcome: {
+              status: 'failed',
+              attempt: assignment.attempt,
+              error: 'Recovery expired.',
+              failureStage: 'recovery',
+            },
+            now: assignment.lease.expiresAt + 2 * DEFAULT_RUN_LEASE_MS,
+          });
+        },
+      );
+      expect(terminal.outbox).toHaveLength(1);
+      const input = {
+        ...identity,
+        status: 'completed' as const,
+        close: { kind: 'review' as const, summary: 'Must not appear.' },
+        tokens: 1_050,
+      };
+      // Settlement ends the attempt's write authority over spend too: not even
+      // the transport's maximum admissible count may move `tokensUsed`, which
+      // is what tree budget enforcement reads to cancel unrelated live runs.
+      for (const tokens of [1_050, 900, 1_000_000_000]) {
+        await expect(
+          applyHostRunResult(
+            PROJECT_ROOT,
+            { ...input, tokens },
+            assignment.lease.expiresAt + 2 * DEFAULT_RUN_LEASE_MS + 1,
+          ),
+        ).resolves.toEqual({ ok: false, reason: 'stale_lease' });
+        expect(await readThread(PROJECT_ROOT, child.id)).toEqual(terminal);
+      }
+    },
+  );
+
+  it('does not account a result after its Host was removed', async () => {
+    const mine = await host('mine', ['qwen']);
+    await placeAgent([mine]);
+    const threadId = await seedQueued();
+    const assignment = (await pickupRunForHost(PROJECT_ROOT, mine, T0))!;
+    await removeAgentHost(PROJECT_ROOT, mine);
+    const removed = await readThread(PROJECT_ROOT, threadId);
+    await expect(
+      applyHostRunResult(
+        PROJECT_ROOT,
+        {
+          threadId,
+          runId: assignment.runId,
+          hostId: mine,
+          leaseId: assignment.lease.leaseId,
+          attempt: assignment.attempt,
+          status: 'completed',
+          tokens: 1_050,
+        },
+        T0 + 1,
+      ),
+    ).resolves.toEqual({ ok: false, reason: 'stale_lease' });
+    expect(await readThread(PROJECT_ROOT, threadId)).toEqual(removed);
   });
 });
 
@@ -475,3 +750,184 @@ describe('removeAgentHost', () => {
     expect(agent?.execution).toEqual({ mode: 'managed-host', hostIds: [kept] });
   });
 });
+
+describe('explicit Agent Host replacement', () => {
+  it('migrates only selected bindings, settles old runs and refuses old credentials and late results', async () => {
+    const old = await enroll('worker', ['qwen']);
+    const sibling = await enroll('worker', ['qwen']);
+    await placeAgent([old.id, sibling.id], 'qwen');
+    const runningId = await seedQueued();
+    const assignment = (await pickupRunForHost(PROJECT_ROOT, old.id, T0))!;
+    const finishing = await createThread(PROJECT_ROOT, {
+      title: 'Already finishing',
+    });
+    await writeThread(PROJECT_ROOT, {
+      ...finishing,
+      runs: [
+        {
+          ...assignmentToRun(assignment),
+          id: 'rn_finishing',
+          status: 'finishing',
+          closeKind: 'review',
+        },
+      ],
+    });
+    const { token } = await issueAgentHostEnrollment(PROJECT_ROOT, old.id);
+    await expect(
+      heartbeatAgentHost(PROJECT_ROOT, old.id, old.secret, {
+        workspaceCwd: '/work/worker',
+        providers: ['Qwen Code ACP'],
+        enrollmentToken: token,
+      }),
+    ).rejects.toThrow('Agent Host replacement requires enrollment.');
+    const replacement = await enrollAgentHost(PROJECT_ROOT, {
+      token,
+      name: 'worker',
+      workspaceCwd: '/work/worker',
+      providers: ['Qwen Code ACP'],
+    });
+    expect(replacement.host.id).not.toBe(old.id);
+    expect((await readWorkspaceAgents(PROJECT_ROOT))[0]?.execution).toEqual({
+      mode: 'managed-host',
+      hostIds: [replacement.host.id, sibling.id],
+      provider: 'qwen',
+    });
+    expect((await readThread(PROJECT_ROOT, runningId))?.runs[0]).toMatchObject({
+      status: 'failed',
+      error: AGENT_HOST_REMOVED,
+    });
+    expect(
+      (await readThread(PROJECT_ROOT, finishing.id))?.runs[0]?.status,
+    ).toBe('completed');
+    expect(
+      (await readAgentHosts(PROJECT_ROOT)).map((entry) => entry.id).sort(),
+    ).toEqual([sibling.id, replacement.host.id].sort());
+    await expect(
+      authenticateAgentHost(PROJECT_ROOT, old.id, old.secret),
+    ).resolves.toBeUndefined();
+    await expect(
+      authenticateAgentHost(PROJECT_ROOT, sibling.id, sibling.secret),
+    ).resolves.toMatchObject({ id: sibling.id });
+    await expect(
+      authenticateAgentHost(
+        PROJECT_ROOT,
+        replacement.host.id,
+        replacement.secret,
+      ),
+    ).resolves.toMatchObject({ id: replacement.host.id });
+    expect(
+      (
+        await applyHostRunResult(PROJECT_ROOT, {
+          threadId: runningId,
+          runId: assignment.runId,
+          hostId: old.id,
+          leaseId: assignment.lease.leaseId,
+          attempt: assignment.attempt,
+          status: 'completed',
+        })
+      ).ok,
+    ).toBe(false);
+    await expect(
+      enrollAgentHost(PROJECT_ROOT, {
+        token,
+        name: 'replay',
+        workspaceCwd: '/work/worker',
+        providers: ['Qwen Code ACP'],
+      }),
+    ).rejects.toThrow('Invalid or expired');
+  });
+
+  it('fails closed for missing, foreign and invalid replacement targets or tokens', async () => {
+    const old = await enroll('old', ['qwen']);
+    await expect(
+      issueAgentHostEnrollment('/another-workspace', old.id),
+    ).rejects.toThrow('not found');
+    const { token } = await issueAgentHostEnrollment(PROJECT_ROOT, old.id);
+    await expect(
+      enrollAgentHost(PROJECT_ROOT, {
+        token: 'wrong-token',
+        name: 'new',
+        workspaceCwd: '/work/new',
+        providers: ['Qwen Code ACP'],
+      }),
+    ).rejects.toThrow('Invalid or expired');
+    expect(
+      (await readAgentHosts(PROJECT_ROOT)).map((entry) => entry.id),
+    ).toEqual([old.id]);
+    await removeAgentHost(PROJECT_ROOT, old.id);
+    await expect(
+      enrollAgentHost(PROJECT_ROOT, {
+        token,
+        name: 'new',
+        workspaceCwd: '/work/new',
+        providers: ['Qwen Code ACP'],
+      }),
+    ).rejects.toThrow('not found');
+  });
+
+  it('refreshes an expired interrupted replacement without losing its staged identity or bindings', async () => {
+    const old = await enroll('old', ['qwen']);
+    await placeAgent([old.id]);
+    const { token } = await issueAgentHostEnrollment(PROJECT_ROOT, old.id);
+    renameFailure.path = getAgentsFilePath(PROJECT_ROOT);
+    const input = {
+      token,
+      name: 'new',
+      workspaceCwd: '/work/new',
+      providers: ['Qwen Code ACP'],
+    };
+    try {
+      await expect(enrollAgentHost(PROJECT_ROOT, input)).rejects.toThrow(
+        'binding write failed',
+      );
+    } finally {
+      renameFailure.path = undefined;
+    }
+    const staged = (await readAgentHosts(PROJECT_ROOT)).find(
+      (entry) => entry.id !== old.id,
+    )!;
+    const registryPath = getAgentHostsFilePath(PROJECT_ROOT);
+    const registry = JSON.parse(await fs.readFile(registryPath, 'utf8'));
+    registry.enrollment.expiresAt = Date.now() - 1;
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+    await expect(enrollAgentHost(PROJECT_ROOT, input)).rejects.toThrow(
+      'Invalid or expired',
+    );
+    await expect(issueAgentHostEnrollment(PROJECT_ROOT)).rejects.toThrow(
+      `select "old" (${old.id}) in Runtimes, choose Replace`,
+    );
+    await expect(removeAgentHost(PROJECT_ROOT, old.id)).rejects.toThrow(
+      `select "old" (${old.id}) in Runtimes, choose Replace`,
+    );
+    const refreshed = await issueAgentHostEnrollment(PROJECT_ROOT, old.id);
+    expect(refreshed.replacementHostId).toBe(staged.id);
+    expect(refreshed.expiresAt).toBeGreaterThan(Date.now());
+    await expect(enrollAgentHost(PROJECT_ROOT, input)).rejects.toThrow(
+      'Invalid or expired',
+    );
+    const replacement = await enrollAgentHost(PROJECT_ROOT, {
+      ...input,
+      token: refreshed.token,
+    });
+    expect(replacement.host.id).toBe(staged.id);
+    expect(
+      (await readAgentHosts(PROJECT_ROOT)).map((entry) => entry.id),
+    ).toEqual([staged.id]);
+    expect((await readWorkspaceAgents(PROJECT_ROOT))[0]?.execution).toEqual({
+      mode: 'managed-host',
+      hostIds: [staged.id],
+    });
+  });
+});
+
+function assignmentToRun(
+  assignment: NonNullable<Awaited<ReturnType<typeof pickupRunForHost>>>,
+): ThreadRun {
+  return {
+    ...queuedRun(),
+    id: assignment.runId,
+    status: 'running',
+    attempts: assignment.attempt,
+    lease: assignment.lease,
+  };
+}

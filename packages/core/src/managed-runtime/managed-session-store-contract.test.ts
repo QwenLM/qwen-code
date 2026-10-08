@@ -12,7 +12,10 @@ import {
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
   type ManagedSessionStoreHttpError,
 } from './http-managed-session-store.js';
-import { MANAGED_SESSION_LIMITS } from './managed-session-records.js';
+import {
+  MANAGED_SESSION_EVENT_KINDS,
+  MANAGED_SESSION_LIMITS,
+} from './managed-session-records.js';
 
 interface ContractFixture {
   contractVersion: number;
@@ -26,11 +29,14 @@ interface ContractFixture {
     maxTransactionBytes: number;
     maxTransactionEvents: number;
     maxJsonDepth: number;
+    maxEventBytes: number;
+    maxCommitMarkerBytes: number;
     minimumWriterTokenLength: number;
     maximumWriterTokenLength: number;
     minimumLeaseDurationMs: number;
     maximumLeaseDurationMs: number;
   };
+  eventKinds: string[];
   sessionKey: {
     tenantId: string;
     workspaceId: string;
@@ -69,6 +75,24 @@ const fixture = JSON.parse(
 describe('Managed Session store shared contract', () => {
   it('pins headers, limits, bytes, and digests', () => {
     expect(fixture.contractVersion).toBe(1);
+    // Every header and limit is read: a key nobody asserts cannot hide.
+    expect(Object.keys(fixture.headers).sort()).toEqual([
+      'tenant',
+      'writerToken',
+    ]);
+    expect(Object.keys(fixture.limits).sort()).toEqual([
+      'maxCommitMarkerBytes',
+      'maxEventBytes',
+      'maxInlineResourceBytes',
+      'maxJsonDepth',
+      'maxResourcesPerTransaction',
+      'maxTransactionBytes',
+      'maxTransactionEvents',
+      'maximumLeaseDurationMs',
+      'maximumWriterTokenLength',
+      'minimumLeaseDurationMs',
+      'minimumWriterTokenLength',
+    ]);
     expect(HTTP_MANAGED_SESSION_STORE_CONTRACT).toEqual({
       tenantHeader: fixture.headers.tenant,
       writerTokenHeader: fixture.headers.writerToken,
@@ -89,6 +113,15 @@ describe('Managed Session store shared contract', () => {
     expect(MANAGED_SESSION_LIMITS.maxJsonDepth).toBe(
       fixture.limits.maxJsonDepth,
     );
+    // The per-kind line caps the Java store enforces at commit time.
+    expect(MANAGED_SESSION_LIMITS.maxEventBytes).toBe(
+      fixture.limits.maxEventBytes,
+    );
+    expect(MANAGED_SESSION_LIMITS.maxCommitMarkerBytes).toBe(
+      fixture.limits.maxCommitMarkerBytes,
+    );
+    // The event-kind vocabulary the Java store mirrors at commit time.
+    expect([...MANAGED_SESSION_EVENT_KINDS]).toEqual(fixture.eventKinds);
 
     for (const resource of fixture.resources) {
       const bytes = Buffer.from(resource.utf8, 'utf8');
@@ -142,7 +175,7 @@ describe('Managed Session store shared contract', () => {
       );
     });
     const stores = createHttpManagedSessionStores({
-      baseUrl: 'http://session-store.test',
+      baseUrl: 'http://127.0.0.1:8080',
       sessionKey: fixture.sessionKey,
       writerId: 'fixture-writer',
       writerToken: 'a'.repeat(32),
@@ -183,7 +216,7 @@ describe('Managed Session store shared contract', () => {
   it('preserves every shared Java error classification', async () => {
     for (const expected of Object.values(fixture.errors)) {
       const stores = createHttpManagedSessionStores({
-        baseUrl: 'http://session-store.test',
+        baseUrl: 'http://127.0.0.1:8080',
         sessionKey: fixture.sessionKey,
         writerId: 'fixture-writer',
         writerToken: 'a'.repeat(32),

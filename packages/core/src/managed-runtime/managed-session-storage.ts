@@ -23,6 +23,15 @@ import {
   type ManagedSessionKey,
 } from './managed-session-records.js';
 
+/** A durable store refused the transaction without appending any records. */
+export class ManagedSessionCommitRejectedError extends ManagedSessionRecordError {
+  constructor(cause: Error) {
+    super(cause.message);
+    this.cause = cause;
+    this.name = 'ManagedSessionCommitRejectedError';
+  }
+}
+
 export interface ManagedSessionCommitReceipt {
   readonly transactionId: string;
   readonly commandId: string;
@@ -244,6 +253,17 @@ export function scanManagedSessionJournal(
       if (header !== undefined) {
         throw new ManagedSessionRecordError(
           `session log line ${index + 1} repeats the Managed header.`,
+        );
+      }
+      // The line kind is only known after the generic parse, so the
+      // reader's own stricter header cap applies here: the value is
+      // spec-pinned in managed-session-record-foundation.md, but no
+      // shared contract or writer enforces it.
+      if (
+        Buffer.byteLength(line, 'utf8') > MANAGED_SESSION_LIMITS.maxHeaderBytes
+      ) {
+        throw new ManagedSessionRecordError(
+          `record exceeds ${MANAGED_SESSION_LIMITS.maxHeaderBytes} UTF-8 bytes.`,
         );
       }
       header = parseManagedSessionHeader(body);

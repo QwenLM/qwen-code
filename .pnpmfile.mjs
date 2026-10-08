@@ -16,6 +16,7 @@ export const workspacePackageNames = new Set([
   '@qwen-code/channel-base',
   '@qwen-code/channel-dingtalk',
   '@qwen-code/channel-dws',
+  '@qwen-code/channel-email',
   '@qwen-code/channel-feishu',
   '@qwen-code/channel-github',
   '@qwen-code/channel-gitlab',
