@@ -22,7 +22,7 @@ genesis/install/renew 与一次准确的空初始 checkpoint，尚未准入连�
 `tool.intent` → `await_runtime` checkpoint → 授权/worker 执行 → 内联
 `managed-tool-outcome` → `message.committed` 工具结果 → `results_ready` →
 工作后的 file-history snapshot。普通文件工作没有 Shell publication receipt。
-资格验证以 `HostedWorkspaceToolTurn` 为源；本地 `ManagedRuntimeOutcomes`
+资格验证以 `HostedCsiToolTurn` 为源；本地 `ManagedRuntimeOutcomes`
 使用另一种 receipt/outcome 形态。
 
 支持原 Session 的 `read_file`、`write_file`、`edit`，保留内联资源及未 compact
@@ -207,6 +207,11 @@ snapshot backup 恰有一个原 pin，跨 revision 不能更改或删除 pin。N
 | Prepared      | 相同不可变字段，`stage: "prepared"`，增加 `intentRef`；直接 predecessor 等于该原 intent ref，仅增加已认证 backup 与匹配观测 state |
 | 完成 idle     | `preparation: null`；直接 predecessor 为对应 prepared record，保留 retained evidence，证明整个原 batch 的 results/history         |
 
+Snapshot 属于 prompt。同一 prompt 的下一 batch 仅可扩充最后 snapshot 的 tracked
+path，保留其 timestamp 和已有 backup entry；新 prompt 追加 snapshot。更早的
+snapshot 和全部 retained backup pin 保持不变。这遵循 retained history service，
+不另建按 batch 划分的 snapshot 模型。
+
 每个 invocation 准确为 `executionCallId`、`callId`、`functionCallId`、`toolName`、
 `partIndex`、`ordinal`、`requestDigest`、`inputRef`、`toolDefinitionRef`。纳入 batch
 全部已准入 read/write/edit，身份唯一并按原 ordinal 递增，对照已提交 assistant
@@ -248,8 +253,8 @@ previousRecordRef 链。
 
 提供独立于 provider lifecycle 的窄认证 history 分支：READY 允许首次空 bind、
 已准入 prepare、snapshot，不允许 rewind/restore。Worker seal 后只允许对已绑定
-原 history 做 idle snapshot。拒绝迟到 prepare，并保留其持久化未完成 intent 为
-blocker。追踪已运行 preparation 至完成及最终 inventory，不能推断失败/拒绝 RPC
+原 history 做观察，保留 pending preparation 为 blocker。拒绝迟到 prepare，并保留
+其持久化未完成 intent 为 blocker。追踪已运行 preparation 至完成及最终 inventory，不能推断失败/拒绝 RPC
 没有改变文件。
 
 独立封闭 `csi-file-history` operation 使用 version 1。Bind/snapshot 只有
@@ -338,13 +343,13 @@ settlement 或卷释放。
 
 实现连通的私有组合后验证；分离的 parser、worker、SQL fixture 通过不能证明正常链。
 
-| 层           | 必须修改和验证的既有 consumer                                                                                      |
-| ------------ | ------------------------------------------------------------------------------------------------------------------ |
-| 身份         | Java `ManagedCsiProtocol`、provisioner/identity/transport；TS CSI envelope、container boot、attestation/drain      |
-| Worker       | managed-context 文件组合、executor/factory/lookup、history route、backup service；不构造完整 profile lifecycle     |
-| 原生权威     | `CsiNativeActivationProof`、`JdbcCsiActivationAdmission`、Session Store commit/resource/read、原 checkpoint proof  |
-| Hosted       | `HostedWorkspaceToolTurn`、Broker client/profile declaration、preparation-intent producer、工作后 history consumer |
-| 剩余 closure | Managed Agent turn/Session/lifecycle 与 retention writer、总体 deadline、retirement-close/finalize                 |
+| 层           | 必须修改和验证的既有 consumer                                                                                           |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| 身份         | Java `ManagedCsiFilesProtocol`、provisioner/identity/private access；TS CSI envelope、container boot、attestation/drain |
+| Worker       | 私有 CSI file worker/composer、executor/factory/lookup、history route、backup service；不构造完整 profile lifecycle     |
+| 原生权威     | `CsiNativeActivationProof`、`JdbcCsiActivationAdmission`、Session Store commit/resource/read、原 checkpoint proof       |
+| Hosted       | `HostedCsiToolTurn`、Broker client/profile declaration、preparation-intent producer、工作后 history consumer            |
+| 剩余 closure | Managed Agent turn/Session/lifecycle 与 retention writer、总体 deadline、retirement-close/finalize                      |
 
 两种语言设计与 E2E plan 随实现更新；先预留 wire 值，再修改 producer/consumer。
 不包含公开 selector/部署变化。

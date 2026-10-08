@@ -26,7 +26,7 @@ The actual Hosted v2 chain is file-history preparation for Write/Edit → Broker
 PREPARED → native `tool.intent` → `await_runtime` checkpoint → authorization /
 worker execution → inline `managed-tool-outcome` → `message.committed` tool
 result → `results_ready` → post-work file-history snapshot. Ordinary file work
-has no Shell publication receipt. Qualify `HostedWorkspaceToolTurn`; the local
+has no Shell publication receipt. Qualify `HostedCsiToolTurn`; the local
 `ManagedRuntimeOutcomes` producer has a different receipt/outcome shape.
 
 Support `read_file`, `write_file` and `edit` for the original Session, retained
@@ -252,6 +252,12 @@ attempts; it cannot replace the earlier pins by approving current bytes.
 | Prepared       | Same immutable fields with `stage: "prepared"` and `intentRef`; immediate predecessor equals that original intent ref; append only authenticated backups and matching observed state |
 | Completed idle | `preparation: null`; immediate predecessor is the corresponding prepared record; preserve retained evidence and prove the entire original batch's results/history                    |
 
+Snapshots belong to prompts. Another batch in the same prompt may extend only
+the last snapshot's tracked paths, preserving its timestamp and existing backup
+entries; a new prompt appends a snapshot. Earlier snapshots and all retained
+backup pins remain unchanged. This matches the retained history service rather
+than imposing a separate per-batch snapshot model.
+
 Each invocation has exactly `executionCallId`, `callId`, `functionCallId`,
 `toolName`, `partIndex`, `ordinal`, `requestDigest`, `inputRef`,
 `toolDefinitionRef`. Include every admitted read/write/edit entry of the batch,
@@ -297,9 +303,9 @@ Do not recurse the whole previousRecordRef chain into every transaction.
 
 Expose a narrow authenticated history branch independently of provider
 lifecycle: initial empty bind, admitted prepare and snapshot in READY; no
-rewind/restore. After worker seal, permit only an idle snapshot of already-bound
-original history. Refuse a late prepare and retain its unresolved durable intent
-as a blocker. Track preparations already running through completion and final
+rewind/restore. After worker seal, permit only observation of already-bound
+original history, retaining pending preparation as a blocker. Refuse a late
+prepare and retain its unresolved durable intent as a blocker. Track preparations already running through completion and final
 inventory; do not infer that a refused/failed RPC left files unchanged.
 
 Use a separate closed `csi-file-history` operation, version 1: bind and snapshot
@@ -409,10 +415,10 @@ parser, worker or SQL fixtures do not establish a normal file chain.
 
 | Layer             | Existing consumers to change and verify                                                                                                  |
 | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Identity          | Java `ManagedCsiProtocol`, provisioner/identity/transport; TS CSI envelope, container boot, attestation/drain                            |
-| Worker            | managed-context file composition, executor/factory/lookup, history route and backup service; exclude full-profile lifecycle construction |
+| Identity          | Java `ManagedCsiFilesProtocol`, provisioner/identity/private access; TS CSI envelope, container boot, attestation/drain                  |
+| Worker            | private CSI file worker/composer, executor/factory/lookup, history route and backup service; exclude full-profile lifecycle construction |
 | Native authority  | `CsiNativeActivationProof`, `JdbcCsiActivationAdmission`, Session Store commit/resource/read and original checkpoint proof               |
-| Hosted            | `HostedWorkspaceToolTurn`, Broker client/profile declarations, preparation-intent producer and post-work history consumer                |
+| Hosted            | `HostedCsiToolTurn`, Broker client/profile declarations, preparation-intent producer and post-work history consumer                      |
 | Remaining closure | Managed Agent turn/Session/lifecycle and retention writers, overall deadline, retirement-close/finalize                                  |
 
 Update both language designs and the E2E plan with implementation. Reserve wire

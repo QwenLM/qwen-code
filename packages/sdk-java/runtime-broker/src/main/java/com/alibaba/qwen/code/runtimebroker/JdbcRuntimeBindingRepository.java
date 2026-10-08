@@ -689,6 +689,10 @@ public final class JdbcRuntimeBindingRepository
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
             var original = JdbcCsiActivationAdmission.lockForExecution(connection, hint);
             JdbcCsiActivationAdmission.requireExecution(original, expected);
+            if (original != null) {
+                throw new RuntimeBrokerException(501, "csi_file_dispatch_unavailable",
+                        "Private CSI dispatch requires original native intent and checkpoint authorization.", false);
+            }
             RuntimeBindingRecord binding = selectById(connection, expected.getBindingId(), true, 10);
             RuntimeAdmission.requireReady(binding, expected.getRuntimeGeneration());
             RuntimeAdmission.requireSession(jdbcSessions.findByIdForUpdate(

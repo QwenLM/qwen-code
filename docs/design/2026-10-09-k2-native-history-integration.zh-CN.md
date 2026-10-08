@@ -3,9 +3,11 @@
 [English](2026-10-09-k2-native-history-integration.md) | [简体中文](2026-10-09-k2-native-history-integration.zh-CN.md)
 
 状态：实现设计，2026-10-09。已调查的源码基线：
-`71805cf0a169fcd72a26d62ff6b41381e1fef6b8`，Draft PR #13526。
-本次增量实现派生的原始 assistant 批次保留，以及先校验全部相关行再分组当前批次。
+`9582aac56085faa42d8c8fcde8f7157e9db64619`，Draft PR #13526。
+前一增量已实现派生的原始 assistant 批次保留，以及先校验全部相关行再分组当前批次。
 下述 bootstrap、schema-2 历史/资源提升、worker 准入/执行与完成仍是提案，尚未验收。
+本增量细化 preparation 合同，并在缺少原生 intent/checkpoint grant 时，加入明确的
+Broker dispatch 和 JDBC authorization 拒绝；尚未实现 preparation。
 本设计细化
 [原生文件执行设计](2026-10-07-k2-native-file-execution.zh-CN.md)与
 [原始批次预留设计](2026-10-08-k2-native-batch-reservation.zh-CN.md)
@@ -208,6 +210,90 @@ Session 和存储 holder 保持到合格退休。
 完成冷恢复、全部 writer cut、DRAINED、物理 stop、NodeUnpublish、RELEASED、reuse
 及部署/目标环境验证。依赖完成不能替换完整目标，也不能开放公共 Hosted/Spring
 CSI selection。
+
+### 6.1 首个完整接线交付：原始 preparation
+
+下一生产边界是完整 preparation 链路，而非独立 codec 或 validator。实际私有入口
+以 `WorkspaceCsiRuntimeAccess` 构造 `RuntimeBrokerService(access, provider,
+access, ...)`；修改普通 Workspace transport 不能连接此路径。保持通用 control
+拒绝，仅在此 access 与 Broker service 准入闭合的私有 history operation。
+
+私有 `serve` 入口从部署配置读取 `K2_RUNTIME_BROKER_ORIGIN`，按第 2 节规则校验，
+将保留元组传给 provisioning，并在同一自有 server 注册独立 lease 认证读回 handler。
+生产 HTTPS 可代理现有 loopback listener；不向 worker 安装全局 Hosted 凭据。
+reconciliation 从已保存 handle 重建 boot，不读取新进程环境来替换它。
+
+`hosted-csi-session` 初始化顺序如下：
+
+1. Acquire 原始固定 Runtime Session 并安装其 context。
+2. 打开原始 native authority，提交第一 activation。
+3. 发起 private bind；worker 在首次调用 retained composer 前读取当前原始证据。
+4. 从返回的真实空观察提交初始 schema-2 idle，使用稳定 bind command 与实际 domain receipt。
+5. 开始正常 input/model 处理；对修改文件的 assistant batch，分配全部已接受
+   Read/Write/Edit 成员，提交已验证 intent 与原资源提升，调用 private prepare，
+   再提交 prepared。
+
+第一条 conversation record 尚不存在时，初始 history projection 没有 conversation
+parent。Session、cwd 和 version 来自原始 authority；后续 projection 接实际最后
+conversation record。不调用需要 conversation 且不返回 receipt 的旧 schema-1 helper。
+私有 helper 返回 `commitDomainRecord` 的原始 `{ receipt, recordRef, revision }`。
+wrapper 仍由 authority 产生，唯一 `domain.committed` event 不带 activation subject。
+对照实际 Harness producer 验证 initial checkpoint 语义；增加 history 不能静默放宽
+无关 checkpoint 字段。
+
+### 6.2 Broker 到 worker 的 history 契约
+
+仅为 boot 5 增加 `POST /internal/managed-runtime/csi/v2/file-history`，使用原始
+lease token 认证。闭合 envelope 严格为 `protocolVersion: 2`、`managedCsi`、
+`identity`、`context`、`installedContext`、`operation`；identity 与完整 context
+元组遵循第 2 节。bind/snapshot operation 严格为 `kind: "csi-file-history"`、
+`version: 1`、`action`；prepare 额外含 `preparationRef`，指向原始已提交 schema-2
+intent ref。不接受调用方 paths、state 或 membership。Broker 仅在当前原始 owner
+验证后转发，worker 对 bind/prepare 各自重新读取当前 native 证据。
+
+成功响应使用相同六个 envelope 字段，另加 `observation`。operation 完整原样返回；
+observation 严格为 `state`、`backupDirectory`、`retainedBackups`，来自 retained
+composer，不添加 authority wrapper、revision、native receipt、grant 或退休声明。
+提交 history 前验证完整 envelope 与观察。request 上限 16 KiB，完整 response 上限
+64 KiB，超限拒绝而非截断；可提前判断容量时必须在文件效果前拒绝。
+
+在等待读回前安装 bind promise；匹配重试加入该 promise 与同一批 descriptor，失败
+不能打开第二个目录。prepare 同样按原 intent ID/digest 加入，完整成员与修改路径
+从 native readback 推导。snapshot 仅观察已保留 composition；本地或 SQL seal 后仍
+可观察它，但不能新建 backend、调用 prepare 或取得新准入。失败或不完整的观察保持
+blocker，不能提交为 idle 或成为退休证据。close/drain 加入全部已准入操作。
+Broker snapshot 使用原始 continuation fence，可以允许保留中的 DRAINING owner；
+不能新 acquire Session，也不能使用仅 READY 的 bind/prepare 准入。此例外仅允许
+观察原始保留 composition，不写入，也不 fallback 到其他 runtime。
+
+### 6.3 Snapshot 演进与 dispatch 边界
+
+Snapshot 按 prompt 建立，不按 assistant batch 建立。现有 history service 在同一
+prompt 的下一 batch 扩充最后 snapshot。prepared 校验保留其 prompt ID、timestamp
+和全部已有 backup entry，仅允许新的修改路径扩充最后 snapshot；更早 snapshot
+不变。新 prompt 追加一个 snapshot，在 I/O 前检查 100 项上限。已有 retained backup
+pin 字节完全不变，包括已跟踪路径不需要新 preimage 的情形。当前 file fingerprint
+仅能通过已验证的执行/完成链改变，preparation 不能虚构这些效果。
+
+此 preparation 交付以持久 prepared blocker 结束。纯 Read batch 也保持关闭，直到
+完整 intent/checkpoint/grant 准入存在。在公开 Broker 入口路径与 JDBC mutation
+边界明确拒绝没有该 grant 的私有 dispatch authorization/start/execute。在已调查的
+基线中，`authorizeDispatch` 只验证原始 READY/session/activation，不关联 native
+tool intent 或 dispatch checkpoint。真实的十一字段 allocation 已在 claim 处以
+`csi_execution_continuation_unavailable` 拒绝，未观察到文件执行绕过。本增量在
+Broker claim 前与 JDBC 写入 authorization marker 前加入
+`csi_file_dispatch_unavailable` 拒绝。保持其他 profile 行为。历史 continuation
+测试明确植入旧持久 marker，不能产生新 native grant，也不能证明当前 dispatch。
+此交付不接受 completed idle、不清空 preparation、不消费 result，也不 release
+Runtime Session。
+私有 start 在 claim dispatch 前拒绝，保留原始 PREPARED row；JDBC 后备边界在写入
+authorization marker 前拒绝已 claim 的私有 call。拒绝不证明执行不存在，也不能
+擦除已有 UNKNOWN 义务。
+
+后续 completion 交付开放 model continuation 时，必须遵循现有 producer 顺序：
+下一 model attempt 先完成，再调用 `consumeResults`。仅在完整 results-ready 闭合后
+允许该 attempt，同时保留未消费义务。若等待 consumption 才准入用于消费的同一
+attempt，会使正常 continuation 死锁。
 
 ## 7. 验证与验收
 

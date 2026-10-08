@@ -2121,6 +2121,32 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void privateCsiFileDispatchRefusesBeforeClaimingOrCallingTheWorker() throws Exception {
+        var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                CsiFilesRetirementProfile.CAPABILITY_DIGEST, "session");
+        try (Fixture fixture = new Fixture(scope)) {
+            join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            for (String toolName : List.of("read_file", "write_file", "edit")) {
+                String payload = "{\"toolName\":\"" + toolName + "\",\"input\":{\"file_path\":\"marker.txt\"}}";
+                String digest = "sha256:" + HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                        .digest(payload.getBytes(StandardCharsets.UTF_8)));
+                var prepared = join(fixture.service.prepareExecution("harness", "runtime", "private-" + toolName,
+                        Map.of("sessionId", "runtime", "promptId", "turn", "callId", toolName, "argsDigest", digest)));
+                for (int attempt = 0; attempt < 2; attempt++) {
+                    var error = failure(fixture.service.startExecution("harness", "runtime", prepared.getExecutionCallId(), payload));
+                    assertEquals(501, error.getStatusCode());
+                    assertEquals("csi_file_dispatch_unavailable", error.getCode());
+                    assertFalse(error.isRetryable());
+                    assertSame(prepared, fixture.executionRepository.findByExecutionCallId(prepared.getExecutionCallId()));
+                }
+            }
+            assertEquals(0, fixture.transport.executeCalls.get());
+            assertEquals(0, fixture.transport.executeV3Calls.get());
+            assertEquals(0, fixture.transport.cancelCalls.get());
+        }
+    }
+
+    @Test
     void privateCsiSessionNeverForwardsGenericRuntimeControl() {
         var scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
                 CsiFilesRetirementProfile.CAPABILITY_DIGEST, "session");

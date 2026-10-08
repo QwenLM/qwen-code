@@ -3,12 +3,14 @@
 [English](2026-10-09-k2-native-history-integration.md) | [简体中文](2026-10-09-k2-native-history-integration.zh-CN.md)
 
 Status: implementation design, 2026-10-09. Investigated source baseline:
-`71805cf0a169fcd72a26d62ff6b41381e1fef6b8`, Draft PR #13526.
-This increment implements derived original assistant-batch retention and
+`9582aac56085faa42d8c8fcde8f7157e9db64619`, Draft PR #13526.
+The preceding increment implements derived original assistant-batch retention and
 complete related-row qualification before current-batch partitioning. Bootstrap,
 schema-2 history/promotion, worker admission/execution and completion below are
-still proposed and not accepted. This refines the
-remaining connected composition in the [native file execution design](2026-10-07-k2-native-file-execution.md)
+still proposed and not accepted. This increment refines the preparation contract
+and adds explicit Broker dispatch and JDBC authorization refusals while original
+native intent/checkpoint grants are absent. It does not implement preparation.
+It refines the remaining connected composition in the [native file execution design](2026-10-07-k2-native-file-execution.md)
 and [original batch reservation design](2026-10-08-k2-native-batch-reservation.md).
 The full K2 objective, proposal #12380 and tracker #13395 remain open.
 
@@ -258,6 +260,116 @@ worker preparation; follow with complete execution and consumption. Continue
 through cold recovery, all-writer cut, DRAINED, physical stop, NodeUnpublish,
 RELEASED, reuse and deployment/target qualification. A dependency finishing does
 not replace that full objective or permit public Hosted/Spring CSI selection.
+
+### 6.1 First connected delivery: original preparation
+
+The next production boundary is the complete preparation chain, rather than a
+standalone codec or validator. The actual private entry constructs
+`RuntimeBrokerService(access, provider, access, ...)` with
+`WorkspaceCsiRuntimeAccess`; changing ordinary Workspace transport does not
+connect this path. Keep generic controls refused and admit only the closed
+private history operation through this access and the Broker service.
+
+The private `serve` entry reads `K2_RUNTIME_BROKER_ORIGIN` from deployment
+configuration, validates the origin rules in section 2 and passes the retained
+tuple to provisioning. It registers the independent lease-authenticated
+readback handler on the same owned server. Production HTTPS can front the
+existing loopback listener; the global Hosted credential is not installed in
+the worker. Reconciliation reconstructs boot from the saved handle, never from
+the new process environment.
+
+Use this order in `hosted-csi-session` initialization:
+
+1. Acquire the original fixed Runtime Session and install its context.
+2. Open the original native authority and commit its first activation.
+3. Send private bind; the worker performs current original readback before
+   invoking the retained composer for the first time.
+4. Commit the initial schema-2 idle record from the returned actual empty
+   observation, with the stable bind command and the actual domain receipt.
+5. Start normal input/model processing. For a mutating assistant batch, allocate
+   all accepted Read/Write/Edit members, commit the qualified intent and its
+   original resource promotion, invoke private prepare, and commit prepared.
+
+Before the first conversation record exists, the initial history projection has
+no conversation parent. Its Session, cwd and version come from the original
+authority; later projections follow the actual last conversation record.
+Do not call the legacy schema-1 helper, which requires a conversation and
+returns no receipt. The private helper returns the original
+`{ receipt, recordRef, revision }` from `commitDomainRecord`. Its wrapper remains
+authority-produced, and the single `domain.committed` event has no activation
+subject. Initial checkpoint semantics are verified against the actual Harness
+producer; adding history must not silently relax unrelated checkpoint fields.
+
+### 6.2 Broker-to-worker history contract
+
+For boot 5 only, add `POST /internal/managed-runtime/csi/v2/file-history`.
+Authenticate with the original lease token. Its closed envelope is exactly
+`protocolVersion: 2`, `managedCsi`, `identity`, `context`, `installedContext`,
+`operation`; identity and the complete context tuples match section 2.
+The operation is exactly `kind: "csi-file-history"`, `version: 1`, `action` for
+bind or snapshot. Prepare additionally has `preparationRef`, the original
+committed schema-2 intent ref. It accepts no caller paths, state or membership.
+Broker forwards only after current original-owner qualification. The worker
+performs its own fresh native readback for bind and prepare.
+
+The successful response has the same six envelope fields plus `observation`.
+The operation is echoed exactly; observation has exactly `state`,
+`backupDirectory`, `retainedBackups`, derived from the retained composer.
+It adds no authority wrapper, revision, native receipt, grant or retirement
+claim. Validate the complete envelope and observation before committing history.
+The request is bounded at 16 KiB and the complete response at 64 KiB; refuse
+overflow without truncation before file effects where capacity is knowable.
+
+Install the bind promise before awaiting readback. Matching bind retries join
+that promise and the same descriptors; failure never opens a second directory.
+Likewise, prepare joins by original intent ID and digest, and derives its full
+membership and mutation paths from native readback. Snapshot only observes an
+already retained composition. After a local or SQL seal it may still observe
+that composition, but cannot construct a new backend, call prepare or acquire
+fresh admission. A failed/incomplete observation remains a blocker and cannot
+be committed as idle or used as retirement evidence. Close and drain join all
+already admitted operations.
+Broker snapshot qualification uses the original continuation fence, which may
+permit the retained DRAINING owner; it never acquires a new Session or uses
+READY-only bind/prepare admission. This exception is confined to observation of
+the original retained composition, with no writes or fallback runtime.
+
+### 6.3 Snapshot evolution and dispatch boundary
+
+Snapshots are per prompt, not per assistant batch. The existing history service
+extends the last snapshot for another batch in the same prompt. Prepared
+validation preserves its prompt ID, timestamp and every existing backup entry,
+while allowing only the new mutation paths to extend that last snapshot. Prior
+snapshots remain unchanged. A new prompt appends one snapshot; the 100-snapshot
+limit is checked before I/O. Existing retained backup pins remain byte-for-byte
+unchanged, including when an already tracked path needs no new preimage. Current
+file fingerprints may change only through the qualified execution/completion
+chain; preparation cannot invent those effects.
+
+The preparation delivery stops with a durable prepared blocker. Read-only
+batches remain closed until full intent/checkpoint/grant admission exists.
+Explicitly refuse private dispatch authorization/start/execute in both public
+Broker entry paths and the JDBC mutation boundary while that grant is absent.
+At the investigated baseline, `authorizeDispatch` checked original
+READY/session/activation without joining a native tool intent or dispatch
+checkpoint. The genuine eleven-field allocation already refused at claim with
+`csi_execution_continuation_unavailable`; this was not an observed file execution
+bypass. This increment adds `csi_file_dispatch_unavailable` at Broker dispatch
+before claim and at JDBC authorization before marker writes. Generic profile
+behavior remains unchanged. Historical continuation tests explicitly seed old
+persisted markers; they cannot mint a new native grant or prove current dispatch.
+Do not accept completed idle, clear preparation, consume results or release the
+Runtime Session in this delivery.
+Reject a private start before claiming dispatch, preserving the original
+PREPARED row. The JDBC backstop rejects any already claimed private call before
+writing authorization markers; a refusal is not evidence of execution absence
+or permission to erase an existing UNKNOWN obligation.
+
+When the later completion delivery opens model continuation, it must respect
+the existing producer order: the next model attempt completes before
+`consumeResults`. Permit that attempt only after complete results-ready closure,
+retaining its unconsumed obligation. Waiting for consumption before allowing
+that same attempt would deadlock the legitimate continuation.
 
 ## 7. Validation and acceptance
 

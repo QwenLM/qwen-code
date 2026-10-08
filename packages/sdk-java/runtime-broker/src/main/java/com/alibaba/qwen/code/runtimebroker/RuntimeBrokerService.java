@@ -3505,6 +3505,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant) {
+        if (JdbcCsiFilesRetirementGuard.isProfile(context.binding().getRequest().getScope())) {
+            throw new RuntimeBrokerException(501, "csi_file_dispatch_unavailable",
+                    "Private CSI dispatch requires original native intent and checkpoint authorization.", false);
+        }
         if (!prepared.isCancelRequested()) {
             bindingRepository.requireHarnessAdmission(context.session().getScope(), context.session().getHarnessSessionId(), null);
         }

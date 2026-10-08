@@ -395,7 +395,7 @@ class WorkspaceCsiNativeActivationGate {
         assertThat(authorityRows()).isEqualTo(before);
         assertThat(executions.findByExecutionCallId(candidate.getExecutionCallId())).isNull();
 
-        var executing = authorize(original);
+        var executing = seedHistoricalExecuting(original);
         before = authorityRows();
         rejected(() -> bindings.admitExecution(sessions, executions, candidate), "csi_native_resources_required");
         assertThat(authorityRows()).isEqualTo(before);
@@ -586,7 +586,7 @@ class WorkspaceCsiNativeActivationGate {
         assertThat(pin()).isEqualTo(2);
         assertThat(jdbc.queryForObject("SELECT latest_checkpoint_resource_id FROM qwen_managed_session_journal_head",
                 String.class)).isEqualTo(checkpoint);
-        var executing = authorize(seedHistorical("checkpoint-original"));
+        var executing = seedHistoricalExecuting(seedHistorical("checkpoint-original"));
         retire();
         assertThat(executions.renewDispatch(executing.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120)))
                 .isNotNull();
@@ -704,7 +704,7 @@ class WorkspaceCsiNativeActivationGate {
     }
 
     @Test
-    void selectedAdmissionDispatchAndContinuationConsumeOriginalLivePin() throws Exception {
+    void originalAdmissionRefusesNewAuthorizationAndRetainsHistoricalContinuation() throws Exception {
         var runtime = bindings.admitSession(sessions, new RuntimeSessionRecord(
                 new RuntimeSession(sessionId, sessionId, "bootstrap", request.getScope()), binding.getBindingId(), 1,
                 RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
@@ -720,7 +720,12 @@ class WorkspaceCsiNativeActivationGate {
         seedHistorical(candidate);
         var claimed = executions.claimDispatch(candidate.getExecutionCallId(), "owner", Duration.ofSeconds(120));
         assertThat(claimed.getState()).isEqualTo(ToolExecutionRecord.State.DISPATCHING);
-        var authorized = bindings.authorizeDispatch(sessions, executions, claimed, "owner", claimed.getDispatchGeneration());
+        var before = authorityRows();
+        rejected(() -> bindings.authorizeDispatch(sessions, executions, claimed, "owner", claimed.getDispatchGeneration()),
+                "csi_file_dispatch_unavailable");
+        assertThat(authorityRows()).isEqualTo(before);
+        assertThat(executions.findByExecutionCallId(candidate.getExecutionCallId()).getAuthorizedBindingVersion()).isNull();
+        var authorized = seedHistoricalExecuting(claimed);
         assertThat(authorized.getAuthorizedBindingVersion()).isEqualTo(binding.getVersion() + 1);
         rejected(() -> executions.compareAndSet(authorized, authorized, "owner", authorized.getDispatchGeneration()),
                 "csi_execution_continuation_unavailable");
@@ -777,7 +782,7 @@ class WorkspaceCsiNativeActivationGate {
         ready();
         var prepared = seedHistorical("started");
         var pending = seedHistorical("pending");
-        var executing = authorize(prepared);
+        var executing = seedHistoricalExecuting(prepared);
         retire();
         rejected(() -> executions.claimDispatch(pending.getExecutionCallId(), "owner", Duration.ofSeconds(120)),
                 "runtime_admission_closed");
@@ -821,7 +826,7 @@ class WorkspaceCsiNativeActivationGate {
     @Test
     void expiredOriginalFencesUnknownWithoutRegrantOrReconciliation() throws Exception {
         ready();
-        var executing = authorize(seedHistorical("expired"));
+        var executing = seedHistoricalExecuting(seedHistorical("expired"));
         retire();
         jdbc.update("UPDATE qwen_tool_execution SET dispatch_lease_until = TIMESTAMP '2000-01-01 00:00:00'");
         assertThat(executions.renewDispatch(executing.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120))).isNull();
@@ -841,7 +846,7 @@ class WorkspaceCsiNativeActivationGate {
     @Test
     void immutableSealStillRejectsLateAuthorizationAfterBindingOperationVersionAdvances() throws Exception {
         ready();
-        var executing = authorize(seedHistorical("sealed"));
+        var executing = seedHistoricalExecuting(seedHistorical("sealed"));
         var retirement = retire();
         var operation = bindings.claimOperation(binding.getBindingId(), "operator", Duration.ofSeconds(120));
         var advanced = bindings.renewOperation(binding.getBindingId(), "operator", operation.getOperationGeneration(), Duration.ofSeconds(120));
@@ -858,7 +863,7 @@ class WorkspaceCsiNativeActivationGate {
     @Test
     void corruptRetirementIdentityRefusesBeforeExecutionMutation() throws Exception {
         ready();
-        var executing = authorize(seedHistorical("corrupt-intent"));
+        var executing = seedHistoricalExecuting(seedHistorical("corrupt-intent"));
         var retirement = retire();
         String encoded = jdbc.queryForObject("SELECT identity_json FROM managed_workspace_csi_retirement", String.class);
         for (String corrupt : List.of(encoded + " {}", encoded.replaceFirst("\\{", "{\"unexpected\":true,"),
@@ -883,7 +888,7 @@ class WorkspaceCsiNativeActivationGate {
     @Test
     void currentSessionAndNativeLeaseLossRefuseContinuationWithoutChangingExecution() throws Exception {
         ready();
-        var executing = authorize(seedHistorical("proof-loss"));
+        var executing = seedHistoricalExecuting(seedHistorical("proof-loss"));
         var runtime = sessions.findById(request.getScope(), sessionId);
         sessions.compareAndSet(runtime, runtime.withState(RuntimeSessionRecord.State.FAILED, Instant.now()));
         var before = executionRows();
@@ -898,7 +903,7 @@ class WorkspaceCsiNativeActivationGate {
     @Test
     void privateLostRecoveryCannotAbandonExecutionOrClearOriginalSlot() throws Exception {
         ready();
-        authorize(seedHistorical("lost-original"));
+        seedHistoricalExecuting(seedHistorical("lost-original"));
         jdbc.update("UPDATE qwen_runtime_binding SET binding_state = 'LOST'");
         var lost = bindings.findById(binding.getBindingId());
         var before = executionRows();
@@ -915,7 +920,7 @@ class WorkspaceCsiNativeActivationGate {
     @Test
     void missingZeroAndFutureAuthorizationCannotUseOriginalContinuation() throws Exception {
         ready();
-        var executing = authorize(seedHistorical("unqualified-authorization"));
+        var executing = seedHistoricalExecuting(seedHistorical("unqualified-authorization"));
         for (long version : List.of(0L, bindings.findById(binding.getBindingId()).getVersion() + 1)) {
             jdbc.update("UPDATE qwen_tool_execution SET authorized_binding_version = ?", version);
             var before = executionRows();
@@ -933,7 +938,7 @@ class WorkspaceCsiNativeActivationGate {
     @Test
     void nonV2ReferenceCannotUsePrivateContinuation() throws Exception {
         ready();
-        var executing = authorize(seedHistorical("non-file-mode"));
+        var executing = seedHistoricalExecuting(seedHistorical("non-file-mode"));
         var reference = new java.util.LinkedHashMap<>(executing.getReference());
         reference.put("runtimeProtocol", 3);
         jdbc.update("UPDATE qwen_tool_execution SET reference_json = ?", JSON.writeValueAsString(reference));
@@ -958,7 +963,7 @@ class WorkspaceCsiNativeActivationGate {
                         assertThat(row.getInt(1)).isZero();
                     }
                 }
-                var original = authorize(seedHistorical("late-" + action));
+                var original = seedHistoricalExecuting(seedHistorical("late-" + action));
                 var runtime = sessions.findById(request.getScope(), sessionId);
                 assertThat(sessions.compareAndSet(runtime,
                         runtime.withState(RuntimeSessionRecord.State.FAILED, Instant.now()))).isNotNull();
@@ -1024,9 +1029,16 @@ class WorkspaceCsiNativeActivationGate {
                 .putInt(bytes.length).put(bytes).array());
     }
 
-    private ToolExecutionRecord authorize(ToolExecutionRecord prepared) {
+    // Persisted legacy markers exercise continuation only, not a native dispatch grant.
+    private ToolExecutionRecord seedHistoricalExecuting(ToolExecutionRecord prepared) {
         var claimed = executions.claimDispatch(prepared.getExecutionCallId(), "owner", Duration.ofSeconds(120));
-        return bindings.authorizeDispatch(sessions, executions, claimed, "owner", claimed.getDispatchGeneration());
+        assertThat(jdbc.update("UPDATE qwen_tool_execution SET execution_state = 'EXECUTING',"
+                        + " authorized_dispatch_generation = ?, authorized_binding_version = ?, record_version = record_version + 1"
+                        + " WHERE execution_call_id = ? AND record_version = ? AND execution_state = 'DISPATCHING'"
+                        + " AND authorized_dispatch_generation IS NULL AND authorized_binding_version IS NULL",
+                claimed.getDispatchGeneration(), bindings.findById(binding.getBindingId()).getVersion(),
+                claimed.getExecutionCallId(), claimed.getVersion())).isEqualTo(1);
+        return executions.findByExecutionCallId(claimed.getExecutionCallId());
     }
 
     private WorkspaceCsiReservationStore.Retirement retire() {
