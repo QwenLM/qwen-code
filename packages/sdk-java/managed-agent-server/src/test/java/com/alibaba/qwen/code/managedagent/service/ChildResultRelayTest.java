@@ -519,6 +519,55 @@ class ChildResultRelayTest {
         assertThat(row.get().state()).isEqualTo("done");
     }
 
+    // A creation failure whose settle committed but whose terminal
+    // classification write never landed: the settled arm discovers the
+    // row for reconciliation, and the walk must never re-enter the
+    // creation path — launching here would start work already recorded
+    // as never started. With no child standing it retires `unknown`.
+    @Test
+    void aSettledCancelledRecordNeverReEntersCreation() {
+        when(store.findPendingChildren(Mockito.anyString(), Mockito.anyInt()))
+                .thenAnswer(ignored -> List.of(new PendingChild(TENANT,
+                        PARENT, RUN, 1, "cancelled", "resource-body")));
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
+                "creating", "owner", now + 30_000, 0, 0, null, now, now));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        assertThat(harness.operations).isEmpty();
+        verify(sessions, never()).createChildSession(anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
+    // The same settled-cancelled surface re-arms only its owed residue:
+    // a binding-state interruption that left a standing child parks the
+    // close debt — no fail commit, no dispatch — and the ordinary
+    // discharge then admits exactly one close.
+    @Test
+    void aSettledCancelledRecordWithAStandingChildRetainsItsClose() {
+        when(store.findPendingChildren(Mockito.anyString(), Mockito.anyInt()))
+                .thenAnswer(ignored -> List.of(new PendingChild(TENANT,
+                        PARENT, RUN, 1, "cancelled", "resource-body")));
+        when(store.sessionStatus(TENANT, CHILD)).thenReturn("ACTIVE");
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 0, 0, null, now, now));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("close_debt");
+        assertThat(harness.operations).isEmpty();
+        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
+                anyString(), anyString());
+        RelayRow parked = row.get();
+        row.set(new RelayRow(parked.tenantId(), parked.parentSessionId(),
+                parked.childRunId(), parked.creationKey(),
+                parked.childSessionId(), parked.state(), parked.claimedBy(),
+                now + 30_000, parked.attempts(), 0, parked.lastError(),
+                parked.createdAt(), now));
+        relay.scan();
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(row.get().state()).isEqualTo("done");
+    }
+
     // The lineage fallback of the same boundary: a creation-answer-lost
     // row that learned its child only from the committed lineage keeps
     // that id on the parked debt, so the discharge knows its Session.

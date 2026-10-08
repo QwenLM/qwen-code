@@ -173,6 +173,33 @@ public class ChildResultRelay {
                     now);
             return;
         }
+        // A settled-failed record whose terminal-classification write
+        // never landed is discovered by the settled arm too, and it is
+        // owed reconciliation, never a fresh walk: re-entering `create`
+        // here relaunches work already recorded as never started, and
+        // re-entering `watch`/`deliver` re-settles an already-terminal
+        // record into a refusal loop. The owed residue is at most the
+        // child Session's close, so it gets exactly that — parked debt
+        // for a standing child, `unknown` where none stands.
+        if ("cancelled".equals(pending.deliveryState())
+                && !"close_debt".equals(row.state())) {
+            String child = row.childSessionId() != null
+                    ? row.childSessionId()
+                    : relayStore.findLineageChild(row.tenantId(),
+                            row.parentSessionId(), row.childRunId());
+            if (child != null
+                    && childSessionNeedsClose(row.tenantId(), child)) {
+                relayStore.advance(row, owner, "close_debt", child,
+                        now + HEARTBEAT_MS,
+                        "close debt retained over a settled record",
+                        now + LEASE_MS, now);
+                return;
+            }
+            relayStore.classify(row, owner, "unknown",
+                    "record settled while the ledger walked "
+                            + row.state(), now);
+            return;
+        }
         try {
             switch (row.state()) {
                 case "creating" -> create(row, pending, now);
