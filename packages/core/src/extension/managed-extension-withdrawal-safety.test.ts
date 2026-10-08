@@ -97,6 +97,102 @@ describe('managed extension withdrawal safety', () => {
     });
   }
 
+  it('retains managed ownership during a named refresh until a full discovery proves withdrawal', async () => {
+    const artifact = path.join(userRoot, 'returning');
+    const deployed = path.join(managedRoot, 'provider');
+    const stableId = 'e1'.repeat(32);
+    writePackage(artifact, 'original');
+    fs.writeFileSync(
+      path.join(artifact, '.qwen-extension-install.json'),
+      JSON.stringify({
+        type: 'snapshot',
+        source: artifact,
+        installId: stableId,
+      }),
+    );
+    const store = new ExtensionStore();
+    const subject = manager();
+    await subject.refreshCache();
+    expect(subject.getLoadedExtensions()[0].id).toBe(stableId);
+    await store.setWorkspaceActivation(
+      { id: stableId, name: 'original', source: 'user' },
+      workspace,
+      'disabled',
+    );
+    writePackage(deployed, 'original');
+    await subject.refreshCache();
+    const managed = subject.getLoadedExtensions()[0];
+    await store.setWorkspaceActivation(
+      { id: managed.id, name: 'original', source: 'managed' },
+      workspace,
+      'enabled',
+    );
+    await updateSetting(
+      managed.config,
+      managed.id,
+      'TOKEN',
+      async () => 'test-only-sentinel',
+      ExtensionSettingScope.USER,
+    );
+    fs.rmSync(deployed, { recursive: true });
+    await new ExtensionManager({
+      workspaceDir: workspace,
+      isWorkspaceTrusted: true,
+    }).refreshCache();
+    const retained = await store.readSnapshot();
+    expect(retained.extensions[stableId]).toMatchObject({
+      name: 'original',
+      managed: true,
+      workspaceOverrides: { [workspace]: 'enabled' },
+      preservedWorkspaceOverrides: { [workspace]: 'disabled' },
+    });
+    writePackage(artifact, 'renamed');
+    writePackage(deployed, 'original');
+    const bytes = fs.readFileSync(
+      path.join(store.storeDir, 'state.json'),
+      'utf8',
+    );
+    const clearing = vi.spyOn(FileTokenStorage.prototype, 'deleteSecret');
+    const refreshing = manager();
+    await expect(refreshing.refreshCache()).rejects.toBeInstanceOf(
+      ExtensionConflictError,
+    );
+    await expect(
+      refreshing.refreshCache({ names: ['renamed'] }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(
+      fs.readFileSync(path.join(store.storeDir, 'state.json'), 'utf8'),
+    ).toBe(bytes);
+    expect(await store.readSnapshot()).toEqual(retained);
+    expect(clearing).not.toHaveBeenCalled();
+    expect(
+      await hasStoredExtensionSecrets('original', managed.id, [workspace]),
+    ).toBe(true);
+    fs.rmSync(deployed, { recursive: true });
+    await expect(
+      refreshing.refreshCache({ names: ['renamed'] }),
+    ).rejects.toBeInstanceOf(ExtensionConflictError);
+    expect(
+      fs.readFileSync(path.join(store.storeDir, 'state.json'), 'utf8'),
+    ).toBe(bytes);
+    await refreshing.refreshCache();
+    const restored = await store.readSnapshot();
+    expect(restored.extensions[stableId].managed).toBeUndefined();
+    expect(restored.extensions[stableId].workspaceOverrides).toEqual({
+      [workspace]: 'disabled',
+    });
+    expect(restored.pendingManagedSecretNames).toBeUndefined();
+    expect(refreshing.getLoadedExtensions()[0]).toMatchObject({
+      name: 'renamed',
+      id: stableId,
+      source: 'user',
+      isActive: false,
+    });
+    expect(
+      await hasStoredExtensionSecrets('original', managed.id, [workspace]),
+    ).toBe(false);
+  });
+
   it('hands back a proven withdrawn episode before a stable user id changes name', async () => {
     const store = new ExtensionStore();
     const user = {

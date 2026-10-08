@@ -1601,6 +1601,7 @@ export class ExtensionManager {
               )
             : discovered;
         managedAbsenceProven =
+          requested.size === 0 &&
           this.managedExtensionsDir !== undefined &&
           !managedListFailed &&
           !unnamedManagedFailure;
