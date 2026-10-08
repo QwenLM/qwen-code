@@ -15,6 +15,8 @@ const resolveUpdateCommand = vi.fn(
   (updateCommand: string, latestVersion: string) =>
     updateCommand.replace('@latest', `@${latestVersion}`),
 );
+const standaloneUpdateMessage =
+  'Standalone install detected. Please rerun the standalone installer to update: curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash';
 const formatUpdateInstructions = vi.fn(
   (
     installationInfo: {
@@ -137,6 +139,7 @@ describe('updateCommand', () => {
     getInstallationInfo.mockReturnValue({
       isStandalone: true,
       standaloneDir: '/tmp/qwen-code',
+      updateMessage: standaloneUpdateMessage,
     });
 
     const result = await updateCommand.action!(
@@ -147,9 +150,9 @@ describe('updateCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content:
-        'Update available: 1.2.3\nManual update required. Please reinstall Qwen Code.',
+      content: `Update available: 1.2.3\n${standaloneUpdateMessage}`,
     });
+    expect(getInstallationInfo).toHaveBeenCalledWith('/repo', false);
     expect(relaunchForUpdate).not.toHaveBeenCalled();
     expect(performStandaloneUpdate).not.toHaveBeenCalled();
   });
@@ -308,6 +311,7 @@ describe('updateCommand', () => {
     getInstallationInfo.mockReturnValue({
       isStandalone: true,
       standaloneDir: '/tmp/qwen-code',
+      updateMessage: standaloneUpdateMessage,
     });
 
     const result = await updateCommand.action!(
@@ -318,9 +322,9 @@ describe('updateCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content:
-        'Update available: 1.2.3\nManual update required. Please reinstall Qwen Code.',
+      content: `Update available: 1.2.3\n${standaloneUpdateMessage}`,
     });
+    expect(getInstallationInfo).toHaveBeenCalledWith('/repo', false);
     expect(performStandaloneUpdate).not.toHaveBeenCalled();
   });
 

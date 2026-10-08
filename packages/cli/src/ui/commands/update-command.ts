@@ -71,7 +71,12 @@ export const updateCommand: SlashCommand = {
     }
 
     const info = updateCheck.info;
-    const installInfo = getInstallationInfo(projectRoot || process.cwd(), true);
+    const isAutoUpdateEnabled =
+      settings.merged.general?.enableAutoUpdate !== false;
+    const installInfo = getInstallationInfo(
+      projectRoot || process.cwd(),
+      isAutoUpdateEnabled,
+    );
     const manualInstructions = () => {
       const lines = [
         info.message,
@@ -85,9 +90,6 @@ export const updateCommand: SlashCommand = {
         content: lines.join('\n'),
       };
     };
-
-    const isAutoUpdateEnabled =
-      settings.merged.general?.enableAutoUpdate !== false;
 
     if (context.executionMode === 'interactive' && projectRoot) {
       const customSandboxImage = process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR];

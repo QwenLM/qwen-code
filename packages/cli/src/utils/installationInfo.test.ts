@@ -211,6 +211,18 @@ describe('getInstallationInfo', () => {
     expect(info.updateCommand).toBeUndefined();
     expect(info.updateMessage).toContain('Standalone install detected');
     expect(info.updateMessage).not.toContain('npm install');
+    expect(info.updateMessage).not.toContain(
+      'Please rerun the standalone installer to update',
+    );
+
+    const disabledInfo = getInstallationInfo(projectRoot, false);
+
+    expect(disabledInfo.updateMessage).toContain(
+      'Please rerun the standalone installer to update',
+    );
+    expect(disabledInfo.updateMessage).not.toContain(
+      'Attempting to automatically update now',
+    );
   });
 
   it('should detect Windows standalone installs and avoid npm auto-update', () => {
