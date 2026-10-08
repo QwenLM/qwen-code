@@ -92,6 +92,10 @@ describe('A2A session port', () => {
     await expect(
       stale.port.mention(SESSION, { text: '@lead hi', clientMessageId: 'a' }),
     ).rejects.toBeInstanceOf(A2ASessionError);
+    await expect(stale.port.cancel(SESSION, 'sr_1')).rejects.toMatchObject({
+      kind: 'unavailable',
+    });
+    await expect(stale.port.liveRun(SESSION, 'sr_1')).resolves.toBeUndefined();
   });
 
   it('maps orchestrator refusals', async () => {

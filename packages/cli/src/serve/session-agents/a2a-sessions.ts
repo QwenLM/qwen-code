@@ -217,7 +217,10 @@ export function createA2ASessionPort(
     async liveRun(sessionId, runId) {
       // Snapshot frames: live runs, and finished ones the orchestrator has
       // not settled (reply record pending, or retryable after a restart).
-      if (!orchestrator) return undefined;
+      // One left over from a replaced bridge no longer owns the session.
+      if (!orchestrator || !Object.is(orchestrator.bridge, bridge)) {
+        return undefined;
+      }
       const frame = (await orchestrator.snapshot(sessionId)).find(
         (candidate) => candidate.runId === runId,
       );
@@ -251,9 +254,8 @@ export function createA2ASessionPort(
     },
 
     async cancel(sessionId, runId) {
-      if (!orchestrator) return false;
       try {
-        return await orchestrator.cancel(sessionId, runId);
+        return await current().cancel(sessionId, runId);
       } catch (error) {
         throw mapOrchestratorError(error);
       }
