@@ -405,37 +405,6 @@ class ChildResultRelayStoreTest {
                 .isEmpty();
     }
 
-    // The orphaned verdict is conditional on the record staying
-    // unsettled under the extension row's own lock: an unsettled walk
-    // classifies as ever, a settled one answers false and mutates
-    // nothing.
-    @Test
-    void orphanedClassificationHoldsTheRecordLockAcrossBothReads() {
-        long now = 600_000L;
-        String session = UUID.randomUUID().toString();
-        insertRecordRow("scope-p", session, "run-orphan-pending", "child_agent",
-                "planned", "pending");
-        RelayRow planned = relayStore.claim(TENANT, session,
-                "run-orphan-pending", "key-orphan-pending", "owner",
-                now + 30_000, now);
-        assertThat(relayStore.classifyOrphanedWithoutSettlement(planned,
-                "owner", "parent closing", now + 1_000)).isTrue();
-        assertThat(relayStore.find(TENANT, session, "run-orphan-pending")
-                .state()).isEqualTo("orphaned");
-        insertRecordRow("scope-s", session, "run-orphan-settled",
-                "child_agent", "cancelled", "failed");
-        RelayRow settled = relayStore.claim(TENANT, session,
-                "run-orphan-settled", "key-orphan-settled", "owner",
-                now + 30_000, now);
-        assertThat(settled).as("claim of the settled run").isNotNull();
-        assertThat(relayStore.classifyOrphanedWithoutSettlement(settled,
-                "owner", "parent closing", now + 1_000)).isFalse();
-        assertThat(relayStore.find(TENANT, session, "run-orphan-settled")
-                .state()).isEqualTo("creating");
-        relayStore.classify(relayStore.find(TENANT, session,
-                "run-orphan-settled"), "owner", "done", null, now + 2_000);
-    }
-
     // A give-up whose settle committed and whose close_debt write then
     // failed leaves delivery `cancelled` against a ledger still walking
     // the earliest arms (`binding`): narrower arm-2 state lists made

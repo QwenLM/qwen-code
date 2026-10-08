@@ -647,46 +647,33 @@ class ChildResultRelayTest {
                 anyString(), anyString());
     }
 
-    // The orphaned arm still owns every unsettled walk: a run whose fail
-    // commit never landed was the close cascade's to stop, and the relay
-    // classifies its parked ledger orphaned as it always has.
+    // The orphaned arm still owns every walk whose child no longer
+    // stands: a ledger row with no Session row to close classifies
+    // orphaned, exactly as it always has.
     @Test
     void anUnsettledRowStillOrphansAtParentClose() {
         when(store.sessionStatus(TENANT, PARENT)).thenReturn("CLOSED");
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
-        when(store.classifyOrphanedWithoutSettlement(any(RelayRow.class),
-                anyString(), any(), anyLong())).thenAnswer(args -> {
-                    RelayRow before = row.get();
-                    row.set(new RelayRow(before.tenantId(),
-                            before.parentSessionId(), before.childRunId(),
-                            before.creationKey(), before.childSessionId(),
-                            "orphaned", null, 0, before.attempts(),
-                            before.nextRetryAt(),
-                            (String) args.getArgument(2), before.createdAt(),
-                            now));
-                    return true;
-                });
         relay.scan();
         assertThat(row.get().state()).isEqualTo("orphaned");
         verify(childCloses, never()).admitChildClose(anyString(), anyString(),
                 anyString(), anyString());
     }
 
-    // A settlement that lands between the walk's read and the verdict
-    // commit no longer orphan-buries the child: the verdict's locked
-    // re-read loses the race, and one fresh evaluation assigns the owed
-    // close debt instead of retirement.
+    // The retention default of the same arm: whichever side wins the
+    // parent-first race, a child that still stands keeps its one
+    // discoverable holder — the debt parks with its name, and no
+    // classification retires the owed close while the child stands.
     @Test
-    void aRaceLosingVerdictRetainsInsteadOfOrphaning() {
+    void aStandingChildNeverOrphansAcrossParentClose() {
         when(store.sessionStatus(TENANT, PARENT)).thenReturn("CLOSED");
         when(store.sessionStatus(TENANT, CHILD)).thenReturn("ACTIVE");
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
-        when(store.classifyOrphanedWithoutSettlement(any(RelayRow.class),
-                anyString(), any(), anyLong())).thenReturn(false);
         relay.scan();
         assertThat(row.get().state()).isEqualTo("close_debt");
+        assertThat(row.get().childSessionId()).isEqualTo(CHILD);
         assertThat(harness.operations).isEmpty();
         verify(childCloses, never()).admitChildClose(anyString(), anyString(),
                 anyString(), anyString());

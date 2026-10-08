@@ -349,34 +349,6 @@ public class ChildResultRelayStore {
                 row.childRunId(), owner);
     }
 
-    /** The orphaned classification ONLY while the record still carries
-     * no task-settled delivery — the extension row is locked FOR UPDATE
-     * inside the caller's transaction, so a settlement that raced the
-     * walk's own read is invisible here (and, if somehow later, waits
-     * its turn at the lock and then sees the verdict it raced). Any
-     * settled shape returns false and the caller re-evaluates retention
-     * against the now-committed truth instead. */
-    @org.springframework.transaction.annotation.Transactional
-    public boolean classifyOrphanedWithoutSettlement(RelayRow row,
-            String owner, String lastError, long now) {
-        List<String> rows = jdbc.query("SELECT delivery_state FROM"
-                        + " qwen_managed_session_extension_record"
-                        + " WHERE tenant_id = ? AND session_id = ?"
-                        + " AND domain = 'child_run' AND record_id = ?"
-                        + " FOR UPDATE",
-                (result, record) -> result.getString("delivery_state"),
-                row.tenantId(), row.parentSessionId(), row.childRunId());
-        if (!rows.isEmpty()
-                && ("accepting".equals(rows.getFirst())
-                        || "accepted".equals(rows.getFirst())
-                        || "consumed".equals(rows.getFirst())
-                        || "cancelled".equals(rows.getFirst()))) {
-            return false;
-        }
-        classify(row, owner, "orphaned", lastError, now);
-        return true;
-    }
-
     /** A Classification is terminal: no claim, no retry, no redelivery —
      * and only the claimant may write it. */
     public void classify(RelayRow row, String owner, String state,
