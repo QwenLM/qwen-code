@@ -244,6 +244,31 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    it('fills an empty signature for a thought part without thoughtSignature when fillUnsignedThinkingSignature is set', () => {
+      // Cross-provider history where the upstream generator set `thought:
+      // true` without a signature used to replay as a `thinking` block with
+      // no `signature` field at all, which strict Anthropic-compatible
+      // backends (SGLang, llama.cpp, vLLM) reject with HTTP 400. With the
+      // option on, it must replay as an empty signature instead.
+      // https://github.com/QwenLM/qwen-code/issues/11772
+      const { messages } = convert(
+        [content('model', thought('internal'), { text: 'visible' })],
+        { fillUnsignedThinkingSignature: true },
+      );
+      expect(messages).toEqual([
+        assistant(think('internal', ''), txt('visible')),
+      ]);
+    });
+
+    it('leaves a thought part without thoughtSignature unsigned when fillUnsignedThinkingSignature is off', () => {
+      // The fill is opt-in per provider quadrant; without the option the
+      // block keeps its original (unsigned) shape.
+      const { messages } = convert([
+        content('model', thought('internal'), { text: 'visible' }),
+      ]);
+      expect(messages).toEqual([assistant(think('internal'), txt('visible'))]);
+    });
+
     it('converts functionCall parts from model role into tool_use blocks', () => {
       const { messages } = convert([
         content(

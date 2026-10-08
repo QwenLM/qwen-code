@@ -1615,6 +1615,31 @@ describe('AnthropicContentGenerator', () => {
       });
     });
 
+    it('fills an empty signature for unsigned history through a strict non-4.6 proxy', async () => {
+      // Pre-4.6 model through a non-native, non-DeepSeek proxy: the strict
+      // backends (SGLang, llama.cpp, vLLM) accept an empty signature, so we
+      // fill `signature: ''` instead of shipping a `thinking` block with no
+      // `signature` field (HTTP 400). Unlike 4.6+ the block is NOT dropped,
+      // and unlike the native API it IS rewritten.
+      // https://github.com/QwenLM/qwen-code/issues/11772
+      const request = (
+        await send(
+          nativeCfg('claude-opus-4-5', {
+            baseUrl: 'https://internal-proxy.example/anthropic',
+          }),
+          { contents: unsignedThinkingConversation },
+        )
+      ).req;
+
+      expect(request.messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: 'unsigned reasoning', signature: '' },
+          { type: 'text', text: 'Visible answer' },
+        ],
+      });
+    });
+
     it('fails before sending an unsigned tool-use turn through a proxy', async () => {
       const toolUseConversation = [
         userText('Run tool'),

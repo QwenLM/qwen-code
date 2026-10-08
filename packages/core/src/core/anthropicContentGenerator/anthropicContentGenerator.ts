@@ -778,6 +778,16 @@ export class AnthropicContentGenerator implements ContentGenerator {
       !!thinking &&
       this.modelSupportsAdaptiveThinking(true) &&
       !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
+    // Strict Anthropic-compatible proxies (SGLang, llama.cpp, vLLM) reject
+    // a `thinking` block with no `signature` field at all (HTTP 400, e.g.
+    // SGLang `thinking.signature`) while accepting an empty signature,
+    // unlike Claude 4.6+ (where `dropUnsignedAssistantThinking` above
+    // applies) and the native API (whose history is left untouched).
+    // https://github.com/QwenLM/qwen-code/issues/11772
+    const fillUnsignedThinkingSignature =
+      !isDeepSeek &&
+      !!thinking &&
+      !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
     // Opus/Sonnet 4.6+ and every 5.x family reject a request whose final
     // message has role 'assistant' ("assistant message prefill") with a
     // hard 400 — per Anthropic's own migration guidance this is a
@@ -819,6 +829,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         normalizeAssistantThinkingSignature: deepseekThinkingOn,
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
         dropUnsignedAssistantThinking,
+        fillUnsignedThinkingSignature,
         stripAssistantThinking,
         stripTrailingAssistantPrefill,
         // Manual (non-adaptive) extended thinking requires an assistant

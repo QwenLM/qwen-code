@@ -106,6 +106,17 @@ export interface ConvertLlmRequestToAnthropicOptions {
    */
   normalizeAssistantThinkingSignature?: boolean;
   /**
+   * Same `signature: ''` fill as `normalizeAssistantThinkingSignature`, for
+   * the non-DeepSeek Anthropic-compatible proxy quadrant: strict backends
+   * (SGLang, llama.cpp, vLLM) reject a `thinking` block that carries no
+   * `signature` field at all (HTTP 400, e.g. SGLang `thinking.signature`)
+   * while accepting an empty signature, unlike Claude 4.6+ where
+   * `dropUnsignedAssistantThinking` applies instead. The caller gates this
+   * off native base URLs so native API history is left untouched.
+   * https://github.com/QwenLM/qwen-code/issues/11772
+   */
+  fillUnsignedThinkingSignature?: boolean;
+  /**
    * Remove assistant thinking blocks whose opaque signature is missing or
    * empty. Completed turns can safely omit thinking during replay. The active
    * tool loop fails instead because Claude requires all of its thinking blocks
@@ -275,8 +286,13 @@ export class AnthropicContentConverter {
       this.stripThinkingFromAssistantMessages(messages);
     }
     // Normalization runs before injection so non-compliant blocks are seen
-    // as already-present (and not duplicated) by the injection pass.
-    if (options.normalizeAssistantThinkingSignature) {
+    // as already-present (and not duplicated) by the injection pass. The
+    // two flags share the same fill: normalize is the DeepSeek path,
+    // fillUnsignedThinkingSignature is the non-DeepSeek proxy path.
+    if (
+      options.normalizeAssistantThinkingSignature ||
+      options.fillUnsignedThinkingSignature
+    ) {
       this.fillMissingThinkingSignatures(messages);
     }
     if (options.injectThinkingOnToolUseTurns) {
