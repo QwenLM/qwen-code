@@ -350,8 +350,50 @@ describe('remember memory helper', () => {
         `## ${getAutoMemoryRoot(projectRoot)}/MEMORY.md\n\n${entry}`,
       );
       expect(systemPrompt).not.toContain('supplied as catalog data');
+      if (scope === 'project') {
+        // Prompt-side mirror of the permission boundary pinned above: the run
+        // denies user reads and writes, so advertising the USER tier would
+        // only burn turns on denied writes and surface as remember_no_update.
+        expect(systemPrompt).not.toContain('USER memory');
+        expect(systemPrompt).not.toContain(getUserAutoMemoryRoot());
+      }
     },
   );
+
+  it('inlines the existing user index into an explicit user-targeted remember', async () => {
+    // Same invariant as the project case above, on the sole-tier render: the
+    // fork gets no request-tail catalog, so this inline index is its only view
+    // of entries it should update instead of duplicating.
+    const entry = '- [Seeded](user/seeded.md) — seeded user entry.';
+    await fs.mkdir(path.dirname(userMem('MEMORY.md')), { recursive: true });
+    await fs.writeFile(userMem('MEMORY.md'), `${entry}\n`, 'utf-8');
+    agentWrites([userMem('user', 'seeded.md')], 'Saved.');
+
+    await run(TARGET_CONTENT.user, 'user');
+
+    const { systemPrompt } = forkParams();
+    expect(systemPrompt).toContain(
+      `## ${getUserAutoMemoryRoot()}/MEMORY.md\n\n${entry}`,
+    );
+    expect(systemPrompt).not.toContain('supplied as catalog data');
+  });
+
+  it('inlines the existing user index into an automatic-scope remember', async () => {
+    // The automatic-scope branch reads the user index for the two-tier prompt.
+    // Unpinned, that read can be replaced with `null` and the scaffold's
+    // default index renders in its place — the heading is identical, so only
+    // a seeded entry distinguishes the two states.
+    const entry = '- [Seeded user](user/seeded.md) — seeded user entry.';
+    await fs.mkdir(path.dirname(userMem('MEMORY.md')), { recursive: true });
+    await fs.writeFile(userMem('MEMORY.md'), `${entry}\n`, 'utf-8');
+    agentWrites([userMem('user', 'seeded.md')], 'Saved.');
+
+    await run(TARGET_CONTENT.user);
+
+    expect(forkParams().systemPrompt).toContain(
+      `## ${getUserAutoMemoryRoot()}/MEMORY.md\n\n${entry}`,
+    );
+  });
 
   it('rejects a project-targeted result that mixes project and user writes', async () => {
     agentWrites(
