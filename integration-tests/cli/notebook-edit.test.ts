@@ -59,11 +59,21 @@ const expectReadThenNotebookEdit = (
   rig: TestRig,
   result: string,
   toolCalls: CapturedToolCall[],
+  notebookFileName: string,
 ) => {
   const foundTools = toolCalls.map((call) => call.name);
-  const readIndex = foundTools.findIndex((name) => name === 'read_file');
-  const notebookEditIndex = foundTools.findIndex(
-    (name) => name === 'notebook_edit',
+  const readIndex = toolCalls.findIndex(
+    (call) =>
+      call.name === 'read_file' &&
+      call.success === true &&
+      capturedToolCallPathMatches(call, 'file_path', notebookFileName),
+  );
+  const notebookEditIndex = toolCalls.findIndex(
+    (call, index) =>
+      index > readIndex &&
+      call.name === 'notebook_edit' &&
+      call.success === true &&
+      capturedToolCallPathMatches(call, 'notebook_path', notebookFileName),
   );
 
   if (readIndex === -1 || notebookEditIndex === -1) {
@@ -148,7 +158,7 @@ Do not change any other cell.`;
     const capture = await rig.runWithToolCapture(prompt);
     const result = capture.result;
 
-    expectReadThenNotebookEdit(rig, result, capture.toolCalls);
+    expectReadThenNotebookEdit(rig, result, capture.toolCalls, fileName);
     expectNoSuccessfulRawNotebookWrites(capture.toolCalls, fileName);
     validateModelOutput(result, null, 'Notebook replace');
 
@@ -214,16 +224,16 @@ Do not change the calculate code cell.`;
     const capture = await rig.runWithToolCapture(prompt);
     const result = capture.result;
 
-    expectReadThenNotebookEdit(rig, result, capture.toolCalls);
+    expectReadThenNotebookEdit(rig, result, capture.toolCalls, fileName);
     expectNoSuccessfulRawNotebookWrites(capture.toolCalls, fileName);
     validateModelOutput(result, null, 'Notebook insert/delete');
 
-    const successfulNotebookEdits = rig
-      .readToolLogs()
-      .filter(
-        (log) =>
-          log.toolRequest.name === 'notebook_edit' && log.toolRequest.success,
-      );
+    const successfulNotebookEdits = capture.toolCalls.filter(
+      (call) =>
+        call.name === 'notebook_edit' &&
+        call.success === true &&
+        capturedToolCallPathMatches(call, 'notebook_path', fileName),
+    );
     expect(successfulNotebookEdits.length).toBeGreaterThanOrEqual(2);
 
     const notebook = readNotebook(rig, fileName);

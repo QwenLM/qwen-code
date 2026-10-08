@@ -73,6 +73,7 @@ import {
   isRecord,
   isAcpChildCapacityError,
 } from './httpErrors.js';
+import { McpAppToolsContext } from '../../mcpAppHostContext.js';
 import { getTranslator } from '../../i18n.js';
 import {
   getDaemonErrorCode,
@@ -381,7 +382,7 @@ function materializeTranscriptHistory(
     const text = (block as { text?: string }).text ?? '';
     const images = (block as { images?: unknown[] }).images?.length ?? 0;
     const files = (block as { files?: unknown[] }).files?.length ?? 0;
-    return `${text} img:${images} file:${files}`;
+    return `${text}\u0000img:${images}\u0000file:${files}`;
   };
   const oldestRetainedBlock = current.blocks[0];
   const boundaryEchoKey =
@@ -3641,6 +3642,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 if (
                   event.type === 'turn_complete' ||
                   event.type === 'turn_error' ||
+                  // A rewind can drop the interrupted turn itself.
+                  event.type === 'session_rewound' ||
                   uiEvents.some((item) => item.type === 'prompt.cancelled')
                 ) {
                   const generation = advanceSessionRecoveryGeneration(
@@ -5378,36 +5381,68 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     [],
   );
 
+  const appSession = sessionRef.current;
+  const mcpAppTools = useMemo(() => {
+    const session = appSession;
+    if (
+      !session ||
+      !session.clientId ||
+      session.sessionId !== connection.sessionId
+    )
+      return undefined;
+    return {
+      sessionId: session.sessionId,
+      callTool: (
+        request: import('../../mcpAppHostContext.js').McpAppToolCallRequest,
+        signal: AbortSignal,
+      ) => {
+        if (sessionRef.current !== session)
+          return Promise.reject(new Error('MCP App session changed'));
+        const clientId = session.clientId;
+        if (!clientId)
+          return Promise.reject(new Error('MCP App client is not attached'));
+        return session.client.callMcpAppTool(
+          session.sessionId,
+          request,
+          clientId,
+          signal,
+        );
+      },
+    };
+  }, [appSession, connection.sessionId]);
+
   return (
-    <DaemonStoreContext.Provider value={store}>
-      <DaemonTurnNavigationContext.Provider value={turnNavigationStore}>
-        <DaemonConnectionContext.Provider value={connection}>
-          <DaemonPromptStatusContext.Provider value={promptStatus}>
-            <DaemonSessionNoticesContext.Provider value={noticesValue}>
-              <DaemonWorkspaceEventSignalsContext.Provider
-                value={workspaceEventSignals}
-              >
-                <DaemonActionsContext.Provider value={actions}>
-                  <DaemonSessionOwnerGuardContext.Provider
-                    value={ownerGuardValue}
-                  >
-                    <DaemonTranscriptHistoryContext.Provider
-                      value={transcriptHistoryValue}
+    <McpAppToolsContext.Provider value={mcpAppTools}>
+      <DaemonStoreContext.Provider value={store}>
+        <DaemonTurnNavigationContext.Provider value={turnNavigationStore}>
+          <DaemonConnectionContext.Provider value={connection}>
+            <DaemonPromptStatusContext.Provider value={promptStatus}>
+              <DaemonSessionNoticesContext.Provider value={noticesValue}>
+                <DaemonWorkspaceEventSignalsContext.Provider
+                  value={workspaceEventSignals}
+                >
+                  <DaemonActionsContext.Provider value={actions}>
+                    <DaemonSessionOwnerGuardContext.Provider
+                      value={ownerGuardValue}
                     >
-                      <DaemonPromptSettlementContext.Provider
-                        value={subscribeToPromptSettlement}
+                      <DaemonTranscriptHistoryContext.Provider
+                        value={transcriptHistoryValue}
                       >
-                        {children}
-                      </DaemonPromptSettlementContext.Provider>
-                    </DaemonTranscriptHistoryContext.Provider>
-                  </DaemonSessionOwnerGuardContext.Provider>
-                </DaemonActionsContext.Provider>
-              </DaemonWorkspaceEventSignalsContext.Provider>
-            </DaemonSessionNoticesContext.Provider>
-          </DaemonPromptStatusContext.Provider>
-        </DaemonConnectionContext.Provider>
-      </DaemonTurnNavigationContext.Provider>
-    </DaemonStoreContext.Provider>
+                        <DaemonPromptSettlementContext.Provider
+                          value={subscribeToPromptSettlement}
+                        >
+                          {children}
+                        </DaemonPromptSettlementContext.Provider>
+                      </DaemonTranscriptHistoryContext.Provider>
+                    </DaemonSessionOwnerGuardContext.Provider>
+                  </DaemonActionsContext.Provider>
+                </DaemonWorkspaceEventSignalsContext.Provider>
+              </DaemonSessionNoticesContext.Provider>
+            </DaemonPromptStatusContext.Provider>
+          </DaemonConnectionContext.Provider>
+        </DaemonTurnNavigationContext.Provider>
+      </DaemonStoreContext.Provider>
+    </McpAppToolsContext.Provider>
   );
 }
 
@@ -5420,11 +5455,15 @@ function promptSettledFromTurnEvent(
   }
   const promptId = eventPromptId(event);
   if (!promptId) return undefined;
+  const originator = event.originatorClientId
+    ? { originatorClientId: event.originatorClientId }
+    : {};
   if (event.type === 'turn_error') {
     const data = isRecord(event.data) ? event.data : {};
     return {
       sessionId,
       promptId,
+      ...originator,
       outcome: 'failed',
       error: {
         // Same defaults `matchTurnEvent` applies when it turns this frame into
@@ -5443,6 +5482,7 @@ function promptSettledFromTurnEvent(
   return {
     sessionId,
     promptId,
+    ...originator,
     outcome:
       stopReason === 'cancelled'
         ? 'cancelled'
@@ -5918,13 +5958,14 @@ export function useDaemonSessionNotices(): {
 }
 
 function hasActiveGenerationSignal(
-  events: ReadonlyArray<{ type: string }>,
+  events: ReadonlyArray<DaemonUiEvent>,
 ): boolean {
   return events.some(
     (event) =>
       event.type === 'assistant.text.delta' ||
       event.type === 'thought.text.delta' ||
-      event.type === 'tool.update',
+      (event.type === 'tool.update' &&
+        !event.toolCallId.startsWith('mcp-app-')),
   );
 }
 

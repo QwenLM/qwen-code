@@ -95,6 +95,7 @@ describe('tool-search / deferred tools', () => {
       }
       const query = (c.args as Record<string, unknown>)['query'];
       return (
+        c.success === true &&
         typeof query === 'string' &&
         query.length > 0 &&
         !query.toLowerCase().startsWith('select:')
@@ -102,8 +103,8 @@ describe('tool-search / deferred tools', () => {
     });
     expect(
       usedKeyword,
-      `expected at least one keyword tool_search; saw args: ${searchCalls
-        .map((c) => JSON.stringify(c.args))
+      `expected at least one successful keyword tool_search; saw calls: ${searchCalls
+        .map((c) => JSON.stringify({ args: c.args, success: c.success }))
         .join(' | ')}`,
     ).toBeTruthy();
 

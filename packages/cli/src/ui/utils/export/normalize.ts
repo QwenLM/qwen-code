@@ -43,14 +43,22 @@ export function normalizeSessionData(
   // Build index of assistant messages by uuid for usageMetadata merging
   const assistantMessageIndexByUuid = new Map<string, number>();
   normalized.forEach((message, index) => {
-    if (message.type === 'assistant') {
+    if (
+      message.type === 'assistant' &&
+      (message.message?.role !== 'thinking' ||
+        !assistantMessageIndexByUuid.has(message.uuid))
+    ) {
       assistantMessageIndexByUuid.set(message.uuid, index);
     }
   });
 
   // Merge tool result information into tool call messages
   for (const record of originalRecords) {
-    if (record.type !== 'tool_result') continue;
+    if (
+      record.type !== 'tool_result' ||
+      record.subtype === 'code_mode_tool_result'
+    )
+      continue;
 
     const toolCallMessage = buildToolCallMessageFromResult(record, config);
     if (!toolCallMessage?.toolCall) continue;

@@ -38,6 +38,17 @@ Reloading requires this explicit menu-open action: saving a file, pulling change
 
 This reload covers hook definitions, not hook controls or HTTP security settings. Changes to `disableAllHooks`, `stopHookBlockingCap`, `security.allowedHttpHookUrls` and `security.allowPrivateNetworkHooks` still require a restart. Hooks registered at runtime by skills or the SDK are not affected. Project hooks load only in a trusted folder. When hooks are turned off by `disableAllHooks`, `--safe-mode` or `--bare`, none load and the browser says so at the top.
 
+### Agent frontmatter scope
+
+Hooks declared in an agent's frontmatter apply only to that invocation, including
+its `SubagentStart` and `SubagentStop` events. They do not inherit into nested
+agents or run for parents and siblings. Global settings hooks and session-wide
+skill/function hooks retain their existing scope. Project-agent hooks recheck
+the trust of the workspace that supplied the agent before every event.
+
+Use `SubagentStop` for agent completion; `Stop` is not automatically remapped.
+Move an agent hook to settings if it should observe the whole session.
+
 ## Hook Types
 
 Qwen Code supports four hook executor types:
@@ -549,7 +560,7 @@ Hook output supports three categories of fields:
 - `hookSpecificOutput.permissionDecision`: "allow", "deny", or "ask" (REQUIRED)
 - `hookSpecificOutput.permissionDecisionReason`: explanation for the decision (REQUIRED)
 - `hookSpecificOutput.updatedInput`: modified tool input parameters to use instead of original
-- `hookSpecificOutput.additionalContext`: additional context information
+- `hookSpecificOutput.additionalContext`: text appended, after a blank line, to this call's tool result that the model sees next (for a call made from a Code Mode `exec` script, to the `exec` call's result; see below). It is delivered whatever the decision: after the tool's own output when it runs, or after the error message when it is denied, stopped, or fails. `<` and `>` are escaped.
 
 The `permissionDecision` value controls whether the tool runs:
 
@@ -558,6 +569,16 @@ The `permissionDecision` value controls whether the tool runs:
 - `"ask"` — pause and ask the user to confirm the tool call in the TUI before it runs. Confirming runs the tool once; declining cancels it. In contexts that cannot prompt for confirmation — headless (`--prompt`) runs and background subagents — `"ask"` falls back to `"deny"`.
 
 For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather than interpreting inline Markdown. This keeps formatting markers and link targets visible to the user.
+
+With `"ask"`, the hook runs once. Its `additionalContext` is delivered with the tool result if the user confirms, and dropped if the user declines or the call is cancelled. In ACP sessions (IDE integrations), `"ask"` is currently treated as `"deny"`, and the context is delivered with the denial.
+
+`additionalContext` goes into the tool result. It does not change the tool input, the approval prompt, the error shown while the tool runs, or the user's prompt. Because it becomes part of the tool result, it is saved in the session transcript with it and can appear wherever the full tool output is shown, such as the Ctrl+O detail view or a resumed session; it is not marked apart from the tool's own output.
+
+The text a call's PreToolUse hooks add is cut to `tools.truncateToolOutputThreshold` characters; in ACP sessions the same limit covers PreToolUse and PostToolUseFailure context together. The batch output limits still apply to the result as a whole.
+
+The context is not delivered when the call is cancelled, or when the turn is cancelled before the tool results go back to the model, even if the tool itself completed.
+
+In Code Mode (`tools.codeModeOnly`), a call made from an `exec` script returns its result to the script, not to the model. Its PreToolUse and PostToolUseFailure context is appended to the `exec` call's tool result instead, after the `exec` call's own context, and the value the script receives is unchanged.
 
 **Note**: While standard hook output fields like `decision` and `reason` are technically supported by the underlying class, the official interface expects the `hookSpecificOutput` with `permissionDecision` and `permissionDecisionReason`.
 
@@ -631,7 +652,7 @@ For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather 
 
 **Output Options**:
 
-- `hookSpecificOutput.additionalContext`: error handling information
+- `hookSpecificOutput.additionalContext`: error handling information, appended after the error in the tool result the model sees next. This applies both when the tool returns an error and when it throws. For a call made from a Code Mode `exec` script, it goes to the `exec` call's result instead (see [PreToolUse](#pretooluse)). `<` and `>` are escaped.
 - Standard hook output fields
 
 **Example Output**:
@@ -750,7 +771,7 @@ This two-field payload is written only for this kind of user-prompt record.
 `hookContext` intentionally duplicates the tagged part so offline and
 third-party consumers can identify its provenance without parsing model text.
 `displayText` is the pre-hook display projection and never includes the hook
-context. On the core/headless path it is the submitted projection when available, otherwise the expanded pre-hook prompt. ACP records the trusted display projection or raw request text before expansion when a projection or attachment references require a payload; otherwise it records the user message without `systemPayload` or `displayText`.
+context. On the core/headless path it is the submitted projection when available, otherwise the expanded pre-hook prompt. ACP records the trusted display projection or raw request text before expansion when a projection, attachment references, or input annotations require a payload; otherwise it records the user message without `systemPayload` or `displayText`.
 
 Transcript display consumers treat `displayText` as this user-prompt projection
 when `systemPayload.hookContext` is a string. For compatibility with released
@@ -1473,6 +1494,9 @@ It fires when the session starts, when context files are reloaded during the ses
 ## Hook Configuration
 
 Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` or user configuration files. Hooks in the system settings files (System and SystemDefaults) load with the source System and, like user hooks, regardless of folder trust. Within one event, sequential hooks from settings and extensions run in this order: Project, User, System, Extension.
+
+> [!NOTE]
+> A hook must include a name field to be enabled or disabled individually at runtime. Hooks without a name will always execute when their event and matcher conditions are met.
 
 ```json
 {

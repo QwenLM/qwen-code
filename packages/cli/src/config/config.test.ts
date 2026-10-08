@@ -36,14 +36,27 @@ import type { Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
+import { addCommand } from '../commands/mcp/add.js';
+import * as Mem0Settings from './mem0-settings.js';
+import {
+  isCrossSessionMessagingActive,
+  isCrossSessionMessagingEnabled,
+} from '../peerMessaging/enabled.js';
+
+const sshWorkspaceProbe = vi.hoisted(() => vi.fn());
+vi.mock('../serve/ssh-workspace-store.js', () => ({
+  readSshWorkspace: sshWorkspaceProbe,
+}));
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockUpdateHandler = vi.hoisted(() => vi.fn());
+const mockBatchHandler = vi.hoisted(() => vi.fn());
 const mockSessionServiceInstance = vi.hoisted(() => ({
   loadLastSession: vi.fn(),
   loadSession: vi.fn(),
   forkSession: vi.fn(),
+  assertLegacySessionExecution: vi.fn(),
   sessionExists: vi.fn(),
   sessionExistsInAnyState: vi.fn(),
   findSessionIdIgnoringCase: vi.fn(),
@@ -64,6 +77,19 @@ vi.mock('../commands/update.js', () => ({
     command: 'update',
     describe: 'mock update command',
     handler: mockUpdateHandler,
+  },
+}));
+
+// The real handler resolves credentials and calls the Batch API, so leaving it
+// unmocked would turn the `batch` exit-list case into a live HTTPS request on
+// any machine with OPENAI_API_KEY + model + base URL set.
+vi.mock('../commands/batch.js', () => ({
+  batchCommand: {
+    // Positionals must be declared: parseArguments runs yargs in strict mode,
+    // so a bare `batch` would reject `status batch_x` before the handler runs.
+    command: 'batch <subcommand> [id]',
+    describe: 'mock batch command',
+    handler: mockBatchHandler,
   },
 }));
 
@@ -301,6 +327,196 @@ describe('parseArguments', () => {
     process.argv = originalArgv;
   });
 
+  it.each([
+    ['--sandbox', 'bwrap'],
+    ['--sandbox=bwrap'],
+    ['-s', 'bwrap'],
+    ['-s=bwrap'],
+  ])(
+    'reports bwrap migration before prompt conflicts: %j',
+    async (...flags) => {
+      process.argv = ['node', 'script.js', ...flags, '-p', 'test prompt'];
+      mockWriteStderrLine.mockClear();
+      await expect(parseArguments()).rejects.toThrow(
+        'Whole-CLI bwrap has been removed',
+      );
+      expect(mockWriteStderrLine).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['docker', 'podman', 'sandbox-exec'])(
+    'preserves named sandbox selection %s',
+    async (backend) => {
+      for (const flags of [[`--sandbox=${backend}`], ['-s', backend]]) {
+        process.argv = ['node', 'script.js', ...flags, '-p', 'query'];
+        expect(await parseArguments()).toMatchObject({
+          sandbox: backend,
+          prompt: 'query',
+        });
+      }
+    },
+  );
+
+  it('preserves boolean sandbox flags and literal prompt text', async () => {
+    process.argv = ['node', 'script.js', '--sandbox', '-p', 'bwrap'];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: true,
+      prompt: 'bwrap',
+    });
+    process.argv = ['node', 'script.js', '--no-sandbox', 'query'];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: false,
+      query: 'query',
+    });
+    process.argv = ['node', 'script.js', '--', '--sandbox', 'bwrap'];
+    expect((await parseArguments())._).toEqual(['--sandbox', 'bwrap']);
+  });
+
+  it('keeps the MCP scope alias in its own command grammar', async () => {
+    const handler = vi
+      .spyOn(addCommand, 'handler')
+      .mockImplementation(() => {});
+    process.argv = [
+      'node',
+      'script.js',
+      '--debug',
+      'mcp',
+      'add',
+      '-s',
+      'project',
+      'myserver',
+      'npx',
+      '-y',
+      'foo',
+    ];
+    await expect(parseArguments()).rejects.toThrow(
+      'process.exit unexpectedly called with "0"',
+    );
+    expect(handler).toHaveBeenCalledWith(
+      expect.objectContaining({ scope: 'project', name: 'myserver' }),
+    );
+    handler.mockRestore();
+  });
+
+  it.each([
+    ['--sandbox=docker', 'mcp', 'list'],
+    ['-s', 'docker', 'mcp', 'list'],
+    ['--sandbox=podman', 'extensions', 'list'],
+  ])(
+    'rejects session options on subcommands instead of starting a prompt: %j',
+    async (...args) => {
+      process.argv = ['node', 'script.js', ...args];
+      mockWriteStderrLine.mockClear();
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "1"',
+      );
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('Unknown argument'),
+      );
+    },
+  );
+
+  it.each([
+    ['--sandbox=true', 'query'],
+    ['--sandbox', '-p', 'query'],
+  ])(
+    'supports explicit automatic selection with a prompt: %j',
+    async (...args) => {
+      process.argv = ['node', 'script.js', ...args];
+      expect(await parseArguments()).toMatchObject({
+        sandbox: true,
+        prompt: 'query',
+      });
+    },
+  );
+
+  it('keeps a positional query separate from explicit automatic sandbox selection', async () => {
+    process.argv = ['node', 'script.js', '--sandbox', 'explain the parser'];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: 'explain the parser',
+    });
+
+    process.argv = [
+      'node',
+      'script.js',
+      '--sandbox=true',
+      'explain the parser',
+    ];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: true,
+      query: 'explain the parser',
+    });
+  });
+
+  it('uses one option grammar and stops parsing options after --', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      'explain',
+      'what',
+      '-s',
+      'docker',
+      'does',
+    ];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: 'docker',
+      query: 'explain what does',
+    });
+    process.argv = [
+      'node',
+      'script.js',
+      'fix',
+      'the',
+      '--sandbox',
+      'false',
+      'bug',
+    ];
+    expect(await parseArguments()).toMatchObject({
+      sandbox: false,
+      query: 'fix the bug',
+    });
+    process.argv = [
+      'node',
+      'script.js',
+      '--',
+      'explain',
+      'what',
+      '-s',
+      'docker',
+      'does',
+    ];
+    expect((await parseArguments())._).toEqual([
+      'explain',
+      'what',
+      '-s',
+      'docker',
+      'does',
+    ]);
+  });
+
+  it.each(['explain what -s docker does', 'fix the --sandbox false bug'])(
+    'keeps option-like text inside an explicit prompt: %s',
+    async (prompt) => {
+      process.argv = ['node', 'script.js', '--sandbox=true', '-p', prompt];
+      expect(await parseArguments()).toMatchObject({
+        sandbox: true,
+        prompt,
+      });
+    },
+  );
+
+  it('keeps last-wins selection without treating an absent option as false', async () => {
+    for (const flags of [
+      ['--sandbox=docker', '--no-sandbox'],
+      ['--sandbox=true', '--sandbox=false'],
+    ]) {
+      process.argv = ['node', 'script.js', ...flags, '-p', 'query'];
+      expect((await parseArguments()).sandbox).toBe(false);
+    }
+    process.argv = ['node', 'script.js', '-p', 'query'];
+    expect((await parseArguments()).sandbox).toBeUndefined();
+  });
+
   it('includes every approval mode description in --help', async () => {
     process.argv = ['node', 'script.js', '--help'];
     const output: string[] = [];
@@ -456,6 +672,30 @@ describe('parseArguments', () => {
     process.argv = ['node', 'script.js', '--insecure'];
     const argv = await parseArguments();
     expect(argv.insecure).toBe(true);
+  });
+
+  it('parses the private ACP execution engine and refuses other engines', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--acp-execution-engine',
+      'managed',
+    ];
+    expect((await parseArguments()).acpExecutionEngine).toBe('managed');
+
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--acp-execution-engine',
+      'legacy',
+    ];
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+    await expect(parseArguments()).rejects.toThrow('process.exit called');
+    mockExit.mockRestore();
   });
 
   it('rejects --json-schema combined with --acp', async () => {
@@ -870,6 +1110,30 @@ describe('parseArguments', () => {
     mockExit.mockRestore();
   });
 
+  it('exits after a `batch` subcommand instead of falling through to the main flow', async () => {
+    // Falling through would reach the memory relaunch, whose child parses argv
+    // again and would submit (and bill) a second batch job.
+    process.argv = ['node', 'script.js', 'batch', 'status', 'batch_x'];
+    mockBatchHandler.mockResolvedValue(undefined);
+
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+      expect(mockBatchHandler).toHaveBeenCalled();
+      expect(mockExit).toHaveBeenCalledWith(0);
+    } finally {
+      mockExit.mockRestore();
+      mockBatchHandler.mockReset();
+      // `run()` in the batch command assigns this before exiting; a leaked 1
+      // would change the exit code of every later test on this worker.
+      process.exitCode = undefined;
+    }
+  });
+
   it('should reject --json-schema with no prompt source when stdin is a TTY', async () => {
     // True interactive invocation with no prompt anywhere → fail fast.
     process.argv = ['node', 'script.js', '--json-schema', '{"type":"object"}'];
@@ -1195,6 +1459,136 @@ describe('loadCliConfig', () => {
     vi.restoreAllMocks();
   });
 
+  it.each([undefined, 'workspace', 'project'] as const)(
+    'registers bundled Mem0 read-only over repository MCP configuration: %s',
+    async (scope) => {
+      const server = {
+        command: process.execPath,
+        args: ['mem0/main.js'],
+        includeTools: ['context_search'],
+      };
+      const createServer = vi
+        .spyOn(Mem0Settings, 'createBundledMem0Server')
+        .mockReturnValue(server);
+      process.argv = ['node', 'script.js', '-p', 'hello'];
+      const argv = await parseArguments();
+      const mem0 = { baseUrl: 'https://mem0.example', enableWrites: true };
+      await loadCliConfig(
+        {
+          memory: { mem0 },
+          ...(scope
+            ? {
+                mcpServers: {
+                  'external-context': { command: 'repo-mcp', scope },
+                },
+              }
+            : {}),
+        },
+        argv,
+      );
+      expect(createServer).toHaveBeenCalledWith(
+        mem0,
+        expect.any(String),
+        false,
+      );
+      expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          mcpServers: expect.objectContaining({ 'external-context': server }),
+        }),
+      );
+    },
+  );
+
+  it('rejects a manual operator external-context server alongside bundled Mem0', async () => {
+    vi.spyOn(Mem0Settings, 'createBundledMem0Server').mockReturnValue({
+      command: process.execPath,
+      args: ['mem0/main.js'],
+    });
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    await expect(
+      loadCliConfig(
+        {
+          memory: { mem0: { baseUrl: 'https://mem0.example' } },
+          mcpServers: { 'external-context': { command: 'operator-mcp' } },
+        },
+        await parseArguments(),
+      ),
+    ).rejects.toThrow(
+      'Configure memory.mem0 or an external-context MCP server',
+    );
+  });
+
+  it('does not create a bundled server for an explicitly disabled Mem0', async () => {
+    const createServer = vi.spyOn(Mem0Settings, 'createBundledMem0Server');
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    await loadCliConfig(
+      { memory: { mem0: null } } as unknown as Settings,
+      await parseArguments(),
+    );
+    expect(createServer).not.toHaveBeenCalled();
+  });
+
+  it('overrides a workspace-scoped external-context server instead of aborting startup', async () => {
+    const server = {
+      command: process.execPath,
+      args: ['mem0/main.js'],
+      includeTools: ['context_search'],
+    };
+    vi.spyOn(Mem0Settings, 'createBundledMem0Server').mockReturnValue(server);
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    const argv = await parseArguments();
+    // A trusted repository's own `.qwen/settings.json` contributes this entry
+    // stamped `scope: 'workspace'` (settings.ts tagMcpServerScope). It is not
+    // operator configuration, so it must not wedge every operator who set
+    // `memory.mem0` in a folder they cannot fix; the built-in binding overrides
+    // it because assembleMcpServers spreads topTierMcpServers last — the same
+    // thing that already happens to a `.mcp.json` entry of that name.
+    await loadCliConfig(
+      {
+        memory: { mem0: { baseUrl: 'https://mem0.example' } },
+        mcpServers: {
+          'external-context': {
+            command: 'node',
+            args: ['.qwen/shim/loader.js'],
+            scope: 'workspace',
+          },
+        },
+      },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        mcpServers: expect.objectContaining({ 'external-context': server }),
+      }),
+    );
+  });
+
+  it('still rejects an operator-scoped external-context server next to memory.mem0', async () => {
+    const server = {
+      command: process.execPath,
+      args: ['mem0/main.js'],
+      includeTools: ['context_search'],
+    };
+    vi.spyOn(Mem0Settings, 'createBundledMem0Server').mockReturnValue(server);
+    process.argv = ['node', 'script.js', '-p', 'hello'];
+    const argv = await parseArguments();
+    // No `scope` = user/default settings, i.e. the operator's own binding: that
+    // conflict stays loud, so dropping the provenance check cannot pass.
+    await expect(
+      loadCliConfig(
+        {
+          memory: { mem0: { baseUrl: 'https://mem0.example' } },
+          mcpServers: {
+            'external-context': { command: 'node', args: ['loader.js'] },
+          },
+        },
+        argv,
+      ),
+    ).rejects.toThrow(
+      'Configure memory.mem0 or an external-context MCP server, not both.',
+    );
+  });
+
   it.each([undefined, '1'])(
     'propagates the operator requirement independently of daemon factory availability: %s',
     async (serve) => {
@@ -1229,6 +1623,49 @@ describe('loadCliConfig', () => {
       ServerConfig.DEFAULT_CONTEXT_FILENAME,
       ServerConfig.AGENT_CONTEXT_FILENAME,
     ]);
+  });
+
+  it('isolates SSH configuration from local project services and code-mode-only settings', async () => {
+    sshWorkspaceProbe.mockReturnValueOnce({
+      host: 'host',
+      port: 2222,
+      directory: '/srv/project',
+    });
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    await loadCliConfig(
+      {
+        tools: {
+          codeModeOnly: true,
+          truncateToolOutputThreshold: 2500,
+          shell: { defaultTimeoutMs: 45000 },
+        },
+        mcpServers: { local: { command: 'must-not-run' } },
+      },
+      argv,
+    );
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        codeModeOnly: false,
+        disableAllHooks: true,
+        mcpServers: {},
+        overrideExtensions: [],
+        workflowsEnabled: false,
+        enableManagedAutoMemory: false,
+        enableManagedAutoDream: false,
+        enableTeamMemory: false,
+        enableTeamMemorySync: false,
+        enableStructuredMemoryRecall: false,
+        enableAutoSkill: false,
+        fileCheckpointingEnabled: false,
+        artifactEnabled: false,
+        executionEnvironment: expect.objectContaining({
+          toolNames: expect.any(Set),
+        }),
+        appendSystemPrompt: expect.stringContaining('/srv/project'),
+      }),
+    );
+    expect(nativeLspServiceMock).not.toHaveBeenCalled();
   });
 
   it('passes the effective model API to Config at startup', async () => {
@@ -1696,6 +2133,92 @@ describe('loadCliConfig', () => {
     expect(config.getModelFallbacks()).toEqual(['cli-a', 'cli-b']);
   });
 
+  it('uses advisorModel from settings when --advisor is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        advisorModel: ' advisor-model ',
+        modelProviders: {
+          openai: [
+            {
+              id: 'advisor-model',
+              apiKey: 'test-key',
+              models: [{ id: 'advisor-model' }],
+            },
+          ],
+        },
+      },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBe('advisor-model');
+  });
+
+  it('lets --advisor override the persisted model for one session', async () => {
+    process.argv = ['node', 'script.js', '--advisor', 'cli-advisor'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        advisorModel: 'settings-advisor',
+        modelProviders: {
+          openai: [
+            {
+              id: 'cli-advisor',
+              apiKey: 'test-key',
+              models: [{ id: 'cli-advisor' }],
+            },
+          ],
+        },
+      },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBe('cli-advisor');
+  });
+
+  it('lets --advisor off disable a persisted model for one session', async () => {
+    process.argv = ['node', 'script.js', '--advisor', 'off'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { advisorModel: 'settings-advisor' },
+      argv,
+    );
+
+    expect(config.getAdvisorModel()).toBeUndefined();
+  });
+
+  it('allows an Advisor matching the CLI runtime model', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--auth-type',
+      'openai',
+      '--model',
+      'runtime-advisor',
+      '--advisor',
+      'runtime-advisor',
+      '--openai-api-key',
+      'test-key',
+      '--openai-base-url',
+      'https://example.com/v1',
+    ];
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({}, argv);
+
+    expect(config.getAdvisorModel()).toBe('runtime-advisor');
+  });
+
+  it('rejects an unavailable persisted Advisor model', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await expect(
+      loadCliConfig({ advisorModel: 'missing-advisor' }, argv),
+    ).rejects.toThrow("Advisor model 'missing-advisor' is not configured.");
+  });
+
   it('should use settings fallback models when the CLI flag is absent', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1717,6 +2240,54 @@ describe('loadCliConfig', () => {
 
     expect(config.getAgentsSettings().maxParallelAgents).toBe(2);
   });
+
+  it('keeps cross-session messaging on when no suppression is in force', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    // An unset key is on, so the off case has to say `false` explicitly.
+    const unset = await loadCliConfig({}, argv);
+    const enabled = await loadCliConfig(
+      { agents: { crossSessionMessaging: true } },
+      argv,
+    );
+    const disabled = await loadCliConfig(
+      { agents: { crossSessionMessaging: false } },
+      argv,
+    );
+
+    expect(isCrossSessionMessagingActive({}, unset)).toBe(true);
+    expect(
+      isCrossSessionMessagingActive(
+        { agents: { crossSessionMessaging: true } },
+        enabled,
+      ),
+    ).toBe(true);
+    expect(
+      isCrossSessionMessagingActive(
+        { agents: { crossSessionMessaging: false } },
+        disabled,
+      ),
+    ).toBe(false);
+  });
+
+  // Both suppressions rather than one: a gate that answered only for
+  // `--safe-mode` would leave `--bare` binding an inbox and publishing its
+  // socket path, in the mode documented as skipping implicit startup work.
+  it.each(['--bare', '--safe-mode'])(
+    'suppresses cross-session messaging in %s mode whatever the setting says',
+    async (flag) => {
+      process.argv = ['node', 'script.js', flag];
+      const argv = await parseArguments();
+      const settings = { agents: { crossSessionMessaging: true } };
+
+      const config = await loadCliConfig(settings, argv);
+
+      // The setting still says on: what turns messaging off is the session,
+      // which only the Config the flag already reaches can see.
+      expect(isCrossSessionMessagingEnabled(settings)).toBe(true);
+      expect(isCrossSessionMessagingActive(settings, config)).toBe(false);
+    },
+  );
 
   it('passes agents.maxParallelAgentsByModel from settings to core config', async () => {
     process.argv = ['node', 'script.js'];
@@ -2619,6 +3190,35 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it.each([
+    { resume: '123e4567-e89b-42d3-a456-426614174000' },
+    { continue: true },
+  ])(
+    'rejects a Managed session before binding a legacy recorder for $resume$continue',
+    async (args) => {
+      const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+      mockSessionServiceInstance.loadSession.mockResolvedValue({
+        conversation: { sessionId, messages: [] },
+      });
+      mockSessionServiceInstance.loadLastSession.mockResolvedValue({
+        conversation: { sessionId, messages: [] },
+      });
+      mockSessionServiceInstance.assertLegacySessionExecution.mockImplementation(
+        () => {
+          throw new Error('belongs to managed');
+        },
+      );
+
+      await expect(loadCliConfig({}, args as CliArgs)).rejects.toThrow(
+        'belongs to managed',
+      );
+      expect(
+        mockSessionServiceInstance.assertLegacySessionExecution,
+      ).toHaveBeenCalledWith(sessionId);
+      expect(mockConfigConstructorParams).not.toHaveBeenCalled();
+    },
+  );
+
   it('rebinds a selective restore projection to the forked session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
     const projectionSource = vi.fn(async (sessionId: string) => ({
@@ -2717,6 +3317,48 @@ describe('loadCliConfig', () => {
           sessionId: sourceSessionId,
         }),
       }),
+    );
+  });
+
+  it.each([undefined, 'legacy'] as const)(
+    'passes the paired host engine %s to the session Config',
+    async (executionEngine) => {
+      await loadCliConfig(
+        {},
+        {} as CliArgs,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        executionEngine ? { executionEngine } : undefined,
+      );
+
+      expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sessionExecutionEngine: executionEngine }),
+      );
+    },
+  );
+
+  it('passes the Managed engine quarantine sink to the session Config', async () => {
+    const onManagedEngineQuarantine = vi.fn();
+    await loadCliConfig(
+      {},
+      {} as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { onManagedEngineQuarantine },
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({ onManagedEngineQuarantine }),
     );
   });
 
@@ -3770,19 +4412,42 @@ describe('mergeExcludeTools', () => {
     expect(codeMode.getToolMode()).toBe('code_mode_only');
   });
 
+  it('should only enable tools.freeform inside CodeModeOnly', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    const direct = await loadCliConfig(
+      { tools: { freeform: true } },
+      argv,
+      undefined,
+      [],
+    );
+    const codeMode = await loadCliConfig(
+      { tools: { codeModeOnly: true, freeform: true } },
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(direct.getCodeModeOnly()).toBe(false);
+    expect(direct.getFreeform()).toBe(false);
+    expect(codeMode.getFreeform()).toBe(true);
+  });
+
   it.each(['--safe-mode', '--bare'])(
-    'should disable CodeModeOnly in %s mode',
+    'should disable CodeModeOnly and Freeform in %s mode',
     async (flag) => {
       process.argv = ['node', 'script.js', flag];
       const argv = await parseArguments();
       const config = await loadCliConfig(
-        { tools: { codeModeOnly: true } },
+        { tools: { codeModeOnly: true, freeform: true } },
         argv,
         undefined,
         [],
       );
 
       expect(config.getCodeModeOnly()).toBe(false);
+      expect(config.getFreeform()).toBe(false);
     },
   );
 
@@ -4712,6 +5377,67 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(NativeLspService).not.toHaveBeenCalled();
   });
 
+  it('builds agent-host sessions with a read-only initialization profile', async () => {
+    const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
+    process.argv = [
+      'node',
+      'script.js',
+      '--experimental-lsp',
+      '--include-directories',
+      path.resolve(path.sep, 'cli', 'path1'),
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      mcpServers: { ambient: { command: 'ambient-mcp' } },
+      context: {
+        includeDirectories: [path.resolve(path.sep, 'settings', 'path1')],
+      },
+      tools: { workflowsEnabled: true },
+      experimental: {
+        cron: true,
+        sessionWorkflow: true,
+        artifact: true,
+      },
+      omni: { enabled: true },
+    };
+
+    await loadCliConfig(
+      settings,
+      argv,
+      mockCwd,
+      ['ambient-extension'],
+      { userHooks: { PromptSubmit: [{ command: 'ambient-hook' }] } },
+      undefined,
+      { injected: new ServerConfig.MCPServerConfig('node', ['injected.js']) },
+      undefined,
+      false,
+      { agentHostReadOnly: true },
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        targetDir: mockCwd,
+        safeMode: true,
+        coreTools: [ToolNames.READ_FILE, ToolNames.GREP, ToolNames.LS],
+        includeDirectories: [],
+        lsp: { enabled: false },
+        disableAllHooks: true,
+        mcpServers: {},
+        topTierMcpServers: undefined,
+        pendingMcpServers: undefined,
+        overrideExtensions: [],
+        workflowsEnabled: false,
+        sessionWorkflowEnabled: false,
+        fileCheckpointingEnabled: false,
+        cronEnabled: false,
+        artifactEnabled: false,
+        omniEnabled: false,
+      }),
+    );
+    expect(sshWorkspaceProbe).not.toHaveBeenCalled();
+    expect(NativeLspService).not.toHaveBeenCalled();
+  });
+
   it('should ignore implicit startup context inputs in bare mode', async () => {
     const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
     const cliPath = path.resolve(path.sep, 'cli', 'path1');
@@ -4850,10 +5576,9 @@ describe('loadCliConfig with includeDirectories', () => {
       ...policy,
       maskedPaths: expect.any(Array),
     });
-    expect(config.getShellExecutionSandbox()?.maskedPaths).toEqual([
-      policy.maskedPaths[0],
-      path.join(policy.workspace, '.qwen', 'review-leases'),
-    ]);
+    expect(config.getShellExecutionSandbox()?.maskedPaths).toEqual(
+      policy.maskedPaths,
+    );
     expect(config.getCoreTools()).toEqual(
       expect.arrayContaining([
         ToolNames.SHELL,
@@ -4871,8 +5596,6 @@ describe('loadCliConfig with includeDirectories', () => {
     );
     expect(ordinary.getShellExecutionSandbox()).toBeUndefined();
     const rejectedModes: Array<[string, Partial<CliArgs>]> = [
-      ['interactive frontend', { bare: false }],
-      ['missing prompt', { prompt: undefined }],
       ['prompt-interactive frontend', { promptInteractive: 'fixture' }],
       ['stream-json frontend', { inputFormat: 'stream-json' }],
       ['worktree startup', { worktree: 'review' }],
@@ -4892,8 +5615,25 @@ describe('loadCliConfig with includeDirectories', () => {
           false,
           { shellExecutionSandbox: policy },
         ),
-      ).rejects.toThrow('requires bare noninteractive mode');
+      ).rejects.toThrow('does not yet support');
     }
+    const normal = await loadCliConfig(
+      {},
+      { ...argv, bare: false },
+      policy.workspace,
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { shellExecutionSandbox: policy },
+    );
+    expect(normal.getShellExecutionSandbox()).toMatchObject({
+      ...policy,
+      maskedPaths: expect.any(Array),
+    });
+    expect(normal.getBareMode()).toBe(false);
     vi.stubEnv('QWEN_AGENT_EXECUTION_BACKEND', 'docker');
     await expect(
       loadCliConfig(

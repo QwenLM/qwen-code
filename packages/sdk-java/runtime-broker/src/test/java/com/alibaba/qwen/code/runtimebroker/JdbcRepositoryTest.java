@@ -12,6 +12,56 @@ class JdbcRepositoryTest {
         JdbcRepositoryContract.verify(dataSource(), "h2");
     }
 
+    @Test
+    void standaloneInitializerUpgradesOldRowsWithoutChangingTheirOutcome() throws Exception {
+        DataSource source = dataSource();
+        String schema;
+        try (var stream = getClass().getResourceAsStream("/com/alibaba/qwen/code/runtimebroker/schema.sql")) {
+            schema = new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
+                    .replace("    loss_evidence_json LONGTEXT,\n", "")
+                    .replace("    stop_evidence_json LONGTEXT,\n", "")
+                    .replace("    abandoned_at DATETIME(6),\n", "")
+                    .replace("    loss_evidence_id VARCHAR(512),\n", "");
+        }
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            for (String command : schema.split(";")) {
+                if (!command.isBlank()) {
+                    statement.execute(command);
+                }
+            }
+        }
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("DROP INDEX qwen_runtime_storage_bindings_idx");
+            statement.execute("DROP INDEX idx_runtime_session_id");
+        }
+        JdbcRepositoryContract.writeLegacyRows(source, "standalone-upgrade");
+        JdbcRuntimeBrokerSchema.initialize(source);
+        JdbcRuntimeBrokerSchema.initialize(source);
+        try (var connection = source.getConnection()) {
+            for (var entry : java.util.Map.of("qwen_runtime_binding", "qwen_runtime_storage_bindings_idx",
+                    "qwen_runtime_session", "idx_runtime_session_id").entrySet()) {
+                int found = 0;
+                try (var indexes = connection.getMetaData().getIndexInfo(
+                        connection.getCatalog(), null, entry.getKey(), false, false)) {
+                    while (indexes.next()) {
+                        if (entry.getValue().equalsIgnoreCase(indexes.getString("INDEX_NAME"))
+                                && indexes.getInt("ORDINAL_POSITION") == 1) {
+                            found++;
+                        }
+                    }
+                }
+                org.junit.jupiter.api.Assertions.assertEquals(1, found, entry.getValue());
+            }
+        }
+        var executions = new JdbcToolExecutionRepository(source);
+        for (String state : java.util.List.of("PREPARED", "UNKNOWN", "SETTLED")) {
+            var stored = executions.findByIdempotencyKey("standalone-upgrade-" + state + "-key");
+            org.junit.jupiter.api.Assertions.assertEquals(state, stored.getState().name());
+            org.junit.jupiter.api.Assertions.assertEquals(5, stored.getVersion());
+            org.junit.jupiter.api.Assertions.assertNull(stored.getLossEvidenceId());
+        }
+    }
+
     private static DataSource dataSource() {
         JdbcDataSource dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:runtime-broker-"

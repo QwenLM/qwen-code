@@ -8,6 +8,7 @@ import express from 'express';
 import { registerWorkspaceRuntimeStopRoutes } from './routes/workspace-runtime-stop.js';
 import type { Application } from 'express';
 import * as path from 'node:path';
+import { TLSSocket } from 'node:tls';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import {
@@ -28,6 +29,7 @@ import type {
   ChannelWorkerSnapshot,
   ChannelWorkerSupervisor,
 } from './channel-worker-supervisor.js';
+import type { ChannelRestoreFailure } from './channel-restore-failures.js';
 import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
 import type {
   ChannelWorkerControlState,
@@ -51,6 +53,7 @@ import {
   LocalControlService,
 } from './local-control/index.js';
 import { registerWorkspaceLocalControlRoutes } from './routes/workspace-local-control.js';
+import { registerWebShellPairingRoutes } from './routes/web-shell-pairing.js';
 import type {
   DeviceFlowProvider,
   DeviceFlowRegistry,
@@ -70,6 +73,11 @@ import {
 } from './acp-http/index.js';
 import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
 import { createTerminalWsHandler } from './routes/terminal.js';
+import { registerSshWorkspaceBoundary } from './routes/ssh-workspace.js';
+import {
+  sshCommand,
+  quoteSshArgument,
+} from '@qwen-code/qwen-code-core/services/ssh-workspace.js';
 import {
   ClientMcpSenderRegistry,
   createClientMcpServerProvider,
@@ -79,6 +87,7 @@ import {
   canonicalizeWorkspace,
   createAcpSessionBridge,
   createSpawnChannelFactory,
+  defaultSpawnChannelFactory,
   MAX_SESSION_RESTORE_TIMEOUT_MS,
   resolveSessionRestoreTimeoutMs,
   SessionNotFoundError,
@@ -113,6 +122,7 @@ import {
 } from './workspace-agents.js';
 import { mountWorkspaceGenerationRoutes } from './workspace-generation.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
+import { registerDaemonUpdateRoutes } from './routes/daemon-update.js';
 import { createHealthRoutes } from './routes/health.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
 import { registerWorkspaceExtensionRoutes } from './routes/workspace-extensions.js';
@@ -135,6 +145,7 @@ import {
 } from './routes/workspace-trust.js';
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
+import { registerSessionCatalogRoutes } from './routes/session-catalog.js';
 import { registerSessionPrBackfillRoutes } from './routes/session-pr-backfill.js';
 import { registerStandaloneSessionRoutes } from './routes/standalone-sessions.js';
 import {
@@ -143,11 +154,26 @@ import {
 } from './session-id-admission.js';
 import { sessionAttachmentsRoots } from './session-attachments-root.js';
 import {
+  createPairedExecutionEngines,
+  type ManagedExecutionEngine,
+} from './session-execution-engine-selector.js';
+import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
 } from './routes/scheduled-tasks.js';
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
+import { registerWorkspaceAgentRoutes } from './routes/workspace-agents.js';
+import { registerSessionAgentSquadRoutes } from './routes/session-agent-squads.js';
+import {
+  registerSessionAgentRoutes,
+  registerSessionAgentSendRoute,
+} from './routes/session-agents.js';
+import {
+  normalizeAgentChainLimit,
+  normalizeAgentTokenBudget,
+} from '@qwen-code/qwen-code-core/agents/session-agents/chain.js';
+import { strandLocalRuns } from '@qwen-code/qwen-code-core';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
   collectBoundSessionIds,
@@ -172,6 +198,12 @@ import {
 import { registerBrandRoutes } from './routes/brand.js';
 import { registerCapabilitiesRoutes } from './routes/capabilities.js';
 import {
+  createHostedHarnessContract,
+  installHostedHarnessContractMiddleware,
+} from './hosted-harness-contract.js';
+import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
+import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
+import {
   registerWorkspacePermissionsRoutes,
   registerWorkspaceQualifiedPermissionsRoutes,
 } from './routes/workspace-permissions.js';
@@ -194,7 +226,11 @@ import {
 import { registerWorkspaceModelsRoutes } from './routes/workspace-models.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
-import { setRateLimiter } from './rate-limit.js';
+import {
+  createRateLimiter,
+  setRateLimiter,
+  type RateLimiterInstance,
+} from './rate-limit.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
 import { VirtualSubagentSessions } from './virtual-subagent-sessions.js';
 import {
@@ -207,6 +243,7 @@ import {
   type SendBridgeError,
 } from './server/error-response.js';
 import { resolveBridgeFsFactory } from './server/fs-factory.js';
+import { readSshWorkspace } from './ssh-workspace-store.js';
 import {
   createBuildWorkspaceCtx,
   parseAndValidateWorkspaceClientId,
@@ -293,6 +330,7 @@ import {
 } from './routes/workspace-git-branches.js';
 import { registerWorkspaceQualifiedGitRemotesRoutes } from './routes/workspace-git-remotes.js';
 import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
+import { registerWorkspaceQualifiedGitWorktreeRoutes } from './routes/workspace-git-worktrees.js';
 import { registerWorkspaceLocalOpenRoutes } from './routes/workspace-local-open.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
 import {
@@ -314,6 +352,16 @@ import {
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
+import {
+  AGENT_HOST_RATE_LIMIT,
+  registerAgentHostTransportRoutes,
+} from './routes/agent-hosts.js';
+import { registerAgentHostRuntimeRoutes } from './routes/agent-host-connection.js';
+import {
+  registerAgentHostRelayRoutes,
+  relayBaseUrl,
+} from './agent-host-relay.js';
+import { registerA2ATransportRoutes } from './routes/a2a.js';
 import type {
   ChannelDeliveryAccepted,
   ChannelDeliveryRequest,
@@ -326,6 +374,7 @@ import {
 import { loadChannelsConfig } from '../commands/channel/runtime.js';
 import { writeStderrLine, writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { loadSettings, SettingScope } from '../config/settings.js';
+import { runWithoutDebugLogSession } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { getModelProvidersOwnerScope } from '../config/modelProvidersScope.js';
 import { registerLiveRoutes } from './routes/live.js';
 import { registerLiveSetupRoutes } from './routes/live-setup.js';
@@ -334,6 +383,7 @@ import { LiveHostInstaller } from './live/live-host-installer.js';
 import { LiveSessionCoordinator } from './live/live-session-coordinator.js';
 import { LiveSetupController } from './live/live-setup-controller.js';
 import { LiveTaskService } from './live/live-task-service.js';
+import { resolveLiveNativeHostEnabled } from './live/native-host-enabled.js';
 import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
 import {
@@ -481,6 +531,7 @@ function getRuntimeEffectiveEnv(
 }
 
 export interface ServeAppDeps {
+  restartForUpdate?: (launcher: string) => Promise<void>;
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
   /**
@@ -568,6 +619,7 @@ export interface ServeAppDeps {
   maxChannelControlWorkspaces?: number;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  getChannelRestoreFailures?: () => readonly ChannelRestoreFailure[];
   getChannelWorkerControl?: () => ChannelWorkerControlState;
   isChannelControlDraining?: () => boolean;
   isChannelControlInitializing?: () => boolean;
@@ -607,6 +659,12 @@ export interface ServeAppDeps {
     policy: ChildHeapPolicy;
     ownsBridge?: (bridge: AcpSessionBridge) => boolean;
   };
+  /**
+   * Managed engine for the default Bridge when `experimentalPairedEngines`
+   * pairs it. Without one, paired sessions run on Legacy and Managed owners
+   * are refused on restore.
+   */
+  managedExecutionEngine?: ManagedExecutionEngine;
   /**
    * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
    * the metrics ring can bucket request rate and latency for the charts.
@@ -803,11 +861,32 @@ export function createServeApp(
   getPort: () => number = () => opts.port,
   deps: ServeAppDeps = {},
 ): Application {
+  validateHostedHarnessProfile(opts);
+  if (opts.profile === 'hosted-harness' && deps.manageScheduledTaskSessions) {
+    throw new Error(
+      '--profile hosted-harness cannot manage scheduled task sessions.',
+    );
+  }
+  if (opts.profile === 'hosted-harness') opts = { ...opts, requireAuth: true };
   if (
-    opts.childHeapMode === 'admit' &&
-    deps.managedChildProcesses?.policy.snapshot().mode !== 'admit'
+    (opts.childHeapMode === 'admit' || opts.childHeapMode === 'enforce') &&
+    deps.managedChildProcesses?.policy.snapshot().mode !== opts.childHeapMode
   ) {
     throw new TypeError('ACP admission requires managed child process wiring.');
+  }
+  if (
+    opts.childHeapMode === 'enforce' &&
+    ((deps.bridge && !deps.managedChildProcesses?.ownsBridge?.(deps.bridge)) ||
+      deps.workspaceRegistry
+        ?.listManaged()
+        .some(
+          (runtime) =>
+            !deps.managedChildProcesses?.ownsBridge?.(runtime.bridge),
+        ))
+  ) {
+    throw new TypeError(
+      'ACP heap enforcement requires managed bridge ownership.',
+    );
   }
   const daemonEnv = deps.daemonEnv ?? process.env;
   const daemonEnvAtBoot = Object.freeze({ ...daemonEnv });
@@ -884,6 +963,14 @@ export function createServeApp(
     injectedWorkspaceRegistry?.primary.workspaceCwd ??
     deps.boundWorkspace ??
     canonicalizeWorkspace(opts.workspace ?? process.cwd());
+  if (
+    readSshWorkspace(boundWorkspace) ||
+    injectedWorkspaceRegistry?.primary.routeFileSystemFactory.sshWorkspace
+  ) {
+    throw new Error(
+      'Start qwen serve in a local workspace, then add the SSH workspace in the workspace picker.',
+    );
+  }
   if (injectedWorkspaceRegistry) {
     const primary = injectedWorkspaceRegistry.primary;
     const registryConflictCandidates = [
@@ -1021,17 +1108,20 @@ export function createServeApp(
     webTerminalRegistry.dispose();
   webTerminalLocals.releaseWebTerminalsForWorkspace = (workspaceCwd) =>
     webTerminalRegistry.releaseWorkspace(workspaceCwd);
-  const acpHttpEnabledAtBoot = resolveAcpHttpEnabled(daemonEnvAtBoot);
+  const acpHttpEnabledAtBoot =
+    opts.profile !== 'hosted-harness' && resolveAcpHttpEnabled(daemonEnvAtBoot);
   const runtimePlatform = deps.runtimePlatform ?? process.platform;
-  // Live Voice needs a Web Shell to control it. The audio endpoint is either
-  // the native macOS Host (`/live/host`) or the Web Shell page itself
-  // (`/live/web`), so only the native ingress is platform-bound.
+  // Live Voice needs a Web Shell to control it. The audio endpoint is the Web
+  // Shell page itself (`/live/web`) on every platform; the native macOS Host
+  // (`/live/host`) is opt-in through QWEN_SERVE_LIVE_NATIVE_HOST=1.
   const liveVoiceSurfaceAvailable =
     opts.serveWebShell !== false &&
     typeof deps.webShellDir === 'string' &&
     acpHttpEnabledAtBoot;
   const liveNativeHostAvailable =
-    liveVoiceSurfaceAvailable && runtimePlatform === 'darwin';
+    liveVoiceSurfaceAvailable &&
+    runtimePlatform === 'darwin' &&
+    resolveLiveNativeHostEnabled(daemonEnvAtBoot);
   const primaryRuntimeTrustAuthoritative =
     deps.workspaceTrustHotReloadAvailable === true ||
     deps.primaryWorkspaceTrusted !== undefined ||
@@ -1058,6 +1148,11 @@ export function createServeApp(
     }
     return () => guard.assertOpen();
   };
+  // The collaboration flag is resolved per workspace at request time (see
+  // `isAgentCollaborationEnabledFor` below). One boot-time decision remains:
+  // when no registered workspace has it on, the routes and recovery are never
+  // registered, so enabling it for the first time still needs a
+  // daemon restart — the setting keeps `requiresRestart: true` for that case.
   let standaloneSessionsAvailable = false;
   const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
     createServeFeatures({
@@ -1112,6 +1207,10 @@ export function createServeApp(
       sessionShellCommandEnabled,
       multiWorkspaceSessionsEnabled: () =>
         workspaceRegistry.listEntries().length > 1,
+      // Present only while the routes are: a workspace opted in after boot
+      // does not mount them until the daemon restarts.
+      agentCollaborationEnabled: () =>
+        agentCollaborationRoutesMounted && anyAgentCollaborationEnabled(),
       dynamicWorkspaceRegistrationAvailable:
         deps.createWorkspaceRuntime !== undefined,
       persistentWorkspaceRegistrationAvailable:
@@ -1208,6 +1307,36 @@ export function createServeApp(
     boundWorkspace,
     Storage.getRuntimeBaseDir(),
   );
+  const defaultBridgeChannels = () => {
+    const channelFactory =
+      acpChildArgs || deps.managedChildProcesses
+        ? createSpawnChannelFactory({
+            processRegistry: deps.managedChildProcesses?.registry,
+            childHeapPolicy: deps.managedChildProcesses?.policy,
+            ...(deps.managedChildProcesses
+              ? {
+                  reclaimIdleChild: async (signal?: AbortSignal) => {
+                    await reclaimIdleAcp?.(
+                      hashDaemonWorkspace(boundWorkspace),
+                      signal,
+                    );
+                  },
+                }
+              : {}),
+            extraArgs: acpChildArgs,
+          })
+        : undefined;
+    if (!opts.experimentalPairedEngines) {
+      return channelFactory ? { channelFactory } : {};
+    }
+    return {
+      executionEngines: createPairedExecutionEngines({
+        legacy: channelFactory ?? defaultSpawnChannelFactory,
+        runtimeBaseDir: Storage.getRuntimeBaseDir(),
+        managed: deps.managedExecutionEngine,
+      }),
+    };
+  };
   const bridge =
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
@@ -1236,25 +1365,7 @@ export function createServeApp(
       ...(opts.restoreAskUserQuestion === true
         ? { restoreAskUserQuestion: true }
         : {}),
-      ...(acpChildArgs || deps.managedChildProcesses
-        ? {
-            channelFactory: createSpawnChannelFactory({
-              processRegistry: deps.managedChildProcesses?.registry,
-              childHeapPolicy: deps.managedChildProcesses?.policy,
-              ...(deps.managedChildProcesses
-                ? {
-                    reclaimIdleChild: async (signal?: AbortSignal) => {
-                      await reclaimIdleAcp?.(
-                        hashDaemonWorkspace(boundWorkspace),
-                        signal,
-                      );
-                    },
-                  }
-                : {}),
-              extraArgs: acpChildArgs,
-            }),
-          }
-        : {}),
+      ...defaultBridgeChannels(),
       boundWorkspace,
       sessionShellCommandEnabled,
       // Wire the production status provider so direct embeds / tests
@@ -1363,7 +1474,8 @@ export function createServeApp(
       }),
       ...(primaryEffectiveEnv ? { skillInstallEnv: primaryEffectiveEnv } : {}),
       ...(primaryEffectiveEnv ? { voiceEnv: primaryEffectiveEnv } : {}),
-      isChannelLive: () => bridge.isChannelLive(),
+      isChannelLive: () =>
+        bridge.isWorkspaceControlLive?.() ?? bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
         (async () => {
@@ -1489,6 +1601,88 @@ export function createServeApp(
       return undefined;
     }
   })();
+  // The collaboration opt-in is workspace-scoped like the feature itself:
+  // every surface resolves it from the same per-workspace merge a hosted
+  // session sees (workspace scope wins), and the env var stays the
+  // operator's process-wide override. The predicate is consulted at request
+  // time, so a workspace registered or reconfigured after boot is seen
+  // without a daemon restart. A daemon that joined another coordinator as an
+  // Agent Host may still coordinate its own workspace when that workspace
+  // opts in (plan decision 5: being a runtime is independent of the flag).
+  // A settings file caught mid-edit (half-written JSON) keeps the last answer
+  // read for that workspace: reading it as "off" would strand every live run
+  // there within one recovery tick. The load asks the loader to report a
+  // broken workspace file rather than recover it — recovery rewrites the file
+  // to `{}`, which this predicate could not tell from a real opt-out, and the
+  // rewrite would make the opt-out permanent. User and system scopes already
+  // throw on a parse error.
+  const lastAgentCollaborationSetting = new Map<string, boolean>();
+  const isAgentCollaborationEnabledFor = (workspaceCwd: string): boolean => {
+    if (process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1')
+      return true;
+    try {
+      // A daemon-level probe, evaluated at boot and per request: its settings
+      // diagnostics belong to no session, and writing them into whichever one
+      // is ambient breaks untrusted-read log isolation.
+      const settings = runWithoutDebugLogSession(() =>
+        loadSettings(workspaceCwd, {
+          preserveInvalidWorkspaceSettings: true,
+        }),
+      );
+      const enabled = settings.merged.experimental?.agentCollaboration === true;
+      lastAgentCollaborationSetting.set(workspaceCwd, enabled);
+      return enabled;
+    } catch {
+      return lastAgentCollaborationSetting.get(workspaceCwd) ?? false;
+    }
+  };
+  // `experimental.agentChainLimit` for session agents, read per use like the
+  // opt-in above. Unreadable settings fall back to the default (unlimited).
+  const agentChainLimitFor = (workspaceCwd: string): number => {
+    try {
+      const settings = runWithoutDebugLogSession(() =>
+        loadSettings(workspaceCwd, {
+          preserveInvalidWorkspaceSettings: true,
+        }),
+      );
+      return normalizeAgentChainLimit(
+        settings.merged.experimental?.agentChainLimit,
+      );
+    } catch {
+      return normalizeAgentChainLimit(undefined);
+    }
+  };
+  // `experimental.agentTokenBudget`: tokens agents may spend in a chat
+  // session between two human messages before they stop waking each other.
+  const agentTokenBudgetFor = (workspaceCwd: string): number => {
+    try {
+      const settings = runWithoutDebugLogSession(() =>
+        loadSettings(workspaceCwd, {
+          preserveInvalidWorkspaceSettings: true,
+        }),
+      );
+      return normalizeAgentTokenBudget(
+        settings.merged.experimental?.agentTokenBudget,
+      );
+    } catch {
+      return normalizeAgentTokenBudget(undefined);
+    }
+  };
+  // Whether the routes and recovery exist at all. Evaluated at call time over
+  // the registry rather than snapshotted at boot.
+  let agentCollaborationRoutesMounted = false;
+  // Only trusted workspaces count: an untrusted one cannot use collaboration,
+  // and reading its settings is itself something untrusted access must not do
+  // (the loader writes debug logs).
+  const anyAgentCollaborationEnabled = () =>
+    workspaceRegistry
+      .listAll()
+      .some(
+        (runtime) =>
+          runtime.trusted &&
+          isAgentCollaborationEnabledFor(runtime.workspaceCwd),
+      );
+
   const liveConfigAtBoot = liveSettingsAtBoot
     ? readLiveVoiceConfiguration(liveSettingsAtBoot)
     : undefined;
@@ -1775,6 +1969,7 @@ export function createServeApp(
       ),
     );
     standaloneSessionService = new StandaloneSessionService({
+      daemonLog,
       ensureRuntime: ensureConversationRuntimeWithLifecycle,
       assertRuntimeCurrent: (runtime) => {
         conversationRuntimeManager.assertCurrent(runtime);
@@ -1905,6 +2100,7 @@ export function createServeApp(
     onStart: (call) => liveSessionCoordinator.start(call),
     onStop: (call) => liveSessionCoordinator.stop(call),
     onInputAudio: (call) => liveSessionCoordinator.pushAudio(call),
+    onScreenFeed: (message) => liveSessionCoordinator.handleScreenFeed(message),
   });
   const publishLiveVoiceEnabled = async (enabled: boolean): Promise<void> => {
     const updateDiscovery = (
@@ -2087,8 +2283,24 @@ export function createServeApp(
   // bind is.
   app.use(hostAllowlist(opts.hostname, getPort));
 
-  installRemoteSelfOriginMiddleware(app, opts.hostname, opts.token);
+  installRemoteSelfOriginMiddleware(
+    app,
+    opts.hostname,
+    opts.token ? credentials : undefined,
+  );
   app.use(allowOriginCors(originAllowlist));
+  if (opts.profile === 'hosted-harness') {
+    app.use((req, res, next) => {
+      if (
+        req.path === '/health' ||
+        req.path === '/capabilities' ||
+        req.path === '/session' ||
+        req.path.startsWith('/session/')
+      )
+        next();
+      else res.sendStatus(404);
+    });
+  }
 
   // Pre-auth health sits below the origin wall so matched cross-origin health
   // probes carry CORS headers. It stays unlogged (path-exempt above), so the
@@ -2137,8 +2349,24 @@ export function createServeApp(
         )
       : [];
   if (webShellDir) {
-    mountWebShellAssets(app, webShellDir, webShellFrameAncestors);
-    mountMcpAppSandbox(app);
+    mountWebShellAssets(
+      app,
+      webShellDir,
+      webShellFrameAncestors,
+      opts.clientMcpOverWs === true,
+    );
+    (app.locals as { stopMcpAppSandbox?: () => void }).stopMcpAppSandbox =
+      mountMcpAppSandbox(app, (origin, req) => {
+        if (originAllowlist.allows(origin)) return true;
+        if (!opts.token || listenerIdentityOf(req).kind !== 'primary')
+          return false;
+        const scheme =
+          req.socket instanceof TLSSocket && req.socket.encrypted
+            ? 'https'
+            : 'http';
+        // Match the existing self-origin rule; forwarded headers are not authority.
+        return origin === new URL(`${scheme}://${req.headers.host}`).origin;
+      });
   }
 
   if (deps.enqueueChannelWebhookTask) {
@@ -2187,14 +2415,73 @@ export function createServeApp(
     });
   }
 
+  let agentHostRateLimiter: RateLimiterInstance | undefined;
+  // `session_send` relay for agent turns this daemon runs as a Host. Before
+  // the bearer gate: the MCP child holds only a per-run token, and the route
+  // answers loopback peers only. Mounted whatever the collaboration flag
+  // says, like the rest of being a runtime.
+  registerAgentHostRelayRoutes(app, {
+    hostname: opts.hostname,
+    getPort,
+    tls: Boolean(opts.tlsCert && opts.tlsKey),
+  });
+  // The URL this daemon's own loopback-only routes are reached on, for the
+  // `session_send` MCP child of an agent this daemon runs (read lazily: the
+  // port is 0 until `listen()` resolves).
+  const daemonLoopbackBaseUrl = () =>
+    relayBaseUrl({
+      hostname: opts.hostname,
+      port: getPort(),
+      tls: Boolean(opts.tlsCert && opts.tlsKey),
+    });
+
+  if (anyAgentCollaborationEnabled()) {
+    registerA2ATransportRoutes(
+      app,
+      workspaceRegistry,
+      rateLimiter,
+      isAgentCollaborationEnabledFor,
+    );
+    // Host traffic (events every 250 ms per turn, heartbeats, polls) gets
+    // its own budget per authenticated Host instead of the general `read`
+    // tier; same opt-in as the general limiter.
+    agentHostRateLimiter = rateLimiter
+      ? createRateLimiter({
+          tiers: {
+            prompt: AGENT_HOST_RATE_LIMIT,
+            mutation: AGENT_HOST_RATE_LIMIT,
+            read: AGENT_HOST_RATE_LIMIT,
+          },
+          hostname: opts.hostname,
+        })
+      : undefined;
+    registerAgentHostTransportRoutes(
+      app,
+      workspaceRegistry,
+      rateLimiter,
+      isAgentCollaborationEnabledFor,
+      agentHostRateLimiter,
+    );
+    // `session_send` from a local session agent's MCP child: per-binding
+    // token, loopback peers only, so it sits before the daemon bearer gate.
+    registerSessionAgentSendRoute(app, {
+      workspaceRegistry,
+      isAgentCollaborationEnabledFor,
+      ...(rateLimiter ? { rateLimiter } : {}),
+    });
+  }
+
   // Credentials are a listener-scoped set, not one token: while Local Control
   // is on, the LAN listener accepts a revocable pairing token and rejects the
   // runtime token, and the primary listener does the reverse. With no Local
   // Control session this behaves exactly as `bearerAuth(opts.token)` did.
+  if (webShellDir) {
+    registerWebShellPairingRoutes(app, credentials, opts.hostname, rateLimiter);
+  }
   app.use(authenticate);
 
   // Rate limiter: after auth (only count authenticated requests), except
-  // webhook routes which use their own shared-secret auth before bearerAuth.
+  // webhook and pairing routes which mount their limiter before returning.
   if (rateLimiter) {
     app.use(rateLimiter.middleware);
   }
@@ -2208,6 +2495,86 @@ export function createServeApp(
   }
 
   installJsonBodyParser(app);
+
+  const hostedHarness =
+    opts.profile === 'hosted-harness'
+      ? createHostedHarnessContract(opts.hostedHarnessCapabilityDigest!)
+      : undefined;
+  installHostedHarnessContractMiddleware(app, hostedHarness);
+  if (hostedHarness) {
+    registerHostedHarnessSessionRoutes(
+      app,
+      hostedHarness,
+      primaryBoundWorkspace,
+      opts.managedRuntimeBrokerUrl && opts.managedRuntimeBrokerToken
+        ? {
+            baseUrl: opts.managedRuntimeBrokerUrl,
+            token: opts.managedRuntimeBrokerToken,
+          }
+        : undefined,
+    );
+    app.use((req, res, next) => {
+      if (req.path === '/capabilities' || req.path === '/health') next();
+      else res.sendStatus(404);
+    });
+  }
+
+  if (opts.clientMcpOverWs === true) {
+    app.post('/desktop-relay/credential', (req, res) => {
+      if (listenerIdentityOf(req).kind !== 'primary') {
+        res.status(403).json({ error: 'primary_listener_required' });
+        return;
+      }
+      const body = req.body as unknown;
+      if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+        res.status(400).json({ error: 'invalid_request' });
+        return;
+      }
+      const { sessionId, workspace } = body as Record<string, unknown>;
+      if (
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        sessionId.length > 4_096
+      ) {
+        res.status(400).json({ error: 'invalid_session_id' });
+        return;
+      }
+
+      let acpPath = '/acp';
+      if (workspace !== undefined) {
+        if (
+          workspace === null ||
+          typeof workspace !== 'object' ||
+          Array.isArray(workspace)
+        ) {
+          res.status(400).json({ error: 'invalid_workspace' });
+          return;
+        }
+        const selector = workspace as Record<string, unknown>;
+        if (
+          (selector['kind'] !== 'id' && selector['kind'] !== 'cwd') ||
+          typeof selector['value'] !== 'string' ||
+          selector['value'].length === 0 ||
+          selector['value'].length > 4_096
+        ) {
+          res.status(400).json({ error: 'invalid_workspace' });
+          return;
+        }
+        acpPath = `/workspaces/${encodeURIComponent(selector['value'])}/acp`;
+      }
+
+      const credential = credentials.createDesktopRelayCredential({
+        acpPath,
+        sessionId,
+      });
+      res.setHeader('Cache-Control', 'no-store');
+      if (!credential) {
+        res.status(429).json({ error: 'credential_limit' });
+        return;
+      }
+      res.json({ credential });
+    });
+  }
 
   // Mutation-route gate factory. Trusted primary loopback requests have
   // operator authority; strict routes otherwise require verified credentials.
@@ -2246,6 +2613,7 @@ export function createServeApp(
   );
 
   const buildWorkspaceCtx = createBuildWorkspaceCtx(primaryBoundWorkspace);
+  registerSshWorkspaceBoundary(app, workspaceRegistry);
   const syncModelProvidersRuntime = async (
     route: string,
     writeScope?: SettingScope,
@@ -2307,6 +2675,13 @@ export function createServeApp(
   const cdpTunnelRegistry =
     opts.cdpTunnelOverWs === true ? new CdpTunnelRegistry() : undefined;
 
+  registerDaemonUpdateRoutes(app, {
+    currentVersion: deps.qwenCodeVersion,
+    runtimeToken: opts.token,
+    restartForUpdate: deps.restartForUpdate,
+    mutate,
+  });
+
   registerDaemonStatusRoutes(app, {
     opts,
     boundWorkspace: primaryBoundWorkspace,
@@ -2325,6 +2700,7 @@ export function createServeApp(
     sessionShellCommandEnabled,
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
     getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
+    getChannelRestoreFailures: deps.getChannelRestoreFailures,
     maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
     getPerfSnapshot: deps.getPerfSnapshot,
     getMetricsSeries: deps.getMetricsSeries,
@@ -2337,7 +2713,8 @@ export function createServeApp(
       ? () => deps.managedChildProcesses!.registry.committedProcessCount
       : undefined,
     childAdmissionEnforced:
-      deps.managedChildProcesses?.policy.snapshot().mode === 'admit',
+      deps.managedChildProcesses?.policy.snapshot().mode === 'admit' ||
+      deps.managedChildProcesses?.policy.snapshot().mode === 'enforce',
   });
 
   if (conversationRuntimeManager) {
@@ -2354,6 +2731,7 @@ export function createServeApp(
     });
   }
   registerCapabilitiesRoutes(app, {
+    hostedHarness,
     qwenCodeVersion: deps.qwenCodeVersion,
     mode: opts.mode,
     currentServeFeatures,
@@ -2368,6 +2746,9 @@ export function createServeApp(
     sessionRestoreTimeoutMs,
     languageCodes,
     daemonEnv: daemonEnvAtBoot,
+    agentCollaborationEnabledFor: (workspaceCwd) =>
+      agentCollaborationRoutesMounted &&
+      isAgentCollaborationEnabledFor(workspaceCwd),
   });
   registerBrandRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -2564,6 +2945,11 @@ export function createServeApp(
     sendBridgeError,
     mutate,
   });
+  registerWorkspaceQualifiedGitWorktreeRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+  });
   registerSessionPrBackfillRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
@@ -2691,6 +3077,10 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspace: primaryWorkspace,
+    // The primary runtime's own resolved env, so extension telemetry consent
+    // and proxy resolve per workspace instead of off the daemon's shared
+    // `process.env` (same carrier `registerWorkspaceSetupGithubRoutes` uses).
+    env: primaryRuntimeEffectiveEnv,
     mutate,
     safeBody,
     sendBridgeError,
@@ -3053,6 +3443,7 @@ export function createServeApp(
   const virtualSubagentSessions = new VirtualSubagentSessions();
   const liveConversationWorkspaceForRoutes = deps.liveConversationWorkspace;
 
+  registerSessionCatalogRoutes(app, workspaceRegistry);
   registerSessionRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
@@ -3290,6 +3681,122 @@ export function createServeApp(
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
+
+  // Being joined as a runtime (`hosts/service`, `hosts/connect`) needs only
+  // the bearer gate, a trusted workspace and the mutation gate — not the
+  // collaboration opt-in, so a running daemon can join without a restart.
+  registerAgentHostRuntimeRoutes(
+    app,
+    '/workspaces/:workspace/agent',
+    (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) {
+        return undefined;
+      }
+      return runtime;
+    },
+    () => mutate(),
+  );
+
+  // Reconnect, in the background, every saved Host connection (`qwen agents
+  // join`, `hosts/connect`) of every trusted workspace, including ones
+  // registered or trusted after boot. The real daemon only, like
+  // scheduled-task residency below: tests and embeds that call
+  // createServeApp must not dial out on the strength of ~/.qwen.
+  if (deps.manageScheduledTaskSessions) {
+    const agentHostRestore = new AbortController();
+    (app.locals as { stopAgentHostRestore?: () => void }).stopAgentHostRestore =
+      () => agentHostRestore.abort();
+    void import('./agent-host-connections.js')
+      .then(({ restoreAgentHostConnections }) =>
+        restoreAgentHostConnections({
+          signal: agentHostRestore.signal,
+          runtimeFor: (workspaceCwd) => {
+            const runtime = workspaceRegistry.getByWorkspaceCwd(workspaceCwd);
+            if (!runtime?.generationGuard || runtime.generationGuard.closed) {
+              return undefined;
+            }
+            const trusted = runtime.primary
+              ? isPrimaryWorkspaceTrusted()
+              : runtime.trusted;
+            return trusted ? runtime : undefined;
+          },
+        }),
+      )
+      .catch((error: unknown) =>
+        writeStderrLine(
+          `qwen serve: could not restore Agent Host connections: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+  }
+
+  // Gated on the opt-in, and gated by *not registering* rather than by
+  // refusing inside the handlers: `registerWorkspaceAgentRoutes` runs a
+  // `recover()` sweep and arms a 5s interval as a side effect of registration,
+  // so a handler-level refusal would still leave the scanner reading
+  // collaboration storage and re-dispatching booked runs on a daemon whose
+  // operator never opted in. Skipping the call leaves the routes 404, which is
+  // also what the absent `agent_collaboration_v1` capability tells clients.
+  if (anyAgentCollaborationEnabled()) {
+    registerWorkspaceAgentRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      isAgentCollaborationEnabledFor,
+    });
+    // Session multi-agent (agents answering @-mentions in a chat session),
+    // built next to the thread routes until those are removed.
+    registerSessionAgentRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      isAgentCollaborationEnabledFor,
+      agentChainLimitFor,
+      agentTokenBudgetFor,
+      daemonLoopbackBaseUrl,
+      standaloneSessionService: () => standaloneSessionService,
+    });
+    // Squads: a leader agent that coordinates member agents in a session.
+    registerSessionAgentSquadRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      isAgentCollaborationEnabledFor,
+    });
+    agentCollaborationRoutesMounted = true;
+  } else if (!opts.agentHostWorker) {
+    // Close out runs the switch left mid-flight. Recovery cannot tell "the
+    // daemon crashed" from "the operator turned this off" — both look like a
+    // live run whose body is gone — so if these were left as they are,
+    // opting back in would silently re-dispatch work nobody asked to resume.
+    // Marking them terminal here means recovery later finds a closed run, and
+    // a person decides whether the work happens again.
+    //
+    // A one-shot, not a scanner: no timer, no routes, nothing created in a
+    // workspace that never used collaboration, and untrusted workspaces are
+    // not touched at all. Failures are logged and dropped — this must never
+    // be able to stop a daemon whose operator opted out from starting.
+    void (async () => {
+      for (const runtime of workspaceRegistry.listAll()) {
+        if (!runtime.trusted) continue;
+        try {
+          const { runsStranded } = await strandLocalRuns(runtime.workspaceCwd);
+          if (runsStranded > 0) {
+            writeStderrLine(
+              `qwen serve: agent collaboration is off; ${runsStranded} run(s) in ${runtime.workspaceCwd} marked stranded for review`,
+            );
+          }
+        } catch (error) {
+          writeStderrLine(
+            `qwen serve: could not close stranded agent runs in ${runtime.workspaceCwd}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+    })();
+  }
 
   // The same CRUD surface, workspace-qualified, so a multi-workspace Web Shell
   // manages every registered project's schedule against that project's own cron
@@ -3594,6 +4101,15 @@ export function createServeApp(
         return {
           workspaceCwd: runtime.workspaceCwd,
           env: getRuntimeEffectiveEnv(runtime.env) ?? daemonEnvAtBoot,
+          ...(runtime.routeFileSystemFactory.sshWorkspace
+            ? {
+                command: sshCommand(
+                  runtime.routeFileSystemFactory.sshWorkspace,
+                  `cd ${quoteSshArgument(runtime.routeFileSystemFactory.sshWorkspace.directory)} && exec "\${SHELL:-/bin/sh}" -l`,
+                  true,
+                ),
+              }
+            : {}),
         };
       }),
     ],
@@ -3683,7 +4199,12 @@ export function createServeApp(
   // is what keeps an attacker-controlled `Accept: text/html` from coaxing the
   // 200 shell out of an authed route.
   if (webShellDir) {
-    mountWebShellSpaFallback(app, webShellDir, webShellFrameAncestors);
+    mountWebShellSpaFallback(
+      app,
+      webShellDir,
+      webShellFrameAncestors,
+      opts.clientMcpOverWs === true,
+    );
   }
 
   installFinalErrorHandler(app);
@@ -3697,6 +4218,7 @@ export function createServeApp(
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
       const pendingDrains = [
+        (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)(),
         workspaceManagementHandle.sealAndWait(),
         (
           app.locals as {
@@ -3715,16 +4237,27 @@ export function createServeApp(
         }
       };
       const locals = app.locals as {
+        stopMcpAppSandbox?: () => void;
         stopScheduledTaskKeepalive?: () => void;
         stopWorkspaceGitState?: () => void;
         stopExtensionGenerationReconciler?: () => void;
+        stopWorkspaceAgentRecovery?: () => void;
+        stopSessionAgentOrchestrators?: () => void;
       };
+      stopAppResource(locals.stopMcpAppSandbox);
       stopAppResource(locals.stopScheduledTaskKeepalive);
       stopAppResource(locals.stopWorkspaceGitState);
       stopAppResource(locals.stopExtensionGenerationReconciler);
+      stopAppResource(locals.stopWorkspaceAgentRecovery);
+      stopAppResource(locals.stopSessionAgentOrchestrators);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());
+      stopAppResource(() => agentHostRateLimiter?.dispose());
+      stopAppResource(
+        (app.locals as { stopAgentHostRestore?: () => void })
+          .stopAgentHostRestore,
+      );
       stopAppResource(() => webTerminalRegistry.dispose());
       const drains = await Promise.allSettled(pendingDrains);
       stopAppResource(() => acpHandleRef.current?.dispose());

@@ -8,9 +8,12 @@ import { readReportedArtifacts } from './reported-artifacts.js';
 import {
   isTaskExecutionMode,
   parseDaemonBackgroundTurn,
+  parseQwenAgentMessageMeta,
+  QWEN_AGENT_MESSAGE_META_KEY,
 } from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
+  QwenAgentMessageMeta,
   DaemonTranscriptBlock,
   DaemonTextTranscriptBlock,
   DaemonToolTranscriptBlock,
@@ -31,6 +34,7 @@ import {
   isActiveToolStatus,
   isSubAgentToolCall,
   projectTerminalBackgroundAgentTool,
+  resolveToolCallName,
 } from './toolClassification.js';
 import { parseTodoItemsFromEntries } from '../utils/todos.js';
 import {
@@ -72,6 +76,28 @@ interface BackgroundAgentTaskUpdate {
   status: string;
   awaitingProcessing: boolean;
   endTime: number;
+}
+
+/**
+ * The session agent behind a user or assistant block: its live / replayed
+ * `_meta.qwenAgentMessage`, or, in an exported transcript (which carries no
+ * `meta`), the block's `author`. The exported form keeps only the name, which
+ * is enough to render the reply as the agent's own message.
+ */
+function agentMessageOfBlock(
+  block: DaemonTextTranscriptBlock,
+  meta: Record<string, unknown> | undefined,
+): QwenAgentMessageMeta | undefined {
+  const live = parseQwenAgentMessageMeta(meta?.[QWEN_AGENT_MESSAGE_META_KEY]);
+  if (live) return live;
+  if (block.kind !== 'user' && block.kind !== 'assistant') return undefined;
+  const author = getRecord((block as { author?: unknown }).author);
+  const name = getString(author, 'name')?.trim();
+  if (!name) return undefined;
+  return {
+    kind: block.kind === 'assistant' ? 'agent_message' : 'agent_mention',
+    author: { agentId: '', name },
+  };
 }
 
 function collectBackgroundTaskUpdates(
@@ -702,6 +728,9 @@ export function transcriptBlocksToDaemonMessages(
           needsNewContentMessage = true;
           break;
         }
+        // An @-mention renders as an ordinary user message; one an agent
+        // posted into the session carries that agent as its author.
+        const agentMessage = agentMessageOfBlock(textBlock, meta);
         const msg: DaemonUserMessage = {
           id: block.id,
           role: 'user',
@@ -710,6 +739,17 @@ export function transcriptBlocksToDaemonMessages(
           sourceBlockIds: [block.id],
           ...(source ? { source } : {}),
           ...(inputAnnotations ? { inputAnnotations } : {}),
+          ...(agentMessage ? { agentMessage } : {}),
+          ...(agentMessage?.author
+            ? {
+                author: {
+                  name: agentMessage.author.name,
+                  ...(agentMessage.author.color
+                    ? { color: agentMessage.author.color }
+                    : {}),
+                },
+              }
+            : {}),
         };
         // Attach images if present
         if (images && images.length > 0) {
@@ -795,6 +835,39 @@ export function transcriptBlocksToDaemonMessages(
             data: notice.compressionPayload,
             timestamp: blockTime,
           });
+          break;
+        }
+        const agentMessage = textBlock.parentToolCallId
+          ? undefined
+          : agentMessageOfBlock(textBlock, meta);
+        if (agentMessage?.kind === 'agent_message') {
+          // A workspace agent's reply is always its own message: it is never
+          // folded into the main assistant's text, nor is the next assistant
+          // text folded into it. It shows even without text, since a failed
+          // or cancelled run still has a status to report.
+          messages.push({
+            id: block.id,
+            role: 'assistant',
+            content: textBlock.text,
+            isStreaming: textBlock.streaming,
+            timestamp: blockTime,
+            sourceBlockIds: [block.id],
+            agentMessage,
+            ...(agentMessage.author
+              ? {
+                  author: {
+                    name: agentMessage.author.name,
+                    ...(agentMessage.author.color
+                      ? { color: agentMessage.author.color }
+                      : {}),
+                  },
+                }
+              : {}),
+            ...(textBlock.usage ? { usage: textBlock.usage } : {}),
+          });
+          currentAssistantIdx = null;
+          currentThinkingIdx = null;
+          needsNewContentMessage = true;
           break;
         }
         if (!textBlock.text && !textBlock.usage) break;
@@ -1585,7 +1658,7 @@ function getString(
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
-function daemonToolBlockToToolCall(
+export function daemonToolBlockToToolCall(
   block: DaemonToolTranscriptBlock,
   safeToolProjection: boolean,
 ): DaemonMessageToolCall {
@@ -1615,11 +1688,13 @@ function daemonToolBlockToToolCall(
     block.status === 'canceled';
   const forceBackgroundPending =
     isBackgroundAgent && (!safeToolProjection || !isComplete);
+  const toolName =
+    resolveToolCallName(block.toolName, block.rawInput) || 'unknown';
 
   return {
     callId: block.toolCallId,
-    toolName: block.toolName || 'unknown',
-    title: block.title,
+    toolName,
+    title: block.title === block.toolName ? toolName : block.title,
     status:
       (forceBackgroundPending ? 'pending' : statusMap[block.status]) ||
       (block.status as DaemonMessageToolCallStatus) ||
@@ -1646,7 +1721,11 @@ function getToolArgs(
   safeToolProjection: boolean,
 ): Record<string, unknown> | undefined {
   if (!safeToolProjection) {
-    return block.rawInput as Record<string, unknown> | undefined;
+    const rawInput = getRecord(block.rawInput);
+    return block.toolName === 'tool_call' &&
+      resolveToolCallName(block.toolName, rawInput) !== block.toolName
+      ? getRecord(rawInput?.['arguments'])
+      : rawInput;
   }
   return daemonToolPreviewToArgs(block.preview);
 }
@@ -1789,24 +1868,16 @@ function getToolRawOutput(
 }
 
 function getRuntimeToolRawOutput(block: DaemonToolTranscriptBlock): unknown {
-  // Active shell details can be an input preview, not command output.
-  if (
-    /^(shell|bash|run_shell_command|execute_command)$/i.test(
-      block.toolName ?? '',
-    ) &&
-    ['pending', 'in_progress', 'running'].includes(block.status) &&
-    block.rawInput !== undefined &&
-    block.rawOutput === undefined
-  ) {
-    return undefined;
-  }
-
   if (isAskUserQuestionBlock(block) && block.status === 'failed') {
     return getToolContentText(block) ?? block.details ?? block.rawOutput;
   }
 
+  // `details` is the daemon's redacted JSON dump of the tool *input* whenever
+  // rawInput is present (see the SDK normalizer), so it is never a result:
+  // falling back to it renders the call's own arguments — `{}` for empty
+  // args — as the completed tool's output.
   if (!isCancelledStatus(block.status) || !block.details) {
-    return block.rawOutput ?? block.details;
+    return block.rawOutput;
   }
 
   if (

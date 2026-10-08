@@ -124,11 +124,21 @@ test('shows channel sessions in the sidebar channel catalog', async ({
   await expect(page.getByText('Web Shell task', { exact: true })).toBeVisible();
   await expect(page.getByText('DingTalk conversation')).toHaveCount(0);
   await expect(page.getByText('Legacy channel conversation')).toHaveCount(0);
-  await page.getByRole('tab', { name: 'Channels' }).click();
+  await page.getByRole('button', { name: 'Channels', exact: true }).click();
   await expect(
     page.getByText('DingTalk conversation', { exact: true }),
   ).toBeVisible();
   await expect(page.getByText('Web Shell task')).toHaveCount(0);
+  await expect(page.getByTestId('inline-panel')).toBeVisible();
+  const sidebar = page.locator('[data-web-shell-sidebar-section="channels"]');
+  await expect(sidebar.getByTestId('manage-workspaces')).toHaveCount(0);
+  await expect(
+    sidebar.getByRole('button', { name: 'Add workspace', exact: true }),
+  ).toHaveCount(0);
+  await expect(sidebar.locator('[aria-label="Workspace actions"]')).toHaveCount(
+    0,
+  );
+
   const dingTalkGroup = page.getByRole('region', { name: 'DingTalk' });
   await expect(dingTalkGroup).toContainText('DingTalk conversation');
   await expect(dingTalkGroup).toContainText('DingTalk ops conversation');
@@ -161,6 +171,43 @@ test('shows channel sessions in the sidebar channel catalog', async ({
     page.getByText('New DingTalk conversation', { exact: true }),
   ).toBeVisible({ timeout: 5_000 });
   await expect(dingTalkGroup).toContainText('New DingTalk conversation');
+
+  const column = page.locator('[data-web-shell-sidebar-section="channels"]');
+  const channelNav = page
+    .locator('[data-web-shell-navigation-rail]')
+    .getByRole('button', { name: 'Channels', exact: true });
+  await expect(column).toBeVisible();
+  await expect(column).toHaveCSS('width', '300px');
+  await expect(page.getByRole('tab', { name: 'Channels' })).toHaveCount(0);
+  await expect(column.getByRole('button', { name: 'Settings' })).toHaveCount(0);
+  await expect(
+    page.getByRole('heading', { name: 'Settings', exact: true }),
+  ).toBeVisible();
+  await channelNav.click();
+  await expect(page.getByTestId('inline-panel')).toBeVisible();
+  await expect(column).toBeVisible();
+  await expect(channelNav).toHaveAttribute('aria-current', 'page');
+  await column.getByText('DingTalk conversation', { exact: true }).click();
+  const channelConnection =
+    await daemon.sse.waitForConnection('dingtalk-session');
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: channelConnection.sessionId }),
+  );
+  await expect(page.getByTestId('inline-panel')).toHaveCount(0);
+  await expect(channelNav).toHaveAttribute('aria-current', 'page');
+  await expect(column).toBeVisible();
+  await page.keyboard.press('Control+b');
+  await expect(column).toBeHidden();
+  await channelNav.click();
+  await expect(column).toBeVisible();
+  await expect(page.getByTestId('inline-panel')).toBeVisible();
+  await page.getByRole('button', { name: 'Home', exact: true }).click();
+  await expect(page.getByText('Web Shell task', { exact: true })).toBeVisible();
+  await expect(page.getByTestId('manage-workspaces')).toBeAttached();
+  await expect(page.locator('[aria-label="Workspace actions"]')).toBeAttached();
+  await expect(
+    page.getByText('DingTalk conversation', { exact: true }),
+  ).toHaveCount(0);
 });
 
 test('creates and deletes a typed Channel configuration', async ({
@@ -216,12 +263,13 @@ test('creates and deletes a typed Channel configuration', async ({
             envResolvable: true,
           },
           {
-            key: 'senderPolicy',
-            label: 'Sender Policy',
+            key: 'privatePolicy',
+            label: 'Private Policy',
             kind: 'enum',
             required: true,
             default: 'pairing',
             options: [
+              { value: 'disabled', label: 'Disabled' },
               { value: 'pairing', label: 'Pairing' },
               { value: 'allowlist', label: 'Allowlist' },
               { value: 'open', label: 'Open' },
@@ -308,7 +356,7 @@ test('creates and deletes a typed Channel configuration', async ({
   );
   await expect(page.getByText('Loading...')).toHaveCount(0);
 
-  await page.getByRole('button', { name: 'Channels' }).click();
+  await page.getByRole('button', { name: 'Channels', exact: true }).click();
   await page.getByRole('button', { name: 'Configure DingTalk' }).click();
   await expect(
     page.getByRole('heading', { name: 'Configure DingTalk' }),
@@ -326,7 +374,7 @@ test('creates and deletes a typed Channel configuration', async ({
   await expect(page.getByLabel('Direct message policy')).toContainText(
     'Pairing',
   );
-  await expect(page.getByLabel('Allowed user IDs')).toHaveCount(0);
+  await expect(page.getByLabel('Allowed user IDs')).toBeVisible();
   await expect(
     page.getByRole('heading', { name: 'Conversation management' }),
   ).toBeVisible();
@@ -363,7 +411,7 @@ test('creates and deletes a typed Channel configuration', async ({
           config: {
             type: 'dingtalk',
             clientId: 'ding-client-id',
-            senderPolicy: 'pairing',
+            privatePolicy: 'pairing',
             groupPolicy: 'disabled',
             sessionScope: 'chat_thread',
           },
@@ -483,7 +531,7 @@ test('creates and deletes a typed Channel configuration', async ({
         config: {
           type: 'dingtalk',
           clientId: 'ding-client-id',
-          senderPolicy: 'allowlist',
+          privatePolicy: 'allowlist',
           allowedUsers: ['staff-a', 'staff-b'],
           groupPolicy: 'allowlist',
           sessionScope: 'chat_thread',
@@ -555,8 +603,8 @@ test('shows Qwen Live sessions in Tasks and excludes them from Channels @smoke',
 
   await page.goto('/');
   await expect(
-    page.getByRole('tab', { name: 'Tasks', exact: true }),
-  ).toHaveAttribute('aria-selected', 'true');
+    page.getByRole('button', { name: 'Home', exact: true }),
+  ).toHaveAttribute('aria-current', 'page');
   await expect(
     page.getByText('Qwen Live task fixture', { exact: true }),
   ).toBeVisible();
@@ -597,7 +645,7 @@ test('shows Qwen Live sessions in Tasks and excludes them from Channels @smoke',
   ).toBeVisible();
   await page.keyboard.press('Escape');
 
-  await page.getByRole('tab', { name: 'Channels', exact: true }).click();
+  await page.getByRole('button', { name: 'Channels', exact: true }).click();
   await expect(
     page.getByText('Channel task fixture', { exact: true }),
   ).toBeVisible();
@@ -605,7 +653,7 @@ test('shows Qwen Live sessions in Tasks and excludes them from Channels @smoke',
     page.getByText('Qwen Live task fixture', { exact: true }),
   ).toHaveCount(0);
 
-  await page.getByRole('tab', { name: 'Tasks', exact: true }).click();
+  await page.getByRole('button', { name: 'Home', exact: true }).click();
   await expect(
     page.getByText('Qwen Live task fixture', { exact: true }),
   ).toBeVisible();

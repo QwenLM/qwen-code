@@ -25,6 +25,7 @@ import {
   pickE2eRenderer,
   resolveE2eCliCommand,
 } from './renderer-matrix.js';
+import { E2E_MEMORY_SETTINGS_DEFAULTS } from './e2e-memory-defaults.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -242,15 +243,25 @@ export function capturedToolCallPathMatches(
 
 type StreamJsonFrame = {
   type?: unknown;
+  parent_tool_use_id?: unknown;
   message?: {
     content?: unknown;
   };
   result?: unknown;
 };
 
+function streamJsonToolCallKey(frame: StreamJsonFrame, callId: string): string {
+  const parentToolUseId =
+    typeof frame.parent_tool_use_id === 'string'
+      ? frame.parent_tool_use_id
+      : '<root>';
+  return `${parentToolUseId}\0${callId}`;
+}
+
 export function parseStreamJsonToolCalls(stdout: string): ToolCaptureResult {
   const toolCalls: CapturedToolCall[] = [];
   const callsById = new Map<string, CapturedToolCall>();
+  const settledCallIds = new Set<string>();
   let result = '';
 
   for (const [index, rawLine] of stdout.split(/\r?\n/).entries()) {
@@ -285,13 +296,21 @@ export function parseStreamJsonToolCalls(stdout: string): ToolCaptureResult {
           continue;
         }
 
+        const callKey = streamJsonToolCallKey(frame, block.id);
+        if (callsById.has(callKey)) {
+          throw new Error(
+            `Duplicate stream-json tool_use id "${block.id}" on line ${
+              index + 1
+            }`,
+          );
+        }
         const captured: CapturedToolCall = {
           callId: block.id,
           name: block.name,
           args: 'input' in block ? block.input : undefined,
         };
         toolCalls.push(captured);
-        callsById.set(captured.callId, captured);
+        callsById.set(callKey, captured);
       }
     }
 
@@ -308,10 +327,23 @@ export function parseStreamJsonToolCalls(stdout: string): ToolCaptureResult {
           continue;
         }
 
-        const captured = callsById.get(block.tool_use_id);
+        const callKey = streamJsonToolCallKey(frame, block.tool_use_id);
+        const captured = callsById.get(callKey);
         if (!captured) {
-          continue;
+          throw new Error(
+            `Unknown stream-json tool_result id "${block.tool_use_id}" on line ${
+              index + 1
+            }`,
+          );
         }
+        if (settledCallIds.has(callKey)) {
+          throw new Error(
+            `Duplicate stream-json tool_result id "${
+              block.tool_use_id
+            }" on line ${index + 1}`,
+          );
+        }
+        settledCallIds.add(callKey);
         if ('is_error' in block && typeof block.is_error === 'boolean') {
           captured.success = !block.is_error;
         }
@@ -377,6 +409,13 @@ export class TestRig {
     // The container mounts the test directory at the same path as the host
     const telemetryPath = join(this.testDir, 'telemetry.log'); // Always use test directory for telemetry
 
+    const optionsSettings = options.settings ?? {};
+    const memorySettings =
+      typeof optionsSettings['memory'] === 'object' &&
+      optionsSettings['memory'] !== null
+        ? (optionsSettings['memory'] as Record<string, unknown>)
+        : {};
+
     const settings = {
       telemetry: {
         enabled: true,
@@ -386,6 +425,8 @@ export class TestRig {
       },
       sandbox: env.QWEN_SANDBOX !== 'false' ? env.QWEN_SANDBOX : false,
       ...options.settings, // Allow tests to override/add settings
+      // Per-key merge: a suite opting back into one flag keeps the other off.
+      memory: { ...E2E_MEMORY_SETTINGS_DEFAULTS, ...memorySettings },
     };
     writeFileSync(
       join(qwenDir, 'settings.json'),
@@ -1187,6 +1228,7 @@ export async function runForcedToolCallScenario(options: {
   vi.stubEnv('QWEN_MODEL', 'fake-model');
   vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
   vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
+  vi.stubEnv('QWEN_CODE_MODELS_DEV_REFRESH', 'off');
   vi.stubEnv('NO_PROXY', noProxy);
   vi.stubEnv('no_proxy', noProxy);
 

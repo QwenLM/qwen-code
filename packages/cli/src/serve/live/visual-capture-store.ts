@@ -9,16 +9,10 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-/**
- * Where a browser Host's capture lands before `capture_screen_context` reads
- * it. A native Host writes its own file and hands over the path; a browser
- * cannot touch this machine, so the daemon persists the bytes it has already
- * validated and keeps ownership of the path. The directory matches the one the
- * native Host uses so the tool's private-directory check covers both.
- */
+/** Long enough for the tool to read the capture, short enough to stay tidy. */
 const CAPTURE_FILE_TTL_MS = 60_000;
 
-/** Long enough for a stalled read to finish, short enough to stay tidy. */
+/** A capture older than this belonged to a run that is no longer around. */
 const STALE_CAPTURE_AGE_MS = 5 * 60_000;
 
 /**
@@ -43,6 +37,13 @@ export interface LiveVisualCaptureSink {
   dispose(): void;
 }
 
+/**
+ * Where a browser Host's capture lands before `capture_screen_context` reads
+ * it. A native Host writes its own file and hands over the path; a browser
+ * cannot touch this machine, so the daemon persists the bytes it has already
+ * validated and keeps ownership of the path. The default directory is the one
+ * the native Host uses, so the tool's private-directory check covers both.
+ */
 export class LiveVisualCaptureStore implements LiveVisualCaptureSink {
   private readonly cleanupTimers = new Map<NodeJS.Timeout, string>();
   private disposed = false;
@@ -108,7 +109,12 @@ export class LiveVisualCaptureStore implements LiveVisualCaptureSink {
     image: Buffer,
   ): Promise<void> {
     try {
-      // `wx` fails rather than following a planted symlink or reusing a file.
+      // `wx` and the check below cannot fail on a POSIX tmpfs, because the name
+      // is a fresh UUID chosen after the directory was verified and `writeFile`
+      // already applied the mode. They are kept for the filesystems where that
+      // is not true — a mount that ignores the requested mode, or a path that
+      // something else got to first — where the cost of being wrong is a
+      // screenshot readable by another user.
       await writeFile(path, image, { flag: 'wx', mode: 0o600 });
       const stat = await lstat(path);
       if (

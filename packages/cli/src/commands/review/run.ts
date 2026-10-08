@@ -81,7 +81,10 @@ export interface RunReviewResult {
   downgraded: boolean;
   downgradedFrom: string | null;
   remediation: string[];
-  /** The FIXes compose-review withheld because the wall would refuse them. */
+  /**
+   * The repairs compose-review named and withheld: a FIX the wall would
+   * refuse, or a selection-drift note, whose repair is not a mid-round one.
+   */
   waivedFixes: string[];
   composedPath: string | null;
   /**

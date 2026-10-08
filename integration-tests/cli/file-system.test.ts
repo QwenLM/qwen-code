@@ -5,6 +5,7 @@
  */
 
 import { afterEach, describe, it, expect, vi } from 'vitest';
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   capturedToolCallPathMatches,
@@ -220,11 +221,16 @@ describe('file-system', () => {
         call.name === 'read_file' &&
         capturedToolCallPathMatches(call, 'file_path', fileName),
     );
-    const editAttempt = capture.toolCalls.find(
-      (call) => call.name === 'edit_file',
+    const failedTargetAttempt = capture.toolCalls.find(
+      (call) =>
+        ['read_file', 'replace', 'write_file'].includes(call.name) &&
+        capturedToolCallPathMatches(call, 'file_path', fileName) &&
+        call.success === false,
     );
-    const successfulReplace = capture.toolCalls.find(
-      (call) => call.name === 'replace' && call.success,
+    const successfulWrite = capture.toolCalls.find(
+      (call) =>
+        (call.name === 'replace' || call.name === 'write_file') &&
+        call.success === true,
     );
 
     // The model can either investigate (and fail) or do nothing.
@@ -242,26 +248,27 @@ describe('file-system', () => {
       ).toBe(false);
     }
 
-    // CRITICAL: Verify that no matter what the model did, it never successfully
-    // wrote or replaced anything.
-    if (editAttempt) {
+    if (!failedTargetAttempt) {
       console.error(
-        'A edit_file attempt was made when no file should be written.',
+        'Expected a failed tool attempt against the non-existent file.',
       );
       printDebugInfo(rig, result);
     }
     expect(
-      editAttempt,
-      'edit_file should not have been called',
-    ).toBeUndefined();
+      failedTargetAttempt,
+      'Expected a failed read, replace, or write attempt against the target',
+    ).toBeDefined();
 
-    if (successfulReplace) {
-      console.error('A successful replace occurred when it should not have.');
+    // CRITICAL: Verify that no matter what the model did, it never successfully
+    // wrote or replaced anything.
+    if (successfulWrite) {
+      console.error('A successful write occurred when it should not have.');
       printDebugInfo(rig, result);
     }
     expect(
-      successfulReplace,
-      'A successful replace should not have occurred',
+      successfulWrite,
+      'A successful write or replace should not have occurred',
     ).toBeUndefined();
+    expect(existsSync(join(rig.testDir!, fileName))).toBe(false);
   });
 });

@@ -5,8 +5,9 @@
  */
 
 import { ToolNames } from '../../tools/tool-names.js';
-import { matchesMcpPattern } from '../../permissions/rule-parser.js';
+import { matchesToolPattern } from '../../permissions/rule-parser.js';
 import type { ToolResult } from '../../tools/tools.js';
+import type { ToolConfig } from './agent-types.js';
 import { ApprovalMode } from '../../config/approval-mode.js';
 import type { Config } from '../../config/config.js';
 import { getTeammateContext, isTeammate } from '../team/identity.js';
@@ -76,7 +77,89 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // fan-out: a subagent spawned by Workflow that calls Workflow would create
   // O(k^n) subagents.
   ToolNames.WORKFLOW,
+  ToolNames.THREAD_POST,
+  ToolNames.THREAD_WAIT,
+  ToolNames.THREAD_BLOCK,
+  ToolNames.THREAD_REVIEW,
+  ToolNames.THREAD_CREATE,
+  ToolNames.THREAD_READ,
+  // Recall state and shared memory writes belong to the parent session.
+  ToolNames.SEARCH_MEMORY,
+  ToolNames.MANAGE_MEMORY,
 ]);
+
+/**
+ * Whether an agent running with `toolConfig` is declared the Skill tool.
+ *
+ * Mirrors the *Direct-mode* declaration filter `AgentCore.prepareTools()`
+ * applies to the Skill tool, so it answers from the `ToolConfig` alone and
+ * does not re-run it. A filter added there propagates here only by hand.
+ *
+ * Shared by `AgentCore.willHaveSkillTool()` (whether the agent is shown the
+ * `<available_skills>` listing) and `SubagentManager.createAgentHeadless()`
+ * (whether the agent's Config holds a `SkillManager`, which decides whether a
+ * bundled reference reaches it as a pointer or inline). One predicate, so the
+ * listing and the pointer cannot disagree about whether a skill can actually
+ * be loaded — the disagreement #12424 reports.
+ *
+ * Tool mode is an input; registry state deliberately is not. A
+ * `permissions.deny` or `excludeTools` entry is a registry property, and
+ * `resolveBundledReferenceRoute` answers the route from it. The per-agent
+ * policy is the one input that resolver cannot see (#12424).
+ *
+ * Of the two `ToolMode.CodeModeOnly` arms, this predicate covers the `exec`
+ * gateway: `prepareTools()` additionally admits every `code-mode-callable`
+ * registry tool when the configured names include `exec`
+ * (`inheritsCodeModeBindings`, `agent-core.ts`), and `getToolExposure(SKILL)`
+ * is `code-mode-callable` because SKILL is in neither `HIDDEN_TOOLS` nor
+ * `DIRECT_ONLY_TOOLS`. So an agent whose finite list names `exec` but not
+ * `skill` reaches the Skill tool, and callers must pass the mode — with it
+ * omitted this answers `false` for that shape, which would withhold the manager
+ * and, through the `config.ts` registration guard, the Skill tool itself.
+ *
+ * The `exec` arm also holds when a `tools.eager` allowlist demotes `skill`:
+ * `prepareTools()` keeps eager-demoted tools in the code-mode allowlist
+ * (#12898), where they stay callable and discoverable through `tool_search`,
+ * so the pointer this answer leads to can be followed (#12809).
+ *
+ * Matching is exact, as `prepareTools()`'s is: `SubagentManager` resolves
+ * configured names to canonical tool names before they reach a `ToolConfig`.
+ *
+ * Where this cannot tell, it answers true. A wrong `true` costs a pointer the
+ * agent cannot follow at the `SubagentManager` call site, and at
+ * `AgentCore.willHaveSkillTool()` additionally an `<available_skills>` block in
+ * the cached prompt prefix listing skills the agent cannot load; a wrong `false`
+ * takes skills away from an agent that could load them.
+ */
+export function toolConfigAllowsSkill(
+  toolConfig: ToolConfig | undefined,
+  codeModeOnly = false,
+): boolean {
+  if (EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL)) {
+    return false;
+  }
+  // No per-agent config inherits the whole registry.
+  if (!toolConfig) {
+    return true;
+  }
+  if (matchesAgentToolBlocklist(toolConfig.disallowedTools, ToolNames.SKILL)) {
+    return false;
+  }
+  const names = toolConfig.tools.filter(
+    (tool): tool is string => typeof tool === 'string',
+  );
+  // Only a wildcard inherits the registry, exactly as `prepareTools()` does.
+  // Neither an explicit empty list (the documented deny-all contract) nor a
+  // list holding only inline declarations inherits: both take the explicit
+  // branch there, which declares no registry tool.
+  const inheritsRegistry = names.includes('*');
+  // Under CodeModeOnly, naming `exec` inherits every code-mode-callable
+  // binding (`prepareTools()`), and `skill` is one of them.
+  const reachesThroughExec = codeModeOnly && names.includes(ToolNames.EXEC);
+  return (
+    inheritsRegistry || names.includes(ToolNames.SKILL) || reachesThroughExec
+  );
+}
 
 /**
  * Tools excluded from teammates. Teammates need send_message and the
@@ -107,6 +190,15 @@ export const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   // for nested agents — without WORKFLOW here, a teammate-launched
   // workflow re-arms the O(k^n) fan-out the subagent set prevents.
   ToolNames.WORKFLOW,
+  ToolNames.THREAD_POST,
+  ToolNames.THREAD_WAIT,
+  ToolNames.THREAD_BLOCK,
+  ToolNames.THREAD_REVIEW,
+  ToolNames.THREAD_CREATE,
+  ToolNames.THREAD_READ,
+  // Teammates also share the leader's memory state.
+  ToolNames.SEARCH_MEMORY,
+  ToolNames.MANAGE_MEMORY,
 ]);
 
 /**
@@ -160,22 +252,26 @@ export function isSubagentLikeExecutionContext(): boolean {
 /**
  * Whether `toolName` matches a per-agent `disallowedTools` blocklist, with
  * the exact match semantics AgentCore.prepareTools() applies at declaration
- * level: MCP server-level patterns via {@link matchesMcpPattern} for `mcp__`
- * tools, exact match otherwise. Shared so a fork's inherited execution
+ * level: delegates to {@link matchesToolPattern} — exact match for non-MCP
+ * names, MCP patterns via `matchesMcpPattern` with the caller-resolved alias
+ * channel. Shared so a fork's inherited execution
  * allowlist (tools/agent/agent.ts) cannot drift from the parent's own
  * declaration/invocation enforcement.
+ *
+ * `toolAliases` is the tool's own advertised `permissionAliases`; deny lists
+ * are fail-open on a lost match, so callers resolve them from the registry.
  */
 export function matchesAgentToolBlocklist(
   blocklist: readonly string[] | undefined,
   toolName: string,
+  toolAliases?: readonly string[],
+  mcpIdentity?: { serverName: string; serverToolName: string },
 ): boolean {
   if (!blocklist?.length) {
     return false;
   }
   return blocklist.some((pattern) =>
-    toolName.startsWith('mcp__')
-      ? matchesMcpPattern(pattern, toolName)
-      : pattern === toolName,
+    matchesToolPattern(pattern, toolName, toolAliases, mcpIdentity),
   );
 }
 

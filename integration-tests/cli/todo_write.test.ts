@@ -115,16 +115,18 @@ Use the todo_write tool to create this list.`;
     const todoWriteCalls = capture.toolCalls.filter(
       (call) => call.name === 'todo_write',
     );
-    const foundToolCall = todoWriteCalls.length > 0;
+    const successfulTodoWrite = todoWriteCalls.find(
+      (call) => call.success === true,
+    );
 
     // Add debugging information
-    if (!foundToolCall) {
+    if (!successfulTodoWrite) {
       printDebugInfo(rig, result);
     }
 
     expect(
-      foundToolCall,
-      'Expected to find a todo_write tool call',
+      successfulTodoWrite,
+      'Expected to find a successful todo_write tool call',
     ).toBeTruthy();
 
     // Validate model output - will throw if no output
@@ -133,7 +135,7 @@ Use the todo_write tool to create this list.`;
     // Check that the tool was called with the right parameters
     expect(todoWriteCalls.length).toBeGreaterThan(0);
 
-    const todoArgs = todoWriteCalls[0].args as {
+    const todoArgs = successfulTodoWrite!.args as {
       todos?: Array<{ id?: unknown; content?: unknown; status?: unknown }>;
     };
 

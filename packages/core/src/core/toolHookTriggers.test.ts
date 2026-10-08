@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, type Mock } from 'vitest';
 import {
   generateToolUseId,
   firePreToolUseHook,
@@ -41,7 +41,97 @@ const createMockMessageBus = () =>
     request: vi.fn(),
   }) as unknown as MessageBus;
 
+/** A MessageBus whose `request` resolves with `response`. */
+function busResolving(response: unknown): MessageBus {
+  const bus = createMockMessageBus();
+  (bus.request as Mock).mockResolvedValue(response);
+  return bus;
+}
+
+/** A MessageBus whose hook run succeeds with `output`. */
+const busWithOutput = (output: unknown) =>
+  busResolving({ success: true, output });
+
+/** A MessageBus whose `request` rejects with `Error(message)`. */
+function busRejecting(message: string): MessageBus {
+  const bus = createMockMessageBus();
+  (bus.request as Mock).mockRejectedValue(new Error(message));
+  return bus;
+}
+
+/** A runner failure carrying an empty error message. */
+const EMPTY_ERROR = { success: false, error: { message: '' } };
+
 describe('toolHookTriggers', () => {
+  it('transports the owner on all six helpers without adding it to stdin', async () => {
+    const bus = createMockMessageBus();
+    const owner = { runtimeId: 'runtime', sessionId: 'session', agentId: 'A' };
+    vi.mocked(bus.request).mockResolvedValue({
+      type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+      correlationId: 'hook-response',
+      success: true,
+      output: {},
+    });
+    await firePreToolUseHook(
+      bus,
+      'read',
+      {},
+      'tool',
+      'default',
+      undefined,
+      'call',
+      owner,
+    );
+    await firePostToolUseHook(
+      bus,
+      'read',
+      {},
+      {},
+      'tool',
+      'default',
+      undefined,
+      'call',
+      undefined,
+      owner,
+    );
+    await firePostToolUseFailureHook(
+      bus,
+      'tool',
+      'read',
+      {},
+      'error',
+      false,
+      'default',
+      undefined,
+      'call',
+      undefined,
+      owner,
+    );
+    await firePostToolBatchHook(bus, [], 'default', undefined, owner);
+    await fireNotificationHook(
+      bus,
+      'message',
+      NotificationType.PermissionPrompt,
+      undefined,
+      undefined,
+      owner,
+    );
+    await firePermissionRequestHook(
+      bus,
+      'read',
+      {},
+      'default',
+      undefined,
+      undefined,
+      owner,
+    );
+    expect(bus.request).toHaveBeenCalledTimes(6);
+    for (const [request] of vi.mocked(bus.request).mock.calls) {
+      expect(request).toHaveProperty('owner', owner);
+      expect(request).not.toHaveProperty('input.owner');
+    }
+  });
+
   describe('generateToolUseId', () => {
     it('should generate unique IDs with the correct prefix', () => {
       const id1 = generateToolUseId();
@@ -63,58 +153,30 @@ describe('toolHookTriggers', () => {
   });
 
   describe('firePreToolUseHook', () => {
-    it('should return shouldProceed: true when no messageBus is provided', async () => {
-      const result = await firePreToolUseHook(
-        undefined,
-        'test-tool',
-        {},
-        'test-id',
-        'auto',
-      );
+    const pre = (bus?: MessageBus) =>
+      firePreToolUseHook(bus, 'test-tool', {}, 'test-id', 'auto');
 
-      expect(result).toEqual({ shouldProceed: true });
+    it('should return shouldProceed: true when no messageBus is provided', async () => {
+      expect(await pre()).toEqual({ shouldProceed: true });
     });
 
     it('should return shouldProceed: true with sentinel hookError when hook execution fails without an error message', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: false,
-      });
+      const result = await pre(busResolving({ success: false }));
 
-      const result = await firePreToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'test-id',
-        'auto',
-      );
-
-      // #4321 review-7 SF-H1: runner contract violation (success:false
-      // with no error.message) used to silently return allow with no
-      // telemetry. Now synthesizes a sentinel hookError so the span
-      // records `success: false` + the description of what went wrong.
+      // #4321 review-7 SF-H1: runner contract violation (success:false with no
+      // error.message) used to silently return allow with no telemetry. Now a
+      // sentinel hookError lets the span record `success: false` + what went
+      // wrong.
       expect(result.shouldProceed).toBe(true);
       expect(result.hookError).toMatch(/success: false/);
     });
 
     it('synthesizes sentinel hookError when runner returns empty-string error message (#4321)', async () => {
-      // #4321 review-9: pin the `||` (not `??`) semantics. A future
-      // regression back to `??` would preserve `hookError: ""` here
-      // which downstream `r.hookError ? ...` truthiness then silently
-      // drops — same allow-without-telemetry pathology SF-H1 closed.
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: false,
-        error: { message: '' },
-      });
-
-      const result = await firePreToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'test-id',
-        'auto',
-      );
+      // #4321 review-9: pin the `||` (not `??`) semantics. A regression back
+      // to `??` would keep `hookError: ""`, which downstream
+      // `r.hookError ? ...` truthiness then silently drops: the same
+      // allow-without-telemetry pathology SF-H1 closed.
+      const result = await pre(busResolving(EMPTY_ERROR));
 
       expect(result.shouldProceed).toBe(true);
       expect(result.hookError).toMatch(/success: false/);
@@ -124,42 +186,17 @@ describe('toolHookTriggers', () => {
     });
 
     it('should return shouldProceed: true when hook output is empty', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {},
-      });
-
-      const result = await firePreToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'test-id',
-        'auto',
-      );
-
-      expect(result).toEqual({ shouldProceed: true });
+      expect(await pre(busWithOutput({}))).toEqual({ shouldProceed: true });
     });
 
     it('should return shouldProceed: false with denied type when tool is denied', async () => {
-      const mockOutput = {
-        hookSpecificOutput: {
-          permissionDecision: 'deny',
-          permissionDecisionReason: 'Tool not allowed',
-        },
-      };
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: mockOutput,
-      });
-
-      const result = await firePreToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'test-id',
-        'auto',
+      const result = await pre(
+        busWithOutput({
+          hookSpecificOutput: {
+            permissionDecision: 'deny',
+            permissionDecisionReason: 'Tool not allowed',
+          },
+        }),
       );
 
       expect(result).toEqual({
@@ -170,24 +207,13 @@ describe('toolHookTriggers', () => {
     });
 
     it('should return shouldProceed: false with ask type when confirmation is required', async () => {
-      const mockOutput = {
-        hookSpecificOutput: {
-          permissionDecision: 'ask',
-          permissionDecisionReason: 'User confirmation required',
-        },
-      };
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: mockOutput,
-      });
-
-      const result = await firePreToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'test-id',
-        'auto',
+      const result = await pre(
+        busWithOutput({
+          hookSpecificOutput: {
+            permissionDecision: 'ask',
+            permissionDecisionReason: 'User confirmation required',
+          },
+        }),
       );
 
       expect(result).toEqual({
@@ -198,22 +224,11 @@ describe('toolHookTriggers', () => {
     });
 
     it('should return shouldProceed: false with stop type when execution should stop', async () => {
-      const mockOutput = {
-        continue: false,
-        reason: 'Execution stopped by policy',
-      };
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: mockOutput,
-      });
-
-      const result = await firePreToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'test-id',
-        'auto',
+      const result = await pre(
+        busWithOutput({
+          continue: false,
+          reason: 'Execution stopped by policy',
+        }),
       );
 
       expect(result).toEqual({
@@ -224,23 +239,10 @@ describe('toolHookTriggers', () => {
     });
 
     it('should return shouldProceed: true with additional context when available', async () => {
-      const mockOutput = {
-        hookSpecificOutput: {
-          additionalContext: 'Additional context here',
-        },
-      };
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: mockOutput,
-      });
-
-      const result = await firePreToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'test-id',
-        'auto',
+      const result = await pre(
+        busWithOutput({
+          hookSpecificOutput: { additionalContext: 'Additional context here' },
+        }),
       );
 
       expect(result).toEqual({
@@ -249,19 +251,61 @@ describe('toolHookTriggers', () => {
       });
     });
 
-    it('should handle hook execution errors gracefully', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockRejectedValue(
-        new Error('Network error'),
-      );
+    it.each([
+      [
+        'denied',
+        {
+          hookSpecificOutput: {
+            permissionDecision: 'deny',
+            permissionDecisionReason: 'Tool not allowed',
+            additionalContext: 'deny <note>',
+          },
+        },
+      ],
+      [
+        'ask',
+        {
+          hookSpecificOutput: {
+            permissionDecision: 'ask',
+            additionalContext: 'ask <note>',
+          },
+        },
+      ],
+      [
+        'stop',
+        {
+          continue: false,
+          reason: 'halt',
+          hookSpecificOutput: { additionalContext: 'stop <note>' },
+        },
+      ],
+    ] as const)(
+      'keeps sanitized additional context on the %s branch',
+      async (blockType, output) => {
+        const mockMessageBus = createMockMessageBus();
+        (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+          success: true,
+          output,
+        });
 
-      const result = await firePreToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'test-id',
-        'auto',
-      );
+        const result = await firePreToolUseHook(
+          mockMessageBus,
+          'test-tool',
+          {},
+          'test-id',
+          'auto',
+        );
+
+        expect(result.shouldProceed).toBe(false);
+        expect(result.blockType).toBe(blockType);
+        expect(result.additionalContext).toBe(
+          `${blockType === 'denied' ? 'deny' : blockType} &lt;note&gt;`,
+        );
+      },
+    );
+
+    it('should handle hook execution errors gracefully', async () => {
+      const result = await pre(busRejecting('Network error'));
 
       // #4321 review: hookError surfaces the swallowed transport error so
       // observers (telemetry spans, debug logs) can distinguish a failed
@@ -274,33 +318,15 @@ describe('toolHookTriggers', () => {
   });
 
   describe('firePostToolUseHook', () => {
-    it('should return shouldStop: false when no messageBus is provided', async () => {
-      const result = await firePostToolUseHook(
-        undefined,
-        'test-tool',
-        {},
-        {},
-        'test-id',
-        'auto',
-      );
+    const post = (bus?: MessageBus) =>
+      firePostToolUseHook(bus, 'test-tool', {}, {}, 'test-id', 'auto');
 
-      expect(result).toEqual({ shouldStop: false });
+    it('should return shouldStop: false when no messageBus is provided', async () => {
+      expect(await post()).toEqual({ shouldStop: false });
     });
 
     it('should return shouldStop: false with sentinel hookError when hook execution fails without an error message', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: false,
-      });
-
-      const result = await firePostToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        {},
-        'test-id',
-        'auto',
-      );
+      const result = await post(busResolving({ success: false }));
 
       // #4321 review-7 SF-H1 — see firePreToolUseHook counterpart.
       expect(result.shouldStop).toBe(false);
@@ -309,20 +335,7 @@ describe('toolHookTriggers', () => {
 
     it('synthesizes sentinel hookError when runner returns empty-string error message (#4321)', async () => {
       // #4321 review-9 — see firePreToolUseHook counterpart.
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: false,
-        error: { message: '' },
-      });
-
-      const result = await firePostToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        {},
-        'test-id',
-        'auto',
-      );
+      const result = await post(busResolving(EMPTY_ERROR));
 
       expect(result.shouldStop).toBe(false);
       expect(result.hookError).toMatch(/success: false/);
@@ -330,42 +343,15 @@ describe('toolHookTriggers', () => {
     });
 
     it('should return shouldStop: false when hook output is empty', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {},
-      });
-
-      const result = await firePostToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        {},
-        'test-id',
-        'auto',
-      );
-
-      expect(result).toEqual({ shouldStop: false });
+      expect(await post(busWithOutput({}))).toEqual({ shouldStop: false });
     });
 
     it('should return shouldStop: true with stop reason when execution should stop', async () => {
-      const mockOutput = {
-        continue: false,
-        reason: 'Execution stopped by policy',
-      };
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: mockOutput,
-      });
-
-      const result = await firePostToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        {},
-        'test-id',
-        'auto',
+      const result = await post(
+        busWithOutput({
+          continue: false,
+          reason: 'Execution stopped by policy',
+        }),
       );
 
       expect(result).toEqual({
@@ -375,66 +361,34 @@ describe('toolHookTriggers', () => {
     });
 
     it('returns PostToolUse artifacts and context when execution stops', async () => {
-      const mockOutput = {
-        continue: false,
-        reason: 'Blocked after audit',
-        hookSpecificOutput: {
-          additionalContext: 'Audit details',
-          artifacts: [
-            {
-              title: 'Audit report',
-              workspacePath: 'reports/audit.html',
-            },
-          ],
-        },
+      const audit = {
+        title: 'Audit report',
+        workspacePath: 'reports/audit.html',
       };
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: mockOutput,
-      });
-
-      const result = await firePostToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        {},
-        'test-id',
-        'auto',
+      const result = await post(
+        busWithOutput({
+          continue: false,
+          reason: 'Blocked after audit',
+          hookSpecificOutput: {
+            additionalContext: 'Audit details',
+            artifacts: [{ ...audit }],
+          },
+        }),
       );
 
       expect(result).toEqual({
         shouldStop: true,
         stopReason: 'Blocked after audit',
         additionalContext: 'Audit details',
-        artifacts: [
-          {
-            title: 'Audit report',
-            workspacePath: 'reports/audit.html',
-          },
-        ],
+        artifacts: [audit],
       });
     });
 
     it('should return shouldStop: false with additional context when available', async () => {
-      const mockOutput = {
-        hookSpecificOutput: {
-          additionalContext: 'Additional context here',
-        },
-      };
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: mockOutput,
-      });
-
-      const result = await firePostToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        {},
-        'test-id',
-        'auto',
+      const result = await post(
+        busWithOutput({
+          hookSpecificOutput: { additionalContext: 'Additional context here' },
+        }),
       );
 
       expect(result).toEqual({
@@ -444,59 +398,26 @@ describe('toolHookTriggers', () => {
     });
 
     it('returns PostToolUse artifacts', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {
+      const report = {
+        title: 'Tool report',
+        workspacePath: 'reports/tool.html',
+      };
+      const result = await post(
+        busWithOutput({
           hookSpecificOutput: {
             artifacts: [
-              {
-                title: 'Tool report',
-                workspacePath: 'reports/tool.html',
-              },
-              {
-                title: 'Malformed report',
-                workspacePath: 123,
-              },
+              { ...report },
+              { title: 'Malformed report', workspacePath: 123 },
             ],
           },
-        },
-      });
-
-      const result = await firePostToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        {},
-        'test-id',
-        'auto',
+        }),
       );
 
-      expect(result).toEqual({
-        shouldStop: false,
-        artifacts: [
-          {
-            title: 'Tool report',
-            workspacePath: 'reports/tool.html',
-          },
-        ],
-      });
+      expect(result).toEqual({ shouldStop: false, artifacts: [report] });
     });
 
     it('should handle hook execution errors gracefully', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockRejectedValue(
-        new Error('Network error'),
-      );
-
-      const result = await firePostToolUseHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        {},
-        'test-id',
-        'auto',
-      );
+      const result = await post(busRejecting('Network error'));
 
       // #4321 review: hookError now surfaced to caller (see PreToolUse parallel test).
       expect(result.shouldStop).toBe(false);
@@ -512,47 +433,27 @@ describe('toolHookTriggers', () => {
     });
 
     it('should send resolved tool calls and return additional context', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {
-          hookSpecificOutput: {
-            hookEventName: 'PostToolBatch',
-            additionalContext: 'batch note',
-          },
+      const bus = busWithOutput({
+        hookSpecificOutput: {
+          hookEventName: 'PostToolBatch',
+          additionalContext: 'batch note',
         },
       });
+      const toolCall = () => ({
+        tool_name: 'read_file',
+        tool_input: { path: 'README.md' },
+        tool_use_id: 'call-1',
+        status: 'success' as const,
+        tool_response: { output: 'contents' },
+      });
 
-      const result = await firePostToolBatchHook(
-        mockMessageBus,
-        [
-          {
-            tool_name: 'read_file',
-            tool_input: { path: 'README.md' },
-            tool_use_id: 'call-1',
-            status: 'success',
-            tool_response: { output: 'contents' },
-          },
-        ],
-        'auto',
-      );
+      const result = await firePostToolBatchHook(bus, [toolCall()], 'auto');
 
-      expect(mockMessageBus.request).toHaveBeenCalledWith(
+      expect(bus.request).toHaveBeenCalledWith(
         {
           type: MessageBusType.HOOK_EXECUTION_REQUEST,
           eventName: 'PostToolBatch',
-          input: {
-            permission_mode: 'auto',
-            tool_calls: [
-              {
-                tool_name: 'read_file',
-                tool_input: { path: 'README.md' },
-                tool_use_id: 'call-1',
-                status: 'success',
-                tool_response: { output: 'contents' },
-              },
-            ],
-          },
+          input: { permission_mode: 'auto', tool_calls: [toolCall()] },
           signal: undefined,
         },
         MessageBusType.HOOK_EXECUTION_RESPONSE,
@@ -566,18 +467,12 @@ describe('toolHookTriggers', () => {
     });
 
     it('should surface stop decisions', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {
-          continue: false,
-          stopReason: 'stop after batch',
-        },
+      const bus = busWithOutput({
+        continue: false,
+        stopReason: 'stop after batch',
       });
 
-      const result = await firePostToolBatchHook(mockMessageBus, []);
-
-      expect(result).toEqual({
+      expect(await firePostToolBatchHook(bus, [])).toEqual({
         shouldStop: true,
         stopReason: 'stop after batch',
         additionalContext: undefined,
@@ -585,52 +480,30 @@ describe('toolHookTriggers', () => {
     });
 
     it('returns PostToolBatch artifacts', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {
-          hookSpecificOutput: {
-            artifacts: [
-              {
-                title: 'Batch report',
-                workspacePath: 'batch.html',
-              },
-              {
-                title: 'Bad report',
-                workspacePath: 123,
-              },
-            ],
-          },
+      const report = { title: 'Batch report', workspacePath: 'batch.html' };
+      const bus = busWithOutput({
+        hookSpecificOutput: {
+          artifacts: [
+            { ...report },
+            { title: 'Bad report', workspacePath: 123 },
+          ],
         },
       });
 
-      const result = await firePostToolBatchHook(mockMessageBus, []);
-
-      expect(result).toEqual({
+      expect(await firePostToolBatchHook(bus, [])).toEqual({
         shouldStop: false,
         additionalContext: undefined,
-        artifacts: [
-          {
-            title: 'Batch report',
-            workspacePath: 'batch.html',
-          },
-        ],
+        artifacts: [report],
       });
     });
 
     it('should stop on deny decisions', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {
-          decision: 'deny',
-          reason: 'blocked after batch',
-        },
+      const bus = busWithOutput({
+        decision: 'deny',
+        reason: 'blocked after batch',
       });
 
-      const result = await firePostToolBatchHook(mockMessageBus, []);
-
-      expect(result).toEqual({
+      expect(await firePostToolBatchHook(bus, [])).toEqual({
         shouldStop: true,
         stopReason: 'blocked after batch',
         additionalContext: undefined,
@@ -638,12 +511,8 @@ describe('toolHookTriggers', () => {
     });
 
     it('should return hookError when hook execution fails without an error message', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: false,
-      });
-
-      const result = await firePostToolBatchHook(mockMessageBus, []);
+      const bus = busResolving({ success: false });
+      const result = await firePostToolBatchHook(bus, []);
 
       expect(result.shouldStop).toBe(false);
       expect(result.hookError).toMatch(/success: false/);
@@ -653,25 +522,17 @@ describe('toolHookTriggers', () => {
     });
 
     it('should return hookError when hook returns success without output', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: undefined,
-      });
-
-      const result = await firePostToolBatchHook(mockMessageBus, []);
+      const result = await firePostToolBatchHook(busWithOutput(undefined), []);
 
       expect(result.shouldStop).toBe(false);
       expect(result.hookError).toMatch(/no output/);
     });
 
     it('should return hookError when messageBus.request throws', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockRejectedValue(
-        new Error('bus timeout'),
+      const result = await firePostToolBatchHook(
+        busRejecting('bus timeout'),
+        [],
       );
-
-      const result = await firePostToolBatchHook(mockMessageBus, []);
 
       expect(result.shouldStop).toBe(false);
       expect(result.hookError).toContain('bus timeout');
@@ -679,31 +540,21 @@ describe('toolHookTriggers', () => {
   });
 
   describe('firePostToolUseFailureHook', () => {
-    it('should return empty object when no messageBus is provided', async () => {
-      const result = await firePostToolUseFailureHook(
-        undefined,
+    const failure = (bus?: MessageBus) =>
+      firePostToolUseFailureHook(
+        bus,
         'test-id',
         'test-tool',
         {},
         'error message',
       );
 
-      expect(result).toEqual({});
+    it('should return empty object when no messageBus is provided', async () => {
+      expect(await failure()).toEqual({});
     });
 
     it('should return sentinel hookError when hook execution fails without an error message', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: false,
-      });
-
-      const result = await firePostToolUseFailureHook(
-        mockMessageBus,
-        'test-id',
-        'test-tool',
-        {},
-        'error message',
-      );
+      const result = await failure(busResolving({ success: false }));
 
       // #4321 review-7 SF-H1 — see firePreToolUseHook counterpart.
       expect(result.hookError).toMatch(/success: false/);
@@ -711,118 +562,46 @@ describe('toolHookTriggers', () => {
 
     it('synthesizes sentinel hookError when runner returns empty-string error message (#4321)', async () => {
       // #4321 review-9 — see firePreToolUseHook counterpart.
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: false,
-        error: { message: '' },
-      });
-
-      const result = await firePostToolUseFailureHook(
-        mockMessageBus,
-        'test-id',
-        'test-tool',
-        {},
-        'error message',
-      );
+      const result = await failure(busResolving(EMPTY_ERROR));
 
       expect(result.hookError).toMatch(/success: false/);
       expect(result.hookError).not.toBe('');
     });
 
     it('should return empty object when hook output is empty', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {},
-      });
-
-      const result = await firePostToolUseFailureHook(
-        mockMessageBus,
-        'test-id',
-        'test-tool',
-        {},
-        'error message',
-      );
-
-      expect(result).toEqual({});
+      expect(await failure(busWithOutput({}))).toEqual({});
     });
 
     it('should return additional context when available', async () => {
-      const mockOutput = {
-        hookSpecificOutput: {
-          additionalContext: 'Additional context about the failure',
-        },
-      };
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: mockOutput,
-      });
-
-      const result = await firePostToolUseFailureHook(
-        mockMessageBus,
-        'test-id',
-        'test-tool',
-        {},
-        'error message',
+      const additionalContext = 'Additional context about the failure';
+      const result = await failure(
+        busWithOutput({ hookSpecificOutput: { additionalContext } }),
       );
 
-      expect(result).toEqual({
-        additionalContext: 'Additional context about the failure',
-      });
+      expect(result).toEqual({ additionalContext });
     });
 
     it('returns PostToolUseFailure artifacts', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {
+      const report = {
+        title: 'Failure report',
+        workspacePath: 'reports/failure.html',
+      };
+      const result = await failure(
+        busWithOutput({
           hookSpecificOutput: {
             artifacts: [
-              {
-                title: 'Failure report',
-                workspacePath: 'reports/failure.html',
-              },
-              {
-                title: 'Malformed failure report',
-                metadata: [],
-              },
+              { ...report },
+              { title: 'Malformed failure report', metadata: [] },
             ],
           },
-        },
-      });
-
-      const result = await firePostToolUseFailureHook(
-        mockMessageBus,
-        'test-id',
-        'test-tool',
-        {},
-        'error message',
+        }),
       );
 
-      expect(result).toEqual({
-        artifacts: [
-          {
-            title: 'Failure report',
-            workspacePath: 'reports/failure.html',
-          },
-        ],
-      });
+      expect(result).toEqual({ artifacts: [report] });
     });
 
     it('should handle hook execution errors gracefully', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockRejectedValue(
-        new Error('Network error'),
-      );
-
-      const result = await firePostToolUseFailureHook(
-        mockMessageBus,
-        'test-id',
-        'test-tool',
-        {},
-        'error message',
-      );
+      const result = await failure(busRejecting('Network error'));
 
       // #4321 review: hookError now surfaced to caller.
       expect(result.hookError).toBeDefined();
@@ -836,26 +615,20 @@ describe('toolHookTriggers', () => {
         { text: 'resource media-1' },
         { fileData: { mimeType: 'image/png', fileUri: 'oss://image' } },
       ];
-      const original = [
+      const response = (output: string) => [
         {
           functionResponse: {
             id: 'call-1',
             name: 'exec',
-            response: { output: 'read completed' },
+            response: { output },
             parts,
           },
         },
       ];
-      expect(appendAdditionalContext(original, 'hook context')).toEqual([
-        {
-          functionResponse: {
-            id: 'call-1',
-            name: 'exec',
-            response: { output: 'read completed\n\nhook context' },
-            parts,
-          },
-        },
-      ]);
+      const original = response('read completed');
+      expect(appendAdditionalContext(original, 'hook context')).toEqual(
+        response('read completed\n\nhook context'),
+      );
       expect(original[0].functionResponse.response.output).toBe(
         'read completed',
       );
@@ -875,9 +648,8 @@ describe('toolHookTriggers', () => {
     });
 
     it('should append context as text part to PartListUnion array', () => {
-      const originalContent = [{ text: 'original' }];
       const result = appendAdditionalContext(
-        originalContent,
+        [{ text: 'original' }],
         'additional context',
       );
 
@@ -888,12 +660,11 @@ describe('toolHookTriggers', () => {
     });
 
     it('wraps single non-array PartListUnion content so the addition still lands', () => {
-      // Regression: `ReadFile` returns `{ inlineData: {...} }` for images
-      // and PDFs (a single Part, not an array). The previous "return
-      // content unchanged" silently dropped any hook-injected reminder
-      // — including the path-conditional skill activation `<system-reminder>`
-      // and the ConditionalRulesRegistry rule injection. Wrap into an array
-      // so the additional context lands.
+      // Regression: `ReadFile` returns a single `{ inlineData: {...} }` Part
+      // (not an array) for images and PDFs. Returning such content unchanged
+      // silently dropped every hook-injected reminder, including the
+      // path-conditional skill activation `<system-reminder>` and the
+      // ConditionalRulesRegistry rule injection. Wrap it into an array.
       const originalContent = {
         inlineData: { data: 'base64', mimeType: 'image/png' },
       };
@@ -906,14 +677,35 @@ describe('toolHookTriggers', () => {
     });
 
     it('should return original array content when no additional context is provided', () => {
-      const originalContent = [{ text: 'original' }];
-      const result = appendAdditionalContext(originalContent, undefined);
+      const result = appendAdditionalContext([{ text: 'original' }], undefined);
 
       expect(result).toEqual([{ text: 'original' }]);
     });
   });
 
   describe('fireNotificationHook', () => {
+    const notify = (bus: MessageBus | undefined, type: NotificationType) =>
+      fireNotificationHook(bus, 'Test notification', type);
+
+    /** Fires on an empty-output bus and checks the request it sent. */
+    async function expectNotificationRequest(
+      message: string,
+      type: NotificationType,
+      notificationType: string,
+      title?: string,
+    ) {
+      const bus = busWithOutput({});
+      await fireNotificationHook(bus, message, type, title);
+      expect(bus.request).toHaveBeenCalledWith(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'Notification',
+          input: { message, notification_type: notificationType, title },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+    }
+
     it('should return empty object when no messageBus is provided', async () => {
       const result = await fireNotificationHook(
         undefined,
@@ -926,30 +718,15 @@ describe('toolHookTriggers', () => {
     });
 
     it('should return empty object when hook execution fails', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: false,
-      });
-
-      const result = await fireNotificationHook(
-        mockMessageBus,
-        'Test notification',
-        NotificationType.PermissionPrompt,
-      );
+      const bus = busResolving({ success: false });
+      const result = await notify(bus, NotificationType.PermissionPrompt);
 
       expect(result).toEqual({});
     });
 
     it('should return empty object when hook output is empty', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {},
-      });
-
-      const result = await fireNotificationHook(
-        mockMessageBus,
-        'Test notification',
+      const result = await notify(
+        busWithOutput({}),
         NotificationType.IdlePrompt,
       );
 
@@ -957,261 +734,123 @@ describe('toolHookTriggers', () => {
     });
 
     it('should return additional context when available', async () => {
-      const mockOutput = {
-        hookSpecificOutput: {
-          additionalContext: 'Additional context from notification hook',
-        },
-      };
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: mockOutput,
-      });
+      const additionalContext = 'Additional context from notification hook';
+      const bus = busWithOutput({ hookSpecificOutput: { additionalContext } });
+      const result = await notify(bus, NotificationType.AuthSuccess);
 
-      const result = await fireNotificationHook(
-        mockMessageBus,
-        'Test notification',
-        NotificationType.AuthSuccess,
-      );
-
-      expect(result).toEqual({
-        additionalContext: 'Additional context from notification hook',
-      });
+      expect(result).toEqual({ additionalContext });
     });
 
     it('should return terminal sequence when available', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: { terminalSequence: '\x07' },
-      });
-
-      const result = await fireNotificationHook(
-        mockMessageBus,
-        'Test notification',
-        NotificationType.PermissionPrompt,
-      );
+      const bus = busWithOutput({ terminalSequence: '\x07' });
+      const result = await notify(bus, NotificationType.PermissionPrompt);
 
       expect(result).toEqual({ terminalSequence: '\x07' });
     });
 
-    it('should send correct parameters to MessageBus for permission_prompt', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {},
-      });
-
-      await fireNotificationHook(
-        mockMessageBus,
-        'Qwen Code needs your permission to use Bash',
+    it.each([
+      [
+        'permission_prompt',
         NotificationType.PermissionPrompt,
+        'Qwen Code needs your permission to use Bash',
         'Permission needed',
-      );
-
-      expect(mockMessageBus.request).toHaveBeenCalledWith(
-        {
-          type: MessageBusType.HOOK_EXECUTION_REQUEST,
-          eventName: 'Notification',
-          input: {
-            message: 'Qwen Code needs your permission to use Bash',
-            notification_type: 'permission_prompt',
-            title: 'Permission needed',
-          },
-        },
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
-      );
-    });
-
-    it('should send correct parameters to MessageBus for idle_prompt', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {},
-      });
-
-      await fireNotificationHook(
-        mockMessageBus,
-        'Qwen Code is waiting for your input',
+      ],
+      [
+        'idle_prompt',
         NotificationType.IdlePrompt,
+        'Qwen Code is waiting for your input',
         'Waiting for input',
-      );
-
-      expect(mockMessageBus.request).toHaveBeenCalledWith(
-        {
-          type: MessageBusType.HOOK_EXECUTION_REQUEST,
-          eventName: 'Notification',
-          input: {
-            message: 'Qwen Code is waiting for your input',
-            notification_type: 'idle_prompt',
-            title: 'Waiting for input',
-          },
-        },
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
-      );
-    });
-
-    it('should send correct parameters to MessageBus for auth_success', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {},
-      });
-
-      await fireNotificationHook(
-        mockMessageBus,
-        'Authentication successful',
+      ],
+      [
+        'auth_success',
         NotificationType.AuthSuccess,
-      );
-
-      expect(mockMessageBus.request).toHaveBeenCalledWith(
-        {
-          type: MessageBusType.HOOK_EXECUTION_REQUEST,
-          eventName: 'Notification',
-          input: {
-            message: 'Authentication successful',
-            notification_type: 'auth_success',
-            title: undefined,
-          },
-        },
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
-      );
-    });
-
-    it('should send correct parameters to MessageBus for elicitation_dialog', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {},
-      });
-
-      await fireNotificationHook(
-        mockMessageBus,
-        'Dialog shown to user',
+        'Authentication successful',
+        undefined,
+      ],
+      [
+        'elicitation_dialog',
         NotificationType.ElicitationDialog,
+        'Dialog shown to user',
         'Dialog',
-      );
-
-      expect(mockMessageBus.request).toHaveBeenCalledWith(
-        {
-          type: MessageBusType.HOOK_EXECUTION_REQUEST,
-          eventName: 'Notification',
-          input: {
-            message: 'Dialog shown to user',
-            notification_type: 'elicitation_dialog',
-            title: 'Dialog',
-          },
-        },
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
-      );
-    });
+      ],
+    ])(
+      'should send correct parameters to MessageBus for %s',
+      (notificationType, type, message, title) =>
+        expectNotificationRequest(message, type, notificationType, title),
+    );
 
     it('should handle hook execution errors gracefully', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockRejectedValue(
-        new Error('Network error'),
-      );
-
-      const result = await fireNotificationHook(
-        mockMessageBus,
-        'Test notification',
-        NotificationType.PermissionPrompt,
-      );
+      const bus = busRejecting('Network error');
+      const result = await notify(bus, NotificationType.PermissionPrompt);
 
       expect(result).toEqual({});
     });
 
     it('should handle notification without title', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {},
-      });
-
-      await fireNotificationHook(
-        mockMessageBus,
+      await expectNotificationRequest(
         'Test notification without title',
         NotificationType.IdlePrompt,
-      );
-
-      expect(mockMessageBus.request).toHaveBeenCalledWith(
-        {
-          type: MessageBusType.HOOK_EXECUTION_REQUEST,
-          eventName: 'Notification',
-          input: {
-            message: 'Test notification without title',
-            notification_type: 'idle_prompt',
-            title: undefined,
-          },
-        },
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
+        'idle_prompt',
       );
     });
   });
 
   describe('firePermissionRequestHook', () => {
-    it('should return hasDecision: false when no messageBus is provided', async () => {
-      const result = await firePermissionRequestHook(
-        undefined,
-        'test-tool',
-        {},
-        'auto',
-      );
+    const permission = (bus?: MessageBus) =>
+      firePermissionRequestHook(bus, 'test-tool', {}, 'auto');
+    const decision = (value: Record<string, unknown>) =>
+      busWithOutput({ hookSpecificOutput: { decision: value } });
 
-      expect(result).toEqual({ hasDecision: false });
+    /** Fires for `ls` with `suggestions` and checks the request it sent. */
+    async function expectPermissionRequest(suggestions?: unknown[]) {
+      const expected = structuredClone(suggestions);
+      const bus = busWithOutput({});
+      await firePermissionRequestHook(
+        bus,
+        'run_shell_command',
+        { command: 'ls' },
+        'auto',
+        suggestions as Parameters<typeof firePermissionRequestHook>[4],
+      );
+      expect(bus.request).toHaveBeenCalledWith(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'PermissionRequest',
+          input: {
+            tool_name: 'run_shell_command',
+            tool_input: { command: 'ls' },
+            permission_mode: 'auto',
+            permission_suggestions: expected,
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+    }
+
+    it('should return hasDecision: false when no messageBus is provided', async () => {
+      expect(await permission()).toEqual({ hasDecision: false });
     });
 
     it('should return hasDecision: false when hook execution fails', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: false,
-      });
-
-      const result = await firePermissionRequestHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'auto',
-      );
+      const result = await permission(busResolving({ success: false }));
 
       expect(result).toEqual({ hasDecision: false });
     });
 
     it('should return hasDecision: false when hook output is empty', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {},
+      expect(await permission(busWithOutput({}))).toEqual({
+        hasDecision: false,
       });
-
-      const result = await firePermissionRequestHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'auto',
-      );
-
-      expect(result).toEqual({ hasDecision: false });
     });
 
     it('should return hasDecision: true with allow decision when tool is allowed', async () => {
-      const mockOutput = {
-        hookSpecificOutput: {
-          decision: {
-            behavior: 'allow',
-            updatedInput: { command: 'ls -la' },
-            message: 'Tool allowed by policy',
-          },
-        },
-      };
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: mockOutput,
+      const bus = decision({
+        behavior: 'allow',
+        updatedInput: { command: 'ls -la' },
+        message: 'Tool allowed by policy',
       });
-
       const result = await firePermissionRequestHook(
-        mockMessageBus,
+        bus,
         'run_shell_command',
         { command: 'ls' },
         'auto',
@@ -1227,23 +866,13 @@ describe('toolHookTriggers', () => {
     });
 
     it('should return hasDecision: true with deny decision when tool is denied', async () => {
-      const mockOutput = {
-        hookSpecificOutput: {
-          decision: {
-            behavior: 'deny',
-            message: 'Tool denied by policy',
-            interrupt: true,
-          },
-        },
-      };
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: mockOutput,
+      const bus = decision({
+        behavior: 'deny',
+        message: 'Tool denied by policy',
+        interrupt: true,
       });
-
       const result = await firePermissionRequestHook(
-        mockMessageBus,
+        bus,
         'run_shell_command',
         { command: 'rm -rf /' },
         'auto',
@@ -1258,68 +887,15 @@ describe('toolHookTriggers', () => {
     });
 
     it('should send correct parameters to MessageBus', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {},
-      });
-
-      await firePermissionRequestHook(
-        mockMessageBus,
-        'run_shell_command',
-        { command: 'ls' },
-        'auto',
-        [
-          {
-            type: 'always_allow',
-            tool: 'run_shell_command',
-          },
-        ],
-      );
-
-      expect(mockMessageBus.request).toHaveBeenCalledWith(
-        {
-          type: MessageBusType.HOOK_EXECUTION_REQUEST,
-          eventName: 'PermissionRequest',
-          input: {
-            tool_name: 'run_shell_command',
-            tool_input: { command: 'ls' },
-            permission_mode: 'auto',
-            permission_suggestions: [
-              {
-                type: 'always_allow',
-                tool: 'run_shell_command',
-              },
-            ],
-          },
-        },
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
-      );
+      await expectPermissionRequest([
+        { type: 'always_allow', tool: 'run_shell_command' },
+      ]);
     });
 
     it('should handle missing updated_input in allow decision', async () => {
-      const mockOutput = {
-        hookSpecificOutput: {
-          decision: {
-            behavior: 'allow',
-            message: 'Tool allowed',
-          },
-        },
-      };
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: mockOutput,
-      });
+      const bus = decision({ behavior: 'allow', message: 'Tool allowed' });
 
-      const result = await firePermissionRequestHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'auto',
-      );
-
-      expect(result).toEqual({
+      expect(await permission(bus)).toEqual({
         hasDecision: true,
         shouldAllow: true,
         denyMessage: undefined,
@@ -1328,27 +904,7 @@ describe('toolHookTriggers', () => {
     });
 
     it('should handle missing message in decision', async () => {
-      const mockOutput = {
-        hookSpecificOutput: {
-          decision: {
-            behavior: 'deny',
-          },
-        },
-      };
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: mockOutput,
-      });
-
-      const result = await firePermissionRequestHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'auto',
-      );
-
-      expect(result).toEqual({
+      expect(await permission(decision({ behavior: 'deny' }))).toEqual({
         hasDecision: true,
         shouldAllow: false,
         denyMessage: undefined,
@@ -1357,75 +913,22 @@ describe('toolHookTriggers', () => {
     });
 
     it('should handle hook execution errors gracefully', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockRejectedValue(
-        new Error('Network error'),
-      );
-
-      const result = await firePermissionRequestHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'auto',
-      );
+      const result = await permission(busRejecting('Network error'));
 
       expect(result).toEqual({ hasDecision: false });
     });
 
     it('should handle permission_suggestions being undefined', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: {},
-      });
-
-      await firePermissionRequestHook(
-        mockMessageBus,
-        'run_shell_command',
-        { command: 'ls' },
-        'auto',
-        undefined,
-      );
-
-      expect(mockMessageBus.request).toHaveBeenCalledWith(
-        {
-          type: MessageBusType.HOOK_EXECUTION_REQUEST,
-          eventName: 'PermissionRequest',
-          input: {
-            tool_name: 'run_shell_command',
-            tool_input: { command: 'ls' },
-            permission_mode: 'auto',
-            permission_suggestions: undefined,
-          },
-        },
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
-      );
+      await expectPermissionRequest(undefined);
     });
 
     it('should handle different permission modes', async () => {
-      const mockMessageBus = createMockMessageBus();
-      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
-        success: true,
-        output: { hookSpecificOutput: { decision: { behavior: 'allow' } } },
-      });
+      const bus = decision({ behavior: 'allow' });
+      const fire = (mode: string) =>
+        firePermissionRequestHook(bus, 'test-tool', {}, mode);
 
-      const result1 = await firePermissionRequestHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'plan',
-      );
-
-      expect(result1.hasDecision).toBe(true);
-
-      const result2 = await firePermissionRequestHook(
-        mockMessageBus,
-        'test-tool',
-        {},
-        'yolo',
-      );
-
-      expect(result2.hasDecision).toBe(true);
+      expect((await fire('plan')).hasDecision).toBe(true);
+      expect((await fire('yolo')).hasDecision).toBe(true);
     });
   });
 });

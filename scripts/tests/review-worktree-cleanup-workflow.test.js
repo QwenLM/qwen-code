@@ -23,7 +23,7 @@ import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import {
   LEASE_PREFIX,
-  REVIEW_LEASE_DIR,
+  RETIRED_REVIEW_LEASE_DIR,
   REVIEW_TMP_DIR,
   reviewBranch,
   worktreePath,
@@ -606,7 +606,7 @@ describe('review worktree cleanup steps', () => {
     // residue wedged every later job on the runner with nothing in the log
     // (R30-1, R30-57).
     expect(reviewCleanStep).toContain(
-      `for lease in ${toPosix(REVIEW_LEASE_DIR)}/${LEASE_PREFIX}pr-*.json ${toPosix(REVIEW_TMP_DIR)}/${LEASE_PREFIX}pr-*.json; do`,
+      `for lease in ${toPosix(RETIRED_REVIEW_LEASE_DIR)}/${LEASE_PREFIX}pr-*.json ${toPosix(REVIEW_TMP_DIR)}/${LEASE_PREFIX}pr-*.json; do`,
     );
     expect(reviewCleanStep).toContain('remove_review_tree "$lease"');
     // No lease-sweep line may discard stderr (R30-1): a survivor the ladder

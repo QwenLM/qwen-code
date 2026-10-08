@@ -47,9 +47,9 @@ export type TrajectoryEntry =
 export interface TrajectoryTiming {
   durationMs: number;
   /**
-   * Requests only. Tool calls are logged in one loop after their whole batch
-   * settles, so the recorded timestamp is the batch's end for every tool in it
-   * and no honest per-tool start can be derived.
+   * Epoch ms. Requests have one whenever their end was recorded; tool calls
+   * only when the session recorded the call's start, which older sessions did
+   * not.
    */
   startedAt?: number;
   /** Requests only: dispatch to first user-visible content. */
@@ -90,11 +90,12 @@ export interface TrajectoryRequestRow extends TrajectoryRowBase {
   model?: string;
   /** Folded from the round's assistant block; absent when none carried it. */
   usage?: DaemonTurnUsage;
+  recordId?: string;
   responseId?: string;
   promptId?: string;
   /** Set when a subagent issued the request. */
   subagentId?: string;
-  /** Main-session tool call that spawned the subagent, when resolvable. */
+  /** Tool call that spawned the subagent, when resolvable. */
   parentToolCallId?: string;
 }
 

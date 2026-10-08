@@ -7,7 +7,14 @@
 // @vitest-environment jsdom
 
 import { webcrypto } from 'node:crypto';
-import { act, useLayoutEffect, type ReactNode } from 'react';
+import {
+  act,
+  useContext,
+  useLayoutEffect,
+  type ContextType,
+  type ReactNode,
+} from 'react';
+import { McpAppToolsContext } from '../../mcpAppHostContext.js';
 import { BrowserTurnNotifications } from '../../browser-turn-notifications';
 import { I18nProvider } from '../../i18n.js';
 import { SessionRecoveryBanner } from '../../components/SessionRecoveryBanner.js';
@@ -11805,6 +11812,85 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
+  it('carries the terminal frame originator on the settlement', async () => {
+    // The composer's take-back of a cancelled prompt recognises its own turn
+    // by this stamp when the cancel cut the admission response short, so the
+    // envelope's `originatorClientId` must survive into the settlement.
+    const terminalGate = createDeferred<void>();
+    const session = createMockSession({
+      sessionId: 'session-settle-originator',
+      submitPrompt: vi.fn(async () => ({
+        promptId: 'prompt-1',
+        lastEventId: 10,
+      })),
+      events: async function* stampedTerminal(
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        await Promise.race([
+          terminalGate.promise,
+          new Promise<void>((resolve) =>
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            }),
+          ),
+        ]);
+        if (opts.signal?.aborted) return;
+        yield {
+          id: 11,
+          v: 1,
+          type: 'turn_complete',
+          promptId: 'prompt-1',
+          originatorClientId: 'client-submitter',
+          data: { promptId: 'prompt-1', stopReason: 'cancelled' },
+        } satisfies DaemonEvent;
+        await new Promise<void>((resolve) =>
+          opts.signal?.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        );
+      },
+    });
+    sdkMocks.sessions.push(session);
+    const settlements: DaemonPromptSettledEvent[] = [];
+    let actions: DaemonUiSessionActions | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      useDaemonPromptSettled((event) => {
+        settlements.push(event);
+      });
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+
+    let prompt: Promise<unknown> | undefined;
+    await act(async () => {
+      prompt = requireActions(actions).sendPrompt('hello');
+      await flushPromises();
+    });
+    await act(async () => {
+      terminalGate.resolve();
+      await flushPromises();
+    });
+    const pending = prompt;
+    if (!pending) throw new Error('prompt was not started');
+    await act(async () => {
+      await expect(pending).resolves.toEqual({ stopReason: 'cancelled' });
+      await flushPromises();
+    });
+
+    expect(settlements).toEqual([
+      {
+        sessionId: 'session-settle-originator',
+        promptId: 'prompt-1',
+        originatorClientId: 'client-submitter',
+        outcome: 'cancelled',
+        stopReason: 'cancelled',
+      },
+    ]);
+  });
+
   it('withholds the live settlement while a journal repair targets the same prompt', async () => {
     // The load arms a live-journal repair for `prompt-live` and the same
     // prompt's terminal then arrives on the live stream. Publishing there
@@ -12393,6 +12479,112 @@ describe('DaemonSessionProvider', () => {
       authVersion: 0,
     });
   });
+
+  it.each([
+    {
+      callId: 'mcp-app-success',
+      terminalStatus: 'completed',
+      expectedPrompt: 'idle',
+    },
+    {
+      callId: 'mcp-app-error',
+      terminalStatus: 'failed',
+      expectedPrompt: 'idle',
+    },
+    {
+      callId: 'model-tool-call',
+      terminalStatus: 'completed',
+      expectedPrompt: 'streaming',
+    },
+  ])(
+    'keeps model activity separate from $callId tool updates',
+    async ({ callId, terminalStatus, expectedPrompt }) => {
+      const startTool = createDeferred<void>();
+      const finishTool = createDeferred<void>();
+      const session = createMockSession({
+        replaySnapshot: createTextReplaySnapshot('Model answer completed'),
+        events: async function* appToolEvents(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          await startTool.promise;
+          if (opts.signal?.aborted) return;
+          yield {
+            id: 3,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: callId,
+                title: 'Get embed token',
+                status: 'in_progress',
+              },
+            },
+          };
+          await finishTool.promise;
+          if (opts.signal?.aborted) return;
+          yield {
+            id: 4,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: callId,
+                status: terminalStatus,
+              },
+            },
+          };
+          yield* createPendingEvents(createDeferred<void>())(opts);
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let promptStatus: ReturnType<typeof useDaemonPromptStatus> | undefined;
+      let streaming: ReturnType<typeof useDaemonStreamingState> | undefined;
+      let blocks: readonly DaemonTranscriptBlock[] = [];
+      function Harness() {
+        promptStatus = useDaemonPromptStatus();
+        streaming = useDaemonStreamingState();
+        blocks = useDaemonTranscriptBlocks();
+        return null;
+      }
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      expect(promptStatus).toBe('idle');
+      await act(async () => {
+        startTool.resolve();
+        await flushPromises();
+        await flushTranscriptDispatch();
+      });
+      expect(blocks).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'tool',
+            toolCallId: callId,
+            status: 'in_progress',
+          }),
+        ]),
+      );
+      expect(promptStatus).toBe(expectedPrompt);
+      if (expectedPrompt === 'idle') expect(streaming).toBe('idle');
+      else expect(streaming).not.toBe('idle');
+      await act(async () => {
+        finishTool.resolve();
+        await flushPromises();
+        await flushTranscriptDispatch();
+      });
+      expect(blocks).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'tool',
+            toolCallId: callId,
+            status: terminalStatus,
+          }),
+        ]),
+      );
+      expect(promptStatus).toBe(expectedPrompt);
+      if (expectedPrompt === 'idle') expect(streaming).toBe('idle');
+    },
+  );
 
   it('finishes passive assistant streaming when no prompt action is active', async () => {
     vi.useFakeTimers();
@@ -14936,10 +15128,10 @@ describe('DaemonSessionProvider', () => {
     });
     sdkMocks.MockDaemonSessionClient.load.mockClear();
 
-    const branch = requireActions(actions).branchSession(
-      'Branch 1',
-      'checkpoint-1',
-    );
+    const branch = requireActions(actions).branchSession({
+      name: 'Branch 1',
+      atRecordId: 'checkpoint-1',
+    });
     await act(async () => {
       await wait(5);
       await flushPromises();
@@ -15005,9 +15197,9 @@ describe('DaemonSessionProvider', () => {
     }>;
     let second!: Promise<unknown>;
     await act(async () => {
-      first = requireActions(actions).branchSession('First');
+      first = requireActions(actions).branchSession({ name: 'First' });
       second = requireActions(actions)
-        .branchSession('Second')
+        .branchSession({ name: 'Second' })
         .catch((error: unknown) => error);
       await flushPromises();
     });
@@ -16646,6 +16838,55 @@ describe('DaemonSessionProvider', () => {
     },
   );
 
+  it('refreshes recovery after a rewind drops the interrupted turn', async () => {
+    const rewind = createDeferred<void>();
+    const initial = {
+      v: 1 as const,
+      sessionId: 'session-1',
+      workspaceCwd: '/mock-workspace',
+      state: {},
+      recovery: { kind: 'interrupted_prompt' as const, canContinue: true },
+    };
+    const clean = { kind: 'clean' as const, canContinue: false };
+    const context = vi
+      .fn()
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValue({ ...initial, recovery: clean });
+    const session = createMockSession({
+      context,
+      lastEventId: 10,
+      async *events(opts) {
+        await rewind.promise;
+        yield {
+          v: 1,
+          id: 11,
+          type: 'session_rewound',
+          data: {
+            sessionId: 'session-1',
+            promptId: 'session-1########2',
+            targetTurnIndex: 1,
+          },
+        };
+        yield* createIdleEvents()(opts);
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    expect(connection?.context?.recovery).toEqual(initial.recovery);
+    expect(context).toHaveBeenCalledOnce();
+    await act(async () => {
+      rewind.resolve();
+      await flushPromises();
+    });
+    expect(context).toHaveBeenCalledTimes(2);
+    expect(connection?.context?.recovery).toEqual(clean);
+  });
+
   it.each(['stream_end', 'transport_error'] as const)(
     'ignores recovery reads from a previous subscription after %s',
     async (ending) => {
@@ -17655,6 +17896,88 @@ describe('DaemonSessionProvider', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('uses the current client id after an in-place session reattach', async () => {
+    const session = createMockSession({});
+    sdkMocks.sessions.push(session);
+    let tools: ContextType<typeof McpAppToolsContext>;
+    function Harness() {
+      tools = useContext(McpAppToolsContext);
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const callback = requireActions(tools).callTool;
+    const request = {
+      serverName: 'tableau',
+      resourceUri: 'ui://tableau/app',
+      name: 'get-embed-token',
+      arguments: {},
+    };
+    const signal = new AbortController().signal;
+    const callMcpAppTool = vi.fn().mockResolvedValue({ content: [] });
+    Object.assign(session.client!, { callMcpAppTool });
+    Object.assign(session, { clientId: 'reattached-client' });
+    await callback(request, signal);
+    expect(callMcpAppTool).toHaveBeenCalledWith(
+      session.sessionId,
+      request,
+      'reattached-client',
+      signal,
+    );
+    Object.assign(session, { clientId: undefined });
+    await expect(callback(request, signal)).rejects.toThrow('not attached');
+    expect(callMcpAppTool).toHaveBeenCalledOnce();
+  });
+
+  it('rebinds MCP App tools after replacing an attachment with the same session and client ids', async () => {
+    const fixture = createResyncReplayFixture({
+      sessionId: 'session-app-reload',
+      reason: 'ring_evicted',
+      terminalStopReason: 'end_turn',
+    });
+    const [firstSession, nextSession] = fixture.sessions;
+    sdkMocks.sessions.push(...fixture.sessions);
+    let tools: ContextType<typeof McpAppToolsContext>;
+    function Harness() {
+      tools = useContext(McpAppToolsContext);
+      return null;
+    }
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    const originalTools = requireActions(tools);
+    const request = {
+      serverName: 'tableau',
+      resourceUri: 'ui://tableau/app',
+      name: 'get-embed-token',
+      arguments: {},
+    };
+    const signal = new AbortController().signal;
+    const raw = { content: [{ type: 'text', text: 'app result' }] };
+    const callMcpAppTool = vi.fn().mockResolvedValue(raw);
+    Object.assign(firstSession!.client!, { callMcpAppTool });
+    await expect(originalTools.callTool(request, signal)).resolves.toEqual(raw);
+    await act(async () => {
+      fixture.resyncGate.resolve();
+      await fixture.reloaded.promise;
+      await flushPromises();
+    });
+    expect(nextSession!.sessionId).toBe(firstSession!.sessionId);
+    expect(nextSession!.clientId).toBe(firstSession!.clientId);
+    expect(tools).not.toBe(originalTools);
+    await expect(originalTools.callTool(request, signal)).rejects.toThrow(
+      'session changed',
+    );
+    Object.assign(nextSession!.client!, { callMcpAppTool });
+    await expect(
+      requireActions(tools).callTool(request, signal),
+    ).resolves.toEqual(raw);
+    expect(callMcpAppTool).toHaveBeenLastCalledWith(
+      'session-app-reload',
+      request,
+      'client-1',
+      signal,
+    );
+    expect(callMcpAppTool).toHaveBeenCalledTimes(2);
   });
 
   it('reloads stale transcript after epoch-reset resync', async () => {

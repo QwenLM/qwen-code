@@ -23,6 +23,7 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import type { WebShellSlashCommandHandler } from '../App';
+import type { WebShellModelManagementOptions } from '../modelManagement';
 import type { RegisterContextUsageControls } from '../hooks/useContextUsageControls';
 import { useI18n } from '../i18n';
 import { ChatPane, type PaneHeaderActionsRenderer } from './ChatPane';
@@ -76,6 +77,7 @@ export interface SplitViewProps {
   onError?: (error: unknown, fallback: string) => void;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   onSlashCommand?: WebShellSlashCommandHandler;
+  modelManagement?: WebShellModelManagementOptions;
   onOpenGoals?: () => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onOpenMonitor?: (
@@ -131,6 +133,7 @@ export function SplitView({
   onError,
   onImageIngestionNotice,
   onSlashCommand,
+  modelManagement,
   onOpenGoals,
   onRightPanelOpen,
   onOpenMonitor,
@@ -669,6 +672,7 @@ export function SplitView({
                       onError={onError}
                       onImageIngestionNotice={onImageIngestionNotice}
                       onSlashCommand={onSlashCommand}
+                      modelManagement={modelManagement}
                       onOpenGoals={onOpenGoals}
                       onRightPanelOpen={onRightPanelOpen}
                       onOpenMonitor={onOpenMonitor}

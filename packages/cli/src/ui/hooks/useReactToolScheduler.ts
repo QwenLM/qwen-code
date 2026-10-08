@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import {
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+} from '@qwen-code/qwen-code-core/tools/tool-call.js';
 import type {
   Config,
   ToolCallRequestInfo,
@@ -32,7 +37,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { ResolvedGeneratorForModel } from '@qwen-code/qwen-code-core/core/baseLlmClient.js';
 import * as path from 'node:path';
-import { useCallback, useState, useMemo } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type {
   HistoryItemToolGroup,
   IndividualToolCallDisplay,
@@ -119,6 +124,26 @@ export function useReactToolScheduler(
     TrackedToolCall[]
   >([]);
 
+  // useLlmStream passes inline callbacks, so identities change every render.
+  // Recreating CoreToolScheduler then would drop an in-flight batch's queue
+  // and let a later schedule() run in parallel on a fresh idle instance.
+  const onCompleteRef = useRef(onComplete);
+  const getPreferredEditorRef = useRef(getPreferredEditor);
+  const onEditorCloseRef = useRef(onEditorClose);
+  const onToolResultFullTurnModelRef = useRef(onToolResultFullTurnModel);
+
+  useLayoutEffect(() => {
+    onCompleteRef.current = onComplete;
+    getPreferredEditorRef.current = getPreferredEditor;
+    onEditorCloseRef.current = onEditorClose;
+    onToolResultFullTurnModelRef.current = onToolResultFullTurnModel;
+  }, [
+    onComplete,
+    getPreferredEditor,
+    onEditorClose,
+    onToolResultFullTurnModel,
+  ]);
+
   const outputUpdateHandler: OutputUpdateHandler = useCallback(
     (toolCallId, outputChunk) => {
       // Shell liveness heartbeats are for headless consumers; the TUI
@@ -143,9 +168,9 @@ export function useReactToolScheduler(
 
   const allToolCallsCompleteHandler: AllToolCallsCompleteHandler = useCallback(
     async (completedToolCalls) => {
-      await onComplete(completedToolCalls);
+      await onCompleteRef.current(completedToolCalls);
     },
-    [onComplete],
+    [],
   );
 
   const toolCallsUpdateHandler: ToolCallsUpdateHandler = useCallback(
@@ -205,18 +230,18 @@ export function useReactToolScheduler(
         outputUpdateHandler,
         onAllToolCallsComplete: allToolCallsCompleteHandler,
         onToolCallsUpdate: toolCallsUpdateHandler,
-        getPreferredEditor,
-        onEditorClose,
-        onToolResultFullTurnModel,
+        getPreferredEditor: () => getPreferredEditorRef.current(),
+        onEditorClose: () => onEditorCloseRef.current(),
+        // Always wrap: Core treats a missing callback as false, and a later
+        // render may introduce onToolResultFullTurnModel on the same instance.
+        onToolResultFullTurnModel: (model: string) =>
+          onToolResultFullTurnModelRef.current?.(model) ?? false,
       }),
     [
       config,
       outputUpdateHandler,
       allToolCallsCompleteHandler,
       toolCallsUpdateHandler,
-      getPreferredEditor,
-      onEditorClose,
-      onToolResultFullTurnModel,
     ],
   );
 
@@ -235,25 +260,31 @@ export function useReactToolScheduler(
         const reason =
           '[Operation Cancelled] Reason: Tool call cancelled before execution.';
         const cancelledCalls: CompletedToolCall[] = requests.map(
-          (toolRequest) => ({
-            status: 'cancelled',
-            request: toolRequest,
-            response: {
-              callId: toolRequest.callId,
-              responseParts: convertToFunctionErrorResponse(
-                toolRequest.name,
-                toolRequest.callId,
-                reason,
-                reason,
-              ),
-              resultDisplay: undefined,
-              error: undefined,
-              errorType: undefined,
-              executionStatus: 'not_started',
-              contentLength: reason.length,
-            },
-            durationMs: 0,
-          }),
+          (toolRequest) => {
+            const message =
+              toolRequest.name === ToolNames.TOOL_CALL
+                ? `${DEFERRED_TOOL_CALL_CANCELLATION_PREFIX}${reason}`
+                : reason;
+            return {
+              status: 'cancelled',
+              request: toolRequest,
+              response: {
+                callId: toolRequest.callId,
+                responseParts: convertToFunctionErrorResponse(
+                  toolRequest.name,
+                  toolRequest.callId,
+                  message,
+                  message,
+                ),
+                resultDisplay: undefined,
+                error: undefined,
+                errorType: undefined,
+                executionStatus: 'not_started',
+                contentLength: message.length,
+              },
+              durationMs: 0,
+            };
+          },
         );
         await allToolCallsCompleteHandler(cancelledCalls);
       };
@@ -292,11 +323,15 @@ export function useReactToolScheduler(
           const completedCalls: CompletedToolCall[] = requests.map(
             (toolRequest) => {
               const toolError = new Error(message);
+              const modelFacingMessage =
+                toolRequest.name === ToolNames.TOOL_CALL
+                  ? `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${message}`
+                  : message;
               const responseParts = convertToFunctionErrorResponse(
                 toolRequest.name,
                 toolRequest.callId,
-                message,
-                message,
+                modelFacingMessage,
+                modelFacingMessage,
               );
               return {
                 status: 'error',
@@ -308,7 +343,7 @@ export function useReactToolScheduler(
                   error: toolError,
                   errorType: ToolErrorType.UNHANDLED_EXCEPTION,
                   executionStatus: 'not_started',
-                  contentLength: message.length,
+                  contentLength: modelFacingMessage.length,
                 },
               };
             },
@@ -452,8 +487,10 @@ export function mapToDisplay(
       let renderOutputAsMarkdown = false;
 
       if (
-        trackedCall.status === 'error' ||
+        (trackedCall.status === 'error' &&
+          trackedCall.request.name !== ToolNames.ADVISOR) ||
         trackedCall.tool === undefined ||
+        !('invocation' in trackedCall) ||
         trackedCall.invocation === undefined
       ) {
         displayName =

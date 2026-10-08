@@ -27,7 +27,12 @@ import type {
   ToolResult,
 } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { ToolNames, ToolDisplayNames } from './tool-names.js';
+import {
+  canonicalToolName,
+  resolveRegisteredToolName,
+  ToolNames,
+  ToolDisplayNames,
+} from './tool-names.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
@@ -43,6 +48,12 @@ import {
   isToolExcludedForCurrentContext,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
 import { isMediaPolicyToolHiddenFromModel } from '../omni/policy/model-access.js';
+import {
+  describeCodeModeBinding,
+  ToolMode,
+  type CodeModeToolBinding,
+} from './code-mode.js';
+import { getToolCallRuntime } from '../code-mode/tool-call-runtime.js';
 
 const debugLogger = createDebugLogger('TOOL_SEARCH');
 
@@ -119,7 +130,7 @@ interface ScoredTool {
   score: number;
 }
 
-function isDeferredToolBridgeAvailable(registry: ToolRegistry): boolean {
+export function isDeferredToolBridgeAvailable(registry: ToolRegistry): boolean {
   return Boolean(
     registry.getTool(ToolNames.TOOL_SEARCH) &&
       registry.getTool(ToolNames.TOOL_CALL),
@@ -138,6 +149,10 @@ Query forms:
 - "+must-word other" — require "must-word" in the name, rank remaining terms
 `;
 
+const codeModeSearchDescription = `Find tools whose descriptions and parameter schemas are deferred from the exec declaration. Invoke this as a separate top-level tool call, outside exec; tool_search is not a JavaScript global or a tools binding. Search by keywords when the registered name is unknown. Use "select:<name>,<name>" with exact registered names, including the full mcp__<server>__<tool> name for MCP tools. Prefix a required keyword with "+". Keyword results are limited by max_results.
+
+Results contain each tool's description, full parameter schema, normalized JavaScript name (jsName), and signature. Read the results, then call tools.<jsName>(args) inside a later exec call using the returned jsName exactly. Supply all required parameters according to the returned schema. Reuse schemas already in the current context; search again if a schema is missing, including after context compression. Tools remain callable through exec; searching does not change the active tool declarations. Only tools callable in your current execution scope are returned.`;
+
 class ToolSearchInvocation extends BaseToolInvocation<
   ToolSearchParams,
   ToolResult
@@ -154,6 +169,18 @@ class ToolSearchInvocation extends BaseToolInvocation<
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
+    const codeMode = this.config.getToolMode?.() === ToolMode.CodeModeOnly;
+    const allowedNames = getToolCallRuntime()?.allowedToolNames;
+    const bindings = codeMode
+      ? new Map(
+          this.config
+            .getToolRegistry()
+            .getCodeModeBindingPlan(
+              allowedNames ? new Set(allowedNames) : undefined,
+            )
+            .bindings.map((binding) => [binding.name, binding]),
+        )
+      : undefined;
     const query = (this.params.query ?? '').trim();
     if (!query) {
       return {
@@ -178,6 +205,9 @@ class ToolSearchInvocation extends BaseToolInvocation<
     // to re-issue another ToolSearch for them instead of silently
     // assuming they were reviewed.
     if (query.toLowerCase().startsWith('select:')) {
+      const knownNames = bindings
+        ? [...bindings.keys()]
+        : this.config.getToolRegistry().getAllToolNames();
       const seen = new Set<string>();
       const names: string[] = [];
       const truncated: string[] = [];
@@ -190,7 +220,17 @@ class ToolSearchInvocation extends BaseToolInvocation<
         // for a tool literally named `"foo"` (with quotes) and miss.
         const stripped = stripMatchingQuotes(raw.trim());
         if (!stripped) continue;
-        const key = stripped.toLowerCase();
+        // Key on the RESOLVED tool, not the raw lowercase spelling: two names
+        // differing only by case can be two genuinely different tools, and
+        // collapsing them would silently drop one from every report list. A
+        // name that resolves to nothing keys on the requested spelling, so two
+        // unresolvable spellings of one alias (`task`/`agent`) are both
+        // reported instead of collapsing into one.
+        const aliased = canonicalToolName(stripped);
+        const resolved = resolveRegisteredToolName(aliased, knownNames);
+        const key = Array.isArray(resolved)
+          ? `ambiguous\u0000${resolved.join('\u0000')}`
+          : (resolved ?? `unresolved\u0000${stripped.toLowerCase()}`);
         if (seen.has(key)) continue;
         seen.add(key);
         if (names.length >= maxResults) {
@@ -199,7 +239,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
         }
         names.push(stripped);
       }
-      return this.returnSchemas(names, truncated);
+      return this.returnSchemas(names, truncated, bindings);
     }
 
     // Mode 2: keyword search. Require-word prefix with "+" boosts mandatory
@@ -222,7 +262,10 @@ class ToolSearchInvocation extends BaseToolInvocation<
       };
     }
 
-    if (!isDeferredToolBridgeAvailable(this.config.getToolRegistry())) {
+    if (
+      !codeMode &&
+      !isDeferredToolBridgeAvailable(this.config.getToolRegistry())
+    ) {
       const message =
         'The deferred-tool bridge is unavailable in this session, so hidden tool schemas cannot be reviewed or invoked.';
       return {
@@ -232,7 +275,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
       };
     }
 
-    const candidates = this.collectCandidates();
+    const candidates = this.collectCandidates(bindings);
     const scored: ScoredTool[] = [];
     for (const tool of candidates) {
       if (!candidateMatchesRequired(tool, requiredTerms)) continue;
@@ -248,11 +291,11 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const matches = scored.slice(0, maxResults).map((s) => s.tool.name);
     if (matches.length === 0) {
       return {
-        llmContent: `No tools found matching '${query}'. Try broader keywords or use \`select:ToolName\`.`,
+        llmContent: `No tools found matching '${escapeJsonTagCharacters(query)}'. Try broader keywords or use \`select:ToolName\`.`,
         returnDisplay: `No matches for '${query}'`,
       };
     }
-    return this.returnSchemas(matches);
+    return this.returnSchemas(matches, [], bindings);
   }
 
   /**
@@ -265,7 +308,9 @@ class ToolSearchInvocation extends BaseToolInvocation<
    * want to re-inspect the schema of a visible tool — and handles its
    * own lookup via {@link returnSchemas}.
    */
-  private collectCandidates(): AnyDeclarativeTool[] {
+  private collectCandidates(
+    bindings?: ReadonlyMap<string, CodeModeToolBinding>,
+  ): AnyDeclarativeTool[] {
     const registry = this.config.getToolRegistry();
     // Mirror the invocation side (resolveDeferredToolCall): a subagent or
     // teammate must not even be SHOWN the schema of a tool the exclusion set
@@ -280,6 +325,8 @@ class ToolSearchInvocation extends BaseToolInvocation<
     return registry.getAllTools().filter(
       (t) =>
         registry.isDeferredAndHidden(t.name) &&
+        registry.isToolDeclared(t.name) &&
+        (!bindings || bindings.has(t.name)) &&
         // Context-gated: the leader's discovery stays unrestricted (the
         // predicate itself is ungated so prepareTools can fail closed).
         !(
@@ -295,6 +342,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
   private async returnSchemas(
     names: string[],
     truncated: string[] = [],
+    bindings?: ReadonlyMap<string, CodeModeToolBinding>,
   ): Promise<ToolResult> {
     if (names.length === 0) {
       return {
@@ -309,18 +357,36 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const missing: string[] = [];
     const blocked: string[] = [];
     const bridgeUnavailable: string[] = [];
-    const bridgeAvailable = isDeferredToolBridgeAvailable(registry);
+    const bridgeAvailable =
+      !!bindings || isDeferredToolBridgeAvailable(registry);
 
-    // Case-insensitive lookup across all known names (instance names + factory
-    // names). Preserve the user-supplied casing in the error list so the
-    // response matches what the model asked for.
-    const lowerIndex = new Map<string, string>();
-    for (const realName of registry.getAllToolNames()) {
-      lowerIndex.set(realName.toLowerCase(), realName);
-    }
+    // Resolve across all known names (instance names + factory names) with
+    // the rule tool_call applies, so the schema reviewed here is the tool
+    // that call invokes. Preserve the user-supplied casing in the error list
+    // so the response matches what the model asked for. In Code Mode the
+    // binding names are the only resolvable names, which is what keeps lookup
+    // inside the current agent's allowed tools.
+    const knownNames = bindings
+      ? [...bindings.keys()]
+      : registry.getAllToolNames();
+    const ambiguous: Array<{ requested: string; candidates: string[] }> = [];
 
     for (const requested of names) {
-      const canonical = lowerIndex.get(requested.toLowerCase());
+      // Canonicalize the legacy alias first, exactly as tool_call does, so the
+      // two halves answer identically for `replace`/`task`/`search_file_content`:
+      // without it `select:replace` reports "Not found" while `tool_call{replace}`
+      // resolves and invokes `edit`, and the invocation then takes the
+      // never-reviewed pass-through. `resolveBuiltinToolName` is deliberately not
+      // used: it also maps display names, which tool_call does not, so discovery
+      // would become broader than invocation instead of identical.
+      const canonical = resolveRegisteredToolName(
+        canonicalToolName(requested),
+        knownNames,
+      );
+      if (Array.isArray(canonical)) {
+        ambiguous.push({ requested, candidates: canonical });
+        continue;
+      }
       if (!canonical) {
         missing.push(requested);
         continue;
@@ -394,6 +460,15 @@ class ToolSearchInvocation extends BaseToolInvocation<
       reviewed.push(tool);
     }
 
+    // Record every tool this returned, not only the currently hidden ones: a
+    // tool revealed here can be hidden again later (session restore, preload
+    // budget), and gating the record on the reveal state at review time made
+    // tool_call's comparison depend on state the model neither controls nor
+    // observes (#11321).
+    for (const tool of reviewed) {
+      registry.recordReviewedDeclaration(tool);
+    }
+
     // Escape tag boundary characters in the JSON-stringified schema so any
     // `</function>`
     // (or `</functions>`) substring inside a tool's description / enum
@@ -401,17 +476,53 @@ class ToolSearchInvocation extends BaseToolInvocation<
     // JSON unicode escapes decode back to their original characters when the
     // model interprets the JSON, but as raw text inside the wrapper they are
     // no longer tag delimiters.
-    const schemaBlocks = reviewed.map(
-      (tool) =>
-        `<function>${escapeJsonTagCharacters(JSON.stringify(tool.schema))}</function>`,
-    );
+    const schemaBlocks = reviewed.map((tool) => {
+      const binding = bindings?.get(tool.name);
+      const declaration = {
+        ...tool.schema,
+        ...(tool instanceof DiscoveredMCPTool
+          ? { serverName: tool.serverName }
+          : {}),
+        ...(binding
+          ? {
+              jsName: binding.jsName,
+              signature: describeCodeModeBinding(binding),
+            }
+          : {}),
+      };
+      return `<function>${escapeJsonTagCharacters(JSON.stringify(declaration))}</function>`;
+    });
     let llmContent = '';
     if (schemaBlocks.length > 0) {
       llmContent += `<functions>\n${schemaBlocks.join('\n')}\n</functions>`;
+      if (bindings) {
+        llmContent +=
+          '\n\nCall these tools through exec using tools.<jsName>(args) and the required parameters above.';
+      }
     }
     if (missing.length > 0) {
       const header = llmContent ? '\n\n' : '';
-      llmContent += `${header}Not found: ${missing.join(', ')}`;
+      llmContent += `${header}Not found: ${escapeJsonTagCharacters(missing.join(', '))}`;
+      if (bindings) {
+        llmContent +=
+          '\nselect: requires the registered name, including mcp__<server>__<tool> for MCP tools. Search with keywords without select: to discover the full name and schema, then use the returned jsName in exec.';
+      }
+    }
+    if (ambiguous.length > 0) {
+      const header = llmContent ? '\n\n' : '';
+      // Mirror the twin refusal on the invocation half (tool-call.ts): quote
+      // the rejected spelling so the response still echoes what the model
+      // asked for, but keep the actionable slot holding names that actually
+      // resolve. Presenting the rejected spelling AS "the exact name" invited a
+      // byte-identical re-issue of the same select:, which loop detection
+      // counts as a duplicate call and can end the turn as a loop.
+      const entries = ambiguous.map(
+        ({ requested, candidates }) =>
+          `"${escapeJsonTagCharacters(requested)}" matches more than one registered tool by case. Re-run tool_search with one exact name, e.g. ${candidates
+            .map((name) => `select:${name}`)
+            .join(' or ')}.`,
+      );
+      llmContent += `${header}Ambiguous — ${entries.join('\n')}`;
     }
     let blockedErrorMessage: string | undefined;
     if (blocked.length > 0) {
@@ -444,13 +555,15 @@ class ToolSearchInvocation extends BaseToolInvocation<
       // assume every requested name was reviewed and later receive an
       // "unknown tool" API error.
       const header = llmContent ? '\n\n' : '';
-      llmContent += `${header}Truncated by max_results — request these in a follow-up call: ${truncated.join(', ')}`;
+      llmContent += `${header}Truncated by max_results — request these in a follow-up call: ${escapeJsonTagCharacters(truncated.join(', '))}`;
     }
 
     const displayParts: string[] = [];
     if (reviewed.length > 0)
       displayParts.push(`Reviewed ${reviewed.length} tool(s)`);
     if (missing.length > 0) displayParts.push(`${missing.length} missing`);
+    if (ambiguous.length > 0)
+      displayParts.push(`${ambiguous.length} ambiguous`);
     if (blocked.length > 0) displayParts.push(`${blocked.length} unavailable`);
     if (bridgeUnavailable.length > 0)
       displayParts.push(`${bridgeUnavailable.length} bridge unavailable`);
@@ -475,11 +588,18 @@ export class ToolSearchTool extends BaseDeclarativeTool<
 > {
   static readonly Name = ToolNames.TOOL_SEARCH;
 
+  override get maxOutputChars(): number {
+    // The bridge requires complete schema blocks; max_results bounds their count.
+    return Number.POSITIVE_INFINITY;
+  }
+
   constructor(private readonly config: Config) {
     super(
       ToolSearchTool.Name,
       ToolDisplayNames.TOOL_SEARCH,
-      toolSearchDescription,
+      config.getToolMode?.() === ToolMode.CodeModeOnly
+        ? codeModeSearchDescription
+        : toolSearchDescription,
       Kind.Other,
       {
         type: 'object',

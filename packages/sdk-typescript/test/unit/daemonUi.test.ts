@@ -31,6 +31,169 @@ import type {
 } from '../../src/daemon/ui/index.js';
 
 describe('daemon UI normalizer and transcript reducer', () => {
+  it('retains tool prompt ownership after byte eviction and journal-only replay', () => {
+    const event = {
+      v: 1 as const,
+      type: 'session_update' as const,
+      promptId: 'active-prompt',
+      data: {
+        update: {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'retained-call',
+          status: 'in_progress',
+          rawInput: { command: 'x'.repeat(2000) },
+          _meta: { toolName: 'run_shell_command' },
+        },
+      },
+    };
+    let state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ maxRetainedBytes: 2000 }),
+      [
+        { type: 'user.text.delta', text: 'Start', promptId: 'active-prompt' },
+        ...normalizeDaemonEvent(event),
+      ],
+    );
+    expect(state.blocks).toHaveLength(1);
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      promptId: 'active-prompt',
+      toolCallId: 'retained-call',
+    });
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'tool.update',
+        toolCallId: 'retained-call',
+        status: 'completed',
+        promptId: 'later-prompt',
+      },
+    ]);
+    expect(state.blocks[0]).toMatchObject({
+      promptId: 'active-prompt',
+      status: 'completed',
+    });
+    const replay = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      normalizeDaemonEvent(event),
+    );
+    expect(replay.blocks[0]).toMatchObject({ promptId: 'active-prompt' });
+  });
+
+  it('backfills tool prompt ownership once and preserves background ownership', () => {
+    let state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      { type: 'tool.update', toolCallId: 'legacy', status: 'pending' },
+      {
+        type: 'tool.update',
+        toolCallId: 'background',
+        status: 'in_progress',
+        promptId: 'foreground-prompt',
+        backgroundTurn: {
+          turnId: 'background-prompt',
+          taskId: 'agent-task',
+          kind: 'agent',
+          startedAt: 1,
+        },
+      },
+    ]);
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'tool.update',
+        toolCallId: 'legacy',
+        promptId: 'owner-prompt',
+      },
+      { type: 'tool.update', toolCallId: 'legacy', status: 'completed' },
+      {
+        type: 'tool.update',
+        toolCallId: 'background',
+        promptId: 'foreground-prompt',
+      },
+    ]);
+    expect(state.blocks.map((block) => block.promptId)).toEqual([
+      'owner-prompt',
+      'background-prompt',
+    ]);
+    expect(state.retainedBytes).toBe(
+      state.blocks.reduce(
+        (bytes, block) => bytes + estimateDaemonTranscriptBlockBytes(block),
+        0,
+      ),
+    );
+  });
+
+  it('retains recorded live tool timing across progress and completion updates', () => {
+    let state = createDaemonTranscriptState({ now: 9000 });
+    for (const update of [
+      {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'timed',
+        status: 'pending',
+        _meta: { startedAt: 1000 },
+      },
+      {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'timed',
+        status: 'in_progress',
+      },
+      {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'timed',
+        status: 'completed',
+        _meta: { durationMs: 4000 },
+      },
+      {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'already-finished',
+        status: 'completed',
+        _meta: { startedAt: 2000, durationMs: 500 },
+      },
+    ]) {
+      state = reduceDaemonTranscriptEvents(
+        state,
+        normalizeDaemonEvent({
+          v: 1,
+          type: 'session_update',
+          data: { update },
+        }),
+        { now: 9000 },
+      );
+      expect(state.blocks[0]).toMatchObject({
+        startedAt: 1000,
+        clientReceivedAt: 9000,
+      });
+    }
+    expect(state.blocks).toMatchObject([
+      {
+        toolCallId: 'timed',
+        status: 'completed',
+        startedAt: 1000,
+        durationMs: 4000,
+      },
+      { toolCallId: 'already-finished', startedAt: 2000, durationMs: 500 },
+    ]);
+  });
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, 'invalid'])(
+    'ignores invalid live tool timing %s',
+    (value) => {
+      const events = normalizeDaemonEvent({
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'invalid',
+            _meta: { startedAt: value, durationMs: value },
+          },
+        },
+      });
+      expect(events[0]).toMatchObject({
+        type: 'tool.update',
+        toolCallId: 'invalid',
+      });
+      expect(events[0]).not.toHaveProperty('startedAt');
+      expect(events[0]).not.toHaveProperty('durationMs');
+    },
+  );
+
   it('normalizes daemon stream chunks and merges assistant transcript blocks', () => {
     let state = createDaemonTranscriptState({ now: 1 });
     state = appendLocalUserTranscriptMessage(state, 'hello', { now: 2 });
@@ -10902,8 +11065,8 @@ describe('transcript timing frames', () => {
     expect(extractTranscriptTiming(update)).toBeUndefined();
   });
 
-  it('drops a start time that showed up on a tool frame', () => {
-    // The producer never puts one there; a reader must not trust one anyway.
+  it('keeps the start time a tool frame carries', () => {
+    // The producer only sends one the session recorded, never a derived one.
     expect(
       extractTranscriptTiming({
         _meta: {
@@ -10915,8 +11078,39 @@ describe('transcript timing frames', () => {
           },
         },
       }),
+    ).toEqual({
+      kind: 'tool',
+      durationMs: 16,
+      callId: 'call-1',
+      startedAt: 1_760_000_000_000,
+    });
+  });
+
+  it('drops a tool start time that is not a finite number', () => {
+    expect(
+      extractTranscriptTiming({
+        _meta: {
+          timing: {
+            kind: 'tool',
+            durationMs: 16,
+            callId: 'call-1',
+            startedAt: '1760000000000',
+          },
+        },
+      }),
     ).toEqual({ kind: 'tool', durationMs: 16, callId: 'call-1' });
   });
+
+  it.each([-1, Number.NaN, Number.POSITIVE_INFINITY, '1760000000000'])(
+    'drops invalid tool start %s without losing recorded duration',
+    (startedAt) => {
+      expect(
+        extractTranscriptTiming({
+          _meta: { timing: { kind: 'tool', durationMs: 16, startedAt } },
+        }),
+      ).toEqual({ kind: 'tool', durationMs: 16 });
+    },
+  );
 
   it('rejects a negative duration', () => {
     expect(

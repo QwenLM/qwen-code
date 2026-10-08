@@ -4,13 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CONTAINER_SANDBOX_NO_PROXY,
-  fakeServerHostOptions,
   capturedToolCallPathMatches,
+  fakeServerHostOptions,
   parseStreamJsonToolCalls,
   TestRig,
 } from './test-helper.js';
@@ -47,6 +47,31 @@ describe('TestRig', () => {
     expect(existsSync(staleFile)).toBe(false);
     expect(rig.testDir).not.toBeNull();
     expect(existsSync(rig.testDir!)).toBe(true);
+  });
+
+  it('disables managed auto-memory by default and honors a suite override', async () => {
+    const rig = new TestRig();
+    await rig.setup('managed memory default off');
+
+    const written = JSON.parse(
+      readFileSync(join(rig.testDir!, '.qwen', 'settings.json'), 'utf-8'),
+    ) as { memory?: Record<string, unknown> };
+    expect(written.memory).toEqual({
+      enableManagedAutoMemory: false,
+      enableManagedAutoDream: false,
+    });
+
+    const override = new TestRig();
+    await override.setup('managed memory opted back in', {
+      settings: { memory: { enableManagedAutoMemory: true } },
+    });
+    const overridden = JSON.parse(
+      readFileSync(join(override.testDir!, '.qwen', 'settings.json'), 'utf-8'),
+    ) as { memory?: Record<string, unknown> };
+    expect(overridden.memory).toEqual({
+      enableManagedAutoMemory: true,
+      enableManagedAutoDream: false,
+    });
   });
 
   it('removes the test directory during cleanup', async () => {
@@ -274,6 +299,150 @@ describe('TestRig', () => {
           `${JSON.stringify({ type: 'system' })}\nnot-json`,
         ),
       ).toThrow('Invalid stream-json frame on line 2');
+    });
+
+    it('fails closed on duplicate tool-use IDs', () => {
+      const toolUse = {
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'duplicate-call',
+              name: 'read_file',
+              input: { file_path: 'a.txt' },
+            },
+          ],
+        },
+      };
+
+      expect(() =>
+        parseStreamJsonToolCalls(
+          [JSON.stringify(toolUse), JSON.stringify(toolUse)].join('\n'),
+        ),
+      ).toThrow('Duplicate stream-json tool_use id "duplicate-call" on line 2');
+    });
+
+    it('fails closed on a result for an unknown tool-use ID', () => {
+      expect(() =>
+        parseStreamJsonToolCalls(
+          JSON.stringify({
+            type: 'user',
+            message: {
+              content: [
+                {
+                  type: 'tool_result',
+                  tool_use_id: 'missing-call',
+                  is_error: false,
+                  content: 'unexpected',
+                },
+              ],
+            },
+          }),
+        ),
+      ).toThrow('Unknown stream-json tool_result id "missing-call" on line 1');
+    });
+
+    it('fails closed on duplicate results for the same tool-use ID', () => {
+      const frames = [
+        {
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'call-1',
+                name: 'read_file',
+                input: { file_path: 'a.txt' },
+              },
+            ],
+          },
+        },
+        {
+          type: 'user',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'call-1',
+                is_error: true,
+                content: 'first result',
+              },
+            ],
+          },
+        },
+        {
+          type: 'user',
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'call-1',
+                is_error: false,
+                content: 'second result',
+              },
+            ],
+          },
+        },
+      ];
+
+      expect(() =>
+        parseStreamJsonToolCalls(
+          frames.map((frame) => JSON.stringify(frame)).join('\n'),
+        ),
+      ).toThrow('Duplicate stream-json tool_result id "call-1" on line 3');
+    });
+
+    it('allows separate parent tool scopes to reuse the same call ID', () => {
+      const frames = ['parent-1', 'parent-2'].flatMap((parentId) => [
+        {
+          type: 'assistant',
+          parent_tool_use_id: parentId,
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'call-1',
+                name: 'read_file',
+                input: { file_path: `${parentId}.txt` },
+              },
+            ],
+          },
+        },
+        {
+          type: 'user',
+          parent_tool_use_id: parentId,
+          message: {
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'call-1',
+                is_error: false,
+                content: parentId,
+              },
+            ],
+          },
+        },
+      ]);
+
+      expect(
+        parseStreamJsonToolCalls(
+          frames.map((frame) => JSON.stringify(frame)).join('\n'),
+        ).toolCalls,
+      ).toEqual([
+        {
+          callId: 'call-1',
+          name: 'read_file',
+          args: { file_path: 'parent-1.txt' },
+          success: true,
+        },
+        {
+          callId: 'call-1',
+          name: 'read_file',
+          args: { file_path: 'parent-2.txt' },
+          success: true,
+        },
+      ]);
     });
 
     it('matches both relative and absolute tool paths without substring collisions', () => {

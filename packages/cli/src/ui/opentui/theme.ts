@@ -25,7 +25,15 @@ export interface Palette {
   green: string;
   red: string;
   yellow: string;
+  /** ink `status.warningDim` / `status.errorDim` — the approval-mode chrome. */
+  warningDim: string;
+  errorDim: string;
   purple: string;
+  /** ink `ui.symbol` — the shell-mode status color. */
+  symbol: string;
+  /** ink `border.focused` / `border.default` — the composer outline. */
+  borderFocused: string;
+  borderDefault: string;
   hover: string;
   /** Mode background; lets selection colors keep contrast on light themes. */
   bg?: string;
@@ -42,7 +50,12 @@ const DARK: Palette = {
   green: '#A6E3A1',
   red: '#F38BA8',
   yellow: '#F9E2AF',
+  warningDim: '#8B7530',
+  errorDim: '#8B3A4A',
   purple: '#89B4FA',
+  symbol: '#89DCEB',
+  borderFocused: '#89B4FA',
+  borderDefault: '#6C7086',
   hover: '#313244',
   // No bg on dark: the default invert selection (bg=text fg, fg=black) is
   // readable on dark terminals, and leaving bg unset keeps transparency.
@@ -57,7 +70,12 @@ const LIGHT: Palette = {
   green: '#3CA84B',
   red: '#DD4C4C',
   yellow: '#D5A40A',
+  warningDim: '#8B7000',
+  errorDim: '#993333',
   purple: '#3B82F6',
+  symbol: '#06B6D4',
+  borderFocused: '#3B82F6',
+  borderDefault: '#97a0b0',
   hover: '#E6E9EF',
   // Light: paint the markdown block with the original light theme's
   // Background so opentui's invert-selection (fg→bg swap) stays readable —
@@ -71,7 +89,9 @@ const LIGHT: Palette = {
  *  `applyThemeMode` mutates it and a React re-render picks it up. */
 export const C: Palette = { ...DARK };
 
-function buildSyntax(mode: 'dark' | 'light'): SyntaxStyle {
+function buildSyntax(
+  mode: 'dark' | 'light',
+): Record<string, StyleDefinitionInput> {
   const styles =
     mode === 'light'
       ? {
@@ -108,10 +128,10 @@ function buildSyntax(mode: 'dark' | 'light'): SyntaxStyle {
           link: { fg: '#7aa2f7' },
           code: { fg: '#9ece6a' },
         };
-  return SyntaxStyle.fromStyles({
+  return {
     ...styles,
     ...markdownMarkupTokens(mode),
-  });
+  };
 }
 
 /**
@@ -150,19 +170,67 @@ export function markdownMarkupTokens(
   };
 }
 
-/** Mutable syntax style — rebuilt on theme change. */
-export let SYNTAX: SyntaxStyle = buildSyntax('dark');
+/** Mutable syntax styles — rebuilt on theme change. */
+export let SYNTAX: SyntaxStyle;
+
+/**
+ * The thought-body variant. ink renders it through MarkdownDisplay with
+ * `textColor={theme.text.secondary}`, which paints its plain text *and* its
+ * headings — only inline code and links keep their own colors. OpenTUI's
+ * `default` token colors plain inline text and wins over the element's `fg`
+ * prop, so the dimmed body needs its own token map. A theme that omits
+ * `default` (NoColor) keeps it omitted, as ink leaves that text uncolored.
+ */
+export let SYNTAX_DIM: SyntaxStyle;
+
+function dimThoughtTokens(
+  styles: Record<string, StyleDefinitionInput>,
+): Record<string, StyleDefinitionInput> {
+  const dimmed = { ...styles };
+  for (const token of Object.keys(dimmed)) {
+    if (token === 'default' || token.startsWith('markup.heading')) {
+      dimmed[token] = { ...dimmed[token], fg: C.dim };
+    }
+  }
+  return dimmed;
+}
+
+function setSyntax(styles: Record<string, StyleDefinitionInput>): void {
+  SYNTAX = SyntaxStyle.fromStyles(styles);
+  SYNTAX_DIM = SyntaxStyle.fromStyles(dimThoughtTokens(styles));
+}
+
+setSyntax(buildSyntax('dark'));
+
+/**
+ * The banner wordmark ramp — ink's `ui.gradient` for the active theme. Empty
+ * means the logo renders uncolored, which is what ink does when a theme has
+ * no two usable stops. Seeded with the built-in themes' `GradientColors` so
+ * the first paint, before any theme is applied, already matches ink.
+ */
+const DEFAULT_GRADIENT = ['#4796E4', '#847ACE', '#C3677F'];
+
+export let GRADIENT: string[] = DEFAULT_GRADIENT;
+
+/**
+ * Bumped on every repaint of the mutable palette. `C` is mutated in place and
+ * neither `settings` nor `config` changes identity when `/theme` writes, so a
+ * colour-bearing `useMemo` needs this as a dependency to recompute.
+ */
+export let THEME_REVISION = 0;
 
 export function applyThemeMode(
   mode: 'dark' | 'light' | null | undefined,
 ): void {
+  THEME_REVISION++;
   const m = mode === 'light' ? 'light' : 'dark';
   const surface = m === 'light' ? LIGHT : DARK;
   Object.assign(C, surface);
   // The dark surface has no `bg` (terminal transparency); Object.assign
   // never deletes keys, so a previous light `bg` must be cleared explicitly.
   C.bg = surface.bg;
-  SYNTAX = buildSyntax(m);
+  GRADIENT = DEFAULT_GRADIENT;
+  setSyntax(buildSyntax(m));
 }
 
 /**
@@ -178,6 +246,7 @@ export function applyThemeMode(
  * to magenta. Unresolvable values stay unset (ink degrades similarly).
  */
 export function applyOpenTuiTheme(definition: OpenTuiThemeDefinition): void {
+  THEME_REVISION++;
   const light = definition.type === 'light';
   const surface = light ? LIGHT : DARK;
   // Empty-string palette values mean "no color" in ink themes (the NoColor
@@ -191,6 +260,13 @@ export function applyOpenTuiTheme(definition: OpenTuiThemeDefinition): void {
   // The dark surface intentionally has no `bg` (keeps terminal transparency);
   // Object.assign never clears keys, so reset it explicitly.
   C.bg = surface.bg;
+  // Same parseColor reason as the palette: resolve the stops to #rrggbb.
+  // Fewer than two survivors means no ramp at all — ink renders the logo
+  // uncolored in that case rather than painting a single stop.
+  const gradient = definition.gradient
+    .map((stop) => toHex(stop))
+    .filter((stop): stop is string => stop !== undefined);
+  GRADIENT = gradient.length >= 2 ? gradient : [];
   const syntaxStyles: Record<string, StyleDefinitionInput> = {};
   for (const [token, style] of Object.entries(definition.syntaxStyles)) {
     const resolved: StyleDefinitionInput = { ...style };
@@ -204,7 +280,7 @@ export function applyOpenTuiTheme(definition: OpenTuiThemeDefinition): void {
     }
     syntaxStyles[token] = resolved;
   }
-  SYNTAX = SyntaxStyle.fromStyles({
+  setSyntax({
     // `default` colors unstyled markdown chunks (table cells, plain inline
     // text); anchor it on the theme's own foreground when it resolved.
     ...(palette.text ? { default: { fg: palette.text } } : {}),

@@ -13,7 +13,9 @@ import type {
   GoalStateCause,
 } from '@qwen-code/qwen-code-core';
 import { collectSessionData } from './collect.js';
+import { toJson } from './formatters/json.js';
 import { toJsonl } from './formatters/jsonl.js';
+import { toMarkdown } from './formatters/markdown.js';
 import type { ExportConfig } from './types.js';
 
 describe('collectSessionData', () => {
@@ -22,6 +24,81 @@ describe('collectSessionData', () => {
       getTool: vi.fn().mockReturnValue(null),
     }),
   } as unknown as Config;
+
+  it('keeps nested writes out of direct-call file statistics', async () => {
+    const base = {
+      sessionId: 'session-1',
+      timestamp: '2026-08-16T00:00:00.000Z',
+      cwd: '/workspace',
+      version: 'test',
+    };
+    const records: ChatRecord[] = [
+      {
+        ...base,
+        uuid: 'calls',
+        parentUuid: null,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'direct',
+                name: 'write_file',
+                args: { file_path: '/workspace/direct.txt' },
+              },
+            },
+          ],
+        },
+      },
+      ...['nested-1', 'nested-2', 'direct'].map(
+        (id, index): ChatRecord => ({
+          ...base,
+          uuid: id,
+          parentUuid: index === 0 ? 'calls' : `nested-${index}`,
+          type: 'tool_result',
+          ...(id !== 'direct'
+            ? { subtype: 'code_mode_tool_result' as const }
+            : {}),
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id,
+                  name: 'write_file',
+                  response: { output: 'written' },
+                },
+              },
+            ],
+          },
+          toolCallResult: {
+            callId: id,
+            resultDisplay: {
+              fileName: `${id}.txt`,
+              fileDiff: '@@ -0,0 +1,2 @@\n+one\n+two',
+              originalContent: null,
+              newContent: 'one\ntwo',
+            },
+          },
+        }),
+      ),
+    ];
+    const data = await collectSessionData(
+      {
+        sessionId: base.sessionId,
+        startTime: base.timestamp,
+        messages: records,
+      },
+      config,
+    );
+    expect(data.metadata).toMatchObject({
+      filesWritten: 1,
+      linesAdded: 2,
+      linesRemoved: 0,
+      uniqueFiles: ['/workspace/direct.txt'],
+    });
+  });
 
   it('keeps oversized canonical tool results lossless in offline export', async () => {
     const source = `head-${'x'.repeat(499_999)}-tail`;
@@ -344,13 +421,23 @@ describe('collectSessionData', () => {
       const uuids = data.messages.map((message) => message.uuid);
       expect(new Set(uuids).size).toBe(uuids.length);
       expect(data.messages[0]).toMatchObject({
+        uuid: 'user-1',
         type: 'user',
         timestamp: '2026-09-17T00:00:01.000Z',
       });
-      expect(data.messages[0]!.uuid).not.toBe('goal-create');
       expect(data.messages[1]).toMatchObject({
         uuid: 'goal-create',
         goalState: { v: 2, cause: 'create' },
+      });
+
+      const assistant = data.messages.find((message) =>
+        message.message?.parts?.some(
+          (part) => part.text === 'assistant assistant-1',
+        ),
+      );
+      expect(assistant).toMatchObject({
+        uuid: 'assistant-1',
+        timestamp: '2026-09-17T00:00:02.000Z',
       });
 
       const reject = data.messages.find(
@@ -390,6 +477,15 @@ describe('collectSessionData', () => {
         message: { parts: [{ text: 'Goal clear' }] },
         goalState: { cause: 'clear', snapshot: { goal: null } },
       });
+      const clearLine = data.messages.find((message) =>
+        message.message?.parts?.some((part) => part.text === '/goal clear'),
+      );
+      expect(clearLine).toMatchObject({
+        timestamp: '2026-09-17T00:00:02.000Z',
+      });
+      expect(clearLine?.uuid).not.toBe('goal-clear');
+      const uuids = data.messages.map((message) => message.uuid);
+      expect(new Set(uuids).size).toBe(uuids.length);
       const lines = toJsonl(data)
         .split('\n')
         .map((line) => JSON.parse(line));
@@ -442,6 +538,236 @@ describe('collectSessionData', () => {
       );
 
       expect(data.messages.map((message) => message.type)).toEqual(['user']);
+    });
+  });
+
+  it('keeps every exported message on its source record identity', async () => {
+    const records: ChatRecord[] = [
+      {
+        uuid: 'user-1',
+        parentUuid: null,
+        sessionId: 'session-identity',
+        timestamp: '2026-09-17T15:52:44.524Z',
+        type: 'user',
+        cwd: '',
+        version: '1.0.0',
+        message: { role: 'user', parts: [{ text: 'first question' }] },
+      },
+      {
+        uuid: 'assistant-1',
+        parentUuid: 'user-1',
+        sessionId: 'session-identity',
+        timestamp: '2026-09-17T15:52:48.291Z',
+        type: 'assistant',
+        cwd: '',
+        version: '1.0.0',
+        message: {
+          role: 'model',
+          parts: [
+            { text: 'thinking about it', thought: true },
+            { text: 'first answer' },
+          ],
+        },
+      },
+      {
+        uuid: 'user-2',
+        parentUuid: 'assistant-1',
+        sessionId: 'session-identity',
+        timestamp: '2026-09-17T15:53:10.000Z',
+        type: 'user',
+        cwd: '',
+        version: '1.0.0',
+        message: { role: 'user', parts: [{ text: 'second question' }] },
+      },
+      {
+        uuid: 'assistant-2',
+        parentUuid: 'user-2',
+        sessionId: 'session-identity',
+        timestamp: '2026-09-17T15:53:14.500Z',
+        type: 'assistant',
+        cwd: '',
+        version: '1.0.0',
+        message: { role: 'model', parts: [{ text: 'second answer' }] },
+      },
+    ];
+
+    const data = await collectSessionData(
+      {
+        sessionId: 'session-identity',
+        startTime: '2026-09-17T15:52:44.524Z',
+        messages: records,
+      },
+      config,
+    );
+
+    // Identity is a provenance invariant: a message's uuid/timestamp identify
+    // the record it came from. A single record may legitimately yield several
+    // messages (its thought and text parts), so uuid is not unique per message.
+    expect(
+      data.messages.map((message) => [
+        message.message?.role,
+        message.uuid,
+        message.timestamp,
+      ]),
+    ).toEqual([
+      ['user', 'user-1', '2026-09-17T15:52:44.524Z'],
+      ['thinking', 'assistant-1', '2026-09-17T15:52:48.291Z'],
+      ['assistant', 'assistant-1', '2026-09-17T15:52:48.291Z'],
+      ['user', 'user-2', '2026-09-17T15:53:10.000Z'],
+      ['assistant', 'assistant-2', '2026-09-17T15:53:14.500Z'],
+    ]);
+  });
+
+  it('merges the text chunks of one record into a single message', async () => {
+    const records: ChatRecord[] = [
+      {
+        uuid: 'assistant-1',
+        parentUuid: null,
+        sessionId: 'session-chunks',
+        timestamp: '2026-09-17T15:52:48.291Z',
+        type: 'assistant',
+        cwd: '',
+        version: '1.0.0',
+        message: {
+          role: 'model',
+          parts: [{ text: 'first chunk ' }, { text: 'second chunk' }],
+        },
+      },
+    ];
+
+    const data = await collectSessionData(
+      {
+        sessionId: 'session-chunks',
+        startTime: '2026-09-17T15:52:48.291Z',
+        messages: records,
+      },
+      config,
+    );
+
+    expect(data.messages).toHaveLength(1);
+    expect(data.messages[0]?.uuid).toBe('assistant-1');
+    expect(data.messages[0]?.timestamp).toBe('2026-09-17T15:52:48.291Z');
+    expect(
+      data.messages[0]?.message?.parts?.map((part) => part.text).join(''),
+    ).toBe('first chunk second chunk');
+  });
+
+  describe('session agent replies', () => {
+    const base = {
+      sessionId: 'session-agents',
+      cwd: '',
+      version: '1.0.0',
+    };
+    const agentReply = (
+      uuid: string,
+      parentUuid: string,
+      name: string,
+      displayText: string,
+    ): ChatRecord =>
+      ({
+        ...base,
+        uuid,
+        parentUuid,
+        timestamp: '2026-10-06T10:00:02.000Z',
+        type: 'user',
+        subtype: 'agent_message',
+        provenance: 'external_agent',
+        message: {
+          role: 'user',
+          parts: [{ text: `<agent_message>${displayText}</agent_message>` }],
+        },
+        systemPayload: {
+          displayText,
+          author: { agentId: `id-${name}`, name },
+          runId: `run-${uuid}`,
+          status: 'completed',
+        },
+        agentId: `id-${name}`,
+        agentName: name,
+      }) as unknown as ChatRecord;
+    const records: ChatRecord[] = [
+      {
+        ...base,
+        uuid: 'user-1',
+        parentUuid: null,
+        timestamp: '2026-10-06T10:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Plan the release' }] },
+      },
+      {
+        ...base,
+        uuid: 'assistant-1',
+        parentUuid: 'user-1',
+        timestamp: '2026-10-06T10:00:01.000Z',
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'Main answer.' }] },
+      },
+      agentReply('agent-1', 'assistant-1', 'claude-B', 'Looks good.'),
+      agentReply('agent-2', 'agent-1', 'codex-C', 'One nit.'),
+    ];
+
+    it('keeps each agent reply its own message, with its agent as author', async () => {
+      const data = await collectSessionData(
+        {
+          sessionId: 'session-agents',
+          startTime: '2026-10-06T10:00:00.000Z',
+          messages: records,
+        },
+        config,
+      );
+
+      expect(
+        data.messages.map((message) => [
+          message.type,
+          message.author?.name,
+          message.message?.parts?.map((part) => part.text).join(''),
+        ]),
+      ).toEqual([
+        ['user', undefined, 'Plan the release'],
+        ['assistant', undefined, 'Main answer.'],
+        ['assistant', 'claude-B', 'Looks good.'],
+        ['assistant', 'codex-C', 'One nit.'],
+      ]);
+    });
+
+    it('prints the agent name in Markdown and carries it in JSON', async () => {
+      const data = await collectSessionData(
+        {
+          sessionId: 'session-agents',
+          startTime: '2026-10-06T10:00:00.000Z',
+          messages: records,
+        },
+        config,
+      );
+
+      const markdown = toMarkdown(data);
+      expect(markdown).toContain(
+        '## Assistant\n\n**claude-B**:\n\nLooks good.',
+      );
+      expect(markdown).toContain('## Assistant\n\n**codex-C**:\n\nOne nit.');
+      expect(markdown).toContain('## Assistant\n\nMain answer.');
+
+      const json = JSON.parse(toJson(data)) as {
+        messages: Array<{ author?: { name: string } }>;
+      };
+      expect(json.messages.map((message) => message.author?.name)).toEqual([
+        undefined,
+        undefined,
+        'claude-B',
+        'codex-C',
+      ]);
+    });
+
+    it('escapes Markdown in an agent name', async () => {
+      const data = await collectSessionData(
+        {
+          sessionId: 'session-agents',
+          startTime: '2026-10-06T10:00:00.000Z',
+          messages: [agentReply('agent-x', 'none', 'a*b_<c>', 'Hi.')],
+        },
+        config,
+      );
+      expect(toMarkdown(data)).toContain('**a\\*b\\_&lt;c>**:');
     });
   });
 
