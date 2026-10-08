@@ -361,11 +361,14 @@ public final class RuntimeBrokerService implements AutoCloseable {
         if (context == null) {
             result = provisioner.reconcile(binding.getRequest(), binding.getProvisionSeed(),
                     binding.getResourceHandle(), binding.getLease()).thenCompose(observation -> {
-                        if (renewal != null && observation != null
+                        if (observation != null
                                 && observation.getOutcome() == RuntimeObservation.Outcome.NOT_FOUND
                                 && observation.getLossEvidence() != null
                                 && observation.getLossEvidence().matches(binding.getProvisionSeed(),
                                         binding.getResourceHandle(), binding.getLease())) {
+                            if (renewal == null) {
+                                return drainBinding(binding);
+                            }
                             if (executionRepository.hasActiveByBinding(binding.getBindingId(), binding.getGeneration())) {
                                 throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
                             }

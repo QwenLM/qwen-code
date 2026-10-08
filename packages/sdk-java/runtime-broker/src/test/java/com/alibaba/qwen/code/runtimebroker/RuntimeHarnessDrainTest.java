@@ -203,6 +203,41 @@ class RuntimeHarnessDrainTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"READY", "ACQUIRING", "RELEASING"})
+    void restoredHookDetachDrainsTheAbsentOriginalWorkerBeforeReleasingSessions(String state) throws Exception {
+        var binding = ready();
+        for (String id : java.util.List.of("original", "earlier-owner")) {
+            var saved = bindings.admitSession(sessions, candidate(binding, id));
+            assertNotNull(sessions.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.valueOf(state), Instant.now())));
+        }
+        provisioner.observation = CompletableFuture.completedFuture(RuntimeObservation.notFound(
+                evidence(binding.getProvisionSeed(), binding.getResourceHandle(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST), null));
+        provisioner.stop = new CompletableFuture<>();
+        try (var service = restoredService(bindings, Duration.ofSeconds(2))) {
+            service.requestHarnessDrain("tenant", "harness");
+            var release = service.release("harness", "original").toCompletableFuture();
+            assertFalse(release.isDone());
+            assertEquals(2, sessions.countActiveByBinding(binding.getBindingId(), binding.getGeneration()));
+            assertNull(bindings.findById(binding.getBindingId()).getDrainReceipt());
+            provisioner.stop.complete(receipt(binding));
+            assertTrue(release.get(5, TimeUnit.SECONDS));
+            var retired = bindings.findById(binding.getBindingId());
+            assertEquals(RuntimeBindingRecord.State.RELEASED, retired.getState());
+            assertTrue(retired.getDrainReceipt().matches(retired));
+            assertEquals(binding.getGeneration(), retired.getGeneration());
+            assertEquals(binding.getResourceHandle(), retired.getResourceHandle());
+            assertEquals(0, sessions.countActiveByBinding(binding.getBindingId(), binding.getGeneration()));
+            assertEquals(2, provisioner.observations);
+            assertEquals(1, provisioner.stops);
+            assertEquals(0, transport.releases);
+            assertEquals(0, transport.acquires);
+            assertEquals(0, provisioner.provisions);
+            assertTrue(service.release("harness", "earlier-owner").toCompletableFuture().get());
+            assertEquals(1, provisioner.stops);
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"missing", "handle", "lease", "unknown"})
     void missingOrForeignAbsenceEvidenceCannotStopTheOriginalWorker(String mismatch) throws Exception {
         var binding = ready();

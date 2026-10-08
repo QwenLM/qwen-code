@@ -47,6 +47,13 @@ active execution remains. NOT_FOUND and JOURNAL_LOST are not stop receipts.
 The provisioner must still verify the original durable registration and native
 PID/boot identity, including the existing trusted same-machine reboot rule.
 
+Hook detach can encounter the absent worker before Workspace close starts its
+binding drain. With the durable Harness drain fence and matching original
+absence evidence, route that release through the same claimed binding drain.
+It rechecks the original identity under the claim and releases all original
+Sessions only after persisting the stop receipt. The writer must still seal
+before Workspace retirement can complete.
+
 Persist the matching original stop receipt under the renewable operation claim
 before logically releasing any saved Session. Then use the existing guarded
 Session release transactions without contacting a worker proven stopped.
@@ -78,7 +85,8 @@ Session, unknown execution, and READY-but-unusable refusal controls.
 
 The independent test engineer freezes exact products and runs one new native
 case per fault: Spring restart, all original product processes crashing, and
-actual OS reboot. Each must preserve original binding/generation/handle and
+actual OS reboot, plus Broker restart with original workers exited while the
+Harness retains its Hook attachment. Each must preserve original binding/generation/handle and
 effect bytes, execute End and Delete once each, avoid replacement workers or
 model replay, confirm original stop receipts, seal the original writer, and
 commit one retirement tombstone. Record raw command failures separately from

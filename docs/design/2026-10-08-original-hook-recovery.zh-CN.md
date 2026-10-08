@@ -41,6 +41,11 @@ NOT_FOUND 观察才能请求 provisioner 已有的 `stopDrained` 操作。NOT_FO
 和 JOURNAL_LOST 不是停机 receipt。provisioner 仍须校验原持久注册和原生
 PID/boot 身份，包括现有受信任的同机器重启规则。
 
+Hook detach 可能先于 Workspace close 的 binding drain 遇到原 worker 已退出。
+在持久 Harness drain 屏障和匹配的原缺失证据下，将该释放导向同一已 claim
+的 binding drain。它在 claim 下重新校验原身份，只在停机 receipt 持久化后
+释放全部原 Session。Workspace 退役完成前仍须 seal 原 writer。
+
 在逻辑释放任何保存的 Session 前，先在可续约的 operation claim 下持久化
 匹配的原停机 receipt。随后使用已有受保护的 Session 释放事务，不再联系
 已经证明停止的 worker，且持续要求零活跃执行。失败、过期或被 fencing 的
@@ -68,7 +73,8 @@ detach、SessionLifecycleCoordinator 和 WorkspaceLifecycleStore。公开 READY
 fencing。保留 LOST Session、未知执行和 READY 但不可用的拒绝控制。
 
 独立 test-engineer 冻结精确产物，每种故障运行一个新原生用例：Spring
-重启、全部原产品进程崩溃、实际操作系统重启。每项必须保留原
+重启、全部原产品进程崩溃、实际操作系统重启，以及 Harness 保留 Hook
+attachment 时 Broker 重启且原 worker 已退出。每项必须保留原
 binding/generation/handle 和效果字节，End 和 Delete 各执行一次，不派发
 替代 worker 或重放模型请求，确认原停机 receipt，seal 原 writer，并提交
 一个退役墓碑。原始命令失败与产品结局分别记录。另以新资源验证有界的
