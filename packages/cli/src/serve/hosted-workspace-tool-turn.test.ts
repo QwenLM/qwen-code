@@ -61,6 +61,7 @@ import * as stdio from '../utils/stdioHelpers.js';
 
 const broker = vi.hoisted(() => ({
   fileHistory: vi.fn(),
+  authorizeLifecycle: vi.fn(),
   workspaceContext: vi.fn(),
   warm: vi.fn(),
   acquire: vi.fn(),
@@ -85,6 +86,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
     fileHistory = broker.fileHistory;
+    authorizeLifecycle = broker.authorizeLifecycle;
     workspaceContext = broker.workspaceContext;
     warm = broker.warm;
     acquire = broker.acquire;
@@ -172,6 +174,7 @@ beforeEach(async () => {
   vi.resetAllMocks();
   expectWritesStopped = false;
   for (const method of [
+    broker.authorizeLifecycle,
     broker.warm,
     broker.acquire,
     broker.cancel,
@@ -1253,6 +1256,9 @@ function contextSlot() {
     write(context: string) {
       this.value = context;
     },
+    invalidate() {
+      this.value = undefined;
+    },
   };
 }
 
@@ -1418,6 +1424,33 @@ it('cancels a turn without waiting for a stalled Workspace context read', async 
   await turn.finish();
   expect(broker.release).toHaveBeenCalledOnce();
 });
+
+it.each([
+  ['QWEN.md', true],
+  ['AGENTS.md', true],
+  ['docs/QWEN.md', false],
+  ['file.txt', false],
+] as const)(
+  'an edit of %s invalidates the cached Workspace context: %s',
+  async (file, stale) => {
+    const slot = contextSlot();
+    slot.value = 'cached rules';
+    turn = turnWithContext(slot);
+    const call = { ...calls[1], args: { ...calls[1].args, file_path: file } };
+    await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args: call.args } }],
+      'model',
+      new AbortController().signal,
+    );
+    await turn.consumeResults();
+    await turn.finish();
+    // Only the Session-root instruction files are read, so only they stale it.
+    expect(slot.value).toBe(stale ? undefined : 'cached rules');
+    // The slot already held text, so this turn did not read again.
+    expect(broker.workspaceContext).not.toHaveBeenCalled();
+  },
+);
 
 it('never blocks a turn when the Workspace context read fails', async () => {
   const log = vi

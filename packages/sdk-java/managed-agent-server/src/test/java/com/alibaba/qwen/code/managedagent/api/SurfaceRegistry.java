@@ -228,6 +228,16 @@ public enum SurfaceRegistry {
             Surface.WEBSHELL, RuleClass.WORKSPACE_DISCOVERY,
             EnumSet.of(Capability.WORKSPACE_GET)),
     // ManagedSessionStoreController: internal writer routes.
+    INTERNAL_EXECUTION_AUTHORIZE(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}"
+                    + "/execution:authorize",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_EXECUTION_AUTHORIZE)),
+    INTERNAL_LIFECYCLE_AUTHORIZE(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}"
+                    + "/lifecycle:authorize",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_LIFECYCLE_AUTHORIZE)),
     INTERNAL_WRITER_ACQUIRE(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
                     + "/writers:acquire",
@@ -451,6 +461,8 @@ public enum SurfaceRegistry {
         AGENT_DEFINITION_CREATE,
         AGENT_DEFINITION_GET,
         AGENT_DEFINITION_UPDATE,
+        STORE_EXECUTION_AUTHORIZE,
+        STORE_LIFECYCLE_AUTHORIZE,
         STORE_WRITER_ACQUIRE,
         STORE_WRITER_RENEW,
         STORE_WRITER_SEAL,
