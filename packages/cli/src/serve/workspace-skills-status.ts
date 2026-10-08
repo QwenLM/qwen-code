@@ -237,6 +237,14 @@ async function buildWorkspaceSkillsStatus(
             // write this probe must not perform (and cannot, on a read-only
             // home). A corrupt store still fails closed out of peekSnapshot.
             const snapshot = await extensionStore.peekSnapshot();
+            if (!snapshot) {
+              const emptiness = await extensionStore.inspectEmptiness();
+              if (emptiness.status !== 'empty') {
+                throw new Error(
+                  'Extension activation state requires recovery before Skills can be listed.',
+                );
+              }
+            }
             if (snapshot) {
               if (managedExtensionsDir) {
                 extensions = await extensionManager.loadManagedExtensions(
@@ -244,6 +252,21 @@ async function buildWorkspaceSkillsStatus(
                   { createDataDir: false },
                 );
                 for (const extension of extensions) {
+                  const policy = snapshot.extensions[extension.id];
+                  if (
+                    policy?.name !== extension.name &&
+                    Object.values(snapshot.extensions).some(
+                      (candidate) =>
+                        candidate.name.toLowerCase() ===
+                          extension.name.toLowerCase() ||
+                        candidate.managedName?.toLowerCase() ===
+                          extension.name.toLowerCase(),
+                    )
+                  ) {
+                    throw new Error(
+                      `Extension "${extension.name}" activation state requires identity migration before Skills can be listed.`,
+                    );
+                  }
                   extension.isActive =
                     extensionStore.getActivation(
                       snapshot,
@@ -258,9 +281,8 @@ async function buildWorkspaceSkillsStatus(
             }
           }
           if (!storeRead) {
-            // Fresh home: neither the user extensions dir nor the store
-            // exists, so no activation preferences can exist, and a
-            // store-free managed discovery with manifest defaults gives the
+            // A fresh home or provably empty store has no activation state.
+            // Store-free managed discovery with manifest defaults gives the
             // same answer — and performs no write. createDataDir: false
             // keeps the probe read-only even for agent-plugins-format
             // managed packages.

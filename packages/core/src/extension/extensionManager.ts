@@ -1565,75 +1565,69 @@ export class ExtensionManager {
     // Stamping post-load would mask that change until something else moved.
     const dirFingerprintBeforeLoad =
       requestedNames.length === 0 ? this.extensionDirFingerprint() : undefined;
-    const handedBackManagedNames: string[] = [];
     let managedAbsenceProven = false;
     const unprovenManagedNames = new Set<string>();
-    const { value: extensions, snapshot } =
-      await this.extensionStore.readConsistent(
-        async () => {
-          let managedListFailed = false;
-          let unnamedManagedFailure = false;
-          const discovered = await this.loadDiscoveredExtensions(
-            this.workspaceDir,
-            {
-              createDataDir: options?.createDataDir,
-              onManagedListFailure: () => {
-                managedListFailed = true;
-              },
-              onManagedLoadFailure: (failure) => {
-                // A failing entry whose declared name could not be recovered
-                // can still be a deployed package the stale-entry branch
-                // would otherwise hand back to a same-name user copy.
-                if (failure.name === undefined) unnamedManagedFailure = true;
-              },
-              onManagedEntrySkipped: (directory) => {
-                // A present entry whose manifest is momentarily missing (a
-                // non-atomic deploy) cannot prove its own package withdrawn.
-                unprovenManagedNames.add(
-                  path.basename(directory).toLowerCase(),
-                );
-              },
+    const { value: extensions, snapshot: refreshedSnapshot } =
+      await this.extensionStore.readConsistent(async () => {
+        let managedListFailed = false;
+        let unnamedManagedFailure = false;
+        const discovered = await this.loadDiscoveredExtensions(
+          this.workspaceDir,
+          {
+            createDataDir: options?.createDataDir,
+            onManagedListFailure: () => {
+              managedListFailed = true;
             },
-          );
-          const requested = new Set(
-            requestedNames.map((name) => name.toLowerCase()),
-          );
-          const loaded =
-            requested.size > 0
-              ? discovered.filter((extension) =>
-                  requested.has(extension.name.toLowerCase()),
-                )
-              : discovered;
-          managedAbsenceProven =
-            this.managedExtensionsDir !== undefined &&
-            !managedListFailed &&
-            !unnamedManagedFailure;
-          return {
-            value: loaded,
-            extensions: loaded.map((extension) => ({
-              id: extension.id,
-              name: extension.name,
-              source: extension.source,
-              ...(extension.source === 'managed'
-                ? { managedDirectory: path.basename(extension.path) }
-                : {}),
-            })),
-            // The store may treat a missing managed identity as a withdrawal
-            // only when this process can see the root: an unconfigured or
-            // unlistable root makes the managed set unknown, not empty — as
-            // does an entry that failed before its name could be read.
-            managedAbsenceProven:
-              options?.allowManagedHandBack !== false && managedAbsenceProven,
-            unprovenManagedNames,
-          };
-        },
-        {
-          onManagedHandBack: (name) => {
-            handedBackManagedNames.push(name);
+            onManagedLoadFailure: (failure) => {
+              // A failing entry whose declared name could not be recovered
+              // can still be a deployed package the stale-entry branch
+              // would otherwise hand back to a same-name user copy.
+              if (failure.name === undefined) unnamedManagedFailure = true;
+            },
+            onManagedEntrySkipped: (directory) => {
+              // A present entry whose manifest is momentarily missing (a
+              // non-atomic deploy) cannot prove its own package withdrawn.
+              unprovenManagedNames.add(path.basename(directory).toLowerCase());
+            },
           },
-        },
-      );
-    await this.clearHandedBackManagedSecrets(handedBackManagedNames);
+        );
+        const requested = new Set(
+          requestedNames.map((name) => name.toLowerCase()),
+        );
+        const loaded =
+          requested.size > 0
+            ? discovered.filter((extension) =>
+                requested.has(extension.name.toLowerCase()),
+              )
+            : discovered;
+        managedAbsenceProven =
+          this.managedExtensionsDir !== undefined &&
+          !managedListFailed &&
+          !unnamedManagedFailure;
+        return {
+          value: loaded,
+          extensions: loaded.map((extension) => ({
+            id: extension.id,
+            name: extension.name,
+            source: extension.source,
+            ...(extension.source === 'managed'
+              ? { managedDirectory: path.basename(extension.path) }
+              : {}),
+          })),
+          // The store may treat a missing managed identity as a withdrawal
+          // only when this process can see the root: an unconfigured or
+          // unlistable root makes the managed set unknown, not empty — as
+          // does an entry that failed before its name could be read.
+          managedAbsenceProven:
+            options?.allowManagedHandBack !== false && managedAbsenceProven,
+          unprovenManagedNames,
+        };
+      });
+    const cleanup =
+      options?.allowManagedHandBack === false
+        ? { snapshot: refreshedSnapshot, skipped: false }
+        : await this.clearPendingManagedSecrets(refreshedSnapshot);
+    const snapshot = cleanup.snapshot;
     const nextCache = new Map<string, Extension>();
     extensions.forEach((extension) => {
       nextCache.set(extension.name, extension);
@@ -1651,7 +1645,9 @@ export class ExtensionManager {
     // Only a full refresh establishes a baseline. A name-filtered refresh leaves
     // the cache partial, so claiming the whole directory is up to date would let
     // `refreshCacheIfSourcesChanged` report "unchanged" over a partial set.
-    if (dirFingerprintBeforeLoad !== undefined) {
+    if (cleanup.skipped) {
+      this.lastSourceFingerprint = undefined;
+    } else if (dirFingerprintBeforeLoad !== undefined) {
       this.lastSourceFingerprint = this.sourceFingerprint(
         dirFingerprintBeforeLoad,
       );
@@ -1749,26 +1745,32 @@ export class ExtensionManager {
     };
   }
 
-  // The refresh-time hand-back deletes the managed marker every secret
-  // cleanup path keys on, so it must finish the transition itself: secrets
-  // written for the managed package live under the managed identity and
-  // would otherwise sit orphaned in the backend forever. A cleanup failure
-  // is a warning, never a refresh failure — the release path's preference
-  // cleanup follows the same rule.
-  private async clearHandedBackManagedSecrets(
-    names: readonly string[],
-  ): Promise<void> {
-    for (const name of names) {
-      try {
+  private async clearPendingManagedSecrets(snapshot: ExtensionStoreSnapshot) {
+    if (!snapshot.pendingManagedSecretNames?.length) {
+      return { snapshot, failures: [], skipped: false };
+    }
+    const result = await this.extensionStore.clearPendingManagedSecrets(
+      async (name) => {
+        await this.assertManagedExtensionAbsent(name);
         await clearStoredExtensionSecrets(name, getManagedExtensionId(name), [
           this.workspaceDir,
         ]);
-      } catch (error) {
-        debugLogger.warn(
-          `Managed extension "${name}" was handed back, but stored-secret cleanup failed: ${getErrorMessage(error)}`,
-        );
-      }
+      },
+      snapshot.generation,
+    );
+    // Keep the atomic discovery pair when another writer won the phase gap.
+    // Its durable cleanup debt can be retried by the next mutating refresh.
+    if (result.skipped) return { snapshot, failures: [], skipped: true };
+    for (const { name, error } of result.failures) {
+      process.stderr.write(
+        `Warning: Managed extension "${name}" was released, but stored-secret cleanup remains pending: ${getErrorMessage(error)}\n`,
+      );
     }
+    return {
+      snapshot: result.snapshot,
+      failures: result.failures,
+      skipped: false,
+    };
   }
 
   async refreshExtensionDetailsSnapshot(name: string): Promise<{
@@ -1904,9 +1906,9 @@ export class ExtensionManager {
    * `enable` / `disable` land.
    *
    * Unlike the directory part this is stamped *after* a refresh, because a
-   * refresh writes the store itself. That is safe: store mutations hold the
-   * store lock, so no external write can interleave with the refresh and be
-   * masked by the post-load stamp.
+   * refresh writes the store itself. A deferred cleanup keeps the captured
+   * discovery view and invalidates its baseline instead of stamping a newer
+   * store generation that view did not observe.
    */
   private extensionStoreFingerprint(): string {
     return [
@@ -2721,6 +2723,8 @@ export class ExtensionManager {
             `Failed to load Agent Plugins manifest from ${path.join(extensionDir, 'plugin.json')}: ${getErrorMessage(error)}`,
           ),
           path.join(extensionDir, AGENT_PLUGIN_MANIFEST),
+          undefined,
+          extensionDir,
         );
       }
     }
@@ -3998,7 +4002,8 @@ export class ExtensionManager {
         // (removePolicy then silently keeps it) fails the release instead of
         // being destroyed under a live policy.
         let secretNames: string[] = [];
-        const released = await this.extensionStore.removePolicy(
+        let preserveUserSurface = false;
+        const releaseSnapshot = await this.extensionStore.removePolicy(
           { id: extensionId, name: policy.name },
           {
             beforeRemove: async (current) => {
@@ -4012,6 +4017,20 @@ export class ExtensionManager {
               }
               await this.assertManagedExtensionAbsent(current.name);
             },
+            preserveActivation: async (current) => {
+              preserveUserSurface = await this.hasSurvivingUserExtension(
+                current.name,
+                snapshot,
+              );
+              await this.assertManagedExtensionAbsent(current.name);
+              return preserveUserSurface
+                ? {
+                    id: hashValue(current.name),
+                    name: current.name,
+                    source: 'user',
+                  }
+                : undefined;
+            },
             onRemoved: (removed) => {
               secretNames = getManagedSecretNames(removed);
             },
@@ -4019,33 +4038,19 @@ export class ExtensionManager {
         );
         if (
           secretNames.length === 0 ||
-          released.extensions[extensionId] !== undefined
+          releaseSnapshot.extensions[extensionId] !== undefined
         ) {
           throw new ExtensionConflictError(
             `Extension "${policy.name}" changed while its release was being committed.`,
           );
         }
+        const cleanup = await this.clearPendingManagedSecrets(releaseSnapshot);
+        const released = cleanup.snapshot;
         const warnings: NonNullable<ExtensionStoreMutationResult['warnings']> =
-          [];
-        for (const name of secretNames) {
-          try {
-            await clearStoredExtensionSecrets(name, extensionId, [
-              this.workspaceDir,
-            ]);
-          } catch (error) {
-            debugLogger.warn(
-              `Managed extension "${name}" was released, but stored-secret cleanup failed: ${getErrorMessage(error)}`,
-            );
-            warnings.push({
-              code: 'extension_secrets_cleanup_failed',
-              error: getErrorMessage(error),
-            });
-          }
-        }
-        let preserveUserSurface = await this.hasSurvivingUserExtension(
-          policy.name,
-          released,
-        );
+          cleanup.failures.map(({ error }) => ({
+            code: 'extension_secrets_cleanup_failed',
+            error: getErrorMessage(error),
+          }));
         if (!preserveUserSurface) {
           for (const name of secretNames) {
             let artifactAbsenceProven = false;
@@ -4557,11 +4562,19 @@ function withDeclaredExtensionName(
   error: Error,
   manifestPath?: string,
   parsedName?: unknown,
+  manifestRoot?: string,
 ): Error {
   let name = typeof parsedName === 'string' && parsedName ? parsedName : '';
-  if (!name && manifestPath) {
+  if (!name && manifestPath && manifestRoot) {
     try {
-      const raw = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as {
+      const resolvedManifestPath = resolveContainedExistingPath(
+        manifestRoot,
+        manifestPath,
+      );
+      if (!fs.statSync(resolvedManifestPath).isFile()) return error;
+      const raw = JSON.parse(
+        fs.readFileSync(resolvedManifestPath, 'utf-8'),
+      ) as {
         name?: unknown;
       };
       if (typeof raw.name === 'string') name = raw.name;

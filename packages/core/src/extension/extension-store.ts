@@ -74,6 +74,25 @@ function restorePreservedActivationSurface(policy: ExtensionPolicy): void {
   }
 }
 
+function handBackManagedPolicy(
+  snapshot: ExtensionStoreSnapshot,
+  policy: ExtensionPolicy,
+): string[] {
+  const names = getManagedSecretNames(policy);
+  snapshot.pendingManagedSecretNames = [
+    ...new Set([...(snapshot.pendingManagedSecretNames ?? []), ...names]),
+  ];
+  delete policy.managed;
+  delete policy.managedName;
+  delete policy.managedSecretNames;
+  delete policy.managedDirectory;
+  restorePreservedActivationSurface(policy);
+  if (policy.artifactGeneration === undefined) {
+    policy.preserveActivationOnNextInstall = true;
+  }
+  return names;
+}
+
 export type ExtensionActivation = 'enabled' | 'disabled';
 export type WorkspaceActivation = ExtensionActivation | 'inherit';
 
@@ -122,6 +141,8 @@ export interface ExtensionStoreSnapshot {
   generation: number;
   legacyProjectionHash: string;
   legacyProjectionRemainder?: AllExtensionsEnablementConfig;
+  /** Released managed spellings whose stored-secret cleanup is still owed. */
+  pendingManagedSecretNames?: string[];
   extensions: Record<string, ExtensionPolicy>;
 }
 
@@ -130,13 +151,8 @@ interface ManagedHandBackOptions {
   // Lowercased basenames of entries without a governing manifest. Any one
   // can be a relocated package mid-deploy, so none proves managed withdrawal.
   unprovenManagedNames?: ReadonlySet<string>;
-  // Fired for each recorded spelling of a policy whose managed marker the
-  // proven-withdrawal hand-back deletes. Secrets written during the managed
-  // episode live
-  // under the managed identity and every cleanup path keys on the marker
-  // being present, so the caller must finish the transition (the store
-  // itself cannot: it knows neither the managed id formula nor the
-  // workspace cwds the clear must cover).
+  // Synchronous notification before committing a hand-back. The durable
+  // pendingManagedSecretNames queue, not this callback, owns secret cleanup.
   onManagedHandBack?: (name: string) => void;
 }
 
@@ -727,6 +743,12 @@ function parseState(
     !/^[a-f0-9]{64}$/.test(candidate.legacyProjectionHash) ||
     (candidate.legacyProjectionRemainder !== undefined &&
       !validLegacyProjection(candidate.legacyProjectionRemainder)) ||
+    (candidate.pendingManagedSecretNames !== undefined &&
+      (!Array.isArray(candidate.pendingManagedSecretNames) ||
+        candidate.pendingManagedSecretNames.length === 0 ||
+        !candidate.pendingManagedSecretNames.every(
+          (name) => typeof name === 'string' && /^[a-zA-Z0-9-_.]+$/.test(name),
+        ))) ||
     !candidate.extensions ||
     Array.isArray(candidate.extensions) ||
     typeof candidate.extensions !== 'object' ||
@@ -899,6 +921,12 @@ export class ExtensionStore {
             reason: 'extension enablement exists without a store state',
           };
     }
+    if (state.pendingManagedSecretNames?.length) {
+      return {
+        status: 'unknown',
+        reason: 'managed extension secret cleanup is still pending',
+      };
+    }
     if (Object.keys(state.extensions).length > 0) {
       return {
         status: 'installed',
@@ -1036,9 +1064,22 @@ export class ExtensionStore {
             directPolicy.managed &&
             directPolicy.name.toLowerCase() !== identity.name.toLowerCase()
           ) {
-            throw new ExtensionConflictError(
-              `Cannot rename retained managed extension "${directPolicy.name}" to "${identity.name}" before its managed ownership is released.`,
-            );
+            if (
+              identity.source === 'managed' ||
+              !managedAbsenceProven ||
+              hasUnprovenManagedEntries(options.unprovenManagedNames) ||
+              loadedNames.get(directPolicy.name.toLowerCase())?.source ===
+                'managed'
+            ) {
+              throw new ExtensionConflictError(
+                `Cannot rename retained managed extension "${directPolicy.name}" to "${identity.name}" before its managed ownership is released.`,
+              );
+            }
+            // Queue the old spellings before changing name: managed metadata
+            // must never describe a different normalized name in state.json.
+            for (const name of handBackManagedPolicy(existing, directPolicy))
+              options.onManagedHandBack?.(name);
+            changed = true;
           }
           if (directPolicy.name !== identity.name) {
             const nameOwner = Object.entries(existing.extensions).find(
@@ -1238,17 +1279,7 @@ export class ExtensionStore {
           managedAbsenceProven &&
           !hasUnprovenManagedEntries(options.unprovenManagedNames)
         ) {
-          const handBackNames = getManagedSecretNames(policy);
-          delete policy.managed;
-          delete policy.managedName;
-          delete policy.managedSecretNames;
-          delete policy.managedDirectory;
-          restorePreservedActivationSurface(policy);
-          if (policy.artifactGeneration === undefined) {
-            // Discovery may describe a returning artifact, so preserve the
-            // next install's activation without declaring the artifact absent.
-            policy.preserveActivationOnNextInstall = true;
-          }
+          const handBackNames = handBackManagedPolicy(existing, policy);
           for (const name of handBackNames) options.onManagedHandBack?.(name);
           changed = true;
         }
@@ -2058,11 +2089,10 @@ export class ExtensionStore {
   }
 
   /**
-   * Removes a policy outright. The managed hand-back keeps a withdrawn
-   * package's policy so activation survives a re-claim; an explicit uninstall
-   * of that absent package releases it here instead. Idempotent for a missing
-   * or name-mismatched record, and never called by ensureInitialized — the
-   * hand-back would lose its state otherwise.
+   * Releases an absent policy, preserving a declaration when a user artifact
+   * still needs its activation. Managed cleanup debt commits with the release,
+   * before any irreversible secret deletion. Missing/name-mismatched records
+   * remain idempotent.
    */
   async removePolicy(
     identity: ExtensionIdentity,
@@ -2071,6 +2101,12 @@ export class ExtensionStore {
         policy: Readonly<ExtensionPolicy>,
       ) => void | Promise<void>;
       onRemoved?: (policy: ExtensionPolicy) => void;
+      preserveActivation?: (
+        policy: Readonly<ExtensionPolicy>,
+      ) =>
+        | ExtensionIdentity
+        | undefined
+        | Promise<ExtensionIdentity | undefined>;
     } = {},
   ): Promise<ExtensionStoreSnapshot> {
     assertIdentity(identity);
@@ -2080,11 +2116,84 @@ export class ExtensionStore {
       const policy = snapshot.extensions[identity.id];
       if (!policy || policy.name !== identity.name) return snapshot;
       await options.beforeRemove?.(policy);
+      const declaration = await options.preserveActivation?.(policy);
+      if (declaration) {
+        assertIdentity(declaration);
+        if (
+          declaration.name.toLowerCase() !== policy.name.toLowerCase() ||
+          declaration.source === 'managed' ||
+          (declaration.id !== identity.id &&
+            snapshot.extensions[declaration.id])
+        ) {
+          throw new ExtensionConflictError(
+            `Cannot preserve activation for extension "${policy.name}" under a conflicting identity.`,
+          );
+        }
+      }
+      const removed = structuredClone(policy);
+      if (policy.managed) handBackManagedPolicy(snapshot, policy);
       delete snapshot.extensions[identity.id];
+      if (declaration) {
+        policy.name = declaration.name;
+        policy.declarationOnly = true;
+        delete policy.artifactDirectory;
+        delete policy.artifactGeneration;
+        delete policy.preserveActivationOnNextInstall;
+        snapshot.extensions[declaration.id] = policy;
+      }
       snapshot.generation += 1;
       await this.writeSnapshotUnlocked(snapshot);
-      options.onRemoved?.(policy);
+      options.onRemoved?.(removed);
       return snapshot;
+    });
+  }
+
+  async clearPendingManagedSecrets(
+    clear: (name: string) => Promise<void>,
+    expectedGeneration?: number,
+  ): Promise<{
+    snapshot: ExtensionStoreSnapshot;
+    failures: Array<{ name: string; error: unknown }>;
+    skipped?: true;
+  }> {
+    return await this.withLock(async () => {
+      const snapshot =
+        (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();
+      if (
+        expectedGeneration !== undefined &&
+        snapshot.generation !== expectedGeneration
+      ) {
+        return { snapshot, failures: [], skipped: true };
+      }
+      const remaining: string[] = [];
+      const failures: Array<{ name: string; error: unknown }> = [];
+      const pending = snapshot.pendingManagedSecretNames ?? [];
+      for (const name of pending) {
+        if (
+          Object.values(snapshot.extensions).some(
+            (policy) =>
+              policy.managed &&
+              policy.name.toLowerCase() === name.toLowerCase(),
+          )
+        ) {
+          remaining.push(name);
+          continue;
+        }
+        try {
+          await clear(name);
+        } catch (error) {
+          remaining.push(name);
+          failures.push({ name, error });
+        }
+      }
+      if (remaining.length !== pending.length) {
+        if (remaining.length > 0)
+          snapshot.pendingManagedSecretNames = remaining;
+        else delete snapshot.pendingManagedSecretNames;
+        snapshot.generation += 1;
+        await this.writeSnapshotUnlocked(snapshot);
+      }
+      return { snapshot, failures };
     });
   }
 
