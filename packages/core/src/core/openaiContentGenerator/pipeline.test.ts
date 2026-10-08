@@ -456,6 +456,29 @@ describe('ContentGenerationPipeline', () => {
   const convertEveryChunkTo = (response: GenerateContentResponse) =>
     (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValue(response);
 
+  /**
+   * Runs `body` with the real chunk converter installed on the module-level
+   * stub, then puts the factory default back. That stub is shared with every
+   * later test in this file and the top-level `vi.clearAllMocks()` clears
+   * calls without uninstalling implementations, so an explicit restore is what
+   * keeps the suite order-independent.
+   */
+  async function withRealChunkConverter(body: () => Promise<void>) {
+    const actual =
+      await vi.importActual<typeof import('./converter.js')>('./converter.js');
+    vi.mocked(
+      OpenAIContentConverter.convertOpenAIChunkToLlm,
+    ).mockImplementation(actual.OpenAIContentConverter.convertOpenAIChunkToLlm);
+    mockProvider.getResponseParsingOptions = vi.fn().mockReturnValue({
+      contentOnlyThinkingTagLeaks: true,
+    });
+    try {
+      await body();
+    } finally {
+      vi.mocked(OpenAIContentConverter.convertOpenAIChunkToLlm).mockReset();
+    }
+  }
+
   /** Streams `chunks` (an Error item throws) and collects what is yielded. */
   const streamed = async (...chunks: unknown[]) =>
     collect(await streamFrom(streamOf(...chunks)));
@@ -2663,70 +2686,60 @@ describe('ContentGenerationPipeline', () => {
 
     it.each([false, true])(
       'preserves pending suffix text without a normal stop (transport error: %s)',
-      async (transportError) => {
-        const actual =
-          await vi.importActual<typeof import('./converter.js')>(
-            './converter.js',
+      async (transportError) =>
+        withRealChunkConverter(async () => {
+          const error = new Error('connection reset');
+          const { items, error: observedError } = await settle(
+            await streamFrom(
+              streamOf(
+                chunkOf({ content: 'Answer.\n</thi' }),
+                ...(transportError ? [error] : []),
+              ),
+            ),
           );
-        vi.mocked(
-          OpenAIContentConverter.convertOpenAIChunkToLlm,
-        ).mockImplementation(
-          actual.OpenAIContentConverter.convertOpenAIChunkToLlm,
-        );
-        mockProvider.getResponseParsingOptions = vi.fn().mockReturnValue({
-          contentOnlyThinkingTagLeaks: true,
-        });
-        const error = new Error('connection reset');
+          expect(observedError).toBe(transportError ? error : undefined);
+          expect(
+            items
+              .flatMap((item) => item.candidates?.[0]?.content?.parts ?? [])
+              .map((part) => part.text ?? '')
+              .join(''),
+          ).toBe('Answer.\n</thi');
+          expect(
+            items.every((item) => !item.candidates?.[0]?.finishReason),
+          ).toBe(true);
+        }),
+    );
+
+    it('withholds the pending suffix when reasoning carried a thinking tag', async () =>
+      withRealChunkConverter(async () => {
         const { items, error: observedError } = await settle(
           await streamFrom(
             streamOf(
-              chunkOf({ content: 'Answer.\n</thi' }),
-              ...(transportError ? [error] : []),
+              chunkOf({ content: 'Answer.\n</thinking>' }),
+              chunkOf({ reasoning_content: 'Let me check<think>' }),
             ),
           ),
         );
-        expect(observedError).toBe(transportError ? error : undefined);
+        expect(observedError).toBeUndefined();
         expect(
           items
             .flatMap((item) => item.candidates?.[0]?.content?.parts ?? [])
+            .filter((part) => !part.thought)
             .map((part) => part.text ?? '')
             .join(''),
-        ).toBe('Answer.\n</thi');
-        expect(items.every((item) => !item.candidates?.[0]?.finishReason)).toBe(
-          true,
-        );
-      },
-    );
+        ).toBe('Answer.');
+      }));
 
-    it('withholds the pending suffix when reasoning carried a thinking tag', async () => {
-      const actual =
-        await vi.importActual<typeof import('./converter.js')>(
-          './converter.js',
-        );
-      vi.mocked(
-        OpenAIContentConverter.convertOpenAIChunkToLlm,
-      ).mockImplementation(
-        actual.OpenAIContentConverter.convertOpenAIChunkToLlm,
-      );
-      mockProvider.getResponseParsingOptions = vi.fn().mockReturnValue({
-        contentOnlyThinkingTagLeaks: true,
-      });
-      const { items, error: observedError } = await settle(
-        await streamFrom(
-          streamOf(
-            chunkOf({ content: 'Answer.\n</thinking>' }),
-            chunkOf({ reasoning_content: 'Let me check<think>' }),
-          ),
-        ),
-      );
-      expect(observedError).toBeUndefined();
+    it('leaves the chunk-converter stub unimplemented for later tests', () => {
+      // Placed after both real-converter cases: the module-level stub must be
+      // back at its factory default (a bare `vi.fn()`), or every later test in
+      // this file silently runs real chunk conversion wherever it streamed one
+      // chunk more than it queued `mockReturnValueOnce` responses for.
       expect(
-        items
-          .flatMap((item) => item.candidates?.[0]?.content?.parts ?? [])
-          .filter((part) => !part.thought)
-          .map((part) => part.text ?? '')
-          .join(''),
-      ).toBe('Answer.');
+        vi
+          .mocked(OpenAIContentConverter.convertOpenAIChunkToLlm)
+          .getMockImplementation(),
+      ).toBeUndefined();
     });
 
     it('should redact proxy credentials from stream creation errors', async () => {
