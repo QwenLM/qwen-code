@@ -13,7 +13,6 @@ import {
 import * as SdkClientStdioLib from '@modelcontextprotocol/client/stdio';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Server } from 'node:net';
-import { tmpdir } from 'node:os';
 import {
   afterEach,
   beforeEach,
@@ -25,8 +24,6 @@ import {
 } from 'vitest';
 import {
   AuthProviderType,
-  DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-  DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
   MCPServerConfig,
   type Config,
 } from '../config/config.js';
@@ -104,10 +101,8 @@ type Obj = Record<string, unknown>;
 
 /**
  * Minimal Config stub for the non-pool `discover()` path, which reads
- * `cliConfig.getResourceRegistry()` to register discovered resources, and for
- * tool execution, which reads the truncation budget the producer layer
- * enforces. By default the registry only has to accept calls; pass one to
- * assert on it.
+ * `cliConfig.getResourceRegistry()` to register discovered resources. By
+ * default the registry only has to accept calls; pass one to assert on it.
  */
 function cfgWithResources(
   registry: Obj = {
@@ -118,10 +113,6 @@ function cfgWithResources(
   return {
     getMcpToolIdleTimeoutMs: () => TEST_MCP_TOOL_IDLE_TIMEOUT_MS,
     getResourceRegistry: () => ({ ...registry }),
-    getTruncateToolOutputThreshold: () =>
-      DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
-    getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-    storage: { getProjectTempDir: () => tmpdir() },
   } as unknown as Config;
 }
 

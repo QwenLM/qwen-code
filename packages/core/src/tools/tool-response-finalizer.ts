@@ -4,14 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  getToolOutputProvenance,
-  measureToolOutput,
-  updateToolOutputBudget,
-  type ToolOutputBudgetSource,
-} from './tool-output-size.js';
-import { logToolResultSize } from '../telemetry/loggers.js';
-import { ToolResultSizeEvent } from '../telemetry/types.js';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ToolArtifact } from './tools.js';
@@ -275,7 +267,6 @@ function replaceTextSlots(
   entries: ToolResponseBudgetEntry[],
   slots: TextSlot[],
   allocations: number[],
-  lineLimit = Number.POSITIVE_INFINITY,
 ): ToolResponseBudgetEntry[] {
   const result = entries.map((entry) => ({
     ...entry,
@@ -287,28 +278,11 @@ function replaceTextSlots(
     if (slot.text.length <= allocations[index]) continue;
     const entry = result[slot.entryIndex];
     const part = entry.responseParts[slot.partIndex];
-    let replacement = fitText(
+    const replacement = fitText(
       slot.text,
       allocations[index],
       entry.persistedOutputFiles,
     );
-    if (Number.isFinite(lineLimit)) {
-      const lines = replacement.split('\n');
-      if (lines.length > lineLimit) {
-        const head = Math.max(1, Math.floor((lineLimit - 1) / 2));
-        const tail = Math.max(0, Math.floor(lineLimit) - head - 1);
-        replacement = [
-          ...lines.slice(0, head),
-          '...',
-          ...(tail > 0 ? lines.slice(-tail) : []),
-        ].join('\n');
-        if (replacement.length > allocations[index])
-          replacement = sliceStartWithoutBrokenSurrogate(
-            replacement,
-            allocations[index],
-          );
-      }
-    }
 
     if (slot.field === 'text') {
       entry.responseParts[slot.partIndex] = { ...part, text: replacement };
@@ -351,7 +325,7 @@ export function enforceFunctionResponseBudget(
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) return entries;
 
-  const reduced = replaceTextSlots(
+  return replaceTextSlots(
     entries,
     slots,
     allocateTextBudget(
@@ -359,14 +333,6 @@ export function enforceFunctionResponseBudget(
       budget,
     ),
   );
-  for (let index = 0; index < reduced.length; index++) {
-    if (
-      toolResponseTextLength(reduced[index].responseParts) <
-      toolResponseTextLength(entries[index].responseParts)
-    )
-      updateToolOutputBudget(reduced[index].responseParts, budget, 'batch');
-  }
-  return reduced;
 }
 
 export async function finalizeToolResponses(
@@ -375,7 +341,6 @@ export async function finalizeToolResponses(
   promptIds?: ReadonlyMap<string, string>,
   observeBoundary = true,
   associateBoundary = false,
-  limits?: { budget: number; source: ToolOutputBudgetSource; lines?: number },
 ): Promise<ToolResponseBudgetEntry[]> {
   const shouldAssociateBoundary = observeBoundary && associateBoundary;
   const associatedEntryIndexes = observeBoundary
@@ -410,14 +375,9 @@ export async function finalizeToolResponses(
       indexes,
     );
   };
-  const requestedBudget =
-    limits?.budget ??
-    config.getToolOutputBatchBudget?.() ??
-    Number.POSITIVE_INFINITY;
   const budget =
-    requestedBudget > 0 ? requestedBudget : Number.POSITIVE_INFINITY;
-  const lineLimit = limits?.lines ?? Number.POSITIVE_INFINITY;
-  if (!Number.isFinite(budget) && !Number.isFinite(lineLimit)) {
+    config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY;
+  if (!Number.isFinite(budget) || budget <= 0) {
     observeUnchangedEntries();
     if (shouldAssociateBoundary)
       associateFinalizerEntries(entries, new Set(entries.keys()));
@@ -426,29 +386,17 @@ export async function finalizeToolResponses(
 
   const slots = collectTextSlots(entries);
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
-  const lineCaps = slots.map((slot) => {
-    if (!Number.isFinite(lineLimit)) return slot.text.length;
-    const lines = slot.text.split('\n');
-    if (lines.length <= lineLimit) return slot.text.length;
-    const side = Math.max(0, Math.floor((lineLimit - 1) / 2));
-    return Math.min(
-      slot.text.length - 1,
-      lines.slice(0, side).join('\n').length +
-        (side > 0 ? lines.slice(-side).join('\n').length : 0) +
-        80,
-    );
-  });
-  if (
-    total <= budget &&
-    lineCaps.every((cap, index) => cap >= slots[index].text.length)
-  ) {
+  if (total <= budget) {
     observeUnchangedEntries();
     if (shouldAssociateBoundary)
       associateFinalizerEntries(entries, new Set(entries.keys()));
     return entries;
   }
 
-  const allocations = allocateTextBudget(lineCaps, budget);
+  const allocations = allocateTextBudget(
+    slots.map((slot) => slot.text.length),
+    budget,
+  );
   const entriesToPersist = new Set<number>();
   for (let index = 0; index < slots.length; index++) {
     if (slots[index].text.length > allocations[index]) {
@@ -530,49 +478,7 @@ export async function finalizeToolResponses(
     }
   }
 
-  const finalized = replaceTextSlots(
-    withPersistence,
-    slots,
-    allocations,
-    lineLimit,
-  );
-  for (let index = 0; index < finalized.length; index++) {
-    if (!entriesToPersist.has(index)) continue;
-    const entry = finalized[index];
-    const before = measureToolOutput(entries[index].responseParts);
-    const after = measureToolOutput(entry.responseParts);
-    for (const part of entry.responseParts) {
-      const provenance = getToolOutputProvenance(part);
-      if (provenance)
-        provenance.persistedOutputFiles = entry.persistedOutputFiles;
-    }
-    updateToolOutputBudget(
-      entry.responseParts,
-      budget,
-      limits?.source ?? 'batch',
-    );
-    try {
-      logToolResultSize(
-        config,
-        new ToolResultSizeEvent(
-          entry.toolName,
-          entry.toolName.startsWith('mcp__') ? 'mcp' : 'native',
-          limits?.source === 'context' ? 'context' : 'batch',
-          before.chars,
-          after.chars,
-          before.estimatedTokens,
-          after.estimatedTokens,
-          true,
-          Number.isFinite(budget) ? budget : undefined,
-          limits?.source ?? 'batch',
-          entry.callId,
-          promptIds?.get(entry.callId),
-        ),
-      );
-    } catch {
-      /* Telemetry is observational. */
-    }
-  }
+  const finalized = replaceTextSlots(withPersistence, slots, allocations);
   if (observeBoundary)
     observeFinalizerEntries(
       config,

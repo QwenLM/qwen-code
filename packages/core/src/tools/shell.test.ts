@@ -55,10 +55,7 @@ vi.mock('../utils/debugLogger.js', () => ({
 }));
 vi.mock('fs');
 vi.mock('os');
-vi.mock('crypto', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('node:crypto')>()),
-  randomBytes: vi.fn(),
-}));
+vi.mock('crypto');
 vi.mock('../services/session-pr-service.js', async (importOriginal) => ({
   ...(await importOriginal<
     typeof import('../services/session-pr-service.js')

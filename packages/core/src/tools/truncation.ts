@@ -4,10 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  measureToolOutput,
-  type ToolOutputBudgetSource,
-} from './tool-output-size.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
@@ -16,16 +12,8 @@ import { ReadFileTool } from './read-file.js';
 import type { Config } from '../config/config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import {
-  logToolOutputTruncated,
-  logToolResultSize,
-  logToolResultPersisted,
-} from '../telemetry/loggers.js';
-import {
-  ToolOutputTruncatedEvent,
-  ToolResultSizeEvent,
-  ToolResultPersistedEvent,
-} from '../telemetry/types.js';
+import { logToolOutputTruncated } from '../telemetry/loggers.js';
+import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
 
 const debugLogger = createDebugLogger('TRUNCATION');
 
@@ -207,22 +195,13 @@ export async function truncateAndSaveToFile(
   // Sanitize fileName to prevent path traversal.
   const safeFileName = `${path.basename(fileName)}.output`;
   const outputFile = path.join(projectTempDir, safeFileName);
-  const jsonPreview = structuredPreview(
-    content,
-    Math.min(PREVIEW_SIZE_CHARS, previewChars),
-  );
-  const previewDescription = jsonPreview
-    ? 'The output below is a structured JSON sample; omitted values remain in the full output file.'
-    : "The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.";
   const wrappedMessage = `${TOOL_OUTPUT_TRUNCATED_PREFIX}.
 The full output has been saved to: ${outputFile}
-Total characters: ${content.length}; total lines: ${lines.length}.
-${FULL_OUTPUT_DIGEST_LABEL}${crypto.createHash('sha256').update(content).digest('hex')}
-Page in with ${ReadFileTool.Name} using the absolute file_path above, offset (zero-based line) and limit (line count).
-${previewDescription}
+To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
+The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
 
 Truncated part of the output:
-${jsonPreview ?? truncatedContent}`;
+${truncatedContent}`;
 
   // Token-aware fallback: if the wrapped (truncated + instructions) output is
   // not actually smaller than the original, truncating wastes effort and
@@ -277,8 +256,6 @@ export async function truncateToolOutput(
     lines?: number;
     keep?: 'head' | 'tail' | 'both';
     previewChars?: number;
-    layer?: 'producer' | 'per_tool' | 'combined';
-    source?: ToolOutputBudgetSource;
   },
   promptId?: string,
 ): Promise<{ content: string; outputFile?: string }> {
@@ -317,34 +294,6 @@ export async function truncateToolOutput(
     outputDirectory !== undefined,
   );
 
-  const inputSize = measureToolOutput(content);
-  const outputSize = measureToolOutput(result.content);
-  try {
-    logToolResultSize(
-      config,
-      new ToolResultSizeEvent(
-        toolName,
-        toolName.startsWith('mcp__') ? 'mcp' : 'native',
-        limits?.layer ?? 'per_tool',
-        inputSize.chars,
-        outputSize.chars,
-        inputSize.estimatedTokens,
-        outputSize.estimatedTokens,
-        result.content !== content,
-        Number.isFinite(threshold) ? threshold : undefined,
-        limits?.source ??
-          (limits?.threshold !== undefined
-            ? 'per_tool'
-            : config.isTruncateToolOutputThresholdExplicit?.()
-              ? 'explicit'
-              : 'global'),
-        undefined,
-        promptId,
-      ),
-    );
-  } catch {
-    /* Telemetry is observational. */
-  }
   if (result.outputFile) {
     try {
       logToolOutputTruncated(
@@ -469,55 +418,6 @@ function generatePreview(content: string): string {
   return text;
 }
 
-function structuredPreview(
-  content: string,
-  maxChars = PREVIEW_SIZE_CHARS,
-): string | undefined {
-  if (content.length > 1_000_000 || !/^[\s]*[[{]/.test(content))
-    return undefined;
-  try {
-    const value: unknown = JSON.parse(content);
-    const sample = (item: unknown, depth: number): unknown => {
-      if (typeof item === 'string')
-        return item.length > 120 ? `${item.slice(0, 120)}…` : item;
-      if (Array.isArray(item))
-        return {
-          rows: item.length,
-          sample:
-            depth > 0
-              ? item.slice(0, 2).map((row) => sample(row, depth - 1))
-              : [],
-        };
-      if (item && typeof item === 'object') {
-        const entries = Object.entries(item);
-        return depth > 0
-          ? Object.fromEntries(
-              entries
-                .slice(0, 8)
-                .map(([key, field]) => [
-                  key.slice(0, 80),
-                  sample(field, depth - 1),
-                ]),
-            )
-          : {
-              keys: entries.slice(0, 8).map(([key]) => key.slice(0, 80)),
-              keyCount: entries.length,
-            };
-      }
-      return item;
-    };
-    const preview = JSON.stringify(sample(value, 3), null, 2);
-    return preview.length <= maxChars
-      ? `Structured sample:\n${preview}`.replace(
-          /<\/?(?:persisted-output|system-reminder)>/g,
-          (tag) => `&lt;${tag.slice(1, -1)}&gt;`,
-        )
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 export interface PersistResult {
   content: string;
   outputFile?: string;
@@ -533,28 +433,6 @@ export function normalizeToolResultCallId(callId: string): string | undefined {
 }
 
 export async function persistAndTruncateToolResult(
-  callId: string,
-  toolName: string,
-  content: string,
-  config: Config,
-): Promise<PersistResult> {
-  const result = await persistToolResult(callId, toolName, content, config);
-  try {
-    logToolResultPersisted(
-      config,
-      new ToolResultPersistedEvent('', {
-        toolName,
-        bytesWritten: result.bytesWritten,
-        outputFile: result.outputFile ?? '',
-      }),
-    );
-  } catch {
-    /* Telemetry is observational. */
-  }
-  return result;
-}
-
-async function persistToolResult(
   callId: string,
   toolName: string,
   content: string,
@@ -660,7 +538,7 @@ function buildStub(
   byteSize: number,
   filePathOrNote: string,
 ): string {
-  const preview = structuredPreview(content) ?? generatePreview(content);
+  const preview = generatePreview(content);
   const sizeKb = Math.round(byteSize / 1024);
   const isFilePath = path.isAbsolute(filePathOrNote);
   // sha256 of the FULL pre-truncation output (see FULL_OUTPUT_DIGEST_LABEL):
@@ -673,9 +551,8 @@ function buildStub(
     return `<persisted-output>
 Output too large (${sizeKb} KB). Full output saved to: ${filePathOrNote}
 ${FULL_OUTPUT_DIGEST_LABEL}${fullDigest}
-Total characters: ${content.length}; total lines: ${content.split('\n').length}.
 Note: this file may be cleaned up after 24 hours.
-Page in with ${ReadFileTool.Name} using the absolute file_path above, offset (zero-based line) and limit (line count).
+To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
 
 Preview (up to ${PREVIEW_SIZE_CHARS} chars):
 ${preview}
@@ -684,7 +561,6 @@ ${preview}
 
   return `Output too large (${sizeKb} KB). ${filePathOrNote}
 ${FULL_OUTPUT_DIGEST_LABEL}${fullDigest}
-Total characters: ${content.length}; total lines: ${content.split('\n').length}.
 
 Preview (up to ${PREVIEW_SIZE_CHARS} chars):
 ${preview}`;

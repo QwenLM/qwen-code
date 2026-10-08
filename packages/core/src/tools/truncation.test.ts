@@ -217,39 +217,13 @@ describe('truncateAndSaveToFile', () => {
     });
   });
 
-  it('summarizes valid JSON without losing the full payload or recovery metadata', async () => {
-    const content = JSON.stringify({
-      rows: Array.from({ length: 5000 }, (_, index) => ({
-        index,
-        label: 'sample value',
-      })),
-    });
-    const result = await save(content);
-    expect(result.content).toContain('Structured sample');
-    expect(result.content).toContain(
-      'The output below is a structured JSON sample; omitted values remain in the full output file.',
-    );
-    expect(result.content).not.toContain('beginning and end');
-    expect(result.content).not.toContain('... [CONTENT TRUNCATED] ...');
-    expect(result.content).toContain('"rows": 5000');
-    expect(result.content).toContain(
-      `Total characters: ${content.length}; total lines: 1`,
-    );
-    expect(result.content).toContain('Full output sha256:');
-    expect(mockWriteFile).toHaveBeenCalledWith(
-      expect.any(String),
-      content,
-      expect.any(Object),
-    );
-  });
-
   it('should include helpful instructions in truncated message', async () => {
     const result = await save('a'.repeat(2_000_000));
 
     expect(result.content).toContain(TRUNCATED_HEADER);
     expect(result.content).toContain('The full output has been saved to:');
     expect(result.content).toContain(
-      'Page in with read_file using the absolute file_path above, offset (zero-based line) and limit (line count)',
+      'To read the complete output, use the read_file tool with the absolute file path above',
     );
     expect(result.content).toContain(
       'The truncated output below shows the beginning and end of the content',
@@ -355,19 +329,6 @@ describe('truncateAndSaveToFile', () => {
 });
 
 describe('persistAndTruncateToolResult', () => {
-  it('does not claim full JSON is saved when the disk budget is exhausted', async () => {
-    const content = JSON.stringify({
-      rows: Array.from({ length: 1000 }, (_, index) => ({ index })),
-    });
-    const result = await persistAndTruncateToolResult('json', 'mcp', content, {
-      getToolResultBytesWritten: () => Number.MAX_SAFE_INTEGER,
-    } as unknown as Config);
-    expect(result.outputFile).toBeUndefined();
-    expect(result.content).toContain('session disk budget exhausted');
-    expect(result.content).toContain('Structured sample:');
-    expect(result.content).not.toContain('full JSON remains in the file');
-  });
-
   it.each([false, true])(
     'keeps container output in its shared store (fallback=%s)',
     async (fallback) => {

@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { measureToolOutput } from './tool-output-size.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type {
   ToolCallConfirmationDetails,
@@ -779,7 +778,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: truncated.parts,
-        rawOutputSize: measureToolOutput(transformedParts),
         returnDisplay: appDisplay ?? fallbackText,
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
@@ -1023,7 +1021,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: truncated.parts,
-        rawOutputSize: measureToolOutput(transformedParts),
         returnDisplay: getDisplayFromPartsWithPersistedOutput(
           transformedParts,
           truncated.persistedOutputFiles,
@@ -1047,9 +1044,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     rawResponseParts: Part[],
     functionCall: FunctionCall,
   ): Promise<ToolResult> {
-    const rawOutputSize = measureToolOutput(
-      transformMcpContentToParts(rawResponseParts),
-    );
     const imageContent = getMcpErrorImageContent(rawResponseParts);
     let llmContent: PartListUnion;
     let errorMessage: string;
@@ -1076,7 +1070,6 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
     return {
       llmContent,
-      rawOutputSize,
       returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
       error: {
         message: errorMessage,
@@ -1135,14 +1128,16 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           this.cliConfig,
           this.registeredToolName,
           part.text,
+          // Per-tool char budget; mirrors DiscoveredMCPTool.maxOutputChars
+          // (10x the global default, since MCP servers return large structured
+          // output). char-only (lines: Infinity) so the global line cap can't
+          // undercut the 500k char budget — many short lines (structured JSON,
+          // tables) would otherwise truncate while chars remain. Consistent
+          // with the shell tool's in-tool truncation.
           {
-            layer: 'producer',
-            source: this.cliConfig.isTruncateToolOutputThresholdExplicit?.()
-              ? 'explicit'
-              : 'global',
-            threshold: this.cliConfig.getTruncateToolOutputThreshold(),
+            threshold: 500_000,
             previewChars: 2000,
-            lines: this.cliConfig.getTruncateToolOutputLines(),
+            lines: Number.POSITIVE_INFINITY,
           },
         );
         result.push({ text: truncated.content });
@@ -1186,6 +1181,13 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
   ToolParams,
   ToolResult
 > {
+  // MCP servers often return large structured payloads; allow 10x the global
+  // budget (mirrors Claude Code's MCP `maxResultSizeChars`) before the
+  // scheduler offloads. truncateTextParts uses the same ceiling per text part.
+  override get maxOutputChars(): number {
+    return 500_000;
+  }
+
   /**
    * Raw identity first; keep truncated legacy aliases only with a preserved
    * server boundary. The registry checks grants for competing claimants.

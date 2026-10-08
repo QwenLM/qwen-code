@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { measureToolOutput } from './tool-output-size.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -3192,8 +3191,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
       0,
     );
 
-    const rawOutputSize = rawCapture ? null : measureToolOutput(llmContent);
-
     // Raw capture owns full output; result.output is only a bounded preview.
     // Otherwise truncate large output and save full content to a temp file.
     if (!rawCapture && typeof llmContent === 'string') {
@@ -3229,7 +3226,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // cap can't undercut the effective Shell char budget — many short lines
         // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
         {
-          layer: 'producer',
           threshold: bodyBudgetChars,
           previewChars: Math.min(4000, bodyBudgetChars),
           keep: 'both',
@@ -3334,7 +3330,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     return {
       llmContent,
-      rawOutputSize,
       returnDisplay: {
         type: 'shell_result',
         version: 1,

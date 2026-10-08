@@ -1513,20 +1513,6 @@ describe('loggers', () => {
         function_args: JSON.stringify({ arg1: 'value1', arg2: 2 }, null, 2),
         duration_ms: 100,
         tool_type: 'native',
-        content_length: 13,
-        processed_estimated_tokens: 4,
-        raw_content_length: undefined,
-        raw_estimated_tokens: undefined,
-        applied_budget: undefined,
-        budget_source: undefined,
-        truncated: undefined,
-        decision: undefined,
-        parent_call_id: undefined,
-        source: undefined,
-        started_at_ms: undefined,
-        response_id: undefined,
-        mcp_server_name: undefined,
-        metadata: undefined,
         ...attributes,
       });
       if (otelOnly) return;
@@ -1982,7 +1968,7 @@ describe('loggers', () => {
           error_type: ToolErrorType.UNKNOWN,
           'error.type': ToolErrorType.UNKNOWN,
           prompt_id: 'prompt-id-5',
-          content_length: 13,
+          content_length: errorMessage.length,
         },
       );
     });

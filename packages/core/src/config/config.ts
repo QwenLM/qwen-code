@@ -979,8 +979,8 @@ export interface ExtensionInstallMetadata {
   networkPolicy?: ExtensionNetworkPolicy;
 }
 
-export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 80_000;
-export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 2000;
+export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 25_000;
+export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 1000;
 /**
  * Per-message budget (chars) for the combined model-facing output of one
  * batch of tool calls. When a batch's total output exceeds this, the largest
@@ -3235,7 +3235,6 @@ export class Config {
   private readonly truncateToolOutputThreshold: number;
   private readonly truncateToolOutputThresholdExplicit: boolean;
   private readonly truncateToolOutputLines: number;
-  private readonly truncateToolOutputLinesExplicit: boolean;
   private readonly toolOutputBatchBudget: number;
   private readonly shellDefaultTimeoutMs: number | undefined;
   private readonly shellHeartbeatIntervalMs: number | undefined;
@@ -3674,8 +3673,6 @@ export class Config {
     // fallback when it is absent, so producers must not pass a defaulted value.
     this.truncateToolOutputThresholdExplicit =
       params.truncateToolOutputThreshold != null;
-    this.truncateToolOutputLinesExplicit =
-      params.truncateToolOutputLines != null;
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
     this.toolOutputBatchBudget =
@@ -11531,10 +11528,6 @@ export class Config {
 
   isTruncateToolOutputThresholdExplicit(): boolean {
     return this.truncateToolOutputThresholdExplicit;
-  }
-
-  isTruncateToolOutputLinesExplicit(): boolean {
-    return this.truncateToolOutputLinesExplicit;
   }
 
   getTruncateToolOutputLines(): number {

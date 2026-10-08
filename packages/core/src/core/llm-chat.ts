@@ -4,15 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  attachToolOutputProvenance,
-  getToolOutputProvenance,
-  measureToolOutput,
-  pressureAwareToolBudget,
-  type ToolOutputProvenance,
-} from '../tools/tool-output-size.js';
-import { logToolResultSize } from '../telemetry/loggers.js';
-import { ToolResultSizeEvent } from '../telemetry/types.js';
 // DISCLAIMER: This is a copied version of https://github.com/googleapis/js-genai/blob/main/src/chats.ts with the intention of working around a key bug
 // where function responses are not treated as "valid" responses: https://b.corp.google.com/issues/420354090
 
@@ -27,10 +18,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent, FinishReason } from './genai-compat.js';
-import {
-  finalizeToolResponses,
-  enforceFunctionResponseBudget,
-} from '../tools/tool-response-finalizer.js';
+import { enforceFunctionResponseBudget } from '../tools/tool-response-finalizer.js';
 import {
   retryWithBackoff,
   isUnattendedMode,
@@ -107,6 +95,7 @@ import {
   resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
+  TOKEN_TO_CHAR_RATIO,
 } from '../services/compactionInputSlimming.js';
 import {
   InMemoryImagePayloadStore,
@@ -2196,6 +2185,14 @@ function stripTrailingSessionStartContextBlock(
   return systemInstruction.slice(0, startIndex);
 }
 
+/**
+ * Floor for the pressure-aware tool result budget (#2566). Right below the
+ * auto-compaction trigger the computed headroom can be a few tokens, and a
+ * budget that small would replace every result with a bare stub; compaction is
+ * about to run anyway, so overshooting by this much is the better trade.
+ */
+const MIN_PRESSURE_TOOL_OUTPUT_CHARS = 4_000;
+
 export class LlmChat {
   // A promise to represent the current state of the message being sent to the
   // model.
@@ -2207,14 +2204,19 @@ export class LlmChat {
    * (which intentionally don't write to the global telemetry singleton) can
    * still make compaction decisions based on their *own* context size.
    */
+  private lastPromptTokenCount = 0;
+  private lastPromptTokenCountIsEstimated = false;
+  /**
+   * This chat's last successful usage report, kept only to size the next
+   * send's tool results (#2566): the route it came from, its prompt+output
+   * tokens and the exact history it covered. Cleared whenever the counts or
+   * the history are replaced, and consumed by every dispatch.
+   */
   private toolBudgetUsageAnchor?: {
     routeKey: string;
     tokens: number;
     history: Content[];
   };
-  private readonly injectedToolResults = new WeakSet<ToolOutputProvenance>();
-  private lastPromptTokenCount = 0;
-  private lastPromptTokenCountIsEstimated = false;
 
   /**
    * Per-chat output-token count from the previous model response. The
@@ -3117,157 +3119,17 @@ export class LlmChat {
       // gap where `lastPromptTokenCount === 0` and the gate would otherwise
       // see only the stale prior-turn count (0).
       let userContent = createUserContent(params.message);
-      // Restored responses have no original-size provenance. Never infer it from a preview.
-      userContent = {
-        ...userContent,
-        parts: userContent.parts?.map((part) =>
-          part.functionResponse && !getToolOutputProvenance(part)
-            ? attachToolOutputProvenance([part], {
-                callId: part.functionResponse.id ?? '',
-                toolName: part.functionResponse.name ?? '',
-                promptId: prompt_id,
-                toolType: part.functionResponse.name?.startsWith('mcp__')
-                  ? 'mcp'
-                  : 'native',
-                truncated: false,
-              })[0]
-            : part,
-        ),
-      };
-      // Only this chat's last successful report can authorize pressure reduction.
-      const anchor = this.toolBudgetUsageAnchor;
-      const knownWindow = cgConfigForThresholds?.contextWindowSize;
-      if (
-        anchor &&
-        anchor.routeKey === requestRouteKey &&
-        typeof knownWindow === 'number' &&
-        Number.isFinite(knownWindow) &&
-        knownWindow > 0 &&
-        anchor.history.length <= this.history.length &&
-        anchor.history.every(
-          (content, index) => content === this.history[index],
-        )
-      ) {
-        const newNonToolContent: Content[] = [
-          ...this.history.slice(anchor.history.length),
-          {
-            ...userContent,
-            parts: userContent.parts?.filter((part) => !part.functionResponse),
-          },
-        ];
-        const imageEstimate = resolveSlimmingConfig(
-          this.config.getChatCompression(),
-        ).imageTokenEstimate;
-        const hardCeiling = computeThresholds(
-          knownWindow,
-          this.config.getAutoCompactThreshold(),
-        ).hard;
-        const resultOverhead = (userContent.parts ?? [])
-          .filter((part) => part.functionResponse)
-          .reduce((total, part) => {
-            const size = measureToolOutput(part, imageEstimate);
-            return (
-              total +
-              Math.max(0, size.estimatedTokens - Math.ceil(size.chars / 4))
-            );
-          }, 0);
-        const remaining =
-          (hardCeiling -
-            anchor.tokens -
-            Math.ceil(
-              estimateContentTokens(newNonToolContent, imageEstimate) *
-                CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR,
-            ) -
-            Math.ceil(resultOverhead * CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR) -
-            2) /
-          CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR;
-        const limits = pressureAwareToolBudget(
-          this.config.getTruncateToolOutputThreshold(),
-          this.config.getTruncateToolOutputLines(),
-          remaining,
-          this.config.isTruncateToolOutputThresholdExplicit?.() ?? false,
-          this.config.isTruncateToolOutputLinesExplicit?.() ?? false,
-        );
-        const reduced: Part[] = [];
-        for (const part of userContent.parts ?? []) {
-          if (
-            !part.functionResponse ||
-            (limits.chars >= this.config.getTruncateToolOutputThreshold() &&
-              limits.lines >= this.config.getTruncateToolOutputLines())
-          ) {
-            reduced.push(part);
-            continue;
-          }
-          const provenance = getToolOutputProvenance(part);
-          const [finalized] = await finalizeToolResponses(
-            this.config,
-            [
-              {
-                callId:
-                  provenance?.callId ??
-                  part.functionResponse.id ??
-                  'context-result',
-                toolName: part.functionResponse.name ?? '',
-                responseParts: [part],
-                persistedOutputFiles: provenance?.persistedOutputFiles,
-              },
-            ],
-            undefined,
-            true,
-            false,
-            {
-              budget: limits.chars,
-              source: 'context',
-              lines:
-                provenance?.budgetSource === 'per_tool'
-                  ? undefined
-                  : limits.lines,
-            },
-          );
-          reduced.push(...finalized.responseParts);
-        }
-        if (
-          !this.config.isTruncateToolOutputThresholdExplicit?.() &&
-          limits.chars < this.config.getTruncateToolOutputThreshold()
-        ) {
-          const entries = reduced.flatMap((part, index) =>
-            part.functionResponse
-              ? [
-                  {
-                    callId:
-                      getToolOutputProvenance(part)?.callId ??
-                      `context-result-${index}`,
-                    toolName: part.functionResponse.name ?? '',
-                    responseParts: [part],
-                    persistedOutputFiles:
-                      getToolOutputProvenance(part)?.persistedOutputFiles,
-                  },
-                ]
-              : [],
-          );
-          const bounded = await finalizeToolResponses(
-            this.config,
-            entries,
-            undefined,
-            true,
-            false,
-            { budget: limits.chars, source: 'context' },
-          );
-          let index = 0;
-          userContent = {
-            ...userContent,
-            parts: reduced.flatMap((part) =>
-              part.functionResponse ? bounded[index++].responseParts : [part],
-            ),
-          };
-        } else userContent = { ...userContent, parts: reduced };
-      }
-      const toolOutputBudget = this.config.getToolOutputBatchBudget?.();
-      if (
-        toolOutputBudget !== undefined &&
-        Number.isFinite(toolOutputBudget) &&
-        userContent.parts
-      ) {
+      // One pass over the batch: the tighter of the aggregate guard and the
+      // pressure budget (#2566), so a result is never cut twice.
+      const toolOutputBudget = Math.min(
+        this.config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY,
+        this.pressureToolOutputBudget(
+          userContent,
+          requestRouteKey,
+          cgConfigForThresholds?.contextWindowSize,
+        ) ?? Number.POSITIVE_INFINITY,
+      );
+      if (Number.isFinite(toolOutputBudget) && userContent.parts) {
         const [guarded] = enforceFunctionResponseBudget(
           [
             {
@@ -5399,38 +5261,9 @@ export class LlmChat {
           continuationInFlight: true,
         }),
       };
+      // A dispatched request supersedes the report that sized it; only its own
+      // successful response may anchor the next send.
       this.toolBudgetUsageAnchor = undefined;
-      params.config?.abortSignal?.throwIfAborted();
-      const groups = new Map<ToolOutputProvenance, Part[]>();
-      for (const content of requestContents)
-        for (const part of content.parts ?? []) {
-          const provenance = getToolOutputProvenance(part);
-          if (!provenance || this.injectedToolResults.has(provenance)) continue;
-          const parts = groups.get(provenance) ?? [];
-          parts.push(part);
-          groups.set(provenance, parts);
-        }
-      for (const [provenance, parts] of groups) {
-        this.injectedToolResults.add(provenance);
-        const injected = measureToolOutput(parts);
-        logToolResultSize(
-          this.config,
-          new ToolResultSizeEvent(
-            provenance.toolName,
-            provenance.toolType,
-            'injection',
-            provenance.rawSize?.chars,
-            injected.chars,
-            provenance.rawSize?.estimatedTokens,
-            injected.estimatedTokens,
-            provenance.truncated,
-            Number.isFinite(provenance.budget) ? provenance.budget : undefined,
-            provenance.budgetSource,
-            provenance.callId,
-            provenance.promptId || prompt_id,
-          ),
-        );
-      }
       return generator.generateContentStream(request, prompt_id);
     };
     const cgConfig = this.config.getContentGeneratorConfig();
@@ -5741,6 +5574,66 @@ export class LlmChat {
   }
 
   /**
+   * The character budget left for this send's tool results before the request
+   * would cross auto-compaction (#2566), or undefined to keep the static
+   * budgets. Only this chat's last successful report, for this route and the
+   * unchanged history prefix, can anchor it; an explicit threshold always wins.
+   *
+   * Anchored to `auto`, not `hard`: on a 1M window the band between the two is
+   * ~127k tokens, so a `hard` anchor only ever shrank results after compaction
+   * had already been triggered. At or above `auto` there is no headroom to
+   * share, and compaction owns that case, so nothing is shrunk here.
+   */
+  private pressureToolOutputBudget(
+    userContent: Content,
+    routeKey: string,
+    contextWindow: number | undefined,
+  ): number | undefined {
+    const anchor = this.toolBudgetUsageAnchor;
+    const baseChars = this.config.getTruncateToolOutputThreshold?.();
+    if (
+      !anchor ||
+      anchor.routeKey !== routeKey ||
+      !userContent.parts?.some((part) => part.functionResponse) ||
+      baseChars === undefined ||
+      this.config.isTruncateToolOutputThresholdExplicit?.() ||
+      typeof contextWindow !== 'number' ||
+      !Number.isFinite(contextWindow) ||
+      contextWindow <= 0 ||
+      anchor.history.length > this.history.length ||
+      !anchor.history.every((content, index) => content === this.history[index])
+    )
+      return undefined;
+    const newNonToolContent: Content[] = [
+      ...this.history.slice(anchor.history.length),
+      {
+        ...userContent,
+        parts: userContent.parts.filter((part) => !part.functionResponse),
+      },
+    ];
+    const { auto } = computeThresholds(
+      contextWindow,
+      this.config.getAutoCompactThreshold(),
+    );
+    const newTokens = Math.ceil(
+      estimateContentTokens(
+        newNonToolContent,
+        resolveSlimmingConfig(this.config.getChatCompression())
+          .imageTokenEstimate,
+      ) * CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR,
+    );
+    const remainingTokens =
+      (auto - anchor.tokens - newTokens) /
+      CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR;
+    if (remainingTokens <= 0) return undefined;
+    const chars = Math.max(
+      MIN_PRESSURE_TOOL_OUTPUT_CHARS,
+      Math.floor(remainingTokens * TOKEN_TO_CHAR_RATIO),
+    );
+    return chars < baseChars ? chars : undefined;
+  }
+
+  /**
    * Clears the chat history.
    */
   clearHistory(): void {
@@ -5919,6 +5812,7 @@ export class LlmChat {
     history: Content[],
     completedToolCallIds?: readonly string[],
   ): void {
+    this.toolBudgetUsageAnchor = undefined;
     this.history = history;
     this.setCompletedToolCallIds(completedToolCallIds);
     // History replacement (compression, /clear, --resume reload) wipes

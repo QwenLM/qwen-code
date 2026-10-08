@@ -4,9 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { measureToolOutput } from './tool-output-size.js';
-import { logToolResultSize } from '../telemetry/loggers.js';
-import { ToolResultSizeEvent } from '../telemetry/types.js';
 import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
@@ -712,11 +709,7 @@ export const CITATION_RULES: readonly string[] = [
 
 const CITATION_POLICY = `\n\nCitation policy: ${CITATION_RULES.map((rule) => `${rule}.`).join(' ')}`;
 
-function formatLlmContent(
-  query: string,
-  outcome: WebSearchOutcome,
-  applyLimit = true,
-): string {
+function formatLlmContent(query: string, outcome: WebSearchOutcome): string {
   const allOpened = outcome.sources.filter((source) => source.opened);
   const opened = allOpened.slice(0, MAX_OPENED_URLS);
   const omittedOpened = allOpened.length - opened.length;
@@ -758,7 +751,7 @@ function formatLlmContent(
 
   const answer = outcome.answerText.trim();
   let body = buildBody(answer);
-  if (applyLimit && body.length > MAX_RESULT_SIZE_CHARS) {
+  if (body.length > MAX_RESULT_SIZE_CHARS) {
     // The URL sections are the citation evidence the policy below demands —
     // an oversized narrated answer must not push them past the limit. Shrink
     // the answer first; the hard slice is only a backstop for the (bounded)
@@ -911,31 +904,12 @@ class WebSearchToolInvocation extends BaseToolInvocation<
     outcome: WebSearchOutcome,
     startedAt: number,
   ): ToolResult {
-    const rawOutputSize = measureToolOutput(
-      formatLlmContent(this.params.query, outcome, false),
-    );
     const llmContent = formatLlmContent(this.params.query, outcome);
-    const processed = measureToolOutput(llmContent);
-    logToolResultSize(
-      this.config,
-      new ToolResultSizeEvent(
-        'web_search',
-        'native',
-        'producer',
-        rawOutputSize.chars,
-        processed.chars,
-        rawOutputSize.estimatedTokens,
-        processed.estimatedTokens,
-        rawOutputSize.chars > processed.chars,
-        MAX_RESULT_SIZE_CHARS,
-        'per_tool',
-      ),
-    );
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
     const returnDisplay =
       `Did ${outcome.searchCount} search${outcome.searchCount === 1 ? '' : 'es'} in ${seconds}s` +
       (outcome.partialNote ? ' (partial result)' : '');
-    return { llmContent, returnDisplay, rawOutputSize };
+    return { llmContent, returnDisplay };
   }
 }
 

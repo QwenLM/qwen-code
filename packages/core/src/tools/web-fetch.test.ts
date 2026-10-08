@@ -120,7 +120,6 @@ describe('WebFetchTool', () => {
       trackToolResultBytes: vi.fn(),
       storage: {
         getToolResultsDir: () => toolResultsDir,
-        getProjectTempDir: () => toolResultsDir,
       },
     } as unknown as Config;
   });
@@ -359,11 +358,7 @@ describe('WebFetchTool', () => {
         'https://example.com/large',
       );
 
-      expect(sent).toContain(
-        'Tool output was too large and has been truncated',
-      );
-      expect(sent).toContain('Total characters:');
-      expect(sent).toContain('offset (zero-based line) and limit (line count)');
+      expect(sent).toContain('[Content truncated: showing first 100,000 of');
       expect(sent).not.toContain('NEEDLE-AT-END');
     });
 

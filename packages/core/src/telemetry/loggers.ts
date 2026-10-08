@@ -82,7 +82,6 @@ import {
   recordGoalStateMetrics,
   recordTokenUsageMetrics,
   recordToolCallMetrics,
-  recordToolResultSizeMetrics,
   recordToolExecutionMetrics,
   recordRepeatedToolFailureGuardMetrics,
   recordArenaSessionStartedMetrics,
@@ -104,8 +103,6 @@ import type {
   IdeConnectionEvent,
   StartSessionEvent,
   ToolCallEvent,
-  ToolResultSizeEvent,
-  ToolResultPersistedEvent,
   UserPromptEvent,
   UserRetryEvent,
   FlashFallbackEvent,
@@ -372,54 +369,6 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
     recordToolExecutionMetrics(config, {
       execution_status: normalizedEvent.execution_status,
       tool_type: normalizedEvent.tool_type,
-    });
-  });
-}
-
-export function logToolResultSize(
-  config: Config,
-  event: ToolResultSizeEvent,
-): void {
-  runToolTelemetrySink(() => {
-    QwenLogger.getInstance(config)?.logToolResultSizeEvent(event);
-  });
-  if (!isTelemetrySdkInitialized()) return;
-  runToolTelemetrySink(() => {
-    logs.getLogger(SERVICE_NAME).emit({
-      body: `Tool result size: ${event.function_name} (${event.layer}).`,
-      attributes: {
-        ...getCommonAttributes(config),
-        ...event,
-        'event.name': `${SERVICE_NAME}.${event['event.name']}`,
-      },
-    });
-  });
-  if (event.layer === 'injection')
-    runToolTelemetrySink(() => {
-      recordToolResultSizeMetrics(config, event);
-    });
-}
-
-export function logToolResultPersisted(
-  config: Config,
-  event: ToolResultPersistedEvent,
-): void {
-  // Output paths stay local; this event's public sinks carry numbers only.
-  runToolTelemetrySink(() => {
-    QwenLogger.getInstance(config)?.logToolResultPersistedEvent(event);
-  });
-  if (!isTelemetrySdkInitialized()) return;
-  runToolTelemetrySink(() => {
-    logs.getLogger(SERVICE_NAME).emit({
-      body: `Tool result persisted: ${event.tool_name}.`,
-      attributes: {
-        ...getCommonAttributes(config),
-        'event.name': `${SERVICE_NAME}.tool_result_persisted`,
-        'event.timestamp': event['event.timestamp'],
-        tool_name: event.tool_name,
-        bytes_written: event.bytes_written,
-        prompt_id: event.prompt_id,
-      },
     });
   });
 }

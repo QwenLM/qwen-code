@@ -103,10 +103,7 @@ describe('executeToolCall', () => {
 
     expect(mockToolRegistry.getTool).toHaveBeenCalledWith('testTool');
     expect(executeFn).toHaveBeenCalledWith(request.args);
-    expect({
-      ...response,
-      responseParts: JSON.parse(JSON.stringify(response.responseParts)),
-    }).toStrictEqual({
+    expect(response).toStrictEqual({
       callId: 'call1',
       error: undefined,
       errorType: undefined,
@@ -224,10 +221,7 @@ describe('executeToolCall', () => {
 
     const expectedErrorMessage =
       'Tool "nonexistentTool" not found in registry. Tools must use the exact names that are registered. Did you mean one of: "testTool", "anotherTool"?';
-    expect({
-      ...response,
-      responseParts: JSON.parse(JSON.stringify(response.responseParts)),
-    }).toStrictEqual({
+    expect(response).toStrictEqual({
       callId: 'call2',
       error: new Error(expectedErrorMessage),
       errorType: ToolErrorType.TOOL_NOT_REGISTERED,
@@ -266,10 +260,7 @@ describe('executeToolCall', () => {
       request,
       abortController.signal,
     );
-    expect({
-      ...response,
-      responseParts: JSON.parse(JSON.stringify(response.responseParts)),
-    }).toStrictEqual({
+    expect(response).toStrictEqual({
       callId: 'call3',
       error: new Error('Invalid parameters'),
       errorType: ToolErrorType.INVALID_TOOL_PARAMS,
@@ -314,10 +305,7 @@ describe('executeToolCall', () => {
       request,
       abortController.signal,
     );
-    expect({
-      ...response,
-      responseParts: JSON.parse(JSON.stringify(response.responseParts)),
-    }).toStrictEqual({
+    expect(response).toStrictEqual({
       callId: 'call4',
       error: new Error('Execution failed'),
       errorType: ToolErrorType.EXECUTION_FAILED,
@@ -355,10 +343,7 @@ describe('executeToolCall', () => {
       abortController.signal,
     );
 
-    expect({
-      ...response,
-      responseParts: JSON.parse(JSON.stringify(response.responseParts)),
-    }).toStrictEqual({
+    expect(response).toStrictEqual({
       callId: 'call5',
       error: new Error('Something went very wrong'),
       errorType: ToolErrorType.UNHANDLED_EXCEPTION,
@@ -401,10 +386,7 @@ describe('executeToolCall', () => {
       abortController.signal,
     );
 
-    expect({
-      ...response,
-      responseParts: JSON.parse(JSON.stringify(response.responseParts)),
-    }).toStrictEqual({
+    expect(response).toStrictEqual({
       callId: 'call6',
       error: undefined,
       errorType: undefined,

@@ -4,13 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { logToolResultSize } from '../telemetry/loggers.js';
-import { ToolResultSizeEvent } from '../telemetry/types.js';
-import {
-  attachToolOutputProvenance,
-  getToolOutputProvenance,
-  measureToolOutput,
-} from '../tools/tool-output-size.js';
 import {
   captureHookExecutionOwner,
   getHookExecutionOwner,
@@ -996,40 +989,6 @@ export function convertToFunctionResponse(
   toolName: string,
   callId: string,
   llmContent: PartListUnion,
-  producerResult?: Pick<ToolResult, 'rawOutputSize' | 'persistedOutputFiles'>,
-): Part[] {
-  const processed = measureToolOutput(llmContent);
-  let rawSize: ReturnType<typeof measureToolOutput> | undefined;
-  let persistedOutputFiles: string[] | undefined;
-  try {
-    if (producerResult) {
-      rawSize =
-        producerResult.rawOutputSize === null
-          ? undefined
-          : (producerResult.rawOutputSize ?? processed);
-      persistedOutputFiles = producerResult.persistedOutputFiles;
-    }
-  } catch {
-    // Optional observation metadata must not change a tool's outcome.
-  }
-  return attachToolOutputProvenance(
-    convertToFunctionResponseParts(toolName, callId, llmContent),
-    {
-      callId,
-      toolName,
-      promptId: '',
-      toolType: toolName.startsWith('mcp__') ? 'mcp' : 'native',
-      rawSize,
-      persistedOutputFiles,
-      truncated: rawSize !== undefined && rawSize.chars > processed.chars,
-    },
-  );
-}
-
-function convertToFunctionResponseParts(
-  toolName: string,
-  callId: string,
-  llmContent: PartListUnion,
 ): Part[] {
   const contentToProcess =
     Array.isArray(llmContent) && llmContent.length === 1
@@ -1109,14 +1068,8 @@ export function convertToFunctionErrorResponse(
   callId: string,
   llmContent: PartListUnion,
   fallbackError: string,
-  producerResult?: Pick<ToolResult, 'rawOutputSize' | 'persistedOutputFiles'>,
 ): Part[] {
-  return convertToFunctionResponse(
-    toolName,
-    callId,
-    llmContent,
-    producerResult,
-  ).map((part) => {
+  return convertToFunctionResponse(toolName, callId, llmContent).map((part) => {
     const functionResponse = part.functionResponse;
     if (!functionResponse) return part;
 
@@ -1719,14 +1672,8 @@ function producerContentEqual(
 ): boolean {
   if (producerInputDropsStructuredContent(input)) return false;
   return isDeepStrictEqual(
-    convertToFunctionResponseParts(toolName, callId, input ?? ''),
-    Array.isArray(output)
-      ? output.map((part) =>
-          typeof part === 'string'
-            ? part
-            : Object.fromEntries(Object.entries(part)),
-        )
-      : output,
+    convertToFunctionResponse(toolName, callId, input ?? ''),
+    output,
   );
 }
 
@@ -6023,37 +5970,6 @@ export class CoreToolScheduler {
       }
       producerToolResult = toolResult;
       observeProducerOutput = (response: CoreToolCallResponseInfo) => {
-        const rawSize =
-          producerToolResult?.rawOutputSize === null
-            ? undefined
-            : (producerToolResult?.rawOutputSize ??
-              measureToolOutput(producerToolResult?.llmContent ?? ''));
-        response.responseParts = attachToolOutputProvenance(
-          response.responseParts,
-          {
-            callId,
-            toolName: getModelFacingToolName(scheduledCall.request),
-            promptId: scheduledCall.request.prompt_id,
-            toolType:
-              scheduledCall.tool instanceof DiscoveredMCPTool
-                ? 'mcp'
-                : 'native',
-            rawSize,
-            persistedOutputFiles: response.persistedOutputFiles,
-            truncated:
-              rawSize !== undefined &&
-              measureToolOutput(response.responseParts).chars < rawSize.chars,
-            budget:
-              scheduledCall.tool.maxOutputChars ??
-              this.config.getTruncateToolOutputThreshold(),
-            budgetSource:
-              scheduledCall.tool.maxOutputChars !== undefined
-                ? 'per_tool'
-                : this.config.isTruncateToolOutputThresholdExplicit?.()
-                  ? 'explicit'
-                  : 'global',
-          },
-        );
         try {
           if (producerObserved || !this.shouldObserveProducer(callId)) return;
           producerObserved = true;
@@ -6586,7 +6502,6 @@ export class CoreToolScheduler {
                 toolName,
                 content,
                 {
-                  layer: 'combined',
                   threshold: baseThreshold * COMBINED_PASS_TOLERANCE_FACTOR,
                   lines: combinedLines,
                   keep: perToolKeep,
@@ -7292,14 +7207,6 @@ export class CoreToolScheduler {
 
     if (this.toolCalls.length > 0 && allCallsAreTerminal) {
       let completedCalls = [...this.toolCalls] as CompletedToolCall[];
-      const provenanceByCall = new Map(
-        completedCalls.map((call) => [
-          call.request.callId,
-          call.response.responseParts
-            .map(getToolOutputProvenance)
-            .find(Boolean),
-        ]),
-      );
       this.toolCalls = [];
       this.isFinalizingToolCalls = true;
       // Captured before PostToolBatch, which can rewrite a cancelled call
@@ -7446,21 +7353,6 @@ export class CoreToolScheduler {
           (callId) =>
             preToolUseContextCallIds.has(callId) && !isAborted(callId),
         );
-        completedCalls = completedCalls.map((call) => {
-          const provenance = provenanceByCall.get(call.request.callId);
-          return provenance
-            ? {
-                ...call,
-                response: {
-                  ...call.response,
-                  responseParts: attachToolOutputProvenance(
-                    call.response.responseParts,
-                    provenance,
-                  ),
-                },
-              }
-            : call;
-        });
         const withoutHookContext = completedCalls;
 
         // Hooks may replace responses or append context, so enforce the same
@@ -7485,21 +7377,6 @@ export class CoreToolScheduler {
         }
 
         for (const call of completedCalls) {
-          const provenance =
-            call.response.responseParts
-              .map(getToolOutputProvenance)
-              .find(Boolean) ?? provenanceByCall.get(call.request.callId);
-          call.response.responseParts = attachToolOutputProvenance(
-            call.response.responseParts,
-            provenance ?? {
-              callId: call.request.callId,
-              toolName: call.request.name,
-              promptId: call.request.prompt_id,
-              toolType:
-                call.tool instanceof DiscoveredMCPTool ? 'mcp' : 'native',
-              truncated: false,
-            },
-          );
           this.runtimeContentGeneratorViews.delete(call.request.callId);
           logToolCall(this.config, new ToolCallEvent(call));
         }
@@ -7568,25 +7445,6 @@ export class CoreToolScheduler {
       toolName,
       text,
       this.config,
-    );
-
-    const before = measureToolOutput(content);
-    const after = measureToolOutput(result.content);
-    logToolResultSize(
-      this.config,
-      new ToolResultSizeEvent(
-        toolName,
-        toolName.startsWith('mcp__') ? 'mcp' : 'native',
-        'persistence',
-        before.chars,
-        after.chars,
-        before.estimatedTokens,
-        after.estimatedTokens,
-        result.content !== text,
-        gateThreshold,
-        'global',
-        callId,
-      ),
     );
 
     if (result.outputFile) {

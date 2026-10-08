@@ -4,11 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  attachToolOutputProvenance,
-  measureToolOutput,
-} from '../tools/tool-output-size.js';
-import { logToolResultSize } from '../telemetry/loggers.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type OpenAI from 'openai';
 import type {
@@ -55,11 +50,7 @@ import { OpenAIContentGenerator } from './openaiContentGenerator/openaiContentGe
 import { EnhancedErrorHandler } from './openaiContentGenerator/errorHandler.js';
 import { APIConnectionTimeoutError } from 'openai';
 import type { OpenAICompatibleProvider } from './openaiContentGenerator/provider/index.js';
-import {
-  DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
-  DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
-  type Config,
-} from '../config/config.js';
+import type { Config } from '../config/config.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { CompressionStatus, type ChatCompressionInfo } from './turn.js';
@@ -147,7 +138,6 @@ const {
 }));
 
 vi.mock('../telemetry/loggers.js', () => ({
-  logToolResultSize: vi.fn(),
   logContentRetry: mockLogContentRetry,
   logContentRetryFailure: mockLogContentRetryFailure,
   logProtocolTagSanitized: mockLogProtocolTagSanitized,
@@ -281,9 +271,6 @@ describe('LlmChat', async () => {
     // Pass-through for tests that don't care about retry logic.
     mockRetryWithBackoff.mockImplementation(async (apiCall) => apiCall());
     mockConfig = {
-      getTruncateToolOutputThreshold: () =>
-        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
-      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getSessionId: () => 'test-session-id',
       getTelemetryLogPromptsEnabled: () => true,
       getUsageStatisticsEnabled: () => true,
@@ -724,10 +711,7 @@ describe('LlmChat', async () => {
     expect(syncReviewedDeclarations).toHaveBeenCalledOnce();
     expect(syncReviewedDeclarations).toHaveBeenCalledWith(
       expect.arrayContaining([
-        expect.objectContaining({
-          role: 'user',
-          parts: [expect.objectContaining(searchResponse)],
-        }),
+        expect.objectContaining({ role: 'user', parts: [searchResponse] }),
       ]),
       chat,
     );
@@ -743,15 +727,7 @@ describe('LlmChat', async () => {
       syncedShapes.push({
         length: history.length,
         hasSearchResponse: history.some((entry) =>
-          (entry.parts ?? []).some(
-            (part) =>
-              part.functionResponse?.id ===
-                searchResponse.functionResponse?.id &&
-              part.functionResponse?.name ===
-                searchResponse.functionResponse?.name &&
-              part.functionResponse?.response?.['output'] ===
-                searchResponse.functionResponse?.response?.['output'],
-          ),
+          (entry.parts ?? []).some((part) => part === searchResponse),
         ),
       });
     });
@@ -2450,9 +2426,7 @@ describe('LlmChat', async () => {
       const output = sentParts[1].functionResponse?.response?.['output'];
       expect(typeof output).toBe('string');
       expect((output as string).length).toBeLessThanOrEqual(100);
-      expect(chat.getHistory()[0].parts).toEqual(
-        JSON.parse(JSON.stringify(sentParts)),
-      );
+      expect(chat.getHistory()[0].parts).toEqual(sentParts);
     });
 
     const retainOneImage = () =>
@@ -11878,181 +11852,116 @@ describe('LlmChat', async () => {
   // #9454: API counts describe the serialization of the route (model + auth
   // + endpoint) that produced them. /model keeps this LlmChat, so the old
   // route's counts must not anchor admission, clamp or compression.
-  describe('pressure-aware tool submission', () => {
+  describe('pressure-aware tool submission (#2566)', () => {
+    // 1M window: auto-compaction triggers at 850_000 tokens. A seeded report
+    // just below it leaves (850_000 - 846_010 - new) / 1.5 ≈ 2.6k tokens of
+    // headroom, i.e. a ~10k-char budget, under the 25k static default.
+    const NEAR_AUTO = 846_000;
     beforeEach(() => {
-      mockConfig.getTruncateToolOutputThreshold = () => 80000;
-      mockConfig.getTruncateToolOutputLines = () => 2000;
+      mockConfig.getTruncateToolOutputThreshold = () => 25_000;
       mockConfig.isTruncateToolOutputThresholdExplicit = () => false;
-      mockConfig.isTruncateToolOutputLinesExplicit = () => false;
-      mockConfig.getToolOutputBatchBudget = () => 200000;
-      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
-        authType: AuthType.USE_OPENAI,
-        model: 'test-model',
-        contextWindowSize: 1000000,
-      });
+      mockConfig.getToolOutputBatchBudget = () => 200_000;
+      mockGeneratorConfig({ contextWindowSize: 1_000_000 });
       vi.spyOn(chat, 'tryCompress').mockResolvedValue({
         compressionStatus: CompressionStatus.NOOP,
         originalTokenCount: 0,
         newTokenCount: 0,
       });
     });
-    const result = () =>
-      attachToolOutputProvenance(
-        [
-          fnResponse(
-            'shell',
-            { output: 'x'.repeat(20000) },
-            'anonymous-result',
-          ),
-        ],
-        {
-          callId: 'anonymous-result',
-          toolName: 'shell',
-          toolType: 'native',
-          promptId: 'p',
-          rawSize: { chars: 20000, estimatedTokens: 5000 },
-          persistedOutputFiles: [],
-          truncated: false,
-        },
-      );
-    const injected = (index: number) => requestAt(index).contents as Content[];
+    const result = (id = 'anonymous-result', fill = 'x') =>
+      fnResponse('shell', { output: fill.repeat(20_000) }, id);
     const resultChars = (index: number) =>
-      measureToolOutput(
-        injected(index)
-          .flatMap((entry) => entry.parts ?? [])
-          .filter((part) => part.functionResponse),
-      ).chars;
-
-    it('shrinks only after a fresh same-chat usage report and records the final request once', async () => {
+      (requestAt(index).contents as Content[])
+        .flatMap((entry) => entry.parts ?? [])
+        .map((part) => part.functionResponse?.response?.['output'])
+        .reduce<number>(
+          (total, output) =>
+            total + (typeof output === 'string' ? output.length : 0),
+          0,
+        );
+    const reportUsage = async (promptTokenCount: number, target = chat) => {
       mockStreamsOnce(
-        textStream('ok', { promptTokenCount: 970000, totalTokenCount: 970010 }),
+        textStream('ok', {
+          promptTokenCount,
+          totalTokenCount: promptTokenCount + 10,
+        }),
         textStream('done'),
-        textStream('again'),
       );
-      await sendDrain('start', 'first');
-      await sendDrain(result(), 'second');
-      expect(resultChars(1)).toBeLessThan(20000);
-      expect(
-        vi
-          .mocked(logToolResultSize)
-          .mock.calls.filter(([, event]) => event.layer === 'injection'),
-      ).toHaveLength(1);
-      const event = vi
-        .mocked(logToolResultSize)
-        .mock.calls.find(([, entry]) => entry.layer === 'injection')![1];
-      expect(event.raw_content_length).toBe(20000);
-      expect(event.injected_content_length).toBe(resultChars(1));
-      await sendDrain('next', 'third');
-      expect(
-        vi
-          .mocked(logToolResultSize)
-          .mock.calls.filter(([, entry]) => entry.layer === 'injection'),
-      ).toHaveLength(1);
+      await sendDrain('start', 'first', target);
+    };
+
+    it('shrinks results to the headroom left before auto-compaction', async () => {
+      await reportUsage(NEAR_AUTO);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBeLessThan(20_000);
+      expect(resultChars(1)).toBeLessThan(12_000);
     });
 
-    it('shares pressure capacity across parallel results and preserves user steering', async () => {
-      mockStreamsOnce(
-        textStream('ok', { promptTokenCount: 970000, totalTokenCount: 970000 }),
-        textStream('done'),
-      );
-      await sendDrain('start', 'first');
-      const second = attachToolOutputProvenance(
-        [fnResponse('read_file', { output: 'y'.repeat(20000) }, 'second')],
-        {
-          callId: 'second',
-          toolName: 'read_file',
-          toolType: 'native',
-          promptId: 'p',
-          rawSize: { chars: 20000, estimatedTokens: 5000 },
-          persistedOutputFiles: [],
-          truncated: false,
-        },
-      );
+    it('leaves results alone when the session is far from auto-compaction', async () => {
+      await reportUsage(500_000);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBe(20_000);
+    });
+
+    it('does not shrink once usage is past auto-compaction, which owns that case', async () => {
+      // A budget computed from non-positive headroom used to floor at 1 char
+      // and replace every result with a one-character stub.
+      await reportUsage(900_000);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBe(20_000);
+    });
+
+    it('shares the budget across parallel results and keeps user steering', async () => {
+      await reportUsage(NEAR_AUTO);
       await sendDrain(
-        [...result(), ...second, { text: 'Preserve this user instruction.' }],
+        [
+          result('first-result'),
+          result('second-result', 'y'),
+          { text: 'Preserve this user instruction.' },
+        ],
         'second',
       );
-      expect(resultChars(1)).toBeLessThan(20000);
+      expect(resultChars(1)).toBeLessThan(12_000);
       expect(
-        injected(1)
+        (requestAt(1).contents as Content[])
           .flatMap((entry) => entry.parts ?? [])
           .some((part) => part.text === 'Preserve this user instruction.'),
       ).toBe(true);
-      expect(
-        vi
-          .mocked(logToolResultSize)
-          .mock.calls.filter(([, event]) => event.layer === 'injection'),
-      ).toHaveLength(2);
-    });
-
-    it('counts a retried generator request once', async () => {
-      mockRetryWithBackoff.mockImplementation(async (apiCall) => {
-        try {
-          return await apiCall();
-        } catch {
-          return apiCall();
-        }
-      });
-      streamMock()
-        .mockRejectedValueOnce(new Error('temporary transport failure'))
-        .mockResolvedValueOnce(textStream('done'));
-      await sendDrain(result(), 'retry');
-      expect(streamMock()).toHaveBeenCalledTimes(2);
-      expect(
-        vi
-          .mocked(logToolResultSize)
-          .mock.calls.filter(([, event]) => event.layer === 'injection'),
-      ).toHaveLength(1);
     });
 
     it.each(['explicit', 'estimated', 'restored', 'foreign', 'other-chat'])(
       'keeps static output for %s ownership',
       async (mode) => {
-        mockStreamsOnce(
-          textStream('ok', {
-            promptTokenCount: 970000,
-            totalTokenCount: 970000,
-          }),
-          textStream('done'),
-        );
-        await sendDrain('start', 'first');
+        await reportUsage(NEAR_AUTO);
         let target = chat;
-        if (mode === 'explicit') {
+        if (mode === 'explicit')
           mockConfig.isTruncateToolOutputThresholdExplicit = () => true;
-          mockConfig.isTruncateToolOutputLinesExplicit = () => true;
-        }
-        if (mode === 'estimated') chat.setLastPromptTokenCount(970000, true);
+        if (mode === 'estimated') chat.setLastPromptTokenCount(NEAR_AUTO, true);
         if (mode === 'restored') chat.setHistory(chat.getHistory());
         if (mode === 'foreign')
           vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
             'other-route',
           );
-        if (mode === 'other-chat') target = newChat();
-        vi.spyOn(target, 'tryCompress').mockResolvedValue({
-          compressionStatus: CompressionStatus.NOOP,
-          originalTokenCount: 0,
-          newTokenCount: 0,
-        });
-        await sendDrain(result(), 'second', target);
-        expect(resultChars(1)).toBe(20000);
+        if (mode === 'other-chat') {
+          target = newChat();
+          vi.spyOn(target, 'tryCompress').mockResolvedValue({
+            compressionStatus: CompressionStatus.NOOP,
+            originalTokenCount: 0,
+            newTokenCount: 0,
+          });
+        }
+        await sendDrain([result()], 'second', target);
+        expect(resultChars(1)).toBe(20_000);
       },
     );
 
-    it('does not count a request cancelled before generator dispatch', async () => {
-      const controller = new AbortController();
-      controller.abort();
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: result(), config: { abortSignal: controller.signal } },
-        'cancelled',
-      );
-      await expect(drain(stream)).rejects.toThrow();
-      expect(streamMock()).not.toHaveBeenCalled();
-      expect(
-        vi
-          .mocked(logToolResultSize)
-          .mock.calls.filter(([, event]) => event.layer === 'injection'),
-      ).toHaveLength(0);
+    it('does not reuse a report once a later request was dispatched', async () => {
+      await reportUsage(NEAR_AUTO);
+      // The follow-up's response reports no usage, so nothing re-anchors.
+      await sendDrain('follow-up', 'second');
+      mockStreamsOnce(textStream('done'));
+      await sendDrain([result()], 'third');
+      expect(resultChars(2)).toBe(20_000);
     });
   });
 

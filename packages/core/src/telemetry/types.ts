@@ -4,11 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  getToolOutputProvenance,
-  measureToolOutput,
-  type ToolOutputBudgetSource,
-} from '../tools/tool-output-size.js';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ApprovalMode } from '../config/config.js';
@@ -211,12 +206,6 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   response_id?: string;
   tool_type: 'native' | 'mcp';
   content_length?: number;
-  raw_content_length?: number;
-  raw_estimated_tokens?: number;
-  processed_estimated_tokens?: number;
-  truncated?: boolean;
-  applied_budget?: number;
-  budget_source?: ToolOutputBudgetSource;
   mcp_server_name?: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   metadata?: { [key: string]: any };
@@ -255,19 +244,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     this.error = call.response.error?.message;
     this.error_type = call.response.errorType;
     this.prompt_id = call.request.prompt_id;
-    const processed = measureToolOutput(call.response.responseParts);
-    const provenance = call.response.responseParts
-      .map(getToolOutputProvenance)
-      .find(Boolean);
-    this.content_length = processed.chars;
-    this.processed_estimated_tokens = processed.estimatedTokens;
-    this.raw_content_length = provenance?.rawSize?.chars;
-    this.raw_estimated_tokens = provenance?.rawSize?.estimatedTokens;
-    this.truncated = provenance?.truncated;
-    this.applied_budget = Number.isFinite(provenance?.budget)
-      ? provenance?.budget
-      : undefined;
-    this.budget_source = provenance?.budgetSource;
+    this.content_length = call.response.contentLength;
     if (
       typeof call.tool !== 'undefined' &&
       call.tool instanceof DiscoveredMCPTool
@@ -1016,35 +993,6 @@ export class ToolOutputTruncatedEvent implements BaseTelemetryEvent {
   }
 }
 
-export class ToolResultSizeEvent implements BaseTelemetryEvent {
-  readonly 'event.timestamp' = new Date().toISOString();
-  readonly 'event.name': string;
-  constructor(
-    readonly function_name: string,
-    readonly tool_type: 'native' | 'mcp',
-    readonly layer:
-      | 'producer'
-      | 'persistence'
-      | 'per_tool'
-      | 'combined'
-      | 'batch'
-      | 'context'
-      | 'injection',
-    readonly raw_content_length: number | undefined,
-    readonly injected_content_length: number,
-    readonly raw_estimated_tokens: number | undefined,
-    readonly injected_estimated_tokens: number,
-    readonly truncated: boolean,
-    readonly applied_budget?: number,
-    readonly budget_source?: ToolOutputBudgetSource,
-    readonly call_id?: string,
-    readonly prompt_id?: string,
-  ) {
-    this['event.name'] =
-      layer === 'injection' ? 'tool_result_injected' : 'tool_result_size';
-  }
-}
-
 export class ToolResultPersistedEvent implements BaseTelemetryEvent {
   readonly eventName = 'tool_result_persisted';
   readonly 'event.timestamp' = new Date().toISOString();
@@ -1386,7 +1334,6 @@ export type TelemetryEvent =
   | ExtensionInstallEvent
   | ExtensionUninstallEvent
   | ToolOutputTruncatedEvent
-  | ToolResultSizeEvent
   | ToolResultPersistedEvent
   | ModelSlashCommandEvent
   | AuthEvent

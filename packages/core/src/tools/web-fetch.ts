@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { truncateToolOutput } from './truncation.js';
 import { LRUCache } from 'mnemonist';
 import type { Config } from '../config/config.js';
 import {
@@ -89,7 +88,6 @@ interface CacheEntry {
    * binary content.
    */
   content: string;
-  persistedTextPath?: string;
   persistedPath?: string;
   persistedSize?: number;
   /** Sniffed mime for the persisted-file note (Content-Type may lie). */
@@ -193,6 +191,16 @@ function readHintForPath(persistedPath: string): string {
     return ` Use ${ToolNames.READ_FILE} to view it.`;
   }
   return '';
+}
+
+function truncateText(text: string): string {
+  if (text.length <= MAX_CONTENT_CHARS) {
+    return text;
+  }
+  return (
+    text.slice(0, MAX_CONTENT_CHARS) +
+    `\n\n[Content truncated: showing first ${MAX_CONTENT_CHARS.toLocaleString('en-US')} of ${text.length.toLocaleString('en-US')} characters]`
+  );
 }
 
 /**
@@ -474,7 +482,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       if (sniff.extension === 'pdf' && persistedPath) {
         const pdfText = await extractPDFText(persistedPath, { signal });
         if (pdfText.success && pdfText.text.trim()) {
-          content = pdfText.text;
+          content = truncateText(pdfText.text);
         } else if (!pdfText.success) {
           this.debugLogger.debug(
             `[WebFetchTool] PDF text extraction failed: ${pdfText.error}`,
@@ -486,42 +494,23 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       const decoded = response.body.toString('utf-8');
       try {
         const turndown = await getTurndownService();
-        content = turndown.turndown(decoded);
+        content = truncateText(turndown.turndown(decoded));
       } catch (error) {
         this.debugLogger.error(
           `[WebFetchTool] HTML conversion failed, using raw text`,
           error,
         );
-        content = decoded;
+        content = truncateText(decoded);
       }
     } else {
-      content = response.body.toString('utf-8');
+      content = truncateText(response.body.toString('utf-8'));
     }
 
     this.debugLogger.debug(
       `[WebFetchTool] network_ms=${networkMs} extract_ms=${Date.now() - extractStart}`,
     );
 
-    let persistedTextPath: string | undefined;
-    if (content.length > MAX_CONTENT_CHARS) {
-      const shortened = await truncateToolOutput(
-        this.config,
-        'web_fetch',
-        content,
-        {
-          threshold: MAX_CONTENT_CHARS,
-          lines: Number.POSITIVE_INFINITY,
-          previewChars: MAX_CONTENT_CHARS - 2000,
-          keep: 'head',
-          layer: 'producer',
-        },
-      );
-      content = shortened.content;
-      persistedTextPath = shortened.outputFile;
-    }
-
     const entry: CacheEntry = {
-      persistedTextPath,
       fetchedAt: Date.now(),
       status: response.status,
       statusText: response.statusText,
@@ -560,11 +549,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
         };
       }
 
-      const header =
-        this.buildMetadataHeader(entry) +
-        (entry.persistedTextPath
-          ? `\nFull extracted text saved to: ${entry.persistedTextPath}. Page in with read_file using file_path, offset and limit.`
-          : '');
+      const header = this.buildMetadataHeader(entry);
       const binaryNote = entry.persistedPath
         ? `\n\n[Binary content (${entry.persistedMime || entry.contentType || 'unknown'}, ${formatByteSize(entry.persistedSize ?? entry.byteLength)}) saved to ${entry.persistedPath}.${readHintForPath(entry.persistedPath)}]`
         : '';
