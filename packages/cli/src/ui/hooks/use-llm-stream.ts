@@ -111,7 +111,10 @@ import {
   splitFencedMarkdown,
   getEnclosingFenceInfo,
 } from '../utils/markdownUtilities.js';
-import { fitPendingSlice } from '../utils/pending-rendered-height.js';
+import {
+  fitPendingSlice,
+  isTableStart,
+} from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
@@ -2004,6 +2007,26 @@ export const useLlmStream = (
           if (bufferLines[k]!.trim() === '') {
             boundaryLine = k;
             break;
+          }
+        }
+        // Raw accounting can stop inside a table; commit it whole once its
+        // closing blank arrives, without mistaking a fenced blank for its end.
+        if (
+          boundaryLine < 0 &&
+          renderModeRef?.current === 'raw' &&
+          isTableStart(bufferLines, 0)
+        ) {
+          for (let k = keptLines + 1; k < bufferLines.length; k++) {
+            if (
+              bufferLines[k]!.trim() === '' &&
+              !getEnclosingFenceInfo(
+                newLlmMessageBuffer,
+                charIndexAfterLine(newLlmMessageBuffer, k + 1),
+              )
+            ) {
+              boundaryLine = k;
+              break;
+            }
           }
         }
         let target: number;

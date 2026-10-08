@@ -12182,6 +12182,228 @@ describe('useLlmStream', () => {
           (item) => item.type === 'gemini' || item.type === 'gemini_content',
         );
 
+    const streamStages = async (
+      result: { current: ReturnType<typeof useLlmStream> },
+      stages: string[],
+    ) => {
+      vi.useFakeTimers();
+      const actualUtilities = await vi.importActual<
+        typeof import('../utils/markdownUtilities.js')
+      >('../utils/markdownUtilities.js');
+      vi.mocked(findLastSafeSplitPoint).mockImplementation(
+        actualUtilities.findLastSafeSplitPoint,
+      );
+      const gates = [...stages, ''].map(() => {
+        let release!: () => void;
+        const wait = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { wait, release };
+      });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          for (const [index, value] of stages.entries()) {
+            await gates[index].wait;
+            yield { type: ServerLlmEventType.Content, value };
+          }
+          await gates[stages.length].wait;
+        })(),
+      );
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+      let nextStage = 0;
+      const advance = async () => {
+        await act(async () => {
+          gates[nextStage++].release();
+          await vi.advanceTimersByTimeAsync(0);
+          vi.advanceTimersByTime(60);
+        });
+      };
+      await advance();
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      return {
+        advance,
+        stop: async () => {
+          act(() => result.current.cancelOngoingRequest());
+          await act(async () => {
+            gates.forEach((gate) => gate.release());
+          });
+        },
+      };
+    };
+
+    const completedTableCases = [
+      {
+        name: 'long row table',
+        rows: Array.from({ length: 40 }, (_, i) => `| r${i} | c${i} |`),
+      },
+      {
+        name: 'bare-separator table',
+        rows: [...Array.from({ length: 100 }, () => '--- | ---'), '| x | y |'],
+      },
+    ].flatMap(({ name, rows }) =>
+      (['raw', 'render'] as const).flatMap((mode) =>
+        ['', '   '].map((blank) => ({
+          name,
+          mode,
+          blank,
+          table: ['| A | B |', '| --- | --- |', ...rows].join('\n'),
+        })),
+      ),
+    );
+
+    it.each(completedTableCases)(
+      'commits a completed $name in $mode mode at blank "$blank" before stream end',
+      async ({ table, mode, blank, name }) => {
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { current: mode },
+        );
+        const stream = await streamStages(result, [
+          `intro\n\n${table}`,
+          `\n${blank}\nDone.`,
+          '\nMore prose.',
+        ]);
+        try {
+          expect(result.current.pendingHistoryItems[0]?.text).toContain(table);
+          expect(
+            llmContentItems().some((item) => item.text.includes('| A | B |')),
+          ).toBe(false);
+
+          await stream.advance();
+          const needsCommit = mode === 'raw' || name === 'long row table';
+          if (needsCommit) {
+            expect(llmContentItems().map((item) => item.text)).toEqual([
+              'intro\n\n',
+              `${table}\n${blank}\n`,
+            ]);
+            expect(result.current.pendingHistoryItems[0]?.text).toBe('Done.');
+          } else {
+            // The visual bare-separator table fits; it can stay pending in full.
+            expect(llmContentItems()).toHaveLength(0);
+            expect(result.current.pendingHistoryItems[0]?.text).toContain(
+              'Done.',
+            );
+          }
+
+          await stream.advance();
+          expect(result.current.pendingHistoryItems[0]?.text).toContain(
+            'Done.\nMore prose.',
+          );
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
+    it.each(['raw', 'render'] as const)(
+      'commits the whole completed table after a live switch to %s',
+      async (nextMode) => {
+        const renderModeRef: { current: 'raw' | 'render' } = {
+          current: nextMode === 'raw' ? 'render' : 'raw',
+        };
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          renderModeRef,
+        );
+        const table = [
+          '| A | B |',
+          '| --- | --- |',
+          ...Array.from({ length: 40 }, (_, i) => `| r${i} | c${i} |`),
+        ].join('\n');
+        const stream = await streamStages(result, [
+          `intro\n\n${table}`,
+          '\n\nDone.',
+        ]);
+        try {
+          expect(result.current.pendingHistoryItems[0]?.text).toContain(table);
+          expect(llmContentItems()).toHaveLength(1);
+          // Keep the already-running generator and its original callback.
+          renderModeRef.current = nextMode;
+          await stream.advance();
+          expect(llmContentItems().map((item) => item.text)).toEqual([
+            'intro\n\n',
+            `${table}\n\n`,
+          ]);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe('Done.');
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
+    it.each([
+      Array.from({ length: 40 }, (_, i) => `- item ${i}`).join('\n'),
+      [
+        '```mermaid',
+        ...Array.from({ length: 40 }, (_, i) => `A${i}-->B${i}`),
+      ].join('\n'),
+    ])('preserves raw non-table block boundaries: %s', async (block) => {
+      const { result } = renderTestHook(
+        [],
+        undefined,
+        { current: 24 },
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { current: 'raw' },
+      );
+      const stream = await streamStages(result, [`${block}\n\nDone.`]);
+      try {
+        expect(llmContentItems()).toHaveLength(0);
+        expect(result.current.pendingHistoryItems[0]?.text).toBe(
+          `${block}\n\nDone.`,
+        );
+      } finally {
+        await stream.stop();
+      }
+    });
+
+    it('waits for a fence outside the raw table to close before using its blank boundary', async () => {
+      const { result } = renderTestHook(
+        [],
+        undefined,
+        { current: 24 },
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { current: 'raw' },
+      );
+      const table = [
+        '| A | B |',
+        '| --- | --- |',
+        ...Array.from({ length: 40 }, (_, i) => `| r${i} | c${i} |`),
+      ].join('\n');
+      const content = `${table}\n\`\`\`mermaid\nflowchart LR\n\nA-->B`;
+      const stream = await streamStages(result, [content, '\n```\n\nDone.']);
+      try {
+        expect(llmContentItems()).toHaveLength(0);
+        expect(result.current.pendingHistoryItems[0]?.text).toBe(content);
+        await stream.advance();
+        expect(llmContentItems().map((item) => item.text)).toEqual([
+          `${content}\n\`\`\`\n\n`,
+        ]);
+        expect(result.current.pendingHistoryItems[0]?.text).toBe('Done.');
+      } finally {
+        await stream.stop();
+      }
+    });
+
     it.each(['render', 'raw'] as const)(
       'uses the %s mode row budget for streamed bare table separators',
       async (renderMode) => {
