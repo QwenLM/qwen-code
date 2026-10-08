@@ -1401,6 +1401,8 @@ export const DAEMON_PASSIVE_MANAGED_RUNTIME_RECOVERY_META_KEY =
   'qwen.daemon.passiveManagedRuntimeRecovery';
 export const DAEMON_ATTACHMENT_REFERENCES_META_KEY =
   'qwen.daemon.attachmentReferences';
+export const DAEMON_ATTACHMENT_CONTEXT_META_KEY =
+  'qwen.daemon.attachmentContext';
 export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;
 
 export function isValidTrustedModelPrompt(value: unknown): value is string {
