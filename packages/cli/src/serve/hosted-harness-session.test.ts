@@ -2097,6 +2097,143 @@ describe('Hosted Harness no-tool session', () => {
       .expect(204);
   }, 60_000);
 
+  // P1 (lifecycle fence): with ordinary authorization closed by the
+  // closing parent's fence, its own child cleanup must present the
+  // matching lifecycle claim to pass — and nothing else may.
+  it('admits claimed child operations while the lifecycle fence holds', async () => {
+    domainEnablement.childRun = true;
+    mockBrokerBroker();
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        captureBytes: 1024 * 1024,
+      })
+      .expect(200);
+    const clientId = created.body.clientId as string;
+    const childRunId = `${PROMPT_ID}:call-1`;
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      const callRequest = {
+        name: 'agent',
+        callId: 'call-1',
+        args: { description: 'audit the diff', prompt: 'review the change' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      await toolTurn!.execute(
+        [callRequest],
+        [
+          {
+            functionCall: {
+              id: callRequest.callId,
+              name: callRequest.name,
+              args: callRequest.args,
+            },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      return { text: 'started', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'launch in the background' }];
+    const posted = (async () =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        }))();
+    await vi.waitFor(
+      async () => {
+        const journal = await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
+        );
+        expect(
+          journal.events.some(
+            (event) =>
+              event.kind === 'domain.committed' &&
+              event.payload['domain'] === 'child_run',
+          ),
+        ).toBe(true);
+      },
+      { timeout: 15_000, interval: 100 },
+    );
+    await posted;
+    // Let the launch turn settle fully: the fence must close only after
+    // its answers exist, not against mid-flight writes.
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 15_000, interval: 100 },
+    );
+    state.authorizeOrdinary.mockRejectedValue(
+      new ManagedSessionStoreHttpError(
+        409,
+        'managed_session_lifecycle_active',
+        'DRAINING',
+      ),
+    );
+    const operation = (body: Record<string, unknown>) =>
+      headers(
+        supertest(server).post(`/session/${SESSION_ID}/children/operations`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ operationId: randomUUID(), childRunId, ...body });
+    // No claim presented: the ordinary fence keeps refusing.
+    const active = await operation({ kind: 'cancel' });
+    expect(active.status).toBe(409);
+    expect(active.body.code).toBe('hosted_lifecycle_operation_active');
+    expect(state.authorizeLifecycle).not.toHaveBeenCalled();
+    // The matching lifecycle claim: authorized through its own gate.
+    await operation({
+      kind: 'cancel',
+      authority: { operationId: 'close-1', claimGeneration: 7 },
+    }).expect(202);
+    expect(state.authorizeLifecycle).toHaveBeenCalledTimes(1);
+    expect(state.setLifecycleAuthority).toHaveBeenLastCalledWith({
+      operationId: 'close-1',
+      claimGeneration: 7,
+    });
+    // A claim the gate itself refuses: conflict, never a silent pass.
+    state.authorizeLifecycle.mockRejectedValueOnce(
+      new ManagedSessionStoreHttpError(
+        409,
+        'managed_session_lifecycle_claim',
+        'stale',
+      ),
+    );
+    const conflict = await operation({
+      kind: 'close_scope',
+      started: true,
+      authority: { operationId: 'close-1', claimGeneration: 7 },
+    });
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.code).toBe('hosted_lifecycle_operation_conflict');
+    log.mockRestore();
+    state.authorizeOrdinary.mockReset();
+    state.authorizeOrdinary.mockResolvedValue(undefined);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`))
+      .set('X-Qwen-Client-Id', clientId)
+      .expect(204);
+  }, 60_000);
+
   it('settles a running Monitor watch as stop_requested when the Session closes', async () => {
     domainEnablement.monitorRun = true;
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();

@@ -10,6 +10,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
@@ -51,6 +52,7 @@ class ChildResultRelayTest {
         final List<Map<String, Object>> operations = new CopyOnWriteArrayList<>();
         private boolean available = true;
         volatile String refuseKind;
+        volatile String refuseRecord;
 
         @Override
         public boolean isAvailable() {
@@ -92,9 +94,27 @@ class ChildResultRelayTest {
         @Override
         public void runChildOperation(String tenantId, String sessionId,
                 Map<String, Object> body) {
+            if (refuseRecord != null && refuseRecord.equals(body.get("kind")))
+                throw recordRefusal();
             if (refuseKind != null && refuseKind.equals(body.get("kind")))
                 throw new IllegalStateException("harness down");
             operations.add(Map.copyOf(body));
+        }
+
+        /** The route's `409 child_operation_record` — the parent's own
+         * committed veto, never a transient shape: its constructor is
+         * package-private inside qwencode, so the double reaches it
+         * reflectively. */
+        private static DaemonHttpException recordRefusal() {
+            try {
+                var ctor = DaemonHttpException.class.getDeclaredConstructor(
+                        String.class, int.class, String.class);
+                ctor.setAccessible(true);
+                return ctor.newInstance("runChildOperation", 409,
+                        "{\"code\":\"child_operation_record\"}");
+            } catch (Exception error) {
+                throw new IllegalStateException(error);
+            }
         }
     }
 
@@ -417,11 +437,11 @@ class ChildResultRelayTest {
                 .containsEntry("started", true);
     }
 
-    // R1-7/12: an unattached give-up still closes the Session its ledger
-    // named, but settles creation_failed/started:false — the parent
-    // record carries no attach to prove otherwise.
+    // R1-7/12: a binding-state give-up with an attached record — the
+    // replayed attach IS that evidence; the ledger's walk never decides.
+    // The reconciliation recovers a lost attach reply.
     @Test
-    void anUnattachedGiveUpClosesAndSettlesUnstarted() {
+    void aBindingGiveUpReconcilesItsLostAttachReply() {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "binding", "owner", now + 30_000, 63, 0, null, now, now));
         when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
@@ -431,10 +451,48 @@ class ChildResultRelayTest {
         verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
         assertThat(harness.operations)
                 .extracting(operation -> operation.get("kind"))
+                .containsExactly("attach", "fail");
+        assertThat(harness.operations.get(1))
+                .containsEntry("stopReason", "child_failed")
+                .containsEntry("started", true);
+    }
+
+    // R1-7/12: when the record vetoes the attach replay
+    // (`child_operation_record`), it carries the unattached truth —
+    // the settle takes the unstarted pairing and classifies; the row
+    // only defers on a refusal the record never owes an answer for.
+    @Test
+    void aRecordVetoReconcilesUnstartedAtGiveUp() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 63, 0, null, now, now));
+        harness.refuseRecord = "attach";
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
                 .containsExactly("fail");
         assertThat(harness.operations.get(0))
                 .containsEntry("stopReason", "creation_failed")
                 .containsEntry("started", false);
+    }
+
+    @Test
+    void aTransientAttachRefusalKeepsTheDebtAtGiveUp() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 63, 0, null, now, now));
+        harness.refuseKind = "attach";
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("binding");
+        assertThat(harness.operations).isEmpty();
+        harness.refuseKind = null;
+        dueAgain();
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("attach", "fail");
     }
 
     // R1-7/12: a creation the control plane never proved has no close
@@ -465,7 +523,9 @@ class ChildResultRelayTest {
         harness.refuseKind = "fail";
         relay.scan();
         assertThat(row.get().state()).isEqualTo("binding");
-        assertThat(harness.operations).isEmpty();
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("attach");
         verify(store, never()).classify(any(RelayRow.class), anyString(),
                 anyString(), any(), anyLong());
         harness.refuseKind = null;
@@ -477,7 +537,10 @@ class ChildResultRelayTest {
                 PARENT, CHILD, RUN);
         assertThat(harness.operations)
                 .extracting(operation -> operation.get("kind"))
-                .containsExactly("fail");
+                .containsExactly("attach", "attach", "fail");
+        assertThat(harness.operations.get(2))
+                .containsEntry("stopReason", "child_failed")
+                .containsEntry("started", true);
     }
 
     // R1-7/12: the same debt ordering guards the close gate itself — a
@@ -491,7 +554,9 @@ class ChildResultRelayTest {
                         RUN);
         relay.scan();
         assertThat(row.get().state()).isEqualTo("binding");
-        assertThat(harness.operations).isEmpty();
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("attach");
         Mockito.doReturn(null).when(childCloses).admitChildClose(TENANT,
                 PARENT, CHILD, RUN);
         dueAgain();
@@ -501,7 +566,7 @@ class ChildResultRelayTest {
                 CHILD, RUN);
         assertThat(harness.operations)
                 .extracting(operation -> operation.get("kind"))
-                .containsExactly("fail");
+                .containsExactly("attach", "attach", "fail");
     }
 
     /** The retry window arrived: the parked row is due again. */

@@ -3088,6 +3088,42 @@ export function registerHostedHarnessSessionRoutes(
         if (session.lifecycle)
           return error(res, 409, 'hosted_lifecycle_operation_active');
       } catch (cause) {
+        if (
+          req.method === 'POST' &&
+          req.path === '/children/operations' &&
+          cause instanceof ManagedSessionStoreHttpError &&
+          cause.status === 409 &&
+          cause.remoteCode === 'managed_session_lifecycle_active'
+        ) {
+          // Closing work means lifecycle admission, so the parent's own
+          // child cleanup presents the matching lifecycle claim instead:
+          // the store itself verifies the operation id and claim
+          // generation named by the call. No valid claim present reverts
+          // to the exact ordinary refusal of before; a refused claim
+          // answers as conflict, never a silent pass.
+          const claim = object(object(req.body)?.['authority']);
+          if (
+            typeof claim?.['operationId'] !== 'string' ||
+            typeof claim['claimGeneration'] !== 'number'
+          )
+            return ordinaryAuthorizationError(res, cause);
+          try {
+            const authority = {
+              operationId: claim['operationId'] as string,
+              claimGeneration: claim['claimGeneration'] as number,
+            };
+            session.stores!.setLifecycleAuthority(authority);
+            await session.stores!.authorizeLifecycle();
+          } catch (lifecycleCause) {
+            if (
+              lifecycleCause instanceof ManagedSessionStoreHttpError &&
+              lifecycleCause.status === 409
+            )
+              return error(res, 409, 'hosted_lifecycle_operation_conflict');
+            return ordinaryAuthorizationError(res, lifecycleCause);
+          }
+          return next();
+        }
         return ordinaryAuthorizationError(res, cause);
       }
     }

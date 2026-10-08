@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -114,6 +115,15 @@ class SessionLifecycleCoordinatorTest {
 
     /** A workspace-bound parent with one child Session, close admitted. */
     private static World closingWorld(String suffix) {
+        return closingWorldOp(suffix, false);
+    }
+
+    /** The same world, but closing under the lifecycle protocol (P1). */
+    private static World closingWorldLifecycle(String suffix) {
+        return closingWorldOp(suffix, true);
+    }
+
+    private static World closingWorldOp(String suffix, boolean protocolOne) {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:close-cascade-" + suffix + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
@@ -154,10 +164,14 @@ class SessionLifecycleCoordinatorTest {
                         new StoreModels.SessionLineage(session, session,
                                 "run-1", 1))
                 .sessionId());
-        String operation = transactions.execute(ignored -> store
-                .beginWorkspaceClose("tenant", session, "owner",
+        String operation = transactions.execute(ignored -> protocolOne
+                ? store.beginWorkspaceLifecycle("tenant", session,
+                        OperationKind.DELETE, "owner", "a".repeat(64),
+                        "delete", "digest", true, 1)
+                        .operation().operationId()
+                : store.beginWorkspaceClose("tenant", session, "owner",
                         "a".repeat(64), "close", "digest", true)
-                .operation().operationId());
+                        .operation().operationId());
         return new World(jdbc, store, new ChildResultRelayStore(jdbc),
                 properties, session, child, operation);
     }
@@ -558,4 +572,50 @@ class SessionLifecycleCoordinatorTest {
             }
         }
     }
+
+    // P1: the cascade's child updates ride the parent's own lifecycle
+    // claim — the fence's matching key. An ordinary parent's updates
+    // stay exactly plain.
+    @Test
+    void lifecycleProtocolClaimTagsEveryCascadeOperation() {
+        World plainWorld = closingWorld("claim-plain-");
+        World lifecycleWorld = closingWorldLifecycle("claim-life-");
+        var harness = new CascadingHarness(true, false);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(
+                    lifecycleWorld.store,
+                    new ManagedSessionStore(lifecycleWorld.jdbc), harness,
+                    warmer(true, false), lifecycleWorld.relayStore,
+                    new ObjectMapper(), admissions(lifecycleWorld.store,
+                            warmer(true, false)),
+                    brokerProvider(null), executor,
+                    Clock.systemUTC(), lifecycleWorld.properties);
+            try {
+                var ordinaryRecord = plainWorld.store.findOperation(
+                        "tenant", plainWorld.session,
+                        plainWorld.operation).orElseThrow();
+                var plain = new java.util.LinkedHashMap<String, Object>();
+                coordinator.runLifecycleChildOperation(ordinaryRecord,
+                        plain);
+                assertThat(plain).doesNotContainKey("authority");
+                var tagged = new java.util.LinkedHashMap<String, Object>();
+                var lifecycleRecord = lifecycleWorld.store.findOperation(
+                        "tenant", lifecycleWorld.session,
+                        lifecycleWorld.operation).orElseThrow();
+                coordinator.runLifecycleChildOperation(lifecycleRecord,
+                        tagged);
+                assertThat(tagged).containsEntry("authority", Map.of(
+                        "operationId", lifecycleWorld.operation,
+                        "claimGeneration", lifecycleRecord.claimGeneration()));
+                assertThat(harness.operations)
+                        .extracting(op -> op.get("authority"))
+                        .containsExactly(null, Map.of("operationId",
+                                lifecycleWorld.operation, "claimGeneration",
+                                lifecycleRecord.claimGeneration()));
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
 }
+

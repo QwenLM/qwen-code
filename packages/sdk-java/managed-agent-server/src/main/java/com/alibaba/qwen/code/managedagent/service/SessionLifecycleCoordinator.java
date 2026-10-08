@@ -482,7 +482,7 @@ public class SessionLifecycleCoordinator {
             cancel.put("kind", "cancel");
             cancel.put("childRunId", scope.childRunId());
             try {
-                harness.runChildOperation(tenantId, sessionId, cancel);
+                runLifecycleChildOperation(operation, cancel);
             } catch (RuntimeException error) {
                 journalDebt = true;
                 LOG.warn("Managed Session close cascade's stop request"
@@ -541,7 +541,7 @@ public class SessionLifecycleCoordinator {
             }
             closeScope.put("started", childSessionId != null);
             try {
-                harness.runChildOperation(tenantId, sessionId, closeScope);
+                runLifecycleChildOperation(operation, closeScope);
             } catch (RuntimeException error) {
                 journalDebt = true;
                 LOG.warn("Managed Session close cascade's terminal"
@@ -594,15 +594,31 @@ public class SessionLifecycleCoordinator {
         dispatch.put("dispatchId", dispatchId);
         dispatch.put("runtimeBindingId", runtimeBindingId);
         dispatch.put("generation", generation);
-        harness.runChildOperation(parent.tenantId(), parent.sessionId(),
-                dispatch);
+        runLifecycleChildOperation(parent, dispatch);
         Map<String, Object> attach = new LinkedHashMap<>();
         attach.put("operationId", UUID.randomUUID().toString());
         attach.put("kind", "attach");
         attach.put("childRunId", childRunId);
         attach.put("childSessionId", childSessionId);
+        runLifecycleChildOperation(parent, attach);
+    }
+
+    /** A lifecycle-protocol parent owns the journal its child updates
+     * live under: the operation's own claim (operationId +
+     * claimGeneration) tags every child operation so the
+     * LIFECYCLE_ONLY fence recognizes its own cleanup instead of
+     * mistaking it for foreign ordinary work. Ordinary parents keep the
+     * ordinary admission exactly as before. Package-visible so tests pin
+     * the tagging contract directly. */
+    void runLifecycleChildOperation(OperationRecord parent,
+            Map<String, Object> childBody) {
+        if (parent.lifecycleProtocolVersion() == 1) {
+            childBody.put("authority", Map.of(
+                    "operationId", parent.operationId(),
+                    "claimGeneration", parent.claimGeneration()));
+        }
         harness.runChildOperation(parent.tenantId(), parent.sessionId(),
-                attach);
+                childBody);
     }
 
     /** The physical Runtime binding proving a child's dispatch identity,

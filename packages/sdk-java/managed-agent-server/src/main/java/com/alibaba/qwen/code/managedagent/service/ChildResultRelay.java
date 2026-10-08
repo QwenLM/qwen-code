@@ -11,6 +11,7 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
@@ -375,18 +376,19 @@ public class ChildResultRelay {
     }
 
     /**
-     * The give-up chain, close first: the child Session's close admission
-     * (the row's admitted id, falling back to the lineage the creation
-     * stamped, which needs no answer to name it), then the parent's fail
-     * settlement with the stopReason×started pairing the parent's
-     * committed dispatch/attach proves — attach only commits past
-     * `watching`, so an unattached give-up must not claim `started` —
-     * and only then the classification. Any refusal anywhere owes through
-     * the ordinary defer; the row never retires with the debt airborne.
+     * The give-up chain, attach truth first: the replayed `attach` op IS
+     * the parent's committed dispatch/attach evidence — a replay landing
+     * means the record really attached (the owed step commits cleanly
+     * even after its reply was lost, and the ledger's own walk never
+     * decides). Then the ordinary close admission, the settle with that
+     * pairing, and only then the classification. Any refusal anywhere
+     * owes through the ordinary defer; the row never retires with the
+     * debt airborne.
      */
     private void settleThenClassifyGaveUp(RelayRow row,
             RuntimeException error, long now) {
         try {
+            boolean started = reconcileAttach(row);
             String child = row.childSessionId() != null ? row.childSessionId()
                     : relayStore.findLineageChild(row.tenantId(),
                             row.parentSessionId(), row.childRunId());
@@ -394,8 +396,6 @@ public class ChildResultRelay {
                 childCloses.admitChildClose(row.tenantId(),
                         row.parentSessionId(), child, row.childRunId());
             }
-            boolean started = "watching".equals(row.state())
-                    || "delivering".equals(row.state());
             Map<String, Object> fail = new LinkedHashMap<>();
             fail.put("operationId", UUID.randomUUID().toString());
             fail.put("kind", "fail");
@@ -421,6 +421,41 @@ public class ChildResultRelay {
                 + " run={} after={} failure={}", row.tenantId(),
                 row.parentSessionId(), row.childRunId(), row.attempts(),
                 error.getMessage());
+    }
+
+    /**
+     * Whether the parent's committed record says this run attached: a
+     * replayed `attach` op with the row's admitted id. Rows past the
+     * watch already proved it by their committed walk; a lost attach
+     * reply or died ledger advance is exactly what the replay recovers.
+     * The refusal's shape carries the record's own answer: the record
+     * veto (`child_operation_record`) means no attach; an attach
+     * conflict (`child_operation_conflict`) means one already stands —
+     * and only transient troubles rethrow into the ordinary defer.
+     */
+    private boolean reconcileAttach(RelayRow row) {
+        if ("watching".equals(row.state()) || "delivering".equals(row.state())) {
+            return true;
+        }
+        if (row.childSessionId() == null) {
+            return false;
+        }
+        Map<String, Object> attach = new LinkedHashMap<>();
+        attach.put("operationId", UUID.randomUUID().toString());
+        attach.put("kind", "attach");
+        attach.put("childRunId", row.childRunId());
+        attach.put("childSessionId", row.childSessionId());
+        try {
+            harness.runChildOperation(row.tenantId(), row.parentSessionId(),
+                    attach);
+            return true;
+        } catch (DaemonHttpException refused) {
+            if (refused.getStatusCode() == 409) {
+                return "child_operation_conflict"
+                        .equals(refused.getErrorCode());
+            }
+            throw refused;
+        }
     }
 
     private JsonNode readJson(String content, String label) {
