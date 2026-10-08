@@ -2132,6 +2132,29 @@ describe('subagent.ts', () => {
         expect(scope.getLastError()).toBe('quota exceeded {"code":429}');
         expect(scope.getLastError()).not.toContain('\n');
       });
+
+      it.each([
+        [
+          'a plain object with a message',
+          { message: 'rate limited', code: 429 },
+          'rate limited',
+        ],
+        ['a bare string', 'socket closed', 'socket closed'],
+      ])(
+        'retains the message of a non-Error rejection: %s (#13597)',
+        async (_label, rejection, expected) => {
+          // Provider SDKs do not always reject with an Error. Narrowing the
+          // getErrorMessage call to Error instances would leave every Error-only
+          // case above green while these collapse to an empty cause, and the
+          // parent would again read the bare '(terminate mode: ERROR).'.
+          const { config } = await createMockConfig();
+          mockSendMessageStream.mockRejectedValue(rejection);
+          const scope = await createAgent(config);
+          await expect(scope.execute(new ContextState())).rejects.toBeDefined();
+          expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+          expect(scope.getLastError()).toContain(expected);
+        },
+      );
     });
 
     describe('execute - retry waits', () => {
