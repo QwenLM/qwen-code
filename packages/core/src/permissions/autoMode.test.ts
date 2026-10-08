@@ -1389,8 +1389,13 @@ describe('applyAutoModeDecision — blocked:destructive-command escalation', () 
   });
 
   it('arms the exact-action manual retry on a destructive denial', () => {
-    // Without the fingerprint the user has no way to get this exact action
-    // re-reviewed, which is what the denial guidance points them at.
+    // The token only pays off once this exact call stops being hard-blocked:
+    // isDestructiveCommand is prompt- and session-commit-dependent, so a later
+    // retry may clear the guard and then route to manual review instead of a
+    // fresh classifier roll. A retry while the guard still fires is hard-blocked
+    // again — L5.2.5 runs before the skipClassifierReason short-circuit and this
+    // branch calls shouldFallback without the fingerprint. See 'preserves an
+    // armed retry when the destructive guard preempts it'.
     const { setAutoModeDenialState } = apply(
       destructive(),
       counters(0, 0, 0, 0),
@@ -1404,21 +1409,40 @@ describe('applyAutoModeDecision — blocked:destructive-command escalation', () 
   it('degrades to manual approval at the consecutive-block cap', () => {
     // counters(2, ...) + this denial reaches maxConsecutiveBlock (3), the same
     // cap that already escalates on the classifier path.
-    const { result } = apply(destructive(), counters(2, 0, 2, 0), fingerprint);
+    const { result, setAutoModeDenialState } = apply(
+      destructive(),
+      counters(2, 0, 2, 0),
+      fingerprint,
+    );
     expect(result.kind).toBe('fallback');
     if (result.kind === 'fallback') {
       expect(result.reason).toBe('consecutive_block');
+      // Must be a non-empty banner naming the guard's reason: the scheduler
+      // gates the fallback decoration on `outcome.message &&`, so an absent
+      // message leaves the prompt undecorated and the session pinned to manual
+      // after the user has already approved.
+      expect(result.message).toContain('Blocked destructive git command');
     }
+    // Mirrors the classifier cap test: the escalation must persist the
+    // incremented counters, not a reset state.
+    expect(setAutoModeDenialState).toHaveBeenCalledWith(counters(3, 0, 3, 0));
   });
 
   it('degrades to manual approval at the session total-denial cap', () => {
     // totalBlock 19 + this denial reaches maxTotalDenials (20). Destructive
     // denials previously counted towards the cap but could never trigger it.
-    const { result } = apply(destructive(), counters(0, 0, 19, 0), fingerprint);
+    const { result, setAutoModeDenialState } = apply(
+      destructive(),
+      counters(0, 0, 19, 0),
+      fingerprint,
+    );
     expect(result.kind).toBe('fallback');
     if (result.kind === 'fallback') {
       expect(result.reason).toBe('total_denial');
+      // Same non-empty-banner requirement as the consecutive cap.
+      expect(result.message).toContain('session denial limit');
     }
+    expect(setAutoModeDenialState).toHaveBeenCalledWith(counters(1, 0, 20, 0));
   });
 
   it('consumes the pending retry once it escalates', () => {
