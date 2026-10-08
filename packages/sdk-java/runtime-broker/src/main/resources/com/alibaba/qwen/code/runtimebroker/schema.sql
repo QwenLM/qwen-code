@@ -60,7 +60,9 @@ CREATE TABLE IF NOT EXISTS qwen_runtime_binding (
     INDEX idx_runtime_binding_scope
         (scope_key, isolation_key, binding_state),
     INDEX qwen_runtime_harness_bindings_idx (isolation_key, isolation_class),
-    INDEX qwen_runtime_storage_bindings_idx (storage_id, binding_id)
+    INDEX qwen_runtime_storage_bindings_idx (storage_id, binding_id),
+    INDEX idx_runtime_binding_retention (binding_state, last_active_at, binding_id),
+    INDEX idx_runtime_binding_tenant_state (tenant_id, binding_state)
 );
 
 CREATE TABLE IF NOT EXISTS managed_workspace_operator_recovery (

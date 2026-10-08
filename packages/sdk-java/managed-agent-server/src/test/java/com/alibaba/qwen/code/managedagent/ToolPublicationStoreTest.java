@@ -137,6 +137,71 @@ class ToolPublicationStoreTest {
         return source;
     }
 
+    @Test
+    void localReservationHoldsBothBrokerRowsUntilThePublicationCommits() throws Exception {
+        var reserved = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        try (var pool = Executors.newFixedThreadPool(3)) {
+            var publisher = pool.submit(() -> new TransactionTemplate(manager).execute(status -> {
+                JsonNode grant = reserve();
+                reserved.countDown();
+                try {
+                    assertThat(release.await(5, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(error);
+                }
+                return grant;
+            }));
+            try {
+                assertThat(reserved.await(3, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                var bindingLock = pool.submit(() -> jdbc.queryForList(
+                        "SELECT binding_id FROM qwen_runtime_binding WHERE binding_id = 'binding-1' FOR UPDATE"));
+                var executionLock = pool.submit(() -> jdbc.queryForList(
+                        "SELECT execution_call_id FROM qwen_tool_execution WHERE execution_call_id = 'execution-1' FOR UPDATE"));
+                for (var contender : List.of(bindingLock, executionLock)) {
+                    assertThatThrownBy(() -> contender.get(250, java.util.concurrent.TimeUnit.MILLISECONDS))
+                            .isInstanceOf(java.util.concurrent.TimeoutException.class);
+                }
+                release.countDown();
+                assertThat(publisher.get(3, java.util.concurrent.TimeUnit.SECONDS).path("publicationId").asText())
+                        .isEqualTo("pub-1");
+                assertThat(bindingLock.get(3, java.util.concurrent.TimeUnit.SECONDS)).hasSize(1);
+                assertThat(executionLock.get(3, java.util.concurrent.TimeUnit.SECONDS)).hasSize(1);
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @Test
+    void localReservationRechecksBindingAfterWaitingForRetirement() throws Exception {
+        try (var connection = jdbc.getDataSource().getConnection(); var pool = Executors.newSingleThreadExecutor()) {
+            connection.setAutoCommit(false);
+            bindings.findByIdForUpdate(connection, "binding-1");
+            var entered = new CountDownLatch(1);
+            var publisher = pool.submit(() -> {
+                entered.countDown();
+                return reserve();
+            });
+            try {
+                assertThat(entered.await(3, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                assertThatThrownBy(() -> publisher.get(250, java.util.concurrent.TimeUnit.MILLISECONDS))
+                        .isInstanceOf(java.util.concurrent.TimeoutException.class);
+                try (var statement = connection.prepareStatement("UPDATE qwen_runtime_binding"
+                        + " SET binding_state = 'RELEASED' WHERE binding_id = 'binding-1'")) {
+                    statement.executeUpdate();
+                }
+                connection.commit();
+                assertThatThrownBy(() -> publisher.get(3, java.util.concurrent.TimeUnit.SECONDS))
+                        .hasRootCauseMessage("Runtime cannot authorize publication");
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication", Integer.class)).isZero();
+            } finally {
+                connection.rollback();
+            }
+        }
+    }
+
     @ParameterizedTest
     @CsvSource({"0.5,false", "1.0,false", "0.0,false", "-0.0,false",
             "0.5,true", "1.0,true", "0.0,true", "-0.0,true"})
