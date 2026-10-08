@@ -300,7 +300,7 @@ public final class JdbcRuntimeBindingRepository
                 ToolExecutionRecord receipt = JdbcToolExecutionRepository.selectByIdempotencyKey(
                         connection, candidate.getIdempotencyKey(), csiOriginal != null);
                 if (receipt != null) {
-                    if (csiOriginal != null && !receipt.sameIdentity(candidate)) {
+                    if (csiOriginal != null && !receipt.sameRequest(candidate)) {
                         throw new IllegalArgumentException("Execution identity differs");
                     }
                     return receipt;

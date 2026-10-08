@@ -278,6 +278,13 @@ send `runtimeProtocol: 3`/`inputDigest`, which the current service limits to
 Shell/Monitor. Read-only batches need no backup intent. Subsequent tool intent
 and dispatch checkpoints require the committed prepared record for mutations.
 
+The [original batch reservation design](2026-10-08-k2-native-batch-reservation.md)
+specifies the private closed reference extension, exact-byte atomic resource/
+allocation persistence, full membership and cold recovery. Current `publish`
+only stages memory; it is not durable upload. Ordinary Tool-v2 shape remains
+unchanged. Read-only allocation freezes at the first native tool intent and
+requires a complete dispatch checkpoint, without creating backup intent.
+
 Use stable commands `csi-file-history:bind:<owner>`, `:intent:<batchId>`,
 `:prepared:<batchId>` and `:settled:<batchId>`, each committing one existing
 file_history-domain event. Derive contentDigest from exact semantic fields,

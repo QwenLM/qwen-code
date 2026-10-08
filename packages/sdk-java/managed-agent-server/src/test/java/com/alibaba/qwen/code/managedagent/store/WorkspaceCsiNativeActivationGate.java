@@ -116,6 +116,85 @@ class WorkspaceCsiNativeActivationGate {
     }
 
     @Test
+    void exactRequestRetryReturnsOriginalReceiptWithoutResetOrRegrant() throws Exception {
+        ready();
+        var original = admit("exact-retry");
+        var candidate = ToolExecutionRecord.prepared("fresh-server-id", original.getIdempotencyKey(),
+                original.getBindingId(), original.getRuntimeGeneration(), original.getHarnessSessionId(),
+                original.getRuntimeSessionId(), original.getTurnId(), original.getToolCallId(),
+                original.getRequestDigest(), original.getReference());
+        var before = authorityRows();
+        assertThat(bindings.admitExecution(sessions, executions, candidate))
+                .usingRecursiveComparison().isEqualTo(original);
+        assertThat(authorityRows()).isEqualTo(before);
+        assertThat(executions.findByExecutionCallId(candidate.getExecutionCallId())).isNull();
+
+        var executing = authorize(original);
+        before = authorityRows();
+        assertThat(bindings.admitExecution(sessions, executions, candidate))
+                .usingRecursiveComparison().isEqualTo(executing);
+        assertThat(authorityRows()).isEqualTo(before);
+
+        var settled = executions.compareAndSet(executing,
+                executing.withResult(Map.of("executionStatus", "success", "responseParts", List.of()), 4, Instant.now()),
+                "owner", executing.getDispatchGeneration());
+        assertThat(settled.getState()).isEqualTo(ToolExecutionRecord.State.SETTLED);
+        before = authorityRows();
+        assertThat(bindings.admitExecution(sessions, executions, candidate))
+                .usingRecursiveComparison().isEqualTo(settled);
+        assertThat(authorityRows()).isEqualTo(before);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_execution", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    void sameKeyWithChangedRequestStillRefusesWithoutMutation() throws Exception {
+        ready();
+        var original = admit("changed-retry");
+        var before = authorityRows();
+        for (String changed : List.of("turn", "call", "digest")) {
+            String turn = changed.equals("turn") ? "different-turn" : original.getTurnId();
+            String call = changed.equals("call") ? "different-call" : original.getToolCallId();
+            String digest = changed.equals("digest") ? "sha256:" + "b".repeat(64) : original.getRequestDigest();
+            var candidate = ToolExecutionRecord.prepared("fresh-" + changed, original.getIdempotencyKey(),
+                    original.getBindingId(), original.getRuntimeGeneration(), original.getHarnessSessionId(),
+                    original.getRuntimeSessionId(), turn, call, digest,
+                    Map.of("dispatchMode", "deferred", "sessionId", sessionId, "promptId", turn,
+                            "callId", call, "argsDigest", digest));
+            assertThatThrownBy(() -> bindings.admitExecution(sessions, executions, candidate))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessage("Execution identity differs");
+            assertThat(authorityRows()).as(changed).isEqualTo(before);
+        }
+    }
+
+    @Test
+    void existingReceiptRetryStillRequiresCurrentNativePinReadySessionAndOpenAdmission() throws Exception {
+        ready();
+        var original = admit("guarded-retry");
+        var candidate = ToolExecutionRecord.prepared("fresh-guarded-id", original.getIdempotencyKey(),
+                original.getBindingId(), original.getRuntimeGeneration(), original.getHarnessSessionId(),
+                original.getRuntimeSessionId(), original.getTurnId(), original.getToolCallId(),
+                original.getRequestDigest(), original.getReference());
+        jdbc.update("UPDATE qwen_runtime_binding SET first_activation_journal_revision = NULL");
+        var before = authorityRows();
+        rejected(() -> bindings.admitExecution(sessions, executions, candidate), "csi_original_activation_unavailable");
+        assertThat(authorityRows()).isEqualTo(before);
+
+        jdbc.update("UPDATE qwen_runtime_binding SET first_activation_journal_revision = 2");
+        var runtime = sessions.findById(request.getScope(), sessionId);
+        assertThat(sessions.compareAndSet(runtime, runtime.withState(RuntimeSessionRecord.State.FAILED, Instant.now())))
+                .isNotNull();
+        before = authorityRows();
+        rejected(() -> bindings.admitExecution(sessions, executions, candidate), "runtime_admission_closed");
+        assertThat(authorityRows()).isEqualTo(before);
+
+        jdbc.update("UPDATE qwen_runtime_session SET session_state = 'READY'");
+        retire();
+        before = authorityRows();
+        rejected(() -> bindings.admitExecution(sessions, executions, candidate), "runtime_admission_closed");
+        assertThat(authorityRows()).isEqualTo(before);
+    }
+
+    @Test
     void initialNativeCheckpointRetainsOriginalPinRenewalAndExecutionContinuation() throws Exception {
         ready();
         commit(2);
@@ -610,7 +689,8 @@ class WorkspaceCsiNativeActivationGate {
         Map<String, List<String>> rows = new TreeMap<>();
         for (String table : List.of("qwen_managed_session_journal_head", "qwen_managed_session_journal_tx",
                 "qwen_managed_session_resource", "qwen_managed_session_resource_ref", "qwen_runtime_binding",
-                "managed_agent_session")) {
+                "managed_agent_session", "qwen_runtime_session", "qwen_tool_execution",
+                "managed_workspace_execution_lease", "managed_workspace_csi_retirement")) {
             rows.put(table, jdbc.queryForList("SELECT * FROM " + table).stream()
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }

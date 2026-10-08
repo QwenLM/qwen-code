@@ -231,6 +231,12 @@ Tool-v2 deferred reference，不能发送 `runtimeProtocol: 3`/`inputDigest`；�
 service 将该分支限制为 Shell/Monitor。Read-only batch 不需要 backup intent。
 后续 mutation 的 tool intent 与 dispatch checkpoint 必须引用已提交 prepared record。
 
+[原 batch 预约设计](2026-10-08-k2-native-batch-reservation.zh-CN.md) 明确私有封闭
+reference 扩展、精确字节与 allocation 原子持久化、完整成员和冷恢复。当前
+`publish` 只暂存内存，不是持久上传；普通 Tool-v2 形状保持不变。Read-only
+allocation 在首个 native tool intent 冻结，并要求完整 dispatch checkpoint，
+不创建 backup intent。
+
 稳定 command 使用 `csi-file-history:bind:<owner>`、`:intent:<batchId>`、
 `:prepared:<batchId>`、`:settled:<batchId>`，每个提交一个既有 file_history-domain
 event。从准确 semantic field 派生 contentDigest，排除 authority wrapper 与生成的
