@@ -191,9 +191,9 @@ export interface WorkspaceAgent {
    * Appended to the optional base definition at boot, so editing the Agent
    * reaches its next turn rather than only its next spawn.
    *
-   * It cannot widen anything. The read-only capability boundary is derived
-   * from the definition and applied after this, so instructions change what an
-   * agent is for and never what it may do.
+   * It cannot widen anything. The tool surface is derived from the linked
+   * definition and applied after this, so instructions change what an agent is
+   * for and never what it may do; see `buildSessionAgentToolConfig`.
    */
   instructions?: string;
   /**

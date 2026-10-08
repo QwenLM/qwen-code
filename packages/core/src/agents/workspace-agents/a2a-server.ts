@@ -210,8 +210,6 @@ const RETRYABLE_STATUS_TEXT =
 const UNTRACKED_RUN_ERROR = 'The run is no longer tracked by this workspace.';
 const REPLY_NOT_RECORDED_ERROR =
   'The agent finished, but its reply is not in the session.';
-/** Owner retries followed from a task's run to the run that replaced it. */
-const MAX_RETRY_HOPS = 10;
 
 /**
  * What a poll saw; `retryable` results may still change, so are not kept.
@@ -270,18 +268,21 @@ async function observeRun(
   sessionId: string,
   runId: string,
   fallbackAt: number,
-  hops = 0,
+  followed: ReadonlySet<string> = new Set(),
 ): Promise<Observation> {
   const file = await readSessionAgents(projectRoot, sessionId);
   const retry = file.runs.find((candidate) => candidate.retryOf === runId);
-  if (retry && hops < MAX_RETRY_HOPS) {
+  // A run is replaced at most once (`run_already_retried`), so the chain has no
+  // length bound and neither does the walk; the followed ids still end it if a
+  // store file was edited into a cycle.
+  if (retry && !followed.has(retry.id)) {
     return observeRun(
       projectRoot,
       port,
       sessionId,
       retry.id,
       fallbackAt,
-      hops + 1,
+      new Set([...followed, retry.id]),
     );
   }
   const live = await port.liveRun(sessionId, runId);

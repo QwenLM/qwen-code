@@ -733,6 +733,39 @@ describe('A2A task state', () => {
     ).resolves.toEqual(done);
   });
 
+  it('follows a retry chain longer than any hop count', async () => {
+    const caller = await grant();
+    const task = await sent(caller);
+    // The task's own run plus 11 owner retries of it. A persistently failing
+    // agent is retried as often as the owner likes, so no depth is out of
+    // reach, and the answer is at the end of the chain.
+    let previous = task.id;
+    for (let hop = 0; hop < 11; hop++) {
+      const id = `sr_chain_${hop}`;
+      await persistRun(task.contextId, {
+        id,
+        status: 'failed',
+        retryOf: previous,
+      });
+      previous = id;
+    }
+    port.reply(previous, 'completed', 'Done at the end of the chain.');
+
+    const done = await a2aGetTask(PROJECT_ROOT, port, caller, task.id);
+    expect(done).toMatchObject({
+      ok: true,
+      value: {
+        answer: 'Done at the end of the chain.',
+        status: { state: 'TASK_STATE_COMPLETED' },
+      },
+    });
+    // Kept, so the answer survives the runs it came from being trimmed.
+    port.replies.clear();
+    await expect(
+      a2aGetTask(PROJECT_ROOT, port, caller, task.id),
+    ).resolves.toEqual(done);
+  });
+
   it('fails a run nothing tracks any more', async () => {
     const caller = await grant();
     const task = await sent(caller);
