@@ -74,7 +74,7 @@ public final class StoreModels {
     }
 
     /**
-     * H4b: a child Session's ancestry (V51). v1 children run at depth 1;
+     * H4b: a child Session's ancestry (V52). v1 children run at depth 1;
      * the tree root for a first-level child is the parent Session itself.
      */
     public record SessionLineage(String parentSessionId, String rootSessionId,
