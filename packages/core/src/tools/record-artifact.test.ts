@@ -212,6 +212,22 @@ describe('RecordArtifactTool', () => {
     expect(result.artifacts?.[0]).not.toHaveProperty('description');
   });
 
+  it('keeps the caller title when the filename has leading whitespace', async () => {
+    const ws = await workspace();
+    await ws.write('reports/ summary.html', 'ok');
+
+    const result = await ws.record(
+      'Workspace report',
+      'reports/ summary.html',
+    );
+
+    expectFirst(result, {
+      title: 'Workspace report',
+      workspacePath: 'reports/ summary.html',
+    });
+    expect(result.artifacts?.[0]).not.toHaveProperty('description');
+  });
+
   it('keeps the caller title when the filename is too long to store', async () => {
     const ws = await workspace();
     const name = 'a'.repeat(201);

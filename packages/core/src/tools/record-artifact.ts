@@ -110,7 +110,11 @@ class RecordArtifactInvocation extends BaseToolInvocation<
       }
 
       const callerTitle = this.params.title.trim();
-      const title = workspaceFileTitle(callerTitle, locator.workspacePath);
+      const filename = path.posix.basename(locator.workspacePath);
+      // A filename can be 255 bytes; a stored title stops at 200 characters.
+      const title = isRecordableDerivedChild(filename, locator.workspacePath)
+        ? filename
+        : callerTitle;
       const description =
         trimOptional(this.params.description) ||
         (callerTitle !== title ? callerTitle : undefined);
@@ -776,24 +780,6 @@ function metadataExceedsBudget(
 ): boolean {
   const withMarker = { ...metadata, expandedFromDirectory: true };
   return Buffer.byteLength(JSON.stringify(withMarker), 'utf8') > 4096;
-}
-
-// A filename can be 255 bytes, while a stored title stops at 200 characters.
-// Keep the caller title instead of dropping an artifact that succeeds today.
-function workspaceFileTitle(
-  callerTitle: string,
-  workspacePath: string,
-): string {
-  const filename = path.posix.basename(workspacePath).trim();
-  if (
-    filename.length > 0 &&
-    filename.length <= ARTIFACT_TITLE_MAX_LENGTH &&
-    !hasControlCharacter(filename) &&
-    !hasUnsafeDisplayPayload(filename)
-  ) {
-    return filename;
-  }
-  return callerTitle;
 }
 
 export function isRecordableDerivedChild(

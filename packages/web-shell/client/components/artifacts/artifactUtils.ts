@@ -342,7 +342,7 @@ export function getArtifactLocation(artifact: DaemonSessionArtifact): string {
 
 /**
  * Workspace files are shown by filename. Links and managed artifacts have no
- * file, so they keep the stored title. The stored title is left unchanged.
+ * file, so they keep the stored title.
  */
 export function artifactDisplayName(
   artifact: Pick<DaemonSessionArtifact, 'title'> & {
