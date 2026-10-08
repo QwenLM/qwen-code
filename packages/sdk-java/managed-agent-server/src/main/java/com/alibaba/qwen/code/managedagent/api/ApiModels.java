@@ -237,6 +237,48 @@ public final class ApiModels {
             @NotBlank @Size(max = 128) String idempotencyKey) {
     }
 
+    public record ChangeCwdRequest(
+            @NotNull @JsonProperty("cwd_relative") String cwdRelative,
+            @NotNull @JsonProperty("expected_context_revision")
+                    Long expectedContextRevision) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicCwdOperation(
+            String id,
+            @JsonProperty("session_id") String sessionId,
+            String type,
+            String status,
+            @JsonProperty("expected_context_revision")
+                    long expectedContextRevision,
+            @JsonProperty("target_cwd_relative") String targetCwdRelative,
+            @JsonProperty("result_context_revision")
+                    Long resultContextRevision,
+            @JsonProperty("failure_code") String failureCode,
+            boolean replayed) {
+    }
+
+    public record WebShellChangeCwdRequest(
+            @Size(max = 128) String requestId,
+            @NotBlank String sessionId,
+            @NotBlank @Size(max = 128) String idempotencyKey,
+            @NotNull String cwdRelative,
+            @NotNull Long expectedContextRevision) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record WebShellCwdOperation(
+            String operationId,
+            String sessionId,
+            String type,
+            String status,
+            long expectedContextRevision,
+            String targetCwdRelative,
+            Long resultContextRevision,
+            String failureCode,
+            boolean replayed) {
+    }
+
     public record WebShellOperationRequest(@NotBlank String sessionId,
             @NotBlank @Size(max = 64) String operationId) {
     }
@@ -299,6 +341,7 @@ public final class ApiModels {
             @JsonProperty("created_at") long createdAt,
             @JsonProperty("started_at") Long startedAt,
             @JsonProperty("settled_at") Long settledAt,
+            @JsonProperty("output_cursor") String outputCursor,
             @JsonProperty("artifact_refs") List<String> artifactRefs,
             @JsonProperty("action_capabilities")
                     List<String> actionCapabilities) {
@@ -308,7 +351,34 @@ public final class ApiModels {
     public record WebShellTask(String taskId, String sessionId, String kind,
             String state, Long definitionRevision, String runtimeState,
             long createdAt, Long startedAt, Long settledAt,
+            String outputCursor,
             List<String> artifactRefs, List<String> actionCapabilities) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicTaskEvent(
+            @JsonProperty("schema_version") int schemaVersion,
+            @JsonProperty("projection_version") int projectionVersion,
+            @JsonProperty("task_id") String taskId,
+            @JsonProperty("session_id") String sessionId,
+            String type, String cursor,
+            @JsonProperty("created_at") long createdAt,
+            String state,
+            @JsonProperty("runtime_state") String runtimeState,
+            String text, Boolean truncated,
+            @JsonProperty("artifact_id") String artifactId) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record WebShellTaskEvent(int schemaVersion, int projectionVersion,
+            String taskId, String sessionId, String type, String cursor,
+            long createdAt, String state, String runtimeState, String text,
+            Boolean truncated, String artifactId) {
+    }
+
+    public record WebShellTaskEventQueryRequest(@NotBlank String sessionId,
+            @NotBlank String taskId, @Size(max = 512) String after,
+            Integer limit) {
     }
 
     public record PermissionResponse(

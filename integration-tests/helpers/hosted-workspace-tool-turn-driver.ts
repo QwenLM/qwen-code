@@ -16,6 +16,7 @@ import {
   type FakeOpenAIHandler,
 } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
+import { relayUpstream } from './hosted-relay-headers.js';
 
 const config = JSON.parse(await readFile(process.argv[2], 'utf8')) as {
   tenantId: string;
@@ -164,8 +165,7 @@ const storeProxy = createServer(async (req, res) => {
           durableReceipts.push(record.managedSession);
       }
     }
-    res.writeHead(response.status, Object.fromEntries(response.headers));
-    res.end(output);
+    relayUpstream(res, response, output);
   } catch (cause) {
     res.writeHead(503);
     res.end(String(cause));
@@ -229,6 +229,7 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
   const tools = body['tools'] as Array<{ function: { name: string } }>;
   assert.deepEqual(tools.map((tool) => tool.function.name).sort(), [
     'edit',
+    ...(shellProfile ? ['monitor'] : []),
     'read_file',
     ...(shellProfile ? ['run_shell_command'] : []),
     'write_file',

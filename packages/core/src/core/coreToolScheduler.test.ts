@@ -1377,6 +1377,12 @@ describe('CoreToolScheduler', () => {
     },
   );
 
+  const URL_REQUIRED_PARAMS = {
+    type: 'object',
+    properties: { url: { type: 'string' } },
+    required: ['url'],
+  };
+
   /** tool_call bridge + hidden deferred MockTool (mcp__github__create_issue). */
   function bridgeWithDeferred(
     deferredOptions: Partial<ConstructorParameters<typeof MockTool>[0]> = {},
@@ -1472,12 +1478,12 @@ describe('CoreToolScheduler', () => {
   function expectBridgeRefusal(completed: ToolCall): void {
     expectStatus(completed, 'error');
     expect(completed.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(completed.response.executionStatus).toBe('not_started');
     expect(functionResponseOf(completed)?.name).toBe(ToolNames.TOOL_CALL);
-    expect(
-      String(functionResponseOf(completed)?.response?.['error']).startsWith(
-        DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
-      ),
-    ).toBe(true);
+    const error = String(functionResponseOf(completed)?.response?.['error']);
+    expect(error.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX)).toBe(true);
+    expect(error.indexOf(DEFERRED_TOOL_CALL_REFUSAL_PREFIX, 1)).toBe(-1);
+    expect(completed.response.contentLength).toBe(error.length);
   }
 
   it('routes tool_call through the underlying tool while preserving the model-facing response name', async () => {
@@ -1511,7 +1517,11 @@ describe('CoreToolScheduler', () => {
 
     expect(execute).toHaveBeenCalledOnce();
     expect(isToolEnabled).toHaveBeenCalledWith(ToolNames.TOOL_CALL);
-    expect(isToolEnabled).toHaveBeenCalledWith(deferred.name);
+    expect(isToolEnabled).toHaveBeenCalledWith(
+      deferred.name,
+      undefined,
+      undefined,
+    );
     expect(messageBus.request.mock.calls[0][0]).toEqual(
       expect.objectContaining({
         eventName: 'PreToolUse',
@@ -1632,12 +1642,66 @@ describe('CoreToolScheduler', () => {
 
     expect(execute).not.toHaveBeenCalled();
     expectStatus(completed, 'error');
-    expect(completed.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
     expect(completed.response.error?.message).toContain(
       "is not permitted by this agent's tool policy",
     );
-    expect(functionResponseOf(completed)?.name).toBe(ToolNames.TOOL_CALL);
+    expectBridgeRefusal(completed);
   });
+
+  it.each(['permission manager', 'legacy permissions', 'target validation'])(
+    'marks a bridge rejection before execution by %s',
+    async (denial) => {
+      const execute = vi.fn();
+      const { scheduler, onAllToolCallsComplete } = bridgeWithDeferred(
+        {
+          name: ToolNames.AGENT,
+          execute,
+          params: {
+            type: 'object',
+            properties: { description: { type: 'string' } },
+            required: ['description'],
+          },
+        },
+        {
+          permissionManager:
+            denial === 'permission manager'
+              ? {
+                  isToolEnabled: async (name) => name !== ToolNames.AGENT,
+                  findMatchingDenyRule: () => 'permissions.deny: agent',
+                }
+              : undefined,
+          getPermissionsDeny: () =>
+            denial === 'legacy permissions' ? [ToolNames.AGENT] : undefined,
+        },
+      );
+      await scheduleBridgeCall(
+        scheduler,
+        'bridge-target-denied',
+        ToolNames.AGENT,
+        denial === 'target validation' ? {} : { description: 'inspect' },
+      );
+      const completed = firstBatch(onAllToolCallsComplete)[0];
+
+      expectStatus(completed, 'error');
+      expect(execute).not.toHaveBeenCalled();
+      expect(completed.response.executionStatus).toBe('not_started');
+      expect(completed.response.errorType).toBe(
+        denial === 'target validation'
+          ? ToolErrorType.INVALID_TOOL_PARAMS
+          : ToolErrorType.EXECUTION_DENIED,
+      );
+      const rawError = completed.response.error?.message;
+      expect(rawError).toBeTruthy();
+      expect(rawError).not.toContain(DEFERRED_TOOL_CALL_REFUSAL_PREFIX);
+      expect(functionResponseOf(completed)?.response?.['error']).toBe(
+        `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${rawError}`,
+      );
+      expect(completed.response.resultDisplay).toBe(rawError);
+      expect(completed.response.contentLength).toBe(
+        DEFERRED_TOOL_CALL_REFUSAL_PREFIX.length + rawError!.length,
+      );
+    },
+  );
 
   it('applies the retry-loop directive to repeated invalid tool_call envelopes', async () => {
     const { scheduler, onAllToolCallsComplete } =
@@ -1672,6 +1736,80 @@ describe('CoreToolScheduler', () => {
     expect(third.response.errorType).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
     expect(third.response.error?.message).toContain('RETRY LOOP DETECTED');
     expect(functionResponseOf(third)?.name).toBe(ToolNames.TOOL_CALL);
+  });
+
+  it('names the target when a bridged call fails its own validation (#12889)', async () => {
+    const { completed, deferred } = await runBridgeCall('bridge-invalid-args', {
+      params: URL_REQUIRED_PARAMS,
+    });
+
+    expectStatus(completed, 'error');
+    expect(completed.response.errorType).toBe(
+      ToolErrorType.INVALID_TOOL_PARAMS,
+    );
+    expect(functionResponseOf(completed)?.name).toBe(ToolNames.TOOL_CALL);
+    const message = completed.response.error?.message ?? '';
+    expect(message).toContain(`Deferred tool "${deferred.name}"`);
+    expect(message).toContain("must have required property 'url'");
+    expect(message).toContain(ToolNames.TOOL_SEARCH);
+  });
+
+  it("leaves a direct call's validation error unlabelled", async () => {
+    const direct = new MockTool({
+      name: 'needs_url',
+      params: URL_REQUIRED_PARAMS,
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName: toolMap(direct) });
+
+    await scheduler.schedule(
+      toolRequest('direct-invalid-args', direct.name, {}, 'prompt-direct'),
+      new AbortController().signal,
+    );
+
+    const completed = firstBatch(onAllToolCallsComplete)[0];
+    expectStatus(completed, 'error');
+    const message = completed.response.error?.message ?? '';
+    expect(message).toContain("must have required property 'url'");
+    expect(message).not.toContain('Deferred tool');
+  });
+
+  it('shares validation retries across bridged and direct calls', async () => {
+    const { deferred, scheduler, onAllToolCallsComplete } = bridgeWithDeferred({
+      params: URL_REQUIRED_PARAMS,
+    });
+
+    for (const [index, name] of [
+      ToolNames.TOOL_CALL,
+      deferred.name,
+      ToolNames.TOOL_CALL,
+    ].entries()) {
+      onAllToolCallsComplete.mockClear();
+      await scheduler.schedule(
+        toolRequest(
+          `mixed-validation-${index}`,
+          name,
+          name === ToolNames.TOOL_CALL
+            ? { name: deferred.name, arguments: {} }
+            : {},
+          'prompt-mixed-validation',
+        ),
+        new AbortController().signal,
+      );
+
+      const completed = firstBatch(onAllToolCallsComplete)[0];
+      expectStatus(completed, 'error');
+      expect(completed.response.errorType).toBe(
+        ToolErrorType.INVALID_TOOL_PARAMS,
+      );
+      expect(functionResponseOf(completed)?.name).toBe(name);
+      const message = completed.response.error?.message ?? '';
+      expect(message).toContain("must have required property 'url'");
+      expect(message.includes('Deferred tool')).toBe(
+        name === ToolNames.TOOL_CALL,
+      );
+      expect(message.includes('RETRY LOOP DETECTED')).toBe(index === 2);
+    }
   });
 
   it('prunes the bridge-keyed retry counter across a successful bridged execution', async () => {
@@ -1846,8 +1984,81 @@ describe('CoreToolScheduler', () => {
       modelFacingName: ToolNames.TOOL_CALL,
       modelFacingArgs: { name: deferred.name, arguments: {} },
     });
+    expect(completed.response.executionStatus).toBe('cancelled');
     expect(functionResponseOf(completed)?.name).toBe(ToolNames.TOOL_CALL);
+    expect(functionResponseOf(completed)?.response?.['error']).not.toContain(
+      DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+    );
   });
+
+  it('marks a bridge cancelled at confirmation as not started', async () => {
+    const execute = vi.fn();
+    const { deferred, scheduler, onAllToolCallsComplete, onToolCallsUpdate } =
+      bridgeWithDeferred(
+        {
+          execute,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+        },
+        { approvalMode: ApprovalMode.DEFAULT },
+      );
+    const scheduled = scheduleBridgeCall(
+      scheduler,
+      'bridge-confirmation-cancel',
+      deferred.name,
+    );
+    const waiting = await waitForApproval(onToolCallsUpdate);
+    await waiting.confirmationDetails.onConfirm(ToolConfirmationOutcome.Cancel);
+    await scheduled;
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const completed = firstBatch(onAllToolCallsComplete)[0];
+
+    expectStatus(completed, 'cancelled');
+    expect(execute).not.toHaveBeenCalled();
+    expect(completed.response.executionStatus).toBe('not_started');
+    const error = String(functionResponseOf(completed)?.response?.['error']);
+    expect(error.startsWith(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX)).toBe(true);
+    expect(completed.response.contentLength).toBe(error.length);
+  });
+
+  it.each(['failure', 'post-hook cancellation'])(
+    'keeps a bridge that executed before %s distinguishable from a refusal',
+    async (outcome) => {
+      const controller = new AbortController();
+      const execute = vi.fn(async () => {
+        if (outcome === 'failure')
+          throw new Error('delegated execution failed');
+        return textResult('delegated execution finished');
+      });
+      const { completed } = await runBridgeCall(
+        'bridge-executed',
+        { execute },
+        {
+          disableHooks: false,
+          messageBus: hookBus(async (request) => {
+            if (
+              outcome === 'post-hook cancellation' &&
+              request.eventName === 'PostToolUse'
+            ) {
+              controller.abort();
+            }
+            return hookResponse('post-hook', { decision: 'allow' });
+          }),
+        },
+        controller.signal,
+      );
+
+      expect(execute).toHaveBeenCalledOnce();
+      expectStatus(completed, outcome === 'failure' ? 'error' : 'cancelled');
+      expect(completed.response.executionStatus).toBe(
+        outcome === 'failure' ? 'error' : 'success',
+      );
+      const error = String(functionResponseOf(completed)?.response?.['error']);
+      expect(error).not.toContain(DEFERRED_TOOL_CALL_REFUSAL_PREFIX);
+      expect(error).not.toContain(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX);
+      expect(completed.response.contentLength).toBe(error.length);
+    },
+  );
 
   it('keeps the queued tool owner after another agent drains the scheduler', async () => {
     const owner = {
@@ -5153,6 +5364,40 @@ describe('CoreToolScheduler', () => {
     expect(functionResponse?.response?.['error']).toBe('capture failed');
     expect(functionResponse?.parts).toEqual([pngPart()]);
     expect(runSideQueryMock).not.toHaveBeenCalled();
+  });
+
+  it('records Goal-only discovery as bookkeeping', async () => {
+    const goalContext = { goalId: 'g-1', revision: 2, turnId: 't-1' };
+    const output =
+      '<functions>\n<function>{"name":"update_goal"}</function>\n</functions>';
+    const recordToolResult = vi.fn();
+    await runReadBatch(
+      { [ToolNames.TOOL_SEARCH]: textResult(output) },
+      [
+        {
+          ...valueRequest(
+            ToolNames.TOOL_SEARCH,
+            'select:update_goal',
+            'prompt-goal-discovery',
+          ),
+          goalContext,
+        },
+      ],
+      {
+        chatRecordingService: {
+          recordToolResult,
+        } as unknown as ChatRecordingService,
+      },
+    );
+
+    expect(recordToolResult).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({
+        callId: 'call-tool_search',
+        status: 'success',
+      }),
+      { goalContext, provenance: 'goal_runtime' },
+    );
   });
 
   it('includes failed tool responses in PostToolBatch payloads', async () => {
