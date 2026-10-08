@@ -17,6 +17,10 @@ Session 上下文。释放仍存活的原 READY Session 随即返回
 和操作系统重启的观察定位了 worker 已退出的路径；这些证据保留其原提交
 归属，需要新的最终验证。上述用例未观察到不安全退役。
 
+一个原生混合故障候选还复现了保留 holder 的依赖冲突：已结算的 Hook
+Session 仍持有存储时，managed provisioner 拒绝停止已经不存在的原 worker。
+正常传输释放是唯一清除该 holder 的路径，但已经不存在的 worker 无法应答。
+
 ## 范围和约束
 
 保留现有闲置 ACTIVE Workspace 准入、End 后 Delete 顺序、签发凭据、当前
@@ -48,7 +52,13 @@ Hook detach 可能先于 Workspace close 的 binding drain 遇到原 worker 已�
 
 在逻辑释放任何保存的 Session 前，先在可续约的 operation claim 下持久化
 匹配的原停机 receipt。随后使用已有受保护的 Session 释放事务，不再联系
-已经证明停止的 worker，且持续要求零活跃执行。失败、过期或被 fencing 的
+已经证明停止的 worker。managed provisioner 只在本地 DRAINING generation
+拥有有效 claim、精确 holder tuple 且零活跃执行时，允许保留原 holder 进行
+物理停机；物理停机期间 holder 始终保留。专用于已停机 Session 的 repository
+事务校验原身份、持久 receipt、调用方 claim owner/generation 和数据库 lease，
+再原子清除该 Session 的精确 LOCAL holder 并释放 Session。同一 binding 中
+另一原 Session 的有效 holder 保留到该 Session 释放；外来或损坏的 holder
+拒绝事务。持续要求零活跃执行。失败、过期或被 fencing 的
 claim 不能保存迟到 receipt 或释放这些 Session。如果 Broker 在 receipt
 持久化后退出，下一次已 claim 的 drain 从该持久 receipt 恢复，不要求
 worker 存活，也不停止新的 worker。
@@ -63,7 +73,9 @@ managed server 仍须在 detach 和 Workspace close 前确认当前生命周期 
 
 消费者为既有 Runtime release HTTP handler、EmbeddedRuntimeBroker
 Workspace close adapter、HostedHookSession release、HostedHarnessSession
-detach、SessionLifecycleCoordinator 和 WorkspaceLifecycleStore。公开 READY
+detach、SessionLifecycleCoordinator、WorkspaceLifecycleStore、
+WorkspaceRuntimeProvisioner、WorkspaceExecutionStore 及 JDBC/内存 binding
+repository。公开 READY
 准入及执行所有权不变。
 
 ## 验证和验收
@@ -71,6 +83,8 @@ detach、SessionLifecycleCoordinator 和 WorkspaceLifecycleStore。公开 READY
 执行 build、typecheck 和定向 Broker 测试。固定原 READY 的精确身份、drain
 屏障、缺失证据、停机拒绝、外来 receipt、receipt 跨重启持久化和迟到完成
 fencing。保留 LOST Session、未知执行和 READY 但不可用的拒绝控制。
+验证过期或被替换的 claim、外来 holder 身份和未知执行会原子回滚 holder 与
+Session；验证同一 claim 的合法续约，以及多个原 Session 不会清除错误 holder。
 
 独立 test-engineer 冻结精确产物，每种故障运行一个新原生用例：Spring
 重启、全部原产品进程崩溃、实际操作系统重启，以及 Harness 保留 Hook

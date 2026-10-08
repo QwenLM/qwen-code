@@ -291,7 +291,7 @@ class RuntimeHarnessDrainTest {
                 evidence(binding.getProvisionSeed(), binding.getResourceHandle(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST), null));
         var interrupted = (RuntimeBindingRepository) Proxy.newProxyInstance(RuntimeBindingRepository.class.getClassLoader(),
                 new Class<?>[] {RuntimeBindingRepository.class}, (proxy, method, arguments) -> {
-                    if (method.getName().equals("completeSessionRelease")) {
+                    if (method.getName().equals("completeStoppedSessionRelease")) {
                         throw new IllegalStateException("Broker stopped after persisting the receipt");
                     }
                     try {

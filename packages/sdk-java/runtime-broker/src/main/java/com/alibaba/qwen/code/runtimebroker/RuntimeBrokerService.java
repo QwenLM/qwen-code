@@ -4152,12 +4152,18 @@ public final class RuntimeBrokerService implements AutoCloseable {
     }
 
     private void finishSessionRelease(RuntimeSessionRecord releasing) {
+        finishSessionRelease(releasing, null);
+    }
+
+    private void finishSessionRelease(RuntimeSessionRecord releasing, RuntimeBindingRecord stopped) {
         RuntimeSessionRecord current = releasing;
         for (int attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
             if (current.getState() == RuntimeSessionRecord.State.RELEASED) {
                 return;
             }
-            RuntimeSessionRecord updated = bindingRepository.completeSessionRelease(sessionRepository, current);
+            RuntimeSessionRecord updated = stopped == null
+                    ? bindingRepository.completeSessionRelease(sessionRepository, current)
+                    : bindingRepository.completeStoppedSessionRelease(sessionRepository, executionRepository, current, stopped);
             if (updated != null
                     || current.getState()
                             == RuntimeSessionRecord.State.RELEASED) {
@@ -4711,7 +4717,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     throw conflict("workspace_close_execution_unsettled", "Original resources are unsettled");
                 }
                 finishSessionRelease(transitionSessionToReleasing(
-                        new SessionContext(record.getSession(), binding, binding.getLease())));
+                        new SessionContext(record.getSession(), binding, binding.getLease())), binding);
                 sessions.remove(record.getRuntimeSessionId());
                 return true;
             } finally {

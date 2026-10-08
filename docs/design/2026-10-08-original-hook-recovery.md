@@ -19,6 +19,11 @@ restart. Earlier all-process-crash and OS-reboot observations identify the
 absent-worker path; they retain their original commit attribution and require
 new final verification. No unsafe retirement was observed in those cases.
 
+A native mixed-fault candidate also reproduces a retained-holder dependency:
+the managed provisioner refuses stopping the absent original worker while its
+settled Hook Session still holds storage. The normal transport release is the
+only path that clears that holder, but the absent worker cannot answer it.
+
 ## Scope and constraints
 
 Keep the existing idle ACTIVE Workspace admission, End then Delete order,
@@ -57,6 +62,14 @@ before Workspace retirement can complete.
 Persist the matching original stop receipt under the renewable operation claim
 before logically releasing any saved Session. Then use the existing guarded
 Session release transactions without contacting a worker proven stopped.
+The managed provisioner permits physical stop with a retained original holder
+only for a claimed local DRAINING generation with a valid holder tuple and zero
+active executions. The holder remains reserved throughout physical stop.
+A stopped-only repository transaction checks the original identity, persisted
+receipt, caller's claim owner/generation and database lease before atomically
+clearing that Session's exact LOCAL holder and releasing the Session. A valid
+holder for another original Session in the same binding is retained until that
+Session releases. Foreign or malformed holders refuse the transaction.
 Continue to require zero active executions. A failed, expired, or fenced claim
 cannot persist a late receipt or release those Sessions. If the Broker exits
 after receipt persistence, the next claimed drain resumes from the durable
@@ -73,7 +86,8 @@ checks every original binding and writer before the atomic tombstone.
 
 Consumers are the existing Runtime release HTTP handler, EmbeddedRuntimeBroker
 Workspace close adapter, HostedHookSession release, HostedHarnessSession detach,
-SessionLifecycleCoordinator, and WorkspaceLifecycleStore. Public READY
+SessionLifecycleCoordinator, WorkspaceLifecycleStore, WorkspaceRuntimeProvisioner,
+WorkspaceExecutionStore, and the JDBC/in-memory binding repositories. Public READY
 admission and execution ownership remain unchanged.
 
 ## Validation and acceptance
@@ -82,6 +96,9 @@ Run build, typecheck, and targeted Broker tests. Pin exact original READY
 identity, the drain fence, absence evidence, stop refusal, foreign receipt,
 receipt persistence across restart, and late completion fencing. Retain LOST
 Session, unknown execution, and READY-but-unusable refusal controls.
+Verify atomic holder/Session rollback for expired or replaced claims, foreign
+holder identity and unknown executions, and same-claim renewal and multiple
+original Sessions without clearing the wrong holder.
 
 The independent test engineer freezes exact products and runs one new native
 case per fault: Spring restart, all original product processes crashing, and

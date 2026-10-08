@@ -86,6 +86,123 @@ class WorkspaceRuntimeTest {
     private Path temp;
 
     @Test
+    void stoppedHookHolderWaitsForPersistedReceiptThenReleasesAtomically() throws Exception {
+        var fixture = retainedHook();
+        var local = mock(RuntimeProvisioner.class);
+        var pending = new CompletableFuture<com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt>();
+        when(local.stopDrained(any())).thenReturn(pending);
+        var wrapper = new WorkspaceRuntimeProvisioner(local, null, authority);
+        var stopping = wrapper.stopDrained(fixture.binding());
+        verify(local).stopDrained(fixture.binding());
+        assertThat(authority.hasHolder(fixture.binding())).isTrue();
+        var releasing = fixture.bindings().beginSessionRelease(fixture.sessions(), fixture.executions(), fixture.session());
+        assertThatThrownBy(() -> fixture.bindings().completeStoppedSessionRelease(
+                fixture.sessions(), fixture.executions(), releasing, fixture.binding()))
+                .isInstanceOf(RuntimeBrokerException.class);
+        assertThat(authority.hasHolder(fixture.binding())).isTrue();
+        var receipt = new com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt(fixture.binding().getBindingId(),
+                fixture.binding().getGeneration(), fixture.binding().getProvisionSeed().getProvisionRequestId(),
+                fixture.binding().getResourceHandle(), Instant.now());
+        pending.complete(receipt);
+        assertThat(stopping.toCompletableFuture().get()).isEqualTo(receipt);
+        assertThat(authority.hasHolder(fixture.binding())).isTrue();
+        var stopped = fixture.bindings().compareAndSet(fixture.binding(), fixture.binding().withDrainReceipt(receipt));
+        assertThat(fixture.bindings().renewOperation(stopped.getBindingId(), stopped.getOperationOwner(),
+                stopped.getOperationGeneration(), Duration.ofMinutes(5))).isNotNull();
+        assertThat(fixture.bindings().completeStoppedSessionRelease(fixture.sessions(), fixture.executions(),
+                releasing, stopped).getState()).isEqualTo(RuntimeSessionRecord.State.RELEASED);
+        assertThat(authority.hasHolder(stopped)).isFalse();
+        assertThat(fixture.bindings().findById(stopped.getBindingId()).getDrainReceipt()).isEqualTo(receipt);
+    }
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"expired", "takeover", "foreign-binding", "foreign-generation", "bad-digest", "unknown-execution"})
+    void stoppedHookReleaseRefusesFencedOrUnverifiedCleanup(String fault) throws Exception {
+        var fixture = retainedHook();
+        var receipt = new com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt(fixture.binding().getBindingId(),
+                fixture.binding().getGeneration(), fixture.binding().getProvisionSeed().getProvisionRequestId(),
+                fixture.binding().getResourceHandle(), Instant.now());
+        var stopped = fixture.bindings().compareAndSet(fixture.binding(), fixture.binding().withDrainReceipt(receipt));
+        var releasing = fixture.bindings().beginSessionRelease(fixture.sessions(), fixture.executions(), fixture.session());
+        switch (fault) {
+            case "expired" -> jdbc.update("UPDATE qwen_runtime_binding SET operation_lease_until = TIMESTAMP '2000-01-01 00:00:00' WHERE binding_id = ?", stopped.getBindingId());
+            case "takeover" -> {
+                fixture.bindings().releaseOperation(stopped.getBindingId(), stopped.getOperationOwner(), stopped.getOperationGeneration());
+                assertThat(fixture.bindings().claimOperation(stopped.getBindingId(), "other", Duration.ofMinutes(5))).isNotNull();
+            }
+            case "foreign-binding" -> jdbc.update("UPDATE managed_workspace_execution_lease SET binding_id = 'foreign' WHERE binding_id = ?", stopped.getBindingId());
+            case "foreign-generation" -> jdbc.update("UPDATE managed_workspace_execution_lease SET runtime_generation = runtime_generation + 1 WHERE binding_id = ?", stopped.getBindingId());
+            case "bad-digest" -> jdbc.update("UPDATE managed_workspace_execution_lease SET holder_key = 'unverified' WHERE binding_id = ?", stopped.getBindingId());
+            case "unknown-execution" -> {
+                var execution = ToolExecutionRecord.prepared(UUID.randomUUID().toString(), UUID.randomUUID().toString(),
+                        stopped.getBindingId(), stopped.getGeneration(), fixture.session().getSession().getHarnessSessionId(),
+                        fixture.session().getRuntimeSessionId(), "prompt", "call", "digest", Map.of()).withUnknown();
+                fixture.executions().findOrCreate(execution);
+            }
+            default -> throw new AssertionError(fault);
+        }
+        assertThat(authority.canStopDrained(stopped)).isFalse();
+        var local = mock(RuntimeProvisioner.class);
+        assertThatThrownBy(() -> new WorkspaceRuntimeProvisioner(local, null, authority).stopDrained(stopped)
+                .toCompletableFuture().join()).hasCauseInstanceOf(RuntimeBrokerException.class);
+        verify(local, never()).stopDrained(any());
+        var before = jdbc.queryForList("SELECT * FROM managed_workspace_execution_lease WHERE holder_key IS NOT NULL");
+        assertThatThrownBy(() -> fixture.bindings().completeStoppedSessionRelease(fixture.sessions(),
+                fixture.executions(), releasing, stopped)).isInstanceOf(RuntimeBrokerException.class);
+        assertThat(fixture.sessions().findById(releasing.getSession().getScope(), releasing.getRuntimeSessionId()).getState())
+                .isEqualTo(RuntimeSessionRecord.State.RELEASING);
+        assertThat(jdbc.queryForList("SELECT * FROM managed_workspace_execution_lease WHERE holder_key IS NOT NULL")).isEqualTo(before);
+    }
+
+    @Test
+    void drainReleasesNonHolderSessionWithoutClearingTheOtherOriginalHolder() throws Exception {
+        var fixture = retainedHook(false);
+        var admitted = fixture.bindings().admitSession(fixture.sessions(), new RuntimeSessionRecord(new RuntimeSession(
+                fixture.session().getSession().getHarnessSessionId(), UUID.randomUUID().toString(), "bootstrap",
+                fixture.session().getSession().getScope()), fixture.binding().getBindingId(), fixture.binding().getGeneration(),
+                RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+        var other = fixture.sessions().compareAndSet(admitted, admitted.withState(RuntimeSessionRecord.State.READY, Instant.now()));
+        var receipt = new com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt(fixture.binding().getBindingId(),
+                fixture.binding().getGeneration(), fixture.binding().getProvisionSeed().getProvisionRequestId(),
+                fixture.binding().getResourceHandle(), Instant.now());
+        var stopped = fixture.bindings().compareAndSet(fixture.binding(), fixture.binding().withDrainRequested(true, Instant.now())
+                .withState(RuntimeBindingRecord.State.DRAINING, fixture.binding().getLease(), Instant.now()).withDrainReceipt(receipt));
+        var releasing = fixture.bindings().beginSessionRelease(fixture.sessions(), fixture.executions(), other);
+        assertThat(fixture.bindings().completeStoppedSessionRelease(fixture.sessions(), fixture.executions(),
+                releasing, stopped).getState()).isEqualTo(RuntimeSessionRecord.State.RELEASED);
+        assertThat(authority.hasHolder(stopped)).isTrue();
+        var owner = fixture.bindings().beginSessionRelease(fixture.sessions(), fixture.executions(), fixture.session());
+        assertThat(fixture.bindings().completeStoppedSessionRelease(fixture.sessions(), fixture.executions(),
+                owner, stopped).getState()).isEqualTo(RuntimeSessionRecord.State.RELEASED);
+        assertThat(authority.hasHolder(stopped)).isFalse();
+    }
+
+    private RetainedHook retainedHook() throws Exception {
+        return retainedHook(true);
+    }
+
+    private RetainedHook retainedHook(boolean drain) throws Exception {
+        var session = createSession("storage", ".");
+        var scope = resolver(session, temp.toRealPath()).resolve(session.sessionId()).scope();
+        var bindings = bindings();
+        var runtime = readyBinding(bindings, new RuntimeProvisionRequest(scope, session.sessionId(),
+                "local-process", session.workspace().getStorageId()), 2);
+        var runtimeSessions = new JdbcRuntimeSessionRepository(dataSource);
+        var execution = new JdbcToolExecutionRepository(dataSource);
+        var admitted = bindings.admitSession(runtimeSessions, new RuntimeSessionRecord(new RuntimeSession(
+                session.sessionId(), UUID.randomUUID().toString(), "bootstrap", scope), runtime.getBindingId(),
+                runtime.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+        var held = runtimeSessions.compareAndSet(admitted, admitted.withState(RuntimeSessionRecord.State.READY, Instant.now()));
+        authority.claim(session.workspace(), held);
+        var draining = drain ? bindings.compareAndSet(runtime, runtime.withDrainRequested(true, Instant.now())
+                .withState(RuntimeBindingRecord.State.DRAINING, runtime.getLease(), Instant.now())) : runtime;
+        return new RetainedHook(bindings, runtimeSessions, execution, draining, held);
+    }
+
+    private record RetainedHook(JdbcRuntimeBindingRepository bindings, JdbcRuntimeSessionRepository sessions,
+            JdbcToolExecutionRepository executions, RuntimeBindingRecord binding, RuntimeSessionRecord session) { }
+
+    @Test
     void operatorRecoveryFencesTheExactHeldGenerationBeforeAttestation() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var scope = resolver(session, temp.toRealPath()).resolve(session.sessionId()).scope();
