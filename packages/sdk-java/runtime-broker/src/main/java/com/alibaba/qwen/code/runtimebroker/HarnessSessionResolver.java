@@ -11,4 +11,8 @@ import java.util.concurrent.CompletionStage;
  */
 public interface HarnessSessionResolver {
     CompletionStage<RuntimeScope> resolve(String harnessSessionId);
+
+    default CompletionStage<String> resolveTenant(String harnessSessionId) {
+        return resolve(harnessSessionId).thenApply(RuntimeScope::getTenantId);
+    }
 }
