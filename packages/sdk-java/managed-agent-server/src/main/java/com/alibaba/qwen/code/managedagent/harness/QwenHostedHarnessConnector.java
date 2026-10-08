@@ -431,12 +431,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             String sessionId,
             String actionId,
             JsonNode response) {
-        requireReadyForNewWork(tenantId, sessionId, true);
+        SessionRecord session = requireReadyForNewWork(tenantId, sessionId, true);
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
         HarnessSessionRef ref = attachments.get(key);
         if (ref == null) {
+            // A resident Harness refuses an ordinary load after the dispatcher loses its cache.
             doCreateOrLoad(tenantId, sessionId, true,
-                    workspaceExecution.verifiedRecoveryEnabled(), true);
+                    session.workspace() != null || workspaceExecution.verifiedRecoveryEnabled(), true);
             ref = attachments.get(key);
         }
         client().resolveAction(
@@ -528,7 +529,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         return attached;
     }
 
-    private void requireReadyForNewWork(String tenantId, String sessionId, boolean actionResponse) {
+    private SessionRecord requireReadyForNewWork(String tenantId, String sessionId, boolean actionResponse) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         if (session.workspace() != null) {
             if (!isWorkspaceFilesAvailable()) {
@@ -541,6 +542,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 workspaceExecution.authorize(session);
             }
         }
+        return session;
     }
 
     private HarnessSessionRef create(SessionRecord session) {

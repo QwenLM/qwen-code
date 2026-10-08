@@ -50,7 +50,7 @@ public class ActionResponseCoordinator {
     }
 
     public void dispatch(String tenant, String session, String operation) {
-        if (!active.add(operation)) {
+        if (!harness.isAvailable() || !active.add(operation)) {
             return;
         }
         executor.execute(
@@ -65,6 +65,9 @@ public class ActionResponseCoordinator {
 
     @Scheduled(fixedDelayString = "${qwen.managed-agent.dispatch.scan-delay:1s}")
     public void recover() {
+        if (!harness.isAvailable()) {
+            return;
+        }
         actions.deliverable(clock.millis())
                 .forEach(op -> dispatch(op.tenantId(), op.sessionId(), op.operationId()));
     }

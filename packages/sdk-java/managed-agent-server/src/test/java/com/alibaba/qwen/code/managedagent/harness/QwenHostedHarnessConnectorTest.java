@@ -460,8 +460,9 @@ class QwenHostedHarnessConnectorTest {
                 .hasMessage("Hosted Workspace files are disabled");
     }
 
-    @Test
-    void resolvesActionsThroughAuthorizedColdAndCachedWorkspaceAttachments() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void resolvesActionsThroughAuthorizedColdAndCachedWorkspaceAttachments(boolean verifiedRecovery) {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
         HarnessSessionRef attached = mock(HarnessSessionRef.class);
@@ -477,7 +478,7 @@ class QwenHostedHarnessConnectorTest {
         AgentStateStore sessions = mock(AgentStateStore.class);
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
-        when(execution.verifiedRecoveryEnabled()).thenReturn(true);
+        when(execution.verifiedRecoveryEnabled()).thenReturn(verifiedRecovery);
         ManagedActionStore actions = mock(ManagedActionStore.class);
         when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
         ManagedAgentProperties properties = properties();

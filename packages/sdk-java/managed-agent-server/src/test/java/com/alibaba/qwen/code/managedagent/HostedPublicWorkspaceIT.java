@@ -804,6 +804,8 @@ class HostedPublicWorkspaceIT {
             Map<String, Object> body = web ? Map.of("sessionId", session, "actionId", id, "idempotencyKey", id,
                     "requestId", "d6b-action", "response", response) : response;
             assertThat(request("POST", route, body, id, "reader", 403).at("/error/code").asText()).isEqualTo("action_forbidden");
+            // The live Harness retains this approval while the dispatcher's attachment cache is cold.
+            ((Map<?, ?>) ReflectionTestUtils.getField(spring.getBean(HarnessConnector.class), "attachments")).clear();
             JsonNode operation = request("POST", route, body, id, "actor", 202);
             String op = operation.path(web ? "operationId" : "id").asText();
             JsonNode replay = request("POST", route, body, id, "actor", 202);

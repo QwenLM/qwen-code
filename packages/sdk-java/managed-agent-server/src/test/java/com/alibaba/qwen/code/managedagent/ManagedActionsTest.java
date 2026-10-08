@@ -102,6 +102,9 @@ class ManagedActionsTest {
         return mock(
                 HarnessConnector.class,
                 call -> {
+                    if ("isAvailable".equals(call.getMethod().getName())) {
+                        return true;
+                    }
                     if ("resolveAction".equals(call.getMethod().getName())) {
                         Answer<Void> answer = responses.get(call.getArgument(2));
                         return answer == null ? null : answer.answer(call);
