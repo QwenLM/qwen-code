@@ -1429,6 +1429,11 @@ describe('HookRunner', () => {
       expect(mockSpawn.mock.calls[0][2].detached).toBe(
         process.platform !== 'win32',
       );
+      // Hiding the console is a Windows-only flag: nothing changes for POSIX
+      // users, who keep the process group they rely on for cancellation.
+      expect(mockSpawn.mock.calls[0][2].windowsHide).toBe(
+        process.platform === 'win32',
+      );
       expect(killSpy).not.toHaveBeenCalled();
     });
 
@@ -1741,6 +1746,11 @@ describe('HookRunner', () => {
 
       expect(result.error?.message).toBe('Hook execution cancelled (aborted)');
       expect(mockSpawn.mock.calls[0][2].detached).toBe(false);
+      // The hook child is created without hiding its console, while the very
+      // same file hides the console of the taskkill child used to reap it. On
+      // Windows the hook child therefore inherits the parent's ConPTY console,
+      // so a `powershell -WindowStyle Hidden` hook minimizes Windows Terminal.
+      expect(mockSpawn.mock.calls[0][2].windowsHide).toBe(true);
       expect(mockExecFile).toHaveBeenCalledWith(
         expect.stringMatching(/\\System32\\taskkill\.exe$/i),
         ['/f', '/t', '/pid', mockProcess.pid.toString()],

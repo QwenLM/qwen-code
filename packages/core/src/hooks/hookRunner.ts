@@ -1309,6 +1309,9 @@ export class HookRunner {
             shell: false,
             // Own a process group for legacy cancellation.
             detached: process.platform !== 'win32',
+            // Give the child a windowless console, so a hook command that hides
+            // its own window cannot minimize the terminal hosting the session.
+            windowsHide: process.platform === 'win32',
           },
         );
         if (processUnit) {
