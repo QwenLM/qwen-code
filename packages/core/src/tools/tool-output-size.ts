@@ -47,17 +47,27 @@ export function measureToolOutput(
   let chars = 0;
   let estimatedChars = 0;
   for (const part of parts) {
-    estimatedChars += estimatePartChars(part, imageTokenEstimate);
-    if (typeof part.text === 'string') chars += part.text.length;
+    let partChars = 0;
+    let structuredChars = 0;
+    if (typeof part.text === 'string') partChars += part.text.length;
     const response = part.functionResponse?.response;
     if (response) {
       for (const value of Object.values(response)) {
-        chars +=
-          typeof value === 'string'
-            ? value.length
-            : (JSON.stringify(value)?.length ?? 0);
+        if (typeof value === 'string') {
+          partChars += value.length;
+          continue;
+        }
+        const nested = JSON.stringify(value)?.length ?? 0;
+        partChars += nested;
+        structuredChars += nested;
       }
     }
+    chars += partChars;
+    // ponytail: estimatePartChars bills a structured functionResponse only its
+    // wrapper floor, so bill the structured values here instead of changing the
+    // estimator that compaction, retention and /context all share.
+    estimatedChars +=
+      estimatePartChars(part, imageTokenEstimate) + structuredChars;
   }
   return {
     chars,

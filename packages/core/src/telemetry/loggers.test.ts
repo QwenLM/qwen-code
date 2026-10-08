@@ -1513,7 +1513,7 @@ describe('loggers', () => {
         function_args: JSON.stringify({ arg1: 'value1', arg2: 2 }, null, 2),
         duration_ms: 100,
         tool_type: 'native',
-        content_length: 13,
+        content_length: undefined,
         processed_estimated_tokens: 4,
         raw_content_length: undefined,
         raw_estimated_tokens: undefined,
@@ -1982,7 +1982,7 @@ describe('loggers', () => {
           error_type: ToolErrorType.UNKNOWN,
           'error.type': ToolErrorType.UNKNOWN,
           prompt_id: 'prompt-id-5',
-          content_length: 13,
+          content_length: errorMessage.length,
         },
       );
     });

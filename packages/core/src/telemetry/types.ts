@@ -259,7 +259,9 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     const provenance = call.response.responseParts
       .map(getToolOutputProvenance)
       .find(Boolean);
-    this.content_length = processed.chars;
+    // content_length keeps the meaning it already ships with on OTLP and RUM;
+    // the new measurement rides processed_estimated_tokens and the size events.
+    this.content_length = call.response.contentLength;
     this.processed_estimated_tokens = processed.estimatedTokens;
     this.raw_content_length = provenance?.rawSize?.chars;
     this.raw_estimated_tokens = provenance?.rawSize?.estimatedTokens;

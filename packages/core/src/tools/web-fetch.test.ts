@@ -353,7 +353,7 @@ describe('WebFetchTool', () => {
         para.repeat(Math.ceil(110_000 / (para.length - 7))) +
         '<p>NEEDLE-AT-END</p></body></html>';
 
-      const { sent } = await runCapturing(
+      const { sent, result } = await runCapturing(
         { body: Buffer.from(html) },
         PROCESSED_USAGE_UNSET,
         'https://example.com/large',
@@ -365,6 +365,10 @@ describe('WebFetchTool', () => {
       expect(sent).toContain('Total characters:');
       expect(sent).toContain('offset (zero-based line) and limit (line count)');
       expect(sent).not.toContain('NEEDLE-AT-END');
+      // The producer shortened this page, so it must declare its pre-reduction
+      // size; without it the execution event falls back to raw == processed and
+      // reports truncated: false for a page that was cut.
+      expect(result.rawOutputSize?.chars).toBeGreaterThan(100_000);
     });
 
     it('should keep content past 100k of raw HTML when the text itself fits', async () => {

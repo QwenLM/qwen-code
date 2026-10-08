@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { describe, expect, it } from 'vitest';
+import { estimatePartChars } from '../services/compactionInputSlimming.js';
 import {
   attachToolOutputProvenance,
   getToolOutputProvenance,
@@ -33,6 +34,18 @@ describe('result-size provenance', () => {
         100,
       ),
     ).toEqual({ chars: 0, estimatedTokens: 100 });
+  });
+
+  it('bills structured responses here, leaving the shared estimator at its wrapper floor', () => {
+    const part = {
+      functionResponse: { name: 'mcp', response: { output: { rows: [1, 2] } } },
+    };
+    // estimatePartChars backs compaction timing, tool-result retention,
+    // microcompaction and /context, so this module must not widen it.
+    expect(estimatePartChars(part, 100)).toBe(64);
+    const size = measureToolOutput([part]);
+    expect(size.chars).toBe(JSON.stringify({ rows: [1, 2] }).length);
+    expect(size.estimatedTokens).toBe(Math.ceil((64 + size.chars) / 4));
   });
 
   it('survives live shallow copies, stays off the wire, and never invents restored raw size', () => {

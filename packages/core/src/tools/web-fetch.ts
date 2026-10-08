@@ -5,6 +5,7 @@
  */
 
 import { truncateToolOutput } from './truncation.js';
+import { measureToolOutput, type ToolOutputSize } from './tool-output-size.js';
 import { LRUCache } from 'mnemonist';
 import type { Config } from '../config/config.js';
 import {
@@ -90,6 +91,8 @@ interface CacheEntry {
    */
   content: string;
   persistedTextPath?: string;
+  /** Size of `content` before the producer-level truncation below. */
+  rawOutputSize?: ToolOutputSize | null;
   persistedPath?: string;
   persistedSize?: number;
   /** Sniffed mime for the persisted-file note (Content-Type may lie). */
@@ -503,7 +506,9 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
     );
 
     let persistedTextPath: string | undefined;
+    let rawOutputSize: ToolOutputSize | undefined;
     if (content.length > MAX_CONTENT_CHARS) {
+      rawOutputSize = measureToolOutput(content);
       const shortened = await truncateToolOutput(
         this.config,
         'web_fetch',
@@ -522,6 +527,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
 
     const entry: CacheEntry = {
       persistedTextPath,
+      rawOutputSize,
       fetchedAt: Date.now(),
       status: response.status,
       statusText: response.statusText,
@@ -599,6 +605,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
         return {
           llmContent: `${header}\n\n${entry.content}${binaryNote}`,
           returnDisplay: `${displaySummary}${elapsedSuffix()}`,
+          rawOutputSize: entry.rawOutputSize,
           ...(entry.persistedPath
             ? { resultFilePaths: [entry.persistedPath] }
             : {}),
@@ -663,6 +670,7 @@ ${entry.content}
         return {
           llmContent: `${header}\n\n[Content processing failed (${getErrorMessage(error)}). The raw fetched content follows.]\n\n${entry.content}${binaryNote}`,
           returnDisplay: `${displaySummary}${elapsedSuffix()} — processing failed, raw content returned`,
+          rawOutputSize: entry.rawOutputSize,
           ...(entry.persistedPath
             ? { resultFilePaths: [entry.persistedPath] }
             : {}),
@@ -676,6 +684,7 @@ ${entry.content}
       return {
         llmContent: `${header}\n\n${resultText}${binaryNote}`,
         returnDisplay: `${displaySummary}${elapsedSuffix()}`,
+        rawOutputSize: entry.rawOutputSize,
         ...(entry.persistedPath
           ? { resultFilePaths: [entry.persistedPath] }
           : {}),
