@@ -6,6 +6,7 @@
 
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -297,11 +298,14 @@ import {
 import {
   type ActiveWorkHoldV1,
   type BridgeConversationDirectoryExpectation,
+  type BridgeSessionExternalRecordRequest,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_ATTACHMENT_CONTEXT_META_KEY,
+  IMAGE_ONLY_PROMPT_TEXT,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
@@ -309,6 +313,7 @@ import {
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
+import { createAgentRecordTranscriptUpdate } from '@qwen-code/acp-bridge/transcriptReplay';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   SERVE_CONTROL_EXT_METHODS,
@@ -485,6 +490,8 @@ import {
 
 const debugLogger = createDebugLogger('SESSION');
 const MAX_RETAINED_SESSION_ROUTE_COUNTS = 8;
+/** Idempotency keys `appendExternalRecord` remembers (oldest dropped first). */
+const MAX_EXTERNAL_RECORD_KEYS = 1_024;
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const NEW_PROMPT_ABORT_REASON = 'qwen:new-prompt';
 const SESSION_DISPOSE_ABORT_REASON = 'qwen:session-dispose';
@@ -1336,7 +1343,7 @@ function extractTurnPromptText(content: ContentBlock[]): string {
     if (block.type === 'image') hasImage = true;
     if (block.type === 'text' && block.text.length > 0) return block.text;
   }
-  return hasImage ? '[image]' : '';
+  return hasImage ? IMAGE_ONLY_PROMPT_TEXT : '';
 }
 
 interface InFlightTurnRecording {
@@ -2406,6 +2413,24 @@ export class Session implements SessionContext {
   pendingRecoveredAgentsNotice: string | null = null;
 
   /**
+   * Session multi-agent: model text of `agent_mention` / `agent_message`
+   * records written since the main model's last ordinary turn, spliced into
+   * the next one (see `appendExternalRecord`). Live history needs it because
+   * writing the record does not touch `LlmChat` history; resume already gets
+   * the same text from the record itself via `appendApiHistoryRecord`, and
+   * this array lives only in memory, so the two never double up.
+   */
+  pendingExternalAgentContext: string[] = [];
+
+  /** recordKey -> record uuid of external records this process wrote. */
+  readonly #externalRecordIds = new Map<string, string>();
+  /** recordKey -> in-flight write, so a retried request does not write twice. */
+  readonly #externalRecordWrites = new Map<
+    string,
+    Promise<{ recordId: string; created: boolean; deferred?: boolean }>
+  >();
+
+  /**
    * Call ids of the ask_user_question being re-hung by the current restore
    * turn, if any. While set, a permission cancel that the bridge resolved as
    * an unattended timeout / session close, or an abort of the restore wait,
@@ -2631,6 +2656,11 @@ export class Session implements SessionContext {
     this.lastGoalSnapshot = undefined;
     this.lastGoalPublicationKey = undefined;
     this.suppressedRecoveredGoalId = undefined;
+    // `/clear` starts a new transcript chain under this long-lived Session:
+    // agent text queued for the old chain must not reach the next model turn,
+    // and record ids from the finalized chain must not answer a re-send.
+    this.pendingExternalAgentContext = [];
+    this.#externalRecordIds.clear();
     this.#bindGoalRuntime();
   }
 
@@ -4613,6 +4643,7 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
+    this.#dropDeferredExternalRecords();
     this.cancelMcpAppCalls();
     for (const capture of this.channelTaskCaptures) {
       capture.controller.abort(SESSION_DISPOSE_ABORT_REASON);
@@ -6721,6 +6752,26 @@ export class Session implements SessionContext {
               };
               parts = insertAfterFunctionResponses(parts, [noticePart]);
               this.pendingRecoveredAgentsNotice = null;
+            }
+
+            // Session multi-agent context written since the last turn (agent
+            // replies, @-mentions). Same gates as the notice above. Each text
+            // is already a complete envelope, so it goes in bare (no
+            // system-reminder wrapper): live history then matches what resume
+            // rebuilds from the records. Taken once, here.
+            // TODO(multi-agent): a turn that fails after this point drops the
+            // context from live history (resume restores it from the record).
+            if (
+              this.pendingExternalAgentContext.length > 0 &&
+              !isContinue &&
+              !isRestoreAskUserQuestion &&
+              !isSlashInput
+            ) {
+              parts = insertAfterFunctionResponses(
+                parts,
+                this.pendingExternalAgentContext.map((text) => ({ text })),
+              );
+              this.pendingExternalAgentContext = [];
             }
 
             // A restore turn must not TAKE the reminder: `take` burns it and
@@ -9827,6 +9878,7 @@ export class Session implements SessionContext {
           // longer timeouts while remaining cancellable by the real turn.
           rawParts = await this.#applyBridgeConversionsIfNeeded(
             rawParts,
+            message.content,
             abortSignal,
             options.onFullTurnModel,
           );
@@ -11077,6 +11129,233 @@ export class Session implements SessionContext {
           this.#activeWorkChanged();
         }
       }
+    }
+  }
+
+  /**
+   * Session multi-agent: write an `agent_mention` / `agent_message` record
+   * the daemon sent (`qwen/control/session/external_record`), show it live,
+   * and queue its model text for the main model's next turn. Never starts a
+   * turn.
+   *
+   * Idempotent per `recordKey`: a repeat (including one that arrives while the
+   * first write is still in flight, and one re-sent after a restart, which
+   * the recorder finds by the key persisted on the record) returns the first
+   * record with `created: false` and emits nothing.
+   *
+   * Throws when the session is closing, when the recorder is unavailable, and
+   * when the write fails; a Managed session's refusal
+   * (`ManagedSessionRecordRefusedError`) propagates unchanged.
+   */
+  async appendExternalRecord(
+    request: BridgeSessionExternalRecordRequest,
+    /** Internal: the deferred queue's own drain, which must not re-queue. */
+    fromDeferredQueue = false,
+  ): Promise<{ recordId: string; created: boolean; deferred?: boolean }> {
+    const existingId = this.#externalRecordIds.get(request.recordKey);
+    if (existingId !== undefined) {
+      return { recordId: existingId, created: false };
+    }
+    const inFlight = this.#externalRecordWrites.get(request.recordKey);
+    if (inFlight) {
+      const first = await inFlight;
+      return {
+        recordId: first.recordId,
+        created: false,
+        ...(first.deferred ? { deferred: true } : {}),
+      };
+    }
+    const write = this.#writeExternalRecord(request, fromDeferredQueue);
+    this.#externalRecordWrites.set(request.recordKey, write);
+    try {
+      return await write;
+    } finally {
+      if (this.#externalRecordWrites.get(request.recordKey) === write) {
+        this.#externalRecordWrites.delete(request.recordKey);
+      }
+    }
+  }
+
+  async #writeExternalRecord(
+    request: BridgeSessionExternalRecordRequest,
+    fromDeferredQueue: boolean,
+  ): Promise<{ recordId: string; created: boolean; deferred?: boolean }> {
+    if (this.disposed || this.closing) {
+      throw new Error(`Session ${this.sessionId} is closing`);
+    }
+    const recording = this.config.getChatRecordingService();
+    if (!recording) {
+      throw new Error(`Session ${this.sessionId} has no chat recorder`);
+    }
+    // Before deferring: a request re-sent after a restart, for a record that
+    // is already in the transcript, must get its id back now rather than be
+    // deferred (and answered with an empty id) again.
+    const existing = await recording.findExternalAgentRecord(request.recordKey);
+    if (existing) {
+      this.#rememberExternalRecord(request.recordKey, existing.uuid);
+      return { recordId: existing.uuid, created: false };
+    }
+    if (this.disposed || this.closing) {
+      throw new Error(`Session ${this.sessionId} is closing`);
+    }
+    // A record must not land while a main-model turn is in flight: written
+    // between a functionCall and its functionResponse it would, on resume,
+    // rebuild as a user entry between them and break tool_use/tool_result
+    // adjacency. Agents finish whenever they finish, so instead of making the
+    // daemon wait (its ext call times out after ~10s) the write is deferred
+    // until the turn settles and the caller is told so.
+    // Nor may a direct write jump records still queued (or being drained)
+    // from an earlier turn: the transcript keeps the daemon's send order.
+    if (
+      !this.isTurnIdle() ||
+      (!fromDeferredQueue &&
+        (this.#deferredExternalRecords.length > 0 ||
+          this.#drainingDeferredExternalRecords))
+    ) {
+      this.#deferExternalRecord(request);
+      return { recordId: '', created: true, deferred: true };
+    }
+    const written = await this.#persistExternalRecord(request);
+    if (!written.created) {
+      return { recordId: written.uuid, created: false };
+    }
+    const recordId = written.uuid;
+    if (this.disposed || this.closing) return { recordId, created: true };
+
+    // The same projection replay produces for this record (timestamp
+    // included), so a client that reloads sees exactly what it saw live.
+    const update = createAgentRecordTranscriptUpdate({
+      recordId,
+      subtype: request.kind,
+      payload: request.payload,
+      timestamp: written.timestamp,
+    });
+    if (update) {
+      try {
+        await this.sendUpdate(update);
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to publish external record [session ${this.sessionId}, record ${recordId}]: ${this.#formatError(error)}`,
+        );
+      }
+    }
+    this.pendingExternalAgentContext.push(request.modelText);
+    return { recordId, created: true };
+  }
+
+  /** Writes the record (deduped by key in the recorder) and remembers its id. */
+  async #persistExternalRecord(
+    request: BridgeSessionExternalRecordRequest,
+  ): Promise<{ uuid: string; timestamp: string; created: boolean }> {
+    const recording = this.config.getChatRecordingService();
+    if (!recording) {
+      throw new Error(`Session ${this.sessionId} has no chat recorder`);
+    }
+    const written = await recording.recordExternalAgentRecordStrict(request);
+    this.#rememberExternalRecord(request.recordKey, written.uuid);
+    return written;
+  }
+
+  #rememberExternalRecord(recordKey: string, recordId: string): void {
+    this.#externalRecordIds.set(recordKey, recordId);
+    if (this.#externalRecordIds.size > MAX_EXTERNAL_RECORD_KEYS) {
+      const oldest = this.#externalRecordIds.keys().next().value;
+      if (oldest !== undefined) this.#externalRecordIds.delete(oldest);
+    }
+  }
+
+  readonly #deferredExternalRecords: BridgeSessionExternalRecordRequest[] = [];
+  #deferredExternalRecordTimer: ReturnType<typeof setInterval> | undefined;
+  #drainingDeferredExternalRecords = false;
+
+  /**
+   * Hold an external record until no main-model turn is running, then write
+   * it through the normal path. Polling keeps this independent of the many
+   * turn-completion paths (prompt, cron, notification, goal, channel task).
+   * Idempotent per `recordKey`: a re-sent request already queued is not
+   * queued twice.
+   *
+   * While the session is closing the queue waits: a close that goes through
+   * writes it with {@link flushDeferredExternalRecords} before the recorder
+   * closes, and a released close gate (a live restore) lets the timer resume.
+   */
+  #deferExternalRecord(request: BridgeSessionExternalRecordRequest): void {
+    if (
+      this.#deferredExternalRecords.some(
+        (queued) => queued.recordKey === request.recordKey,
+      )
+    ) {
+      return;
+    }
+    this.#deferredExternalRecords.push(request);
+    if (this.#deferredExternalRecordTimer) return;
+    this.#deferredExternalRecordTimer = setInterval(() => {
+      if (this.disposed) {
+        this.#dropDeferredExternalRecords();
+        return;
+      }
+      // One drain at a time, so a second batch cannot interleave the first.
+      if (!this.isTurnIdle() || this.#drainingDeferredExternalRecords) return;
+      clearInterval(this.#deferredExternalRecordTimer);
+      this.#deferredExternalRecordTimer = undefined;
+      const pending = this.#deferredExternalRecords.splice(0);
+      this.#drainingDeferredExternalRecords = true;
+      void (async () => {
+        try {
+          for (const request of pending) {
+            try {
+              await this.appendExternalRecord(request, true);
+            } catch (error) {
+              debugLogger.warn(
+                `Deferred external record failed [session ${this.sessionId}, key ${request.recordKey}]: ${this.#formatError(error)}`,
+              );
+            }
+          }
+        } finally {
+          this.#drainingDeferredExternalRecords = false;
+        }
+      })();
+    }, 500);
+    this.#deferredExternalRecordTimer.unref?.();
+  }
+
+  /**
+   * Close path: write the external records still deferred, once the session's
+   * turns have settled and before its recorder is finalized and closed. No
+   * live update and no model text: the session is going away, and a later
+   * load reads both from the records. A record that cannot be written is
+   * dropped with a log line; the daemon re-sends it after the session is
+   * restored, and the key persisted on each record keeps that from
+   * duplicating one written here.
+   */
+  async flushDeferredExternalRecords(): Promise<void> {
+    clearInterval(this.#deferredExternalRecordTimer);
+    this.#deferredExternalRecordTimer = undefined;
+    // Writes the timer already started run to completion first.
+    await Promise.allSettled([...this.#externalRecordWrites.values()]);
+    const pending = this.#deferredExternalRecords.splice(0);
+    for (const request of pending) {
+      if (this.#externalRecordIds.has(request.recordKey)) continue;
+      try {
+        await this.#persistExternalRecord(request);
+      } catch (error) {
+        debugLogger.warn(
+          `Dropped deferred external record on close [session ${this.sessionId}, key ${request.recordKey}]: ${this.#formatError(error)}`,
+        );
+      }
+    }
+  }
+
+  #dropDeferredExternalRecords(): void {
+    clearInterval(this.#deferredExternalRecordTimer);
+    this.#deferredExternalRecordTimer = undefined;
+    const dropped = this.#deferredExternalRecords.splice(0);
+    if (dropped.length > 0) {
+      debugLogger.warn(
+        `Dropped ${dropped.length} deferred external record(s) on dispose [session ${this.sessionId}]; the daemon re-sends them after restore: ${dropped
+          .map((request) => request.recordKey)
+          .join(', ')}`,
+      );
     }
   }
 
@@ -13631,9 +13910,12 @@ export class Session implements SessionContext {
       | undefined;
     let subAgentCleanupFunctions: Array<() => void> = [];
 
-    const cleanupAgentToolResources = () => {
+    const cleanupSubAgentTracking = () => {
       subAgentCleanupFunctions.forEach((cleanup) => cleanup());
       subAgentCleanupFunctions = [];
+    };
+    const cleanupAgentToolResources = () => {
+      cleanupSubAgentTracking();
       removeAgentToolAbortPropagation?.();
       removeAgentToolAbortPropagation = undefined;
     };
@@ -13966,10 +14248,6 @@ export class Session implements SessionContext {
       tool instanceof DiscoveredMCPTool ? tool.serverName : undefined;
     const policyToolName = tool.name;
     guardContext.policyToolName = policyToolName;
-    const originalPolicyRequestArgs =
-      policyToolName === ToolNames.SHELL || policyToolName === ToolNames.MONITOR
-        ? structuredClone(args)
-        : args;
 
     const toolSpan = startToolSpan(
       policyToolName,
@@ -14058,6 +14336,59 @@ export class Session implements SessionContext {
           );
         }
 
+        // ---- PreToolUse: once, before every input-dependent check ----
+        // A replacement input then goes through the same gates, validation,
+        // permission and approval as the model's input; the checks above fix
+        // the tool's identity, which the hook cannot change.
+        const toolUseId = generateToolUseId();
+        const hooksEnabledForTool = !this.config.getDisableAllHooks?.();
+        const messageBusForTool = this.config.getMessageBus?.();
+        if (hooksEnabledForTool && messageBusForTool) {
+          const preHookResult = await firePreToolUseHook(
+            messageBusForTool,
+            policyToolName,
+            args,
+            toolUseId,
+            String(this.config.getApprovalMode()),
+            activeToolAbortSignal,
+            callId,
+            hookOwner,
+          );
+          preToolUseContext = preHookResult.additionalContext;
+          const preHookCancellation = cancelBeforeExecutionIfAborted(toolName);
+          if (preHookCancellation) return preHookCancellation;
+
+          if (!preHookResult.shouldProceed) {
+            // Hook blocked the tool execution - send notification to UI
+            const blockReason =
+              preHookResult.blockReason || 'Blocked by PreToolUse hook';
+            try {
+              await this.messageEmitter.emitAgentMessage(
+                `✗ **PreToolUse blocked**: ${toolName} - ${blockReason}`,
+              );
+            } catch (emitError) {
+              debugLogger.debug(
+                '[Session.runTool] Failed to emit PreToolUse block message',
+                emitError,
+              );
+            }
+            const blockMessageCancellation =
+              cancelBeforeExecutionIfAborted(toolName);
+            if (blockMessageCancellation) return blockMessageCancellation;
+            return earlyErrorResponse(new Error(blockReason), toolName, {
+              status: 'error',
+              errorType: ToolErrorType.EXECUTION_DENIED,
+              executionStatus: 'not_started',
+            });
+          }
+          if (preHookResult.updatedInput) args = preHookResult.updatedInput;
+        }
+        const originalPolicyRequestArgs =
+          policyToolName === ToolNames.SHELL ||
+          policyToolName === ToolNames.MONITOR
+            ? structuredClone(args)
+            : args;
+
         // ---- Media-policy modelAccess gate (mirrors CoreToolScheduler) ----
         // Every ACP-originated call is a model call: there is no in-process
         // fixed_policy caller on this path, so the origin is pinned rather
@@ -14136,26 +14467,27 @@ export class Session implements SessionContext {
           }
         }
 
-        // Generate tool_use_id for hook tracking (aligned with core path)
-        const toolUseId = generateToolUseId();
-
         // Get approval mode for hook context (defined outside try for catch block access)
         let approvalMode = this.config.getApprovalMode();
 
         let toolBuildSucceeded = false;
         try {
-          const invocation = appExecution
-            ? appExecution.tool.buildForApp(
-                args,
-                appExecution.onResult,
-                this.config,
-              )
-            : tool.build(args);
-          builtInvocation = invocation;
-          const callIdAware = invocation as {
-            setCallId?: (id: string) => void;
+          const buildInvocation = (input: Record<string, unknown>) => {
+            const built = appExecution
+              ? appExecution.tool.buildForApp(
+                  input,
+                  appExecution.onResult,
+                  this.config,
+                )
+              : tool.build(input);
+            const callIdAware = built as {
+              setCallId?: (id: string) => void;
+            };
+            callIdAware.setCallId?.(callId);
+            return built;
           };
-          callIdAware.setCallId?.(callId);
+          let invocation = buildInvocation(args);
+          builtInvocation = invocation;
           toolBuildSucceeded = true;
 
           if (this.config.getSessionSourceType?.() === 'agent-host') {
@@ -14198,19 +14530,21 @@ export class Session implements SessionContext {
             }
           }
 
-          // Production AgentTool always initializes `eventEmitter` on its
-          // invocation (`agent.ts:392`). Be defensive about the `undefined`
-          // case too so an incomplete/custom AgentTool invocation degrades
-          // gracefully (no sub-agent event forwarding) instead of throwing
-          // inside SubAgentTracker.setup — the `'eventEmitter' in invocation`
-          // key-presence check passed for `{ eventEmitter: undefined }` and
-          // the ensuing `eventEmitter.on(...)` blew up.
-          const taskEventEmitter = (
-            invocation as {
-              eventEmitter?: AgentEventEmitter;
-            }
-          ).eventEmitter;
-          if (isAgentTool && taskEventEmitter) {
+          // Sub-agent tracking belongs to the invocation that can run.
+          const trackAgentInvocation = () => {
+            // Production AgentTool always initializes `eventEmitter` on its
+            // invocation (`agent.ts:392`). Be defensive about the `undefined`
+            // case too so an incomplete/custom AgentTool invocation degrades
+            // gracefully (no sub-agent event forwarding) instead of throwing
+            // inside SubAgentTracker.setup — the `'eventEmitter' in invocation`
+            // key-presence check passed for `{ eventEmitter: undefined }` and
+            // the ensuing `eventEmitter.on(...)` blew up.
+            const taskEventEmitter = (
+              invocation as {
+                eventEmitter?: AgentEventEmitter;
+              }
+            ).eventEmitter;
+            if (!isAgentTool || !taskEventEmitter) return;
             // Extract subagent metadata from AgentTool call
             const parentToolCallId = callId;
             const subagentType = (args['subagent_type'] as string) ?? '';
@@ -14237,7 +14571,8 @@ export class Session implements SessionContext {
               taskEventEmitter,
               activeToolAbortSignal,
             );
-          }
+          };
+          trackAgentInvocation();
 
           // L3→L4→L5 Permission Flow (aligned with coreToolScheduler)
           //
@@ -14402,14 +14737,10 @@ export class Session implements SessionContext {
               `Auto mode: L4 allow overridden by protected-write guard for ${policyToolName}`,
             );
           }
-          let autoModeAllowed =
-            finalPermission === 'allow' &&
-            !forceAutoReviewForAllow &&
-            !planShellRequiresConfirmation;
-          if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
+          const recordAutoModeAllow = (params: Record<string, unknown>) => {
             const actionFingerprint = getAutoModeActionFingerprint(
               policyToolName,
-              toolParams,
+              params,
               this.config.getCwd(),
             );
             this.config.setAutoModeDenialState(
@@ -14418,23 +14749,29 @@ export class Session implements SessionContext {
                 actionFingerprint,
               ),
             );
-          }
-          let wasAutoModeManualFallback = false;
-          let autoModeFallback: AutoModeFallbackConfirmation | undefined;
-
+          };
           // ── L5: AUTO mode three-layer filter (duplicated from
           // coreToolScheduler.ts; ACP routes through this Session path).
-          // Returns 'allowed' / 'blocked' / 'fallback'. Blocked early-returns;
-          // allowed skips requestPermission; fallback drops through to the
-          // existing manual-approval flow below.
-          if (
-            !autoModeAllowed &&
-            !requiresUserInteraction &&
-            shouldRunAutoModeForCall(approvalMode, policyToolName)
-          ) {
+          // Returns 'approved' / 'blocked' / 'fallback', or the cancellation
+          // result when the call was cancelled meanwhile.
+          const classifyForAutoMode = async (
+            params: Record<string, unknown>,
+            ctx: typeof pmCtx,
+            forcedAsk: boolean,
+          ): Promise<
+            | {
+                cancelled: NonNullable<
+                  ReturnType<typeof cancelBeforeExecutionIfAborted>
+                >;
+              }
+            | {
+                outcome: ReturnType<typeof applyAutoModeDecision>;
+                denialState: Parameters<typeof applyAutoModeDecision>[2];
+              }
+          > => {
             const actionFingerprint = getAutoModeActionFingerprint(
               policyToolName,
-              toolParams,
+              params,
               this.config.getCwd(),
             );
             const { fallback } = prepareAutoModeFallback(
@@ -14452,9 +14789,9 @@ export class Session implements SessionContext {
             const trustedUserAnswers =
               llmClient?.getTrustedUserAnswers?.() ?? [];
             const decision = await evaluateAutoMode({
-              ctx: pmCtx,
-              pmForcedAsk,
-              toolParams,
+              ctx,
+              pmForcedAsk: forcedAsk,
+              toolParams: params,
               messages,
               trustedUserAnswers,
               config: this.config,
@@ -14465,7 +14802,8 @@ export class Session implements SessionContext {
             });
             const autoModeCancellation =
               cancelBeforeExecutionIfAborted(toolName);
-            if (autoModeCancellation) return autoModeCancellation;
+            if (autoModeCancellation)
+              return { cancelled: autoModeCancellation };
 
             // Apply decision via shared helper — eliminates ~40 lines of
             // line-for-line duplication with coreToolScheduler.ts and makes
@@ -14485,7 +14823,7 @@ export class Session implements SessionContext {
               decision,
               outcome,
               policyToolName,
-              toolParams,
+              params,
               callId,
               abortSignal,
               hookOwner,
@@ -14493,17 +14831,81 @@ export class Session implements SessionContext {
             const permissionDeniedHookCancellation =
               cancelBeforeExecutionIfAborted(toolName);
             if (permissionDeniedHookCancellation) {
-              return permissionDeniedHookCancellation;
+              return { cancelled: permissionDeniedHookCancellation };
             }
+            if (outcome.kind === 'blocked') {
+              debugLogger.warn(
+                `Auto mode blocked (${outcome.reason}): tool=${policyToolName}, ` +
+                  formatDenialStateLog(denialState),
+              );
+            }
+            return { outcome, denialState };
+          };
+
+          let autoModeAllowed =
+            finalPermission === 'allow' &&
+            !forceAutoReviewForAllow &&
+            !planShellRequiresConfirmation;
+          if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
+            recordAutoModeAllow(toolParams);
+          }
+          let wasAutoModeManualFallback = false;
+          let autoModeFallback: AutoModeFallbackConfirmation | undefined;
+          // Recovery state follows the input whose classification was last
+          // decided, so approving a fallback resets the right counters.
+          const updateAutoModeFallback = (
+            outcome?: ReturnType<typeof applyAutoModeDecision>,
+            denialState?: Parameters<typeof applyAutoModeDecision>[2],
+          ) => {
+            wasAutoModeManualFallback = false;
+            autoModeFallback = undefined;
+            if (outcome?.kind !== 'fallback') return;
+            wasAutoModeManualFallback =
+              isDenialFallbackReason(outcome.reason) ||
+              outcome.reason === 'classifier_unavailable' ||
+              outcome.reason === 'external_write' ||
+              outcome.reason === 'external_directory';
+
+            if (
+              outcome.message &&
+              (outcome.reason === 'classifier_unavailable' ||
+                outcome.reason === 'external_write' ||
+                outcome.reason === 'external_directory' ||
+                isDenialFallbackReason(outcome.reason))
+            ) {
+              autoModeFallback = {
+                reason: outcome.reason,
+                message: outcome.message,
+              };
+            }
+
+            if (wasAutoModeManualFallback && denialState) {
+              debugLogger.warn(
+                `Auto mode fallback to manual approval (${outcome.reason}): ` +
+                  formatDenialStateLog(denialState),
+              );
+            }
+          };
+
+          // Blocked early-returns; approved skips requestPermission;
+          // fallback drops through to the existing manual-approval flow.
+          if (
+            !autoModeAllowed &&
+            !requiresUserInteraction &&
+            shouldRunAutoModeForCall(approvalMode, policyToolName)
+          ) {
+            const classified = await classifyForAutoMode(
+              toolParams,
+              pmCtx,
+              pmForcedAsk,
+            );
+            if ('cancelled' in classified) return classified.cancelled;
+            const { outcome, denialState } = classified;
             switch (outcome.kind) {
               case 'approved':
                 autoModeAllowed = true;
                 break;
               case 'blocked':
-                debugLogger.warn(
-                  `Auto mode blocked (${outcome.reason}): tool=${policyToolName}, ` +
-                    formatDenialStateLog(denialState),
-                );
                 return earlyErrorResponse(
                   new Error(outcome.errorMessage),
                   toolName,
@@ -14515,31 +14917,7 @@ export class Session implements SessionContext {
                 );
               case 'fallback':
                 // Drop through to the manual-approval flow below.
-                wasAutoModeManualFallback =
-                  isDenialFallbackReason(outcome.reason) ||
-                  outcome.reason === 'classifier_unavailable' ||
-                  outcome.reason === 'external_write' ||
-                  outcome.reason === 'external_directory';
-
-                if (
-                  outcome.message &&
-                  (outcome.reason === 'classifier_unavailable' ||
-                    outcome.reason === 'external_write' ||
-                    outcome.reason === 'external_directory' ||
-                    isDenialFallbackReason(outcome.reason))
-                ) {
-                  autoModeFallback = {
-                    reason: outcome.reason,
-                    message: outcome.message,
-                  };
-                }
-
-                if (wasAutoModeManualFallback) {
-                  debugLogger.warn(
-                    `Auto mode fallback to manual approval (${outcome.reason}): ` +
-                      formatDenialStateLog(denialState),
-                  );
-                }
+                updateAutoModeFallback(outcome, denialState);
                 break;
               default: {
                 const _exhaustive: never = outcome;
@@ -14792,9 +15170,166 @@ export class Session implements SessionContext {
                     recordAutoModeFallbackResolution(approval.outcome);
                   } else {
                     if (hookResult.updatedInput) {
-                      args = hookResult.updatedInput;
-                      invocation.params =
-                        hookResult.updatedInput as typeof invocation.params;
+                      // The replacement is checked like the input before it:
+                      // its gates, schema and permission rules. This hook's
+                      // allow then stands in only for an ordinary
+                      // confirmation of it; the original's is dropped.
+                      const reject = (
+                        message: string,
+                        errorType = ToolErrorType.EXECUTION_DENIED,
+                      ) =>
+                        earlyErrorResponse(new Error(message), toolName, {
+                          status: 'error',
+                          errorType,
+                          executionStatus: 'not_started',
+                        });
+                      const replacementGate = evaluateMediaPolicyToolCall({
+                        config: this.config,
+                        tool,
+                        args: hookResult.updatedInput,
+                        executionOrigin: { kind: 'model' },
+                      });
+                      if (replacementGate.outcome === 'reject') {
+                        return reject(
+                          replacementGate.message,
+                          replacementGate.reason === 'invalid_params'
+                            ? ToolErrorType.INVALID_TOOL_PARAMS
+                            : ToolErrorType.EXECUTION_DENIED,
+                        );
+                      }
+                      const replacementArgs = replacementGate.args;
+                      if (
+                        this.requiresManagedConversationBinding &&
+                        isAgentTool &&
+                        (replacementArgs['isolation'] === 'worktree' ||
+                          (typeof replacementArgs['working_dir'] === 'string' &&
+                            replacementArgs['working_dir'].trim().length > 0))
+                      ) {
+                        return reject(STANDALONE_WORKTREE_ACTION_ERROR);
+                      }
+                      let replacement: typeof invocation;
+                      try {
+                        replacement = buildInvocation(replacementArgs);
+                      } catch (error) {
+                        return reject(
+                          error instanceof Error
+                            ? error.message
+                            : String(error),
+                          ToolErrorType.INVALID_TOOL_PARAMS,
+                        );
+                      }
+                      // The replacement is released when the call ends,
+                      // even if a later check rejects it; the original
+                      // will not run, so release it now.
+                      const original = builtInvocation;
+                      builtInvocation = replacement;
+                      if (original?.release && original !== replacement) {
+                        void Promise.resolve()
+                          .then(() => original.release?.())
+                          .catch((error: unknown) => {
+                            debugLogger.warn(
+                              'Tool invocation resource cleanup failed:',
+                              error,
+                            );
+                          });
+                      }
+                      const replacementFlow = await evaluatePermissionFlow(
+                        this.config,
+                        replacement,
+                        policyToolName,
+                        replacement.params as Record<string, unknown>,
+                        activeToolAbortSignal,
+                      );
+                      const replacementFlowCancellation =
+                        cancelBeforeExecutionIfAborted(toolName);
+                      if (replacementFlowCancellation) {
+                        return replacementFlowCancellation;
+                      }
+                      if (replacementFlow.finalPermission === 'deny') {
+                        return reject(
+                          replacementFlow.denyMessage ??
+                            `Tool "${toolName}" is denied.`,
+                        );
+                      }
+                      if (replacementFlow.requiresUserInteraction) {
+                        return reject(
+                          `The PermissionRequest hook's replacement input for "${toolName}" needs a user decision, so it was not run.`,
+                        );
+                      }
+                      const replacementDetails =
+                        await replacement.getConfirmationDetails(
+                          activeToolAbortSignal,
+                        );
+                      const replacementDetailsCancellation =
+                        cancelBeforeExecutionIfAborted(toolName);
+                      if (replacementDetailsCancellation) {
+                        return replacementDetailsCancellation;
+                      }
+                      if (
+                        isPlanModeBlocked(
+                          isPlanMode,
+                          isExitPlanModeTool,
+                          isAskUserQuestionTool,
+                          replacementDetails,
+                          isEnterPlanModeTool,
+                        )
+                      ) {
+                        return reject(
+                          `Plan mode is active. The tool "${toolName}" cannot be executed because it modifies the system. ` +
+                            'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
+                        );
+                      }
+                      // AUTO mode judges the replacement like any input: its
+                      // own allow rule, else the classifier. Only a block
+                      // overrides this hook's one-time allow.
+                      const replacementParams = replacement.params as Record<
+                        string,
+                        unknown
+                      >;
+                      const replacementAllowed =
+                        replacementFlow.finalPermission === 'allow' &&
+                        !(
+                          approvalMode === ApprovalMode.AUTO &&
+                          (shouldForceAutoModeReviewForAllow(
+                            replacementFlow.pmCtx,
+                            this.config.getCwd(),
+                          ) ||
+                            shouldClassifyAllShellForAutoMode(
+                              policyToolName,
+                              this.config,
+                            ))
+                        );
+                      if (
+                        replacementAllowed &&
+                        approvalMode === ApprovalMode.AUTO
+                      ) {
+                        recordAutoModeAllow(replacementParams);
+                        updateAutoModeFallback();
+                      } else if (
+                        !replacementAllowed &&
+                        shouldRunAutoModeForCall(approvalMode, policyToolName)
+                      ) {
+                        const classified = await classifyForAutoMode(
+                          replacementParams,
+                          replacementFlow.pmCtx,
+                          replacementFlow.pmForcedAsk,
+                        );
+                        if ('cancelled' in classified) {
+                          return classified.cancelled;
+                        }
+                        if (classified.outcome.kind === 'blocked') {
+                          return reject(classified.outcome.errorMessage);
+                        }
+                        updateAutoModeFallback(
+                          classified.outcome,
+                          classified.denialState,
+                        );
+                      }
+                      cleanupSubAgentTracking();
+                      invocation = replacement;
+                      args = replacementArgs;
+                      confirmationDetails = replacementDetails;
+                      trackAgentInvocation();
                     }
 
                     await confirmationDetails.onConfirm(
@@ -15231,52 +15766,7 @@ export class Session implements SessionContext {
             if (startEmissionCancellation) return startEmissionCancellation;
           }
 
-          // Fire PreToolUse hook (aligned with core path in coreToolScheduler.ts)
-          const hooksEnabledForTool = !this.config.getDisableAllHooks?.();
-          const messageBusForTool = this.config.getMessageBus?.();
           const permissionMode = String(approvalMode);
-
-          if (hooksEnabledForTool && messageBusForTool) {
-            const preHookResult = await firePreToolUseHook(
-              messageBusForTool,
-              policyToolName,
-              args,
-              toolUseId,
-              permissionMode,
-              activeToolAbortSignal,
-              callId,
-              hookOwner,
-            );
-            preToolUseContext = preHookResult.additionalContext;
-            const preHookCancellation =
-              cancelBeforeExecutionIfAborted(toolName);
-            if (preHookCancellation) return preHookCancellation;
-
-            if (!preHookResult.shouldProceed) {
-              // Hook blocked the tool execution - send notification to UI
-              const blockReason =
-                preHookResult.blockReason || 'Blocked by PreToolUse hook';
-              try {
-                await this.messageEmitter.emitAgentMessage(
-                  `✗ **PreToolUse blocked**: ${toolName} - ${blockReason}`,
-                );
-              } catch (emitError) {
-                debugLogger.debug(
-                  '[Session.runTool] Failed to emit PreToolUse block message',
-                  emitError,
-                );
-              }
-              const blockMessageCancellation =
-                cancelBeforeExecutionIfAborted(toolName);
-              if (blockMessageCancellation) return blockMessageCancellation;
-              return earlyErrorResponse(new Error(blockReason), toolName, {
-                status: 'error',
-                errorType: ToolErrorType.EXECUTION_DENIED,
-                executionStatus: 'not_started',
-              });
-            }
-          }
-
           const toolInvocationGuard = this.config.getToolInvocationGuard?.();
           if (toolInvocationGuard) {
             const invocationContext = getInvocationContext();
@@ -15618,7 +16108,8 @@ export class Session implements SessionContext {
                       !(
                         kind === Kind.Execute &&
                         !this.config.getDisableAllHooks?.() &&
-                        this.config.hasHooksForEvent?.('PermissionRequest')
+                        (this.config.hasHooksForEvent?.('PreToolUse') ||
+                          this.config.hasHooksForEvent?.('PermissionRequest'))
                       );
                     if (!safe) {
                       await Promise.all(executing);
@@ -16344,6 +16835,7 @@ export class Session implements SessionContext {
               });
         return this.#applyBridgeConversionsIfNeeded(
           [...attachmentParts, ...expandedPrompt],
+          attachmentBlocks,
           abortSignal,
           onFullTurnModel,
         );
@@ -16531,6 +17023,7 @@ export class Session implements SessionContext {
     const sshWorkspace = Boolean(this.config.getExecutionEnvironment?.());
 
     const embeddedContext: EmbeddedResourceResource[] = [];
+    const attachmentParts: Part[] = [];
     const extensionMentions = new Map<string, string>();
     const mcpServerMentions = new Map<string, string>();
     const textPathSpecsToRead = new Map<string, string>();
@@ -16542,11 +17035,20 @@ export class Session implements SessionContext {
         ? parts
         : this.#applyBridgeConversionsIfNeeded(
             parts,
+            message,
             abortSignal,
             options.onFullTurnModel,
           );
 
     const parts = message.map((part) => {
+      const attachmentContext =
+        part._meta?.[DAEMON_ATTACHMENT_CONTEXT_META_KEY];
+      if (
+        (part.type === 'image' || part.type === 'resource') &&
+        typeof attachmentContext === 'string'
+      ) {
+        attachmentParts.push({ text: attachmentContext });
+      }
       switch (part.type) {
         case 'text':
           if (sshWorkspace) return { text: part.text };
@@ -16694,13 +17196,18 @@ export class Session implements SessionContext {
     if (
       pathSpecsToRead.length === 0 &&
       embeddedContext.length === 0 &&
+      attachmentParts.length === 0 &&
       extensionParts.length === 0 &&
       mcpServerParts.length === 0
     ) {
       return finish(partsToSend);
     }
 
-    if (pathSpecsToRead.length === 0 && embeddedContext.length === 0) {
+    if (
+      pathSpecsToRead.length === 0 &&
+      embeddedContext.length === 0 &&
+      attachmentParts.length === 0
+    ) {
       return finish([...partsToSend, ...extensionParts, ...mcpServerParts]);
     }
 
@@ -16736,6 +17243,7 @@ export class Session implements SessionContext {
     // the "--- Content from ... ---" delimiter labels, not by position, so
     // leading with the content is safe.
     const referenceParts: Part[] = [
+      ...attachmentParts,
       ...partsToSend.filter((part) => 'inlineData' in part),
       ...extensionParts,
       ...mcpServerParts,
@@ -16813,6 +17321,7 @@ export class Session implements SessionContext {
 
   async #applyBridgeConversionsIfNeeded(
     originalParts: Part[],
+    sourceBlocks: ContentBlock[],
     abortSignal: AbortSignal,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<Part[]> {
@@ -16851,11 +17360,23 @@ export class Session implements SessionContext {
 
     let bridgeResult: VisionBridgeResult;
     try {
+      const attachmentContexts = new Set(
+        sourceBlocks
+          .filter(
+            (block) => block.type === 'image' || block.type === 'resource',
+          )
+          .map((block) => block._meta?.[DAEMON_ATTACHMENT_CONTEXT_META_KEY])
+          .filter((context) => typeof context === 'string'),
+      );
       debugLogger.debug('vision bridge: gate matched, running conversion');
       bridgeResult = await runVisionBridge({
         config: this.config,
         parts,
         signal: abortSignal,
+        // Stored paths stay in model context, outside the bridge's focus budget.
+        intentText: collectText(
+          parts.filter((part) => !attachmentContexts.has(part.text ?? '')),
+        ),
       });
     } catch (error) {
       debugLogger.debug(

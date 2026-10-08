@@ -12,6 +12,7 @@ import {
   effectiveHistoryEnd,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
 } from './turn-interruption.js';
+import { formatAgentMessageModelText } from '../agents/session-agents/envelope.js';
 
 const reminder = (text: string) => ({
   text: `<system-reminder>\n${text}\n</system-reminder>`,
@@ -467,6 +468,33 @@ describe('detectTurnInterruption with authoritative notification provenance', ()
     expect(detectTurnInterruption(history, undefined, 2)).toEqual({
       kind: 'none',
     });
+  });
+});
+
+describe('detectTurnInterruption with session agent records', () => {
+  const agentEntry: Content = {
+    role: 'user',
+    parts: [
+      {
+        text: formatAgentMessageModelText({
+          displayText: 'done',
+          author: { agentId: 'agent-1', name: 'claude-B' },
+          runId: 'run-1',
+          status: 'completed',
+        }),
+      },
+    ],
+  };
+  const answered: Content[] = [
+    { role: 'user', parts: [{ text: 'hi' }] },
+    { role: 'model', parts: [{ text: 'hello' }] },
+  ];
+
+  it('does not treat a trailing agent message as an unfinished turn', () => {
+    expect(detectTurnInterruption([...answered, agentEntry])).toEqual({
+      kind: 'none',
+    });
+    expect(effectiveHistoryEnd([...answered, agentEntry])).toBe(2);
   });
 });
 
