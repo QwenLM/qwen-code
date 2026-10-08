@@ -112,12 +112,37 @@ public final class StoreModels {
             String sessionStatusBefore, String receiptId, String leaseOwner,
             long claimGeneration, int attemptCount, String targetCwdRelative,
             Long expectedContextRevision, Long resultContextRevision,
-            String failureCode, int budgetExemptAttempt) {
+            String failureCode, int budgetExemptAttempt, int lifecycleProtocolVersion) {
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState, String sessionStatusBefore,
+                String receiptId, String leaseOwner, long claimGeneration, int attemptCount, String targetCwdRelative,
+                Long expectedContextRevision, Long resultContextRevision, String failureCode) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, targetCwdRelative,
+                    expectedContextRevision, resultContextRevision, failureCode, 0, 0);
+        }
+
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState, String sessionStatusBefore,
+                String receiptId, String leaseOwner, long claimGeneration, int attemptCount, String failureCode,
+                int lifecycleProtocolVersion) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null, null, null,
+                    failureCode, 0, lifecycleProtocolVersion);
+        }
+
+        public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
+                String requestDigest, String state, String admissionStage, String deliveryState, String sessionStatusBefore,
+                String receiptId, String leaseOwner, long claimGeneration, int attemptCount, String failureCode) {
+            this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, failureCode, 0);
+        }
+
         public OperationRecord(String tenantId, String sessionId, String operationId, OperationKind kind,
                 String requestDigest, String state, String admissionStage, String deliveryState,
                 String sessionStatusBefore, String receiptId, String leaseOwner, long claimGeneration, int attemptCount) {
             this(tenantId, sessionId, operationId, kind, requestDigest, state, admissionStage, deliveryState,
-                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null, null, null, null, 0);
+                    sessionStatusBefore, receiptId, leaseOwner, claimGeneration, attemptCount, null, 0);
         }
     }
 

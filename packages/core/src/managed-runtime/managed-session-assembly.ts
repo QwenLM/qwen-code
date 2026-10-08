@@ -136,8 +136,11 @@ export interface ManagedSession {
     readonly activationId: string;
     readonly epoch: number;
   }>;
-  /** Seals the writer, leaving the at-rest barrier in place. */
-  close(): Promise<void>;
+  /**
+   * Seals the writer, leaving the at-rest barrier in place. Omit activation
+   * release only when an external permanent lifecycle fence forbids appends.
+   */
+  close(options?: { readonly releaseActivation?: boolean }): Promise<void>;
 }
 
 /**
@@ -254,15 +257,17 @@ export async function openManagedSession(
     },
     // Sealing is the at-rest barrier, but only the lease's owner may end it.
     // A call that owns the whole lifecycle also records the boundary, or the
-    // activation would read as abandoned. An adopted lease still stops the
+    // activation would read as abandoned. An external permanent fence may
+    // forbid that append. An adopted lease still stops the
     // renewal it started; only the lease itself stays with its owner.
     // The seal runs in a finally: a writer left unsealed because releasing
     // the activation failed can neither resume cleanly nor be taken over.
-    close: async () => {
+    close: async (options) => {
       renewal.stop();
       if (adopted) return;
       try {
-        await authority.releaseActivation();
+        if (options?.releaseActivation !== false)
+          await authority.releaseActivation();
       } catch (error) {
         // The finally's seal failure would otherwise erase this error from
         // the caller's view entirely.

@@ -30,6 +30,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry.ResolvedBinding;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -94,6 +95,13 @@ public class ManagedAgentStore implements AgentStateStore {
             "turn_record." + String.join(", turn_record.",
                     TURN_SUMMARY_COLUMNS.split(", "));
     private final JdbcTemplate jdbc;
+    private WorkspaceLifecycleStore lifecycle;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setWorkspaceLifecycleStore(WorkspaceLifecycleStore lifecycle) {
+        this.lifecycle = lifecycle;
+    }
+
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final String approvalMode;
@@ -205,7 +213,9 @@ public class ManagedAgentStore implements AgentStateStore {
                     additiveLong(result, "expected_context_revision"),
                     additiveLong(result, "result_context_revision"),
                     result.getString("error_code"),
-                    additiveInt(result, "budget_exempt_attempt"));
+                    additiveInt(result, "budget_exempt_attempt"),
+                    hasColumn(result, "lifecycle_protocol_version")
+                            ? result.getInt("lifecycle_protocol_version") : 0);
     private final RowMapper<OperationTarget> operationTargetMapper =
             (result, row) -> new OperationTarget(
                     result.getString("tenant_id"),
@@ -706,6 +716,13 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
+    @Transactional
+    public OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
+            OperationKind kind, String actorId, String actorDigest, String key, String digest, boolean supported, int protocolVersion) {
+        return beginLifecycle(tenantId, sessionId, kind, actorDigest, key, digest, actorId, supported, protocolVersion);
+    }
+
+    @Override
     public boolean hasCompletedWorkspaceClose(String tenantId, String sessionId) {
         return completedWorkspaceCloses(tenantId, List.of(sessionId))
                 .contains(sessionId);
@@ -778,7 +795,15 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind,
             String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported) {
+        return beginLifecycle(tenantId, sessionId, kind, actorDigest, idempotencyKey, requestDigest, actorId, supported, 0);
+    }
+
+    private OperationAdmission beginLifecycle(String tenantId, String sessionId, OperationKind kind,
+            String actorDigest, String idempotencyKey, String requestDigest, String actorId, boolean supported, int protocolVersion) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        if (protocolVersion == 1) {
+            ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+        }
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
         if (session.workspace() != null) {
             requireWorkspaceCreator(session, actorId);
@@ -807,8 +832,11 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ApiException(HttpStatus.NOT_FOUND, "session_not_found",
                     "The Session was not found.");
         }
+        if (kind == OperationKind.DELETE && List.of("CLOSED", "ARCHIVED").contains(session.status())) {
+            protocolVersion = 0;
+        }
         if (session.workspace() != null) {
-            if (kind == OperationKind.CLOSE) {
+            if (kind == OperationKind.CLOSE || kind == OperationKind.DELETE && "ACTIVE".equals(session.status()) && protocolVersion == 1) {
                 if (!supported || !workspaceFilesEnabled) {
                     throw workspaceExecutionUnavailable();
                 }
@@ -829,6 +857,9 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         requireNoOpenOperation(tenantId, sessionId);
         validateOperationStart(session, kind);
+        if (protocolVersion == 1) {
+            WorkspaceLifecycleStore.requireIdleJournal(jdbc, objectMapper, tenantId, sessionId);
+        }
         long now = lifecycleDatabaseTime();
         String operationId = publicId("op");
         Map<String, Object> data = Map.of("sessionId", sessionId,
@@ -840,15 +871,21 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " actor_digest, idempotency_key, request_digest,"
                         + " state, admission_stage, delivery_state,"
                         + " session_status_before, receipt_id, available_at,"
-                        + " created_at, updated_at, completed_at) VALUES"
+                        + " created_at, updated_at, completed_at, lifecycle_protocol_version) VALUES"
                         + " (?, ?, ?, ?, ?, ?, ?, ?, 'JAVA_DURABLE', ?, ?, ?,"
-                        + " ?, ?, ?, ?)",
+                        + " ?, ?, ?, ?, ?)",
                 tenantId, sessionId, operationId, kind.name(), actorDigest,
                 idempotencyKey, requestDigest,
                 archive ? "COMPLETED" : "PENDING",
                 archive ? "CONFIRMED" : "PENDING", session.status(),
                 archive ? publicId("rcpt") : null, now, now, now,
-                archive ? now : null);
+                archive ? now : null, protocolVersion);
+        if (protocolVersion == 1) {
+            jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, tenantId, sessionId, operationId);
+                return null;
+            });
+        }
         jdbc.update("UPDATE managed_agent_session SET status = ?,"
                         + " updated_at = ?, version = version + 1 WHERE"
                         + " tenant_id = ? AND session_id = ?",
@@ -924,10 +961,11 @@ public class ManagedAgentStore implements AgentStateStore {
         // turn_active), so the directory change must hold as well.
         if (hasOpenOperation(tenantId, sessionId)
                 || hasActiveTurn(tenantId, sessionId)
-                || hasDecidableAction(session)) {
+                || hasDecidableAction(session)
+                || hasRetainedRuntimeSession(tenantId, sessionId)) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "session_context_busy",
-                    "The Session has an active Turn or operation.");
+                    "The Session has an active Turn, operation or retained Runtime context.");
         }
         long now = lifecycleDatabaseTime();
         String operationId = publicId("op");
@@ -988,7 +1026,8 @@ public class ManagedAgentStore implements AgentStateStore {
             failure = "context_revision_conflict";
         } else if (hasOpenOperation(tenantId, sessionId, operationId)
                 || hasActiveTurn(tenantId, sessionId)
-                || hasDecidableAction(session)) {
+                || hasDecidableAction(session)
+                || hasRetainedRuntimeSession(tenantId, sessionId)) {
             failure = "session_context_busy";
         } else if (!hasCwdChangeRegistryFacts(session)) {
             failure = "workspace_unavailable";
@@ -1092,6 +1131,14 @@ public class ManagedAgentStore implements AgentStateStore {
         return hasOpenOperation(tenantId, sessionId, null);
     }
 
+    // Hook owners can outlive their Turn with an immutable worker context.
+    // Only confirmed release permits changing that context's cwd/revision.
+    private boolean hasRetainedRuntimeSession(String tenantId, String sessionId) {
+        return !jdbc.queryForList("SELECT runtime_session_id FROM qwen_runtime_session"
+                + " WHERE tenant_id = ? AND harness_session_id = ?"
+                + " AND session_state <> 'RELEASED' LIMIT 1", tenantId, sessionId).isEmpty();
+    }
+
     // The bound later-Turn barrier: context-changing operations only —
     // pending command rows and permission-action operations are excluded,
     // matching the recovery scan's own population.
@@ -1168,6 +1215,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public Optional<OperationRecord> claimOperation(String tenantId,
             String sessionId, String operationId, String owner,
             Duration leaseDuration) {
+        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         long now = lifecycleDatabaseTime();
         int updated = jdbc.update("UPDATE managed_agent_operation SET state ="
                         + " 'RUNNING', delivery_state = 'LEASED',"
@@ -1179,6 +1227,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " OR (delivery_state = 'LEASED' AND lease_until < ?))",
                 owner, Math.addExact(now, leaseDuration.toMillis()), now,
                 tenantId, sessionId, operationId, now, now);
+        if (updated == 1) {
+            syncLifecycleClaim(tenantId, sessionId, operationId);
+        }
         return updated == 1 ? findOperation(tenantId, sessionId, operationId)
                 : Optional.empty();
     }
@@ -1189,10 +1240,17 @@ public class ManagedAgentStore implements AgentStateStore {
             String operationId, String owner, long claimGeneration,
             boolean harnessConfirmed) {
         var target = findOperation(tenantId, sessionId, operationId).orElseThrow();
-        if (target.kind() == OperationKind.DELETE) {
+        if (target.lifecycleProtocolVersion() == 1) {
+            WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
+            ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+        }
+        if (target.kind() == OperationKind.DELETE && target.lifecycleProtocolVersion() != 1) {
             ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);
         }
         SessionRecord session = requireSessionForUpdate(tenantId, sessionId);
+        if (target.lifecycleProtocolVersion() == 1 && target.kind() == OperationKind.DELETE) {
+            ToolPublicationRetentionStore.lockDeletion(jdbc, tenantId, sessionId);
+        }
         OperationRecord operation = jdbc.query("SELECT * FROM"
                         + " managed_agent_operation WHERE tenant_id = ? AND"
                         + " session_id = ? AND operation_id = ? FOR UPDATE",
@@ -1213,9 +1271,16 @@ public class ManagedAgentStore implements AgentStateStore {
                     + session.status() + " during its "
                     + operation.kind() + " operation");
         }
+        if (operation.lifecycleProtocolVersion() == 1) {
+            if (lifecycle == null) {
+                throw WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
+            }
+            lifecycle.verifyCompletion(operation);
+        }
         long now = lifecycleDatabaseTime();
         if (operation.kind() == OperationKind.DELETE) {
-            if (session.workspace() != null && !List.of("CLOSED", "ARCHIVED").contains(operation.sessionStatusBefore())) {
+            if (session.workspace() != null && !List.of("CLOSED", "ARCHIVED").contains(operation.sessionStatusBefore())
+                    && operation.lifecycleProtocolVersion() != 1) {
                 throw new IllegalStateException("Workspace deletion requires a closed Session");
             }
             ToolPublicationRetentionStore.retire(jdbc, tenantId, sessionId, operationId);
@@ -1288,11 +1353,29 @@ public class ManagedAgentStore implements AgentStateStore {
     @Transactional
     public boolean renewLifecycleOperation(String tenantId, String sessionId, String operationId,
             String owner, long generation, Duration duration) {
+        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         long now = lifecycleDatabaseTime();
-        return jdbc.update("UPDATE managed_agent_operation SET lease_until = ?, updated_at = ?"
+        int updated = jdbc.update("UPDATE managed_agent_operation SET lease_until = ?, updated_at = ?"
                 + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ? AND delivery_state = 'LEASED'"
                 + " AND lease_owner = ? AND claim_generation = ? AND lease_until > ?",
-                Math.addExact(now, duration.toMillis()), now, tenantId, sessionId, operationId, owner, generation, now) == 1;
+                Math.addExact(now, duration.toMillis()), now, tenantId, sessionId, operationId, owner, generation, now);
+        if (updated == 1) {
+            syncLifecycleClaim(tenantId, sessionId, operationId);
+        }
+        return updated == 1;
+    }
+
+    private void syncLifecycleClaim(String tenantId, String sessionId, String operationId) {
+        var rows = jdbc.queryForList("SELECT lifecycle_protocol_version, claim_generation, lease_until FROM managed_agent_operation"
+                + " WHERE tenant_id = ? AND session_id = ? AND operation_id = ?", tenantId, sessionId, operationId);
+        if (!rows.isEmpty() && ((Number) rows.getFirst().get("lifecycle_protocol_version")).intValue() == 1) {
+            var row = rows.getFirst();
+            jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_generation = ?, claim_lease_until = ?"
+                    + " WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND harness_session_id = ?"
+                    + " AND operation_id = ? AND phase = 'LIFECYCLE_ONLY'",
+                    row.get("claim_generation"), row.get("lease_until"), JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId), tenantId, sessionId, operationId);
+        }
     }
 
     @Override
@@ -1308,6 +1391,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public void blockLifecycleOperation(String tenantId, String sessionId, String operationId,
             String owner, long generation, String failureCode, long availableAt,
             boolean budgetExempt) {
+        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         long now = lifecycleDatabaseTime();
         // The exempt count increments from itself, never from
         // attempt_count: a wait refunds no already-charged attempt, so
@@ -1323,6 +1407,10 @@ public class ManagedAgentStore implements AgentStateStore {
                 + " AND lease_owner = ? AND claim_generation = ? AND lease_until > ?",
                 failureCode, Math.addExact(now, Math.max(0, availableAt - clock.millis())),
                 now, tenantId, sessionId, operationId, owner, generation, now);
+        jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_lease_until = NULL WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
+                + " AND harness_session_id = ? AND operation_id = ? AND claim_generation = ?",
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                tenantId, sessionId, operationId, generation);
     }
 
     @Override
@@ -1339,6 +1427,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public void retryOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             long availableAt, boolean budgetExempt) {
+        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         long delay = Math.max(0, availableAt - clock.millis());
         long now = lifecycleDatabaseTime();
         availableAt = Math.addExact(now, delay);
@@ -1358,6 +1447,10 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " AND lease_owner = ? AND claim_generation = ? AND lease_until > ?",
                 availableAt, now, tenantId, sessionId,
                 operationId, owner, claimGeneration, now);
+        jdbc.update("UPDATE qwen_runtime_harness_drain SET claim_lease_until = NULL WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ?"
+                + " AND harness_session_id = ? AND operation_id = ? AND claim_generation = ?",
+                JdbcRuntimeBindingRepository.harnessDrainKey(tenantId), JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                tenantId, sessionId, operationId, claimGeneration);
     }
 
     public Admission replayCommand(String tenantId, String operation,
@@ -3239,7 +3332,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     // The cwd columns arrive with V46 and the budget-exempt watermark with
-    // V47; an operation read against an additive-upgrade schema that predates
+    // V53; an operation read against an additive-upgrade schema that predates
     // them must treat the columns as absent instead of erroring the whole
     // query.
     private static String additiveString(java.sql.ResultSet result,
