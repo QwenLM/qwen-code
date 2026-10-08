@@ -53,6 +53,95 @@ const sessionData = {
 };
 
 describe('ExportTranscriptDocumentV1', () => {
+  it('exports a complete outer transcript while retaining raw internal evidence', () => {
+    const results = [
+      {
+        id: 'nested-write',
+        name: 'write_file',
+        output: CANARY,
+        provenance: 'tool_result',
+        subtype: 'code_mode_tool_result',
+      },
+      {
+        id: 'nested-goal',
+        name: 'get_goal',
+        output: CANARY,
+        provenance: 'goal_runtime',
+        subtype: 'code_mode_tool_result',
+      },
+      {
+        id: 'outer',
+        name: 'exec',
+        output: 'script finished',
+        provenance: 'execution_output',
+      },
+      {
+        id: 'direct-goal',
+        name: 'get_goal',
+        output: 'direct goal result',
+        provenance: 'goal_runtime',
+      },
+    ];
+    const records = [
+      record('calls', null, {
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'outer',
+                name: 'exec',
+                args: { source: 'await tools.write_file({})' },
+              },
+            },
+            { functionCall: { id: 'direct-goal', name: 'get_goal', args: {} } },
+          ],
+        },
+      }),
+      ...results.map(({ id, name, output, ...options }, index) =>
+        record(id, index === 0 ? 'calls' : results[index - 1].id, {
+          type: 'tool_result',
+          ...options,
+          message: {
+            role: 'user',
+            parts: [{ functionResponse: { id, name, response: { output } } }],
+          },
+          toolCallResult: {
+            callId: id,
+            status: 'success',
+            resultDisplay:
+              id === 'nested-write'
+                ? {
+                    fileName: 'internal.txt',
+                    fileDiff: `@@ -0,0 +1 @@\n+${output}`,
+                    originalContent: null,
+                    newContent: output,
+                  }
+                : output,
+          },
+        }),
+      ),
+    ];
+    const original = JSON.stringify(records);
+    const document = createExportTranscriptDocumentV1(
+      records,
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    expect(document.metadata).toMatchObject({
+      complete: true,
+      truncated: false,
+    });
+    expect(document.diagnostics).toEqual([]);
+    expect(
+      document.blocks
+        .filter((block) => block.kind === 'tool')
+        .map((block) => block.toolName),
+    ).toEqual(['exec', 'get_goal']);
+    expect(JSON.stringify(document)).not.toContain(CANARY);
+    expect(JSON.stringify(records)).toBe(original);
+  });
   it('projects records through an explicit allowlist without raw leakage', () => {
     const records = [
       record('user-1', null, {
@@ -2681,6 +2770,97 @@ describe('ExportTranscriptDocumentV1', () => {
       maxArrayLength: 1_000,
       maxRichRenderTasks: 100,
     });
+  });
+
+  it("names the agent on an agent's reply and on its posts", () => {
+    const records = [
+      record('prompt', null),
+      record('answer', 'prompt', {
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'Main answer.' }] },
+      }),
+      record('agent-reply', 'answer', {
+        subtype: 'agent_message',
+        provenance: 'external_agent',
+        message: {
+          role: 'user',
+          parts: [{ text: '<agent_message>Looks good.</agent_message>' }],
+        },
+        systemPayload: {
+          displayText: 'Looks good.',
+          author: { agentId: 'agent-1', name: 'claude-B', color: '#f80' },
+          runId: 'run-1',
+          status: 'completed',
+        },
+        agentId: 'agent-1',
+        agentName: 'claude-B',
+      }),
+      record('agent-post', 'agent-reply', {
+        subtype: 'agent_mention',
+        provenance: 'external_agent',
+        systemPayload: {
+          displayText: '@codex-C your turn',
+          mentionedAgentIds: ['agent-2'],
+          author: { agentId: 'agent-1', name: 'claude-B' },
+        },
+      }),
+    ];
+    const document = createExportTranscriptDocumentV1(
+      records,
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    expect(
+      document.blocks.map((block) => [
+        block.kind,
+        'text' in block ? block.text : undefined,
+        'author' in block ? block.author : undefined,
+      ]),
+    ).toEqual([
+      ['user', 'prompt', undefined],
+      ['assistant', 'Main answer.', undefined],
+      ['assistant', 'Looks good.', { name: 'claude-B' }],
+      ['user', '@codex-C your turn', { name: 'claude-B' }],
+    ]);
+    // Only the name travels: no agent id, color or raw meta.
+    expect(JSON.stringify(document)).not.toContain('agent-1');
+    expect(JSON.stringify(document)).not.toContain('qwenAgentMessage');
+    expect(() => assertExportTranscriptDocumentV1(document)).not.toThrow();
+  });
+
+  it('rejects an unsafe or widened block author', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('agent-reply', null, {
+          subtype: 'agent_message',
+          systemPayload: {
+            displayText: 'Hi.',
+            author: { agentId: 'agent-1', name: 'claude-B' },
+            runId: 'run-1',
+            status: 'completed',
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const withAuthor = (author: unknown) => ({
+      ...document,
+      blocks: document.blocks.map((block) =>
+        'author' in block ? { ...block, author } : block,
+      ),
+    });
+    expect(() =>
+      assertExportTranscriptDocumentV1(withAuthor({ name: 'bad\u0007name' })),
+    ).toThrowError('invalid_block');
+    expect(() =>
+      assertExportTranscriptDocumentV1(
+        withAuthor({ name: 'claude-B', agentId: 'agent-1' }),
+      ),
+    ).toThrowError('schema_validation_failed');
+    expect(() =>
+      assertExportTranscriptDocumentV1(withAuthor({ name: '' })),
+    ).toThrowError('schema_validation_failed');
   });
 
   it('escapes HTML script terminators in serialized document data', () => {

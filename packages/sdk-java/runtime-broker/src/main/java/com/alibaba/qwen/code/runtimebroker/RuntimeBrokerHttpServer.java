@@ -4,6 +4,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.URLDecoder;
@@ -37,9 +38,29 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
 
     public RuntimeBrokerHttpServer(InetSocketAddress address, String token,
             RuntimeBrokerService service) throws IOException {
+        this(address, token, service, false);
+    }
+
+    /**
+     * The face authenticates with one global Bearer token over plaintext
+     * HTTP, so by default it only binds a loopback address. Serving beyond
+     * loopback requires {@code allowNonLoopback} and a deployment that
+     * terminates TLS and authorizes callers in front.
+     */
+    public RuntimeBrokerHttpServer(InetSocketAddress address, String token,
+            RuntimeBrokerService service, boolean allowNonLoopback)
+            throws IOException {
         if (address == null || service == null) {
             throw new IllegalArgumentException(
                     "address and service are required");
+        }
+        InetAddress bind = address.getAddress();
+        if (!allowNonLoopback && (bind == null || !bind.isLoopbackAddress())) {
+            throw new IllegalArgumentException("Runtime Broker serves one"
+                    + " global token over plaintext HTTP and refuses a"
+                    + " non-loopback listen address (" + address
+                    + "); pass allowNonLoopback only behind a TLS-terminating"
+                    + " layer that authorizes callers");
         }
         this.authorization = ("Bearer "
                 + BrokerValues.requireId(token, "token"))
@@ -89,8 +110,17 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 requireProtocol(body);
                 JsonCodec.requiredString(body, "requestId", "warm request");
                 String sessionId = JsonCodec.requiredString(body, "harnessSessionId", "warm request");
-                complete(exchange, service.warm(sessionId), ignored -> Map.of(
+                complete(exchange, service.warm(sessionId, lifecycleAuthority(exchange)), ignored -> Map.of(
                         "protocolVersion", 1, "harnessSessionId", sessionId, "ready", true));
+                return;
+            }
+            if ("POST".equals(exchange.getRequestMethod()) && "/runtimes:authorize-lifecycle".equals(relative)) {
+                Map<String, Object> body = requestBody(exchange, "lifecycle authorization");
+                requireProtocol(body);
+                String sessionId = JsonCodec.requiredString(body, "harnessSessionId", "lifecycle authorization");
+                String runtimeSessionId = JsonCodec.requiredString(body, "runtimeSessionId", "lifecycle authorization");
+                complete(exchange, service.authorizeLifecycle(sessionId, lifecycleAuthority(exchange)),
+                        ignored -> envelope(sessionId, runtimeSessionId, "authorized", true));
                 return;
             }
             if ("POST".equals(exchange.getRequestMethod())
@@ -124,6 +154,19 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         }
     }
 
+    private static RuntimeLifecycleAuthority lifecycleAuthority(HttpExchange exchange) {
+        String operation = exchange.getRequestHeaders().getFirst(RuntimeLifecycleAuthority.OPERATION_HEADER);
+        String generation = exchange.getRequestHeaders().getFirst(RuntimeLifecycleAuthority.GENERATION_HEADER);
+        if (operation == null && generation == null) {
+            return null;
+        }
+        try {
+            return new RuntimeLifecycleAuthority(operation, Long.parseLong(generation));
+        } catch (RuntimeException error) {
+            throw new RuntimeBrokerException(400, "runtime_lifecycle_authority_invalid", "Invalid lifecycle authority", false);
+        }
+    }
+
     private void acquire(HttpExchange exchange) throws IOException {
         Map<String, Object> body = requestBody(exchange, "acquire request");
         requireProtocol(body);
@@ -134,18 +177,25 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                 "runtimeSessionId", "acquire request");
         String turnKind = JsonCodec.requiredString(body, "turnKind",
                 "acquire request");
-        complete(exchange, service.acquire(harnessSessionId, runtimeSessionId,
-                turnKind), record -> {
-                    Map<String, Object> response = new LinkedHashMap<>(envelope(harnessSessionId,
-                            runtimeSessionId, "acquired", true));
-                    RuntimeScope scope = record.getSession().getScope();
-                    response.put("scope", Map.of("tenantId", scope.getTenantId(),
-                            "workspaceId", scope.getWorkspaceId(), "workspaceGeneration", scope.getWorkspaceGeneration(),
-                            "capabilityDigest", scope.getCapabilityDigest()));
-                    response.put("runtime", Map.of("bindingId", record.getBindingId(),
-                            "generation", Long.toString(record.getRuntimeGeneration())));
-                    return response;
-                });
+        CompletionStage<RuntimeSessionRecord> acquisition;
+        if (body.containsKey("recoveryBindingId")) {
+            acquisition = service.acquireRecovery(harnessSessionId, runtimeSessionId,
+                    JsonCodec.requiredString(body, "recoveryBindingId", "acquire request"),
+                    Long.parseLong(JsonCodec.requiredString(body, "recoveryGeneration", "acquire request")));
+        } else {
+            acquisition = service.acquire(harnessSessionId, runtimeSessionId, turnKind, lifecycleAuthority(exchange));
+        }
+        complete(exchange, acquisition, record -> {
+            Map<String, Object> response = new LinkedHashMap<>(envelope(harnessSessionId,
+                    runtimeSessionId, "acquired", true));
+            RuntimeScope scope = record.getSession().getScope();
+            response.put("scope", Map.of("tenantId", scope.getTenantId(),
+                    "workspaceId", scope.getWorkspaceId(), "workspaceGeneration", scope.getWorkspaceGeneration(),
+                    "capabilityDigest", scope.getCapabilityDigest()));
+            response.put("runtime", Map.of("bindingId", record.getBindingId(),
+                    "generation", Long.toString(record.getRuntimeGeneration())));
+            return response;
+        });
     }
 
     private void toolSession(HttpExchange exchange, String suffix)
@@ -181,7 +231,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             Map<String, Object> operation = requiredObject(body, "operation",
                     "control request");
             complete(exchange, service.control(harnessSessionId,
-                    runtimeSessionId, operation), result -> envelope(
+                    runtimeSessionId, operation, lifecycleAuthority(exchange)), result -> envelope(
                             harnessSessionId, runtimeSessionId, "result",
                             result));
             return;
@@ -307,7 +357,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                                     body.get("publicationToken") instanceof String publicationToken
                                             ? publicationToken : null)
                             : service.startExecution(harnessSessionId, runtimeSessionId, executionCallId))
-                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record, false)),
+                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record, false, false)),
                     observation -> observedExecutionEnvelope(harnessSessionId, runtimeSessionId, observation));
             return;
         }
@@ -324,7 +374,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             String runtimeSessionId = JsonCodec.requiredString(body,
                     "runtimeSessionId", "cancel request");
             complete(exchange, service.cancelExecution(harnessSessionId, runtimeSessionId, executionCallId)
-                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record, false)),
+                    .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record, false, false)),
                     observation -> observedExecutionEnvelope(harnessSessionId, runtimeSessionId, observation));
             return;
         }
@@ -349,7 +399,7 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             }
             complete(exchange, service.getExecution(harnessSessionId, runtimeSessionId, executionCallId)
                     .thenCompose(record -> observe(harnessSessionId, runtimeSessionId, record,
-                            Boolean.parseBoolean(reconcile))),
+                            Boolean.parseBoolean(reconcile), true)),
                     observation -> observedExecutionEnvelope(harnessSessionId, runtimeSessionId, observation));
             return;
         }
@@ -357,7 +407,8 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
     }
 
     private CompletionStage<ExecutionReconciliation> observe(String harnessSessionId,
-            String runtimeSessionId, ToolExecutionRecord record, boolean reconcile) {
+            String runtimeSessionId, ToolExecutionRecord record,
+            boolean reconcile, boolean coolable) {
         // A lost dispatch is asked of the original Runtime when it can answer;
         // a tool v2 reference keeps its UNKNOWN unless reconciliation is requested.
         if (record.getState() != ToolExecutionRecord.State.UNKNOWN
@@ -365,8 +416,15 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
             return CompletableFuture.completedFuture(new ExecutionReconciliation(record,
                     ExecutionReconciliation.Outcome.IN_FLIGHT, null));
         }
-        CompletionStage<ExecutionReconciliation> observation = service.reconcileExecution(
-                harnessSessionId, runtimeSessionId, record.getExecutionCallId());
+        // An explicit reconcile asks the Runtime every time, and a mutation's
+        // own response never serves the cooldown cache; only pure polling
+        // reuses a cooled answer.
+        CompletionStage<ExecutionReconciliation> observation =
+                reconcile || !coolable
+                        ? service.reconcileExecution(harnessSessionId,
+                                runtimeSessionId, record.getExecutionCallId())
+                        : service.observeExecution(harnessSessionId,
+                                runtimeSessionId, record.getExecutionCallId());
         if (reconcile) {
             return observation;
         }

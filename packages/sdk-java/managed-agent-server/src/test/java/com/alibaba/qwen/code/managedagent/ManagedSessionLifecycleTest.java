@@ -629,8 +629,10 @@ class ManagedSessionLifecycleTest {
                                 """))
                 .andExpect(status().isAccepted());
         await().atMost(Duration.ofSeconds(5)).until(() ->
-                store.findActiveTurn(tenant, kept).isEmpty()
-                        && store.findLatestTurn(tenant, kept).orElseThrow()
+                !store.findActiveTurns(tenant, List.of(kept))
+                        .containsKey(kept)
+                        && store.findLatestTurns(tenant, List.of(kept))
+                                .get(kept)
                                 .status().equals("COMPLETED"));
         assertThat(sessionStatus(tenant, kept)).isEqualTo("active");
     }
@@ -670,15 +672,14 @@ class ManagedSessionLifecycleTest {
                         .principal(actor(tenant, "actor-a")), tenant, "bound-close")
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
-        for (MockHttpServletRequestBuilder request : List.of(
-                post("/v1/agents/sessions/{id}/archive", sessionId),
-                delete("/v1/agents/sessions/{id}", sessionId))) {
-            lifecycle(request.principal(actor(tenant, "actor-a")), tenant,
-                    "bound-" + UUID.randomUUID())
-                    .andExpect(status().isConflict())
-                    .andExpect(jsonPath("$.error.code")
-                            .value("session_state_conflict"));
-        }
+        lifecycle(post("/v1/agents/sessions/{id}/archive", sessionId)
+                        .principal(actor(tenant, "actor-a")), tenant, "bound-archive")
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("session_state_conflict"));
+        lifecycle(delete("/v1/agents/sessions/{id}", sessionId)
+                        .principal(actor(tenant, "actor-a")), tenant, "bound-delete")
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
         mvc.perform(post(WEB_SHELL + "/sessions/delete").header(TENANT, tenant)
                         .principal(actor(tenant, "actor-b"))
                         .contentType(MediaType.APPLICATION_JSON)
@@ -733,7 +734,8 @@ class ManagedSessionLifecycleTest {
                 .andReturn().getResponse().getContentAsString())
                 .get("id").asText();
         await().atMost(Duration.ofSeconds(5)).until(() ->
-                store.findActiveTurn(tenant, sessionId).isEmpty()
+                !store.findActiveTurns(tenant, List.of(sessionId))
+                        .containsKey(sessionId)
                         && store.requireSession(tenant, sessionId)
                                 .harnessBootId() != null);
         return sessionId;

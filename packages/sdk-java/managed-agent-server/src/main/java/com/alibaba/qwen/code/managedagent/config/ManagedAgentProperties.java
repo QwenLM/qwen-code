@@ -18,11 +18,21 @@ public class ManagedAgentProperties {
     private final Dispatch dispatch = new Dispatch();
     private final Events events = new Events();
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
+    private final Auth auth = new Auth();
+    private final InternalServer internalServer = new InternalServer();
     private String agentRevision = "1";
     private String trustedActorHeader = "";
 
     public Harness getHarness() {
         return harness;
+    }
+
+    public Auth getAuth() {
+        return auth;
+    }
+
+    public InternalServer getInternalServer() {
+        return internalServer;
     }
 
     public SessionStore getSessionStore() {
@@ -108,7 +118,15 @@ public class ManagedAgentProperties {
 
         private Duration connectTimeout = Duration.ofSeconds(5);
         private Duration requestTimeout = Duration.ofSeconds(30);
+        private Duration loadTimeout = Duration.ofSeconds(120);
         private Duration heartbeatInterval = Duration.ofSeconds(30);
+        /**
+         * Turn-level deadline passed to the Harness at prompt admission. An
+         * admitted Turn outliving it is settled by the Harness as a
+         * classified deadline failure, so a stalled model stream cannot pin
+         * a Session forever.
+         */
+        private Duration turnDeadline = Duration.ofMinutes(30);
 
         public boolean isEnabled() {
             return enabled;
@@ -154,6 +172,14 @@ public class ManagedAgentProperties {
             return approvalMode;
         }
 
+        public Duration getLoadTimeout() {
+            return loadTimeout;
+        }
+
+        public void setLoadTimeout(Duration value) {
+            loadTimeout = value;
+        }
+
         public void setApprovalMode(String approvalMode) {
             this.approvalMode = approvalMode;
         }
@@ -181,6 +207,14 @@ public class ManagedAgentProperties {
         public void setHeartbeatInterval(Duration heartbeatInterval) {
             this.heartbeatInterval = heartbeatInterval;
         }
+
+        public Duration getTurnDeadline() {
+            return turnDeadline;
+        }
+
+        public void setTurnDeadline(Duration turnDeadline) {
+            this.turnDeadline = turnDeadline;
+        }
     }
 
     public static class SessionStore {
@@ -188,6 +222,8 @@ public class ManagedAgentProperties {
         private String baseUrl = "";
         private String workspaceId = "";
         private Duration writerLeaseDuration = Duration.ofSeconds(60);
+        private String bindingKey = "";
+        private boolean allowInsecureHttp;
 
         public boolean isEnabled() {
             return enabled;
@@ -220,6 +256,94 @@ public class ManagedAgentProperties {
         public void setWriterLeaseDuration(Duration writerLeaseDuration) {
             this.writerLeaseDuration = writerLeaseDuration;
         }
+
+        public String getBindingKey() {
+            return bindingKey;
+        }
+
+        public void setBindingKey(String bindingKey) {
+            this.bindingKey = bindingKey;
+        }
+
+        public boolean isAllowInsecureHttp() {
+            return allowInsecureHttp;
+        }
+
+        public void setAllowInsecureHttp(boolean allowInsecureHttp) {
+            this.allowInsecureHttp = allowInsecureHttp;
+        }
+    }
+
+    public static class Auth {
+        private String mode = "auto";
+        private String signingKey = "";
+        private Duration allowedDrift = Duration.ofMinutes(5);
+        private boolean allowInsecureBind;
+        private long maxSignedBodyBytes = 10 * 1024 * 1024;
+
+        public String getMode() {
+            return mode;
+        }
+
+        public void setMode(String mode) {
+            this.mode = mode;
+        }
+
+        public String getSigningKey() {
+            return signingKey;
+        }
+
+        public void setSigningKey(String signingKey) {
+            this.signingKey = signingKey;
+        }
+
+        public long getMaxSignedBodyBytes() {
+            return maxSignedBodyBytes;
+        }
+
+        public void setMaxSignedBodyBytes(long maxSignedBodyBytes) {
+            this.maxSignedBodyBytes = maxSignedBodyBytes;
+        }
+
+        public Duration getAllowedDrift() {
+            return allowedDrift;
+        }
+
+        public void setAllowedDrift(Duration allowedDrift) {
+            this.allowedDrift = allowedDrift;
+        }
+
+        public boolean isAllowInsecureBind() {
+            return allowInsecureBind;
+        }
+
+        public void setAllowInsecureBind(boolean allowInsecureBind) {
+            this.allowInsecureBind = allowInsecureBind;
+        }
+    }
+
+    public static class InternalServer {
+        private int port;
+        private String address = "127.0.0.1";
+
+        public int getPort() {
+            return port;
+        }
+
+        public void setPort(int port) {
+            this.port = port;
+        }
+
+        // A blank value comes from an unset template variable; both the
+        // startup guard and the connector must read it as the default.
+        public String getAddress() {
+            return address == null || address.isBlank() ? "127.0.0.1"
+                    : address;
+        }
+
+        public void setAddress(String address) {
+            this.address = address;
+        }
     }
 
     public static class ToolPublication {
@@ -239,7 +363,13 @@ public class ManagedAgentProperties {
         private Duration maxVerificationTimeout;
         private boolean gcEnabled;
         private Duration deletionGrace = Duration.ofHours(24);
+        // Off by default: the head's activation columns are only trustworthy
+        // once no pre-V36 binary can still commit. Enable after the fleet
+        // fully runs the schema's version.
+        private boolean journalHeadAuthorization;
 
+        public boolean isJournalHeadAuthorization() { return journalHeadAuthorization; }
+        public void setJournalHeadAuthorization(boolean value) { journalHeadAuthorization = value; }
         public boolean isGcEnabled() { return gcEnabled; }
         public void setGcEnabled(boolean value) { gcEnabled = value; }
         public Duration getDeletionGrace() { return deletionGrace; }
@@ -281,6 +411,7 @@ public class ManagedAgentProperties {
         private boolean publishPreview;
         private int maxConcurrentReads = 4;
         private Duration readTimeout = Duration.ofMinutes(2);
+        private Duration readRevalidationInterval = Duration.ofSeconds(5);
 
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean value) { enabled = value; }
@@ -292,6 +423,9 @@ public class ManagedAgentProperties {
         public void setMaxConcurrentReads(int value) { maxConcurrentReads = value; }
         public Duration getReadTimeout() { return readTimeout; }
         public void setReadTimeout(Duration value) { readTimeout = value; }
+        /** How often a download re-verifies content access; PT0S checks on every chunk. */
+        public Duration getReadRevalidationInterval() { return readRevalidationInterval; }
+        public void setReadRevalidationInterval(Duration value) { readRevalidationInterval = value; }
     }
 
     public static class Dispatch {
@@ -355,6 +489,7 @@ public class ManagedAgentProperties {
         private Duration pollInterval = Duration.ofSeconds(5);
         private Duration heartbeatInterval = Duration.ofSeconds(15);
         private Duration streamTimeout = Duration.ofMinutes(30);
+        private Duration readGrantRecheckInterval = Duration.ofSeconds(5);
         private Duration batchInterval = Duration.ofMillis(75);
         private int batchMaxEvents = 64;
         private int batchMaxBytes = 65536;
@@ -365,6 +500,19 @@ public class ManagedAgentProperties {
 
         public void setPollInterval(Duration pollInterval) {
             this.pollInterval = pollInterval;
+        }
+
+        /**
+         * How often a stream re-verifies the subscriber's read grant; PT0S
+         * checks before every event.
+         */
+        public Duration getReadGrantRecheckInterval() {
+            return readGrantRecheckInterval;
+        }
+
+        public void setReadGrantRecheckInterval(
+                Duration readGrantRecheckInterval) {
+            this.readGrantRecheckInterval = readGrantRecheckInterval;
         }
 
         public Duration getHeartbeatInterval() {
@@ -412,8 +560,10 @@ public class ManagedAgentProperties {
         private boolean enabled;
         private String host = "127.0.0.1";
         private int port = 4182;
+        private boolean allowNonLoopback;
         private String token = "";
         private String provisioner = "local-process";
+        private Duration v3ResultWindow = Duration.ofMinutes(30);
         private String workspaceId = "";
         private String workspaceGeneration = "1";
         private String workspaceCwd = "";
@@ -470,6 +620,22 @@ public class ManagedAgentProperties {
 
         public void setPort(int port) {
             this.port = port;
+        }
+
+        public boolean isAllowNonLoopback() {
+            return allowNonLoopback;
+        }
+
+        public void setAllowNonLoopback(boolean allowNonLoopback) {
+            this.allowNonLoopback = allowNonLoopback;
+        }
+
+        public Duration getV3ResultWindow() {
+            return v3ResultWindow;
+        }
+
+        public void setV3ResultWindow(Duration v3ResultWindow) {
+            this.v3ResultWindow = v3ResultWindow;
         }
 
         public String getToken() {

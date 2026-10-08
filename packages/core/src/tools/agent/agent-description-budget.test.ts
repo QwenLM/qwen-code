@@ -159,6 +159,22 @@ function surfaceLength(tool: AgentTool): number {
 }
 
 describe('AgentTool per-turn size budgets', () => {
+  it('keeps the refreshed agent declaration deferred by default', async () => {
+    const tool = await buildTool();
+    expect(tool.shouldDefer).toBe(true);
+    expect(tool.alwaysLoad).toBe(false);
+    expect(tool.description).toContain(
+      'In Direct mode: If the list_agents tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
+    );
+  });
+
+  it('keeps the deferred summary specific enough to discover Agent', async () => {
+    const tool = await buildTool();
+    expect(tool.description.split('\n')[0]).toBe(
+      'Delegate complex, independent work to specialized agents for explicit parallel requests or broad codebase research that clearly needs more than 3 searches.',
+    );
+  });
+
   it('keeps the description within its budget in the default shape', async () => {
     // Two subagents, team off, todo on, a pointer at the delegation
     // reference. The catalogue itself is covered by the proportional-growth

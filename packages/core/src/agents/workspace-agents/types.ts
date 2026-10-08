@@ -13,10 +13,15 @@
  * addressed, so its work survives the originating conversation.
  */
 
+import type { HostProgramProbe } from '../session-agents/contract.js';
+
 /** Author id used for messages a person wrote. Never a valid agent id. */
 export const HUMAN_AUTHOR_ID = 'user';
 
 export const AGENTS_SCHEMA_VERSION = 1;
+export const AGENT_HOST_REPLACEMENT_REQUIRED =
+  'Agent Host replacement requires enrollment.';
+
 export const AGENT_HOSTS_SCHEMA_VERSION = 1;
 export const LOCAL_AGENT_RUNTIME_ID = 'local';
 
@@ -25,7 +30,17 @@ export interface AgentHost {
   name: string;
   secretHash: string;
   workspaceCwd: string;
+  /**
+   * Programs the Host offers. A protocol-v2 Host reports program ids
+   * (`qwen` / `claude` / `codex`); records written by a v1 Host hold display
+   * labels (`Qwen Code ACP`). Readers go through {@link hostOffersProgram},
+   * which accepts both.
+   */
   providers: string[];
+  /** What the Host's last v2 heartbeat probed on its PATH, installed or not. */
+  programs?: HostProgramProbe[];
+  /** Host protocol version of the last heartbeat; absent means v1. */
+  protocol?: number;
   createdAt: number;
   lastSeenAt?: number;
 }
@@ -35,6 +50,8 @@ export type AgentHostView = Omit<AgentHost, 'secretHash'>;
 export interface AgentHostEnrollment {
   tokenHash: string;
   expiresAt: number;
+  supersedesHostId?: string;
+  replacementHostId?: string;
 }
 
 export interface AgentHostsFile {
@@ -95,10 +112,33 @@ export function isAgentProgram(value: unknown): value is AgentProgram {
 }
 
 export function hostOffersProgram(
-  host: { providers: readonly string[] },
+  host: {
+    providers: readonly string[];
+    programs?: ReadonlyArray<Pick<HostProgramProbe, 'program' | 'available'>>;
+  },
   program: AgentProgram,
 ): boolean {
-  return host.providers.includes(AGENT_PROGRAM_LABELS[program]);
+  // A v2 Host's probe is authoritative: it says what is installed now.
+  if (host.programs) {
+    return host.programs.some(
+      (probe) => probe.program === program && probe.available,
+    );
+  }
+  // Tolerate both vocabularies: v1 records hold labels, v2 ones ids.
+  return (
+    host.providers.includes(program) ||
+    host.providers.includes(AGENT_PROGRAM_LABELS[program])
+  );
+}
+
+/** Every program a Host offers, as ids. */
+export function hostAvailablePrograms(host: {
+  providers: readonly string[];
+  programs?: ReadonlyArray<Pick<HostProgramProbe, 'program' | 'available'>>;
+}): AgentProgram[] {
+  return (Object.keys(AGENT_PROGRAM_LABELS) as AgentProgram[]).filter(
+    (program) => hostOffersProgram(host, program),
+  );
 }
 
 /**
@@ -112,7 +152,11 @@ export function hostOffersProgram(
 export const AGENT_HOST_CREDENTIAL_REJECTED = 'Invalid Agent Host credential.';
 
 export type WorkspaceAgentExecution =
-  | { mode: 'local' }
+  | {
+      mode: 'local';
+      /** Program on this machine; `qwen` when absent (session agents only). */
+      provider?: AgentProgram;
+    }
   | {
       mode: 'managed-host';
       hostIds: string[];
@@ -377,6 +421,12 @@ export interface ThreadRun {
   closeKind?: RunCloseKind;
   closeAcknowledgedAtSequence?: number;
   finalMessageId?: string;
+  /** Written with terminal settlement only when a Host result was accepted. */
+  hostResultReceipt?: {
+    attempt: number;
+    leaseId: string;
+    digest: string;
+  };
   usageByRound: RunUsageRound[];
   /**
    * The task session's cumulative token total when this run started. The delta

@@ -21,7 +21,6 @@ import {
   type Mock,
 } from 'vitest';
 import * as fs from 'node:fs';
-import stripJsonComments from 'strip-json-comments';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import * as jsoncEditor from '../utils/jsonc-editor.js';
@@ -59,9 +58,6 @@ vi.mock('fs', async (importOriginal) => {
     mkdirSync: vi.fn(),
   };
 });
-vi.mock('strip-json-comments', () => ({
-  default: vi.fn((content) => content),
-}));
 vi.mock('../utils/jsonc-editor.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../utils/jsonc-editor.js')>();
@@ -85,17 +81,12 @@ vi.mock('../utils/stdioHelpers.js', () => ({
 
 describe('Trusted Folders Loading', () => {
   let mockFsExistsSync: Mocked<typeof fs.existsSync>;
-  let mockStripJsonComments: Mocked<typeof stripJsonComments>;
 
   beforeEach(() => {
     resetTrustedFoldersForTesting();
     vi.resetAllMocks();
     mockFsExistsSync = vi.mocked(fs.existsSync);
-    mockStripJsonComments = vi.mocked(stripJsonComments);
     vi.mocked(osActual.homedir).mockReturnValue('/mock/home/user');
-    (mockStripJsonComments as unknown as Mock).mockImplementation(
-      (jsonString: string) => jsonString,
-    );
     (mockFsExistsSync as Mock).mockReturnValue(false);
     (fs.readFileSync as Mock).mockReturnValue('{}');
     (fs.lstatSync as Mock).mockReturnValue({
@@ -200,7 +191,7 @@ describe('Trusted Folders Loading', () => {
     expect(rules).toEqual([]);
     expect(errors.length).toBe(1);
     expect(errors[0].path).toBe(userPath);
-    expect(errors[0].message).toContain('Unexpected token');
+    expect(errors[0].message).toContain('InvalidSymbol');
   });
 
   it('should use QWEN_CODE_TRUSTED_FOLDERS_PATH env var if set', () => {
@@ -293,14 +284,10 @@ describe('Trusted Folders Loading', () => {
   // work repos
   "/existing/path": "TRUST_FOLDER"
 }`;
-    const strippedContent = JSON.stringify({
-      '/existing/path': TrustLevel.TRUST_FOLDER,
-    });
 
     (mockFsExistsSync as Mock).mockImplementation(
       (p) => p === userPath || p === dirPath,
     );
-    (mockStripJsonComments as unknown as Mock).mockReturnValue(strippedContent);
     (fs.readFileSync as Mock).mockImplementation((p) => {
       if (p === userPath) return originalContent;
       return '{}';
@@ -508,7 +495,7 @@ describe('isWorkspaceTrusted', () => {
     // This mock needs to be specific to this test to override the one in beforeEach
     vi.spyOn(fs, 'readFileSync').mockImplementation((p) => {
       if (p === getTrustedFoldersPath()) {
-        return '{"foo": "bar",}'; // Malformed JSON with trailing comma
+        return '{"foo":'; // Incomplete JSONC document
       }
       return '{}';
     });
