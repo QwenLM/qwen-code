@@ -351,14 +351,17 @@ class WorkspaceSessionRetentionMySqlIT {
         assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_session")).containsAllEntriesOf(originalSession);
         assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_operation"))
                 .containsAllEntriesOf(originalClose)
-                .hasSize(originalClose.size() + 3)
+                .hasSize(originalClose.size() + 5)
                 .containsEntry("target_cwd_relative", null)
                 .containsEntry("expected_context_revision", null)
-                .containsEntry("result_context_revision", null);
+                .containsEntry("result_context_revision", null)
+                .containsEntry("lifecycle_protocol_version", 0)
+                .containsEntry("lifecycle_effects_receipt_json", null);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
         var store = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties);
         assertThat(store.hasCompletedWorkspaceClose(tenant, session)).isTrue();
+        assertThat(store.findOperation(tenant, session, "legacy-close").orElseThrow().lifecycleProtocolVersion()).isZero();
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("CLOSED");
         assertThat(store.requireSession(tenant, session).toolProfile()).isEqualTo("hosted-workspace-files/1");
         assertThat(store.findOperation(tenant, session, "legacy-close").orElseThrow().receiptId()).isEqualTo("legacy-close-receipt");

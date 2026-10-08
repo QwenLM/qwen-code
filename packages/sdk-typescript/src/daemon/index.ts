@@ -896,3 +896,25 @@ export type { DaemonBackgroundTurn } from './types.js';
 
 export { isShellResultDisplay } from './shellResult.js';
 export type { ShellResultDisplay } from './shellResult.js';
+
+export {
+  QWEN_AGENT_MESSAGE_META_KEY,
+  parseQwenAgentMessageMeta,
+} from './session-agents.js';
+export type {
+  QwenAgentMessageMeta,
+  SessionAgentAuthor,
+  SessionAgentChangedFrame,
+  SessionAgentEventFrame,
+  SessionAgentPermissionPrompt,
+  SessionAgentProgram,
+  SessionAgentRunFrame,
+  SessionAgentRunStatus,
+  SessionAgentStep,
+  SessionAgentTerminalStatus,
+  SessionSquad,
+  SessionSquadLeaderIssue,
+  SessionSquadMember,
+  SessionSquadOutcome,
+  SessionSquadView,
+} from './session-agents.js';

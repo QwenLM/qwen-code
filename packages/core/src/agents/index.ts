@@ -35,7 +35,10 @@ export {
   releaseAgentHostSession,
 } from './workspace-agents/store.js';
 export { consumeAgentInput } from './workspace-agents/run-lifecycle.js';
-export { resolveAgentPersona } from './workspace-agents/persona.js';
+export {
+  buildRemoteSessionAgentSystemPrompt,
+  resolveAgentPersona,
+} from './workspace-agents/persona.js';
 export { findAgentSessionBinding } from './workspace-agents/session-binding.js';
 export type {
   HostRunAssignment,
