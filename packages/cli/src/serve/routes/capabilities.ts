@@ -199,7 +199,8 @@ export function registerCapabilitiesRoutes(
             ? { kind: 'live' as const }
             : {}),
           registrationIds: entry.registrationIds,
-          ...(pinnedAt !== undefined ? { isPinned: true, pinnedAt } : {}),
+          isPinned: pinnedAt !== undefined,
+          ...(pinnedAt !== undefined ? { pinnedAt } : {}),
         };
       }),
       supportedLanguages: deps.languageCodes,

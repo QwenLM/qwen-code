@@ -6025,6 +6025,7 @@ describe('createServeApp', () => {
           primary: true,
           trusted: true,
           workflowsEnabled: false,
+          registrationIds: [],
           isPinned: false,
         },
       ]);
@@ -6187,6 +6188,7 @@ describe('createServeApp', () => {
         trusted: true,
         workflowsEnabled: false,
         kind: 'live',
+        registrationIds: [],
         isPinned: false,
       });
       expect(response.body.features).not.toContain('multi_workspace_sessions');
