@@ -40,6 +40,7 @@ import {
 import { isAuthenticationRequiredError } from '../utils/authErrors.js';
 import { getErrorMessage } from '../utils/errorMessage.js';
 import { handleAuthenticateUpdate } from '../utils/authNotificationHandler.js';
+import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
 
 export type { ChatMessage, PlanEntry, ToolCallUpdateData };
 
@@ -812,7 +813,7 @@ export class QwenAgentManager {
         // the model never made.
         else if (
           r.type === 'tool_result' &&
-          r.subtype !== 'code_mode_tool_result' &&
+          !isInternalCodeModeToolResult(r) &&
           r.toolCallResult &&
           typeof r.toolCallResult === 'object'
         ) {

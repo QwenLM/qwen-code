@@ -6,6 +6,7 @@
 
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -310,6 +311,7 @@ import {
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_ATTACHMENT_CONTEXT_META_KEY,
   IMAGE_ONLY_PROMPT_TEXT,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
@@ -10020,6 +10022,7 @@ export class Session implements SessionContext {
           // longer timeouts while remaining cancellable by the real turn.
           rawParts = await this.#applyBridgeConversionsIfNeeded(
             rawParts,
+            message.content,
             abortSignal,
             options.onFullTurnModel,
           );
@@ -16764,6 +16767,7 @@ export class Session implements SessionContext {
               });
         return this.#applyBridgeConversionsIfNeeded(
           [...attachmentParts, ...expandedPrompt],
+          attachmentBlocks,
           abortSignal,
           onFullTurnModel,
         );
@@ -16951,6 +16955,7 @@ export class Session implements SessionContext {
     const sshWorkspace = Boolean(this.config.getExecutionEnvironment?.());
 
     const embeddedContext: EmbeddedResourceResource[] = [];
+    const attachmentParts: Part[] = [];
     const extensionMentions = new Map<string, string>();
     const mcpServerMentions = new Map<string, string>();
     const textPathSpecsToRead = new Map<string, string>();
@@ -16962,11 +16967,20 @@ export class Session implements SessionContext {
         ? parts
         : this.#applyBridgeConversionsIfNeeded(
             parts,
+            message,
             abortSignal,
             options.onFullTurnModel,
           );
 
     const parts = message.map((part) => {
+      const attachmentContext =
+        part._meta?.[DAEMON_ATTACHMENT_CONTEXT_META_KEY];
+      if (
+        (part.type === 'image' || part.type === 'resource') &&
+        typeof attachmentContext === 'string'
+      ) {
+        attachmentParts.push({ text: attachmentContext });
+      }
       switch (part.type) {
         case 'text':
           if (sshWorkspace) return { text: part.text };
@@ -17114,13 +17128,18 @@ export class Session implements SessionContext {
     if (
       pathSpecsToRead.length === 0 &&
       embeddedContext.length === 0 &&
+      attachmentParts.length === 0 &&
       extensionParts.length === 0 &&
       mcpServerParts.length === 0
     ) {
       return finish(partsToSend);
     }
 
-    if (pathSpecsToRead.length === 0 && embeddedContext.length === 0) {
+    if (
+      pathSpecsToRead.length === 0 &&
+      embeddedContext.length === 0 &&
+      attachmentParts.length === 0
+    ) {
       return finish([...partsToSend, ...extensionParts, ...mcpServerParts]);
     }
 
@@ -17156,6 +17175,7 @@ export class Session implements SessionContext {
     // the "--- Content from ... ---" delimiter labels, not by position, so
     // leading with the content is safe.
     const referenceParts: Part[] = [
+      ...attachmentParts,
       ...partsToSend.filter((part) => 'inlineData' in part),
       ...extensionParts,
       ...mcpServerParts,
@@ -17233,6 +17253,7 @@ export class Session implements SessionContext {
 
   async #applyBridgeConversionsIfNeeded(
     originalParts: Part[],
+    sourceBlocks: ContentBlock[],
     abortSignal: AbortSignal,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<Part[]> {
@@ -17271,11 +17292,23 @@ export class Session implements SessionContext {
 
     let bridgeResult: VisionBridgeResult;
     try {
+      const attachmentContexts = new Set(
+        sourceBlocks
+          .filter(
+            (block) => block.type === 'image' || block.type === 'resource',
+          )
+          .map((block) => block._meta?.[DAEMON_ATTACHMENT_CONTEXT_META_KEY])
+          .filter((context) => typeof context === 'string'),
+      );
       debugLogger.debug('vision bridge: gate matched, running conversion');
       bridgeResult = await runVisionBridge({
         config: this.config,
         parts,
         signal: abortSignal,
+        // Stored paths stay in model context, outside the bridge's focus budget.
+        intentText: collectText(
+          parts.filter((part) => !attachmentContexts.has(part.text ?? '')),
+        ),
       });
     } catch (error) {
       debugLogger.debug(

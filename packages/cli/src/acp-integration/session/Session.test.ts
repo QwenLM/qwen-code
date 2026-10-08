@@ -13103,6 +13103,64 @@ describe('Session', () => {
       },
     );
 
+    it.each(['image', 'text', 'binary'] as const)(
+      'keeps %s attachment paths in model context without changing user display text',
+      async (kind) => {
+        const context = 'Attachment absolutePath: /tmp/attached-file';
+        const reference = {
+          type: kind === 'image' ? 'image' : 'resource',
+          attachmentId: kind === 'image' ? 'image.png' : 'file.txt',
+          mimeType: kind === 'image' ? 'image/png' : 'text/plain',
+          size: 3,
+        };
+        const attachment: PromptRequest['prompt'][number] =
+          kind === 'image'
+            ? { type: 'image', data: 'AQID', mimeType: 'image/png' }
+            : {
+                type: 'resource',
+                resource: {
+                  uri: 'attachment:///file.txt',
+                  mimeType: 'text/plain',
+                  ...(kind === 'text'
+                    ? { text: 'contents' }
+                    : { blob: 'AP8B' }),
+                },
+              };
+        attachment._meta = { 'qwen.daemon.attachmentContext': context };
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        // The image case has no user text or resource block to avoid either
+        // image-only early return hiding the model context.
+        const userText = kind === 'image' ? '' : 'inspect this';
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            ...(userText ? [{ type: 'text' as const, text: userText }] : []),
+            attachment,
+          ],
+          _meta: { 'qwen.daemon.attachmentReferences': [reference] },
+        });
+
+        expect(firstSentMessage()).toContainEqual({ text: context });
+        if (kind === 'image') {
+          expect(firstSentMessage()).toContainEqual({
+            inlineData: { data: 'AQID', mimeType: 'image/png' },
+          });
+        }
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          userText,
+          undefined,
+          expect.objectContaining({
+            displayText: userText,
+            attachmentReferences: [reference],
+          }),
+          expect.any(String),
+          undefined,
+        );
+      },
+    );
+
     it('records daemon attachment references for transcript replay', async () => {
       const imageReference = {
         type: 'image' as const,
@@ -18498,6 +18556,65 @@ describe('Session', () => {
       expect(sent.some((part) => 'inlineData' in part)).toBe(false);
     });
 
+    it.each(['normal', 'custom command', 'image-only'] as const)(
+      'keeps attachment paths outside the vision bridge focus for %s prompts',
+      async (kind) => {
+        const question = kind === 'image-only' ? '' : 'Read the serial number.';
+        const context = `Attachment absolutePath: /tmp/${'a'.repeat(2100)}`;
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'qwen3.7-plus',
+        });
+        runVisionBridgeSpy.mockResolvedValue({
+          applied: false,
+          status: 'skipped',
+          convertedCount: 0,
+          omittedCount: 0,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        if (kind === 'custom command') {
+          vi.mocked(
+            nonInteractiveCliCommands.handleSlashCommand,
+          ).mockResolvedValueOnce({
+            type: 'submit_prompt',
+            content: [{ text: question }],
+            resolvedCommand: { name: 'inspect', kind: CommandKind.FILE },
+          });
+        }
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            {
+              type: 'text',
+              text: kind === 'custom command' ? '/inspect' : question,
+            },
+            {
+              type: 'image',
+              mimeType: 'image/png',
+              data: 'iVBORw0KGgo=',
+              _meta: { 'qwen.daemon.attachmentContext': context },
+            },
+          ],
+        });
+
+        expect(runVisionBridgeSpy).toHaveBeenCalledOnce();
+        expect(runVisionBridgeSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            intentText: question,
+            parts: expect.arrayContaining([
+              { text: context },
+              { inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' } },
+            ]),
+          }),
+        );
+        expect(textParts(firstSentMessage())).toContain(context);
+        if (question) expect(textParts(firstSentMessage())).toContain(question);
+      },
+    );
+
     it('routes an agent-capable image prompt for that ACP prompt only', async () => {
       const runtimeView = {
         contentGenerator: {},
@@ -23815,6 +23932,10 @@ describe('Session', () => {
                   type: 'image',
                   mimeType: 'image/png',
                   data: 'cHVyZS1pbWFnZQ==',
+                  _meta: {
+                    'qwen.daemon.attachmentContext':
+                      'Attachment absolutePath: /tmp/image-2.png',
+                  },
                 },
               ],
               displayText: '',
@@ -23918,6 +24039,9 @@ describe('Session', () => {
         expect(secondCall?.[1].message).toEqual(
           expect.arrayContaining(midTurnParts),
         );
+        expect(secondCall?.[1].message).toContainEqual({
+          text: 'Attachment absolutePath: /tmp/image-2.png',
+        });
         expect(runVisionBridgeSpy).not.toHaveBeenCalled();
         expect(secondCall?.[1].message).not.toEqual(
           expect.arrayContaining([
@@ -24025,7 +24149,10 @@ describe('Session', () => {
         expect(
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(
-          [{ text: '\n[User message received during tool execution]: ' }],
+          [
+            { text: '\n[User message received during tool execution]: ' },
+            { text: 'Attachment absolutePath: /tmp/image-2.png' },
+          ],
           '',
           undefined,
           [

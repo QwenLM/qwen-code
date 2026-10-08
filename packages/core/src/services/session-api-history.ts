@@ -17,6 +17,7 @@ import type {
   GoalTurnEndRecordPayload,
   SlashCommandRecordPayload,
 } from './chatRecordingService.js';
+import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
 
 const API_HISTORY_PROMPT_ID = Symbol('apiHistoryPromptId');
 
@@ -317,10 +318,7 @@ export class SessionApiHistoryAccumulator {
 
   add(record: ChatRecord): void {
     // Internal calls have no model-emitted function-call partner.
-    if (
-      record.type === 'tool_result' &&
-      record.subtype === 'code_mode_tool_result'
-    ) {
+    if (isInternalCodeModeToolResult(record)) {
       return;
     }
     if (record.type === 'system') {

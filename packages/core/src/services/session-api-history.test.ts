@@ -677,3 +677,74 @@ describe('cancelled prompt identity with automatic tails', () => {
     ).toBeUndefined();
   });
 });
+
+describe('internal Code Mode tool results', () => {
+  it('keeps the internal functionResponse out of model history', () => {
+    const base = {
+      sessionId: 'session',
+      timestamp: '2026-10-07T00:00:00.000Z',
+      cwd: '/workspace',
+      version: 'test',
+    };
+    const messages: ChatRecord[] = [
+      {
+        ...base,
+        uuid: 'call',
+        parentUuid: null,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [{ functionCall: { id: 'outer', name: 'exec' } }],
+        },
+      },
+      {
+        ...base,
+        uuid: 'nested',
+        parentUuid: 'call',
+        type: 'tool_result',
+        subtype: 'code_mode_tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'nested',
+                name: 'write_file',
+                response: { output: 'internal' },
+              },
+            },
+          ],
+        },
+      },
+      {
+        ...base,
+        uuid: 'result',
+        parentUuid: 'nested',
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'outer',
+                name: 'exec',
+                response: { output: 'script finished' },
+              },
+            },
+          ],
+        },
+      },
+    ];
+
+    const parts = buildApiHistoryFromConversation({ messages }).flatMap(
+      (entry) => entry.parts ?? [],
+    );
+
+    expect(parts.some((part) => part.functionResponse?.id === 'outer')).toBe(
+      true,
+    );
+    expect(parts.some((part) => part.functionResponse?.id === 'nested')).toBe(
+      false,
+    );
+  });
+});
