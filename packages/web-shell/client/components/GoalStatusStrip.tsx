@@ -86,7 +86,7 @@ export function GoalStatusStrip({
   onResume,
   onClear,
 }: GoalStatusStripProps) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const goal = snapshot.goal;
   const [now, setNow] = useState(() => Date.now());
 
@@ -108,6 +108,7 @@ export function GoalStatusStrip({
       className={styles.root}
       data-testid="goal-status-strip"
       data-web-shell-goal-status=""
+      lang={language === 'ru' ? 'ru' : undefined}
     >
       <Target className={styles.target} size={17} aria-hidden="true" />
       <div className={styles.summary}>

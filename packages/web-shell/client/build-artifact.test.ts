@@ -398,13 +398,14 @@ describe('build artifact — transcript entry (#11031)', () => {
     // What the entry does deliver is a bounded payload, so bound it. The JS
     // remainder measured 1,309,207 UTF-16 code units at 1aba19c878. Table
     // fullscreen and Shadow DOM keyboard handling add 3,033, bringing it to
-    // 1,312,240. The ceiling leaves a small margin around that intentional UI;
-    // re-measure and lower it if the entry gets leaner.
+    // 1,312,240. The RU goal-card catalog and pluralization add 5,732,
+    // bringing it to 1,317,972 (#13610). The ceiling leaves a small margin around
+    // that intentional UI; re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_315_000);
+    expect(js.length).toBeLessThan(1_321_000);
   });
 
   it('carries no Live Voice strings and looks none up', () => {

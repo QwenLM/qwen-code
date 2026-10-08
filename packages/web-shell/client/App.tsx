@@ -370,6 +370,7 @@ import {
   languageSettingToWebShellLanguage,
   languageLabel,
   normalizeLanguage,
+  toDomLanguage,
   type WebShellLanguage,
 } from './i18n';
 import { CapacityRecoveryDialog } from './components/workspaces/CapacityRecoveryDialog';
@@ -16838,6 +16839,7 @@ export function App({
                     t('language.options'),
                     '  - en: English',
                     '  - zh-CN: 中文',
+                    '  - ru: Русский',
                   ].join('\n'),
                 },
               ]);
@@ -16856,15 +16858,21 @@ export function App({
                       t('language.options'),
                       '  - en: English',
                       '  - zh-CN: 中文',
+                      '  - ru: Русский',
                     ].join('\n'),
                   },
                 ]);
                 return true;
               }
               const normalizedArg = languageArg.toLowerCase();
-              const valid = ['en', 'zh', 'zh-cn', 'zh_cn'].includes(
-                normalizedArg,
-              );
+              const valid = [
+                'en',
+                'zh',
+                'zh-cn',
+                'zh_cn',
+                'ru',
+                'ru-ru',
+              ].includes(normalizedArg);
               if (!valid) {
                 pushToast('error', t('language.invalid'));
                 return true;
@@ -19596,7 +19604,7 @@ export function App({
         'dark',
         selectedTheme === WebShellThemeId.Dark,
       );
-      portalRoot.lang = selectedLanguage;
+      portalRoot.lang = toDomLanguage(selectedLanguage);
       for (let index = 0; index < computedStyle.length; index += 1) {
         const name = computedStyle[index];
         if (!name.startsWith('--')) continue;
@@ -19923,7 +19931,7 @@ export function App({
           data-web-shell-root
           data-web-shell-shadcn
           data-compact-sidebar={compactShell ? '' : undefined}
-          lang={selectedLanguage}
+          lang={toDomLanguage(selectedLanguage)}
         >
           {capacityRecovery && <CapacityRecoveryDialog intent={capacityRecovery} onClose={dismissCapacityRecovery} />}
           {!onToast && (
@@ -21010,7 +21018,7 @@ export function App({
                         shadowDomOptions.plugins &&
                         isPluginShadowPanel(activePanel)
                       }
-                      language={selectedLanguage}
+                      language={toDomLanguage(selectedLanguage)}
                       themeClassName={[
                         selectedTheme === WebShellThemeId.Light
                           ? styles.themeLight

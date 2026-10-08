@@ -45,7 +45,7 @@ export function GoalApprovalContent({
   content: string;
   id: string;
 }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [view, setView] = useState('overview');
   const sections = splitSections(objective);
   const fullText = content || objective;
@@ -66,6 +66,7 @@ export function GoalApprovalContent({
       onValueChange={setView}
       className={styles.goalTabs}
       data-approval-shortcuts-ignore
+      lang={language === 'ru' ? 'ru' : undefined}
     >
       <TabsList variant="line" aria-label={t('approval.goal.title')}>
         <TabsTrigger value="overview">

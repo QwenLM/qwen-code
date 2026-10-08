@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   getTranslator,
@@ -78,7 +81,45 @@ describe('ru locale', () => {
     expect(t('approval.goal.title')).toBe('Подтвердите цель сессии');
     expect(t('goal.turns', { count: 1 })).toBe('1 ход');
     expect(t('goal.turns', { count: 5 })).toBe('5 ходов');
+    expect(t('goal.turns', { count: 11 })).toBe('11 ходов');
+    expect(t('goal.turns', { count: 14 })).toBe('14 ходов');
+    expect(t('goal.turns', { count: 21 })).toBe('21 ход');
+    expect(t('goal.turns', { count: 22 })).toBe('22 хода');
     expect(t('goals.count', { count: 2 })).toBe('2 активные цели');
+    expect(t('goals.count', { count: 12 })).toBe('12 активных целей');
     expect(t('memory.add')).toBe('Add');
+  });
+
+  it('maintains parity between EN and RU for all goal-card keys', () => {
+    const currentDir = dirname(fileURLToPath(import.meta.url));
+    const content = readFileSync(join(currentDir, 'i18n.tsx'), 'utf8');
+
+    const extractKeys = (blockName: string) => {
+      const match = content.match(
+        new RegExp(`const ${blockName}: Messages = {([\\s\\S]*?)};`),
+      );
+      if (!match) return new Set<string>();
+      const keys = new Set<string>();
+      const keyRegex = /'([a-zA-Z0-9_.-]+)':/g;
+      let m: RegExpExecArray | null;
+      while ((m = keyRegex.exec(match[1])) !== null) {
+        if (
+          m[1].startsWith('goal.') ||
+          m[1].startsWith('goals.') ||
+          m[1].startsWith('approval.goal.')
+        ) {
+          keys.add(m[1]);
+        }
+      }
+      return keys;
+    };
+
+    const enGoalKeys = extractKeys('EN');
+    const ruGoalKeys = extractKeys('RU');
+
+    expect(ruGoalKeys.size).toBeGreaterThan(0);
+    expect(Array.from(ruGoalKeys).sort()).toEqual(
+      Array.from(enGoalKeys).sort(),
+    );
   });
 });

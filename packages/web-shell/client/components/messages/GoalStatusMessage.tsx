@@ -155,7 +155,7 @@ export function GoalStatusMessage({
 }: {
   status: SerializedGoalStatusMessage;
 }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
 
   const title = getTitle(status, t);
   const stats: string[] = [];
@@ -181,7 +181,7 @@ export function GoalStatusMessage({
     status.kind === 'checking' ? t('goal.judge') : t('goal.lastCheck');
 
   return (
-    <div className={styles.message}>
+    <div className={styles.message} lang={language === 'ru' ? 'ru' : undefined}>
       <div className={styles.body}>
         <div className={`${styles.title} ${title.colorClass}`}>
           {title.title}

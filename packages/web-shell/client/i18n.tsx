@@ -19,6 +19,21 @@ export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN', 'ru'] as const;
 
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
 
+/**
+ * Locales whose catalogs cover the full web-shell surface.
+ * Partial locales like 'ru' (which only covers the goal card today, refs #13391)
+ * must keep DOM lang="en" at root / portal emitters so screen readers and
+ * text tools treat the 98% English chrome accurately.
+ */
+export const FULL_CATALOG_LANGUAGES: Record<WebShellLanguage, boolean> = {
+  en: true,
+  'zh-CN': true,
+  ru: false,
+};
+
+export function toDomLanguage(language: WebShellLanguage): string {
+  return FULL_CATALOG_LANGUAGES[language] ? language : 'en';
+}
 type MessageValue =
   | string
   | ((vars?: Record<string, string | number>) => string);
@@ -2296,10 +2311,10 @@ const EN: Messages = {
   'slash.category.system': 'System commands',
   'language.changed': (v) => `UI language changed to ${v?.language ?? ''}`,
   'language.current': (v) => `Current UI language: ${v?.language ?? ''}`,
-  'language.invalid': 'Invalid language. Available: en, zh-CN',
+  'language.invalid': 'Invalid language. Available: en, zh-CN, ru',
   'language.options': 'Available options:',
   'language.set': 'Set UI language',
-  'language.usage': 'Usage: /language ui [en|zh-CN]',
+  'language.usage': 'Usage: /language ui [en|zh-CN|ru]',
   'localCommand.noSession':
     'No active session yet. Send your first message before using this command.',
   'localCommand.diffNoWorkspace':
@@ -6453,10 +6468,10 @@ const ZH: Messages = {
   'slash.category.system': '系统',
   'language.changed': (v) => `UI 语言已切换为 ${v?.language ?? ''}`,
   'language.current': (v) => `当前 UI 语言：${v?.language ?? ''}`,
-  'language.invalid': '语言无效。可用值：en, zh-CN',
+  'language.invalid': '语言无效。可用值：en, zh-CN, ru',
   'language.options': '可用选项：',
   'language.set': '设置 UI 语言',
-  'language.usage': '用法：/language ui [en|zh-CN]',
+  'language.usage': '用法：/language ui [en|zh-CN|ru]',
   'localCommand.noSession':
     '当前还没有会话。请先发送第一条消息，再使用这个命令。',
   'localCommand.diffNoWorkspace': '当前还没有可用于查看变更的工作区。',
@@ -8440,9 +8455,9 @@ const Context = createContext<{
 export function normalizeLanguage(
   value: string | undefined | null,
 ): WebShellLanguage {
-  const normalized = value?.trim().toLowerCase();
+  const normalized = value?.trim().toLowerCase().replace(/_/g, '-');
   if (!normalized) return 'en';
-  if (normalized === 'zh' || normalized === 'zh-cn' || normalized === 'zh_cn') {
+  if (normalized === 'zh' || normalized === 'zh-cn') {
     return 'zh-CN';
   }
   if (normalized === 'ru' || normalized.startsWith('ru-')) {
@@ -8479,7 +8494,7 @@ export function languageSettingToWebShellLanguage(
   }
   if (
     normalized === 'ru' ||
-    normalized === 'ru-ru' ||
+    normalized.startsWith('ru-') ||
     normalized === 'russian' ||
     normalized === 'русский'
   ) {

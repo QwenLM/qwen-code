@@ -505,7 +505,7 @@ daemon 参数的完整含义和配置方式见
 | `theme`                    | `'dark' \| 'light'`                                                                                                                   | UI 主题，默认 `dark`                                                                                                                           |
 | `onThemeChange`            | `(theme: WebShellTheme) => void`                                                                                                      | `/theme` 命令切换主题后触发                                                                                                                    |
 | `onThemeResolved`          | `(theme: WebShellTheme) => void`                                                                                                      | 未提供 `theme` 且 shell 从 daemon 设置解析出主题时触发；仅供宿主同步文档外观，不应持久化为宿主偏好                                             |
-| `language`                 | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                                                                                                  | UI 语言                                                                                                                                        |
+| `language`                 | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn' \| 'ru'`                                                                                          | UI 语言（`ru` 当前覆盖目标卡片等界面，其余回退英文）                                                                                           |
 | `onLanguageChange`         | `(language: WebShellLanguage) => void`                                                                                                | `/language ui` 切换 UI 语言后触发                                                                                                              |
 | `onLanguageResolved`       | `(language: WebShellLanguage) => void`                                                                                                | 未提供 `language` 时，有效 UI 语言在未成为宿主偏好时触发，包括设置解析、乐观切换与回滚；仅供同步文档外观                                       |
 | `brand`                    | `WebShellBrand`                                                                                                                       | 产品品牌（名称与 Logo，`logo` 为 React 节点）；提供时整体取代 daemon 解析出的品牌，见下方「品牌（白标）」                                      |
@@ -820,45 +820,45 @@ Chart/Data 控件、无数据提示和错误提示默认跟随 WebShell 语言�
 - **本地实现**：web-shell 前端直接打开弹窗、调用 daemon REST API，或切换本地状态。
 - **ACP 透传**：web-shell 将命令发送给 daemon，由 daemon/ACP 执行。
 
-| 命令             | 支持方式            | 说明                                                                                                                    |
-| ---------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `/help`          | 本地实现            | 打开帮助弹窗，支持键盘浏览命令和快捷键。                                                                                |
-| `/theme`         | 本地实现            | 打开主题选择弹窗；支持 `/theme light`、`/theme dark`。                                                                  |
-| `/settings`      | 本地实现            | 打开设置面板，管理工作区与用户级（`~/.qwen/settings.json`）配置；两个作用域均可编辑并写回对应的 settings.json。         |
-| `/language`      | 本地实现 + ACP 透传 | `/language ui <lang>` 会切换 web-shell UI 语言并同步给 daemon；其他语言能力由 daemon 执行。包含 `ui`、`output` 子命令。 |
-| `/model`         | 本地实现 + 部分透传 | 无参数打开模型弹窗；普通参数直接切换模型；`/model --fast <model>` 透传给 daemon。                                       |
-| `/plan`          | 本地实现            | 切换到 `plan` approval mode，并可继续发送后续 prompt。                                                                  |
-| `/approval-mode` | 本地实现            | 打开审批模式弹窗或直接切换审批模式。                                                                                    |
-| `/mode`          | 本地实现            | web-shell 本地别名，用于切换审批模式。                                                                                  |
-| `/mcp`           | 本地实现            | 打开 MCP 管理弹窗。                                                                                                     |
-| `/skills`        | 本地实现 + ACP 透传 | 无参数或 `detail`/`details` 打开 skills 弹窗；其他参数转换为直接 skill 命令（`/skills review` → `/review`）。           |
-| `/tools`         | 本地实现            | 打开 tools 弹窗，列表展示工具名称、启用状态和 `description`。                                                           |
-| `/memory`        | 本地实现            | 打开 memory 弹窗，支持 `show`、`refresh`、`add user`、`add project` 等分支。                                            |
-| `/agents`        | 本地实现            | 打开 agents 弹窗，支持 `manage`、`create user`、`create project` 等分支。                                               |
-| `/copy`          | 本地实现            | 复制最后一条 assistant 输出；支持 `code`、语言名、LaTeX、inline LaTeX 等选择器。                                        |
-| `/release`       | 本地实现            | 释放 live session 连接，不删除历史会话记录。                                                                            |
-| `/clear`         | 本地实现            | 清空当前 web-shell transcript store。                                                                                   |
-| `/new`           | 本地实现            | 创建新的 daemon session。                                                                                               |
-| `/reset`         | 本地实现            | 与 `/new` 一样创建新的 daemon session。                                                                                 |
-| `/rename <name>` | 本地实现            | 修改当前 daemon session 的展示名称。                                                                                    |
-| `/resume`        | 本地实现            | 无参数打开恢复会话弹窗；带 session id 时直接加载。                                                                      |
-| `/status`        | ACP 透传            | daemon 支持，包含 `paths` 子命令。                                                                                      |
-| `/auth`          | ACP 透传            | 连接 LLM provider。                                                                                                     |
-| `/bug`           | ACP 透传            | 提交错误报告。                                                                                                          |
-| `/compress`      | ACP 透传            | 通过摘要替换来压缩上下文。                                                                                              |
-| `/context`       | ACP 透传            | 显示上下文窗口使用情况，包含 `detail` 子命令。                                                                          |
-| `/diff`          | ACP 透传            | 显示工作区相对 `HEAD` 的变更统计。                                                                                      |
-| `/docs`          | ACP 透传            | 打开 Qwen Code 文档。                                                                                                   |
-| `/doctor`        | ACP 透传            | 执行安装与环境诊断，包含 `memory` 子命令。                                                                              |
-| `/export`        | ACP 透传            | 导出当前会话记录，包含 `html`、`md`、`json`、`jsonl` 子命令。                                                           |
-| `/goal`          | ACP 透传            | 设置目标，并持续工作直到条件满足。                                                                                      |
-| `/init`          | ACP 透传            | 分析项目并创建定制的 `QWEN.md`。                                                                                        |
-| `/stats`         | ACP 透传            | 显示统计信息，包含 `model`、`tools` 子命令。                                                                            |
-| `/summary`       | ACP 透传            | 生成当前会话摘要。                                                                                                      |
-| `/tasks`         | 本地实现            | 打开环境信息面板并刷新后台任务。                                                                                        |
-| `/btw`           | 本地实现 + ACP 透传 | daemon 支持侧边任务时新建侧边任务；否则发送一个不影响主对话的侧边问题。                                                 |
-| `/fork`          | 本地实现 + ACP 透传 | 启动共享当前上下文的后台智能体。                                                                                        |
-| `/insight`       | ACP 透传            | 查看 insight 相关信息。                                                                                                 |
+| 命令             | 支持方式            | 说明                                                                                                                                                |
+| ---------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/help`          | 本地实现            | 打开帮助弹窗，支持键盘浏览命令和快捷键。                                                                                                            |
+| `/theme`         | 本地实现            | 打开主题选择弹窗；支持 `/theme light`、`/theme dark`。                                                                                              |
+| `/settings`      | 本地实现            | 打开设置面板，管理工作区与用户级（`~/.qwen/settings.json`）配置；两个作用域均可编辑并写回对应的 settings.json。                                     |
+| `/language`      | 本地实现 + ACP 透传 | `/language ui <lang>` 会切换 web-shell UI 语言（支持 `en`、`zh-CN`、`ru`）并同步给 daemon；其他语言能力由 daemon 执行。包含 `ui`、`output` 子命令。 |
+| `/model`         | 本地实现 + 部分透传 | 无参数打开模型弹窗；普通参数直接切换模型；`/model --fast <model>` 透传给 daemon。                                                                   |
+| `/plan`          | 本地实现            | 切换到 `plan` approval mode，并可继续发送后续 prompt。                                                                                              |
+| `/approval-mode` | 本地实现            | 打开审批模式弹窗或直接切换审批模式。                                                                                                                |
+| `/mode`          | 本地实现            | web-shell 本地别名，用于切换审批模式。                                                                                                              |
+| `/mcp`           | 本地实现            | 打开 MCP 管理弹窗。                                                                                                                                 |
+| `/skills`        | 本地实现 + ACP 透传 | 无参数或 `detail`/`details` 打开 skills 弹窗；其他参数转换为直接 skill 命令（`/skills review` → `/review`）。                                       |
+| `/tools`         | 本地实现            | 打开 tools 弹窗，列表展示工具名称、启用状态和 `description`。                                                                                       |
+| `/memory`        | 本地实现            | 打开 memory 弹窗，支持 `show`、`refresh`、`add user`、`add project` 等分支。                                                                        |
+| `/agents`        | 本地实现            | 打开 agents 弹窗，支持 `manage`、`create user`、`create project` 等分支。                                                                           |
+| `/copy`          | 本地实现            | 复制最后一条 assistant 输出；支持 `code`、语言名、LaTeX、inline LaTeX 等选择器。                                                                    |
+| `/release`       | 本地实现            | 释放 live session 连接，不删除历史会话记录。                                                                                                        |
+| `/clear`         | 本地实现            | 清空当前 web-shell transcript store。                                                                                                               |
+| `/new`           | 本地实现            | 创建新的 daemon session。                                                                                                                           |
+| `/reset`         | 本地实现            | 与 `/new` 一样创建新的 daemon session。                                                                                                             |
+| `/rename <name>` | 本地实现            | 修改当前 daemon session 的展示名称。                                                                                                                |
+| `/resume`        | 本地实现            | 无参数打开恢复会话弹窗；带 session id 时直接加载。                                                                                                  |
+| `/status`        | ACP 透传            | daemon 支持，包含 `paths` 子命令。                                                                                                                  |
+| `/auth`          | ACP 透传            | 连接 LLM provider。                                                                                                                                 |
+| `/bug`           | ACP 透传            | 提交错误报告。                                                                                                                                      |
+| `/compress`      | ACP 透传            | 通过摘要替换来压缩上下文。                                                                                                                          |
+| `/context`       | ACP 透传            | 显示上下文窗口使用情况，包含 `detail` 子命令。                                                                                                      |
+| `/diff`          | ACP 透传            | 显示工作区相对 `HEAD` 的变更统计。                                                                                                                  |
+| `/docs`          | ACP 透传            | 打开 Qwen Code 文档。                                                                                                                               |
+| `/doctor`        | ACP 透传            | 执行安装与环境诊断，包含 `memory` 子命令。                                                                                                          |
+| `/export`        | ACP 透传            | 导出当前会话记录，包含 `html`、`md`、`json`、`jsonl` 子命令。                                                                                       |
+| `/goal`          | ACP 透传            | 设置目标，并持续工作直到条件满足。                                                                                                                  |
+| `/init`          | ACP 透传            | 分析项目并创建定制的 `QWEN.md`。                                                                                                                    |
+| `/stats`         | ACP 透传            | 显示统计信息，包含 `model`、`tools` 子命令。                                                                                                        |
+| `/summary`       | ACP 透传            | 生成当前会话摘要。                                                                                                                                  |
+| `/tasks`         | 本地实现            | 打开环境信息面板并刷新后台任务。                                                                                                                    |
+| `/btw`           | 本地实现 + ACP 透传 | daemon 支持侧边任务时新建侧边任务；否则发送一个不影响主对话的侧边问题。                                                                             |
+| `/fork`          | 本地实现 + ACP 透传 | 启动共享当前上下文的后台智能体。                                                                                                                    |
+| `/insight`       | ACP 透传            | 查看 insight 相关信息。                                                                                                                             |
 
 ## 当前会话内容搜索
 

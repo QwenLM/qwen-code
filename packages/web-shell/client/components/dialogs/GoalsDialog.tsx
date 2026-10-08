@@ -46,7 +46,7 @@ export function GoalsDialog({
   onOpenSession,
   onError,
 }: GoalsDialogProps) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const actions = useWorkspaceActions();
 
   const [goals, setGoals] = useState<DaemonGoal[] | null>(null);
@@ -245,7 +245,7 @@ export function GoalsDialog({
   );
 
   return (
-    <div className={styles.root}>
+    <div className={styles.root} lang={language === 'ru' ? 'ru' : undefined}>
       <div className={styles.intro}>{t('goals.subtitle')}</div>
 
       <div className={styles.toolbar}>

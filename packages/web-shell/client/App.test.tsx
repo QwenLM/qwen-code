@@ -44750,6 +44750,18 @@ describe('settings-derived theme and language (#11955)', () => {
     expect(onLanguageResolved).toHaveBeenCalledWith('zh-CN');
   });
 
+  it('resolves general.language ru to ru for host but leaves DOM lang as en', async () => {
+    testState.settings = [languageSetting('ru')];
+    const onLanguageResolved = vi.fn();
+    const { container } = renderApp({ onLanguageResolved });
+    await flush();
+
+    expect(
+      container.querySelector('[data-web-shell-root]')?.getAttribute('lang'),
+    ).toBe('en');
+    expect(onLanguageResolved).toHaveBeenCalledWith('ru');
+  });
+
   it('lets an explicit language prop win over general.language', async () => {
     testState.settings = [languageSetting('zh')];
     const onLanguageResolved = vi.fn();

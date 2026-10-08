@@ -15,7 +15,12 @@ import {
 } from './components/managed/java-managed-agent-provider';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WebShellCustomizationProvider } from './customization';
-import { I18nProvider, normalizeLanguage, type WebShellLanguage } from './i18n';
+import {
+  I18nProvider,
+  normalizeLanguage,
+  toDomLanguage,
+  type WebShellLanguage,
+} from './i18n';
 import { WebShellPortalRootContext } from './portalRoot';
 import {
   ThemeProvider,
@@ -165,7 +170,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
                       style={style}
                       data-web-shell-root
                       data-web-shell-shadcn
-                      lang={resolvedLanguage}
+                      lang={toDomLanguage(resolvedLanguage)}
                     >
                       <ManagedSessionsPage
                         key={provider.storageKey}

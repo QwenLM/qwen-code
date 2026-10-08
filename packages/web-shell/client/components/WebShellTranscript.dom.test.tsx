@@ -641,6 +641,19 @@ describe('WebShellTranscript DOM integration', () => {
     ).toBeNull();
   });
 
+  it('keeps dom lang as en when language is partial ru', () => {
+    const { container, unmount } = render(
+      <WebShellTranscript blocks={[]} theme="light" language="ru" />,
+    );
+    const root = container.querySelector<HTMLElement>('[data-web-shell-root]');
+    const portal = document.body.querySelector<HTMLElement>(
+      '[data-web-shell-portal-root]',
+    );
+    expect(root?.lang).toBe('en');
+    expect(portal?.lang).toBe('en');
+    unmount();
+  });
+
   it('falls back to the built-in Markdown renderer when customization throws', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const { container } = render(
