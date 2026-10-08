@@ -61,7 +61,6 @@ type WriteScenario = {
   approvalMode: string;
   approveWrite: boolean;
   expectedRequests: number;
-  expectsMcpConfirmation: boolean;
   content?: string;
   verifiesShortLiteral?: boolean;
   verifiesLongConfirmation?: boolean;
@@ -71,12 +70,11 @@ type ManagedWritePaths = { mcpConfigPath?: string };
 
 const WRITE_SCENARIOS: WriteScenario[] = [
   {
-    name: 'uses two confirmations in default mode',
+    name: 'asks for content confirmation in default mode',
     provider: 'platform-v3',
     approvalMode: 'default',
     approveWrite: true,
     expectedRequests: 1,
-    expectsMcpConfirmation: true,
     content:
       'LINK [visible label](https://hidden.example/secret-target) BOLD **bold-value** CODE `code-value` UNDER <u>under-value</u>',
     verifiesShortLiteral: true,
@@ -87,7 +85,6 @@ const WRITE_SCENARIOS: WriteScenario[] = [
     approvalMode: 'default',
     approveWrite: false,
     expectedRequests: 0,
-    expectsMcpConfirmation: true,
   },
   {
     name: 'asks for content confirmation in auto-edit mode',
@@ -95,7 +92,6 @@ const WRITE_SCENARIOS: WriteScenario[] = [
     approvalMode: 'auto-edit',
     approveWrite: true,
     expectedRequests: 1,
-    expectsMcpConfirmation: true,
   },
   {
     name: 'still asks for content confirmation in YOLO mode',
@@ -103,7 +99,6 @@ const WRITE_SCENARIOS: WriteScenario[] = [
     approvalMode: 'yolo',
     approveWrite: true,
     expectedRequests: 1,
-    expectsMcpConfirmation: false,
     content:
       'LINK [visible label](https://hidden.example/secret-target) BOLD **bold-value** CODE `code-value` UNDER <u>under-value</u>',
     verifiesShortLiteral: true,
@@ -114,17 +109,15 @@ const WRITE_SCENARIOS: WriteScenario[] = [
     approvalMode: 'yolo',
     approveWrite: true,
     expectedRequests: 1,
-    expectsMcpConfirmation: false,
     content: LONG_CONFIRMATION_CONTENT,
     verifiesLongConfirmation: true,
   },
   {
-    name: 'uses two confirmations for the OSS REST provider with its credential from settings.env',
+    name: 'asks for content confirmation for the OSS REST provider with its credential from settings.env',
     provider: 'oss-rest',
     approvalMode: 'default',
     approveWrite: true,
     expectedRequests: 1,
-    expectsMcpConfirmation: true,
   },
   {
     name: 'does not write to the OSS REST provider when content confirmation is rejected',
@@ -132,7 +125,6 @@ const WRITE_SCENARIOS: WriteScenario[] = [
     approvalMode: 'default',
     approveWrite: false,
     expectedRequests: 0,
-    expectsMcpConfirmation: true,
   },
   {
     name: 'still asks for content confirmation for the OSS REST provider in YOLO mode',
@@ -140,7 +132,6 @@ const WRITE_SCENARIOS: WriteScenario[] = [
     approvalMode: 'yolo',
     approveWrite: true,
     expectedRequests: 1,
-    expectsMcpConfirmation: false,
   },
 ];
 
@@ -264,18 +255,6 @@ const WRITE_SCENARIOS: WriteScenario[] = [
       ).toBe(true);
       await type(ptyProcess, 'Remember the repository policy.');
       await type(ptyProcess, '\r');
-
-      if (scenario.expectsMcpConfirmation) {
-        // Screen-based, not rig.waitForText: OpenTUI emits pty bytes by cell
-        // diff and drops spaces over previously-blank cells, so multi-word
-        // rows never appear verbatim in the raw stream on that leg.
-        await waitForScreen(
-          screen,
-          (value) => value.includes('Allow execution of MCP tool'),
-          'ordinary MCP confirmation did not appear',
-        );
-        await type(ptyProcess, '\r');
-      }
 
       if (scenario.verifiesLongConfirmation) {
         const constrainedScreen = await waitForScreen(

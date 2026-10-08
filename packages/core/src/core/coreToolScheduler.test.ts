@@ -11034,6 +11034,38 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(getToolSpans()[0].ended).toBe(false);
   });
 
+  it('shows the hook reason as a literal info confirmation when an MCP tool asks', async () => {
+    const { waiting } = await askUntilApproval({
+      messageBus: askMessageBus('Save this exact content?'),
+      tools: [
+        new MockTool({
+          name: 'mockTool',
+          getConfirmationDetails: async () => ({
+            type: 'mcp',
+            title: 'Confirm MCP Tool Execution',
+            serverName: 'external-context',
+            toolName: 'context_remember',
+            toolDisplayName: 'Context Remember',
+            onConfirm: async () => {},
+          }),
+        }),
+      ],
+    });
+
+    // The mcp dialog has no slot for the reason, so the ask falls back to
+    // the hook's own literal-text confirmation instead of dropping it.
+    expect(waiting.confirmationDetails.type).toBe('info');
+    const details = waiting.confirmationDetails as {
+      prompt?: string;
+      renderPromptAsPlainText?: boolean;
+      hideAlwaysAllow?: boolean;
+    };
+    expect(details.prompt).toBe('Save this exact content?');
+    expect(details.renderPromptAsPlainText).toBe(true);
+    // The hook re-evaluates on every call, so "always allow" is hidden.
+    expect(details.hideAlwaysAllow).toBe(true);
+  });
+
   it('executes the tool exactly once when the user approves an ask (no re-ask loop)', async () => {
     const execute = vi.fn().mockResolvedValue(textResult('ok'));
     const messageBus = askMessageBus();

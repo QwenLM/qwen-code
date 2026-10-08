@@ -241,11 +241,10 @@ log. Provider access logs remain outside its control.
 ## Confirmation and trust boundary
 
 The managed settings put search in `permissions.allow` and remember in
-`permissions.ask`. In a normal interactive session, Qwen therefore shows its
-ordinary server/tool confirmation before `PreToolUse` shows the full content;
-two confirmations are intentional. YOLO bypasses ordinary `permissions.ask`,
-but a working Hook still asks once. A post-Hook ask is re-executed without
-running the same Hook again, so approval does not create a loop.
+`permissions.ask`. In an interactive session the Hook's ask is the
+confirmation: it shows the full content as literal text in place of the
+ordinary server/tool prompt, in every approval mode including YOLO. The Hook
+runs once per call, so approval does not create a loop.
 
 Qwen command-Hook transport failures retain Qwen's existing fail-open
 semantics. A user who can disable the Hook, alter the launcher, or obtain the
@@ -278,8 +277,8 @@ mapping, all result classes, transport ambiguity, conditional tool
 registration, bounded stable MCP output, and confirmation escaping and modes.
 Interactive E2E uses a fake model, real TTY Qwen process, pinned MCP process,
 real command Hook, and fake Mem0 endpoint to verify denial creates no request,
-approval creates one request, normal mode uses two confirmations, YOLO still
-shows the content confirmation, and `PENDING` is reported only as accepted.
+approval creates one request, and every approval mode shows the content
+confirmation, and `PENDING` is reported only as accepted.
 
 Roll out through a fake service, an isolated temporary Mem0 Project, one
 trusted repository, and then a small trusted team. Roll back by removing the

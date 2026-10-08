@@ -1608,6 +1608,17 @@ function withPreToolUseAskReason(
         prompt: `${reason}\n\n${details.prompt}`,
         renderPromptAsPlainText: true,
       };
+    case 'mcp':
+      // The mcp confirmation has no slot for the reason, so the ask falls
+      // back to the hook's own literal-text dialog — the shape every
+      // PreToolUse ask had before the reason joined the tool's prompt.
+      return {
+        type: 'info',
+        title: details.title,
+        prompt: reason,
+        renderPromptAsPlainText: true,
+        onConfirm: details.onConfirm,
+      };
     default:
       return details;
   }
