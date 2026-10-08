@@ -41,6 +41,13 @@ import {
   type GoalSnapshotV2,
   type GoalStateCause,
 } from '@qwen-code/qwen-code-core/goalWire';
+// Type-only (erased): this module ships in the browser replay bundle.
+import type {
+  QwenAgentMessageMeta,
+  SessionAgentAuthor,
+  SessionAgentStep,
+  SessionAgentTerminalStatus,
+} from '@qwen-code/qwen-code-core';
 
 export const MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
@@ -135,6 +142,12 @@ interface UpdateMetaOptions {
   readonly planToolCallId?: string;
   readonly todoPlanId?: string;
   readonly resultPreviewText?: string;
+  /**
+   * Explicit `qwenTranscript.segmentId`. Set only where live and replay must
+   * agree on a segment id the record alone determines (session agent
+   * records); the replay machine then keeps it instead of deriving one.
+   */
+  readonly segmentId?: string;
   readonly extra?: Readonly<Record<string, unknown>>;
 }
 
@@ -263,6 +276,7 @@ function buildUpdateMeta(
     ...(options.resultPreviewText
       ? { resultPreviewText: options.resultPreviewText }
       : {}),
+    ...(options.segmentId ? { segmentId: options.segmentId } : {}),
   };
   const meta: Record<string, unknown> = {
     ...(options.extra ?? {}),
@@ -286,6 +300,182 @@ export function createTranscriptMessageUpdate(
     content: { type: 'text', text: options.text },
     ...(meta ? { _meta: meta } : {}),
   } as SessionUpdate;
+}
+
+const AGENT_TERMINAL_STATUSES: ReadonlySet<string> = new Set([
+  'completed',
+  'failed',
+  'cancelled',
+  'offline',
+] satisfies SessionAgentTerminalStatus[]);
+
+function parseAgentAuthor(value: unknown): SessionAgentAuthor | undefined {
+  if (
+    !isObjectRecord(value) ||
+    typeof value['agentId'] !== 'string' ||
+    typeof value['name'] !== 'string'
+  ) {
+    return undefined;
+  }
+  const program = value['program'];
+  return {
+    agentId: value['agentId'],
+    name: value['name'],
+    ...(typeof value['color'] === 'string' ? { color: value['color'] } : {}),
+    ...(program === 'qwen' || program === 'claude' || program === 'codex'
+      ? { program }
+      : {}),
+    ...(typeof value['runtimeId'] === 'string'
+      ? { runtimeId: value['runtimeId'] }
+      : {}),
+    ...(typeof value['squadName'] === 'string' && value['squadName']
+      ? { squadName: value['squadName'] }
+      : {}),
+    ...(typeof value['memberSquadName'] === 'string' && value['memberSquadName']
+      ? { memberSquadName: value['memberSquadName'] }
+      : {}),
+  };
+}
+
+function parseAgentSteps(value: unknown): SessionAgentStep[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const steps = value.flatMap((step): SessionAgentStep[] =>
+    isObjectRecord(step) &&
+    typeof step['id'] === 'string' &&
+    typeof step['title'] === 'string' &&
+    (step['status'] === 'running' ||
+      step['status'] === 'completed' ||
+      step['status'] === 'failed')
+      ? [{ id: step['id'], title: step['title'], status: step['status'] }]
+      : [],
+  );
+  return steps.length > 0 ? steps : undefined;
+}
+
+export interface AgentRecordTranscriptUpdateInput {
+  /** uuid of the `agent_message` / `agent_mention` record. */
+  readonly recordId: string;
+  readonly subtype: 'agent_message' | 'agent_mention';
+  /** The record's `systemPayload`; validated here. */
+  readonly payload: unknown;
+  readonly timestamp?: string | number;
+}
+
+/**
+ * The one session update a session multi-agent record projects to. Shared by
+ * replay (`projectUserRecord`) and the ACP child's live emission when it
+ * writes the record, so both carry the same role, text, `_meta.qwenAgentMessage`
+ * and `qwenTranscript.{segmentId, sourceRecordIds}` and reconcile.
+ *
+ * - `agent_message`: an assistant chunk authored by the agent, segment
+ *   `agent:<runId>`.
+ * - `agent_mention`: a user chunk, segment `mention:<recordId>`.
+ *
+ * Returns `undefined` for a payload without display text.
+ */
+export function createAgentRecordTranscriptUpdate(
+  input: AgentRecordTranscriptUpdateInput,
+): SessionUpdate | undefined {
+  const payload = isObjectRecord(input.payload) ? input.payload : undefined;
+  if (!payload || typeof payload['displayText'] !== 'string') return undefined;
+  const displayText = payload['displayText'];
+  const author = parseAgentAuthor(payload['author']);
+  if (input.subtype === 'agent_message') {
+    const runId =
+      typeof payload['runId'] === 'string' && payload['runId'].length > 0
+        ? payload['runId']
+        : undefined;
+    const status =
+      typeof payload['status'] === 'string' &&
+      AGENT_TERMINAL_STATUSES.has(payload['status'])
+        ? (payload['status'] as SessionAgentTerminalStatus)
+        : undefined;
+    const error =
+      typeof payload['error'] === 'string' && payload['error'].length > 0
+        ? payload['error']
+        : undefined;
+    const steps = parseAgentSteps(payload['steps']);
+    const totalTokens =
+      typeof payload['totalTokens'] === 'number' &&
+      Number.isFinite(payload['totalTokens'])
+        ? payload['totalTokens']
+        : undefined;
+    // A failed run can end with no reply text; show why instead of nothing.
+    // TODO(multi-agent): UI copy for an empty failed reply is a placeholder.
+    const squadOutcome =
+      payload['squadOutcome'] === 'no_action' ? 'no_action' : undefined;
+    // An empty chunk is dropped by the client's normalizer, so a squad
+    // leader's silent "no action" turn carries a short placeholder; the UI
+    // renders it from `squadOutcome`, not from this text.
+    const text =
+      displayText.length > 0
+        ? displayText
+        : status && status !== 'completed'
+          ? (error ?? `Agent run ${status}.`)
+          : squadOutcome
+            ? 'No action needed.'
+            : '';
+    if (text.length === 0) return undefined;
+    const agentMeta: QwenAgentMessageMeta = {
+      kind: 'agent_message',
+      ...(author ? { author } : {}),
+      ...(runId ? { runId } : {}),
+      ...(status ? { status } : {}),
+      ...(error ? { error } : {}),
+      ...(steps ? { steps } : {}),
+      ...(totalTokens !== undefined ? { totalTokens } : {}),
+      ...(squadOutcome ? { squadOutcome } : {}),
+    };
+    return createTranscriptMessageUpdate({
+      role: 'assistant',
+      text,
+      timestamp: input.timestamp,
+      sourceRecordIds: [input.recordId],
+      // TODO(multi-agent): a record without runId falls back to its uuid.
+      segmentId: runId ? `agent:${runId}` : `agent-record:${input.recordId}`,
+      extra: {
+        source: 'agent_message',
+        qwenAgentMessage: agentMeta,
+        qwenDiscreteMessage: true,
+      },
+    });
+  }
+  if (displayText.length === 0) return undefined;
+  const mentionedAgentIds = Array.isArray(payload['mentionedAgentIds'])
+    ? payload['mentionedAgentIds'].filter(
+        (id): id is string => typeof id === 'string',
+      )
+    : [];
+  const mentionedSquadIds = Array.isArray(payload['mentionedSquadIds'])
+    ? payload['mentionedSquadIds'].filter(
+        (id): id is string => typeof id === 'string',
+      )
+    : [];
+  const mentionError =
+    typeof payload['error'] === 'string' && payload['error'].length > 0
+      ? payload['error']
+      : undefined;
+  const mentionMeta: QwenAgentMessageMeta = {
+    kind: 'agent_mention',
+    mentionedAgentIds,
+    ...(mentionedSquadIds.length > 0 ? { mentionedSquadIds } : {}),
+    ...(mentionError ? { error: mentionError } : {}),
+    ...(author ? { author } : {}),
+  };
+  return createTranscriptMessageUpdate({
+    role: 'user',
+    text: displayText,
+    timestamp: input.timestamp,
+    sourceRecordIds: [input.recordId],
+    // The contract comment says `mention:<recordKey>`; the record uuid is
+    // what both live and replay know, so it is the key here.
+    segmentId: `mention:${input.recordId}`,
+    extra: {
+      source: 'agent_mention',
+      qwenAgentMessage: mentionMeta,
+      qwenDiscreteMessage: true,
+    },
+  });
 }
 
 export function createTranscriptImageUpdate(
@@ -744,8 +934,10 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         activeSegmentLane = undefined;
         activeSegmentId = undefined;
       }
+      // An update that already names its segment (session agent records)
+      // keeps it, so the live emission and this replay reconcile.
       const projectedUpdate =
-        lane && activeSegmentId
+        lane && activeSegmentId && !hasExplicitTranscriptSegmentId(update)
           ? withTranscriptSegmentId(update, activeSegmentId)
           : update;
       if (isTranscriptDiscreteMessage(update)) {
@@ -889,6 +1081,21 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
           : {}),
       },
     };
+    if (
+      record.subtype === 'agent_message' ||
+      record.subtype === 'agent_mention'
+    ) {
+      // `message` holds the model envelope; project the authored display
+      // text through the helper the live emission uses.
+      const update = createAgentRecordTranscriptUpdate({
+        recordId: record.uuid,
+        subtype: record.subtype,
+        payload: record.systemPayload,
+        timestamp: record.timestamp,
+      });
+      if (update) yield emit(update);
+      return;
+    }
     const replayMeta: UpdateMetaOptions =
       record.subtype === 'mid_turn_user_message'
         ? {
@@ -1648,6 +1855,16 @@ function withTranscriptSegmentId(
       },
     },
   } as unknown as SessionUpdate;
+}
+
+function hasExplicitTranscriptSegmentId(update: SessionUpdate): boolean {
+  const meta = (update as unknown as Record<string, unknown>)['_meta'];
+  const transcript = isObjectRecord(meta) ? meta['qwenTranscript'] : undefined;
+  return (
+    isObjectRecord(transcript) &&
+    typeof transcript['segmentId'] === 'string' &&
+    transcript['segmentId'].length > 0
+  );
 }
 
 function transcriptSegmentLane(update: SessionUpdate): string | undefined {
