@@ -18,6 +18,7 @@ import { processBootLoaderEnv } from '../config/shared-env-keys.js';
 import { createServer } from 'node:http';
 import { MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES } from './managed-runtime-attestation-contract.js';
 import {
+  LedgerSweepRetiredError,
   LedgerSweepUnprovenError,
   processGroupLiveness,
   queryProcessTable,
@@ -254,10 +255,20 @@ describe.skipIf(process.platform === 'win32')(
     afterEach(async () => {
       await Promise.all(
         workers.splice(0).map((worker) =>
-          // close() rejects only with its AggregateError contract — anything
-          // else is a defect this teardown must not swallow.
+          // close() reports every stop failure through its one AggregateError
+          // wrapper, so the discrimination must be on the members: the ledger
+          // tests above deliberately leave a sweep unproven or retired, and
+          // those members this teardown tolerates. Anything else — a worker
+          // whose process tree could not be proven gone — is a defect it
+          // must surface.
           worker.close().catch((error) => {
             if (!(error instanceof AggregateError)) throw error;
+            const unexpected = error.errors.filter(
+              (member) =>
+                !(member instanceof LedgerSweepUnprovenError) &&
+                !(member instanceof LedgerSweepRetiredError),
+            );
+            if (unexpected.length > 0) throw new AggregateError(unexpected);
           }),
         ),
       );
@@ -1344,13 +1355,37 @@ describe.skipIf(process.platform === 'win32')(
   },
 );
 
+/** The last failure a tolerant poll swallowed, so an expired deadline can name the cause. */
+let lastTableError: unknown;
+let tableFailuresInARow = 0;
+
 /** A transient ps failure retries within the poll's deadline instead of aborting the test. */
 function queryProcessTableTolerant(): ReadonlyMap<number, ProcessTableRow> {
   try {
-    return queryProcessTable();
-  } catch {
+    const table = queryProcessTable();
+    tableFailuresInARow = 0;
+    return table;
+  } catch (error) {
+    lastTableError = error;
+    // Every break condition below needs positive table evidence, so a
+    // persistent failure — a missing ps, a query that always times out —
+    // can only burn the deadline. After a margin of consecutive failures
+    // the cause itself aborts the poll instead of the fixture's name.
+    if (++tableFailuresInARow >= 20) throw error;
     return new Map();
   }
+}
+
+/** The deadline error of a table poll, naming the failure it kept tolerating. */
+function tableDeadlineError(message: string): Error {
+  if (lastTableError === undefined) return new Error(message);
+  return new Error(
+    `${message} (last process-table failure: ${
+      lastTableError instanceof Error
+        ? lastTableError.message
+        : String(lastTableError)
+    })`,
+  );
 }
 
 describe.skipIf(process.platform === 'win32')(
@@ -2411,6 +2446,37 @@ describe.skipIf(process.platform === 'win32')(
       },
     );
 
+    it('heals a loose ledger directory at creation, before any launch', async () => {
+      // The startup sweep is the third path that touches the ledger
+      // directory, and it runs at environment creation — before any worker
+      // launch. A session that never runs a tool, or whose admissions the
+      // sweep itself refuses, must still heal a directory a pre-hardening
+      // build left loose, or the old ledgers inside stay listable by
+      // another local user forever.
+      const ledgerDir = path.join(
+        config.storage.getProjectTempDir(),
+        'managed-runtime',
+      );
+      await mkdir(ledgerDir, { recursive: true });
+      chmodSync(ledgerDir, 0o755);
+      sweepWitnesses.dirCalls.length = 0;
+      create('ok');
+      // The startup pass actually ran over the directory: without that
+      // witness the mode assertion could green off a path that never read.
+      await vi.waitFor(
+        () => {
+          expect(
+            sweepWitnesses.dirCalls.some(
+              (call) => call.directory === ledgerDir,
+            ),
+          ).toBe(true);
+        },
+        { timeout: 10_000 },
+      );
+      // No execute() anywhere: no launch-path heal can mask the read side.
+      expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
+    });
+
     it(
       'a second environment creation never sweeps the first live worker',
       { timeout: 30_000 },
@@ -2576,7 +2642,9 @@ describe.skipIf(process.platform === 'win32')(
                 break;
               }
               if (Date.now() > memberDeadline) {
-                throw new Error('the leaderless member never appeared');
+                throw tableDeadlineError(
+                  'the leaderless member never appeared',
+                );
               }
               await new Promise((resolve) => setTimeout(resolve, 25));
             }
@@ -2633,7 +2701,7 @@ describe.skipIf(process.platform === 'win32')(
                 );
                 if (rows.length === 1 && rows[0]!.pid === youngPid) break;
                 if (Date.now() > settleDeadline) {
-                  throw new Error('the young group never settled');
+                  throw tableDeadlineError('the young group never settled');
                 }
                 await new Promise((resolve) => setTimeout(resolve, 25));
               }
@@ -2820,7 +2888,9 @@ describe.skipIf(process.platform === 'win32')(
                 break;
               }
               if (Date.now() > memberDeadline) {
-                throw new Error('the leaderless member never appeared');
+                throw tableDeadlineError(
+                  'the leaderless member never appeared',
+                );
               }
               await new Promise((resolve) => setTimeout(resolve, 25));
             }
@@ -2946,7 +3016,9 @@ describe.skipIf(process.platform === 'win32')(
                 break;
               }
               if (Date.now() > memberDeadline) {
-                throw new Error('the leaderless member never appeared');
+                throw tableDeadlineError(
+                  'the leaderless member never appeared',
+                );
               }
               await new Promise((resolve) => setTimeout(resolve, 25));
             }
@@ -3072,7 +3144,9 @@ describe.skipIf(process.platform === 'win32')(
                 break;
               }
               if (Date.now() > memberDeadline) {
-                throw new Error('the leaderless member never appeared');
+                throw tableDeadlineError(
+                  'the leaderless member never appeared',
+                );
               }
               await new Promise((resolve) => setTimeout(resolve, 25));
             }

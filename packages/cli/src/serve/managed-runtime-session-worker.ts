@@ -1253,6 +1253,10 @@ export function createManagedRuntimeEnvironment(
   // admission it runs with: a stop it cannot prove quarantines the engine
   // for every admission AFTER the report — a session just admitted has its
   // own ledger and its own close-time sweep, so it is never untracked work.
+  // The sweep is the read side of the directory and runs before any launch,
+  // so the owner-only heal runs here too: a session whose admissions are
+  // refused never reaches the launch-path heal at all.
+  ensureLedgerDirectory(ledgerDir);
   sweepStaleRuntimeLedgers(ledgerDir, quarantine);
   const worker = new ManagedSessionRuntimeWorker(
     config.getSessionId(),

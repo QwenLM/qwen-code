@@ -216,10 +216,10 @@ describe.skipIf(process.platform === 'win32')(
     });
 
     it('kills in pid order when the ledger fails to record: never a settle-then-kill', async () => {
-      // The failure path has one admissible order: the group the ledger
-      // could not record dies BEFORE the caller hears the call failed — a
-      // settle-then-kill shape would hand back an error while the group
-      // still runs.
+      // The failure path has one admissible order: the ledger record is
+      // attempted and the kill is INITIATED before the caller hears the call
+      // failed. The kill is deliberately not awaited — post-SIGKILL reaping
+      // is scheduler-paced, so the group may still be running at the settle.
       const events: string[] = [];
       const realWait = ledger.waitForGroupExit.bind(ledger);
       const doubled = {
@@ -290,6 +290,33 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.executionStatus).toBe('error');
       expect(result.error?.message).toContain('ledger disk full');
       expect(seen).toHaveLength(1);
+      // The kill must be INITIATED before the caller hears the failure. The
+      // ledger double never observes signalProcessGroup, so the oracle is
+      // the group leader's kernel state after a synchronous spin: long
+      // enough for a sent SIGKILL to land, and — a spin yields to the
+      // kernel but never to the event loop — proof that a kill deferred to
+      // a macrotask cannot have run. Linux-only: /proc is the readable
+      // kernel state.
+      if (process.platform === 'linux') {
+        const spinUntil = Date.now() + 40;
+        while (Date.now() < spinUntil) {
+          // Busy on purpose: yielding would let a deferred kill land here.
+        }
+        let state: string | undefined;
+        try {
+          const stat = readFileSync(`/proc/${seen[0]!}/stat`, 'utf8');
+          // `pid (comm) state …` — comm itself may hold spaces and parens,
+          // so the state is the first field after the LAST ')'.
+          state = stat
+            .slice(stat.lastIndexOf(')') + 1)
+            .trim()
+            .split(' ')[0];
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          state = undefined; // Reaped already: not running by any measure.
+        }
+        expect(state ?? 'gone').not.toMatch(/^[RS]$/);
+      }
       // The callback killed the group it could not record. Post-SIGKILL
       // reaping is scheduler-paced: assert the consequence it settles into,
       // never the instant the kill lands.

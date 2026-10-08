@@ -481,8 +481,16 @@ export function ensureLedgerDirectory(ledgerDir: string): void {
   if (process.platform === 'win32') return;
   try {
     chmodSync(ledgerDir, 0o700);
-  } catch {
-    // Best-effort: a truly unwritable dir fails the ledger write itself.
+  } catch (error) {
+    // Best-effort: a truly unwritable dir fails the ledger write itself. But
+    // a chmod the owner or the mount refuses while the dir stays writable —
+    // a root-created leaf, sshfs/CIFS — leaves the ledger readable, and that
+    // degradation must not be silent.
+    debugLogger.warn(
+      `Managed Runtime ledger directory ${ledgerDir} could not be made owner-only: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
   }
 }
 

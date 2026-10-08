@@ -50,6 +50,14 @@ const readFileSyncControl = vi.hoisted(() => ({ failing: new Set<string>() }));
 const writeFileSyncControl = vi.hoisted(() => ({
   failingPrefix: new Set<string>(),
 }));
+// A controllable chmodSync for the owner-only-heal failure path: enrolled
+// paths throw EPERM, as a chmod refused by the owner or the mount does,
+// everything else passes through.
+const chmodSyncControl = vi.hoisted(() => ({ failing: new Set<string>() }));
+// The warn channel of the module under test: a best-effort step that
+// degrades must say so, and the suite can only see that through the logger.
+// Transparent: every call still reaches the real logger.
+const debugWarnings = vi.hoisted(() => ({ messages: [] as string[] }));
 // A count of the blocking ps consults the module under test issues:
 // every process-table read goes through one execFileSync, so a fanout that
 // should share one consult shows up as a count here. Transparent: every
@@ -96,6 +104,17 @@ vi.mock('node:fs', async (importOriginal) => {
       }
       return actual.rmSync(target, options);
     },
+    chmodSync: ((target: unknown, ...rest: unknown[]): unknown => {
+      if (typeof target === 'string' && chmodSyncControl.failing.has(target)) {
+        throw Object.assign(new Error(`EPERM: cannot chmod ${target}`), {
+          code: 'EPERM',
+        });
+      }
+      return (actual.chmodSync as (...args: unknown[]) => unknown)(
+        target,
+        ...rest,
+      );
+    }) as typeof actual.chmodSync,
     readFileSync: ((target: unknown, ...rest: unknown[]): unknown => {
       if (
         typeof target === 'string' &&
@@ -112,6 +131,29 @@ vi.mock('node:fs', async (importOriginal) => {
     }) as typeof actual.readFileSync,
   };
 });
+
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/debugLogger.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/debugLogger.js')
+      >();
+    return {
+      ...actual,
+      createDebugLogger: (tag?: string) => {
+        const logger = actual.createDebugLogger(tag);
+        return {
+          ...logger,
+          warn: (...args: unknown[]) => {
+            debugWarnings.messages.push(args.map(String).join(' '));
+            logger.warn(...args);
+          },
+        };
+      },
+    };
+  },
+);
 
 const POSIX = process.platform !== 'win32';
 
@@ -275,6 +317,43 @@ describe('Managed Runtime ledger', () => {
         });
         expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
         expect(statSync(path.dirname(ledgerDir)).mode & 0o777).toBe(ambient);
+      },
+    );
+
+    it.skipIf(!POSIX)(
+      'still writes the ledger when the directory refuses the chmod, and says so',
+      async () => {
+        // A chmod the owner or the mount refuses — a root-created leaf, a
+        // shared CI cache, sshfs/CIFS — must not fail the creation: the
+        // directory stays writable, the ledger lands, and the silent
+        // degradation is warned instead of swallowed.
+        const ledgerDir = path.join(root, 'unchmoddable');
+        const workFile = path.join(ledgerDir, 'ledger.json');
+        chmodSyncControl.failing.add(ledgerDir);
+        debugWarnings.messages.length = 0;
+        try {
+          const ledger = ManagedRuntimeLedger.create({
+            workFile,
+            worker: {
+              pid: process.pid,
+              pgid: process.pid,
+              incarnation: 'inc',
+              startedAt: Date.now(),
+            },
+          });
+          ledger.addGroup({ pgid: 4242, callId: 'c1', startedAt: 123 });
+        } finally {
+          chmodSyncControl.failing.delete(ledgerDir);
+        }
+        const written = JSON.parse(await readFile(workFile, 'utf8')) as {
+          version: number;
+          groups: Array<{ pgid: number }>;
+        };
+        expect(written.version).toBe(1);
+        expect(written.groups.map((group) => group.pgid)).toContain(4242);
+        expect(
+          debugWarnings.messages.some((message) => message.includes(ledgerDir)),
+        ).toBe(true);
       },
     );
 
