@@ -457,6 +457,8 @@ describe('validateTranscriptRecord', () => {
     rewind: true,
     agent_bootstrap: true,
     agent_launch_prompt: true,
+    agent_mention: true,
+    agent_message: true,
     agent_retry: true,
     agent_session_ready: true,
     file_history_snapshot: true,
