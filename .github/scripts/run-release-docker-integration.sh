@@ -42,6 +42,16 @@ check_docker_data_root_floor() {
   if [ "$RUNNER_ENVIRONMENT" != 'self-hosted' ]; then
     return 0
   fi
+  # Validate this gate's own knobs first: the helper validates what it is
+  # handed under ITS variable names, so a malformed DISK_FLOOR_DOCKER_*
+  # value would otherwise surface as a bad DISK_FLOOR_MIN_FREE_KB — and the
+  # pre-vitest knob's typo only after the whole image build.
+  for knob in DISK_FLOOR_DOCKER_MIN_FREE_KB DISK_FLOOR_DOCKER_POST_MIN_FREE_KB DISK_FLOOR_DOCKER_MIN_FREE_INODES; do
+    if [ -n "${!knob:-}" ] && ! [[ "${!knob}" =~ ^[0-9]{1,18}$ ]]; then
+      echo "::error::${knob} must be a non-negative integer of at most 18 digits"
+      return 1
+    fi
+  done
   if [ ! -f .github/scripts/check-disk-floor.sh ]; then
     echo "::warning::docker data root floor gate skipped: .github/scripts/check-disk-floor.sh not present at this ref on ${RUNNER_NAME:-this runner}"
     return 0
@@ -54,10 +64,17 @@ check_docker_data_root_floor() {
   # Dedicated knobs, not the job-start gate's DISK_FLOOR_MIN_FREE_KB and
   # DISK_FLOOR_MIN_FREE_INODES: one env setting must not move both floors.
   # The free-space floor arrives as an argument because the two checkpoints
-  # size it differently; the inode floor stays shared.
-  DISK_FLOOR_MIN_FREE_KB="$min_free_kb" \
-    DISK_FLOOR_MIN_FREE_INODES="${DISK_FLOOR_DOCKER_MIN_FREE_INODES:-100000}" \
-    bash .github/scripts/check-disk-floor.sh "$docker_root"
+  # size it differently; the inode floor stays shared. An unset override is
+  # forwarded empty so the helper's own default (its :- fallback) applies:
+  # copying the calibrated value here would drift the next time the helper
+  # is retuned. A failure is re-labelled with this gate's knobs so the
+  # operator is not sent to the job-start gate's variables.
+  if ! DISK_FLOOR_MIN_FREE_KB="$min_free_kb" \
+    DISK_FLOOR_MIN_FREE_INODES="${DISK_FLOOR_DOCKER_MIN_FREE_INODES:-}" \
+    bash .github/scripts/check-disk-floor.sh "$docker_root"; then
+    echo "::error::docker data root floor gate failed for ${docker_root} on ${RUNNER_NAME:-this runner}; its knobs are DISK_FLOOR_DOCKER_MIN_FREE_KB (pre-build), DISK_FLOOR_DOCKER_POST_MIN_FREE_KB (pre-vitest) and DISK_FLOOR_DOCKER_MIN_FREE_INODES, not the job-start gate's DISK_FLOOR_MIN_FREE_KB / DISK_FLOOR_MIN_FREE_INODES"
+    return 1
+  fi
 }
 
 if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
@@ -96,7 +113,17 @@ timeout 20m docker image prune --force --filter 'until=24h' || echo "::warning::
 # nothing.
 timeout 20m docker builder prune --all --force --filter 'until=24h' || echo "::warning::docker build cache cleanup failed on ${RUNNER_NAME:-this runner}"
 
-if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
+# The presence probe runs with the shared host locks held, so it keeps the
+# same bound as every other daemon call — and a timeout must not read as
+# "image absent": rebuilding against a wedged daemon would hang with the
+# locks held until the job timeout.
+image_inspect_status=0
+timeout 60 docker image inspect "$sandbox_image" > /dev/null 2>&1 || image_inspect_status=$?
+if [ "$image_inspect_status" -eq 124 ]; then
+  echo "::error::docker image inspect timed out after 60s on ${RUNNER_NAME:-this runner}; the daemon is wedged — failing instead of holding the shared locks"
+  exit 1
+fi
+if [ "$image_inspect_status" -ne 0 ]; then
   if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
     # Host build mutex, shared with the E2E lane and held only while an image
     # is prepared.
@@ -120,7 +147,9 @@ if ! docker image inspect "$sandbox_image" > /dev/null 2>&1; then
     exec 7>&-
   fi
 fi
-sandbox_image_id="$(docker image inspect --format '{{.Id}}' "$sandbox_image")"
+# Fails closed under set -e: the id read runs with the locks held, and an
+# empty id must never reach QWEN_SANDBOX_IMAGE.
+sandbox_image_id="$(timeout 60 docker image inspect --format '{{.Id}}' "$sandbox_image")"
 export QWEN_SANDBOX_IMAGE="$sandbox_image_id"
 if [ "$RUNNER_ENVIRONMENT" = 'self-hosted' ]; then
   flock --unlock 8
@@ -137,7 +166,7 @@ fi
 # already consumed that headroom, so re-charging it here would fail the lane
 # after the build succeeded. DISK_FLOOR_DOCKER_POST_MIN_FREE_KB tunes this
 # checkpoint independently of the pre-build floor.
-check_docker_data_root_floor "${DISK_FLOOR_DOCKER_POST_MIN_FREE_KB:-2097152}"
+check_docker_data_root_floor "${DISK_FLOOR_DOCKER_POST_MIN_FREE_KB:-}"
 
 # The package.json docker test scripts each rebuild the sandbox image. Run
 # vitest directly here so this job reuses the image built above.

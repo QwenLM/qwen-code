@@ -2192,6 +2192,19 @@ describe('release workflow', () => {
     expect(dockerIntegrationScript).toContain(
       "timeout 60 docker info --format '{{.DockerRootDir}}'",
     );
+    // The image-presence probe and the image-id read run with the shared
+    // host locks held, so both carry the same bound as the prunes — and the
+    // probe discriminates a timeout (124) from "image absent" instead of
+    // silently taking the rebuild branch against a wedged daemon.
+    expect(dockerIntegrationScript).toContain(
+      'timeout 60 docker image inspect "$sandbox_image"',
+    );
+    expect(dockerIntegrationScript).toContain(
+      '[ "$image_inspect_status" -eq 124 ]',
+    );
+    expect(dockerIntegrationScript).toMatch(
+      /timeout [0-9]+ docker image inspect --format '\{\{\.Id\}\}'/,
+    );
   });
 
   const dockerIntegrationScriptAbsolutePath = join(
@@ -2218,6 +2231,8 @@ describe('release workflow', () => {
     dockerFloorKb,
     dockerFloorInodes,
     dockerPostFloorKb,
+    postGateExit,
+    inspectTimesOut = false,
   } = {}) => {
     const directory = mkdtempSync(
       join(tmpdir(), 'release-docker-integration-'),
@@ -2244,6 +2259,11 @@ if [ "$1" = 'image' ] && [ "$2" = 'inspect' ]; then
   if [ "$3" = '--format' ]; then
     echo sha256:fakeimageid
     exit 0
+  fi
+  # The stubbed timeout passes the child's status through, so a 124 here
+  # stands in for the probe hitting its bound.
+  if [ "$INSPECT_TIMES_OUT" = '1' ]; then
+    exit 124
   fi
   if [ "$IMAGE_PRESENT" = '1' ]; then
     exit 0
@@ -2272,10 +2292,20 @@ exit 0`,
     stub('npm', `printf 'npm %s\\n' "$*" >> "$CALLS_LOG"`);
     stub('npx', `printf 'npx %s\\n' "$*" >> "$CALLS_LOG"`);
     if (!helperAbsent) {
+      // Both checkpoints share this stub: count invocations so a case can
+      // fail the pre-vitest gate while the pre-build gate passes.
       writeFileSync(
         join(directory, '.github', 'scripts', 'check-disk-floor.sh'),
         '#!/bin/sh\n' +
-          'printf \'disk-floor %s floor=%s inodes=%s\\n\' "$*" "${DISK_FLOOR_MIN_FREE_KB:-unset}" "${DISK_FLOOR_MIN_FREE_INODES:-100000}" >> "$CALLS_LOG"\n' +
+          'count_file="$CALLS_LOG.gate-count"\n' +
+          'count=0\n' +
+          'if [ -f "$count_file" ]; then count=$(cat "$count_file"); fi\n' +
+          'count=$((count + 1))\n' +
+          'printf \'%s\' "$count" > "$count_file"\n' +
+          'printf \'disk-floor %s floor=%s inodes=%s\\n\' "$*" "${DISK_FLOOR_MIN_FREE_KB:-unset}" "${DISK_FLOOR_MIN_FREE_INODES:-unset}" >> "$CALLS_LOG"\n' +
+          'if [ "$count" -gt 1 ] && [ -n "${POST_GATE_EXIT:-}" ]; then\n' +
+          '  exit "$POST_GATE_EXIT"\n' +
+          'fi\n' +
           'exit "${GATE_EXIT:-0}"\n',
         { mode: 0o755 },
       );
@@ -2290,6 +2320,7 @@ exit 0`,
         CALLS_LOG: callsLog,
         DOCKER_ROOT_DIR: dockerRoot,
         IMAGE_PRESENT: imagePresent ? '1' : '0',
+        INSPECT_TIMES_OUT: inspectTimesOut ? '1' : '0',
         GATE_EXIT: gateExit,
         PRUNE_FAILS: pruneFails ? '1' : '0',
         IMAGE_PRUNE_FAILS: imagePruneFails ? '1' : '0',
@@ -2302,6 +2333,7 @@ exit 0`,
       delete env.DISK_FLOOR_DOCKER_MIN_FREE_KB;
       delete env.DISK_FLOOR_DOCKER_MIN_FREE_INODES;
       delete env.DISK_FLOOR_DOCKER_POST_MIN_FREE_KB;
+      delete env.POST_GATE_EXIT;
       if (ambientDiskFloorKb !== undefined) {
         env.DISK_FLOOR_MIN_FREE_KB = ambientDiskFloorKb;
       }
@@ -2316,6 +2348,9 @@ exit 0`,
       }
       if (dockerPostFloorKb !== undefined) {
         env.DISK_FLOOR_DOCKER_POST_MIN_FREE_KB = dockerPostFloorKb;
+      }
+      if (postGateExit !== undefined) {
+        env.POST_GATE_EXIT = postGateExit;
       }
       const result = spawnSync('bash', [dockerIntegrationScriptAbsolutePath], {
         cwd: directory,
@@ -2416,14 +2451,15 @@ exit 0`,
       // One gate sample before the build and one after it: the #13479 death
       // landed in the vitest phase, after the build had already finished.
       // The pre-build sample charges the build-sized floor; the pre-vitest
-      // sample charges the repo's calibrated job floor, because the build
-      // budget is spent by then.
+      // sample forwards an empty override so the helper's calibrated job
+      // floor applies — echoed as "unset" here, so a re-hardcoded literal
+      // turns red instead of silently drifting from check-disk-floor.sh.
       expect(gates).toHaveLength(2);
       expect(lines[gates[0]]).toBe(
-        `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
+        `disk-floor ${dockerRoot} floor=8388608 inodes=unset`,
       );
       expect(lines[gates[1]]).toBe(
-        `disk-floor ${dockerRoot} floor=2097152 inodes=100000`,
+        `disk-floor ${dockerRoot} floor=unset inodes=unset`,
       );
       expect(gates[0]).toBeGreaterThan(imagePrune);
       expect(build).toBeGreaterThan(gates[0]);
@@ -2453,6 +2489,11 @@ exit 0`,
       // process exit): no unlock may be recorded past the trip.
       expect(calls).not.toContain('flock --unlock 7');
       expect(calls).not.toContain('flock --unlock 8');
+      // The lane re-labels a helper failure with the knobs this gate
+      // actually reads, so the operator is not sent to the job-start gate's
+      // variables.
+      expect(result.stdout).toContain('docker data root floor gate failed');
+      expect(result.stdout).toContain('DISK_FLOOR_DOCKER_MIN_FREE_KB');
     },
   );
 
@@ -2474,10 +2515,10 @@ exit 0`,
         .filter((line) => line.startsWith('disk-floor'));
       expect(floors).toHaveLength(2);
       expect(floors[0]).toBe(
-        `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
+        `disk-floor ${dockerRoot} floor=8388608 inodes=unset`,
       );
       expect(floors[1]).toBe(
-        `disk-floor ${dockerRoot} floor=2097152 inodes=100000`,
+        `disk-floor ${dockerRoot} floor=unset inodes=unset`,
       );
     },
   );
@@ -2499,10 +2540,10 @@ exit 0`,
       // pre-vitest checkpoint has its own knob so the build budget is
       // charged once.
       expect(floors[0]).toBe(
-        `disk-floor ${dockerRoot} floor=4194304 inodes=100000`,
+        `disk-floor ${dockerRoot} floor=4194304 inodes=unset`,
       );
       expect(floors[1]).toBe(
-        `disk-floor ${dockerRoot} floor=2097152 inodes=100000`,
+        `disk-floor ${dockerRoot} floor=unset inodes=unset`,
       );
     },
   );
@@ -2523,41 +2564,30 @@ exit 0`,
       // DISK_FLOOR_DOCKER_POST_MIN_FREE_KB sizes the pre-vitest sample
       // only: an operator can tune the two checkpoints independently.
       expect(floors[0]).toBe(
-        `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
+        `disk-floor ${dockerRoot} floor=8388608 inodes=unset`,
       );
       expect(floors[1]).toBe(
-        `disk-floor ${dockerRoot} floor=3145728 inodes=100000`,
+        `disk-floor ${dockerRoot} floor=3145728 inodes=unset`,
       );
     },
   );
 
   it.skipIf(process.platform === 'win32')(
-    'runs both vitest phases on a host admitted between the build and vitest floors',
+    'stops before the vitest phase when the post-build gate trips',
     () => {
-      // A host admitted by the pre-build floor can drop below it during the
-      // build: the build's own layers are exactly what the 8 GiB budget
-      // pays for. Re-charging that budget at the pre-vitest checkpoint
-      // would fail every such host after the build it already paid for, so
-      // this gate charges the repo's calibrated job floor instead.
-      const { result, calls, dockerRoot } = runDockerIntegrationScript({
+      // A host admitted by the pre-build floor can drop below the
+      // pre-vitest floor during the build: the build's own layers are
+      // exactly what the 8 GiB budget pays for. The post-build gate must
+      // then stop the lane before vitest writes container layers to the
+      // same filesystem — #13479 died in that phase.
+      const { result, calls } = runDockerIntegrationScript({
         runnerEnvironment: 'self-hosted',
+        postGateExit: '1',
       });
-      expect(result.status, result.stderr).toBe(0);
-      const lines = calls.trim().split('\n');
-      const gates = lines
-        .map((line, index) => (line.startsWith('disk-floor') ? index : -1))
-        .filter((index) => index >= 0);
-      expect(gates).toHaveLength(2);
-      expect(lines[gates[0]]).toBe(
-        `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
-      );
-      expect(lines[gates[1]]).toBe(
-        `disk-floor ${dockerRoot} floor=2097152 inodes=100000`,
-      );
+      expect(result.status).not.toBe(0);
       expect(calls).toContain('npm run build:sandbox');
-      expect(
-        lines.filter((line) => line.startsWith('npx vitest')),
-      ).toHaveLength(2);
+      expect(calls).toContain('flock --unlock 7');
+      expect(calls).not.toContain('npx vitest');
     },
   );
 
@@ -2579,10 +2609,10 @@ exit 0`,
         .filter((line) => line.startsWith('disk-floor'));
       expect(floors).toHaveLength(2);
       expect(floors[0]).toBe(
-        `disk-floor ${dockerRoot} floor=8388608 inodes=100000`,
+        `disk-floor ${dockerRoot} floor=8388608 inodes=unset`,
       );
       expect(floors[1]).toBe(
-        `disk-floor ${dockerRoot} floor=2097152 inodes=100000`,
+        `disk-floor ${dockerRoot} floor=unset inodes=unset`,
       );
     },
   );
@@ -2604,7 +2634,7 @@ exit 0`,
         `disk-floor ${dockerRoot} floor=8388608 inodes=200000`,
       );
       expect(floors[1]).toBe(
-        `disk-floor ${dockerRoot} floor=2097152 inodes=200000`,
+        `disk-floor ${dockerRoot} floor=unset inodes=200000`,
       );
     },
   );
@@ -2664,7 +2694,7 @@ exit 0`,
       expect(cachePrune).toBeGreaterThan(danglingPrune);
       expect(gates).toHaveLength(1);
       expect(lines[gates[0]]).toBe(
-        `disk-floor ${dockerRoot} floor=2097152 inodes=100000`,
+        `disk-floor ${dockerRoot} floor=unset inodes=unset`,
       );
       expect(gates[0]).toBeGreaterThan(cachePrune);
       expect(firstVitest).toBeGreaterThan(gates[0]);
@@ -2681,6 +2711,43 @@ exit 0`,
       });
       expect(result.status).not.toBe(0);
       expect(calls).toContain('disk-floor');
+      expect(calls).not.toContain('npm run build:sandbox');
+      expect(calls).not.toContain('npx vitest');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'fails fast with the docker knob named when a docker floor knob is malformed',
+    () => {
+      // The helper validates what it is handed under ITS variable names, so
+      // without the lane-side check a malformed DISK_FLOOR_DOCKER_* value
+      // is reported as a bad DISK_FLOOR_MIN_FREE_KB — and the pre-vitest
+      // knob's typo only after the whole image build.
+      const { result, calls } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
+        dockerPostFloorKb: '3G',
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain(
+        'DISK_FLOOR_DOCKER_POST_MIN_FREE_KB must be a non-negative integer',
+      );
+      expect(calls).not.toContain('npm run build:sandbox');
+      expect(calls).not.toContain('npx vitest');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'fails fast when the image-presence probe times out instead of rebuilding',
+    () => {
+      // The probe runs with the shared host locks held: a wedged daemon
+      // must fail the lane on the bound, not read as "image absent" and
+      // rebuild against a daemon that cannot answer.
+      const { result, calls } = runDockerIntegrationScript({
+        runnerEnvironment: 'self-hosted',
+        inspectTimesOut: true,
+      });
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).toContain('docker image inspect timed out');
       expect(calls).not.toContain('npm run build:sandbox');
       expect(calls).not.toContain('npx vitest');
     },
