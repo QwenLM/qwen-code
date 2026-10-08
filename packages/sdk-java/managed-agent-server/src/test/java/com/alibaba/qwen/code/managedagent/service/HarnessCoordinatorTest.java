@@ -525,9 +525,14 @@ class HarnessCoordinatorTest {
 
     // An approval wait is bounded by the approval timeout, never by a
     // durable verdict: a decline with this reason stays retriable — the
-    // Turn must not die while the Action is still requested.
-    @Test
-    void awaitActionDeclineStaysRetriableWhileActionRequested() {
+    // Turn must not die while the Action is still requested. 10 is exactly
+    // the spent post-admission budget and 42 is far past it: no constant
+    // retry budget tracks the 1s-to-24h operator-settable approval timeout,
+    // so the wait is exempt (review R3-9).
+    @ParameterizedTest(name = "retryCount = {0}")
+    @ValueSource(ints = {5, 10, 42})
+    void awaitActionDeclineStaysRetriableWhileActionRequested(
+            int retryCount) {
         AgentStateStore store = mock(AgentStateStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
@@ -535,13 +540,18 @@ class HarnessCoordinatorTest {
         // submissionAttempted = true: the wait the retry beats the human
         // over happens after admission, where the budget is bypassed.
         TurnRecord claimed = turn("tenant", "session", "turn", "prompt",
-                "epoch-1", 3, "RUNNING", true, 5);
+                "epoch-1", 3, "RUNNING", true, retryCount);
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
         when(store.requireSession("tenant", "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", null,
                         "ACTIVE", "boot-old", null, 0, 0, 1, 1, null, 1));
+        // Keep the terminal path's reconcile observable: without the
+        // exemption the post-admission budget arm cancels through the bound
+        // Harness before recording the terminal failure.
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-old"))).thenReturn(true);
         when(harness.recoverManagedRuntime("tenant", "session", false))
                 .thenThrow(new HostedHarnessRecoveryDeclinedException(
                         "await_action"));
@@ -558,6 +568,7 @@ class HarnessCoordinatorTest {
                 eq("turn"), anyString(), anyLong());
         verify(store, never()).failTurn(anyString(), anyString(),
                 anyString(), anyString(), anyString(), anyString());
+        verify(harness, never()).cancel(anyString(), anyString());
     }
 
     // The daemon now answers a cancellation-only takeover plain when the

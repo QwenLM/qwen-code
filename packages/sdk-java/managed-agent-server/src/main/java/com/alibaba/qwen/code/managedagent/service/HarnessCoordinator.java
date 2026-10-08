@@ -236,7 +236,7 @@ public class HarnessCoordinator {
             // guard only catches a Harness that still declines it.
             if ("await_action".equals(error.getReason())) {
                 terminal = transientFailure(claimed,
-                        submissionAttempted.get(), error, false);
+                        submissionAttempted.get(), error, true);
             } else {
                 // The reason is remote-supplied; the terminal write lands
                 // in managed_agent_turn.error_message VARCHAR(2048), so bound it
