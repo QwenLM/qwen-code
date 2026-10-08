@@ -124,6 +124,76 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsLifecycle() {
+        if (!isWorkspaceFilesAvailable()) {
+            return false;
+        }
+        try {
+            return client().capabilities().getLifecycleProtocolVersion() == 1;
+        } catch (com.alibaba.qwen.code.daemon.DaemonException
+                | IllegalStateException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
+    public com.fasterxml.jackson.databind.JsonNode settleLifecycle(
+            com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+        try {
+            return doSettleLifecycle(operation);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    private com.fasterxml.jackson.databind.JsonNode doSettleLifecycle(
+            com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+        SessionRecord session = sessions.requireSession(operation.tenantId(), operation.sessionId());
+        AttachmentKey key = new AttachmentKey(operation.tenantId(), operation.sessionId());
+        HarnessSessionRef ref = attachments.get(key);
+        if (ref == null) {
+            ref = client().loadSession(new LoadHarnessSession(session.sessionId(), managedSessionStore(session),
+                    false, toolProfile(session), false).forLifecycle(operation.operationId(), operation.claimGeneration()));
+            attachments.put(key, ref);
+        }
+        var authority = Map.<String, Object>of("operationId", operation.operationId(), "claimGeneration", operation.claimGeneration());
+        var request = Map.<String, Object>of("sessionKey", Map.of("tenantId", session.tenantId(),
+                "workspaceId", session.workspace().getWorkspaceId(), "sessionId", session.sessionId()),
+                "kind", operation.kind().name().toLowerCase(java.util.Locale.ROOT), "authority", authority);
+        return new com.fasterxml.jackson.databind.ObjectMapper().valueToTree(client().settleLifecycle(ref, request));
+    }
+
+    @Override
+    public void detachLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+        try {
+            doDetachLifecycle(operation);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    private void doDetachLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+        AttachmentKey key = new AttachmentKey(operation.tenantId(), operation.sessionId());
+        HarnessSessionRef ref = attachments.get(key);
+        try {
+            var authority = Map.<String, Object>of("operationId", operation.operationId(), "claimGeneration", operation.claimGeneration());
+            if (ref == null) {
+                client().detachLifecycle(operation.sessionId(), authority);
+            } else {
+                client().detachLifecycle(ref, authority);
+            }
+        } catch (DaemonHttpException error) {
+            if (error.getStatusCode() != 404) {
+                throw error;
+            }
+        }
+        attachments.remove(key);
+        pendingRecovery.remove(key);
+    }
+
+    @Override
     public boolean isWorkspaceFilesAvailable() {
         return properties.isWorkspaceFilesEnabled();
     }

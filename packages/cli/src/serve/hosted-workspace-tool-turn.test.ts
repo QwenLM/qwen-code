@@ -61,6 +61,7 @@ import * as stdio from '../utils/stdioHelpers.js';
 
 const broker = vi.hoisted(() => ({
   fileHistory: vi.fn(),
+  authorizeLifecycle: vi.fn(),
   workspaceContext: vi.fn(),
   warm: vi.fn(),
   acquire: vi.fn(),
@@ -85,6 +86,7 @@ vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   HostedWorkspaceBroker: class {
     readonly runtimeSessionId = 'prompt';
     fileHistory = broker.fileHistory;
+    authorizeLifecycle = broker.authorizeLifecycle;
     workspaceContext = broker.workspaceContext;
     warm = broker.warm;
     acquire = broker.acquire;
@@ -172,6 +174,7 @@ beforeEach(async () => {
   vi.resetAllMocks();
   expectWritesStopped = false;
   for (const method of [
+    broker.authorizeLifecycle,
     broker.warm,
     broker.acquire,
     broker.cancel,

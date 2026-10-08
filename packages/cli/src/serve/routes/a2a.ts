@@ -232,6 +232,8 @@ function fail(failure: A2AFailure): never {
         message: `Message id was already used for different content. Existing task: ${failure.existingTaskId}.`,
         metadata: { existingTaskId: failure.existingTaskId },
       });
+    case 'unsupported':
+      throw new JsonRpcUnsupportedOperationError({ message: failure.detail });
     default: {
       // `A2AFailure` is a closed union, so this is unreachable today. It is
       // here so that adding a member is a compile error at the one place that

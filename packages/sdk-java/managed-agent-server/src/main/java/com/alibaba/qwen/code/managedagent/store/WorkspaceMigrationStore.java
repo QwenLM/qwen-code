@@ -387,8 +387,8 @@ public final class WorkspaceMigrationStore {
     }
 
     private void lockAuthority() {
-        ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenant);
+        ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
     }
 
     private void requireOwner() {
