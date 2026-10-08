@@ -50,6 +50,17 @@ public class SessionLifecycleCoordinator {
     // is the documented transient case.
     private static final int CWD_CHANGE_ATTEMPT_BUDGET = 8;
     private final AgentStateStore store;
+    private com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore lifecycle;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setWorkspaceLifecycleStore(com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore lifecycle) {
+        this.lifecycle = lifecycle;
+    }
+
+    public boolean supportsWorkspaceLifecycle() {
+        return runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle();
+    }
+
     private final ManagedSessionStore sessionStore;
     private final HarnessConnector harness;
     private final RuntimeWarmer runtimeWarmer;
@@ -169,6 +180,15 @@ public class SessionLifecycleCoordinator {
                     blocked = "workspace_close_identity_unverified";
                 }
             }
+            if (cause instanceof com.alibaba.qwen.code.managedagent.api.ApiException apiError
+                    && (apiError.getCode().startsWith("workspace_lifecycle") || apiError.getCode().startsWith("workspace_close"))) {
+                blocked = apiError.getCode();
+            }
+            if ((cause instanceof com.alibaba.qwen.code.daemon.DaemonHttpException
+                    || cause instanceof com.alibaba.qwen.code.daemon.MutationOutcomeUnknownException)
+                    && operationIsLifecycle(claimed)) {
+                blocked = "workspace_lifecycle_hooks_unsettled";
+            }
             if (valid.get() && blocked != null) {
                 store.blockLifecycleOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(), blocked, Math.addExact(clock.millis(), delay));
@@ -186,6 +206,10 @@ public class SessionLifecycleCoordinator {
         } finally {
             renewal.cancel(false);
         }
+    }
+
+    private static boolean operationIsLifecycle(OperationRecord operation) {
+        return operation.lifecycleProtocolVersion() == 1;
     }
 
     // A cwd change settles without Harness or worker involvement: the probe
@@ -266,6 +290,23 @@ public class SessionLifecycleCoordinator {
         if (bound && operation.kind() == OperationKind.DELETE
                 && ("CLOSED".equals(operation.sessionStatusBefore()) || "ARCHIVED".equals(operation.sessionStatusBefore()))) {
             return false;
+        }
+        if (bound && operation.lifecycleProtocolVersion() == 1) {
+            if (lifecycle == null || !runtimeWarmer.supportsWorkspaceClose()) {
+                throw com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.blocked("workspace_close_identity_unverified");
+            }
+            if (lifecycle.recoverEffects(operation) == null) {
+                if (!harness.supportsLifecycle()) {
+                    throw com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.blocked("workspace_lifecycle_protocol_unavailable");
+                }
+                lifecycle.saveEffects(operation, harness.settleLifecycle(operation));
+            }
+            harness.detachLifecycle(operation);
+            if (sessionStore.hasLiveWriter(operation.tenantId(), operation.sessionId())) {
+                throw com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
+            }
+            runtimeWarmer.closeWorkspace(operation.tenantId(), operation.sessionId()).toCompletableFuture().join();
+            return true;
         }
         if (bound) {
             if (!runtimeWarmer.supportsWorkspaceClose()) {
