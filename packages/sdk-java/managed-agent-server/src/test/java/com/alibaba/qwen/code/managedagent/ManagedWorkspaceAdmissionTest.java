@@ -85,6 +85,45 @@ class ManagedWorkspaceAdmissionTest {
     private PlatformTransactionManager transactionManager;
 
     @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void sessionReadsOmitForegroundShellForFilesAndUnbound(boolean bound) throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        if (bound) {
+            register(tenant, "ws-a", "storage-a");
+            grant(tenant, "ws-a", "actor-a", true);
+        }
+        String body = bound
+                ? "{\"agent_id\":\"qwen-code\",\"workspace\":{\"workspace_id\":\"ws-a\"}}"
+                : "{\"agent_id\":\"qwen-code\"}";
+        var created = mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "create")
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.capabilities").isMap())
+                .andExpect(jsonPath("$.capabilities.foreground_shell").doesNotHaveJsonPath())
+                .andReturn();
+        String session = mapper.readTree(created.getResponse().getContentAsString()).get("id").asText();
+        assertThat(store.requireSession(tenant, session).toolProfile())
+                .isEqualTo(bound ? "hosted-workspace-files/1" : null);
+        mvc.perform(get("/v1/agents/sessions/" + session)
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a")))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.capabilities").isMap())
+                .andExpect(jsonPath("$.capabilities.foreground_shell").doesNotHaveJsonPath());
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/get")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"sessionId\":\"" + session + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.capabilities").isMap())
+                .andExpect(jsonPath("$.capabilities.foregroundShell").doesNotHaveJsonPath());
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"default", "auto-edit"})
     void shellFlagChangesPreserveCreationAndTurnReplayButBlockFreshWorkAndLifecycle(String mode) {
         String tenant = "tenant-" + UUID.randomUUID();

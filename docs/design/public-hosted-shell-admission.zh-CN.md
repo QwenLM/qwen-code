@@ -90,7 +90,7 @@ Linux 物理静默。完成前执行 build、bundle、typecheck、定向包测�
 Checkstyle、两轮干净自审及独立审查。结果记录于
 `.qwen/e2e-tests/public-hosted-shell-admission.md`。
 
-合入 main bb66a52c 后验证通过 181 项定向 Java 测试、30 项 WebShell adapter 测试、
+历史提交 `9c5e2817` 合入 main bb66a52c 后验证通过 181 项定向 Java 测试、30 项 WebShell adapter 测试、
 341 项 CLI Harness/恢复测试与六项真实 MySQL/Broker/Harness 公开集成测试。receipt 事务失败和已提交 receipt 丢失响应
 两种场景均保留一次 dispatch、一次副作用，receipt 重试字节一致，capture 资源
 完整验证。独立关开关/冷恢复探针验证 Store/Service 准入与实际 Connector，包含
@@ -101,5 +101,10 @@ Checkstyle、两轮干净自审及独立审查。结果记录于
 
 在部署具备 #12904、#13010 和公开 FG6f 证据前保持开关关闭。本功能不修复这些独立
 问题，不增加完整 Shell 生命周期，不绕过恢复拒绝。创建 Shell Session 前统一升级
-Session 读取端，旧二进制不得把持久化 profile 解释为 files。本切片无未决产品选择。
-缺少物理测试基础设施时明确报告未验证门禁，不记为通过。
+Session 读取端，旧二进制不得把持久化 profile 解释为 files。本切片的实现选择已确定，
+公开契约与发布顺序仍需维护者审查。缺少物理测试基础设施时明确报告未验证门禁，
+不记为通过。
+
+W1c 离线 Workspace 迁移仍只支持 files/1。持久化的 Shell definition 会使其 storage
+返回 `migration_profile_unsupported`，因此须在该 storage 创建 Shell Session 前
+规划 W1c 迁移。本切片不放宽迁移守卫，也不增加 Shell 迁移支持。

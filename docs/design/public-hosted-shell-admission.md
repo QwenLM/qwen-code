@@ -110,7 +110,7 @@ package tests, Java packaging and Checkstyle, two clean self-audits and an
 independent review precede completion. Results live in
 `.qwen/e2e-tests/public-hosted-shell-admission.md`.
 
-Validation after merging main bb66a52c passed 181 focused Java tests, 30
+Historical validation at `9c5e2817`, after merging main bb66a52c, passed 181 focused Java tests, 30
 WebShell adapter tests, 341 CLI Harness/recovery tests and six real
 MySQL/Broker/Harness public integration cases. The receipt failure and
 committed-receipt/lost-reply cases each retain one dispatch and one side effect,
@@ -126,5 +126,11 @@ Keep the flag off until the deployment has evidence for #12904, #13010 and the
 public FG6f gates. This feature does not fix those independent issues, add full
 Shell lifecycle, or bypass a recovery refusal. Deploy all Session readers before
 creating Shell Sessions; an older binary must not reinterpret the stored
-profile as files. No unresolved product choice remains for this slice. Missing
+profile as files. The implementation choices for this slice are set; maintainer
+review of the public contract and rollout sequencing remains required. Missing
 physical test infrastructure is reported as an unverified gate, never a pass.
+
+W1c offline Workspace migration remains files/1-only. A persisted Shell
+definition causes `migration_profile_unsupported` for its storage, so plan any
+W1c migration before creating Shell Sessions there. This slice does not widen
+the migration guard or add Shell migration support.
