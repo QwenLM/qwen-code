@@ -157,6 +157,11 @@ export function useManagedSession(
         // A standing terminal verdict leaves only through retire(): a
         // weaker later failure on the same leg must not downgrade it.
         if (previous?.final && !final) return current;
+        // A repeat of the same terminal answer is not fresh evidence:
+        // re-stamping it with a fresh seq would let this leg suppress a
+        // newer record another leg just booked.
+        if (previous?.final && final && previous.message === message)
+          return current;
         // A stall warning leaves only through a terminal verdict or an
         // advancing stream (retire): a weaker transient would strip the
         // stall flag, and the next clean pass would expire it without the
@@ -197,20 +202,27 @@ export function useManagedSession(
     const retire = (leg: SignalLeg) => {
       if (abort.signal.aborted) return;
       if (leg === 'stream') streamVerdictMessageRef.current = undefined;
-      setState((current) => {
-        if (!current.signals?.[leg]) return current;
-        const signals = { ...current.signals };
-        delete signals[leg];
-        return { ...current, signals };
-      });
-      if (leg === 'session' && endedRef.current) {
+      // Past the re-arm bound the ended loops never run again — the poll
+      // keeps the summary live and reload() is the way back — so the
+      // standing verdict must survive the poll's successes: deleting it
+      // would paint a healthy-looking empty session with no alert and no
+      // path back.
+      const budgetSpent =
+        leg === 'session' &&
+        endedRef.current &&
+        rearmRef.current >= MAX_SESSION_REARMS;
+      if (!budgetSpent) {
+        setState((current) => {
+          if (!current.signals?.[leg]) return current;
+          const signals = { ...current.signals };
+          delete signals[leg];
+          return { ...current, signals };
+        });
+      }
+      if (leg === 'session' && endedRef.current && !budgetSpent) {
         endedRef.current = false;
-        // Past the bound the ended loops stay ended: the poll keeps the
-        // summary live and reload() is the way back.
-        if (rearmRef.current < MAX_SESSION_REARMS) {
-          rearmRef.current += 1;
-          setRevision((value) => value + 1);
-        }
+        rearmRef.current += 1;
+        setRevision((value) => value + 1);
       }
     };
     // A terminal record expires only on its own leg's success evidence;
@@ -383,6 +395,9 @@ export function useManagedSession(
           if (error instanceof SnapshotLegError && error.leg === 'transcript') {
             failed(error, 'transcript');
           } else if (failed(error, 'session')) {
+            // This shared ref outlives the run: guard it even though the
+            // record() writes above are abort-guarded internally.
+            if (abort.signal.aborted) return;
             endedRef.current = true;
             return;
           }
@@ -416,8 +431,8 @@ export function useManagedSession(
         // expiry is gated on a delivered frame (a replay counts: delivered
         // is set before the replay guard) or a heartbeat (onAlive below).
         // A failed attempt is no answer either: the catch below restores a
-        // verdict this removed — unless a heartbeat landed, which certified
-        // the connection no matter how it later ends.
+        // verdict this removed — unless a heartbeat or a late frame
+        // certified the connection, no matter how it later ends.
         const proofOfLife = setTimeout(() => {
           proofOfLifePassed = true;
           // An attempt that answered nothing expires nothing, so it must
