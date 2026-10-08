@@ -140,6 +140,63 @@ class RuntimeHarnessDrainTest {
     }
 
     @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void failedAdoptedReleaseReobservesTheOriginalWorkerWithoutRestart(boolean detach) throws Exception {
+        var binding = ready();
+        var saved = bindings.admitSession(sessions, candidate(binding, "original"));
+        assertNotNull(sessions.compareAndSet(saved, saved.withState(RuntimeSessionRecord.State.READY, Instant.now())));
+        transport.loseReleaseReply = true;
+        try (var service = restoredService(bindings, Duration.ofSeconds(2))) {
+            service.requestHarnessDrain("tenant", "harness");
+            var first = detach ? service.release("harness", "original").toCompletableFuture()
+                    : service.drainHarnessSession("tenant", "harness").toCompletableFuture();
+            var failure = assertThrows(ExecutionException.class, () -> first.get(5, TimeUnit.SECONDS));
+            assertEquals("runtime_session_release_failed", assertInstanceOf(RuntimeBrokerException.class, failure.getCause()).getCode());
+            assertEquals(RuntimeSessionRecord.State.RELEASING, sessions.findById(scope, "original").getState());
+            assertNull(bindings.findById(binding.getBindingId()).getDrainReceipt());
+            assertEquals(1, provisioner.observations);
+            assertEquals(1, transport.releases);
+            assertEquals(0, provisioner.stops);
+
+            provisioner.usable = false;
+            provisioner.observation = CompletableFuture.completedFuture(RuntimeObservation.notFound(
+                    evidence(binding.getProvisionSeed(), binding.getResourceHandle(), RuntimeRecoveryEvidence.Fact.JOURNAL_LOST), null));
+            provisioner.stop = new CompletableFuture<>();
+            var retry = detach ? service.release("harness", "original").toCompletableFuture()
+                    : service.drainHarnessSession("tenant", "harness").toCompletableFuture();
+            assertFalse(retry.isDone());
+            assertEquals(RuntimeSessionRecord.State.RELEASING, sessions.findById(scope, "original").getState());
+            assertNull(bindings.findById(binding.getBindingId()).getDrainReceipt());
+            assertEquals(detach ? 3 : 2, provisioner.observations);
+            assertEquals(1, provisioner.stops);
+            assertEquals(1, transport.releases);
+            provisioner.stop.complete(receipt(binding));
+            retry.get(5, TimeUnit.SECONDS);
+
+            var retired = bindings.findById(binding.getBindingId());
+            assertEquals(RuntimeBindingRecord.State.RELEASED, retired.getState());
+            assertTrue(retired.getDrainReceipt().matches(retired));
+            assertEquals(binding.getGeneration(), retired.getGeneration());
+            assertEquals(binding.getProvisionSeed(), retired.getProvisionSeed());
+            assertEquals(binding.getResourceHandle(), retired.getResourceHandle());
+            assertEquals(binding.getLease().getRuntimeInstanceId(), retired.getLease().getRuntimeInstanceId());
+            assertEquals(binding.getLease().getEndpoint(), retired.getLease().getEndpoint());
+            assertEquals(binding.getLease().getToken(), retired.getLease().getToken());
+            assertEquals(binding.getLease().getLeaseId(), retired.getLease().getLeaseId());
+            assertEquals(binding.getLease().getEpoch(), retired.getLease().getEpoch());
+            assertEquals(RuntimeSessionRecord.State.RELEASED, sessions.findById(scope, "original").getState());
+            assertEquals(0, sessions.countActiveByBinding(binding.getBindingId(), binding.getGeneration()));
+            assertTrue(service.release("harness", "original").toCompletableFuture().get());
+            service.drainHarnessSession("tenant", "harness").toCompletableFuture().get();
+            assertEquals(1, provisioner.stops);
+            assertEquals(1, transport.releases);
+            assertEquals(0, transport.acquires);
+            assertEquals(0, transport.attestations);
+            assertEquals(0, provisioner.provisions);
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"handle", "runtime", "lease", "epoch", "endpoint", "unfenced"})
     void restoredLiveReleaseRequiresTheOriginalIdentityAndDrainFence(String mismatch) throws Exception {
         var binding = ready();

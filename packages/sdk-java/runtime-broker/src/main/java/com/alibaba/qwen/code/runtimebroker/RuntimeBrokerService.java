@@ -390,7 +390,12 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         var adopted = CompletableFuture.completedFuture(
                                 new SessionContext(record.getSession(), binding, binding.getLease()));
                         var existing = sessions.putIfAbsent(record.getRuntimeSessionId(), adopted);
-                        return releaseOriginalSession(binding, record, existing == null ? adopted : existing);
+                        return releaseOriginalSession(binding, record, existing == null ? adopted : existing)
+                                .whenComplete((ignored, error) -> {
+                                    if (existing == null && error != null) {
+                                        sessions.remove(record.getRuntimeSessionId(), adopted);
+                                    }
+                                });
                     });
         } else {
             result = releaseOriginalSession(binding, record, context);
