@@ -283,8 +283,8 @@ byte-dropped after the same deletion grace under a per-Session claim ledger
 state `COLLECTED`. Reads of the retired Session stay fenced with
 `tool_output_session_retired` exactly as before; a workspace-recovery read
 that physically reaches a collected byte copy fails the named check
-`resource_collected` instead of the generic `resource_layout_unsupported`
-verdict a pre-V53 broker produces.
+`resource_collected` instead of the generic `resource_layout_unsupported` or
+`resource_corrupt` verdict a pre-V53 broker produces.
 
 The Phase 1 schema has not been released. A development database created by an
 older revision with `harness_session_id` must be recreated before running this

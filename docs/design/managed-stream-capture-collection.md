@@ -234,8 +234,9 @@ Rollout notes:
 - Older broker versions without V53 never start the pass. The first upgraded
   broker starts collecting as soon as `gc-enabled` is already true, since
   there is no version handshake; pre-upgrade brokers misname legitimately
-  collected rows as `resource_layout_unsupported`, so a fleet that may roll
-  workloads during the upgrade keeps the flag off until every broker runs V53
+  collected rows as `resource_layout_unsupported` or `resource_corrupt`, so a
+  fleet that may roll workloads during the upgrade keeps the flag off until
+  every broker runs V53
   — the same every-writer-first order the O4 rollout already requires.
 
 ## Affected layers and delivery

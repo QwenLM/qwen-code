@@ -181,9 +181,9 @@ head 为 `DELETED` 之后才可能进入 `COLLECTED`，而 `ManagedSessionStore`
   用。
 - 没有 V53 的旧版 broker 不会启动本通道。由于没有版本握手，第一台升级的 broker 在
   `gc-enabled` 已为 true 时立刻开始回收；低于 V53 的 broker 会把合法回收的行误报
-  为 `resource_layout_unsupported`，因此升级期间仍可能回滚工作负载的集群应保持该
-  开关关闭，直到全部 broker 跑上 V53 —— 与 O4 发布已要求的「先升级全部写者」顺
-  序一致。
+  为 `resource_layout_unsupported` 或 `resource_corrupt`，因此升级期间仍可能回滚
+  工作负载的集群应保持该开关关闭，直到全部 broker 跑上 V53 —— 与 O4 发布已要求
+  的「先升级全部写者」顺序一致。
 
 ## 影响面与交付
 
