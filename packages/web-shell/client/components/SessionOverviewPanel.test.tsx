@@ -12,6 +12,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonCapabilities,
   DaemonSessionSummary,
+  DaemonStandaloneSessionSummary,
   DaemonStatusReportSession,
 } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
@@ -47,6 +48,12 @@ let statusState: {
 };
 // Live sessions the mock daemon returns per non-primary workspace cwd.
 let otherWorkspaceSessions: Record<string, DaemonSessionSummary[]>;
+// Standalone pages queued (FIFO) for the mocked listStandaloneSessionsPage.
+let standalonePages: {
+  sessions: DaemonStandaloneSessionSummary[];
+  nextCursor?: string;
+}[];
+const standaloneListPage = vi.fn();
 // Options captured from the (mocked) useScopedSessions call, so tests can
 // assert the live-state vs catalog-poll fallback.
 let scopedSessionsOptions: { pollIntervalMs?: number };
@@ -67,6 +74,7 @@ let workspaceClient: {
   workspaceByCwd: ReturnType<typeof vi.fn>;
   archiveSessionsData: ReturnType<typeof vi.fn>;
   deleteSessionsData: ReturnType<typeof vi.fn>;
+  listStandaloneSessionsPage: ReturnType<typeof vi.fn>;
 };
 // Primary-workspace actions surfaced by useWorkspace / useActions.
 let workspaceActions: {
@@ -155,6 +163,18 @@ function session(
   };
 }
 
+function standaloneSession(
+  id: string,
+  extra: Partial<DaemonStandaloneSessionSummary> = {},
+): DaemonStandaloneSessionSummary {
+  return {
+    ...session(id, { workspaceCwd: '/standalone' }),
+    sourceType: 'standalone',
+    context: { kind: 'standalone' },
+    ...extra,
+  };
+}
+
 function statusSession(
   id: string,
   extra: Partial<DaemonStatusReportSession> = {},
@@ -197,6 +217,11 @@ beforeEach(() => {
   sessionsState = { sessions: [], loading: false };
   statusState = { report: { full: { sessions: [] } } };
   otherWorkspaceSessions = {};
+  standalonePages = [];
+  standaloneListPage.mockReset();
+  standaloneListPage.mockImplementation(
+    async () => standalonePages.shift() ?? { sessions: [] },
+  );
   scopedSessionsOptions = {};
   workspaceLiveStateOptions = { enabled: false };
   statusReportOptions = {};
@@ -251,6 +276,7 @@ beforeEach(() => {
       notFound: [],
       errors: [],
     })),
+    listStandaloneSessionsPage: standaloneListPage,
   };
   sessionsReload.mockClear();
   statusReload.mockClear();
@@ -726,7 +752,11 @@ describe('SessionOverviewPanel', () => {
     sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
     render();
     act(() => click(rows()[0]!.querySelectorAll('td')[2] as HTMLElement));
-    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s-run', '/w');
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      's-run',
+      '/w',
+      undefined,
+    );
     expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
       'unchecked',
     );
@@ -755,13 +785,21 @@ describe('SessionOverviewPanel', () => {
       );
       expect(onOpenSession).not.toHaveBeenCalled();
       act(() => title.click());
-      expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s1', '/w');
+      expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+        's1',
+        '/w',
+        undefined,
+      );
       onOpenSession.mockClear();
     } finally {
       selection.removeAllRanges();
     }
     act(() => click(cell));
-    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s1', '/w');
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      's1',
+      '/w',
+      undefined,
+    );
   });
 
   it('keeps an inline rename draft when clicking a plain row cell', () => {
@@ -1060,7 +1098,11 @@ describe('SessionOverviewPanel', () => {
       act(() => cell.dispatchEvent(mouseDown));
       expect(mouseDown.defaultPrevented).toBe(false);
       act(() => click(cell));
-      expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('question', '/w');
+      expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+        'question',
+        '/w',
+        undefined,
+      );
       sessionsState.sessions = sessionsState.sessions.map((entry) =>
         entry.sessionId === 'target' ? target : entry,
       );
@@ -1131,7 +1173,11 @@ describe('SessionOverviewPanel', () => {
     const title = titleTrigger(rows()[0]!);
     expect(title.tagName).toBe('BUTTON');
     act(() => click(title));
-    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('s-run', '/w');
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      's-run',
+      '/w',
+      undefined,
+    );
     expect(rowCheckbox(rows()[0]!).getAttribute('data-state')).toBe(
       'unchecked',
     );
@@ -1404,7 +1450,11 @@ describe('SessionOverviewPanel', () => {
     await flushAsync();
     const beta = rows().find((tr) => tr.textContent?.includes('Beta'))!;
     act(() => click(titleTrigger(beta)));
-    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith('b1', '/wsB');
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      'b1',
+      '/wsB',
+      undefined,
+    );
   });
 
   it('keeps equal session ids in different workspaces independent', async () => {
@@ -3351,5 +3401,140 @@ describe('SessionOverviewPanel polling', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('SessionOverviewPanel standalone sessions', () => {
+  function useStandaloneCapabilities(): void {
+    connectionState.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaceCwd: '/w',
+    };
+  }
+
+  it('does not request standalone sessions without the capability', async () => {
+    render();
+    await flushAsync();
+    expect(standaloneListPage).not.toHaveBeenCalled();
+  });
+
+  it('merges standalone sessions into the overview when advertised', async () => {
+    useStandaloneCapabilities();
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    expect(standaloneListPage).toHaveBeenCalledWith({
+      archiveState: 'active',
+      pageSize: 50,
+    });
+    expect(rowTitles()).toEqual(['Solo', 'One']);
+  });
+
+  it('collects every standalone page before rendering', async () => {
+    useStandaloneCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'First',
+            updatedAt: '2026-07-06T12:00:00.000Z',
+          }),
+        ],
+        nextCursor: 'c1',
+      },
+      {
+        sessions: [
+          standaloneSession('st2', {
+            displayName: 'Second',
+            updatedAt: '2026-07-06T11:30:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    expect(standaloneListPage).toHaveBeenCalledTimes(2);
+    expect(standaloneListPage).toHaveBeenLastCalledWith({
+      archiveState: 'active',
+      pageSize: 50,
+      cursor: 'c1',
+    });
+    expect(rowTitles()).toEqual(['First', 'Second']);
+  });
+
+  it('deduplicates a standalone session a workspace already lists', async () => {
+    useStandaloneCapabilities();
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('s1', {
+            workspaceCwd: '/w',
+            displayName: 'One',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    expect(rowTitles()).toEqual(['One']);
+  });
+
+  it('warns and keeps the overview when the standalone list fails', async () => {
+    useStandaloneCapabilities();
+    standaloneListPage.mockRejectedValue(new Error('offline'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      render();
+      await flushAsync();
+      expect(warn).toHaveBeenCalledWith(
+        '[web-shell] overview standalone sessions list failed:',
+        expect.any(Error),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('opens a standalone row with the standalone context', async () => {
+    useStandaloneCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render();
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(row.querySelectorAll('td')[2] as HTMLElement));
+    expect(onOpenSession).toHaveBeenCalledExactlyOnceWith(
+      'st1',
+      '/standalone',
+      { kind: 'standalone' },
+    );
+  });
+
+  it('opens a workspace row without a standalone context', async () => {
+    useStandaloneCapabilities();
+    sessionsState.sessions = [session('s1', { displayName: 'One' })];
+    render();
+    await flushAsync();
+    act(() => click(rows()[0]!.querySelectorAll('td')[2] as HTMLElement));
+    expect(onOpenSession).toHaveBeenCalledWith('s1', '/w', undefined);
   });
 });
