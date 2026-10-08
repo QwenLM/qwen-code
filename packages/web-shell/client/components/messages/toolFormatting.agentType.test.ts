@@ -6,7 +6,11 @@
 
 import { describe, expect, it } from 'vitest';
 import { localizeAgentTypeName } from './toolFormatting.js';
-import { WEB_SHELL_LANGUAGES, getTranslator } from '../../i18n.js';
+import {
+  FULL_CATALOG_LANGUAGES,
+  WEB_SHELL_LANGUAGES,
+  getTranslator,
+} from '../../i18n.js';
 
 // `localizeAgentTypeName` falls back to the raw agent-type id when no
 // `agentType.<name>` key exists, so a missing entry is invisible: the badge
@@ -33,7 +37,11 @@ describe('localizeAgentTypeName', () => {
     'fork',
   ];
 
-  it.each(WEB_SHELL_LANGUAGES)('localises every builtin type in %s', (lang) => {
+  const FULL_CATALOG = WEB_SHELL_LANGUAGES.filter(
+    (lang) => FULL_CATALOG_LANGUAGES[lang],
+  );
+
+  it.each(FULL_CATALOG)('localises every builtin type in %s', (lang) => {
     const t = getTranslator(lang);
     for (const type of BUILTIN_TYPES) {
       const rendered = localizeAgentTypeName(type, t);
@@ -46,16 +54,20 @@ describe('localizeAgentTypeName', () => {
     }
   });
 
-  it('gives each locale its own string, not the English one twice', () => {
-    // `getTranslator` falls back to EN for a missing key, so "not the raw id"
-    // alone would pass on a zh table that never got the entry. The zh label
-    // must differ from the en one for a type whose name is translated.
-    const en = getTranslator('en');
-    const zh = getTranslator('zh-CN');
-    expect(localizeAgentTypeName('review-agent', zh)).not.toBe(
-      localizeAgentTypeName('review-agent', en),
-    );
-  });
+  it.each(FULL_CATALOG.filter((lang) => lang !== 'en'))(
+    'gives %s its own agent-type strings, not the English ones',
+    (lang) => {
+      // `getTranslator` falls back to EN for a missing key, so "not the raw id"
+      // alone would pass on a table that never got the entry.
+      const en = getTranslator('en');
+      const other = getTranslator(lang);
+      for (const type of BUILTIN_TYPES) {
+        expect(localizeAgentTypeName(type, other)).not.toBe(
+          localizeAgentTypeName(type, en),
+        );
+      }
+    },
+  );
 
   it('falls back to the raw id for an unknown type', () => {
     // The documented behaviour the pins above exist to keep from becoming the

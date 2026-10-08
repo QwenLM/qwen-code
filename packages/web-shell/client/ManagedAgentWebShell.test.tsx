@@ -86,6 +86,23 @@ describe('ManagedAgentWebShell', () => {
     expect(props.sessionId).toBe('session-1');
   });
 
+  it('keeps the document lang in English for a partial locale', async () => {
+    await act(async () => {
+      root.render(
+        <ManagedAgentWebShell
+          baseUrl="https://product.example"
+          environmentId="python"
+          language="ru"
+          sessionId="session-1"
+        />,
+      );
+    });
+
+    expect(
+      container.querySelector('[data-web-shell-root]')?.getAttribute('lang'),
+    ).toBe('en');
+  });
+
   it('does not pass the previous identity Session ID to a new provider', async () => {
     await act(async () => {
       root.render(

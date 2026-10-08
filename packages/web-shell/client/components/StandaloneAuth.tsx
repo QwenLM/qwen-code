@@ -73,43 +73,46 @@ interface AuthCopy {
   pairingFailed: string;
 }
 
+const COPY_EN: AuthCopy = {
+  pairingFailed:
+    'Pairing failed or the QR code expired. Scan a fresh QR code, or enter the daemon token.',
+  heading: 'Connect to Qwen Code',
+  connecting: 'Connecting…',
+  starting: 'Daemon is starting…',
+  unreachable: 'Cannot reach the daemon. Retrying…',
+  remoteUnreachable:
+    'Cannot reach the daemon. Retrying… Check the address, network, HTTPS certificate, and --allow-origin for this page origin.',
+  notReady: 'Daemon is not ready. Retrying…',
+  startFailed: 'Daemon failed to start.',
+  invalidToken:
+    'Invalid or expired token. Enter the token from the daemon terminal.',
+  enterToken: 'Enter the bearer token from the daemon terminal.',
+  policyBlocked:
+    'Access blocked by the daemon Origin or Host policy. Open its direct address, or check --allow-origin for cross-origin access.',
+  invalidAddress: 'Invalid daemon address. Enter an HTTP or HTTPS origin.',
+  addressChanged:
+    'Connection paused. Select Connect to use the entered address.',
+  confirmTarget:
+    'This page points to a daemon this browser has not connected to before. Connect only if you trust it.',
+  remoteHint:
+    'The token is sent to the address shown above. Enter only a token issued by that daemon.',
+  switchUnavailable:
+    'Browser storage is unavailable, so the token could not be carried to that daemon.',
+  addressLabel: 'Daemon address',
+  tokenLabel: 'Bearer token (optional)',
+  connect: 'Connect',
+  local: 'Return to local workspaces',
+  remoteAddCancel: 'Cancel adding workspace',
+  connectionAddCancel: 'Cancel adding connection',
+  retry: 'Retry',
+  hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
+};
+
 // This gate renders before the app (and therefore before its I18nProvider), so
 // it carries its own copy table instead of calling useI18n.
 const COPY: Record<WebShellLanguage, AuthCopy> = {
-  en: {
-    pairingFailed:
-      'Pairing failed or the QR code expired. Scan a fresh QR code, or enter the daemon token.',
-    heading: 'Connect to Qwen Code',
-    connecting: 'Connecting…',
-    starting: 'Daemon is starting…',
-    unreachable: 'Cannot reach the daemon. Retrying…',
-    remoteUnreachable:
-      'Cannot reach the daemon. Retrying… Check the address, network, HTTPS certificate, and --allow-origin for this page origin.',
-    notReady: 'Daemon is not ready. Retrying…',
-    startFailed: 'Daemon failed to start.',
-    invalidToken:
-      'Invalid or expired token. Enter the token from the daemon terminal.',
-    enterToken: 'Enter the bearer token from the daemon terminal.',
-    policyBlocked:
-      'Access blocked by the daemon Origin or Host policy. Open its direct address, or check --allow-origin for cross-origin access.',
-    invalidAddress: 'Invalid daemon address. Enter an HTTP or HTTPS origin.',
-    addressChanged:
-      'Connection paused. Select Connect to use the entered address.',
-    confirmTarget:
-      'This page points to a daemon this browser has not connected to before. Connect only if you trust it.',
-    remoteHint:
-      'The token is sent to the address shown above. Enter only a token issued by that daemon.',
-    switchUnavailable:
-      'Browser storage is unavailable, so the token could not be carried to that daemon.',
-    addressLabel: 'Daemon address',
-    tokenLabel: 'Bearer token (optional)',
-    connect: 'Connect',
-    local: 'Return to local workspaces',
-    remoteAddCancel: 'Cancel adding workspace',
-    connectionAddCancel: 'Cancel adding connection',
-    retry: 'Retry',
-    hint: 'This token grants full access to the daemon. Only enter it on a page you opened from the daemon terminal or its QR code.',
-  },
+  en: COPY_EN,
+  ru: COPY_EN, // reuses the English copy until a ru table covers this surface
   'zh-CN': {
     pairingFailed:
       '配对失败或二维码已过期。请扫描新的二维码，或输入 daemon 令牌。',

@@ -37,6 +37,7 @@ import {
   getTranslator,
   I18nProvider,
   normalizeLanguage,
+  toDomLanguage,
   type WebShellLanguage,
 } from '../i18n';
 import { transcriptBlocksToLocalizedMessages } from '../adapters/localizedMessages';
@@ -61,7 +62,8 @@ export interface WebShellTranscriptProps {
   blocks: readonly DaemonTranscriptBlock[];
   renderMode?: 'readonly' | 'document';
   theme?: WebShellTheme;
-  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
+  /** Any string; normalized the same way as the shell `language` prop. */
+  language?: string;
   className?: string;
   style?: CSSProperties;
   chatMaxWidth?: number;
@@ -238,7 +240,7 @@ function WebShellTranscriptContent({
       const nextNames = new Set<string>();
       portalRoot.dataset.webShellShadcn = '';
       portalRoot.classList.toggle('dark', theme === WebShellThemeId.Dark);
-      portalRoot.lang = resolvedLanguage;
+      portalRoot.lang = toDomLanguage(resolvedLanguage);
       for (let index = 0; index < computedStyle.length; index += 1) {
         const name = computedStyle[index];
         if (!name.startsWith('--')) continue;
@@ -300,7 +302,7 @@ function WebShellTranscriptContent({
                         data-document-expanded={
                           documentMode ? String(documentExpanded) : undefined
                         }
-                        lang={resolvedLanguage}
+                        lang={toDomLanguage(resolvedLanguage)}
                       >
                         <div
                           className={`${styles.content} ${styles.contentHasMessages}`}

@@ -21,16 +21,19 @@ interface FallbackCopy {
   reload: string;
 }
 
+const COPY_EN: FallbackCopy = {
+  title: 'Something went wrong',
+  body: 'An unexpected error occurred and this content could not be displayed.',
+  retry: 'Try again',
+  reload: 'Reload page',
+};
+
 // This surface renders OUTSIDE the in-app I18nProvider (the boundary wraps the
 // whole App, which owns that provider), so it cannot call useI18n. It carries
 // its own minimal copy instead of pulling the full translation table.
 const COPY: Record<WebShellLanguage, FallbackCopy> = {
-  en: {
-    title: 'Something went wrong',
-    body: 'An unexpected error occurred and this content could not be displayed.',
-    retry: 'Try again',
-    reload: 'Reload page',
-  },
+  en: COPY_EN,
+  ru: COPY_EN, // reuses the English copy until a ru table covers this surface
   'zh-CN': {
     title: '出了点问题',
     body: '发生意外错误，无法显示此内容。',

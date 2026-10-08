@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useI18n } from '../../i18n';
+import { toSurfaceLanguage, useI18n } from '../../i18n';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import styles from './ToolApproval.module.css';
 
@@ -45,7 +45,7 @@ export function GoalApprovalContent({
   content: string;
   id: string;
 }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [view, setView] = useState('overview');
   const sections = splitSections(objective);
   const fullText = content || objective;
@@ -66,6 +66,7 @@ export function GoalApprovalContent({
       onValueChange={setView}
       className={styles.goalTabs}
       data-approval-shortcuts-ignore
+      lang={toSurfaceLanguage(language)}
     >
       <TabsList variant="line" aria-label={t('approval.goal.title')}>
         <TabsTrigger value="overview">
@@ -75,20 +76,24 @@ export function GoalApprovalContent({
       </TabsList>
       <div className={styles.goalBody} id={id}>
         <TabsContent value="overview" className={styles.goalPanel}>
-          {objective && notice && <p className={styles.goalNotice}>{notice}</p>}
+          {objective && notice && (
+            <p className={styles.goalNotice} lang="">
+              {notice}
+            </p>
+          )}
           {sections.length ? (
             sections.map((section, index) => (
               <section key={index} className={styles.goalSection}>
                 <h3>{t(section.label)}</h3>
-                <p>{section.text}</p>
+                <p lang="">{section.text}</p>
               </section>
             ))
           ) : (
-            <p>{objective || fullText}</p>
+            <p lang="">{objective || fullText}</p>
           )}
         </TabsContent>
         <TabsContent value="full" className={styles.goalPanel}>
-          <p>{fullText}</p>
+          <p lang="">{fullText}</p>
         </TabsContent>
       </div>
     </Tabs>

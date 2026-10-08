@@ -28,6 +28,8 @@ interface DialogShellProps {
   size?: DialogSize;
   allowFullscreen?: boolean;
   dismissible?: boolean;
+  /** Language of this dialog's own copy. Portals sit outside the opener's lang. */
+  lang?: string;
   onClose: () => void;
   children: ReactNode;
 }
@@ -82,6 +84,7 @@ export function DialogShell({
   size = 'md',
   allowFullscreen = false,
   dismissible = true,
+  lang,
   onClose,
   children,
 }: DialogShellProps) {
@@ -182,6 +185,7 @@ export function DialogShell({
       <DialogShellIdContext.Provider value={shellIdRef.current}>
         <DialogContent
           ref={panelRef}
+          lang={lang}
           showCloseButton={false}
           overlayProps={{
             onMouseDown: handleBackdropMouseDown,

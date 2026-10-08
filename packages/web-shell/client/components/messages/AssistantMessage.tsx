@@ -16,7 +16,7 @@ import {
   type WebShellAssistantTurnFooterRenderInfo,
   type WebShellSource,
 } from '../../customization';
-import { useI18n } from '../../i18n';
+import { useI18n, type WebShellLanguage } from '../../i18n';
 import {
   useTranscriptDocumentExpanded,
   useTranscriptRenderMode,
@@ -597,6 +597,12 @@ export const ThinkingMessage = memo(function ThinkingMessage({
   );
 });
 
+const TARGET_LANGUAGE_NAMES: Record<WebShellLanguage, string> = {
+  en: 'English',
+  'zh-CN': 'Simplified Chinese',
+  ru: 'Russian',
+};
+
 interface ThinkingTranslateButtonProps {
   content: string;
   generateContent?: SessionContentGenerator;
@@ -647,8 +653,7 @@ export function ThinkingTranslateButton({
       let text = '';
       let completed = false;
       try {
-        const targetLanguage =
-          language === 'zh-CN' ? 'Simplified Chinese' : 'English';
+        const targetLanguage = TARGET_LANGUAGE_NAMES[language];
         const prompt =
           mode === 'explain-shell'
             ? `Explain the following shell command in ${targetLanguage}. Describe what it does and call out any notable risks. Be concise and output only the explanation.\n\n\`\`\`shell\n${content}\n\`\`\``

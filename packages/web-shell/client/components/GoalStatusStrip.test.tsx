@@ -283,6 +283,34 @@ describe('GoalStatusStrip', () => {
     ).toBeNull();
   });
 
+  it('marks Russian chrome and leaves the objective language unset', () => {
+    act(() => {
+      root.render(
+        <I18nProvider language="ru">
+          <GoalStatusStrip
+            snapshot={snapshot('active', { objective: 'All checks pass' })}
+            onEdit={vi.fn()}
+            onPause={vi.fn()}
+            onResume={vi.fn()}
+            onClear={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const strip = container.querySelector('[data-testid="goal-status-strip"]');
+    expect(strip?.getAttribute('lang')).toBe('ru');
+    expect(container.textContent).toContain('В работе');
+    const objective = container.querySelector('[class*="objective"]');
+    expect(objective?.textContent).toBe('All checks pass');
+    expect(objective?.getAttribute('lang')).toBe('');
+    expect(
+      container
+        .querySelector('[data-testid="goal-active-elapsed"]')
+        ?.getAttribute('lang'),
+    ).toBe('');
+  });
+
   it('shows no checkpoint streak, even for a snapshot an older daemon filled in', () => {
     render('active', {
       checkpointStalls: 2,

@@ -403,14 +403,15 @@ describe('build artifact — transcript entry (#11031)', () => {
     // 1,315,297 at e951f96; that rendering is intentional transcript UI.
     // main grew the same entry in parallel — 1,309,207 at 1aba19c878, plus
     // 3,033 for table fullscreen and Shadow DOM keyboard handling, reaching
-    // 1,312,240. Merging the two measures 1,320,366 in CI at d4304811. The
-    // ceiling leaves a small margin around that intentional UI;
-    // re-measure and lower it if the entry gets leaner.
+    // 1,312,240. Merging the two measures 1,320,366 in CI at d4304811. The RU
+    // goal-card catalog and pluralization add 5,732, bringing it to
+    // 1,326,098 (#13610). The ceiling leaves a small margin around
+    // that intentional UI; re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_323_000);
+    expect(js.length).toBeLessThan(1_329_000);
   });
 
   it('carries no Live Voice strings and looks none up', () => {

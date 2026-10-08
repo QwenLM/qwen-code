@@ -808,6 +808,26 @@ describe('ToolApproval accessibility', () => {
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
+  it('asks for a Russian explanation when the UI language is ru', async () => {
+    const generateContent = vi.fn(async function* () {
+      yield {
+        v: 1 as const,
+        type: 'done' as const,
+        requestId: 'explain-ru',
+        model: 'fast-model',
+        modelSource: 'fast' as const,
+        inputTokens: 1,
+        outputTokens: 1,
+      };
+    });
+    render(undefined, execRequest, undefined, 'ru', generateContent);
+    const explain = container!.querySelector<HTMLButtonElement>(
+      'button[title="Explain"]',
+    );
+    await act(async () => explain?.click());
+    expect(generateContent.mock.calls[0]?.[0]).toContain('Russian');
+  });
+
   it('only offers explanations for Shell commands', () => {
     const generateContent = async function* () {};
     render(undefined, request, undefined, 'en', generateContent);
@@ -1679,6 +1699,21 @@ function switchGoalTab(value: string) {
 }
 
 describe('goal approval', () => {
+  it('tags the goal panel as ru and leaves the English draft unmarked', () => {
+    render(false, goalRequest, undefined, 'ru');
+    expect(
+      container!
+        .querySelector('[data-web-shell-goal-approval]')
+        ?.getAttribute('lang'),
+    ).toBe('ru');
+    const draft = Array.from(container!.querySelectorAll('p')).find((node) =>
+      node.textContent?.includes('Audit open PRs'),
+    );
+    expect(draft?.getAttribute('lang')).toBe('');
+    expect(container!.querySelector('h3')?.textContent).toBe('Результат');
+    expect(container!.querySelector('h3')?.hasAttribute('lang')).toBe(false);
+  });
+
   it('formats the draft without hiding constraints or the replacement notice', () => {
     render(false, goalRequest, undefined, 'zh-CN');
     expect(container!.textContent).toContain('确认会话目标');
