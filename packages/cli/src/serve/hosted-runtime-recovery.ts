@@ -369,8 +369,9 @@ export async function stopParkedRuntimeExecutions(input: {
  * original `executionCallId` — the Broker's durable record keeps that
  * exactly-once — commits the tool results and lets the checkpoint reach
  * `results_ready` before the caller answers. A passive load adopts the
- * dead owner's Runtime Session and reads execution states for the
- * cancellation path; it never dispatches.
+ * original Runtime Session and reads execution states for the cancellation
+ * path; it never dispatches. It reports that adoption before fallible reads,
+ * so the caller retains the lease even when no recovery report returns.
  *
  * A parked state that can be taken over answers `recovered`; one that is
  * deterministically unrecoverable answers `declined` with a typed reason.
@@ -392,6 +393,7 @@ export async function recoverHostedRuntimeTurn(input: {
   promptId: string;
   brokerOptions: HostedWorkspaceBrokerOptions;
   passive: boolean;
+  onPassiveRuntimeAcquired?: (runtimeSessionId: string) => void;
   /** Set when the calling Session already holds the Runtime lease from an
    * earlier recovery of the same parked Turn (a re-answered load whose
    * first reply was lost): a failed re-acquire then says nothing about
@@ -551,7 +553,7 @@ export async function recoverHostedRuntimeTurn(input: {
     // The passive path never compensation-releases: a release persists the
     // record as RELEASED, every retried acquire of the same identity then
     // conflicts with 409 runtime_session_not_acquirable, and a load that
-    // throws leaves no harness-side record a route could hand back. The
+    // throws before registration leaves no owner a route could hand back. The
     // adoption instead stays owed to the retried takeover, which re-acquires
     // a READY session under the same identity idempotently server-side; a
     // load that reports successfully hands the lease to the cancel route.
@@ -560,6 +562,7 @@ export async function recoverHostedRuntimeTurn(input: {
     // follow-up, not settled by this change.
     await broker.acquire();
     acquiredRuntime = true;
+    input.onPassiveRuntimeAcquired?.(broker.runtimeSessionId);
   }
   if (pending.length > 0) {
     if (passive) {
