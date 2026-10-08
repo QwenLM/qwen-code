@@ -1,5 +1,7 @@
 import {
   DAEMON_ERROR_KINDS,
+  parseQwenAgentMessageMeta,
+  QWEN_AGENT_MESSAGE_META_KEY,
   type DaemonErrorKind,
   type DaemonPermissionTranscriptBlock,
   type DaemonShellTranscriptBlock,
@@ -136,6 +138,13 @@ export type ExportPermissionResolutionV1 =
   | 'expired'
   | 'resolved';
 
+/**
+ * The workspace agent that wrote a user or assistant block: an agent's reply
+ * (`agent_message`) or a message it posted into the session.
+ */
+export interface ExportTranscriptAuthorV1 {
+  name: string;
+}
 type ExportTextTranscriptBlockBaseV1 = Pick<
   DaemonTextTranscriptBlock,
   | Exclude<ExportBlockBaseKeys, 'kind'>
@@ -145,10 +154,15 @@ type ExportTextTranscriptBlockBaseV1 = Pick<
   | 'parentToolCallId'
 > & { streaming?: false };
 type ExportTextTranscriptBlockV1 =
-  | (ExportTextTranscriptBlockBaseV1 & { kind: 'user' | 'thought' })
+  | (ExportTextTranscriptBlockBaseV1 & { kind: 'thought' })
+  | (ExportTextTranscriptBlockBaseV1 & {
+      kind: 'user';
+      author?: ExportTranscriptAuthorV1;
+    })
   | (ExportTextTranscriptBlockBaseV1 & {
       kind: 'assistant';
       usage?: DaemonTextTranscriptBlock['usage'];
+      author?: ExportTranscriptAuthorV1;
     });
 type ExportToolTranscriptBlockV1 = Pick<
   DaemonToolTranscriptBlock,
@@ -417,6 +431,12 @@ const VISIBLE_SYSTEM_RECORD_SUBTYPES = new Set([
   'realtime_message',
   'goal_state',
   'goal_runtime',
+  // Session multi-agent records are `type: 'user'`, so the gate above already
+  // admits them; listed so the set names every visible subtype. Replay
+  // projects their display text (an agent reply as an assistant block), and
+  // the block carries its agent as `author`.
+  'agent_mention',
+  'agent_message',
 ]);
 
 function sanitizeBlock(
@@ -452,11 +472,20 @@ function sanitizeBlock(
         );
         budget.markContentLoss();
       }
+      const authorName =
+        block.kind === 'thought' || block.parentToolCallId
+          ? undefined
+          : parseQwenAgentMessageMeta(
+              block.meta?.[QWEN_AGENT_MESSAGE_META_KEY],
+            )?.author?.name.trim();
       return {
         ...common,
         kind: block.kind,
         text,
         streaming: false,
+        ...(authorName
+          ? { author: { name: budget.label(authorName, 128) } }
+          : {}),
         ...(block.collapsed ? { collapsed: true } : {}),
         ...(block.parentToolCallId
           ? {
@@ -1402,6 +1431,15 @@ function assertSemanticSafety(value: Record<string, unknown>): void {
       return;
     }
     if (!isRecord(entry)) return;
+    if (
+      key === 'author' &&
+      !(
+        isSafeLabel(entry['name'], 128) &&
+        isSafePresentationLabel(entry['name'], 128)
+      )
+    ) {
+      throw new ExportTranscriptDocumentError('invalid_block');
+    }
     if (
       (entry['kind'] === 'status' || entry['kind'] === 'error') &&
       entry['code'] !== undefined &&

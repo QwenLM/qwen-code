@@ -2109,6 +2109,90 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
+    void aWebShellCreateReplayAfterTheSessionWasDeletedAnswersTheRecordedAdmission()
+            throws Exception {
+        String tenant = "tenant-ws-create-replay-" + UUID.randomUUID();
+        String create = """
+                {"idempotencyKey":"ws-replay-create",
+                 "agentId":"qwen-code",
+                 "input":[]}
+                """;
+        String sessionId = objectMapper.readTree(mvc.perform(post(
+                        "/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(create))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString())
+                .get("sessionId").asText();
+        String deleteId = objectMapper.readTree(lifecycle(
+                        delete("/v1/agents/sessions/{id}", sessionId), tenant,
+                        "ws-replay-delete")
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString())
+                .get("id").asText();
+        awaitOperation(tenant, sessionId, deleteId);
+
+        // The contract qualifies the create replay per surface: the public
+        // route re-reads the Session and answers 404, while the WebShell
+        // route answers the recorded 202 admission carrying the tombstoned
+        // sessionId.
+        mvc.perform(post("/api/agent/web-shell/v1/sessions/create")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(create))
+                .andExpect(status().isAccepted())
+                .andExpect(jsonPath("$.replayed").value(true))
+                .andExpect(jsonPath("$.sessionId").value(sessionId));
+    }
+
+    @Test
+    void theTitleBoundIsEnforcedInUtf16CodeUnits() throws Exception {
+        String tenant = "tenant-title-units-" + UUID.randomUUID();
+        String sessionId = objectMapper.readTree(mvc.perform(
+                        post("/v1/agents/sessions")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .header("Idempotency-Key", "title-units")
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"agent_id\":\"qwen-code\",\"input\":[]}"))
+                .andExpect(status().isAccepted()).andReturn()
+                .getResponse().getContentAsString()).get("id").asText();
+        // 128 astral characters are exactly 256 UTF-16 code units — the
+        // boundary where the schema's code-point count and the server's
+        // unit count still agree.
+        String boundary = "\uD83D\uDE00".repeat(128);
+        assertThat(boundary.codePointCount(0, boundary.length()))
+                .isEqualTo(128);
+        assertThat(boundary.length()).isEqualTo(256);
+        String boundaryJson = "\\ud83d\\ude00".repeat(128);
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"" + boundaryJson + "\"}"), tenant,
+                "title-units-boundary")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.metadata.title").value(boundary));
+        // 129 astral characters stay inside the schema's maxLength (129
+        // code points) but occupy 258 units, so the server refuses them —
+        // and the schema's description names the unit the server counts.
+        String overJson = "\\ud83d\\ude00".repeat(129);
+        String over = objectMapper.readTree("{\"title\":\"" + overJson
+                + "\"}").get("title").asText();
+        assertThat(over.codePointCount(0, over.length())).isEqualTo(129);
+        assertThat(over.length()).isEqualTo(258);
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"title\":\"" + overJson + "\"}"), tenant,
+                "title-units-over")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_title"));
+        JsonNode title = OpenApiContract.load()
+                .node("/components/schemas/UpdateSessionRequest/properties"
+                        + "/title");
+        assertThat(title.get("maxLength").asInt()).isEqualTo(256);
+        assertThat(title.get("description").asText()).contains("UTF-16");
+    }
+
+    @Test
     void enforcesOneTitlePolicyAcrossCreateAndRename() throws Exception {
         String tenant = "tenant-title-policy-" + UUID.randomUUID();
         // 256 — the Harness client's own cap, so every accepted title stays

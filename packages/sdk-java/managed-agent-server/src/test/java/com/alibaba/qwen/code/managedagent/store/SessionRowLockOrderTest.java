@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -153,12 +154,114 @@ class SessionRowLockOrderTest {
         assertThat(locked).containsExactly("helperLockWriter");
     }
 
+    // A declaration directly under a // comment line is still a member: the
+    // stripper blanks the comment's text but keeps its newline, so the
+    // declaration's \n prefix survives and the audit visits it.
+    @Test
+    void aCommentLineAboveADeclarationDoesNotHideIt() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    // ordering note
+                    public void badWriter(String tenantId, String sessionId) {
+                        deferTurnRetry(tenantId, sessionId);
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void deferTurnRetry(String tenantId,
+                            String sessionId) {
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'");
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThat(auditLockOrder(synthetic, new ArrayList<>()))
+                .containsExactly("badWriter");
+    }
+
+    // The lock's position is its FOR UPDATE, not the table's first mention:
+    // a writer that reads the session row, writes the turn row and only then
+    // locks mentions the session table long before it locks, and scoring the
+    // lock at that mention would pass the inversion this canary exists to
+    // catch.
+    @Test
+    void theAuditScoresTheLockAtTheForUpdateStatement() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void lateLockWriter(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session WHERE session_id"
+                                + " = ?");
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'");
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThat(auditLockOrder(synthetic, new ArrayList<>()))
+                .containsExactly("lateLockWriter");
+    }
+
+    // The parity guard is the fail-closed half of the strip: a comment
+    // shaped like a member declaration matches in the raw source but not
+    // after the strip, and that drift must fail the canary instead of
+    // silently dropping a member from the audit.
+    @Test
+    void theStripperMustNotDropADeclaration() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    /*
+                    A comment line shaped like a member declaration:
+                    public void ghost(String tenantId) {
+                    */
+
+                    @Transactional
+                    public void writer(String tenantId, String sessionId) {
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThatThrownBy(() -> auditLockOrder(synthetic,
+                new ArrayList<>()))
+                .isInstanceOf(AssertionError.class)
+                .hasMessageContaining("ghost");
+    }
+
     // Returns the public writers that touch the turn row — directly or one
     // hop through a same-file method — before taking the session-row lock,
     // and collects every public lock-bearing member into locked.
     private static List<String> auditLockOrder(String source,
             List<String> locked) {
         String code = stripComments(source);
+        // Fail closed on stripper or regex drift: a declaration the strip
+        // loses never enters the member map, so the audit can never visit
+        // it.
+        List<String> declared = declarationsOf(source);
+        List<String> kept = declarationsOf(code);
+        if (!declared.equals(kept)) {
+            List<String> lost = new ArrayList<>(declared);
+            kept.forEach(lost::remove);
+            throw new AssertionError("stripComments dropped declarations "
+                    + lost);
+        }
         Map<String, List<String>> members = memberBodies(code);
         List<String> violations = new ArrayList<>();
         Matcher declarations = DECLARATION.matcher(code);
@@ -172,7 +275,10 @@ class SessionRowLockOrderTest {
             if (sessionLock < 0) {
                 continue;
             }
-            locked.add(name);
+            // Overloads audit as separate declarations but name one locker.
+            if (!locked.contains(name)) {
+                locked.add(name);
+            }
             assertThat(body).as(name + " is transactional, so the"
                     + " session-row lock outlives the statement")
                     .contains("@Transactional");
@@ -182,6 +288,15 @@ class SessionRowLockOrderTest {
             }
         }
         return violations;
+    }
+
+    private static List<String> declarationsOf(String source) {
+        List<String> names = new ArrayList<>();
+        Matcher declarations = DECLARATION.matcher(source);
+        while (declarations.find()) {
+            names.add(declarations.group(1));
+        }
+        return names;
     }
 
     // The index the session-row lock is taken at: the helper call or raw
@@ -215,14 +330,19 @@ class SessionRowLockOrderTest {
         if (helper >= 0) {
             return helper;
         }
+        // The lock is scored at its FOR UPDATE, not the table's first
+        // mention: a body that reads the session row before locking it
+        // mentions the table long before the lock statement.
         return body.contains(SESSION_TABLE) && body.contains(LOCK_MODE)
-                ? body.indexOf(SESSION_TABLE)
+                ? body.indexOf(LOCK_MODE)
                 : -1;
     }
 
     // Comments are prose, not code: naming the lock helper in a comment must
     // not count as taking the lock. String literals stay — the raw-SQL
-    // needles live inside them.
+    // needles live inside them. The comment's characters are blanked but
+    // every newline survives, so a declaration directly under a comment line
+    // keeps the \n prefix DECLARATION matches on.
     private static String stripComments(String text) {
         StringBuilder out = new StringBuilder(text.length());
         boolean inString = false;
@@ -243,12 +363,22 @@ class SessionRowLockOrderTest {
             } else if (c == '/' && i + 1 < text.length()
                     && text.charAt(i + 1) == '/') {
                 while (i < text.length() && text.charAt(i) != '\n') {
+                    out.append(' ');
                     i++;
+                }
+                if (i < text.length()) {
+                    out.append('\n');
                 }
             } else if (c == '/' && i + 1 < text.length()
                     && text.charAt(i + 1) == '*') {
                 int end = text.indexOf("*/", i + 2);
-                i = end < 0 ? text.length() - 1 : end + 1;
+                int last = end < 0 ? text.length() : end + 2;
+                while (i < last) {
+                    char inside = text.charAt(i);
+                    out.append(inside == '\n' ? '\n' : ' ');
+                    i++;
+                }
+                i--;
             } else {
                 out.append(c);
             }

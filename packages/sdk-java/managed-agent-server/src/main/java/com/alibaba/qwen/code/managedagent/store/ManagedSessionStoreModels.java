@@ -60,6 +60,16 @@ public final class ManagedSessionStoreModels {
     private ManagedSessionStoreModels() {
     }
 
+    public record AuthorizeLifecycleRequest(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
+            String kind) {
+        public AuthorizeLifecycleRequest(String workspaceId, String writerId, long writerGeneration) {
+            this(workspaceId, writerId, writerGeneration, null);
+        }
+    }
+
     public record AcquireWriterRequest(
             @NotBlank @Size(max = 512) String workspaceId,
             @NotBlank @Size(max = 512) String writerId,

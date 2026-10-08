@@ -17,6 +17,8 @@ import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.DispatchTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
@@ -131,13 +133,26 @@ class ManagedAgentWorkspaceReplayTest {
 
         files.set(false);
         clearInvocations(coordinator);
-        transaction.executeWithoutResult(status -> assertThat(
-                service.submitTurn(tenant, "actor-a", "submit", sessionId,
-                        input).replayed()).isTrue());
+        transaction.executeWithoutResult(status -> {
+            var replay = service.submitTurn(tenant, "actor-a", "submit",
+                    sessionId, input);
+            assertThat(replay.replayed()).isTrue();
+            assertThat(replay.turnId()).isEqualTo(turnId);
+        });
         // The replay answers its recorded 202 but must not re-dispatch the
         // Turn: a client's own retries would otherwise spend the
         // pre-admission budget the files hold charges.
         verify(coordinator, never()).dispatch(tenant, sessionId, turnId);
+        // The same budget claim in durable form: the Turn never deferred,
+        // so it stays parked where the availability-gated sweep can
+        // re-offer it once the files return.
+        TurnRecord row = store.findTurn(tenant, sessionId, turnId)
+                .orElseThrow();
+        assertThat(row.status()).isEqualTo("ACCEPTED");
+        assertThat(row.retryCount()).isZero();
+        assertThat(store.findDispatchable(System.currentTimeMillis(), 10))
+                .extracting(DispatchTarget::turnId)
+                .contains(turnId);
         // The outage changes nothing about who the recorded outcome answers
         // to...
         transaction.executeWithoutResult(status ->
@@ -330,12 +345,25 @@ class ManagedAgentWorkspaceReplayTest {
 
         files.set(false);
         clearInvocations(coordinator);
-        transaction.executeWithoutResult(status -> assertThat(
-                service.cancelTurn(tenant, "actor-a", "cancel", sessionId,
-                        turnId).replayed()).isTrue());
+        transaction.executeWithoutResult(status -> {
+            var replay = service.cancelTurn(tenant, "actor-a", "cancel",
+                    sessionId, turnId);
+            assertThat(replay.replayed()).isTrue();
+            assertThat(replay.turnId()).isEqualTo(turnId);
+        });
         // Same rule as the submit twin: the recorded cancel answers, the
-        // Turn is not re-dispatched into the outage hold.
+        // Turn is not re-dispatched into the outage hold — and the durable
+        // row proves the replay spent nothing: the first cancel's
+        // CANCELLING stands, the budget is untouched, and the cancel
+        // dispatch is still owed to the sweep.
         verify(coordinator, never()).dispatch(tenant, sessionId, turnId);
+        TurnRecord row = store.findTurn(tenant, sessionId, turnId)
+                .orElseThrow();
+        assertThat(row.status()).isEqualTo("CANCELLING");
+        assertThat(row.retryCount()).isZero();
+        assertThat(store.findDispatchable(System.currentTimeMillis(), 10))
+                .extracting(DispatchTarget::turnId)
+                .contains(turnId);
         // The outage changes nothing about who the recorded outcome answers
         // to...
         transaction.executeWithoutResult(status ->

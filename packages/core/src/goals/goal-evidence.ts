@@ -44,7 +44,10 @@ type GoalRecordProvenance =
   | GoalEvidenceProvenance
   | 'goal_control'
   | 'goal_runtime'
-  | 'system';
+  | 'system'
+  // Session multi-agent records (agent_mention/agent_message) share the
+  // transcript; they carry no Goal context and are never evidence.
+  | 'external_agent';
 
 export interface GoalEvidenceRecord {
   uuid: string;

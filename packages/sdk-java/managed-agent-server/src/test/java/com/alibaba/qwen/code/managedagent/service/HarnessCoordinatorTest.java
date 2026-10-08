@@ -114,11 +114,7 @@ class HarnessCoordinatorTest {
     // is honoured once the files return.
     @Test
     void defersABoundCancellationWhileWorkspaceFilesAreUnavailable() {
-        ContextBinding binding = new ContextBinding("tenant", "ws-a", 1,
-                "storage-a", ".", "config-a", 1);
-        SessionRecord session = new SessionRecord("tenant", "session",
-                "qwen-code", null, null, "ACTIVE", null, null, 0, 0, 0, 1, 1,
-                null, 1, binding, "yolo", "hosted-workspace-files/1");
+        SessionRecord session = boundSessionRecord();
         AgentStateStore store = mock(AgentStateStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         TurnRecord claimed = turn("tenant", "session", "turn",
@@ -156,11 +152,7 @@ class HarnessCoordinatorTest {
     // availability-gated sweep re-offers it once the files are back.
     @Test
     void defersABoundTurnWhileWorkspaceFilesAreUnavailable() {
-        ContextBinding binding = new ContextBinding("tenant", "ws-a", 1,
-                "storage-a", ".", "config-a", 1);
-        SessionRecord session = new SessionRecord("tenant", "session",
-                "qwen-code", null, null, "ACTIVE", null, null, 0, 0, 0, 1, 1,
-                null, 1, binding, "yolo", "hosted-workspace-files/1");
+        SessionRecord session = boundSessionRecord();
         AgentStateStore store = mock(AgentStateStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
@@ -194,11 +186,7 @@ class HarnessCoordinatorTest {
     // an eternal ACCEPTED.
     @Test
     void failsABoundTurnAfterTheWorkspaceOutageBudgetIsExhausted() {
-        ContextBinding binding = new ContextBinding("tenant", "ws-a", 1,
-                "storage-a", ".", "config-a", 1);
-        SessionRecord session = new SessionRecord("tenant", "session",
-                "qwen-code", null, null, "ACTIVE", null, null, 0, 0, 0, 1, 1,
-                null, 1, binding, "yolo", "hosted-workspace-files/1");
+        SessionRecord session = boundSessionRecord();
         AgentStateStore store = mock(AgentStateStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         TurnRecord claimed = turn("tenant", "session", "turn",
