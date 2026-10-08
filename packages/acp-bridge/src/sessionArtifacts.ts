@@ -290,6 +290,7 @@ export class SessionArtifactStore {
   // Failed removals or partial restores can leave ownership without a live record.
   private readonly pendingSnapshotRemovals = new Set<string>();
   private lastRestoreWarnings: string[] = [];
+  private legacyOnlyRestore = false;
   private lastRestoreWarningDetails: SessionArtifactWarningDetail[] = [];
 
   constructor(options: SessionArtifactStoreOptions) {
@@ -748,8 +749,12 @@ export class SessionArtifactStore {
     snapshot: RebuiltSessionArtifactSnapshot | undefined,
     options: SessionArtifactRestoreOptions = {},
   ): Promise<string[]> {
-    if (!snapshot) return [];
+    if (!snapshot) {
+      this.legacyOnlyRestore = false;
+      return [];
+    }
     return this.enqueue(async () => {
+      this.legacyOnlyRestore = false;
       const warnings = [...(snapshot?.warnings ?? [])];
       const baselineWarnings = [...warnings];
       const previousState = this.cloneState();
@@ -918,7 +923,6 @@ export class SessionArtifactStore {
         this.setLastRestoreWarnings(rollbackWarnings);
         return rollbackWarnings;
       }
-      this.logLegacyLocalPublishedDrops(droppedLegacyIds, false);
       for (const artifact of preservedLiveEphemeralArtifacts) {
         if (
           this.artifacts.has(artifact.id) ||
@@ -931,6 +935,11 @@ export class SessionArtifactStore {
           insertSeq: ++this.insertSeq,
         });
       }
+      this.legacyOnlyRestore = restoredCount === 0 && expectedExpiredDrops > 0;
+      this.logLegacyLocalPublishedDrops(
+        droppedLegacyIds.filter((id) => !this.artifacts.has(id)),
+        false,
+      );
       if (!warnings.some(isArtifactSnapshotCompletenessWarning)) {
         this.pendingSnapshotRemovals.clear();
       }
@@ -996,6 +1005,12 @@ export class SessionArtifactStore {
         return ['artifact snapshot not persisted'];
       }
     });
+  }
+
+  consumeLegacyOnlyRestore(): boolean {
+    const value = this.legacyOnlyRestore;
+    this.legacyOnlyRestore = false;
+    return value;
   }
 
   private clearResurrectionMarkers(id: string): void {
@@ -1392,10 +1407,8 @@ export class SessionArtifactStore {
         continue;
       }
       if (change.artifact && change.artifact.retention !== 'ephemeral') {
-        this.tombstonedIds.delete(change.artifactId);
-        this.tombstonedClientIds.delete(change.artifactId);
+        this.clearResurrectionMarkers(change.artifactId);
         this.stickyEphemeralIds.delete(change.artifactId);
-        this.markerArtifacts.delete(change.artifactId);
       }
     }
   }
@@ -1440,9 +1453,7 @@ export class SessionArtifactStore {
           oldest,
         )} limit=${MAX_TOMBSTONED_IDS}`,
       );
-      this.tombstonedIds.delete(oldest);
-      this.tombstonedClientIds.delete(oldest);
-      this.markerArtifacts.delete(oldest);
+      this.clearResurrectionMarkers(oldest);
     }
   }
 
@@ -1786,8 +1797,14 @@ export class SessionArtifactStore {
         toolName,
       })
     ) {
+      const requestedRetention = retention;
       retention = 'ephemeral';
       retentionExplicit = false;
+      writeStderrLine(
+        `[artifacts] session=${this.sessionId} ` +
+          'action=local_published_coerced_ephemeral ' +
+          `artifactId=${id} requestedRetention=${requestedRetention}`,
+      );
     }
 
     return {
@@ -2236,7 +2253,7 @@ function mergeBatchArtifact(
       lastStatAt: undefined,
     };
     delete merged.workspacePath;
-    coerceNonSnapshotPublishedFile(merged);
+    coerceMergedPublishedFile(merged, wasDurablyJournaled(existing));
     return merged;
   }
   const refreshDisplay =
@@ -2265,7 +2282,7 @@ function mergeBatchArtifact(
     retention: mergeRetention(existing, next),
     lastStatAt: next.lastStatAt ?? existing.lastStatAt,
   };
-  coerceNonSnapshotPublishedFile(merged);
+  coerceMergedPublishedFile(merged, wasDurablyJournaled(existing));
   return merged;
 }
 
@@ -2366,7 +2383,7 @@ function mergeArtifact(
     next.metadata = stripExpandedFromDirectoryMarker(next.metadata);
   }
 
-  coerceNonSnapshotPublishedFile(next);
+  coerceMergedPublishedFile(next, wasDurablyJournaled(existing));
 
   const changed = !publicArtifactsEqual(
     toPublicArtifact(existing),
@@ -2842,6 +2859,16 @@ function artifactIdMatchesIdentity(
   );
 }
 
+function wasDurablyJournaled(artifact: {
+  durableTombstoneRequired?: boolean;
+  persistedAt?: string;
+}): boolean {
+  return (
+    artifact.durableTombstoneRequired === true ||
+    artifact.persistedAt !== undefined
+  );
+}
+
 function coerceNonSnapshotPublishedFile<
   T extends {
     retention: DaemonSessionArtifactRetention;
@@ -2855,6 +2882,20 @@ function coerceNonSnapshotPublishedFile<
   artifact.retentionExplicit = false;
   artifact.durableTombstoneRequired = undefined;
   artifact.persistedAt = undefined;
+}
+
+function coerceMergedPublishedFile<
+  T extends {
+    retention: DaemonSessionArtifactRetention;
+    retentionExplicit?: boolean;
+    durableTombstoneRequired?: boolean;
+    persistedAt?: string;
+  },
+>(artifact: T, wasDurable: boolean): void {
+  coerceNonSnapshotPublishedFile(artifact);
+  if (wasDurable && isNonSnapshotPublishedFileUrl(artifact)) {
+    artifact.durableTombstoneRequired = true;
+  }
 }
 
 function isWebPreviewSnapshotLocator(

@@ -2076,6 +2076,9 @@ describe('SessionArtifactStore', () => {
       },
     });
     const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
     try {
       const url = pathToFileURL(path.join(outside, 'page.html')).href;
       await fs.writeFile(path.join(outside, 'page.html'), '<html>ok</html>');
@@ -2135,6 +2138,14 @@ describe('SessionArtifactStore', () => {
       expect(events[0]?.changes).toHaveLength(1);
       expect(events[0]?.changes[0]?.artifactId).toBe(snapshot.id);
       expect(events[0]?.changes[0]?.artifact?.url).toBe(snapshot.url);
+      const localId = created.changes.find(
+        (change) => change.artifact?.title === 'Local published page',
+      )?.artifactId;
+      expect(
+        stderr.mock.calls.map((call) => String(call[0])).join(''),
+      ).toContain(
+        `action=local_published_coerced_ephemeral artifactId=${localId}`,
+      );
       await expect(store.list()).resolves.toMatchObject({
         artifacts: expect.arrayContaining([
           expect.objectContaining({
@@ -2148,6 +2159,7 @@ describe('SessionArtifactStore', () => {
         ]),
       });
     } finally {
+      stderr.mockRestore();
       await fs.rm(outside, { recursive: true, force: true });
     }
   });
@@ -7555,6 +7567,9 @@ describe('SessionArtifactStore', () => {
       },
     });
     const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
     try {
       const url = pathToFileURL(path.join(outside, 'page.html')).href;
       await fs.writeFile(path.join(outside, 'page.html'), '<html>ok</html>');
@@ -7573,6 +7588,7 @@ describe('SessionArtifactStore', () => {
         { strict: true, trustedPublisher: true },
       );
       const pageId = created.changes[0]!.artifactId;
+      stderr.mockClear();
 
       const warnings = await store.restore(
         {
@@ -7593,6 +7609,11 @@ describe('SessionArtifactStore', () => {
       );
 
       expect(warnings).toEqual([]);
+      expect(
+        stderr.mock.calls.map((call) => String(call[0])).join(''),
+      ).not.toContain(
+        `action=legacy_local_published_dropped artifactId=${pageId}`,
+      );
       await expect(store.list()).resolves.toMatchObject({
         artifacts: [
           expect.objectContaining({
@@ -7603,6 +7624,7 @@ describe('SessionArtifactStore', () => {
         ],
       });
     } finally {
+      stderr.mockRestore();
       await fs.rm(outside, { recursive: true, force: true });
     }
   });
@@ -8236,6 +8258,467 @@ describe('SessionArtifactStore', () => {
       stderr.mockRestore();
       await fs.rm(outside, { recursive: true, force: true });
     }
+  });
+
+  it('tombstones a hosted page deleted after it is republished locally', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const sessionId = 's11-tombstone-hosted-after-local';
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      const managedId = managedIdForWorkspacePath('report.html');
+      const created = await store.upsertMany(
+        [
+          {
+            kind: 'html',
+            title: 'Hosted report',
+            storage: 'published',
+            source: 'tool',
+            toolName: 'artifact',
+            managedId,
+            url: 'https://cdn.example.com/pages/report.html',
+          },
+        ],
+        { strict: true, trustedPublisher: true },
+      );
+      const pageId = created.changes[0]!.artifactId;
+      const url = pathToFileURL(path.join(outside, 'report.html')).href;
+      await fs.writeFile(path.join(outside, 'report.html'), '<html>ok</html>');
+      await store.upsertMany(
+        [
+          {
+            kind: 'html',
+            title: 'Local report',
+            storage: 'published',
+            source: 'tool',
+            toolName: 'artifact',
+            managedId,
+            url,
+          },
+        ],
+        { strict: true, trustedPublisher: true },
+      );
+      await store.remove(pageId);
+
+      const rebuilt = rebuildSessionArtifactSnapshot(
+        events.map((systemPayload) => ({
+          type: 'system' as const,
+          subtype: 'session_artifact_event' as const,
+          systemPayload,
+        })),
+        sessionId,
+      )!;
+      const restored = new SessionArtifactStore({
+        sessionId,
+        workspaceCwd: workspace,
+      });
+      await expect(restored.restore(rebuilt)).resolves.toEqual([]);
+      await expect(restored.list()).resolves.toMatchObject({ artifacts: [] });
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('does not unpin when a journaled page is republished locally with explicit retention', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const sessionId = 's11-explicit-retention-local-republish';
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      const managedId = managedIdForWorkspacePath('report.html');
+      await store.upsertMany(
+        [
+          {
+            kind: 'html',
+            title: 'Hosted report',
+            storage: 'published',
+            source: 'tool',
+            toolName: 'artifact',
+            managedId,
+            retention: 'restorable',
+            url: 'https://cdn.example.com/pages/report.html',
+          },
+        ],
+        { strict: true, trustedPublisher: true },
+      );
+      const url = pathToFileURL(path.join(outside, 'report.html')).href;
+      await fs.writeFile(path.join(outside, 'report.html'), '<html>ok</html>');
+      await store.upsertMany(
+        [
+          {
+            kind: 'html',
+            title: 'Local report',
+            storage: 'published',
+            source: 'tool',
+            toolName: 'artifact',
+            managedId,
+            retention: 'restorable',
+            url,
+          },
+        ],
+        { strict: true, trustedPublisher: true },
+      );
+      await expect(store.recordSnapshot()).resolves.toEqual([]);
+
+      expect(
+        events.flatMap((payload) =>
+          payload.changes.filter(
+            (change) => change.reason === 'unpin_to_ephemeral',
+          ),
+        ),
+      ).toEqual([]);
+      const pageId = stableSessionArtifactId(sessionId, `managed:${managedId}`);
+      expect(snapshots.at(-1)?.stickyEphemeralIds ?? []).not.toContain(pageId);
+
+      events.length = 0;
+      await store.upsertMany(
+        [
+          {
+            kind: 'html',
+            title: 'Hosted report again',
+            storage: 'published',
+            source: 'tool',
+            toolName: 'artifact',
+            managedId,
+            url: 'https://cdn.example.com/pages/report-v2.html',
+          },
+        ],
+        { strict: true, trustedPublisher: true },
+      );
+      await expect(store.list()).resolves.toMatchObject({
+        artifacts: [
+          expect.objectContaining({
+            retention: 'restorable',
+            url: 'https://cdn.example.com/pages/report-v2.html',
+          }),
+        ],
+      });
+      expect(
+        events.flatMap((payload) =>
+          payload.changes.map((change) => change.artifact?.url),
+        ),
+      ).toContain('https://cdn.example.com/pages/report-v2.html');
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('coerces a same-batch published file merge back to ephemeral', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's11-batch-published-file-merge',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      const managedId = managedIdForWorkspacePath('report.html');
+      const fileUrl = pathToFileURL(path.join(outside, 'report.html')).href;
+      await fs.writeFile(path.join(outside, 'report.html'), '<html>ok</html>');
+      const publishedFile = {
+        kind: 'html' as const,
+        title: 'Local report',
+        storage: 'published' as const,
+        source: 'tool' as const,
+        toolName: 'artifact',
+        managedId,
+        url: fileUrl,
+      };
+      const hosted = {
+        kind: 'html' as const,
+        title: 'Hosted report',
+        storage: 'published' as const,
+        source: 'tool' as const,
+        toolName: 'artifact',
+        managedId,
+        url: 'https://cdn.example.com/pages/report.html',
+      };
+
+      const fileFirst = await store.upsertMany([publishedFile, hosted], {
+        strict: true,
+        trustedPublisher: true,
+      });
+      expect(fileFirst.changes).toEqual([
+        expect.objectContaining({
+          artifact: expect.objectContaining({
+            retention: 'ephemeral',
+            url: fileUrl,
+          }),
+        }),
+      ]);
+
+      const upgrade = new SessionArtifactStore({
+        sessionId: 's11-batch-managed-published-upgrade',
+        workspaceCwd: workspace,
+        persistence: {
+          recordEvent: async (payload) => {
+            events.push(payload);
+          },
+          recordSnapshot: async (payload) => {
+            snapshots.push(payload);
+          },
+        },
+      });
+      const upgraded = await upgrade.upsertMany(
+        [
+          {
+            title: 'Managed report',
+            storage: 'managed',
+            managedId,
+            retention: 'restorable',
+          },
+          publishedFile,
+        ],
+        { strict: true, trustedPublisher: true },
+      );
+      expect(upgraded.changes.at(-1)?.artifact).toMatchObject({
+        storage: 'published',
+        retention: 'ephemeral',
+        url: fileUrl,
+      });
+      await expect(store.recordSnapshot()).resolves.toEqual([]);
+      await expect(upgrade.recordSnapshot()).resolves.toEqual([]);
+      expect(
+        events.flatMap((payload) =>
+          payload.changes
+            .map((change) => change.artifact?.url)
+            .filter((url): url is string => url?.startsWith('file:') === true),
+        ),
+      ).toEqual([]);
+      expect(
+        snapshots.flatMap((payload) =>
+          (payload.markerArtifacts ?? [])
+            .map((artifact) => artifact.url)
+            .filter((url) => url?.startsWith('file:')),
+        ),
+      ).toEqual([]);
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('clears a sticky ephemeral override after a later durable publish', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-clear-sticky-after-durable-publish',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    const managedId = 'a582c3d4-cccc-4ccc-8ccc-cccccccccccc';
+    const published = {
+      kind: 'html' as const,
+      title: 'Hosted report',
+      storage: 'published' as const,
+      source: 'tool' as const,
+      toolName: 'artifact',
+      managedId,
+    };
+    await store.upsertMany(
+      [
+        {
+          ...published,
+          retention: 'restorable',
+          url: 'https://cdn.example.com/pages/report.html',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          ...published,
+          retention: 'ephemeral',
+          url: 'https://cdn.example.com/pages/report.html',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          ...published,
+          retention: 'restorable',
+          url: 'https://cdn.example.com/pages/report-v2.html',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          ...published,
+          url: 'https://cdn.example.com/pages/report-v3.html',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+
+    const listed = await store.list();
+    expect(listed.artifacts[0]).toMatchObject({
+      retention: 'restorable',
+      url: 'https://cdn.example.com/pages/report-v3.html',
+    });
+    expect(listed.artifacts[0]?.persistenceWarning).not.toBe(
+      'sticky_override_active',
+    );
+  });
+
+  it('rolls back a forged non-html published file whose id matches its identity', async () => {
+    const sessionId = 's11-restore-forged-link-matching-id';
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    const live = await store.upsertMany([
+      { title: 'Live', url: 'https://example.com/live' },
+    ]);
+    const liveId = live.changes[0]!.artifactId;
+    const managedId = 'a582c3d4-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const warnings = await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 4,
+      artifacts: [
+        {
+          id: stableSessionArtifactId(sessionId, `managed:${managedId}`),
+          kind: 'link',
+          storage: 'published',
+          source: 'client',
+          status: 'available',
+          title: 'Tampered',
+          managedId,
+          url: 'file:///tmp/secret.html',
+          retention: 'restorable',
+          clientRetained: false,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+
+    expect(warnings).toEqual([
+      'artifact snapshot restore failed; kept existing live artifacts',
+    ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ id: liveId, title: 'Live' }],
+    });
+  });
+
+  it('logs a rolled-back drop when restore hits a completeness warning', async () => {
+    const sessionId = 's11-completeness-rollback-logs-drop';
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    await store.upsertMany([
+      { title: 'Live', url: 'https://example.com/live' },
+    ]);
+    const kept = {
+      id: stableSessionArtifactId(sessionId, 'url:https://example.com/kept'),
+      kind: 'link' as const,
+      storage: 'external_url' as const,
+      source: 'tool' as const,
+      status: 'available' as const,
+      title: 'Kept',
+      url: 'https://example.com/kept',
+      retention: 'restorable' as const,
+      clientRetained: false,
+      createdAt: '2026-09-17T16:53:00.000Z',
+      updatedAt: '2026-09-17T16:53:00.000Z',
+      persistedAt: '2026-09-17T16:53:00.000Z',
+    };
+
+    try {
+      const warnings = await store.restore({
+        v: 2,
+        sessionId,
+        sequence: 4,
+        artifacts: [
+          persistedLocalPublishedPage(
+            sessionId,
+            'a582c3d4-dddd-4ddd-8ddd-dddddddddddd',
+          ),
+          kept,
+        ],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: ['skipped artifact restore: title is required'],
+      });
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+
+      expect(warnings).toContain(
+        'artifact snapshot restore partially failed; kept existing live artifacts',
+      );
+      expect(logged).toContain(
+        'action=legacy_local_published_drop_rolled_back',
+      );
+      expect(logged).not.toContain('action=legacy_local_published_dropped');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('marks a legacy-only restore so attach can replay transcript artifacts', async () => {
+    const sessionId = 's11-legacy-only-restore-replay';
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    const warnings = await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 2,
+      artifacts: [
+        persistedLocalPublishedPage(
+          sessionId,
+          'a582c3d4-eeee-4eee-8eee-eeeeeeeeeeee',
+        ),
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+
+    expect(warnings).toEqual([]);
+    expect(store.consumeLegacyOnlyRestore()).toBe(true);
+    expect(store.consumeLegacyOnlyRestore()).toBe(false);
   });
 
   it('prunes over-limit restored artifacts and records eviction tombstones', async () => {

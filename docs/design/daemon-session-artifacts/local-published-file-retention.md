@@ -47,9 +47,13 @@ descriptors stay restorable and still use the content route.
 ## Decision
 
 On write, any `published + file://` artifact that is not a snapshot descriptor
-is forced to `ephemeral`, even when the caller asks for `restorable`. The store
-does not set `retentionExplicit` for that force — the flag stays caller intent.
-The live page remains in the current session list.
+is forced to `ephemeral`, even when the caller asks for `restorable`. The force
+also clears `retentionExplicit`, so the coerced page never satisfies
+`shouldRecordEphemeralUnpin` and no `unpin_to_ephemeral` durable event is
+emitted; the caller's original `retention` request is deliberately not treated
+as explicit. If the record being replaced was already in the journal, the
+downgrade keeps `durableTombstoneRequired`, so a later delete still tombstones
+that id. The live page remains in the current session list.
 
 On restore and marker restore, drop local pages by locator and identity:
 
@@ -88,6 +92,11 @@ journal tombstones the page's id, in which case it is dropped and no warning
 is emitted. When the page is dropped, the snapshot recorded after the rewind
 no longer contains it. That is the durable metadata state after the drop; no
 user-facing warning is emitted. Operators can still see the stderr action.
+A committed drop of a page that rewind puts back is not logged as dropped.
+
+A journal that contains only these local pages restores empty, without a
+user-facing warning. Attach still replays transcript artifacts in that case,
+and rewind does not record the emptied list as a new snapshot.
 
 ## Validation
 

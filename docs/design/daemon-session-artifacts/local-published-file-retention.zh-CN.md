@@ -44,8 +44,12 @@ journal。恢复并不信任该定位符，加载时出现
 ## 决策
 
 写入时，任何不是快照描述符的 `published + file://` artifact 都强制
-`ephemeral`，即使调用方请求 `restorable`。这次强制不设置
-`retentionExplicit`，该标志只表示调用方意图。当前页仍出现在本会话列表中。
+`ephemeral`，即使调用方请求 `restorable`。这次强制会清掉
+`retentionExplicit`，因此被强制的页面不会满足 `shouldRecordEphemeralUnpin`，
+也不会写出 `unpin_to_ephemeral` durable event；调用方原来的 `retention`
+请求不按显式意图处理。如果被替换的记录已经在 journal 里，降级时保留
+`durableTombstoneRequired`，之后删除仍会给该 id 写 tombstone。当前页仍出现在
+本会话列表中。
 
 恢复和 marker 恢复时，按定位符和 identity 丢弃本地页：
 
@@ -78,7 +82,11 @@ HTTP/HTTPS published 定位符和快照描述符不变。
 进行 restore，而该页面现在是 ephemeral —— 除非被回放到的 journal 把该页 id
 列入 tombstone，此时页面会被丢掉且不发 warning。页面被丢掉时，回放之后记录的
 snapshot 不再包含它。这就是丢弃后的 durable metadata 状态；不会产生面向用户的
-warning。运维仍然可以通过 stderr action 看到。
+warning。运维仍然可以通过 stderr action 看到。rewind 又放回的页面不会被记成
+已丢弃。
+
+只包含这类本地页的 journal 会恢复成空列表，且没有面向用户的 warning。这种情况下
+挂载仍会回放 transcript 里的产物，rewind 也不会把清空后的列表写成新 snapshot。
 
 ## 验证
 
