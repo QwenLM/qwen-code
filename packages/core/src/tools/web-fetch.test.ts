@@ -18,6 +18,7 @@ import type { WebFetchToolParams } from './web-fetch.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { ToolConfirmationOutcome } from './tools.js';
+import { truncateLlmContent } from './truncation.js';
 import { ToolErrorType } from './tool-error.js';
 import * as fetchUtils from '../utils/fetch.js';
 import type { FetchPolicyResponse } from '../utils/fetch.js';
@@ -369,6 +370,53 @@ describe('WebFetchTool', () => {
       // size; without it the execution event falls back to raw == processed and
       // reports truncated: false for a page that was cut.
       expect(result.rawOutputSize?.chars).toBeGreaterThan(100_000);
+    });
+
+    it('should survive the scheduler per-tool pass without a second spill', async () => {
+      // The producer already bounded this body, so the scheduler's pass must
+      // treat web_fetch as its own sizing authority: otherwise the global 25k
+      // threshold cuts the envelope again, spills a second file, and points the
+      // model at that envelope instead of the page. Reachable through the
+      // raw-content fallback arm, whose body starts with the metadata header
+      // rather than the truncation sentinel.
+      stubFetch({
+        contentType: 'text/markdown',
+        body: Buffer.from('# Docs\n' + 'word '.repeat(30_000)),
+        finalUrl: 'https://example.com/big',
+      });
+      mockGenerateContent.mockRejectedValue(new Error('API error'));
+
+      const tool = new WebFetchTool(mockConfig);
+      const result = await tool
+        .build({ url: 'https://example.com/big', prompt: 'summarize' })
+        .execute(new AbortController().signal);
+      const body = result.llmContent as string;
+      expect(body).toContain(
+        'Tool output was too large and has been truncated',
+      );
+
+      // Exactly the scheduler's step-1 per-tool limits.
+      const schedulerConfig = {
+        ...mockConfig,
+        getTruncateToolOutputThreshold: () => 25_000,
+        getTruncateToolOutputLines: () => 1000,
+        isTruncateToolOutputThresholdExplicit: () => false,
+      } as unknown as Config;
+      const again = await truncateLlmContent(
+        schedulerConfig,
+        'web_fetch',
+        body,
+        {
+          threshold: tool.maxOutputChars,
+          lines:
+            tool.maxOutputChars === undefined
+              ? undefined
+              : Number.POSITIVE_INFINITY,
+          keep: tool.truncateKeep,
+        },
+      );
+
+      expect(again.content).toBe(body);
     });
 
     it('should keep content past 100k of raw HTML when the text itself fits', async () => {

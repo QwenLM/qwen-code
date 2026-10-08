@@ -207,10 +207,16 @@ export async function truncateAndSaveToFile(
   // Sanitize fileName to prevent path traversal.
   const safeFileName = `${path.basename(fileName)}.output`;
   const outputFile = path.join(projectTempDir, safeFileName);
-  const jsonPreview = structuredPreview(
-    content,
-    Math.min(PREVIEW_SIZE_CHARS, previewChars),
-  );
+  // A structured sample is deliberately compact (8 keys / 2 rows per level),
+  // so it can never fill a preview budget above PREVIEW_SIZE_CHARS. Emitting
+  // it anyway would shrink web_fetch's ~98k preview and shell's 4k preview to
+  // ~2k, silently discarding the content the caller budgeted for. Keep the
+  // caller's budget authoritative: sample only inside the sample's own size
+  // class, otherwise keep the head/tail preview.
+  const jsonPreview =
+    previewChars <= PREVIEW_SIZE_CHARS
+      ? structuredPreview(content, previewChars)
+      : undefined;
   const previewDescription = jsonPreview
     ? 'The output below is a structured JSON sample; omitted values remain in the full output file.'
     : "The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.";
@@ -478,6 +484,19 @@ function structuredPreview(
   try {
     const value: unknown = JSON.parse(content);
     const sample = (item: unknown, depth: number): unknown => {
+      if (typeof item === 'number') {
+        // JSON.parse has already rounded an integer the wire carried verbatim,
+        // and JSON.stringify renders a non-finite value as `null`. Showing
+        // either as if it were the payload's value sends the model after an id
+        // that never existed; name the loss instead.
+        if (!Number.isFinite(item)) {
+          return '<non-finite number - read the full output file>';
+        }
+        if (Number.isInteger(item) && !Number.isSafeInteger(item)) {
+          return '<integer beyond safe precision - read the full output file>';
+        }
+        return item;
+      }
       if (typeof item === 'string')
         return item.length > 120 ? `${item.slice(0, 120)}…` : item;
       if (Array.isArray(item))
@@ -490,19 +509,26 @@ function structuredPreview(
         };
       if (item && typeof item === 'object') {
         const entries = Object.entries(item);
-        return depth > 0
-          ? Object.fromEntries(
-              entries
-                .slice(0, 8)
-                .map(([key, field]) => [
-                  key.slice(0, 80),
-                  sample(field, depth - 1),
-                ]),
-            )
-          : {
-              keys: entries.slice(0, 8).map(([key]) => key.slice(0, 80)),
-              keyCount: entries.length,
-            };
+        if (depth > 0) {
+          const shown = entries.slice(0, 8);
+          const shownObject: Record<string, unknown> = Object.fromEntries(
+            shown.map(([key, field]) => [
+              key.slice(0, 80),
+              sample(field, depth - 1),
+            ]),
+          );
+          // The depth-0 branch reports keyCount; without the equivalent here a
+          // dropped key reads as an absent field and the model reports the
+          // value it was asked about as missing.
+          if (entries.length > shown.length) {
+            shownObject['omittedKeys'] = entries.length - shown.length;
+          }
+          return shownObject;
+        }
+        return {
+          keys: entries.slice(0, 8).map(([key]) => key.slice(0, 80)),
+          keyCount: entries.length,
+        };
       }
       return item;
     };

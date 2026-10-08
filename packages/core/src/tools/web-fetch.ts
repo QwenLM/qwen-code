@@ -65,6 +65,10 @@ export function sideQueryTimeoutMs(): number {
 // Truncation applies to converted/decoded text, never to raw HTML — cutting
 // markup before conversion silently destroys content deep in large pages.
 const MAX_CONTENT_CHARS = 100_000;
+// Slack above MAX_CONTENT_CHARS for the metadata header, the saved-text
+// pointer and the binary note the producer envelope is wrapped in: the
+// declared budget must exceed the ASSEMBLED body, not just the content.
+const FETCH_ENVELOPE_HEADROOM_CHARS = 2_000;
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 const MAX_REDIRECTS = 10;
 
@@ -782,6 +786,16 @@ export class WebFetchTool extends BaseDeclarativeTool<
   ToolResult
 > {
   static readonly Name: string = ToolNames.WEB_FETCH;
+
+  // web_fetch already bounds its own output (MAX_CONTENT_CHARS via the
+  // producer truncation, plus the envelope and metadata header). Without this
+  // override the scheduler's global 25k pass would cut that envelope a second
+  // time, spill a second file and point the model at an envelope instead of
+  // the page — the nested-header case the truncation sentinel exists to
+  // prevent. Mirrors WebSearchTool.
+  override get maxOutputChars(): number {
+    return MAX_CONTENT_CHARS + FETCH_ENVELOPE_HEADROOM_CHARS;
+  }
 
   constructor(private readonly config: Config) {
     super(

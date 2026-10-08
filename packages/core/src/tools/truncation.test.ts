@@ -11,6 +11,7 @@ import {
   truncateToolOutput,
   truncateLlmContent,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
+  PREVIEW_SIZE_CHARS,
   persistAndTruncateToolResult,
 } from './truncation.js';
 import * as fs from 'node:fs/promises';
@@ -224,7 +225,16 @@ describe('truncateAndSaveToFile', () => {
         label: 'sample value',
       })),
     });
-    const result = await save(content);
+    // The structured sample only applies inside its own preview size class.
+    const result = await truncateAndSaveToFile(
+      content,
+      'test-file',
+      '/tmp',
+      THRESHOLD,
+      TRUNCATE_LINES,
+      'both',
+      PREVIEW_SIZE_CHARS,
+    );
     expect(result.content).toContain('Structured sample');
     expect(result.content).toContain(
       'The output below is a structured JSON sample; omitted values remain in the full output file.',
@@ -241,6 +251,72 @@ describe('truncateAndSaveToFile', () => {
       content,
       expect.any(Object),
     );
+  });
+
+  it('keeps a caller-requested JSON preview budget instead of a 2k sample', async () => {
+    // A valid-JSON body used to collapse to the ~2k structured sample whatever
+    // previewChars asked for, so web_fetch lost ~98k of the content it handed
+    // to the side query and shell lost the 4k preview it budgets for.
+    const content = JSON.stringify(
+      {
+        rows: Array.from({ length: 200 }, (_, index) => ({
+          index,
+          label: 'x'.repeat(1000),
+        })),
+      },
+      null,
+      2,
+    );
+
+    const result = await truncateAndSaveToFile(
+      content,
+      'json-budget',
+      '/tmp',
+      THRESHOLD,
+      TRUNCATE_LINES,
+      'both',
+      38_000,
+    );
+
+    expect(result.content).not.toContain('Structured sample');
+    expect(result.content).toContain('beginning and end');
+    expect(truncatedPartOf(result.content).length).toBeGreaterThan(35_000);
+    expect(truncatedPartOf(result.content).length).toBeLessThan(39_500);
+  });
+
+  it('marks values a JSON round-trip cannot show faithfully', async () => {
+    // The preview is a JSON.parse -> JSON.stringify round trip: it renders a
+    // 20-digit id as a different integer, a non-finite number as null, and
+    // drops keys past the eighth. Nothing in the envelope used to say so, so
+    // a shown value read as the payload's value.
+    // Hand-written so the wire genuinely carries the full-precision values:
+    // JSON.stringify would have already turned 1e400 into null before the
+    // preview ever saw it.
+    const content =
+      '{"ids":[12345678901234567890],"total":1e400,' +
+      Array.from({ length: 18 }, (_, index) => `"k${index}":${index}`).join(
+        ',',
+      ) +
+      // Only a payload past the truncation threshold puts the sample in front
+      // of the model at all.
+      `,"bulk":"${'x'.repeat(50_000)}"}`;
+
+    const result = await truncateAndSaveToFile(
+      content,
+      'json-fidelity',
+      '/tmp',
+      THRESHOLD,
+      TRUNCATE_LINES,
+      'both',
+      PREVIEW_SIZE_CHARS,
+    );
+
+    expect(result.content).toContain('Structured sample');
+    expect(result.content).not.toContain('12345678901234567000');
+    expect(result.content).toContain('beyond safe precision');
+    expect(result.content).not.toContain('"total": null');
+    expect(result.content).toContain('non-finite number');
+    expect(result.content).toContain('omittedKeys');
   });
 
   it('should include helpful instructions in truncated message', async () => {
