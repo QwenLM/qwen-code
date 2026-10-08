@@ -141,7 +141,12 @@ type CopyKey = keyof (typeof COPY)['en'];
 
 function useDesktopRelayCopy(): (key: CopyKey) => string {
   const { language } = useI18n();
-  return useCallback((key: CopyKey) => COPY[language][key], [language]);
+  // No ru copy for the desktop relay yet — same partial-catalog policy as the
+  // ru table in i18n.tsx (#13391): ru reuses the EN copy.
+  return useCallback(
+    (key: CopyKey) => COPY[language === 'ru' ? 'en' : language][key],
+    [language],
+  );
 }
 
 export interface DesktopRelayStatus {
