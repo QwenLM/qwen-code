@@ -513,6 +513,13 @@ export class DefaultHookOutput implements HookOutput {
  * Specific hook output class for PreToolUse events.
  */
 export class PreToolUseHookOutput extends DefaultHookOutput {
+  getUpdatedInput(): Record<string, unknown> | undefined {
+    const input = this.hookSpecificOutput?.['updatedInput'];
+    return input !== null && typeof input === 'object' && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : undefined;
+  }
+
   /**
    * Get permission decision from hook output
    * @returns 'allow' | 'deny' | 'ask' | undefined
@@ -792,8 +799,9 @@ export interface PreToolUseInput extends HookInput {
 export interface PreToolUseOutput extends HookOutput {
   hookSpecificOutput: {
     hookEventName: 'PreToolUse';
-    permissionDecision: 'allow' | 'deny' | 'ask';
-    permissionDecisionReason: string;
+    permissionDecision?: 'allow' | 'deny' | 'ask';
+    permissionDecisionReason?: string;
+    updatedInput?: Record<string, unknown>;
   };
 }
 

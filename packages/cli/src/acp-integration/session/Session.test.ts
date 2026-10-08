@@ -7530,9 +7530,9 @@ describe('Session', () => {
   // `_meta.qwenTodoApproval` binding instead of poking the private
   // `activeTodoPlanRevision` field. Mirrors the it.each harness in the
   // prompt describe block.
-  async function runExitPlanModeApprovalPrompt(
+  async function runExitPlanModePrompt(
     onConfirm = vi.fn().mockResolvedValue(undefined),
-  ): Promise<Parameters<AgentSideConnection['requestPermission']>[0]> {
+  ): Promise<void> {
     let mode = ApprovalMode.PLAN;
     const hookSpy = vi
       .spyOn(core, 'firePermissionRequestHook')
@@ -7596,7 +7596,12 @@ describe('Session', () => {
     } finally {
       hookSpy.mockRestore();
     }
+  }
 
+  async function runExitPlanModeApprovalPrompt(
+    onConfirm = vi.fn().mockResolvedValue(undefined),
+  ): Promise<Parameters<AgentSideConnection['requestPermission']>[0]> {
+    await runExitPlanModePrompt(onConfirm);
     const calls = vi.mocked(mockClient.requestPermission).mock.calls;
     expect(calls.length).toBeGreaterThan(0);
     return calls.at(-1)![0];
@@ -35759,7 +35764,7 @@ describe('Session', () => {
       });
 
       try {
-        const prompt = runExitPlanModeApprovalPrompt();
+        const prompt = runExitPlanModePrompt();
         await vi.waitFor(() => expect(preToolUseSpy).toHaveBeenCalledOnce());
         session.clearActiveTodoPlanRevision();
         resolvePreToolUse({ shouldProceed: true });
@@ -35768,6 +35773,7 @@ describe('Session', () => {
         preToolUseSpy.mockRestore();
       }
 
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
       expect(
         vi
           .mocked(mockClient.sessionUpdate)
@@ -37650,6 +37656,222 @@ describe('Session', () => {
       });
 
       describe('PreToolUse hook', () => {
+        it.each(['none', 'locked', 'endpoint'])(
+          'preserves injected media policy fields while refusing a %s override',
+          async (override) => {
+            const executed: Array<Record<string, unknown>> = [];
+            class MediaInvocation extends core.BaseToolInvocation<
+              Record<string, unknown>,
+              core.ToolResult
+            > {
+              getDescription() {
+                return 'Media fixture';
+              }
+              override async getDefaultPermission(): Promise<core.PermissionDecision> {
+                return 'allow';
+              }
+              async execute(): Promise<core.ToolResult> {
+                executed.push(this.params);
+                return { llmContent: 'ok', returnDisplay: 'ok' };
+              }
+            }
+            class MediaTool extends core.BaseDeclarativeTool<
+              Record<string, unknown>,
+              core.ToolResult
+            > {
+              constructor() {
+                super(
+                  'media_fixture',
+                  'Media',
+                  'Media fixture',
+                  core.Kind.Read,
+                  {
+                    type: 'object',
+                    properties: {
+                      value: { type: 'string' },
+                      locked: { type: 'string' },
+                      endpoint: { type: 'string' },
+                    },
+                    required: ['value'],
+                  },
+                );
+              }
+              override get mediaPolicyDescriptor(): core.MediaPolicyToolDescriptor {
+                return {
+                  kind: 'media_policy',
+                  inputMediaTypes: ['image'],
+                  outputs: [],
+                  operatorOnlyParams: ['endpoint'],
+                };
+              }
+              protected createInvocation(params: Record<string, unknown>) {
+                return new MediaInvocation(params);
+              }
+            }
+            mockConfig.getOmniPolicyToolsSettings = vi.fn().mockReturnValue({
+              media_fixture: {
+                modelAccess: {
+                  enabled: true,
+                  lockedArguments: { locked: 'operator' },
+                  defaultArguments: { endpoint: 'local' },
+                },
+              },
+            });
+            mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+            mockConfig.getMessageBus = vi.fn().mockReturnValue({
+              request: vi.fn(async (request: core.HookExecutionRequest) => ({
+                success: true,
+                output:
+                  request.eventName === 'PreToolUse'
+                    ? {
+                        hookSpecificOutput: {
+                          updatedInput: {
+                            ...(request.input['tool_input'] as Record<
+                              string,
+                              unknown
+                            >),
+                            value: 'hook',
+                            ...(override === 'none'
+                              ? {}
+                              : { [override]: 'forbidden' }),
+                          },
+                        },
+                      }
+                    : {},
+              })),
+            });
+            mockToolRegistry.getTool.mockReturnValue(new MediaTool());
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValueOnce(
+                createStreamWithChunks([
+                  {
+                    type: core.StreamEventType.CHUNK,
+                    value: {
+                      functionCalls: [
+                        {
+                          id: 'media-echo',
+                          name: 'media_fixture',
+                          args: { value: 'model' },
+                        },
+                      ],
+                    },
+                  },
+                ]),
+              )
+              .mockResolvedValue(createEmptyStream());
+            await session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'media' }],
+            });
+            expect(executed).toEqual(
+              override === 'none'
+                ? [{ value: 'hook', locked: 'operator', endpoint: 'local' }]
+                : [],
+            );
+          },
+        );
+
+        it.each([
+          [{ value: 'hook' }, ['hook'], ['hook']],
+          [{ missing: true }, [], []],
+          [{ value: 'denied' }, ['denied'], []],
+        ])(
+          'prepares and executes only validated effective input %j',
+          async (updatedInput, expectedPrepared, expectedExecuted) => {
+            const prepared: string[] = [];
+            const executed: string[] = [];
+            class EchoInvocation extends core.BaseToolInvocation<
+              { value: string },
+              core.ToolResult
+            > {
+              private cached?: string;
+              getDescription() {
+                return this.params.value;
+              }
+              override async getDefaultPermission(): Promise<core.PermissionDecision> {
+                this.cached = this.params.value;
+                prepared.push(this.params.value);
+                return this.params.value === 'denied' ? 'deny' : 'allow';
+              }
+              async execute(): Promise<core.ToolResult> {
+                executed.push(this.cached!);
+                return {
+                  llmContent: this.cached!,
+                  returnDisplay: this.cached!,
+                };
+              }
+            }
+            class EchoTool extends core.BaseDeclarativeTool<
+              { value: string },
+              core.ToolResult
+            > {
+              constructor() {
+                super('echo_input', 'Echo', 'Echo input', core.Kind.Read, {
+                  type: 'object',
+                  properties: { value: { type: 'string' } },
+                  required: ['value'],
+                });
+              }
+              protected createInvocation(params: { value: string }) {
+                return new EchoInvocation(params);
+              }
+            }
+            const messageBus = {
+              request: vi.fn(async (request: core.HookExecutionRequest) => ({
+                success: true,
+                output:
+                  request.eventName === 'PreToolUse'
+                    ? {
+                        hookSpecificOutput: {
+                          hookEventName: 'PreToolUse',
+                          permissionDecision: 'allow',
+                          updatedInput,
+                        },
+                      }
+                    : {},
+              })),
+            };
+            mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+            mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+            mockConfig.getApprovalMode = vi
+              .fn()
+              .mockReturnValue(ApprovalMode.DEFAULT);
+            mockToolRegistry.getTool.mockReturnValue(new EchoTool());
+            mockChat.sendMessageStream = vi
+              .fn()
+              .mockResolvedValueOnce(
+                createStreamWithChunks([
+                  {
+                    type: core.StreamEventType.CHUNK,
+                    value: {
+                      functionCalls: [
+                        {
+                          id: 'effective-input',
+                          name: 'echo_input',
+                          args: { value: 'model' },
+                        },
+                      ],
+                    },
+                  },
+                ]),
+              )
+              .mockResolvedValue(createEmptyStream());
+            await session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'echo' }],
+            });
+            expect(prepared).toEqual(expectedPrepared);
+            expect(executed).toEqual(expectedExecuted);
+            if (expectedExecuted.length) {
+              const post = messageBus.request.mock.calls.find(
+                ([r]) => r.eventName === 'PostToolUse',
+              );
+              expect(post?.[0].input['tool_input']).toEqual({ value: 'hook' });
+            }
+          },
+        );
+
         it('fires PreToolUse hook before tool execution', async () => {
           const seen: string[] = [];
           const definition = (label: string): core.HookDefinition[] => [
@@ -42930,6 +43152,52 @@ describe('Session', () => {
       }
     });
 
+    it('rejects a hook-added standalone worktree override before rebuilding', async () => {
+      recreateStandaloneSession();
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'must not execute',
+        returnDisplay: '',
+      });
+      const build = vi.fn((params: Record<string, unknown>) => ({
+        params,
+        getDefaultPermission: async () => 'allow',
+        execute,
+        getDescription: () => 'Agent',
+        toolLocations: () => [],
+      }));
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.AGENT,
+        kind: core.Kind.Think,
+        build,
+      });
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({
+        request: vi.fn(async () => ({
+          success: true,
+          output: {
+            hookSpecificOutput: {
+              updatedInput: { subagent_type: 'explore', isolation: 'worktree' },
+            },
+          },
+        })),
+      });
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-hook-worktree', [
+        {
+          id: 'hook-worktree',
+          name: core.ToolNames.AGENT,
+          args: { subagent_type: 'explore' },
+        },
+      ]);
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error:
+          'Standalone sessions cannot change or override their working directory.',
+      });
+      expect(build).toHaveBeenCalledTimes(1);
+      expect(execute).not.toHaveBeenCalled();
+    });
+
     it('allows a standalone fork Agent without a cwd override', async () => {
       recreateStandaloneSession();
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
@@ -45514,6 +45782,79 @@ describe('Session', () => {
           errorType: core.ToolErrorType.EXECUTION_DENIED,
         }),
       );
+    });
+
+    it('denies a PreToolUse rewrite outside the Host workspace before permissions', async () => {
+      vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('agent-host');
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+      const originalPath = path.join(process.cwd(), 'original.txt');
+      const updatedPath = path.join(process.cwd(), '..', 'outside.txt');
+      vi.mocked(
+        mockConfig.getWorkspaceContext().isPathWithinWorkspace,
+      ).mockImplementation(
+        (candidate) =>
+          candidate === originalPath || candidate === process.cwd(),
+      );
+      const preHook = vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
+        shouldProceed: true,
+        updatedInput: { file_path: updatedPath },
+      });
+      const permissionHook = vi.spyOn(core, 'firePermissionRequestHook');
+      const execute = vi.fn();
+      const tool = mockConfirmingTool(
+        core.ToolNames.READ_FILE,
+        execute,
+        'info',
+      );
+      tool.kind = core.Kind.Read;
+      const invocation = tool.build();
+      tool.build.mockImplementation((params: Record<string, unknown>) => ({
+        ...invocation,
+        params,
+      }));
+      mockToolRegistry.getTool.mockReturnValue(tool);
+      const upstream = vi.fn().mockResolvedValue({ allowed: true });
+      mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(upstream);
+
+      try {
+        const result = await (
+          session as unknown as ToolCallInternals
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-host-pre-rewrite',
+          [
+            {
+              id: 'rewritten_read',
+              name: core.ToolNames.READ_FILE,
+              args: { file_path: originalPath },
+            },
+          ],
+        );
+
+        expect(preHook).toHaveBeenCalledOnce();
+        expect(tool.build).toHaveBeenLastCalledWith({ file_path: updatedPath });
+        expect(invocation.getDefaultPermission).not.toHaveBeenCalled();
+        expect(permissionHook).not.toHaveBeenCalled();
+        expect(mockClient.requestPermission).not.toHaveBeenCalled();
+        expect(upstream).not.toHaveBeenCalled();
+        expect(execute).not.toHaveBeenCalled();
+        expect(result.parts[0]?.functionResponse?.response).toEqual({
+          error: 'Agent Host reads are limited to the assigned workspace.',
+        });
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          [result.parts[0]],
+          expect.objectContaining({
+            callId: 'rewritten_read',
+            status: 'error',
+            executionStatus: 'not_started',
+            errorType: core.ToolErrorType.EXECUTION_DENIED,
+          }),
+        );
+      } finally {
+        preHook.mockRestore();
+        permissionHook.mockRestore();
+      }
     });
 
     it('checks full Host authority once after permission-hook input rewriting', async () => {

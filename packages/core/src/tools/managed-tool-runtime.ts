@@ -611,6 +611,14 @@ export class ManagedToolRuntime {
         entry.hookOwner,
       );
       this.assertExecutable(entry);
+      if (
+        result.updatedInput &&
+        managedToolDigest(result.updatedInput) !== entry.reference.argsDigest
+      ) {
+        throw new Error(
+          'PreToolUse cannot change managed tool parameters after preparation.',
+        );
+      }
       entry.preflightResult = structuredClone(result);
       return result;
     });

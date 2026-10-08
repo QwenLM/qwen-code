@@ -63,6 +63,45 @@ function busRejecting(message: string): MessageBus {
 const EMPTY_ERROR = { success: false, error: { message: '' } };
 
 describe('toolHookTriggers', () => {
+  it.each([undefined, 'allow', 'ask'])(
+    'returns whole replacement input for the %s decision',
+    async (permissionDecision) => {
+      const result = await firePreToolUseHook(
+        busWithOutput({
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision,
+            updatedInput: { value: 'hook' },
+          },
+        }),
+        'echo',
+        { value: 'model', removed: true },
+        'use',
+        'default',
+      );
+      expect(result).toHaveProperty('updatedInput', { value: 'hook' });
+    },
+  );
+
+  it('stop wins over ask and ignores replacement input', async () => {
+    const result = await firePreToolUseHook(
+      busWithOutput({
+        continue: false,
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'ask',
+          updatedInput: { value: 'hook' },
+        },
+      }),
+      'echo',
+      { value: 'model' },
+      'use',
+      'default',
+    );
+    expect(result).toMatchObject({ shouldProceed: false, blockType: 'stop' });
+    expect(result).not.toHaveProperty('updatedInput');
+  });
+
   it('transports the owner on all six helpers without adding it to stdin', async () => {
     const bus = createMockMessageBus();
     const owner = { runtimeId: 'runtime', sessionId: 'session', agentId: 'A' };

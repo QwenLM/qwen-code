@@ -7,6 +7,10 @@
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import {
+  getPreToolUseInputForBuild,
+  normalizeToolHookInput,
+} from '@qwen-code/qwen-code-core/core/toolHookTriggers.js';
+import {
   captureHookExecutionOwner,
   runWithHookExecutionOwner,
   type HookExecutionOwner,
@@ -14242,11 +14246,6 @@ export class Session implements SessionContext {
       tool instanceof DiscoveredMCPTool ? tool.serverName : undefined;
     const policyToolName = tool.name;
     guardContext.policyToolName = policyToolName;
-    const originalPolicyRequestArgs =
-      policyToolName === ToolNames.SHELL || policyToolName === ToolNames.MONITOR
-        ? structuredClone(args)
-        : args;
-
     const toolSpan = startToolSpan(
       policyToolName,
       {
@@ -14338,6 +14337,7 @@ export class Session implements SessionContext {
         // Every ACP-originated call is a model call: there is no in-process
         // fixed_policy caller on this path, so the origin is pinned rather
         // than read from the (untrusted) protocol payload.
+        const callerInput = { ...args };
         const mediaPolicyGate = evaluateMediaPolicyToolCall({
           config: this.config,
           tool,
@@ -14373,27 +14373,34 @@ export class Session implements SessionContext {
         const isAgentTool = tool.name === ToolNames.AGENT;
         const isExitPlanModeTool = tool.name === ToolNames.EXIT_PLAN_MODE;
         const isEnterPlanModeTool = tool.name === ToolNames.ENTER_PLAN_MODE;
-        const requestsAgentWorkingDirectory =
-          isAgentTool &&
-          (args['isolation'] === 'worktree' ||
-            (typeof args['working_dir'] === 'string' &&
-              args['working_dir'].trim().length > 0));
-        if (
-          this.requiresManagedConversationBinding &&
-          (requestsAgentWorkingDirectory ||
-            tool.name === ToolNames.ENTER_WORKTREE ||
-            tool.name === ToolNames.EXIT_WORKTREE)
-        ) {
-          return earlyErrorResponse(
-            new Error(STANDALONE_WORKTREE_ACTION_ERROR),
-            toolName,
-            {
-              status: 'error',
-              errorType: ToolErrorType.EXECUTION_DENIED,
-              executionStatus: 'not_started',
-            },
-          );
-        }
+        const rejectStandaloneWorktree = () => {
+          const requestsAgentWorkingDirectory =
+            isAgentTool &&
+            (args['isolation'] === 'worktree' ||
+              (typeof args['working_dir'] === 'string' &&
+                args['working_dir'].trim().length > 0));
+          if (
+            this.requiresManagedConversationBinding &&
+            (requestsAgentWorkingDirectory ||
+              tool.name === ToolNames.ENTER_WORKTREE ||
+              tool.name === ToolNames.EXIT_WORKTREE)
+          ) {
+            return earlyErrorResponse(
+              new Error(STANDALONE_WORKTREE_ACTION_ERROR),
+              toolName,
+              {
+                status: 'error',
+                errorType: ToolErrorType.EXECUTION_DENIED,
+                executionStatus: 'not_started',
+              },
+            );
+          }
+
+          return undefined;
+        };
+        const initialStandaloneRestriction = rejectStandaloneWorktree();
+        if (initialStandaloneRestriction) return initialStandaloneRestriction;
+
         if (isAgentTool) {
           agentToolAbortController = new AbortController();
           activeToolAbortSignal = agentToolAbortController.signal;
@@ -14420,19 +14427,172 @@ export class Session implements SessionContext {
 
         let toolBuildSucceeded = false;
         try {
-          const invocation = appExecution
-            ? appExecution.tool.buildForApp(
-                args,
-                appExecution.onResult,
-                this.config,
-              )
-            : tool.build(args);
-          builtInvocation = invocation;
-          const callIdAware = invocation as {
-            setCallId?: (id: string) => void;
+          let originalPolicyRequestArgs = structuredClone(args);
+          const buildInvocation = () => {
+            const invocation = appExecution
+              ? appExecution.tool.buildForApp(
+                  args,
+                  appExecution.onResult,
+                  this.config,
+                )
+              : tool.build(args);
+            (invocation as { setCallId?: (id: string) => void }).setCallId?.(
+              callId,
+            );
+            return invocation;
           };
-          callIdAware.setCallId?.(callId);
+          let invocation = buildInvocation();
+          builtInvocation = invocation;
           toolBuildSucceeded = true;
+
+          const workflowPlanRevision = isExitPlanModeTool
+            ? this.config.getSessionWorkflowPlanRevision?.()
+            : undefined;
+          const qwenTodoApproval =
+            isExitPlanModeTool &&
+            this.activeTodoPlanRevision &&
+            workflowPlanRevision?.planId ===
+              this.activeTodoPlanRevision.planId &&
+            workflowPlanRevision.sourceCallId ===
+              this.activeTodoPlanRevision.sourceCallId
+              ? this.activeTodoPlanRevision
+              : undefined;
+          if (qwenTodoApproval) {
+            todoPlanApprovalGeneration = this.todoPlanRevisionGeneration;
+            todoPlanApprovalRevision = qwenTodoApproval;
+          }
+
+          let confirmationDetails: ToolCallConfirmationDetails | undefined;
+          const cancelStaleTodoPlanApproval = async () => {
+            const configRevision =
+              this.config.getSessionWorkflowPlanRevision?.();
+            if (
+              todoPlanApprovalGeneration === undefined ||
+              !todoPlanApprovalRevision ||
+              (todoPlanApprovalGeneration === this.todoPlanRevisionGeneration &&
+                this.activeTodoPlanRevision?.planId ===
+                  todoPlanApprovalRevision.planId &&
+                this.activeTodoPlanRevision?.sourceCallId ===
+                  todoPlanApprovalRevision.sourceCallId &&
+                configRevision?.planId === todoPlanApprovalRevision.planId &&
+                configRevision?.sourceCallId ===
+                  todoPlanApprovalRevision.sourceCallId)
+            ) {
+              return undefined;
+            }
+            try {
+              await confirmationDetails?.onConfirm(
+                ToolConfirmationOutcome.Cancel,
+              );
+            } catch (error) {
+              debugLogger.warn(
+                `Failed to cancel stale plan approval: ${this.#formatError(error)}`,
+              );
+            }
+            onStopAfterPermissionCancel?.();
+            return earlyErrorResponse(
+              new Error(
+                'Plan approval is stale because its Session Workflow revision changed. No action was taken.',
+              ),
+              toolName,
+              {
+                status: 'cancelled',
+                errorType: undefined,
+                executionStatus: 'not_started',
+                stopAfterPermissionCancel: true,
+              },
+            );
+          };
+
+          // Fire PreToolUse hook (aligned with core path in coreToolScheduler.ts)
+          const hooksEnabledForTool = !this.config.getDisableAllHooks?.();
+          const messageBusForTool = this.config.getMessageBus?.();
+          const permissionMode = String(approvalMode);
+          // Keep operator-injected policy fields out of caller-authored replacements.
+          const hookInput = normalizeToolHookInput(callerInput);
+
+          if (hooksEnabledForTool && messageBusForTool) {
+            const preHookResult = await firePreToolUseHook(
+              messageBusForTool,
+              policyToolName,
+              hookInput,
+              toolUseId,
+              permissionMode,
+              activeToolAbortSignal,
+              callId,
+              hookOwner,
+            );
+            preToolUseContext = preHookResult.additionalContext;
+            const preHookCancellation =
+              cancelBeforeExecutionIfAborted(toolName);
+            if (preHookCancellation) return preHookCancellation;
+            const stalePreHookApproval = await cancelStaleTodoPlanApproval();
+            if (stalePreHookApproval) return stalePreHookApproval;
+
+            if (!preHookResult.shouldProceed) {
+              // Hook blocked the tool execution - send notification to UI
+              const blockReason =
+                preHookResult.blockReason || 'Blocked by PreToolUse hook';
+              try {
+                await this.messageEmitter.emitAgentMessage(
+                  `✗ **PreToolUse blocked**: ${toolName} - ${blockReason}`,
+                );
+              } catch (emitError) {
+                debugLogger.debug(
+                  '[Session.runTool] Failed to emit PreToolUse block message',
+                  emitError,
+                );
+              }
+              const blockMessageCancellation =
+                cancelBeforeExecutionIfAborted(toolName);
+              if (blockMessageCancellation) return blockMessageCancellation;
+              return earlyErrorResponse(new Error(blockReason), toolName, {
+                status: 'error',
+                errorType: ToolErrorType.EXECUTION_DENIED,
+                executionStatus: 'not_started',
+              });
+            }
+            if (preHookResult.updatedInput) {
+              const effectivePolicy = evaluateMediaPolicyToolCall({
+                config: this.config,
+                tool,
+                args: getPreToolUseInputForBuild(
+                  callerInput,
+                  hookInput,
+                  preHookResult.updatedInput,
+                ),
+                executionOrigin: { kind: 'model' },
+              });
+              if (effectivePolicy.outcome === 'reject') {
+                return earlyErrorResponse(
+                  new Error(effectivePolicy.message),
+                  toolName,
+                  {
+                    status: 'error',
+                    executionStatus: 'not_started',
+                    errorType:
+                      effectivePolicy.reason === 'invalid_params'
+                        ? ToolErrorType.INVALID_TOOL_PARAMS
+                        : ToolErrorType.EXECUTION_DENIED,
+                  },
+                );
+              }
+              args = effectivePolicy.args;
+              originalPolicyRequestArgs = structuredClone(args);
+              const rewrittenStandaloneRestriction = rejectStandaloneWorktree();
+              if (rewrittenStandaloneRestriction)
+                return rewrittenStandaloneRestriction;
+              await invocation.release?.();
+              builtInvocation = undefined;
+              toolBuildSucceeded = false;
+              invocation = buildInvocation();
+              builtInvocation = invocation;
+              toolBuildSucceeded = true;
+              const rebuildCancellation =
+                cancelBeforeExecutionIfAborted(toolName);
+              if (rebuildCancellation) return rebuildCancellation;
+            }
+          }
 
           if (this.config.getSessionSourceType?.() === 'agent-host') {
             // Keep upstream authority at the final execution boundary.
@@ -14824,47 +14984,6 @@ export class Session implements SessionContext {
             }
           }
 
-          let confirmationDetails: ToolCallConfirmationDetails | undefined;
-          const cancelStaleTodoPlanApproval = async () => {
-            const configRevision =
-              this.config.getSessionWorkflowPlanRevision?.();
-            if (
-              todoPlanApprovalGeneration === undefined ||
-              !todoPlanApprovalRevision ||
-              (todoPlanApprovalGeneration === this.todoPlanRevisionGeneration &&
-                this.activeTodoPlanRevision?.planId ===
-                  todoPlanApprovalRevision.planId &&
-                this.activeTodoPlanRevision?.sourceCallId ===
-                  todoPlanApprovalRevision.sourceCallId &&
-                configRevision?.planId === todoPlanApprovalRevision.planId &&
-                configRevision?.sourceCallId ===
-                  todoPlanApprovalRevision.sourceCallId)
-            ) {
-              return undefined;
-            }
-            try {
-              await confirmationDetails?.onConfirm(
-                ToolConfirmationOutcome.Cancel,
-              );
-            } catch (error) {
-              debugLogger.warn(
-                `Failed to cancel stale plan approval: ${this.#formatError(error)}`,
-              );
-            }
-            onStopAfterPermissionCancel?.();
-            return earlyErrorResponse(
-              new Error(
-                'Plan approval is stale because its Session Workflow revision changed. No action was taken.',
-              ),
-              toolName,
-              {
-                status: 'cancelled',
-                errorType: undefined,
-                executionStatus: 'not_started',
-                stopAfterPermissionCancel: true,
-              },
-            );
-          };
           const recordAutoModeFallbackResolution = (
             outcome: ToolConfirmationOutcome,
           ) => {
@@ -15172,22 +15291,6 @@ export class Session implements SessionContext {
               const offeredPermissionOptions = permissionOptions.map(
                 (option) => ({ ...option }),
               );
-              const workflowPlanRevision = isExitPlanModeTool
-                ? this.config.getSessionWorkflowPlanRevision?.()
-                : undefined;
-              const qwenTodoApproval =
-                isExitPlanModeTool &&
-                this.activeTodoPlanRevision &&
-                workflowPlanRevision?.planId ===
-                  this.activeTodoPlanRevision.planId &&
-                workflowPlanRevision.sourceCallId ===
-                  this.activeTodoPlanRevision.sourceCallId
-                  ? this.activeTodoPlanRevision
-                  : undefined;
-              if (qwenTodoApproval) {
-                todoPlanApprovalGeneration = this.todoPlanRevisionGeneration;
-                todoPlanApprovalRevision = qwenTodoApproval;
-              }
               const params: RequestPermissionRequest = {
                 sessionId: this.sessionId,
                 ...(appExecution ? { _meta: { mcpAppCallId: callId } } : {}),
@@ -15505,52 +15608,6 @@ export class Session implements SessionContext {
             const startEmissionCancellation =
               cancelBeforeExecutionIfAborted(toolName);
             if (startEmissionCancellation) return startEmissionCancellation;
-          }
-
-          // Fire PreToolUse hook (aligned with core path in coreToolScheduler.ts)
-          const hooksEnabledForTool = !this.config.getDisableAllHooks?.();
-          const messageBusForTool = this.config.getMessageBus?.();
-          const permissionMode = String(approvalMode);
-
-          if (hooksEnabledForTool && messageBusForTool) {
-            const preHookResult = await firePreToolUseHook(
-              messageBusForTool,
-              policyToolName,
-              args,
-              toolUseId,
-              permissionMode,
-              activeToolAbortSignal,
-              callId,
-              hookOwner,
-            );
-            preToolUseContext = preHookResult.additionalContext;
-            const preHookCancellation =
-              cancelBeforeExecutionIfAborted(toolName);
-            if (preHookCancellation) return preHookCancellation;
-
-            if (!preHookResult.shouldProceed) {
-              // Hook blocked the tool execution - send notification to UI
-              const blockReason =
-                preHookResult.blockReason || 'Blocked by PreToolUse hook';
-              try {
-                await this.messageEmitter.emitAgentMessage(
-                  `✗ **PreToolUse blocked**: ${toolName} - ${blockReason}`,
-                );
-              } catch (emitError) {
-                debugLogger.debug(
-                  '[Session.runTool] Failed to emit PreToolUse block message',
-                  emitError,
-                );
-              }
-              const blockMessageCancellation =
-                cancelBeforeExecutionIfAborted(toolName);
-              if (blockMessageCancellation) return blockMessageCancellation;
-              return earlyErrorResponse(new Error(blockReason), toolName, {
-                status: 'error',
-                errorType: ToolErrorType.EXECUTION_DENIED,
-                executionStatus: 'not_started',
-              });
-            }
           }
 
           const toolInvocationGuard = this.config.getToolInvocationGuard?.();

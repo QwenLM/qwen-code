@@ -84,6 +84,7 @@ describe('tool hook additionalContext delivery', () => {
       file_path: filePath,
     }),
     extraSettings: Record<string, unknown> = {},
+    followingToolCall?: ReturnType<typeof fakeToolCall>,
   ): Promise<FakeOpenAIServer> {
     rig = new TestRig();
     const hookGroup = [
@@ -114,7 +115,9 @@ describe('tool hook additionalContext delivery', () => {
               ),
             ],
           }
-        : { content: 'done' };
+        : followingToolCall && streaming === 2
+          ? { toolCalls: [followingToolCall] }
+          : { content: 'done' };
     }, fakeServerHostOptions());
     fakeServer = server;
 
@@ -133,7 +136,8 @@ describe('tool hook additionalContext delivery', () => {
       (request) =>
         request.body['stream'] === true &&
         (request.body['messages'] as ToolMessage[]).some(
-          (message) => message.role === 'tool',
+          (message) =>
+            message.role === 'tool' && message.tool_call_id === callId,
         ),
     );
     const messages = (followUp?.body['messages'] ?? []) as ToolMessage[];
@@ -167,6 +171,137 @@ describe('tool hook additionalContext delivery', () => {
   function setPreDecision(decision: 'deny' | 'ask'): void {
     writeFileSync(join(rig.testDir!, DECISION_FILE), decision);
   }
+
+  it.each(['headless', 'ACP'])(
+    '%s: executes command-hook replacement through a real MCP server',
+    async (surface) => {
+      const group = [
+        {
+          matcher: '^mcp__effective__echo$',
+          hooks: [{ type: 'command', command: `node ${HOOK_SCRIPT}` }],
+        },
+      ];
+      const server = await setup(
+        'effective input ' + surface,
+        'tool_search',
+        'unused',
+        'find_echo',
+        () => ({ query: 'select:mcp__effective__echo' }),
+        {
+          mcpServers: {
+            effective: {
+              command: 'node',
+              args: ['effective-echo.cjs'],
+              trust: true,
+            },
+          },
+          hooks: {
+            PreToolUse: [
+              {
+                ...group[0],
+                sequential: true,
+                hooks: [
+                  ...group[0].hooks,
+                  { type: 'command', command: 'node effective-inspect.cjs' },
+                ],
+              },
+            ],
+            PostToolUse: group,
+          },
+        },
+        fakeToolCall(
+          'tool_call',
+          { name: 'mcp__effective__echo', arguments: { value: 'model' } },
+          'call_echo',
+        ),
+      );
+      rig.createFile(
+        'effective-inspect.cjs',
+        `
+const { readFileSync, writeFileSync } = require('node:fs');
+const input = JSON.parse(readFileSync(0, 'utf8'));
+writeFileSync('effective-sequential.json', JSON.stringify(input.tool_input));
+process.stdout.write('{}');
+`,
+      );
+      rig.createFile(
+        'effective-echo.cjs',
+        `
+const { createInterface } = require('node:readline');
+const { appendFileSync } = require('node:fs');
+createInterface({ input: process.stdin }).on('line', line => {
+  const message = JSON.parse(line);
+  if (message.id === undefined) return;
+  let result = {};
+  if (message.method === 'initialize') result = { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'effective', version: '1' } };
+  if (message.method === 'tools/list') result = { tools: [{ name: 'echo', description: 'Echo input', inputSchema: { type: 'object', properties: { value: { type: 'string' } }, required: ['value'] } }] };
+  if (message.method === 'tools/call') {
+    appendFileSync('effective-executed.jsonl', JSON.stringify(message.params.arguments) + '\\n');
+    result = { content: [{ type: 'text', text: message.params.arguments.value }] };
+  }
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }) + '\\n');
+});
+`,
+      );
+      writeFileSync(
+        join(rig.testDir!, HOOK_SCRIPT),
+        `
+import { appendFileSync, readFileSync } from 'node:fs';
+const input = JSON.parse(readFileSync(0, 'utf8'));
+appendFileSync('effective-hooks.jsonl', JSON.stringify(input) + '\\n');
+process.stdout.write(JSON.stringify({ hookSpecificOutput: input.hook_event_name === 'PreToolUse'
+  ? { hookEventName: 'PreToolUse', updatedInput: { value: 'hook' } }
+  : { hookEventName: input.hook_event_name } }));
+`,
+      );
+      if (surface === 'ACP') {
+        const settingsPath = join(rig.testDir!, '.qwen', 'settings.json');
+        const settings = JSON.parse(readFileSync(settingsPath, 'utf8'));
+        const userSettings = {
+          hooks: settings.hooks,
+          mcpServers: settings.mcpServers,
+        };
+        delete settings.hooks;
+        delete settings.mcpServers;
+        writeFileSync(settingsPath, JSON.stringify(settings));
+        await runAcp(server, userSettings);
+      } else await rig.run('echo the value', ...fakeModelLaunchArgs(server));
+      expect(
+        existsSync(join(rig.testDir!, 'effective-executed.jsonl')),
+        JSON.stringify(
+          server.requests.map((request) =>
+            (request.body['messages'] as ToolMessage[]).filter(
+              (message) => message.role === 'tool',
+            ),
+          ),
+        ),
+      ).toBe(true);
+      expect(
+        readFileSync(
+          join(rig.testDir!, 'effective-executed.jsonl'),
+          'utf8',
+        ).trim(),
+      ).toBe('{"value":"hook"}');
+      const hooks = readFileSync(
+        join(rig.testDir!, 'effective-hooks.jsonl'),
+        'utf8',
+      )
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(
+        hooks.map((hook) => [hook.hook_event_name, hook.tool_input]),
+      ).toEqual([
+        ['PreToolUse', { value: 'model' }],
+        ['PostToolUse', { value: 'hook' }],
+      ]);
+      expect(hooks[0].tool_use_id).toBe(hooks[1].tool_use_id);
+      expect(
+        readFileSync(join(rig.testDir!, 'effective-sequential.json'), 'utf8'),
+      ).toBe('{"value":"hook"}');
+      expect(toolResultFor(server, 'call_echo')).toContain('hook');
+    },
+  );
 
   it('headless: delivers PreToolUse context with a successful result', async () => {
     const server = await setup(
@@ -301,9 +436,28 @@ describe('tool hook additionalContext delivery', () => {
       'missing.txt',
       'call_fail',
     );
+    await runAcp(server);
+
+    expect(hookHits()).toEqual([
+      { event: 'PreToolUse', call: 'call_fail' },
+      { event: 'PostToolUseFailure', call: 'call_fail' },
+    ]);
+    const result = toolResultFor(server, 'call_fail');
+    expect(count(result, marker('PreToolUse', 'call_fail'))).toBe(1);
+    expect(count(result, marker('PostToolUseFailure', 'call_fail'))).toBe(1);
+  });
+  async function runAcp(
+    server: FakeOpenAIServer,
+    userSettings?: Record<string, unknown>,
+  ) {
     // The agent keeps writing under QWEN_HOME briefly after it exits, so keep
     // it out of rig.testDir, whose teardown would otherwise race those writes.
     const qwenHome = mkdtempSync(join(tmpdir(), ACP_HOME_PREFIX));
+    if (userSettings)
+      writeFileSync(
+        join(qwenHome, 'settings.json'),
+        JSON.stringify(userSettings),
+      );
     const child = spawn(
       'node',
       [
@@ -406,13 +560,5 @@ describe('tool hook additionalContext delivery', () => {
       await closed;
       await removeScratchDir(qwenHome);
     }
-
-    expect(hookHits()).toEqual([
-      { event: 'PreToolUse', call: 'call_fail' },
-      { event: 'PostToolUseFailure', call: 'call_fail' },
-    ]);
-    const result = toolResultFor(server, 'call_fail');
-    expect(count(result, marker('PreToolUse', 'call_fail'))).toBe(1);
-    expect(count(result, marker('PostToolUseFailure', 'call_fail'))).toBe(1);
-  });
+  }
 });

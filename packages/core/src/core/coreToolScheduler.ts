@@ -42,6 +42,8 @@ import { compactToolResultDisplayForHistory } from '../utils/toolResultDisplayCo
 import {
   generateToolUseId,
   firePreToolUseHook,
+  getPreToolUseInputForBuild,
+  normalizeToolHookInput,
   firePostToolUseHook,
   firePostToolUseFailureHook,
   firePostToolBatchHook,
@@ -1728,20 +1730,11 @@ export class CoreToolScheduler {
   // callIdToBatch is drained earlier when spans end, so it cannot be used
   // to recover the PostToolBatch AbortSignal reliably.
   private callIdToPostToolBatchSignal = new Map<string, AbortSignal>();
-  // Tool calls that a PreToolUse 'ask' hook bounced from the EXECUTION
-  // phase back to awaiting_approval. Tracked so that, once the user
-  // approves, the re-execution skips BOTH the PreToolUse hook (otherwise
-  // the hook would return 'ask' again → infinite confirmation loop) and
-  // the path-unescape prelude (unescapePath is not idempotent — running
-  // it twice corrupts paths containing escaped metacharacters). Cleared
-  // on terminal state via finalizeToolSpan.
+  // Hook-requested confirmations cannot be modified or auto-approved by a
+  // sibling's permission grant. Cleared on execution or terminal cleanup.
   private readonly bouncedAwaitingApproval = new Set<string>();
-  // Original tool_use_id captured when a tool is bounced by a PreToolUse
-  // 'ask', keyed by callId. The first (bounced) attempt fires PreToolUse
-  // with this id; the post-approval re-execution skips PreToolUse but fires
-  // PostToolUse — reusing this id keeps the Pre/Post pair correlated instead
-  // of orphaning two events. Cleared on terminal state via finalizeToolSpan.
-  private readonly bouncedToolUseId = new Map<string, string>();
+  // Pair the scheduling-time PreToolUse with post-execution hooks.
+  private readonly toolUseIds = new Map<string, string>();
   // Sanitized PreToolUse additionalContext keyed by callId. Held until the
   // batch's terminal assembly (it must survive an 'ask' bounce, whose
   // re-execution skips the hook) and cleared with the batch's hook owners.
@@ -2372,7 +2365,7 @@ export class CoreToolScheduler {
     // (before the span guard) so a bounced call is cleared even on the
     // defensive no-span path.
     this.bouncedAwaitingApproval.delete(callId);
-    this.bouncedToolUseId.delete(callId);
+    this.toolUseIds.delete(callId);
     this.autoModeFallbackCallIds.delete(callId);
     this.runtimeContentGeneratorViews.delete(callId);
     // PostToolBatch can replace the response at the last position in request
@@ -3020,8 +3013,7 @@ export class CoreToolScheduler {
       );
       // args are cloned at intake: callers pass args that may alias the
       // model-emitted functionCall part stored in chat history, and
-      // _executeToolCallBody later rewrites PATH_ARG_KEYS on request.args in
-      // place (a persistence the post-'ask' bounce re-execution relies on).
+      // execution normalizes PATH_ARG_KEYS on request.args in place.
       // Without the clone those rewrites would leak into history and skew
       // the (name, args) fingerprints that duplicate-replay detection
       // derives from it.
@@ -3510,7 +3502,7 @@ export class CoreToolScheduler {
           continue;
         }
 
-        const { request: reqInfo, invocation } = toolCall;
+        let { request: reqInfo, invocation } = toolCall;
         const canonicalName = canonicalToolName(reqInfo.name);
 
         // Open the tool span as soon as the call is validated. This covers
@@ -3552,6 +3544,174 @@ export class CoreToolScheduler {
             continue;
           }
 
+          const toolUseId = generateToolUseId();
+          this.toolUseIds.set(reqInfo.callId, toolUseId);
+          const originalInput = { ...reqInfo.args };
+          const hookInput = normalizeToolHookInput(originalInput);
+          let hookAskReason: string | undefined;
+          const messageBus = this.config.getMessageBus() as
+            | MessageBus
+            | undefined;
+          if (!this.config.getDisableAllHooks() && messageBus) {
+            const permissionMode = this.config.getApprovalMode();
+            const preHookResult = await runInToolSpanContext(toolSpan, () =>
+              this.withHookSpan(
+                { hookEvent: 'PreToolUse', toolName: canonicalName, toolUseId },
+                () =>
+                  runInRequestGoalContext(reqInfo, () =>
+                    firePreToolUseHook(
+                      messageBus,
+                      canonicalName,
+                      hookInput,
+                      toolUseId,
+                      permissionMode,
+                      signal,
+                      reqInfo.callId, // Original API call ID (e.g., call_xxx)
+                      this.hookOwners.get(reqInfo.callId),
+                    ),
+                  ),
+                (r) =>
+                  r.hookError
+                    ? {
+                        success: false,
+                        error: r.hookError,
+                        // Hook transport failures do NOT block tool execution
+                        // (firePreToolUseHook returns shouldProceed:true with a
+                        // hookError). Surface that on the span too so operators
+                        // see the same allow-on-failure semantics the runtime
+                        // applies (#4321 review-2 DeepSeek Suggestion).
+                        shouldProceed: true,
+                      }
+                    : {
+                        success: true,
+                        shouldProceed: r.shouldProceed,
+                        // Propagate the actual blockType ('denied' / 'ask' / 'stop')
+                        // instead of collapsing every block to 'denied'.
+                        blockType: r.shouldProceed ? undefined : r.blockType,
+                        hasAdditionalContext: !!r.additionalContext,
+                      },
+              ),
+            );
+
+            if (
+              this.cancelPreExecutionIfAborted(reqInfo.callId, signal, toolSpan)
+            )
+              continue;
+            if (preHookResult.additionalContext) {
+              this.preToolUseContexts.set(
+                reqInfo.callId,
+                preHookResult.additionalContext,
+              );
+            }
+            const hookAsk = preHookResult.blockType === 'ask';
+            if (
+              !preHookResult.shouldProceed &&
+              (!hookAsk ||
+                reqInfo.executionOrigin?.kind === 'fixed_policy' ||
+                !this.canPromptForHookAsk())
+            ) {
+              this.setStatusInternal(
+                reqInfo.callId,
+                'error',
+                createErrorResponse(
+                  reqInfo,
+                  new Error(
+                    preHookResult.blockReason ||
+                      'Tool execution blocked by hook',
+                  ),
+                  ToolErrorType.EXECUTION_DENIED,
+                  'not_started',
+                ),
+              );
+              setToolSpanFailure(
+                toolSpan,
+                TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED,
+                TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED,
+              );
+              this.finalizeToolSpan(reqInfo.callId);
+              continue;
+            }
+            if (preHookResult.updatedInput) {
+              if (
+                reqInfo.executionOrigin?.kind === 'fixed_policy' &&
+                !isDeepStrictEqual(preHookResult.updatedInput, hookInput)
+              ) {
+                throw new Error(
+                  'PreToolUse cannot change fixed-policy tool input.',
+                );
+              }
+              const policyGate = evaluateMediaPolicyToolCall({
+                config: this.config,
+                tool: toolCall.tool,
+                args: getPreToolUseInputForBuild(
+                  originalInput,
+                  hookInput,
+                  preHookResult.updatedInput,
+                ),
+                executionOrigin: reqInfo.executionOrigin,
+              });
+              if (policyGate.outcome === 'reject') {
+                this.setStatusInternal(
+                  reqInfo.callId,
+                  'error',
+                  createErrorResponse(
+                    reqInfo,
+                    new Error(policyGate.message),
+                    policyGate.reason === 'invalid_params'
+                      ? ToolErrorType.INVALID_TOOL_PARAMS
+                      : ToolErrorType.EXECUTION_DENIED,
+                    'not_started',
+                  ),
+                );
+                this.finalizeToolSpan(reqInfo.callId);
+                continue;
+              }
+              const previousInvocation = invocation;
+              if (!this.setArgsInternal(reqInfo.callId, policyGate.args)) {
+                await previousInvocation.release?.();
+                continue;
+              }
+              const effectiveCall = this.toolCalls.find(
+                (call) => call.request.callId === reqInfo.callId,
+              ) as ValidatingToolCall;
+              reqInfo = effectiveCall.request;
+              invocation = effectiveCall.invocation;
+              await previousInvocation.release?.();
+              if (
+                this.cancelPreExecutionIfAborted(
+                  reqInfo.callId,
+                  signal,
+                  toolSpan,
+                )
+              )
+                continue;
+            }
+            if (hookAsk)
+              hookAskReason =
+                preHookResult.blockReason || 'User confirmation required';
+          }
+          const scheduleApproved = async () => {
+            if (hookAskReason) {
+              const currentCall = this.toolCalls.find(
+                (call) => call.request.callId === reqInfo.callId,
+              );
+              if (
+                !currentCall ||
+                (currentCall.status !== 'validating' &&
+                  currentCall.status !== 'scheduled')
+              )
+                return;
+              await this.requestHookConfirmation(
+                currentCall,
+                hookAskReason,
+                toolSpan,
+                signal,
+              );
+            } else {
+              this.setStatusInternal(reqInfo.callId, 'scheduled');
+            }
+          };
+
           // =================================================================
           // L3→L4→L5 Permission Flow
           // =================================================================
@@ -3561,14 +3721,13 @@ export class CoreToolScheduler {
           // confirmation dialog, no plan/auto classification. The remaining
           // guards still hold — PM tool-enablement ran at schedule time,
           // origin/descriptor pairing was enforced before buildInvocation,
-          // and PreToolUse hooks fire (a hook deny fails the call closed)
-          // at execution time.
+          // and PreToolUse has already rejected denies and input changes.
           if (reqInfo.executionOrigin?.kind === 'fixed_policy') {
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
             );
-            this.setStatusInternal(reqInfo.callId, 'scheduled');
+            await scheduleApproved();
             continue;
           }
 
@@ -3645,7 +3804,7 @@ export class CoreToolScheduler {
                 reqInfo.callId,
                 ToolConfirmationOutcome.ProceedAlways,
               );
-              this.setStatusInternal(reqInfo.callId, 'scheduled');
+              await scheduleApproved();
               continue;
             }
 
@@ -3807,7 +3966,7 @@ export class CoreToolScheduler {
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
             );
-            this.setStatusInternal(reqInfo.callId, 'scheduled');
+            await scheduleApproved();
             continue;
           }
 
@@ -3900,7 +4059,7 @@ export class CoreToolScheduler {
                   reqInfo.callId,
                   ToolConfirmationOutcome.ProceedAlways,
                 );
-                this.setStatusInternal(reqInfo.callId, 'scheduled');
+                await scheduleApproved();
                 continue;
               case 'blocked':
                 debugLogger.warn(
@@ -3985,7 +4144,7 @@ export class CoreToolScheduler {
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
             );
-            this.setStatusInternal(reqInfo.callId, 'scheduled');
+            await scheduleApproved();
           } else {
             confirmationDetails = await runInRequestGoalContext(reqInfo, () =>
               invocation.getConfirmationDetails(signal),
@@ -4102,7 +4261,7 @@ export class CoreToolScheduler {
                 reqInfo.callId,
                 ToolConfirmationOutcome.ProceedAlways,
               );
-              this.setStatusInternal(reqInfo.callId, 'scheduled');
+              await scheduleApproved();
               continue;
             }
 
@@ -4249,7 +4408,7 @@ export class CoreToolScheduler {
                       approval.outcome,
                     );
                     this.setToolCallOutcome(reqInfo.callId, approval.outcome);
-                    this.setStatusInternal(reqInfo.callId, 'scheduled');
+                    await scheduleApproved();
                     continue;
                   }
                   // Hook granted permission - apply updated input if provided and proceed
@@ -4288,7 +4447,7 @@ export class CoreToolScheduler {
                     reqInfo.callId,
                     ToolConfirmationOutcome.ProceedOnce,
                   );
-                  this.setStatusInternal(reqInfo.callId, 'scheduled');
+                  await scheduleApproved();
                 } else {
                   // Hook denied permission - cancel with optional message
                   const cancelPayload = hookResult.denyMessage
@@ -4427,6 +4586,55 @@ export class CoreToolScheduler {
               );
             }
 
+            if (hookAskReason) {
+              this.bouncedAwaitingApproval.add(reqInfo.callId);
+              if (
+                confirmationDetails.type === 'edit' ||
+                confirmationDetails.type === 'exec'
+              ) {
+                confirmationDetails = {
+                  ...confirmationDetails,
+                  ...(confirmationDetails.type === 'edit'
+                    ? { hideModify: true }
+                    : {}),
+                  warnings: [
+                    hookAskReason,
+                    ...(confirmationDetails.warnings ?? []),
+                  ],
+                };
+              } else if (confirmationDetails.type === 'info') {
+                confirmationDetails = {
+                  ...confirmationDetails,
+                  prompt: `${confirmationDetails.prompt}\n\n${hookAskReason}`,
+                  renderPromptAsPlainText: true,
+                };
+              } else if (confirmationDetails.type === 'mcp') {
+                confirmationDetails = {
+                  ...confirmationDetails,
+                  type: 'info',
+                  prompt: `MCP Server: ${confirmationDetails.serverName}\nTool: ${confirmationDetails.toolName}\n\n${hookAskReason}`,
+                  renderPromptAsPlainText: true,
+                };
+              } else if (confirmationDetails.type === 'plan') {
+                confirmationDetails = {
+                  ...confirmationDetails,
+                  title: `${confirmationDetails.title}\n${hookAskReason}`,
+                };
+              } else {
+                confirmationDetails = {
+                  ...confirmationDetails,
+                  questions: confirmationDetails.questions.map(
+                    (question, index) =>
+                      index === 0
+                        ? {
+                            ...question,
+                            question: `${question.question}\n\n${hookAskReason}`,
+                          }
+                        : question,
+                  ),
+                };
+              }
+            }
             const originalOnConfirm = confirmationDetails.onConfirm;
             const invocationContext = getInvocationContext();
             let planShellResponseClaimed = false;
@@ -4435,7 +4643,7 @@ export class CoreToolScheduler {
               // When PM has an explicit 'ask' rule, 'always allow' would be
               // ineffective because ask takes priority over allow.
               // Hide the option so users aren't misled.
-              ...(pmForcedAsk || requiresUserInteraction
+              ...(pmForcedAsk || requiresUserInteraction || hookAskReason
                 ? { hideAlwaysAllow: true }
                 : {}),
               onConfirm: async (
@@ -4868,25 +5076,17 @@ export class CoreToolScheduler {
           isModifying: true,
         } as ToolCallConfirmationDetails);
 
-        // Normalize shell-escaped paths so the editor receives actual
-        // filesystem paths (request.args may still hold escaped values
-        // since buildInvocation normalizes a structuredClone) — UNLESS this
-        // tool was bounced by a PreToolUse 'ask', in which case
-        // _executeToolCallBody already unescaped request.args in place
-        // before the hook fired. Unescaping again here would double-strip
-        // and corrupt paths containing escaped metacharacters.
+        // The editor consumes filesystem paths; stored request args remain raw.
         const normalizedArgs = {
           ...waitingToolCall.request.args,
         } as typeof waitingToolCall.request.args;
-        if (!this.bouncedAwaitingApproval.has(callId)) {
-          for (const key of PATH_ARG_KEYS) {
-            if (typeof normalizedArgs[key] === 'string') {
-              (normalizedArgs as Record<string, unknown>)[key] = unescapePath(
-                String(normalizedArgs[key]).trim(),
-              );
-            }
-          }
+        for (const key of PATH_ARG_KEYS) {
+          if (typeof normalizedArgs[key] === 'string')
+            normalizedArgs[key] = unescapePath(
+              String(normalizedArgs[key]).trim(),
+            );
         }
+
         const { updatedParams, updatedDiff } = await modifyWithEditor<
           typeof waitingToolCall.request.args
         >(
@@ -5266,7 +5466,7 @@ export class CoreToolScheduler {
       );
     } catch (error) {
       this.bouncedAwaitingApproval.delete(callId);
-      this.bouncedToolUseId.delete(callId);
+      this.toolUseIds.delete(callId);
       // _executeToolCallBody records the span outcome only AFTER its main
       // try/catch is entered: ERROR or CANCELLED, while success remains
       // UNSET. Throws from the prelude — for example getMessageBus — happen
@@ -5302,20 +5502,8 @@ export class CoreToolScheduler {
         ),
       );
     } finally {
-      // A PreToolUse 'ask' hook can bounce this tool back to
-      // awaiting_approval (see bounceToAwaitingApprovalForAsk). The tool
-      // span must then stay open until handleConfirmationResponse resolves
-      // the confirmation — finalizing here would orphan it and the
-      // re-execution would open a second span. The re-execution consumes
-      // the marker before running, so the post-approval finally finalizes
-      // normally. Checking the marker (not a re-read of tool status) avoids
-      // a race where a STREAM_JSON client answers the confirmation
-      // synchronously and flips status to 'scheduled' before this runs.
-      if (!this.bouncedAwaitingApproval.has(callId)) {
-        // _executeToolCallBody records the outcome via setToolSpan*; finalize
-        // without metadata to preserve ERROR / UNSET status semantics.
-        this.finalizeToolSpan(callId);
-      }
+      // _executeToolCallBody records the outcome; preserve its span status.
+      this.finalizeToolSpan(callId);
       this.memoryMonitor?.scheduleCheck();
     }
   }
@@ -5327,7 +5515,7 @@ export class CoreToolScheduler {
    * requests) and background agents cannot prompt, so an 'ask' there must
    * fall back to deny rather than hang forever in awaiting_approval.
    */
-  private canPromptForAskBounce(): boolean {
+  private canPromptForHookAsk(): boolean {
     const isNonInteractive =
       !this.config.isInteractive() &&
       !this.config.getExperimentalZedIntegration() &&
@@ -5341,19 +5529,9 @@ export class CoreToolScheduler {
     return true;
   }
 
-  /**
-   * Bounce a tool from the EXECUTION phase back to awaiting_approval so the
-   * user can confirm a PreToolUse 'ask' decision in the TUI. Reuses the
-   * standard confirmation machinery, including the existing diff view for
-   * edit tools. `hideAlwaysAllow` is set because the hook re-evaluates on
-   * every call, so an "always allow" rule is meaningless. The callId is
-   * added to `bouncedAwaitingApproval` BEFORE the status change so
-   * executeSingleToolCall's finally keeps the tool span open across the
-   * bounce and the re-execution skips the hook + prelude (see
-   * `_executeToolCallBody`).
-   */
-  private async bounceToAwaitingApprovalForAsk(
-    scheduledCall: ScheduledToolCall,
+  /** Request confirmation for an otherwise automatically approved call. */
+  private async requestHookConfirmation(
+    scheduledCall: ValidatingToolCall | ScheduledToolCall,
     reason: string | undefined,
     toolSpan: Span,
     signal: AbortSignal,
@@ -5476,34 +5654,10 @@ export class CoreToolScheduler {
     const canonicalName = canonicalToolName(toolName);
     const invocation = scheduledCall.invocation;
     const toolInput = scheduledCall.request.args as Record<string, unknown>;
+    Object.assign(toolInput, normalizeToolHookInput(toolInput));
 
-    // Re-execution after the user approved a PreToolUse 'ask' bounce: the
-    // hook already ran and the user already confirmed. Consuming the marker
-    // here (a) lets executeSingleToolCall's finally finalize the span
-    // normally for this run, and (b) signals that we must skip BOTH the
-    // hook re-fire below (otherwise the hook returns 'ask' again → infinite
-    // confirmation loop) and the path-unescape prelude (unescapePath is not
-    // idempotent — running it twice corrupts paths with escaped metachars).
-    const isPostAskReexecution = this.bouncedAwaitingApproval.delete(callId);
-
-    if (!isPostAskReexecution) {
-      // Normalize shell-escaped path params so hooks operate on actual
-      // filesystem paths, matching the normalization done in tool validation.
-      for (const key of PATH_ARG_KEYS) {
-        if (typeof toolInput[key] === 'string') {
-          toolInput[key] = unescapePath(String(toolInput[key]).trim());
-        }
-      }
-    }
-
-    // Generate unique tool_use_id for hook tracking. On a post-'ask'
-    // re-execution, reuse the id from the first (bounced) attempt so the
-    // PreToolUse event fired then pairs with the PostToolUse event fired now
-    // — a fresh id would leave both events orphaned for consumers that
-    // correlate Pre/Post by tool_use_id (audit trails, metrics).
-    const toolUseId = isPostAskReexecution
-      ? (this.bouncedToolUseId.get(callId) ?? generateToolUseId())
-      : generateToolUseId();
+    this.bouncedAwaitingApproval.delete(callId);
+    const toolUseId = this.toolUseIds.get(callId) ?? generateToolUseId();
 
     // Get MessageBus for hook execution
     const messageBus = this.config.getMessageBus() as MessageBus | undefined;
@@ -5543,100 +5697,6 @@ export class CoreToolScheduler {
         // Diagnostics must not affect tool execution.
       }
     };
-
-    // PreToolUse Hook — skipped on a post-'ask' re-execution (the hook
-    // already ran and the user already confirmed; re-firing would loop).
-    if (hooksEnabled && messageBus && !isPostAskReexecution) {
-      // Convert ApprovalMode to permission_mode string for hooks
-      const permissionMode = this.config.getApprovalMode();
-      const preHookResult = await this.withHookSpan(
-        { hookEvent: 'PreToolUse', toolName: canonicalName, toolUseId },
-        () =>
-          firePreToolUseHook(
-            messageBus,
-            canonicalName,
-            toolInput,
-            toolUseId,
-            permissionMode,
-            undefined, // signal
-            callId, // Original API call ID (e.g., call_xxx)
-            this.hookOwners.get(callId),
-          ),
-        (r) =>
-          r.hookError
-            ? {
-                success: false,
-                error: r.hookError,
-                // Hook transport failures do NOT block tool execution
-                // (firePreToolUseHook returns shouldProceed:true with a
-                // hookError). Surface that on the span too so operators
-                // see the same allow-on-failure semantics the runtime
-                // applies (#4321 review-2 DeepSeek Suggestion).
-                shouldProceed: true,
-              }
-            : {
-                success: true,
-                shouldProceed: r.shouldProceed,
-                // Propagate the actual blockType ('denied' / 'ask' / 'stop')
-                // instead of collapsing every block to 'denied'.
-                blockType: r.shouldProceed ? undefined : r.blockType,
-                hasAdditionalContext: !!r.additionalContext,
-              },
-      );
-      if (preHookResult.additionalContext) {
-        this.preToolUseContexts.set(callId, preHookResult.additionalContext);
-      }
-      if (!signal.aborted && !preHookResult.shouldProceed) {
-        // A PreToolUse hook returning permissionDecision:'ask' wants the
-        // user to confirm in the TUI before the tool runs. When we can
-        // prompt, bounce the tool into the existing awaiting_approval flow
-        // instead of denying it. 'denied'/'stop' (and 'ask' in a
-        // non-interactive/background context where we cannot prompt) keep
-        // the original deny-as-error behavior. A fixed_policy invocation
-        // never bounces: the orchestrator awaits it headlessly behind the
-        // scheduler, so an awaiting_approval entry would sit unanswerable
-        // (the confirmation UI belongs to the outer tool call) — an 'ask'
-        // on a fixed-policy call fails closed as a deny instead.
-        if (
-          preHookResult.blockType === 'ask' &&
-          !signal.aborted &&
-          scheduledCall.request.executionOrigin?.kind !== 'fixed_policy' &&
-          this.canPromptForAskBounce()
-        ) {
-          // Mirror the confirmation-phase abort re-check: never open a
-          // transient awaiting_approval (flashing a confirmation nobody can
-          // answer) on an already-aborted signal — fall through to deny.
-          // Preserve the tool_use_id so the post-approval re-execution
-          // reuses it (see the toolUseId comment above).
-          this.bouncedToolUseId.set(callId, toolUseId);
-          await this.bounceToAwaitingApprovalForAsk(
-            scheduledCall,
-            preHookResult.blockReason,
-            span,
-            signal,
-          );
-          return;
-        }
-
-        // Hook blocked the execution.
-        const blockMessage =
-          preHookResult.blockReason || 'Tool execution blocked by hook';
-        const errorResponse = createErrorResponse(
-          scheduledCall.request,
-          new Error(blockMessage),
-          ToolErrorType.EXECUTION_DENIED,
-          'not_started',
-        );
-        observeSyntheticProducer(errorResponse);
-        this.setStatusInternal(callId, 'error', errorResponse);
-        setToolSpanFailure(
-          span,
-          TOOL_FAILURE_KIND_PRE_HOOK_BLOCKED,
-          TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED,
-        );
-        return;
-      }
-    }
 
     const toolInvocationGuard = this.config.getToolInvocationGuard?.();
     if (toolInvocationGuard) {
