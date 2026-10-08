@@ -2203,6 +2203,31 @@ describe('MemoryManager', () => {
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
     });
 
+    it('does not re-arm a session from a trailing run queued across a switch', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      let finish!: (value: ReturnType<typeof engagedNoop>) => void;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const first = turn(mgr, 2);
+      await vi.waitFor(() => expect(runAutoMemoryExtract).toHaveBeenCalled());
+      // The turn is queued behind the in-flight run, so the epoch has to be
+      // captured here: the switch lands while it waits, and `finally` only
+      // starts it afterwards.
+      expect((await turn(mgr, 4)).skippedReason).toBe('queued');
+      mgr.discardExtractCadence('sess', 'next');
+      finish(engagedNoop());
+      await first;
+      await mgr.drain();
+
+      expect((await turn(mgr, 6)).skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+    });
+
     it('flushes the latest skipped turn once and then forgets it', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
       const mgr = new MemoryManager();
@@ -3312,15 +3337,16 @@ describe('MemoryManager', () => {
         extractorEngaged: true,
       });
 
-      // The shape memoryLifecycle.integration.test.ts already uses: one shared
-      // manager with this helper in afterEach. Without the cadence clear, the
-      // armed skip from the first "test" suppresses the second one's extract.
+      // No suite in this repo shares one manager across cases today (the
+      // helper runs in each suite's own beforeEach/afterEach); the cadence
+      // clear exists so a future shared-manager suite cannot inherit an armed
+      // skip.
       const mgr = new MemoryManager();
-      const turn = (length: number) =>
+      const turn = (length: number, sessionId = 'sess') =>
         mgr.scheduleExtract({
           ...extractParams(
             '/project',
-            'sess',
+            sessionId,
             Array.from({ length }, (_, i) => userText(`turn ${i}`)),
           ),
           belowCompactionWarn: true,
@@ -3332,6 +3358,27 @@ describe('MemoryManager', () => {
       mgr.resetExtractStateForTests();
 
       expect((await turn(6)).skippedReason).toBeUndefined();
+      await mgr.drain();
+
+      // The same reset, with the extraction still in flight when it lands: the
+      // run holds the pre-reset epoch, so the helper has to bump the counter or
+      // the run re-arms an id the clear just dropped.
+      const inFlight = deferred<ExtractResult>();
+      let started = false;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(() => {
+        started = true;
+        return inFlight.promise;
+      });
+      const running = turn(2, 'other');
+      await vi.waitFor(() => expect(started).toBe(true));
+
+      mgr.resetExtractStateForTests();
+
+      inFlight.resolve({ ...extractResult('other'), extractorEngaged: true });
+      await running;
+      await mgr.drain();
+
+      expect((await turn(4, 'other')).skippedReason).toBeUndefined();
     });
   });
 

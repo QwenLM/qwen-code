@@ -663,7 +663,7 @@ export class MemoryManager {
   private readonly extractCurrentTaskId = new Map<string, string>();
   private readonly extractQueued = new Map<
     string,
-    { taskId: string; params: ScheduleExtractParams }
+    { taskId: string; params: ScheduleExtractParams; epoch: number }
   >();
   // #13004 cadence, per session and in memory only. A session switch drops
   // both ids' entries (discardExtractCadence), so /clear, /resume and /branch
@@ -677,10 +677,13 @@ export class MemoryManager {
       pending?: ScheduleExtractParams;
     }
   >();
-  // Bumped by every cadence discard. An extraction that was in flight across
-  // a discard drops its outcome: the discarded id can come back (/resume, or
-  // a failed resume restoring the old id), and must not be re-armed by a run
-  // the switch already left. Dropping an outcome only costs one arm.
+  // Bumped by every cadence discard. An extraction that was in flight, or a
+  // trailing request already queued, when the discard lands drops its outcome:
+  // the discarded id can come back (/resume, or a failed resume restoring the
+  // old id), and must not be re-armed by a run the switch already left.
+  // Dropping an outcome only costs one arm. The epoch is captured where the
+  // request is queued, not where it starts, or a bump landing while it waits
+  // would be invisible to it.
   private cadenceDiscardEpoch = 0;
   // One shared flush run per session (#13004), so overlapping boundaries wait
   // for the same extraction instead of each passing on an entry the first one
@@ -1224,8 +1227,11 @@ export class MemoryManager {
 
       const queued = this.extractQueued.get(params.projectRoot);
       if (queued) {
-        // Supersede the existing queued request with newer params
+        // Supersede the existing queued request with newer params, and refresh
+        // the epoch: a turn arriving after a switch must not be judged by one
+        // captured before it.
         queued.params = params;
+        queued.epoch = this.cadenceDiscardEpoch;
         const queuedRecord = this.tasks.get(queued.taskId);
         if (queuedRecord) {
           this.update(queuedRecord, {
@@ -1258,6 +1264,7 @@ export class MemoryManager {
         this.extractQueued.set(params.projectRoot, {
           taskId: record.id,
           params,
+          epoch: this.cadenceDiscardEpoch,
         });
       }
 
@@ -1512,6 +1519,9 @@ export class MemoryManager {
   private async runExtract(
     taskId: string,
     params: ScheduleExtractParams,
+    // Captured when the request was queued: a bump landing while it waited must
+    // discard its outcome too, and `finally` starts it after that bump.
+    queuedEpoch?: number,
   ): Promise<Awaited<ReturnType<typeof runAutoMemoryExtract>>> {
     const record = this.tasks.get(taskId)!;
 
@@ -1524,7 +1534,7 @@ export class MemoryManager {
     });
 
     const t0 = Date.now();
-    const cadenceEpoch = this.cadenceDiscardEpoch;
+    const cadenceEpoch = queuedEpoch ?? this.cadenceDiscardEpoch;
     try {
       // Memory-pressure gate. Checked inside try so the finally block
       // always runs — extractRunning/extractCurrentTaskId are cleaned up
@@ -1634,7 +1644,7 @@ export class MemoryManager {
     this.extractQueued.delete(projectRoot);
     await this.track(
       queued.taskId,
-      this.runExtract(queued.taskId, queued.params),
+      this.runExtract(queued.taskId, queued.params, queued.epoch),
     );
   }
 
@@ -2832,6 +2842,10 @@ export class MemoryManager {
     this.extractQueued.clear();
     this.extractCadence.clear();
     this.extractFlushRuns.clear();
+    // Bump (never re-zero) the discard epoch: a run that started before the
+    // reset holds the old value and would otherwise pass the guard and re-arm
+    // an id this helper just cleared.
+    this.cadenceDiscardEpoch += 1;
   }
 
   /** Reset all dream scheduling state. */

@@ -1759,7 +1759,8 @@ describe('isBelowCompactionWarn', () => {
   // The fake above reports exactly what the implementation falls back to —
   // DEFAULT_TOKEN_LIMIT is 200_000, and computeThresholds already defaults an
   // undefined pct to DEFAULT_PCT — so it cannot fail when a fallback is taken.
-  // These two cases use configs that differ from both fallbacks.
+  // Each case below follows one config value instead of one fallback; the
+  // fallback itself is pinned by the no-window case at the end.
   it('follows the config window, not the DEFAULT_TOKEN_LIMIT fallback', () => {
     const config32k = {
       getContentGeneratorConfig: () => ({ contextWindowSize: 32_000 }),
@@ -1786,6 +1787,23 @@ describe('isBelowCompactionWarn', () => {
     expect(overridden).not.toBe(computeThresholds(200_000).warn); // 147_000
     expect(isBelowCompactionWarn(configHalf, overridden - 1)).toBe(true);
     expect(isBelowCompactionWarn(configHalf, overridden)).toBe(false);
+  });
+
+  it('uses the default limit when the config reports no window at all', () => {
+    // The `?.contextWindowSize ?? DEFAULT_TOKEN_LIMIT` arm no earlier case
+    // reaches: a config without a generator config. Falling back to 0 instead
+    // would put every prompt above the tier, so the cadence experiment would
+    // never skip a turn and the paired runs would measure nothing.
+    const configNoWindow = {
+      getContentGeneratorConfig: () => undefined,
+      getAutoCompactThreshold: () => undefined,
+    } as unknown as Config;
+    const configZeroWindow = {
+      getContentGeneratorConfig: () => ({ contextWindowSize: 0 }),
+      getAutoCompactThreshold: () => undefined,
+    } as unknown as Config;
+    expect(isBelowCompactionWarn(configNoWindow, 1_000)).toBe(true);
+    expect(isBelowCompactionWarn(configZeroWindow, 1_000)).toBe(false);
   });
 });
 
