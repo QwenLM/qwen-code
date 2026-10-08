@@ -11870,15 +11870,16 @@ describe('LlmChat', async () => {
     });
     const result = (id = 'anonymous-result', fill = 'x') =>
       fnResponse('shell', { output: fill.repeat(20_000) }, id);
-    const resultChars = (index: number) =>
+    /** The characters of the `field` slot across the `index`th request. */
+    const slotChars = (index: number, field: 'output' | 'error') =>
       (requestAt(index).contents as Content[])
         .flatMap((entry) => entry.parts ?? [])
-        .map((part) => part.functionResponse?.response?.['output'])
+        .map((part) => part.functionResponse?.response?.[field])
         .reduce<number>(
-          (total, output) =>
-            total + (typeof output === 'string' ? output.length : 0),
+          (total, text) => total + (typeof text === 'string' ? text.length : 0),
           0,
         );
+    const resultChars = (index: number) => slotChars(index, 'output');
     /** The string outputs of the `index`th request's function responses. */
     const resultOutputs = (index: number) =>
       (requestAt(index).contents as Content[])
@@ -11986,6 +11987,23 @@ describe('LlmChat', async () => {
       // conservative factor, so nothing is shrunk and the memory result travels
       // whole on top of the budget.
       expect(resultChars(1)).toBe(68_000);
+    });
+
+    it('budgets an exempt tool error like a plain result instead of cutting it twice', async () => {
+      await reportUsage(NEAR_AUTO);
+      await sendDrain(
+        [
+          fnResponse('search_memory', { error: 'e'.repeat(8_000) }, 'mem'),
+          result(),
+        ],
+        'second',
+      );
+      // Only `output` is exempt-protected, so the error text is charged to the
+      // same 10,640-char batch budget as a plain 8k result: it is neither held
+      // out of the headroom estimate (which would make the budget 4,000 and
+      // stub both parts to 2,000) nor left whole.
+      expect(resultChars(1)).toBe(5_320);
+      expect(resultChars(1) + slotChars(1, 'error')).toBe(10_640);
     });
 
     it('keeps the tighter of the aggregate budget and the headroom', async () => {

@@ -116,12 +116,14 @@ function isBudgetExemptOutputName(name: string | undefined): boolean {
  */
 export function isBudgetShrinkablePart(part: Part): boolean {
   const response = part.functionResponse;
-  if (!response || isBudgetExemptOutputName(response.name)) return false;
+  if (!response) return false;
   if ((getFunctionResponseParts(part)?.length ?? 0) > 0) return false;
-  return (
-    typeof response.response?.['output'] === 'string' ||
-    typeof response.response?.['error'] === 'string'
-  );
+  // collectTextSlots budgets an `error` field unconditionally - the exemption
+  // only ever protected `output` - so a part carrying one IS shrinkable even
+  // when its tool is exempt.
+  if (typeof response.response?.['error'] === 'string') return true;
+  if (isBudgetExemptOutputName(response.name)) return false;
+  return typeof response.response?.['output'] === 'string';
 }
 
 function collectTextSlots(
