@@ -396,15 +396,21 @@ describe('build artifact — transcript entry (#11031)', () => {
     // docblock in client/transcript.ts and #11100).
     //
     // What the entry does deliver is a bounded payload, so bound it. The JS
-    // remainder measured 1,309,207 UTF-16 code units at 1aba19c878. Table
-    // fullscreen and Shadow DOM keyboard handling add 3,033, bringing it to
-    // 1,312,240. The ceiling leaves a small margin around that intentional UI;
+    // remainder measured 1,298,657 UTF-16 code units on main at fa4a4c92 and
+    // 1,300,341 here after adding author attribution for multi-agent
+    // transcripts. O3 result summaries bring it to 1,306,052, and
+    // session-agent replies (status, steps, token usage, squad labels) to
+    // 1,315,297 at e951f96; that rendering is intentional transcript UI.
+    // main grew the same entry in parallel — 1,309,207 at 1aba19c878, plus
+    // 3,033 for table fullscreen and Shadow DOM keyboard handling, reaching
+    // 1,312,240. Merging the two measures 1,320,366 in CI at d4304811. The
+    // ceiling leaves a small margin around that intentional UI;
     // re-measure and lower it if the entry gets leaner.
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_315_000);
+    expect(js.length).toBeLessThan(1_323_000);
   });
 
   it('carries no Live Voice strings and looks none up', () => {

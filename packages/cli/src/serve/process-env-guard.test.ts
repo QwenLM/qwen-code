@@ -224,6 +224,38 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/session-agents/adapters/claude-cli.ts',
+    {
+      reason:
+        "A session agent runs the user's own Claude Code CLI as a child process, so it inherits the daemon process environment (with nested-Claude markers scrubbed).",
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/session-agents/adapters/codex-app-server.ts',
+    {
+      reason:
+        "A session agent runs the user's own Codex CLI as a child process, so it inherits the daemon process environment (CODEX_HOME, auth).",
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/session-agents/program-probe.ts',
+    {
+      reason:
+        'Probing which agent CLIs are installed reads the process PATH and the QWEN_AGENT_*_PATH overrides of the daemon process.',
+      accesses: { whole: 2 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/session-agents/orchestrator.ts',
+    {
+      reason:
+        'The session_send MCP child re-runs this CLI; its entry point is process-scoped, mirroring managed-runtime-session-worker.',
+      accesses: { 'key:QWEN_CLI_ENTRY': 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/managed-runtime-ledger.ts',
     {
       reason:

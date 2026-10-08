@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
@@ -116,13 +117,25 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         HarnessSessionResolver resolver = new HarnessSessionResolver() {
             @Override
             public CompletionStage<RuntimeScope> resolve(String sessionId) {
-                return resolveScope(sessionId, false);
+                return resolveScope(sessionId, false, null);
+            }
+
+            @Override
+            public CompletionStage<RuntimeScope> resolve(String sessionId,
+                    RuntimeLifecycleAuthority authority) {
+                return resolveScope(sessionId, false, authority);
             }
 
             @Override
             public CompletionStage<RuntimeScope> resolveAdmission(
                     String sessionId) {
-                return resolveScope(sessionId, true);
+                return resolveScope(sessionId, true, null);
+            }
+
+            @Override
+            public CompletionStage<RuntimeScope> resolveAdmission(
+                    String sessionId, RuntimeLifecycleAuthority authority) {
+                return resolveScope(sessionId, true, authority);
             }
 
             @Override
@@ -137,7 +150,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
             }
 
             private CompletionStage<RuntimeScope> resolveScope(
-                    String sessionId, boolean admission) {
+                    String sessionId, boolean admission,
+                    RuntimeLifecycleAuthority authority) {
                 SessionRecord session = store.findSessionById(sessionId)
                         .orElse(null);
                 if (session == null) {
@@ -149,7 +163,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
                 }
                 if (session.workspace() != null) {
                     if (workspaces != null) {
-                        return CompletableFuture.completedFuture(workspaces.resolve(sessionId).scope());
+                        return CompletableFuture.completedFuture(workspaces.resolve(sessionId, authority).scope());
                     }
                     return CompletableFuture.failedFuture(
                             new RuntimeBrokerException(409,
