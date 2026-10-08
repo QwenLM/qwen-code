@@ -67,7 +67,7 @@ ACP clients that only choose Allow or Reject continue to use the existing protoc
 ## Failure boundaries
 
 - User cancellation of the classifier request remains an abort and does not become an approval prompt.
-- Explicit permission denies and deterministic destructive-command blocks remain errors.
+- Explicit permission denies remain errors. Deterministic destructive-command blocks remain errors until denial tracking reaches the consecutive-block or session-total cap; at a cap they fall back to manual approval the same way classifier blocks do (see `applyAutoModeDecision`).
 - Non-interactive calls without a permission transport and background agents that cannot prompt still deny through their existing manual-confirmation fallback handling.
 - A failed policy review in classifier Stage 2 is considered unavailable and therefore asks the user; a completed Stage 2 policy block remains denied.
 
