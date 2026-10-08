@@ -263,12 +263,22 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
       );
       expect(s.run, s.name).toContain('flock --wait 1200 9');
     }
-    // The ceiling must absorb one full lock wait on top of the ~12 minutes
-    // of measured Maven work — 25 minutes already cancelled this lane on the
-    // pool (run 37692037879).
+    // The ceiling must absorb one full lock wait per acquisition — this job
+    // takes the lock once per Maven step — plus the ~14 minutes of measured
+    // Maven work: pool run 37743332082 recorded 1193 s of waits and 818 s of
+    // holds, and 25 minutes already cancelled this lane once (run
+    // 37692037879). Derived from the step count so a fourth locked step
+    // turns this red instead of silently over-drawing the budget.
     expect(
       parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
-    ).toBeGreaterThanOrEqual(1200 + 12 * 60);
+    ).toBeGreaterThanOrEqual(mavenSteps.length * 1200 + 14 * 60);
+    // The sibling test job shares the same per-host lock: its ceiling must
+    // cover one full wait plus its own measured locked work (~5 minutes on
+    // the Java 21 leg of run 37743332082) — this job's holds now consume
+    // part of that wait budget, and nothing else asserts the headroom.
+    expect(parsed.jobs.test['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
+      1200 + 5 * 60,
+    );
   });
 
   it('installs and verifies against one job-local Maven repository', () => {
@@ -289,19 +299,40 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
         '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
       );
     }
+    // The runtime-broker step must not join them: Maven creates the
+    // job-local directory the moment any goal runs with the override, so the
+    // seed's cp -aln would hit an existing destination and nest one level
+    // down (m2-repo/repository/…), and the write-back would extract that
+    // bogus tree into the host-shared repo. The per-job count pin above is
+    // invariant under moving the override between this job's steps, so pin
+    // the step.
+    const broker = steps.find(
+      (s) => s.name === 'Run Runtime Broker MySQL integration tests',
+    );
+    expect(broker?.env?.MAVEN_ARGS, broker?.name).not.toContain(
+      '-Dmaven.repo.local',
+    );
     expect(install.run).toContain(
       'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
     );
     // The write-back closes the cache: 'maven' loop — the seed above only
     // reads the cache-saved ~/.m2, so without it a pom key rotation saves a
     // thin entry that never recaptures the managed-agent-server tree. The
-    // exclude keeps the in-house fixed release coordinates out of the
-    // host-shared repo.
+    // excludes name the three in-house fixed release coordinates, not the
+    // whole com/alibaba group, so third-party artifacts under it (druid)
+    // still recapture. The pipeline is best-effort like the seed: the
+    // warning arm keeps a copy failure from reddening the gate after mvn
+    // has already passed, and pipefail keeps a failing left-hand tar from
+    // being masked by the extractor's exit 0.
+    expect(verify.run).toContain('set -o pipefail');
     expect(verify.run).toContain(
-      'tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba -cf - .',
+      'tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-runtime-broker --exclude=./com/alibaba/qwen-managed-agent-server -cf - .',
     );
     expect(verify.run).toContain(
       'tar -C "${HOME}/.m2/repository" --skip-old-files -xf -',
+    );
+    expect(verify.run).toContain(
+      '|| echo "::warning::Maven cache write-back failed; the gate result above is unaffected"',
     );
   });
 });

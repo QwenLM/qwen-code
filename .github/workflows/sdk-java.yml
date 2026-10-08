@@ -443,10 +443,14 @@ jobs:
     # pool-safe: the database is a per-job service container on a random host
     # port, and every Maven run holds the test job's per-host sdk-java lock.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # 15 covered the hosted lane. On the pool each locked step can wait out
-    # one full flock --wait 1200, so the ceiling is one 20-minute lock wait
-    # plus the ~12 minutes of measured Maven work, plus margin: 45.
-    timeout-minutes: 45
+    # 15 covered the hosted lane. On the pool this job takes the per-host
+    # sdk-java lock once per Maven step — three acquisitions today — and each
+    # acquisition can wait out one full flock --wait 1200 behind the sibling
+    # test job's holds (measured run 37743332082: 1193 s of waits against
+    # 818 s of holds, the cross-job term a one-wait budget misses). The
+    # ceiling is three 20-minute lock waits plus the ~14 minutes of measured
+    # Maven work, plus margin: 85.
+    timeout-minutes: 85
     services:
       mariadb:
         image: 'mariadb:10.11.18'
@@ -643,6 +647,7 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
           MYSQL_PORT: "${{ job.services.mariadb.ports['3306'] }}"
         run: |-
+          set -o pipefail
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
           if ! flock --wait 1200 9; then
@@ -654,10 +659,16 @@ jobs:
             -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check
           # Close the cache loop inside the same lock: the one-way seed
           # above leaves cache: 'maven' saving only the runtime-broker tree
-          # after a pom key rotation. The exclude keeps the in-house fixed
-          # release coordinates out of the host-shared ~/.m2.
-          tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba -cf - . \
-            | tar -C "${HOME}/.m2/repository" --skip-old-files -xf -
+          # after a pom key rotation. The excludes name the three in-house
+          # fixed release coordinates rather than the whole com/alibaba
+          # group, so third-party artifacts under it (druid) still
+          # recapture into the host-shared ~/.m2. Best-effort like the
+          # seed: the warning arm keeps a copy failure from reddening the
+          # gate after mvn has already passed, and pipefail keeps a
+          # failing left-hand tar from being masked by the extractor.
+          tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba/qwencode-sdk --exclude=./com/alibaba/qwen-managed-runtime-broker --exclude=./com/alibaba/qwen-managed-agent-server -cf - . \
+            | tar -C "${HOME}/.m2/repository" --skip-old-files -xf - \
+            || echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
 
       # Maven passes a selection narrowed by a profile, MAVEN_ARGS or
       # .mvn/maven.config, so compare what ran with the source tree.
