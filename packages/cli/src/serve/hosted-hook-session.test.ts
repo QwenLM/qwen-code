@@ -2135,6 +2135,77 @@ function loseFinalMarkerWrite() {
 }
 
 it.each([
+  { merge: false, loseMarker: false },
+  { merge: true, loseMarker: false },
+  { merge: false, loseMarker: true },
+  { merge: true, loseMarker: true },
+])(
+  'stops malformed sequential Shell input and reconstructs its terminal prefix ($merge, $loseMarker)',
+  async ({ merge, loseMarker }) => {
+    catalog = {
+      ...catalog,
+      hooks: ['first', 'repair'].map((hookId) => ({
+        ...catalog.hooks[0],
+        hookId,
+        sequential: true,
+        onceKey: hookId === 'repair' ? 'repair-once' : null,
+      })),
+    };
+    execute = async (operation) => ({
+      success: true,
+      outcome: 'success',
+      duration: 0,
+      output: {
+        hookSpecificOutput: {
+          [merge ? 'tool_input' : 'updatedInput']: {
+            command:
+              operation.hookId === 'first' ? 'echo 😀\ud800' : 'echo repaired',
+          },
+        },
+      },
+    });
+    const input = {
+      tool_name: 'run_shell_command',
+      tool_input: { command: 'echo valid' },
+    };
+    const lost = loseMarker ? loseFinalMarkerWrite() : undefined;
+    const firing = hooks.fire(
+      HookEventName.PreToolUse,
+      'unicode',
+      input,
+      signal(),
+    );
+    if (lost) {
+      await expect(firing).rejects.toThrow('lost final marker write');
+      lost.mockRestore();
+    } else
+      await expect(firing).resolves.toMatchObject({
+        hookSpecificOutput: { updatedInput: { command: 'echo 😀\ud800' } },
+      });
+    const restored = new HostedHookSession(options, session, pin);
+    expect((await restored.status('unicode')).run.state).toBe('settled');
+    expect(
+      await restored.fire(HookEventName.PreToolUse, 'unicode', input, signal()),
+    ).toMatchObject({
+      hookSpecificOutput: { updatedInput: { command: 'echo 😀\ud800' } },
+    });
+    expect(restored.hasPendingOperations).toBe(false);
+    expect(
+      requests
+        .filter((request) => request.kind === 'hook-execute')
+        .map((request) => request.hookId),
+    ).toEqual(['first']);
+    expect(
+      session.authority
+        .extensionRecordsInDomain('hook_execution')
+        .some(
+          (entry) => parseHookExecution(entry.record).onceKey === 'repair-once',
+        ),
+    ).toBe(false);
+  },
+);
+
+it.each([
   [HookEventName.PreToolUse, false],
   [HookEventName.PreToolUse, true],
   [HookEventName.PermissionRequest, false],
