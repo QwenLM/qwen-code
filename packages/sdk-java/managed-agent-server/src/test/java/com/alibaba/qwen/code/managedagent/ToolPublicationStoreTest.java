@@ -138,6 +138,41 @@ class ToolPublicationStoreTest {
     }
 
     @Test
+    void localReservationWaitsForLifecyclePlacementBeforeLockingBrokerRows() throws Exception {
+        try (var pool = Executors.newSingleThreadExecutor()) {
+            var publisher = new TransactionTemplate(manager).execute(status -> {
+                com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.lockPlacement(jdbc, "tenant-1");
+                String tenantKey = ToolPublicationContract.sha256("tenant-1".getBytes(StandardCharsets.UTF_8));
+                jdbc.update("INSERT INTO qwen_tool_publication_tenant (tenant_key, tenant_id) VALUES (?, ?)"
+                        + " ON DUPLICATE KEY UPDATE tenant_key = tenant_key", tenantKey, "tenant-1");
+                jdbc.queryForList("SELECT tenant_id FROM qwen_tool_publication_tenant WHERE tenant_key = ? FOR UPDATE",
+                        tenantKey);
+                var entered = new CountDownLatch(1);
+                var pending = pool.submit(() -> {
+                    entered.countDown();
+                    return reserve();
+                });
+                try {
+                    assertThat(entered.await(3, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                    assertThatThrownBy(() -> pending.get(250, java.util.concurrent.TimeUnit.MILLISECONDS))
+                            .isInstanceOf(java.util.concurrent.TimeoutException.class);
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException(error);
+                }
+                RuntimeBindingRecord original = jdbc.execute(
+                        (org.springframework.jdbc.core.ConnectionCallback<RuntimeBindingRecord>) connection ->
+                                bindings.findByIdForUpdate(connection, "binding-1"));
+                assertThat(original.getBindingId()).isEqualTo("binding-1");
+                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication", Integer.class)).isZero();
+                return pending;
+            });
+            assertThat(publisher.get(3, java.util.concurrent.TimeUnit.SECONDS).path("publicationId").asText())
+                    .isEqualTo("pub-1");
+        }
+    }
+
+    @Test
     void localReservationHoldsBothBrokerRowsUntilThePublicationCommits() throws Exception {
         var reserved = new CountDownLatch(1);
         var release = new CountDownLatch(1);

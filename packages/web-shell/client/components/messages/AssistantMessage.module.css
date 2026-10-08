@@ -25,6 +25,26 @@
   white-space: nowrap;
 }
 
+/* A squad leader's "had nothing to do": a muted line, not a message. Spaced
+   like a message so it does not read as the next one's header, and starting
+   at the message column's edge, where the avatars sit. */
+.squadNoAction {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 4px 0 12px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.squadNoActionText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .thinkingAuthor {
   flex-shrink: 0;
   color: var(--foreground);

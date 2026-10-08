@@ -2772,6 +2772,97 @@ describe('ExportTranscriptDocumentV1', () => {
     });
   });
 
+  it("names the agent on an agent's reply and on its posts", () => {
+    const records = [
+      record('prompt', null),
+      record('answer', 'prompt', {
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'Main answer.' }] },
+      }),
+      record('agent-reply', 'answer', {
+        subtype: 'agent_message',
+        provenance: 'external_agent',
+        message: {
+          role: 'user',
+          parts: [{ text: '<agent_message>Looks good.</agent_message>' }],
+        },
+        systemPayload: {
+          displayText: 'Looks good.',
+          author: { agentId: 'agent-1', name: 'claude-B', color: '#f80' },
+          runId: 'run-1',
+          status: 'completed',
+        },
+        agentId: 'agent-1',
+        agentName: 'claude-B',
+      }),
+      record('agent-post', 'agent-reply', {
+        subtype: 'agent_mention',
+        provenance: 'external_agent',
+        systemPayload: {
+          displayText: '@codex-C your turn',
+          mentionedAgentIds: ['agent-2'],
+          author: { agentId: 'agent-1', name: 'claude-B' },
+        },
+      }),
+    ];
+    const document = createExportTranscriptDocumentV1(
+      records,
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    expect(
+      document.blocks.map((block) => [
+        block.kind,
+        'text' in block ? block.text : undefined,
+        'author' in block ? block.author : undefined,
+      ]),
+    ).toEqual([
+      ['user', 'prompt', undefined],
+      ['assistant', 'Main answer.', undefined],
+      ['assistant', 'Looks good.', { name: 'claude-B' }],
+      ['user', '@codex-C your turn', { name: 'claude-B' }],
+    ]);
+    // Only the name travels: no agent id, color or raw meta.
+    expect(JSON.stringify(document)).not.toContain('agent-1');
+    expect(JSON.stringify(document)).not.toContain('qwenAgentMessage');
+    expect(() => assertExportTranscriptDocumentV1(document)).not.toThrow();
+  });
+
+  it('rejects an unsafe or widened block author', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('agent-reply', null, {
+          subtype: 'agent_message',
+          systemPayload: {
+            displayText: 'Hi.',
+            author: { agentId: 'agent-1', name: 'claude-B' },
+            runId: 'run-1',
+            status: 'completed',
+          },
+        }),
+      ],
+      sessionData,
+      EXPORT_OPTIONS,
+    );
+    const withAuthor = (author: unknown) => ({
+      ...document,
+      blocks: document.blocks.map((block) =>
+        'author' in block ? { ...block, author } : block,
+      ),
+    });
+    expect(() =>
+      assertExportTranscriptDocumentV1(withAuthor({ name: 'bad\u0007name' })),
+    ).toThrowError('invalid_block');
+    expect(() =>
+      assertExportTranscriptDocumentV1(
+        withAuthor({ name: 'claude-B', agentId: 'agent-1' }),
+      ),
+    ).toThrowError('schema_validation_failed');
+    expect(() =>
+      assertExportTranscriptDocumentV1(withAuthor({ name: '' })),
+    ).toThrowError('schema_validation_failed');
+  });
+
   it('escapes HTML script terminators in serialized document data', () => {
     const escaped = escapeJsonForHtmlScriptData(
       JSON.stringify({ text: '</ScRiPt><!--\u2028\u2029' }),

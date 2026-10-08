@@ -68,6 +68,11 @@ class ToolPublicationRecoveryMySqlIT {
     }
 
     @Test
+    void localReservationWaitsForLifecyclePlacementBeforeLockingBrokerRows() throws Exception {
+        fixture.localReservationWaitsForLifecyclePlacementBeforeLockingBrokerRows();
+    }
+
+    @Test
     void localReservationHoldsBothBrokerRowsUntilThePublicationCommits() throws Exception {
         fixture.localReservationHoldsBothBrokerRowsUntilThePublicationCommits();
     }

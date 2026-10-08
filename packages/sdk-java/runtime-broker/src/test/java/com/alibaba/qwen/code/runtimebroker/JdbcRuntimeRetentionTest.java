@@ -88,7 +88,8 @@ class JdbcRuntimeRetentionTest {
         fixture.session(binding, "session", "RELEASED", OLD);
         fixture.execution(binding, "session", "settled", "SETTLED", OLD);
         fixture.execution(binding, "session", "abandoned", "ABANDONED", OLD);
-        fixture.execute("INSERT INTO qwen_runtime_harness_drain VALUES (?, ?, ?, ?)",
+        fixture.execute("INSERT INTO qwen_runtime_harness_drain"
+                + " (tenant_key, harness_key, tenant_id, harness_session_id) VALUES (?, ?, ?, ?)",
                 JdbcRepositorySupport.valueKey("other-tenant"), JdbcRepositorySupport.valueKey("other-harness"),
                 "other-tenant", "other-harness");
         fixture.execute("INSERT INTO qwen_runtime_storage_fence VALUES (?, ?, ?, ?, ?)",

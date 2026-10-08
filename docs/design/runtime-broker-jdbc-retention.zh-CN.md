@@ -22,7 +22,7 @@ Operator recovery、Workspace holder 和 CSI retirement 保护整个 binding，�
 
 JdbcRuntimeRetention 提供不依赖框架的 JDBC sweep，嵌入方提供同连接引用检查器。返回续扫游标以及扫描、跳过和各表删除计数。两层 keyset 游标跟踪 binding 和子表阶段；已检查的受保护行也推进游标。完整扫描后回绕，重启可安全重扫。
 
-批量值为 B 时，每轮最多检查 B 个 binding、B 个子行，三表合计最多删除 B 行。大家族跨轮处理。每个事务依次锁 tenant placement domain、slot、binding 和子记录；使用当前已提交状态复查资格与引用，然后依次删除 execution、session、binding。不执行无界级联删除。数据库错误回滚并向上抛出。Local publication 修改在原有事务中先锁原 JDBC binding 和 execution，再锁 publication，防止引用创建与删除竞争。CSI 保持现有锁顺序。
+批量值为 B 时，每轮最多检查 B 个 binding、B 个子行，三表合计最多删除 B 行。大家族跨轮处理。每个事务依次锁 tenant placement domain、slot、binding 和子记录；使用当前已提交状态复查资格与引用，然后依次删除 execution、session、binding。不执行无界级联删除。数据库错误回滚并向上抛出。Local publication 修改在原有事务中依次锁 tenant placement guard、原 JDBC binding 和 execution，再锁 publication，防止引用创建与删除竞争，并保持 session 生命周期的锁顺序。CSI 保持现有锁顺序。
 
 Managed-server 使用独立单线程 scheduler，只有 Broker 和 retention 同时开启才创建。qwen.managed-agent.runtime-broker.retention 配置为 enabled=false、max-age=30d、batch-size=100（1–1000）、scan-delay=1m。保留期和间隔必须为正数。失败轮次记录日志并在下个周期重试，恢复调度保持独立。已有 HTTP 和业务 repository 接口保持不变。
 

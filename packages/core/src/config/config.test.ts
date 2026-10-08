@@ -77,6 +77,7 @@ import {
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { LlmClient } from '../core/client.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { buildSessionAgentToolConfig } from '../agents/workspace-agents/capability.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import {
@@ -12243,6 +12244,65 @@ describe('applyWorkspaceAgentPersona', () => {
     }
   });
 
+  it('registers no thread tools for a session-agents session', async () => {
+    // Both collaboration surfaces coexist for now: a session the session-agents
+    // orchestrator drives has no thread behind it, so its thread tools could
+    // only ever throw "requires an active agent run context".
+    const factory = ToolRegistry.prototype.registerFactory as unknown as Mock;
+    factory.mockClear();
+    const config = agentSession();
+    config.markSessionAgentSession();
+    await config.createToolRegistry(undefined, { skipDiscovery: true });
+    const registered = factory.mock.calls.map(([name]) => name as string);
+    for (const name of [
+      'thread_post',
+      'thread_read',
+      'thread_create',
+      'thread_wait',
+      'thread_block',
+      'thread_review',
+    ]) {
+      expect(registered).not.toContain(name);
+    }
+  });
+
+  it('pins a session-agents session to default approval', () => {
+    // Every write or command a session agent runs asks the person in the chat
+    // session, whatever the settings say (session-multi-agent design §8-1).
+    const config = new Config({
+      ...baseParams,
+      agentCollaborationEnabled: true,
+      approvalMode: ApprovalMode.YOLO,
+    });
+    config.setSessionSource('agent', 'ag_alice');
+    expect(config.getApprovalMode()).toBe(ApprovalMode.YOLO);
+    config.markSessionAgentSession();
+    expect(config.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+
+    for (const mode of [
+      ApprovalMode.YOLO,
+      ApprovalMode.AUTO_EDIT,
+      ApprovalMode.AUTO,
+    ]) {
+      expect(() => config.setApprovalMode(mode)).toThrow(/stays "default"/);
+      expect(config.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+    }
+    expect(() => config.setPlanMode(true, ApprovalMode.AUTO_EDIT)).toThrow(
+      /stays "default"/,
+    );
+    config.setApprovalMode(ApprovalMode.PLAN);
+    expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+    config.setApprovalMode(ApprovalMode.DEFAULT);
+    expect(config.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
+    // A subagent it starts cannot widen it either.
+    expect(
+      deriveApprovalModeConfig(
+        config,
+        ApprovalMode.YOLO,
+      ).config.getApprovalMode(),
+    ).toBe(ApprovalMode.DEFAULT);
+  });
+
   it('refuses on a session that is not an agent', () => {
     // Otherwise any session could be handed a persona and post under a name
     // that is not its own.
@@ -12274,6 +12334,34 @@ describe('applyWorkspaceAgentPersona', () => {
       expect(result.allowed).toBe(
         toolName === 'read_file' || toolName === 'thread_review',
       );
+    }
+  });
+
+  it("enforces a session agent's deny-only definition", async () => {
+    const config = agentSession();
+    config.markSessionAgentSession();
+    const toolConfig = buildSessionAgentToolConfig({
+      tools: ['*'],
+      disallowedTools: ['write_file'],
+    });
+    config.applyWorkspaceAgentPersona(
+      'You are alice.',
+      'alice',
+      toolConfig.executionAllowedTools,
+      toolConfig.disallowedTools,
+    );
+    const guard = config.getToolInvocationGuard()!;
+    for (const [toolName, allowed] of [
+      ['write_file', false],
+      ['read_file', true],
+    ] as const) {
+      const result = await guard({
+        callId: 'guard-check',
+        toolName,
+        args: {},
+        signal: new AbortController().signal,
+      });
+      expect(result.allowed).toBe(allowed);
     }
   });
 
