@@ -486,7 +486,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             // and wakes a turn), so a cached attachment is no admission:
             // the Workspace checks submit and continueManagedRuntime run
             // apply to every relay.
-            requireReadyForNewWork(tenantId, sessionId);
+            requireReadyForNewWork(tenantId, sessionId, false);
             if (!attachments.containsKey(new AttachmentKey(tenantId, sessionId))
                     && sessions.requireSession(tenantId, sessionId)
                             .harnessBootId() != null) {
