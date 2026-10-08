@@ -1879,4 +1879,78 @@ describe('stripAnalysisBlock', () => {
       ),
     ).toBe(snapshot + '\nthe format ends with </state_snapshot>');
   });
+
+  it('strips a closed mid-line analysis block after the envelope', () => {
+    expect(
+      stripAnalysisBlock(
+        '<state_snapshot>real</state_snapshot>\nNote: <analysis>post</analysis> tail',
+      ),
+    ).toBe('<state_snapshot>real</state_snapshot>\nNote: tail');
+  });
+
+  it('ignores a closer quoted inside a post-envelope scratchpad', () => {
+    const snapshot = '<state_snapshot>real</state_snapshot>';
+    expect(
+      stripAnalysisBlock(
+        snapshot +
+          '\n<analysis>post-note about </state_snapshot> - yes</analysis>',
+      ),
+    ).toBe(snapshot);
+    expect(
+      stripAnalysisBlock(
+        snapshot + '\n<think>post-note about </state_snapshot></think>',
+      ),
+    ).toBe(snapshot);
+  });
+
+  it('keeps prose around an empty envelope mention', () => {
+    // An empty <state_snapshot></state_snapshot> pair is a mention, not a
+    // summary; binding it would discard the prose before it.
+    const input = 'notes\n<state_snapshot></state_snapshot> done';
+    expect(stripAnalysisBlock(input)).toBe(input);
+  });
+
+  it('strips unclosed scratch drafted before a second envelope', () => {
+    expect(
+      stripAnalysisBlock(
+        '<state_snapshot>a</state_snapshot>\n' +
+          '<analysis>scratch never closed\n' +
+          '<state_snapshot>b</state_snapshot>',
+      ),
+    ).toBe(
+      '<state_snapshot>a</state_snapshot>\n<state_snapshot>b</state_snapshot>',
+    );
+  });
+
+  it('refuses the rebind when the gap holds an unterminated instructed tag', () => {
+    const snapshot = '<state_snapshot>real</state_snapshot>';
+    expect(
+      stripAnalysisBlock(
+        snapshot + '\n<analysis>draft </state_snapshot> never closed',
+      ),
+    ).toBe(snapshot);
+  });
+
+  it('strips an unterminated instructed block after the envelope', () => {
+    expect(
+      stripAnalysisBlock(
+        '<state_snapshot>x</state_snapshot>\n<analysis>cut off',
+      ),
+    ).toBe('<state_snapshot>x</state_snapshot>');
+  });
+
+  it('strips an unterminated native block after the envelope', () => {
+    expect(
+      stripAnalysisBlock('<state_snapshot>x</state_snapshot>\n<think>cut off'),
+    ).toBe('<state_snapshot>x</state_snapshot>');
+  });
+
+  it('keeps prose naming the instructed tag before a native closer mention', () => {
+    const traced =
+      'We traced <analysis> output and stray </think> closers in one pass.';
+    expect(stripAnalysisBlock(traced)).toBe(traced);
+    const docs =
+      'Docs mention <analysis> here.\n\nREAL SUMMARY about </thinking> handling';
+    expect(stripAnalysisBlock(docs)).toBe(docs);
+  });
 });

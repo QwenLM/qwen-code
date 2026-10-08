@@ -569,12 +569,18 @@ const CLOSED_REASONING_BLOCK = new RegExp(
 // "Here is my analysis:". The line-anchored pattern above misses those, and
 // the unclosed fallback below would then eat the real summary after the
 // block. `<analysis>` is scratchpad wherever it starts; the lead-in on its
-// line is kept.
+// line is kept. The closer here must be the matching `</analysis>`: with any
+// native closer allowed, a prose mention of `<analysis>` pairs with a later
+// `</think>` mention and deletes the text in between.
 const CLOSED_ANALYSIS_BLOCK_ANYWHERE = new RegExp(
-  `<analysis>[\\s\\S]*?<\\/${REASONING_TAG_NAMES}>\\s*`,
+  `<analysis>[\\s\\S]*?<\\/analysis>\\s*`,
   'gi',
 );
 const UNCLOSED_ANALYSIS_BLOCK = /<analysis>[\s\S]*$/i;
+// Generic-pass variant: when a reasoning closer is mentioned after the
+// opener, the opener is prose discussing the tags, not a truncated block.
+const UNCLOSED_ANALYSIS_BLOCK_PROSE =
+  /<analysis>(?![\s\S]*<\/(?:analysis|think|thinking|reasoning)>)[\s\S]*$/i;
 const UNCLOSED_REASONING_BLOCK = new RegExp(
   `(?<=^|\\n)[ \\t]*<(?:think|thinking|reasoning)>[\\s\\S]*$`,
   'i',
@@ -601,16 +607,21 @@ function closedReasoningSpans(text: string): Array<[number, number]> {
 
 export function stripAnalysisBlock(rawSummary: string): string {
   // A closed <state_snapshot> envelope IS the summary: anything before it is
-  // drafting scratchpad, anything after it is chatter. Binding the strip to
-  // the envelope keeps the tag patterns outside the payload, so a tag quoted
-  // inside the snapshot is never a strip candidate. The opener only counts at
-  // the start of a line (prose naming the tags mid-sentence is ignored). The
-  // closer still binds to its LAST occurrence, so a payload that quotes the
-  // closer verbatim cannot end the binding early: the text between the first
-  // and last closer is re-glued with only closed reasoning blocks stripped,
-  // and the real remainder is never exposed to the unclosed-tag passes.
-  const closeAt = rawSummary.lastIndexOf(ENVELOPE_CLOSE);
+  // drafting scratchpad, anything after it is chatter. The opener only counts
+  // at the start of a line (prose naming the tags mid-sentence is ignored).
+  // The closer binds to its last occurrence outside a closed reasoning block,
+  // so a payload quoting the closer cannot end the binding early, and a
+  // closer quoted inside a post-envelope scratchpad cannot extend it late.
+  // On the single-closer path the payload is never exposed to the tag
+  // passes; the rebind path below still runs the closed passes over a gap
+  // that can be payload interior (#13707).
   const reasoningSpans = closedReasoningSpans(rawSummary);
+  let closeAt = -1;
+  for (const match of rawSummary.matchAll(/<\/state_snapshot>/g)) {
+    if (!reasoningSpans.some(([s, e]) => match.index >= s && match.index < e)) {
+      closeAt = match.index;
+    }
+  }
   for (const match of rawSummary.matchAll(/(?:^|\n)[ \t]*<state_snapshot>/g)) {
     const start = match.index + match[0].length - ENVELOPE_OPEN.length;
     if (closeAt < start + ENVELOPE_OPEN.length) {
@@ -640,6 +651,7 @@ export function stripAnalysisBlock(rawSummary: string): string {
     const end = closeAt + ENVELOPE_CLOSE.length;
     const suffix = rawSummary
       .slice(end)
+      .replace(CLOSED_ANALYSIS_BLOCK_ANYWHERE, '')
       .replace(CLOSED_REASONING_BLOCK, '')
       .replace(UNCLOSED_ANALYSIS_BLOCK, '')
       .replace(UNCLOSED_REASONING_BLOCK, '');
@@ -653,10 +665,39 @@ export function stripAnalysisBlock(rawSummary: string): string {
     // A second closer after the bound envelope is a later draft or prose
     // naming the tag. Scratch drafted in between is not payload: rebind to
     // the first envelope plus whatever real content the gap leaves.
-    const gap = rawSummary
-      .slice(firstCloseAt + ENVELOPE_CLOSE.length, closeAt)
-      .replace(CLOSED_ANALYSIS_BLOCK_ANYWHERE, '')
-      .replace(CLOSED_REASONING_BLOCK, '');
+    const gapRaw = rawSummary.slice(
+      firstCloseAt + ENVELOPE_CLOSE.length,
+      closeAt,
+    );
+    const secondOpen = gapRaw.indexOf(ENVELOPE_OPEN);
+    let gap: string;
+    if (secondOpen !== -1) {
+      // The model drafted a fresh envelope in the gap: text before the new
+      // opener is scratch and gets the unclosed passes too; text from it is
+      // payload interior and gets only the closed passes, same as the
+      // single-closer path.
+      gap =
+        gapRaw
+          .slice(0, secondOpen)
+          .replace(CLOSED_ANALYSIS_BLOCK_ANYWHERE, '')
+          .replace(CLOSED_REASONING_BLOCK, '')
+          .replace(UNCLOSED_ANALYSIS_BLOCK, '')
+          .replace(UNCLOSED_REASONING_BLOCK, '') +
+        gapRaw
+          .slice(secondOpen)
+          .replace(CLOSED_ANALYSIS_BLOCK_ANYWHERE, '')
+          .replace(CLOSED_REASONING_BLOCK, '');
+    } else {
+      gap = gapRaw
+        .replace(CLOSED_ANALYSIS_BLOCK_ANYWHERE, '')
+        .replace(CLOSED_REASONING_BLOCK, '');
+      // An instructed tag still open in the gap is a scratchpad truncated
+      // mid-draft; gluing the rebound closer on here would duplicate it.
+      // Refuse this binding and let the generic passes strip the scratch.
+      if (/<analysis>/i.test(gap)) {
+        continue;
+      }
+    }
     return (
       rawSummary.slice(start, firstCloseAt + ENVELOPE_CLOSE.length) +
       gap +
@@ -672,8 +713,10 @@ export function stripAnalysisBlock(rawSummary: string): string {
     .replace(CLOSED_ANALYSIS_BLOCK_ANYWHERE, '')
     .replace(CLOSED_REASONING_BLOCK, '');
   // Second pass: strip any remaining unclosed reasoning tag (the model ran
-  // out of output tokens before closing).
-  result = result.replace(UNCLOSED_ANALYSIS_BLOCK, '');
+  // out of output tokens before closing). The instructed-tag pass uses the
+  // prose-aware variant: a closer mentioned after the opener means the text
+  // is discussing tags, not thinking in a truncated block.
+  result = result.replace(UNCLOSED_ANALYSIS_BLOCK_PROSE, '');
   result = result.replace(UNCLOSED_REASONING_BLOCK, '');
   return result.trim();
 }
