@@ -404,24 +404,36 @@ describe('subagent.ts', () => {
       expect(templateString(template, contextWith(values))).toBe(expected);
     });
 
-    it('should still throw for missing valid identifier placeholders', () => {
-      expect(() =>
+    it('should leave placeholders absent from the context as literal text', () => {
+      // Subagent definition bodies are ordinary markdown: a `${identifier}`
+      // inside a code fence documents a shell or JS template literal and is
+      // not a context key, so it must survive rendering untouched.
+      expect(
+        templateString(
+          'Run `curl ${baseUrl}/v1` with ${task_prompt}.',
+          contextWith({ task_prompt: 'T' }),
+        ),
+      ).toBe('Run `curl ${baseUrl}/v1` with T.');
+    });
+
+    it('should substitute known keys and leave unknown ones literal', () => {
+      expect(
         templateString(
           'Hello ${name}, missing ${missing}.',
           contextWith({ name: 'Agent' }),
         ),
-      ).toThrow('Missing context values for the following keys: missing');
+      ).toBe('Hello Agent, missing ${missing}.');
     });
 
     it('should handle mixed numeric and identifier placeholders', () => {
-      // ${var} and ${_private} are valid identifiers; ${0} is literal
-      // ${_private} is missing from context, so it should throw
-      expect(() =>
+      // ${var} is a known key and is substituted; ${0} is not an identifier
+      // and ${_private} is not in the context, so both stay literal.
+      expect(
         templateString(
           '${var} and ${0} and ${_private}',
           contextWith({ var: 'value' }),
         ),
-      ).toThrow('Missing context values for the following keys: _private');
+      ).toBe('value and ${0} and ${_private}');
     });
   });
 
@@ -1049,19 +1061,17 @@ describe('subagent.ts', () => {
         expect(system).toBe(rendered);
       });
 
-      it('should throw an error if template variables are missing', async () => {
+      it('should leave missing template variables literal instead of failing', async () => {
         const { config } = await createMockConfig();
-        const scope = await createAgent(config, {
-          prompt: {
-            systemPrompt: 'Hello ${name}, you are missing ${missing}.',
-          },
-        });
-        // 'missing' is not set: templating fails, execute rejects and the
-        // terminate reason is ERROR.
-        await expectExecuteError(
-          scope,
-          'Missing context values for the following keys: missing',
+        const { system } = await runPrompt(
+          config,
+          { systemPrompt: 'Hello ${name}, missing ${missing} and ${baseUrl}.' },
           contextWith({ name: 'Agent' }),
+        );
+        // Only 'name' is in the context. The unknown keys stay in the rendered
+        // prompt, so execute() completes instead of rejecting with ERROR.
+        expect(system).toContain(
+          'Hello Agent, missing ${missing} and ${baseUrl}.',
         );
       });
 
