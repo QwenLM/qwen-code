@@ -5,6 +5,9 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, type ComponentProps } from 'react';
+import { Box, Text } from 'ink';
+import stringWidth from 'string-width';
 import stripAnsi from 'strip-ansi';
 import { MarkdownDisplay } from './MarkdownDisplay.js';
 import { LoadedSettings } from '../../config/settings.js';
@@ -49,6 +52,242 @@ describe('<MarkdownDisplay />', () => {
       <MarkdownDisplay {...baseProps} text={text} />,
     );
     expect(lastFrame()).toMatchSnapshot();
+  });
+
+  describe('bounded raw header preview', () => {
+    const table = (header: string, eol = '\n') =>
+      [`| ${header} | B |`, '| --- | --- |', '| tail | SENTINEL |'].join(eol);
+    const props = {
+      isPending: true,
+      contentWidth: 80,
+      availableTerminalHeight: 24,
+    };
+    const tree = (
+      options: ComponentProps<typeof MarkdownDisplay>,
+      mode: 'raw' | 'render' = 'raw',
+    ) => (
+      <RenderModeProvider
+        value={{ renderMode: mode, setRenderMode: () => undefined }}
+      >
+        <Box width={options.contentWidth} flexDirection="column">
+          <MarkdownDisplay {...options} />
+        </Box>
+      </RenderModeProvider>
+    );
+    const frameFor = (
+      options: ComponentProps<typeof MarkdownDisplay>,
+      mode: 'raw' | 'render' = 'raw',
+    ) => {
+      let view!: ReturnType<typeof renderWithProviders>;
+      act(() => {
+        view = renderWithProviders(tree(options, mode));
+      });
+      try {
+        return stripAnsi(view.lastFrame() ?? '');
+      } finally {
+        act(() => {
+          view.unmount();
+          view.cleanup();
+        });
+      }
+    };
+
+    it.each(
+      [20, 21, 40, 80].flatMap((width) =>
+        [
+          'x',
+          '界',
+          '😀',
+          '👩‍💻',
+          'e\u0301',
+          '\u001b[31mx\u001b[39m',
+          'word ',
+        ].map((token) => ({ width, token })),
+      ),
+    )(
+      'shows a bounded header at width $width for $token',
+      ({ width, token }) => {
+        const text = table(
+          token.repeat(Math.ceil((width * 23 + 1) / stringWidth(token))),
+        );
+        expect(
+          fitPendingSlice(text.split('\n'), width, 22, 21, {
+            visualTables: false,
+          }),
+        ).toEqual({ keptLines: 0, clipped: true });
+        const frame = frameFor({ ...props, text, contentWidth: width });
+        expect(frame.startsWith('| ')).toBe(true);
+        expect(frame.split('\n')).toHaveLength(22);
+        expect(frame).not.toContain('SENTINEL');
+      },
+    );
+
+    it.each([1, 2, 3, 4, 10, 24])(
+      'respects the height floor at viewport %i',
+      (height) => {
+        const budget = Math.max(1, height - 2);
+        const frame = frameFor({
+          ...props,
+          text: table('x'.repeat(2000)),
+          availableTerminalHeight: height,
+        });
+        expect(frame.startsWith('|')).toBe(true);
+        expect(frame.split('\n')).toHaveLength(budget);
+      },
+    );
+
+    it.each([-1, 0, 1])(
+      'handles the first-line wrap threshold at delta %i',
+      (delta) => {
+        const text = table('x'.repeat(80 * 22 - 8 + delta));
+        const frame = frameFor({ ...props, text });
+        expect(frame.startsWith('| ')).toBe(true);
+        expect(frame.split('\n')).toHaveLength(22);
+        const visible = frame.replace(/\s/g, '');
+        const header = text.split('\n')[0]!.replace(/\s/g, '');
+        expect(header.startsWith(visible)).toBe(true);
+        if (delta <= 0) expect(visible).toBe(header);
+      },
+    );
+
+    it.each(['\n', '\r\n'])(
+      'keeps final and unbounded source complete (%j)',
+      (eol) => {
+        const text = table('x'.repeat(2000), eol);
+        for (const options of [
+          { ...props, text, isPending: false },
+          { ...props, text, availableTerminalHeight: undefined },
+        ]) {
+          const frame = frameFor(options);
+          expect(frame.replace(/\s/g, '')).toBe(text.replace(/\s/g, ''));
+          expect(frame).toContain('SENTINEL');
+        }
+        const enforced = frameFor({
+          ...props,
+          text,
+          isPending: false,
+          enforceHeightBudget: true,
+        });
+        expect(enforced).toContain('3 more lines not shown');
+        expect(enforced).not.toContain('| ');
+      },
+    );
+
+    it('preserves ordinary tables and the unconfirmed/non-table holdback', () => {
+      const ordinary = table('A');
+      expect(frameFor({ ...props, text: ordinary })).toBe(ordinary);
+      const header = `| ${'x'.repeat(2000)} | B |`;
+      for (const text of [
+        'x'.repeat(2000),
+        header,
+        `${header}\n| --- | --- | --- |`,
+      ]) {
+        expect(frameFor({ ...props, text })).toBe('');
+      }
+    });
+
+    it('preserves raw inline styling and literal inline math in the header', () => {
+      const frame = frameFor({
+        ...props,
+        text: table(`**HEAD** $x^2$ ${'x'.repeat(2000)}`),
+      });
+      expect(frame).toContain('HEAD');
+      expect(frame).toContain('$x^2$');
+      expect(frame.split('\n')).toHaveLength(22);
+    });
+
+    it('fits the conversation prefix with the actual content width', () => {
+      let view!: ReturnType<typeof renderWithProviders>;
+      act(() => {
+        view = renderWithProviders(
+          <RenderModeProvider
+            value={{ renderMode: 'raw', setRenderMode: () => undefined }}
+          >
+            <Box width={80}>
+              <Box width={2} flexShrink={0}>
+                <Text>◆ </Text>
+              </Box>
+              <Box flexGrow={1} flexDirection="column">
+                <MarkdownDisplay
+                  {...props}
+                  text={table('界'.repeat(1000))}
+                  contentWidth={78}
+                />
+              </Box>
+            </Box>
+          </RenderModeProvider>,
+        );
+      });
+      try {
+        const frame = stripAnsi(view.lastFrame() ?? '');
+        expect(frame.startsWith('◆ | ')).toBe(true);
+        expect(frame.split('\n')).toHaveLength(22);
+      } finally {
+        act(() => {
+          view.unmount();
+          view.cleanup();
+        });
+      }
+    });
+
+    it.each(['raw', 'render'] as const)(
+      'updates modes, dimensions and final content from %s',
+      async (initial) => {
+        const text = table('x'.repeat(2000));
+        const expectedVisual = frameFor({ ...props, text }, 'render');
+        expect(expectedVisual).toContain('SENTINEL');
+        let view!: ReturnType<typeof renderWithProviders>;
+        act(() => {
+          view = renderWithProviders(tree({ ...props, text }, initial));
+        });
+        try {
+          for (const mode of ['raw', 'render', 'raw'] as const) {
+            act(() => {
+              view.rerender(withProviders(tree({ ...props, text }, mode)));
+            });
+            await vi.waitFor(() => {
+              const frame = stripAnsi(view.lastFrame() ?? '');
+              if (mode === 'raw') {
+                expect(frame.startsWith('|')).toBe(true);
+                expect(frame.split('\n')).toHaveLength(22);
+              } else expect(frame).toBe(expectedVisual);
+            });
+          }
+          act(() => {
+            view.rerender(
+              withProviders(
+                tree({
+                  ...props,
+                  text,
+                  contentWidth: 21,
+                  availableTerminalHeight: 6,
+                }),
+              ),
+            );
+          });
+          await vi.waitFor(() =>
+            expect(stripAnsi(view.lastFrame() ?? '').split('\n')).toHaveLength(
+              4,
+            ),
+          );
+          act(() => {
+            view.rerender(
+              withProviders(tree({ ...props, text, isPending: false })),
+            );
+          });
+          await vi.waitFor(() => {
+            expect(stripAnsi(view.lastFrame() ?? '').replace(/\s/g, '')).toBe(
+              text.replace(/\s/g, ''),
+            );
+          });
+        } finally {
+          act(() => {
+            view.unmount();
+            view.cleanup();
+          });
+        }
+      },
+    );
   });
 
   const lineEndings = [

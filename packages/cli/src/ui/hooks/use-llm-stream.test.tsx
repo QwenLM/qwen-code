@@ -12412,6 +12412,64 @@ describe('useLlmStream', () => {
       { name: 'visual to raw', start: 'render', end: 'raw' },
       { name: 'raw to visual', start: 'raw', end: 'render' },
     ] as const;
+
+    it.each(boundaryModes)(
+      'keeps oversized table source whole while streaming in $name',
+      async ({ start, end }) => {
+        const mode: { current: 'raw' | 'render' } = { current: start };
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          mode,
+        );
+        const table = [
+          `| ${'x'.repeat(80 * 23 + 1)} | B |`,
+          '| --- | --- |',
+          ...Array.from({ length: 40 }, (_, i) => `| r${i} | c${i} |`),
+        ].join('\n');
+        const stream = await streamStages(result, [
+          `intro\n\n${table}`,
+          '\n\nDone.',
+        ]);
+        try {
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          expect(llmContentItems().map((item) => item.text)).toEqual([
+            'intro\n\n',
+          ]);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(table);
+          mode.current = end;
+          await stream.advance();
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          expect(llmContentItems().map((item) => item.text)).toEqual([
+            'intro\n\n',
+            `${table}\n\n`,
+          ]);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe('Done.');
+          await stream.advance();
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+          expect(result.current.pendingHistoryItems).toEqual([]);
+          expect(llmContentItems().map((item) => item.text)).toEqual([
+            'intro\n\n',
+            `${table}\n\n`,
+            'Done.',
+          ]);
+          expect(
+            llmContentItems()
+              .map((item) => item.text)
+              .join(''),
+          ).toBe(`intro\n\n${table}\n\nDone.`);
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
     const makeBoundaryTable = (rows: number) =>
       [
         '| A | B |',

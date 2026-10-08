@@ -42,6 +42,10 @@ To start Qwen Code in raw mode by default, set `ui.renderMode`:
 Accepted values are `"render"` and `"raw"`. The shortcut only changes the
 current session view; it does not rewrite your settings file.
 
+While a confirmed table is streaming in raw mode, a header that wraps beyond
+the live preview's height limit shows its beginning within that limit. The
+complete table remains available when the response is committed.
+
 ## Assistant and Tool Images
 
 Image parts use a separate TUI display path and behave the same in Markdown

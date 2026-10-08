@@ -19,6 +19,7 @@ import { useRenderMode } from '../contexts/RenderModeContext.js';
 import { parseCodeFenceInfo } from './markdownUtilities.js';
 import {
   fitPendingSlice,
+  isTableStart,
   isNonRowTableSeparator,
   splitMarkdownTableRow,
   TABLE_ROW_RE,
@@ -196,7 +197,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // exceeds the viewport, so ink cannot fall into its from-top full-redraw path
   // (the scroll-to-top lock). Note keptLines can be 0 when even the first
   // line/table alone overflows (e.g. a single very wide/CJK line that wraps past
-  // the budget): render nothing rather than an oversized row.
+  // the budget): confirmed raw tables get a bounded header preview below.
   let lines = allLines;
   // Track how many source lines were dropped by the pre-slice so a non-streaming
   // caller (e.g. the `exit_plan_mode` confirmation dialog) can render a visible
@@ -218,6 +219,24 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       tableClampRows,
       { visualTables: renderVisualBlocks },
     );
+    if (
+      isPending &&
+      !renderVisualBlocks &&
+      keptLines === 0 &&
+      isTableStart(allLines, 0)
+    ) {
+      return (
+        <Box maxHeight={pendingRenderedBudget} overflow="hidden">
+          <Text wrap="wrap" color={textColor}>
+            <RenderInline
+              text={allLines[0]!}
+              textColor={textColor}
+              enableInlineMath={false}
+            />
+          </Text>
+        </Box>
+      );
+    }
     if (keptLines < allLines.length) {
       lines = allLines.slice(0, keptLines);
       droppedSourceLines = allLines.length - keptLines;
