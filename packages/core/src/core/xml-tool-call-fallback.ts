@@ -99,8 +99,12 @@ function stripDelimitingNewlines(value: string): string {
  * close). A closing fence must also be whitespace-only after the delimiter
  * run — CommonMark forbids an info string on a closing fence.
  *
- * Lines inside `parameterRanges` are skipped: they are parameter values,
- * not prose, so fence-like content there must not affect fence state.
+ * Delimiters inside a line that starts in `parameterRanges` are only allowed to
+ * *close* a fence: those lines are parameter values, not prose, so fence-like
+ * content there must not open one — but the mask covers a value wholesale, and
+ * a prose-opened fence whose closing delimiter sits inside a value would
+ * otherwise never close, marking the rest of the turn fenced and dropping every
+ * call after it. See #13492.
  */
 function positionInsideFence(
   text: string,
@@ -115,18 +119,22 @@ function positionInsideFence(
       ([start, end]) => lineStart >= start && lineStart < end,
     );
     lineStart = lineEnd + 1;
-    if (insideParameter) continue;
     const m = /^ {0,3}((`{3,})|~{3,})/.exec(line);
     if (!m) continue;
     const delim = m[2] ? '`' : '~';
     const len = m[1].length;
-    if (openFence === null) openFence = { delim, len };
-    else if (
+    const closes =
+      openFence !== null &&
       openFence.delim === delim &&
       len >= openFence.len &&
-      line.slice(m[0].length).trim() === ''
-    )
+      line.slice(m[0].length).trim() === '';
+    if (insideParameter) {
+      if (closes) openFence = null;
+    } else if (openFence === null) {
+      openFence = { delim, len };
+    } else if (closes) {
       openFence = null;
+    }
   }
   return openFence !== null;
 }
@@ -186,17 +194,26 @@ function computeExampleRanges(
   let match: RegExpExecArray | null;
   while ((match = tags.exec(text)) !== null) {
     const tagPosition = match.index;
+    const closes = match[0].startsWith('</');
+    const masked = parameterRanges.some(
+      ([start, end]) => tagPosition >= start && tagPosition < end,
+    );
+    // Masked tags are parameter data, which may close an example but never
+    // open one. Symmetric treatment matters because the mask covers a value
+    // wholesale: an opener that stays inert is what keeps documented syntax
+    // from swallowing the turn, while a swallowed closer would leave a
+    // prose-opened example range running to the end of the text and filter out
+    // every real call after it. See #13492.
     if (
-      (!skipLexer && !tagPositions.has(tagPosition)) ||
-      parameterRanges.some(
-        ([start, end]) => tagPosition >= start && tagPosition < end,
-      ) ||
+      (masked
+        ? !closes
+        : !skipLexer && !tagPositions.has(tagPosition)) ||
       positionInsideFence(text, tagPosition, parameterRanges)
     ) {
       continue;
     }
     if (/\/\s*>$/.test(match[0])) continue;
-    if (match[0].startsWith('</')) {
+    if (closes) {
       if (depth > 0 && --depth === 0) {
         ranges.push([start, tagPosition + match[0].length]);
       }
@@ -368,8 +385,6 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     const toolName = match[1] ?? match[3];
     // A rejected block may have swallowed a complete later block, so rescan
     // from just after this block's open tag instead of its borrowed close.
-    // When the tag end is not derivable, skip the whole block: rescanning
-    // inside a rejected block is what dispatches markup it never accepted.
     const tagEnd = openTagEnd(match[0]);
     const resumeAt =
       tagEnd === -1 ? match.index + match[0].length : match.index + tagEnd;
@@ -377,20 +392,33 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     let closeStart = match.index + match[0].length - closeTag.length;
     // Where this match's own closer sat before the advance below moved it.
     const lazyCloseStart = closeStart;
-    let quotedValue: [number, number] | undefined;
-    while (
-      (quotedValue = quotedValueRanges.find(
-        ([start, end]) => closeStart >= start && closeStart < end,
-      ))
-    ) {
+    // The ranges are sorted and disjoint and `closeStart` only moves forward,
+    // so the scan resumes past every range it has already left instead of
+    // re-finding from index 0: a turn built of many value-quoting blocks makes
+    // the repeated whole-list search cubic, and every step here reaches further
+    // right anyway.
+    let rangeIndex = 0;
+    while (rangeIndex < quotedValueRanges.length) {
+      const quotedValue = quotedValueRanges[rangeIndex];
+      if (quotedValue[1] <= closeStart) {
+        rangeIndex++;
+        continue;
+      }
+      if (closeStart < quotedValue[0]) break;
       closeStart = text.indexOf(closeTag, quotedValue[1]);
       if (closeStart === -1) break;
     }
-    if (tagEnd === -1 || closeStart === -1) {
+    if (closeStart === -1) {
       TOOL_CALL_PATTERN.lastIndex = resumeAt;
       continue;
     }
-    const paramsStart = match.index + tagEnd;
+    // `match[0]` is exactly openTag + body + closeTag, so the body length is
+    // what separates this block's open tag from its parameters. Deriving the
+    // split location by scanning instead returns an offset inside the body
+    // whenever the name attribute opens with one quote character and closes
+    // with the other — the name group's delimiters are independent classes —
+    // which silently drops every parameter before that offset.
+    const paramsStart = lazyCloseStart - (match[2] ?? match[4]).length;
     const paramsBlock = text.slice(paramsStart, closeStart);
     const blockEnd = closeStart + closeTag.length;
     TOOL_CALL_PATTERN.lastIndex = blockEnd;

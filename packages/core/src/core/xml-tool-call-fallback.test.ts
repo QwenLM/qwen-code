@@ -1147,6 +1147,81 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     expect(tryRecoverXmlToolCalls(text).remainingText).toBe('');
   });
 
+  it('keeps leading parameters when the name attribute mixes quote characters', () => {
+    // TOOL_CALL_PATTERN's name group is `["']([^"']+)["']`, whose delimiters
+    // are independent character classes, so a name opened with one quote
+    // character and closed with the other matches. Splitting the open tag by
+    // scanning enters quote mode on that name, never finds the matching quote
+    // and lands inside the block body, so every parameter before the landing
+    // point is dropped: the required `content` here never reaches write_file,
+    // validation fails, and the block is accepted so nothing is left behind in
+    // the turn to explain it.
+    const text = `${OPEN} name='write_file'>\n${param('file_path', 'doc.md')}\n${param('content', 'body')}\n${CLOSE}`;
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'write_file', args: { file_path: 'doc.md', content: 'body' } },
+    ]);
+  });
+
+  it('keeps a single-parameter block whose name mixes quote characters', () => {
+    // The same split lands past the block's only parameter, which previously
+    // dropped the whole call instead of disabling it.
+    const text = `${OPEN} name='read_file'>\n${param('file_path', 'a.ts')}\n${CLOSE}`;
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'read_file', args: { file_path: 'a.ts' } },
+    ]);
+  });
+
+  it('carries the advance past two quoted values in one block', () => {
+    // The lazy match ends at the first quoted closer, so a block quoting one
+    // call per value needs a second advance step to reach its own closer.
+    // Stopping after one step leaves closeStart inside the second value, its
+    // element fails the ownership lookup, the trailing closer is read as a
+    // rejected block and the whole call is dropped into the visible turn.
+    const quoted = invoke('read_file', param('file_path', 'x.txt'));
+    const text = invoke(
+      'write_file',
+      param('content', `Usage:\n${quoted}\n`) +
+        param('note', `Also:\n${quoted}\n`),
+    );
+    expect(extractXmlToolCalls(text)).toEqual([
+      {
+        name: 'write_file',
+        args: { content: `Usage:\n${quoted}`, note: `Also:\n${quoted}` },
+      },
+    ]);
+    expect(tryRecoverXmlToolCalls(text).remainingText).toBe('');
+  });
+
+  it('keeps a later call when a quoted value hides an example closer', () => {
+    // The mask covers the quoting value wholesale, so the `</example>` that
+    // ends the prose construct sits inside it. Masked tags may not open an
+    // example, but they must still close one: otherwise the prose-opened range
+    // runs to the end of the turn and every real call in it is filtered out.
+    const quoted = invoke('b', param('p', 'w'));
+    const text =
+      '<example>\n' +
+      `<invoke name="a"><parameter name="content">${quoted}</example>\n</parameter></invoke>\n` +
+      invoke('c', param('q', 'z'));
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'c', args: { q: 'z' } },
+    ]);
+  });
+
+  it('keeps a later call when a quoted value hides a fence closer', () => {
+    // Same asymmetry with a delimiter: a prose-opened fence must still be
+    // closed by the delimiter line the mask covers.
+    const quoted = invoke('b', param('p', 'w'));
+    const text =
+      '```\n' +
+      '<invoke name="a"><parameter name="content">' +
+      quoted +
+      '\n```\n</parameter></invoke>\n' +
+      invoke('c', param('q', 'z'));
+    expect(extractXmlToolCalls(text)).toEqual([
+      { name: 'c', args: { q: 'z' } },
+    ]);
+  });
+
   it('masks quoted values out of the lexer prose without changing its length', () => {
     // Example tag positions are reported in prose offsets and looked up again
     // in the raw text, so the mask has to be length-preserving. Appending the
