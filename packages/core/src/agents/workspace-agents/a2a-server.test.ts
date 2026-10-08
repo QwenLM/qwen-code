@@ -16,7 +16,8 @@ import type {
   SessionAgentRunStatus,
 } from '../session-agents/contract.js';
 import { updateSessionAgents } from '../session-agents/binding-store.js';
-import { resolveMentionTargets } from '../session-agents/chain.js';
+import { resolveMentionTargetsWithSquads } from '../session-agents/chain.js';
+import { createSquad } from '../session-agents/squad-store.js';
 import { QWEN_A2A_EXTENSION_URI } from './a2a-contract.js';
 import { getExternalCallerFilePath } from './external-intake.js';
 import { issueA2AGrant, revokeA2AGrant } from './a2a-grants.js';
@@ -39,7 +40,9 @@ vi.mock('../session-agents/chain.js', async (importOriginal) => {
     await importOriginal<typeof import('../session-agents/chain.js')>();
   return {
     ...actual,
-    resolveMentionTargets: vi.fn(actual.resolveMentionTargets),
+    resolveMentionTargetsWithSquads: vi.fn(
+      actual.resolveMentionTargetsWithSquads,
+    ),
   };
 });
 
@@ -329,16 +332,31 @@ describe('A2A send', () => {
     });
   });
 
+  it('neutralizes squad names too, and nothing that addresses no one', async () => {
+    await createSquad(PROJECT_ROOT, {
+      name: 'reviewers',
+      leaderAgentId: 'ag_other',
+    });
+    const caller = await grant();
+    await sent(caller, 'msg-1', 'Ask @reviewers; keep @media print as is.');
+
+    expect(port.posts[0]!.text).toBe(
+      '@lead Ask @\u2060reviewers; keep @media print as is.',
+    );
+  });
+
   it('refuses a post that would address more than the granted agent', async () => {
     const caller = await grant();
     const actual = await vi.importActual<
       typeof import('../session-agents/chain.js')
     >('../session-agents/chain.js');
     // As if another `@name` got past the neutralization.
-    vi.mocked(resolveMentionTargets).mockImplementationOnce((text, roster) => ({
-      ...actual.resolveMentionTargets(text, roster),
-      agents: [...roster],
-    }));
+    vi.mocked(resolveMentionTargetsWithSquads).mockImplementationOnce(
+      (text, roster, squads) => ({
+        ...actual.resolveMentionTargetsWithSquads(text, roster, squads),
+        agents: [...roster],
+      }),
+    );
 
     await expect(send(caller)).resolves.toEqual({
       ok: false,

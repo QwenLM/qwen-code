@@ -39,7 +39,8 @@ import {
   isValidSessionAgentsSessionId,
   readSessionAgents,
 } from '../session-agents/binding-store.js';
-import { resolveMentionTargets } from '../session-agents/chain.js';
+import { resolveMentionTargetsWithSquads } from '../session-agents/chain.js';
+import { readSquads } from '../session-agents/squad-store.js';
 import {
   A2A_PROTOCOL_VERSION,
   A2A_TRANSPORT_BINDING,
@@ -549,16 +550,24 @@ export async function a2aSendMessage(
         // A failure below leaves the reservation without a run; a retry of
         // the same request resumes it (in the same session, if one was made).
         try {
-          const text = a2aMentionText(agent.name, request.text);
+          const roster = await readWorkspaceAgents(projectRoot);
+          const squads = await readSquads(projectRoot);
+          const text = a2aMentionText(agent.name, request.text, [
+            ...roster,
+            ...squads.map((squad) => ({
+              id: squad.id,
+              name: squad.name,
+              createdAt: squad.createdAt,
+            })),
+          ]);
           // The grant is for this agent alone. `a2aMentionText` neutralizes
-          // every other @name; this checks that the post addresses exactly it.
-          const targets = resolveMentionTargets(
-            text,
-            await readWorkspaceAgents(projectRoot),
-          );
+          // every other agent and squad name; this checks that the post
+          // addresses exactly it, and no squad.
+          const targets = resolveMentionTargetsWithSquads(text, roster, squads);
           if (
             targets.agents.length !== 1 ||
-            targets.agents[0]?.id !== agent.id
+            targets.agents[0]?.id !== agent.id ||
+            targets.squads.length > 0
           ) {
             return { ok: false, kind: 'refused' };
           }

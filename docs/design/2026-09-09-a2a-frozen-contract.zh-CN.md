@@ -55,6 +55,7 @@
 - **幂等只有 `MAY`。** 规范说 agent _may_ 用 `Message.messageId` 去重，而这个 id 由客户端自己生成、且没有作用域。两个不同调用方可以给出同一个 id。所以服务端自己加作用域键：`externalRequestKey(callerId, targetAgentId, messageId)`，按认证调用方与目标 agent 限定。三段用长度前缀拼接而非分隔符连接——id 是外部来的不透明字符串，能把分隔符塞进 id 的调用方本可以伪造出别人的键（这一点有断言，且变异验证过）。
   **该键必须在开始干活之前持久化。** 事后补写的键无法回答它存在的那个问题（重试是否与正在接受的请求是同一个），而“同键不同内容明确拒绝”也就无从判断。具体做法：先在一次加锁写入中把键预留到调用方映射文件（`<agentsDir>/a2a/<callerId>.json`，权限 0600），再在锁外建会话、发消息（编排器在同一把锁下持久化 run，锁不可重入），最后记录 run；重试会续上尚无 run 的预留，消息 id 由键派生，半途中断的接单会被编排器自身的幂等挡住。
 - **两处本地状态缺口：** `TASK_STATE_REJECTED`（agent 拒绝接活）与 `TASK_STATE_AUTH_REQUIRED` 在本地模型里没有对应物。取消排队中的 run 立即生效；执行中的 run 会被要求停止，程序真正停下后才进入 `CANCELED`（取消响应里的 `runsStillLive` 说明是哪种）。不能给已有任务追加消息，但可以在同一 context 中继续。
+- **不继承 thread 时代的数据。** A2A 基于 thread 运行期间记录的任务和幂等键，基于会话的存储不会读取：这些任务 id 返回 `not_found`，当时用过的 `messageId` 会被当作新任务接受。A2A 处于 `experimental.agentCollaboration`（默认关闭）之后，也没有已发布的调用方，因此不做迁移。
 
 ## 5. 本地 run 状态的非 `_meta` 通道
 

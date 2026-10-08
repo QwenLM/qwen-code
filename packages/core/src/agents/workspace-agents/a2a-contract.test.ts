@@ -64,6 +64,7 @@ describe('A2A contract', () => {
     const text = a2aMentionText(
       'lead',
       'Ask @other and 请@迁移助手看一下, then mail ops@example.com about @scope/pkg.',
+      roster,
     );
 
     expect(text.startsWith('@lead ')).toBe(true);
@@ -74,12 +75,18 @@ describe('A2A contract', () => {
     // Addresses that were never mentions are left alone.
     expect(text).toContain('ops@example.com');
     // A caller naming the granted agent again does not change who answers.
-    const repeated = a2aMentionText('lead', '@lead hi');
+    const repeated = a2aMentionText('lead', '@lead hi', roster);
     expect(parseMentions(repeated, roster).ids).toEqual(['ag_lead']);
   });
 
+  it('posts every other @word exactly as written', () => {
+    const prose =
+      'Add @staticmethod, keep @media print, run npm i @scope/pkg, see @param.';
+    expect(a2aMentionText('lead', prose, roster)).toBe(`@lead ${prose}`);
+  });
+
   it('refuses a name that would not parse as a mention', () => {
-    expect(() => a2aMentionText('two words', 'hi')).toThrow(
+    expect(() => a2aMentionText('two words', 'hi', roster)).toThrow(
       'Invalid agent name',
     );
   });

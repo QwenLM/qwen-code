@@ -25,7 +25,9 @@
  */
 
 import type { SessionAgentRunStatus } from '../session-agents/contract.js';
+import { neutralizeMentions } from './mentions.js';
 import { isValidAgentName } from './store.js';
+import type { WorkspaceAgent } from './types.js';
 
 /**
  * Wire version, sent and matched in the `A2A-Version` header. `Major.Minor`
@@ -169,14 +171,6 @@ export function externalRequestKey(input: {
     .join('');
 }
 
-/**
- * Any `@token` the mention parser could read as an address: an `@` not
- * preceded by an ASCII word character or a dot, followed by a letter or
- * digit. A superset of `MENTION_PATTERN` in mentions.ts, so neutralizing
- * every match leaves nothing the parser resolves.
- */
-const MENTION_LIKE_AT = /(?<![A-Za-z0-9_.])@(?=[\p{L}\p{N}])/gu;
-
 /** U+2060 WORD JOINER: invisible, and not a letter or digit. */
 const WORD_JOINER = '⁠';
 
@@ -184,15 +178,21 @@ const WORD_JOINER = '⁠';
  * The chat-session post an external message becomes.
  *
  * A grant names one agent, so an external caller addresses that agent only:
- * the post is `@<agent> <text>`, and every `@name` the caller wrote is
- * neutralized (a word joiner after the `@`) so it cannot wake another agent
- * of this workspace. The text still reads the same to people and models.
+ * the post is `@<agent> <text>`, and every `@name` in the text that would
+ * address someone in `addressable` (the workspace's agents and squads) gets
+ * a word joiner after the `@`. That is the mention parser's own grammar, so
+ * what it would resolve is exactly what is neutralized; any other `@word`
+ * (`@media`, `@scope/pkg`, an email address) is posted as written.
  */
-export function a2aMentionText(agentName: string, text: string): string {
+export function a2aMentionText(
+  agentName: string,
+  text: string,
+  addressable: readonly WorkspaceAgent[],
+): string {
   if (!isValidAgentName(agentName)) {
     throw new Error(`Invalid agent name: ${JSON.stringify(agentName)}`);
   }
-  return `@${agentName} ${text.replace(MENTION_LIKE_AT, `@${WORD_JOINER}`)}`;
+  return `@${agentName} ${neutralizeMentions(text, addressable, WORD_JOINER)}`;
 }
 
 /** Everything the extension publishes about a task, for `Task.metadata`. */
