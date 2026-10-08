@@ -210,7 +210,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             boolean loadExisting, boolean passiveManagedRuntimeRecovery) {
         try {
             return doCreateOrLoad(tenantId, sessionId, loadExisting,
-                    passiveManagedRuntimeRecovery);
+                    passiveManagedRuntimeRecovery, false);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -218,7 +218,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private Attachment doCreateOrLoad(String tenantId, String sessionId,
-            boolean loadExisting, boolean passiveManagedRuntimeRecovery) {
+            boolean loadExisting, boolean passiveManagedRuntimeRecovery,
+            boolean actionResponse) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         if (session.workspace() != null) {
             if (!isWorkspaceFilesAvailable()) {
@@ -228,7 +229,12 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 throw new IllegalStateException("Hosted Workspace Sessions"
                         + " require the Managed Action store");
             }
-            if (passiveManagedRuntimeRecovery) {
+            if (actionResponse) {
+                workspaceExecution.authorizeActionResponse(session);
+                if (!passiveManagedRuntimeRecovery) {
+                    workspaceExecution.verifyMountForProbe(session.workspace());
+                }
+            } else if (passiveManagedRuntimeRecovery) {
                 workspaceExecution.authorizePassiveAttachment(session);
             } else {
                 workspaceExecution.authorize(session);
@@ -300,7 +306,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private Admission doSubmit(String tenantId, String sessionId,
             String promptId,
             List<Map<String, Object>> input, String payloadDigest) {
-        requireReadyForNewWork(tenantId, sessionId);
+        requireReadyForNewWork(tenantId, sessionId, false);
         SubmitHarnessTurn.Builder builder = SubmitHarnessTurn.builder()
                 .session(attachment(tenantId, sessionId, true))
                 .promptId(promptId)
@@ -328,7 +334,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private Admission doContinueManagedRuntime(String tenantId,
             String sessionId, String promptId, String checkpointId,
             String activationId) {
-        requireReadyForNewWork(tenantId, sessionId);
+        requireReadyForNewWork(tenantId, sessionId, false);
         // Resolve the attachment BEFORE fetching the client: the resolution
         // may block on a create/load round trip, and an adoption closing the
         // captured client during that window would strand this call on a
@@ -356,7 +362,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private Admission doCancelManagedRuntime(String tenantId,
             String sessionId, String promptId, String checkpointId,
             String activationId) {
-        HarnessSessionRef ref = attachment(tenantId, sessionId, false);
+        HarnessSessionRef ref = cancellationAttachment(tenantId, sessionId);
         PromptReceipt receipt = client().cancelManagedRuntime(
                 new CancelManagedRuntime(ref,
                         promptId, checkpointId, activationId));
@@ -426,8 +432,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             String sessionId,
             String actionId,
             JsonNode response) {
-        requireReadyForNewWork(tenantId, sessionId);
-        HarnessSessionRef ref = attachment(tenantId, sessionId, true);
+        requireReadyForNewWork(tenantId, sessionId, true);
+        AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+        HarnessSessionRef ref = attachments.get(key);
+        if (ref == null) {
+            doCreateOrLoad(tenantId, sessionId, true,
+                    workspaceExecution.verifiedRecoveryEnabled(), true);
+            ref = attachments.get(key);
+        }
         client().resolveAction(
                         ref,
                         actionId,
@@ -447,8 +459,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private void doCancel(String tenantId, String sessionId) {
-        HarnessSessionRef ref = attachment(tenantId, sessionId, false);
+        HarnessSessionRef ref = cancellationAttachment(tenantId, sessionId);
         client().cancelTurn(ref);
+        pendingRecovery.remove(new AttachmentKey(tenantId, sessionId));
     }
 
     @Override
@@ -518,16 +531,28 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         return attachment;
     }
 
-    private void requireReadyForNewWork(String tenantId, String sessionId) {
-        if (!workspaceExecution.verifiedRecoveryEnabled()) {
-            return;
+    private HarnessSessionRef cancellationAttachment(String tenantId, String sessionId) {
+        AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+        HarnessSessionRef attached = attachments.get(key);
+        if (attached == null) {
+            recoverManagedRuntime(tenantId, sessionId, true);
+            attached = attachments.get(key);
         }
+        return attached;
+    }
+
+    private void requireReadyForNewWork(String tenantId, String sessionId, boolean actionResponse) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         if (session.workspace() != null) {
             if (!isWorkspaceFilesAvailable()) {
                 throw new IllegalStateException("Hosted Workspace files are disabled");
             }
-            workspaceExecution.authorize(session);
+            if (actionResponse) {
+                workspaceExecution.authorizeActionResponse(session);
+                workspaceExecution.verifyMountForProbe(session.workspace());
+            } else {
+                workspaceExecution.authorize(session);
+            }
         }
     }
 
@@ -668,7 +693,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         + " require the Managed Action store");
             }
             if (cancellation) {
-                workspaceExecution.authorizePassiveAttachment(session);
+                workspaceExecution.authorizeCancellation(session);
             } else {
                 workspaceExecution.authorize(session);
             }
