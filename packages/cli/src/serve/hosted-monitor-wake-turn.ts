@@ -69,28 +69,39 @@ export function createMonitorWakeRunTurn(params: {
   /**
    * H5/F5: a source's own terminal settlement for a wake turn it already
    * ran (a channel input cannot mint a second user record, and a text
-   * turn has no checkpoint to continue). Returning true means the input
-   * is settled and the pump continues without freezing the Session;
+   * turn has no checkpoint to continue). 'settled' means the input is
+   * settled and the pump continues without freezing the Session; 'held'
+   * means a durable approval owns the wait and the Session must stay
+   * usable — blocking it would refuse the approval's own resolve route;
    * absent or false keeps the recovery-blocked freeze.
    */
   readonly settleInterrupted?: (
     turn: HostedMonitorWakeTurn,
     attempted: ChatRecord[],
-  ) => Promise<boolean>;
+  ) => Promise<'settled' | 'held' | false>;
   readonly writeStderr: (line: string) => void;
-}): (turn: HostedMonitorWakeTurn) => Promise<'settled' | 'busy'> {
+}): (turn: HostedMonitorWakeTurn) => Promise<'settled' | 'busy' | 'held'> {
   const { session } = params;
   return async (turn) => {
     if (params.busy() || session.blocked) return 'busy';
     const attempted = await session.managed.sink.project();
     if (wakeHasPriorAttempt(attempted, turn.turnId)) {
-      if (await params.settleInterrupted?.(turn, attempted)) {
+      const interrupted = await params.settleInterrupted?.(turn, attempted);
+      if (interrupted === 'settled') {
         params.writeStderr(
           'qwen serve: Interrupted channel wake turn ' +
             turn.turnId +
             ' was settled without a reply; the Session stays usable.',
         );
         return 'settled';
+      }
+      if (interrupted === 'held') {
+        params.writeStderr(
+          'qwen serve: Interrupted channel wake turn ' +
+            turn.turnId +
+            ' keeps its durable wait for its approval; the Session stays usable.',
+        );
+        return 'held';
       }
       // The notification ran and died inside the turn it started.
       // Re-driving it text-only would mint a second user record and an

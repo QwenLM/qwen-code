@@ -151,6 +151,39 @@ describe('HostedMonitorWakeScheduler', () => {
     scheduler.close();
   });
 
+  it('stops on a held turn without a retry or a settle-verify; the next kick re-derives', async () => {
+    const queue: HostedMonitorWakeTurn[] = [{ turnId: 'm:1', text: 'x' }];
+    let reads = 0;
+    let verdict: 'held' | 'settled' = 'held';
+    const scheduler = new HostedMonitorWakeScheduler(
+      {
+        next: async () => {
+          reads += 1;
+          return queue[0];
+        },
+        state: () => 'idle',
+        runTurn: async () => {
+          if (verdict === 'settled') queue.shift();
+          return verdict;
+        },
+        failed: () => {
+          throw new Error('pump must not fail here');
+        },
+      },
+      10,
+    );
+    scheduler.kick();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // A durable owner holds the wait: no 10 ms retry re-reads behind it,
+    // and an unconsumed input is not a programming error here.
+    expect(reads).toBe(1);
+    expect(queue).toHaveLength(1);
+    verdict = 'settled';
+    scheduler.kick();
+    await poll(() => queue.length === 0);
+    scheduler.close();
+  });
+
   it('leaves a blocked Session’s remainder pending', async () => {
     const queue: HostedMonitorWakeTurn[] = [{ turnId: 'm:1', text: 'x' }];
     const ran: string[] = [];
@@ -493,6 +526,101 @@ describe('createMonitorWakeRunTurn', () => {
       });
       expect(access.blocked).toBe(false);
       expect(access.active).toBeUndefined();
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
+  it('settles an interrupted channel wake turn instead of blocking the Session', async () => {
+    const { session, lease } = await openWakeSession();
+    try {
+      const access: MonitorWakeTurnSession['session'] = {
+        active: undefined,
+        blocked: false,
+        managed: { sink: session.sink },
+      };
+      await session.sink.write({
+        uuid: 'chin-1:user',
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: '/workspace',
+        version: 'test',
+        daemonPromptId: 'chin-1',
+        message: { role: 'user', parts: [{ text: 'channel' }] },
+      } as ChatRecord);
+      const lines: string[] = [];
+      const runTurn = createMonitorWakeRunTurn({
+        session: access,
+        sessionId,
+        cwd: '/workspace',
+        executeHostedTurn: async () => {
+          throw new Error('an interrupted turn must not re-drive');
+        },
+        busy: () => access.active !== undefined,
+        needsRecovery,
+        settleInterrupted: async () => 'settled',
+        writeStderr: (line) => {
+          lines.push(line);
+        },
+      });
+      expect(
+        await runTurn({ turnId: 'chin-1', text: 'channel', source: 'channel' }),
+      ).toBe('settled');
+      expect(access.blocked).toBe(false);
+      expect(
+        lines.some((line) => line.includes('settled without a reply')),
+      ).toBe(true);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
+  it('parks an interrupted turn held by its approval without blocking the Session', async () => {
+    // A durable approval owns the wait; blocking the Session here is what
+    // refused the approval's own resolve route (R4 P1).
+    const { session, lease } = await openWakeSession();
+    try {
+      const access: MonitorWakeTurnSession['session'] = {
+        active: undefined,
+        blocked: false,
+        managed: { sink: session.sink },
+      };
+      await session.sink.write({
+        uuid: 'chin-2:user',
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: '/workspace',
+        version: 'test',
+        daemonPromptId: 'chin-2',
+        message: { role: 'user', parts: [{ text: 'channel' }] },
+      } as ChatRecord);
+      const lines: string[] = [];
+      const runTurn = createMonitorWakeRunTurn({
+        session: access,
+        sessionId,
+        cwd: '/workspace',
+        executeHostedTurn: async () => {
+          throw new Error('a held turn must not re-drive');
+        },
+        busy: () => access.active !== undefined,
+        needsRecovery,
+        settleInterrupted: async () => 'held',
+        writeStderr: (line) => {
+          lines.push(line);
+        },
+      });
+      expect(
+        await runTurn({ turnId: 'chin-2', text: 'channel', source: 'channel' }),
+      ).toBe('held');
+      expect(access.blocked).toBe(false);
+      expect(access.active).toBeUndefined();
+      expect(
+        lines.some((line) => line.includes('keeps its durable wait')),
+      ).toBe(true);
     } finally {
       await lease.release().catch(() => undefined);
     }

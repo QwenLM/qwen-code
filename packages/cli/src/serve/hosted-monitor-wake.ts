@@ -58,12 +58,15 @@ export interface HostedMonitorWakeDeps {
    * Runs the notification's text turn and settles the input's turnId, or
    * marks the owner blocked when the turn cannot settle. Returns 'busy'
    * when the owner took a turn synchronously between the pump's state
-   * check and this call — the pump retries; anything else must consume
-   * the input (the pump verifies the settle before taking the next one).
-   * The busy claim must be checked and taken synchronously at the top of
-   * the call so a prompt route admission cannot interleave.
+   * check and this call — the pump retries; 'held' when a durable owner
+   * (a pending approval) holds the wait — the pump stops without
+   * blocking, leaving its resolve route usable until the next kick
+   * re-derives; anything else must consume the input (the pump verifies
+   * the settle before taking the next one). The busy claim must be
+   * checked and taken synchronously at the top of the call so a prompt
+   * route admission cannot interleave.
    */
-  runTurn(turn: HostedMonitorWakeTurn): Promise<'settled' | 'busy'>;
+  runTurn(turn: HostedMonitorWakeTurn): Promise<'settled' | 'busy' | 'held'>;
   /** A failure the pump itself cannot recover: the owner decides. */
   failed(cause: unknown): void;
 }
@@ -131,10 +134,15 @@ export class HostedMonitorWakeScheduler {
         this.armRetry();
         return;
       }
-      if ((await this.deps.runTurn(next)) === 'busy') {
+      const outcome = await this.deps.runTurn(next);
+      if (outcome === 'busy') {
         this.armRetry();
         return;
       }
+      // A held wait belongs to its durable owner (a pending approval):
+      // neither a retry nor a settle-verify applies — the next kick
+      // re-derives after the owner decides.
+      if (outcome === 'held') return;
       // runTurn must have consumed the input: re-reading the journal is
       // the only honest check, and consuming is what lets the next
       // notification's turn begin. When the owner's own settle path went

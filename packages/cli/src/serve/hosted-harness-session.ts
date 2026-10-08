@@ -522,6 +522,22 @@ function isMonitorInput(event: ManagedSessionEvent): boolean {
   );
 }
 
+// H5/F5 follow-up: a channel input's parked turn is the wake pump's own,
+// exactly like the unsettled-input arithmetic above treats it — including
+// the file-history obligation the turn left behind. Naming this once
+// keeps the load gate's exception aligned with the pump's ownership.
+function isChannelInputTurn(session: HostedSession, turnId: string): boolean {
+  const authority = session.managed.authority;
+  return authority
+    .eventsInSequenceRange(1, authority.committedSequence)
+    .some(
+      (event) =>
+        event.kind === 'input.accepted' &&
+        event.payload['turnId'] === turnId &&
+        event.payload['source'] === CHANNEL_INPUT_SOURCE,
+    );
+}
+
 function unsettledInputsThrough(
   session: HostedSession,
   throughSequence: number,
@@ -2571,12 +2587,13 @@ export function registerHostedHarnessSessionRoutes(
                 // record cannot advance it — the next wake turn's
                 // requireModelStart refuses and the Session wedges. Stop
                 // and settle the parked executions first, mirroring the
-                // takeover cancellation; a wait that cannot be proven
-                // stopped — or a pending approval — stays with the
-                // recovery fleet instead of settling into a wedge.
-                let broker: HostedWorkspaceBroker | undefined;
+                // takeover cancellation. A wait that cannot be verified or
+                // proven stopped keeps the recovery fleet's freeze; a
+                // pending approval holds the turn instead — blocking the
+                // Session would refuse the approval's own resolve route.
+                let runtime;
                 try {
-                  broker = await settleInterruptedTurnRuntime({
+                  runtime = await settleInterruptedTurnRuntime({
                     session: session.managed,
                     sessionId,
                     cwd,
@@ -2593,13 +2610,14 @@ export function registerHostedHarnessSessionRoutes(
                   );
                   return false;
                 }
+                if (runtime.kind === 'held') return 'held';
                 const settled = await session.channels.settleInterruptedWake(
                   turn.turnId,
                 );
                 // The recovered lease hands back only once the terminal
                 // record is durable: a release persisted earlier would
                 // wedge the retry on runtime_session_not_acquirable.
-                await broker?.release().catch((cause: unknown) => {
+                await runtime.broker?.release().catch((cause: unknown) => {
                   if (
                     cause instanceof HostedWorkspaceBrokerRejection &&
                     cause.status === 404
@@ -2612,7 +2630,7 @@ export function registerHostedHarnessSessionRoutes(
                       String(cause),
                   );
                 });
-                return settled;
+                return settled ? 'settled' : false;
               },
               writeStderr: writeStderrLineSafe,
             });
@@ -2664,9 +2682,20 @@ export function registerHostedHarnessSessionRoutes(
       // refusing with 409 so it never drives a Runtime by accident.
       const takeover = !lifecycle && !session.hooks && takeoverFlags;
       const fileHistory = await readHostedFileHistory(managed);
+      // H5/F5 follow-up: a channel turn interrupted inside a Write/Edit
+      // owes the wake pump its recovery, but refusing here would kill that
+      // pump before it started — the input is pump-owned, so the takeover
+      // arithmetic above can never match its pendingTurn. Let the load
+      // through: the pump proves the stop and settles right after
+      // attachment.
+      const channelParked =
+        fileHistory?.pendingTurn !== null &&
+        fileHistory?.pendingTurn !== undefined &&
+        isChannelInputTurn(session, fileHistory.pendingTurn);
       if (
         fileHistory?.pendingUndo ||
         (fileHistory?.pendingTurn &&
+          !channelParked &&
           !(takeover && fileHistory.pendingTurn === unsettled) &&
           !(await canSettleHostedFileHistory(managed, fileHistory)))
       ) {
