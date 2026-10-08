@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationRetentionObserver;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationCollector;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.aliyun.oss.ClientBuilderConfiguration;
@@ -88,6 +89,9 @@ public class ToolPublicationConfiguration {
             ManagedSessionStore sessions, ToolPublicationObjectStore objects,
             ManagedAgentProperties properties) {
         var settings = properties.getToolPublication();
+        if (settings.isAsyncVerificationEnabled() && !settings.isJournalHeadAuthorization()) {
+            throw new IllegalStateException("Async verification requires journal-head authorization");
+        }
         if (settings.getOperationTimeout() == null || settings.getClaimTimeout() == null
                 || settings.getMaxVerificationTimeout() == null) {
             throw new IllegalStateException("Tool publication operation and verification deadlines are required");
@@ -127,6 +131,17 @@ public class ToolPublicationConfiguration {
     @Bean
     public ThreadPoolTaskScheduler managedToolOutputScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("managed-tool-output-").build();
+    }
+
+    @Bean
+    public ThreadPoolTaskScheduler managedToolVerificationScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("managed-tool-verification-scan-").build();
+    }
+
+    @Bean(destroyMethod = "close")
+    public ToolPublicationVerifier toolPublicationVerifier(ToolPublicationDataStore data,
+            ManagedAgentProperties properties) {
+        return new ToolPublicationVerifier(data, properties.getToolPublication().getVerificationConcurrency());
     }
 
     @Bean

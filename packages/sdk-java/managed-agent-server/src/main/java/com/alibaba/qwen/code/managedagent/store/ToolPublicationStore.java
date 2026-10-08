@@ -5,6 +5,8 @@ import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.t
 
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
@@ -21,6 +23,7 @@ import java.util.List;
 import java.util.Objects;
 import javax.sql.DataSource;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.datasource.DataSourceUtils;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -162,13 +165,41 @@ public final class ToolPublicationStore {
     private ProducerBinding producerBindingLocked(String scope, String publicationId,
             String publicationToken, Access access) {
         String suppliedHash = ToolPublicationContract.tokenHash(publicationToken);
+        return producerBindingWithHashLocked(scope, publicationId, suppliedHash, null, access);
+    }
+
+    ProducerBinding producerVerificationBindingLocked(String scope, String publicationId,
+            String bindingDigest, String tokenHash) {
+        require(bindingDigest != null && tokenHash != null, "Accepted verification identity is missing");
+        return producerBindingWithHashLocked(scope, publicationId, tokenHash, bindingDigest, Access.PRODUCE);
+    }
+
+    private ProducerBinding producerBindingWithHashLocked(String scope, String publicationId,
+            String suppliedHash, String expectedBindingDigest, Access access) {
         Row row = publicationRow(scope, publicationId);
         JsonNode binding = ToolPublicationContract.parseBytes("binding",
                 row.binding().getBytes(StandardCharsets.UTF_8));
         require(ToolPublicationContract.bindingDigest(binding).equals(row.digest())
+                && (expectedBindingDigest == null || expectedBindingDigest.equals(row.digest()))
                 && equalHash(suppliedHash, row.tokenHash()) && "OPEN".equals(row.state()),
                 "Publication grant conflicts");
-        Original original = lockOriginal(binding);
+        Original original;
+        try {
+            original = lockOriginal(binding);
+        } catch (RuntimeException error) {
+            // Accepted tasks must leave the queue when their original CSI
+            // authority is gone; credential/SQL failures may recover elsewhere.
+            boolean missingRuntime = error instanceof IllegalStateException && error.getCause() == null
+                    && ("Runtime binding slot is unavailable".equals(error.getMessage())
+                    || "Original Runtime binding is unavailable".equals(error.getMessage()));
+            boolean fencedCsi = error instanceof RuntimeBrokerException broker
+                    && "workspace_csi_unavailable".equals(broker.getCode()) && !broker.isRetryable();
+            if (expectedBindingDigest != null && (missingRuntime || fencedCsi)) {
+                throw new ApiException(HttpStatus.CONFLICT, "managed_tool_publication_runtime_unavailable",
+                        "Original publication runtime is unavailable");
+            }
+            throw error;
+        }
         lockTenant(row.tenant());
         return producerBindingAfterParentLocked(scope, publicationId, suppliedHash, row,
                 binding, original, access);

@@ -54,6 +54,8 @@ qwen:
       gc-enabled: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_GC_ENABLED:false}'
       deletion-grace: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_DELETION_GRACE:24h}'
       journal-head-authorization: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_JOURNAL_HEAD_AUTHORIZATION:false}'
+      async-verification-enabled: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_ASYNC_VERIFICATION_ENABLED:false}'
+      verification-concurrency: '${QWEN_MANAGED_AGENT_TOOL_PUBLICATION_VERIFICATION_CONCURRENCY:2}'
     harness:
       enabled: '${QWEN_MANAGED_AGENT_HARNESS_ENABLED:false}'
       workspace-files-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED:false}'

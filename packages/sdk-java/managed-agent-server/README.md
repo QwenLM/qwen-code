@@ -118,6 +118,32 @@ Design: [English](../../../docs/design/2026-09-29-managed-tool-result-public-pro
 revalidation window: [English](../../../docs/design/2026-10-02-managed-agent-query-amplification.md) |
 [简体中文](../../../docs/design/2026-10-02-managed-agent-query-amplification.zh-CN.md).
 
+## Asynchronous tool publication verification
+
+Apply migration V52 and upgrade all servers before enabling
+`qwen.managed-agent.tool-publication.async-verification-enabled` (default
+`false`). Enable `journal-head-authorization` first; startup rejects async
+admission without it. `verification-concurrency` defaults to `2` and controls
+the dedicated verifier pool, independently of retention and GC.
+
+Updated clients send `X-Qwen-Tool-Publication-Async: 1` and poll the existing
+operation status after HTTP 202. They continue accepting direct receipts from
+old or disabled servers. Older clients remain synchronous. A mode is saved
+when each operation is created, so retries do not change it. `FAILED` carries
+only a safe `error: {status, code}` and must be handled as a terminal error,
+outside network retry handling. The adapter keeps awaiting verified success
+before completing publish, seal, prefix, or finish.
+
+For rollback, disable new async admission and leave the verifier and head
+authorization running until accepted work drains. Do not downgrade the server
+while pending async operations still need verification. Historical async
+success replay returns the prior receipt; actual reads and final integrity
+checks still validate current storage bytes.
+
+Design and client migration contract:
+[English](../../../docs/design/2026-10-07-managed-tool-publication-async-verification.md) |
+[简体中文](../../../docs/design/2026-10-07-managed-tool-publication-async-verification.zh-CN.md).
+
 ## Prerequisites
 
 - Java 21

@@ -25,6 +25,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.MaterializationTarge
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.store.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.store.ToolPublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -995,6 +996,58 @@ class Issue13181QueryBudgetTest {
         journal.reserve();
         return new PublicationFixture(journal.sessions, journal.bindings,
                 journal.executions, journal.store);
+    }
+
+    @Test
+    void asynchronousVerificationHeartbeatsAndStatusAvoidJournalBodyReads() {
+        Fixture fixture = new Fixture();
+        PublicationFixture publication = publicationFixture(fixture);
+        byte[] bytes = new byte[] {1, 2, 3, 4};
+        ToolPublicationObjectStore bucket = new ToolPublicationObjectStore() {
+            @Override
+            public void putIfAbsent(String key, byte[] input) {}
+
+            @Override
+            public InputStream open(String key) {
+                return open(key, () -> {});
+            }
+
+            @Override
+            public InputStream open(String key, Runnable guard) {
+                return new ByteArrayInputStream(bytes) {
+                    @Override
+                    public synchronized int read(byte[] buffer, int offset, int length) {
+                        try {
+                            Thread.sleep(120);
+                        } catch (InterruptedException error) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(error);
+                        }
+                        guard.run();
+                        return super.read(buffer, offset, Math.min(length, 1));
+                    }
+                };
+            }
+
+            @Override
+            public void requireUnversioned() {}
+        };
+        ToolPublicationDataStore data = new ToolPublicationDataStore(fixture.jdbc, fixture.manager,
+                publication.store(), publication.sessions(), bucket, Duration.ofSeconds(10), Duration.ofMillis(300),
+                new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
+        data.publishSegment(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-heartbeat",
+                "stdout", 0, bytes, null, true);
+        fixture.ledger.reset();
+        try (var verifier = new ToolPublicationVerifier(data, 1)) {
+            assertThat(verifier.runOnce()).isTrue();
+        }
+        for (int i = 0; i < 12; i++) {
+            assertThat(data.operationStatus(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-heartbeat")
+                    .path("state").asText()).isEqualTo("SUCCEEDED");
+        }
+        assertThat(fixture.ledger.count("update qwen_tool_publication_operation set claim_until")).isGreaterThanOrEqualTo(2);
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx")).isZero();
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_head", "for update")).isPositive();
     }
 
     @Test
