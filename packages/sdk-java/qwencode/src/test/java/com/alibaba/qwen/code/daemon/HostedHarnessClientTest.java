@@ -182,7 +182,7 @@ class HostedHarnessClientTest {
                 // A completed old prompt permits the replacement's new prompt before the old detach returns.
                 server.createContext("/session/" + SESSION_ID + "/status", exchange -> {
                     exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
-                    sendJson(exchange, 200, "{\"sessionId\":\"" + SESSION_ID + "\",\"hasActivePrompt\":false}", false);
+                    sendJson(exchange, 200, "{\"sessionId\":\"" + SESSION_ID + "\",\"hasActivePrompt\":" + (calls.get() >= 2) + "}", false);
                 });
                 client.getStatus(next);
             }
