@@ -418,20 +418,17 @@ public class ManagedAutomationService {
     }
 
     /**
-     * Refusals that can only ever answer before any commit: the funnel's
-     * own business refusals, each audited against its single answering
-     * path. Anything else a 4xx may mean — a malformed request, a broken
-     * read of committed data, a Session the takeover found busy or
-     * missing — proves nothing about whether the operation landed, and
-     * never releases the claim.
+     * Refusals that are functions of the request alone — never of state
+     * any other attempt under the same key could be moving. The mode
+     * gate qualifies: the definition's sessionMode and the deployment's
+     * admitted set decide it before anything else runs, identically on
+     * every attempt. Capacity, existence, binding, revision and terminal
+     * verdicts all evaluate mutable state shared across the key's
+     * attempts, so a refused early attempt can never dissolve the
+     * binding its successful sibling owns.
      */
     private static final Set<String> PRE_COMMIT_REFUSALS = Set.of(
-            "automation_not_found",
-            "automation_mode_disabled",
-            "automation_operation_conflict",
-            "automation_revision_stale",
-            "automation_retired",
-            "automation_count_limit");
+            "automation_mode_disabled");
 
     /**
      * The relay of a claimed mutation. Only a refusal in
