@@ -1290,6 +1290,7 @@ import {
   CHANNEL_LIVENESS_VERSION,
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  MID_TURN_SEND_NOW_METHOD,
   PROMPT_CANCEL_METHOD,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
   SESSION_INITIALIZATION_TIMEOUT_ERROR_KIND,
@@ -2487,6 +2488,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         hasStandaloneRelocationBlockers: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
         prompt: ReturnType<typeof vi.fn>;
+        sendMidTurnInputNow: ReturnType<typeof vi.fn>;
         releaseTodoStopGuardQueuedPromptWait: ReturnType<typeof vi.fn>;
         refreshWorkflowHistory: ReturnType<typeof vi.fn>;
         deleteWorkflowHistory: ReturnType<typeof vi.fn>;
@@ -6008,6 +6010,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           setSessionReasoningSelection: vi.fn(),
           getSessionReasoningSelection: vi.fn(),
           hardSuspendTodoStopGuard: vi.fn(),
+          sendMidTurnInputNow: vi.fn(),
           releaseTodoStopGuardQueuedPromptWait: vi.fn().mockReturnValue(true),
           isIdle: vi.fn().mockReturnValue(true),
           isTurnIdle: vi.fn().mockReturnValue(true),
@@ -7304,6 +7307,27 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(
       lastSessionMock?.releaseTodoStopGuardQueuedPromptWait,
     ).toHaveBeenCalledWith('guard-owner');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('passes a send-now request for queued mid-turn messages to its session', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(MID_TURN_SEND_NOW_METHOD, { sessionId }),
+    ).resolves.toEqual({});
+    expect(lastSessionMock?.sendMidTurnInputNow).toHaveBeenCalledTimes(1);
+    await expect(
+      agent.extMethod(MID_TURN_SEND_NOW_METHOD, {
+        sessionId: '22222222-2222-2222-2222-222222222222',
+      }),
+    ).resolves.toEqual({});
+    expect(lastSessionMock?.sendMidTurnInputNow).toHaveBeenCalledTimes(1);
 
     mockConnectionState.resolve();
     await agentPromise;

@@ -105,6 +105,7 @@ const daemonActions = {
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
 const editQueuedPrompt = vi.fn();
+const sendQueuedPromptNow = vi.fn();
 const editLastQueuedPrompt = vi.fn(() => false);
 const clearQueuedPrompts = vi.fn(() => false);
 let queuedPromptsMock: any[] = [];
@@ -178,6 +179,7 @@ vi.mock('../hooks/useQueuedPrompts', () => ({
       queuedTexts: queuedTextsMock,
       enqueuePrompt,
       removeQueuedPrompt,
+      sendQueuedPromptNow,
       editQueuedPrompt,
       editLastQueuedPrompt,
       clearQueuedPrompts,
@@ -378,6 +380,8 @@ vi.mock('./QueuedPromptDisplay', () => ({
       data-testid="pane-queue"
       data-can-mutate-mid-turn={String(props.canMutateMidTurn)}
       data-can-insert-mid-turn={String(props.canInsertMidTurn)}
+      data-can-send-mid-turn-now={String(props.canSendMidTurnNow)}
+      onClick={() => props.onSendNow?.(1)}
     >
       {String(props.prompts.length)}
     </div>
@@ -2977,6 +2981,19 @@ describe('ChatPane', () => {
     queuedPromptsMock = [{ id: 1, text: 'queued next' }];
     render();
     expect(testid('pane-queue')?.dataset.canMutateMidTurn).toBe('false');
+  });
+
+  it('offers send-now on queued rows only when advertised', () => {
+    queuedPromptsMock = [{ id: 1, text: 'queued next' }];
+    render();
+    expect(testid('pane-queue')?.dataset.canSendMidTurnNow).toBe('false');
+    connectionState.capabilities = {
+      features: ['session_mid_turn_send_now'],
+    };
+    rerender();
+    expect(testid('pane-queue')?.dataset.canSendMidTurnNow).toBe('true');
+    act(() => testid('pane-queue')?.click());
+    expect(sendQueuedPromptNow).toHaveBeenCalledWith(1);
   });
 
   it('passes follow-up suggestions to the pane editor', () => {

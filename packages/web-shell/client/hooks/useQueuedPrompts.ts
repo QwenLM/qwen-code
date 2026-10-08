@@ -498,6 +498,8 @@ export interface UseQueuedPromptsResult {
   ) => boolean;
   removeQueuedPrompt: (id: number) => void;
   insertQueuedPrompt: (id: number) => Promise<void>;
+  /** Ask the daemon to deliver the queued mid-turn messages now. */
+  sendQueuedPromptNow: (id: number) => Promise<void>;
   editQueuedPrompt: (id: number) => Promise<void>;
   editLastQueuedPrompt: () => boolean;
   clearQueuedPrompts: () => boolean;
@@ -4612,12 +4614,34 @@ export function useQueuedPrompts({
     sessionActions,
   ]);
 
+  const sendQueuedPromptNow = useCallback(
+    async (id: number) => {
+      const target = queuedPromptsRef.current.find(
+        (prompt) => prompt.id === id,
+      );
+      // The daemon drains its whole queue, so this delivers every message
+      // waiting there, not only this row.
+      if (target?.midTurnState !== 'queued' || !target.midTurnMessageId) {
+        return;
+      }
+      try {
+        await sessionActions.sendMidTurnMessagesNow({
+          sessionId: target.sessionId,
+        });
+      } catch (error) {
+        reportError(error, t('queue.sendNowFailed'));
+      }
+    },
+    [reportError, sessionActions, t],
+  );
+
   return {
     queuedPrompts: visibleQueuedPrompts,
     queuedTexts,
     enqueuePrompt,
     removeQueuedPrompt,
     insertQueuedPrompt,
+    sendQueuedPromptNow,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,

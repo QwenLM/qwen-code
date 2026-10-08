@@ -328,6 +328,70 @@ describe('QueuedPromptDisplay', () => {
     ).toBe(true);
   });
 
+  it('offers send-now on a queued mid-turn row when the daemon supports it', () => {
+    const onSendNow = vi.fn();
+    const { container } = setup({
+      canSendMidTurnNow: true,
+      onSendNow,
+      prompts: [
+        { id: 1, text: '本地排队' },
+        {
+          id: 2,
+          text: '补充信息',
+          midTurnState: 'queued',
+          midTurnMessageId: 'mid-1',
+        },
+      ],
+    });
+
+    const sendNow = [
+      ...container.querySelectorAll<HTMLButtonElement>('button'),
+    ].filter((button) => button.textContent === t('queue.sendNow'));
+    expect(sendNow).toHaveLength(1);
+    expect(sendNow[0]?.title).toBe(t('queue.sendNowTip'));
+    act(() => sendNow[0]?.click());
+    expect(onSendNow).toHaveBeenCalledWith(2);
+  });
+
+  it('hides send-now without the capability or before the daemon owns the row', () => {
+    const queued: QueuedPrompt = {
+      id: 1,
+      text: '补充信息',
+      midTurnState: 'queued',
+      midTurnMessageId: 'mid-1',
+    };
+    const labels = (container: HTMLElement) =>
+      [...container.querySelectorAll('button')].map(
+        (button) => button.textContent,
+      );
+
+    expect(
+      labels(setup({ onSendNow: vi.fn(), prompts: [queued] }).container),
+    ).not.toContain(t('queue.sendNow'));
+    expect(
+      labels(
+        setup({
+          canSendMidTurnNow: true,
+          onSendNow: vi.fn(),
+          prompts: [{ ...queued, midTurnState: 'submitting' }],
+        }).container,
+      ),
+    ).not.toContain(t('queue.sendNow'));
+    // An older daemon that answered without a message id.
+    expect(
+      labels(
+        setup({
+          canSendMidTurnNow: true,
+          onSendNow: vi.fn(),
+          prompts: [{ ...queued, midTurnMessageId: undefined }],
+        }).container,
+      ),
+    ).not.toContain(t('queue.sendNow'));
+    expect(
+      labels(setup({ canSendMidTurnNow: true, prompts: [queued] }).container),
+    ).not.toContain(t('queue.sendNow'));
+  });
+
   it('keeps actions disabled when an older daemon returns no message id', () => {
     const { container } = setup({
       prompts: [{ id: 1, text: '补充信息', midTurnState: 'queued' }],

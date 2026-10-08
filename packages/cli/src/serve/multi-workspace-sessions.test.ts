@@ -143,6 +143,10 @@ interface FakeBridge extends AcpSessionBridge {
     messageId: string;
     context?: BridgeClientRequestContext;
   }>;
+  readonly sendMidTurnNowCalls: Array<{
+    sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
   readonly taskCancelCalls: Array<{
     sessionId: string;
     taskId: string;
@@ -479,6 +483,7 @@ function makeBridge(
   const midTurnMessageCalls: FakeBridge['midTurnMessageCalls'] = [];
   const getMidTurnMessagesCalls: FakeBridge['getMidTurnMessagesCalls'] = [];
   const removeMidTurnMessageCalls: FakeBridge['removeMidTurnMessageCalls'] = [];
+  const sendMidTurnNowCalls: FakeBridge['sendMidTurnNowCalls'] = [];
   const taskCancelCalls: FakeBridge['taskCancelCalls'] = [];
   const goalClearCalls: string[] = [];
   const continueCalls: FakeBridge['continueCalls'] = [];
@@ -519,6 +524,7 @@ function makeBridge(
     midTurnMessageCalls,
     getMidTurnMessagesCalls,
     removeMidTurnMessageCalls,
+    sendMidTurnNowCalls,
     taskCancelCalls,
     goalClearCalls,
     continueCalls,
@@ -771,6 +777,16 @@ function makeBridge(
         ...(context ? { context } : {}),
       });
       return { removed: workspaceCwd === SECONDARY_CWD };
+    },
+    sendMidTurnMessagesNow(
+      sessionId: string,
+      context?: BridgeClientRequestContext,
+    ) {
+      sendMidTurnNowCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+      });
+      return { requested: workspaceCwd === SECONDARY_CWD };
     },
     async cancelSessionTask(
       sessionId: string,
@@ -3601,6 +3617,17 @@ describe('multi-workspace session dispatch', () => {
     expect(removeMidTurnRes.status).toBe(200);
     expect(removeMidTurnRes.body).toEqual({ removed: true });
 
+    const sendNowRes = await request(app)
+      .post(
+        '/session/22222222-2222-4222-a222-222222222222/mid-turn-messages/send-now',
+      )
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({});
+    expect(sendNowRes.status).toBe(200);
+    expect(sendNowRes.body).toEqual({ requested: true });
+
     const taskCancelRes = await request(app)
       .post('/session/22222222-2222-4222-a222-222222222222/tasks/task-1/cancel')
       .set('Host', host())
@@ -3656,6 +3683,12 @@ describe('multi-workspace session dispatch', () => {
         context: { clientId: 'secondary-client' },
       },
     ]);
+    expect(secondaryBridge.sendMidTurnNowCalls).toEqual([
+      {
+        sessionId: '22222222-2222-4222-a222-222222222222',
+        context: { clientId: 'secondary-client' },
+      },
+    ]);
     expect(secondaryBridge.taskCancelCalls).toEqual([
       {
         sessionId: '22222222-2222-4222-a222-222222222222',
@@ -3673,6 +3706,7 @@ describe('multi-workspace session dispatch', () => {
       primaryBridge.btwCalls,
       primaryBridge.midTurnMessageCalls,
       primaryBridge.removeMidTurnMessageCalls,
+      primaryBridge.sendMidTurnNowCalls,
       primaryBridge.taskCancelCalls,
       primaryBridge.goalClearCalls,
     ]) {

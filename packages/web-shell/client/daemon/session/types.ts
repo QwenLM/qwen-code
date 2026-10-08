@@ -23,6 +23,7 @@ import type {
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
+  DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
@@ -667,6 +668,14 @@ export interface DaemonSessionActions {
     messageId: string,
     opts?: PendingPromptActionOptions,
   ): Promise<DaemonRemoveMidTurnMessageResult>;
+  /**
+   * Ask the daemon to deliver the queued mid-turn messages now, cutting a
+   * streaming model response short. Pre-flight the daemon's
+   * `session_mid_turn_send_now` capability: older daemons lack the route.
+   */
+  sendMidTurnMessagesNow(
+    opts?: PendingPromptActionOptions,
+  ): Promise<DaemonSendMidTurnMessagesNowResult>;
   /**
    * Best-effort reconciliation snapshot (queue + delivery-state rings) from the
    * daemon. Resolves `undefined` (never throws/raises a notice) when there

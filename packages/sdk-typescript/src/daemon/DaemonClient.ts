@@ -209,6 +209,7 @@ import type {
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
+  DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
   DaemonSessionRecapResult,
@@ -4918,6 +4919,38 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonMidTurnMessageResult;
+      },
+    );
+  }
+
+  /**
+   * Ask the daemon to deliver the session's queued mid-turn messages now
+   * instead of at the agent's next tool boundary: a model response that is
+   * streaming is cut short, while running tools still finish first. Only
+   * available when the daemon advertises `session_mid_turn_send_now`.
+   */
+  async sendMidTurnMessagesNow(
+    sessionId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonSendMidTurnMessagesNowResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/mid-turn-messages/send-now`,
+      {
+        method: 'POST',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: '{}',
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/mid-turn-messages/send-now',
+          );
+        }
+        return (await res.json()) as DaemonSendMidTurnMessagesNowResult;
       },
     );
   }

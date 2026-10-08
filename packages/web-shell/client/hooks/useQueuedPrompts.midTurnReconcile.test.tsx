@@ -30,6 +30,7 @@ const sdkMock = vi.hoisted(() => {
       removePendingPrompt: vi.fn(),
       getPendingPrompts: vi.fn(),
       removeMidTurnMessage: vi.fn(),
+      sendMidTurnMessagesNow: vi.fn(),
     },
     injectedBatches: [] as Array<{
       sessionId: string;
@@ -292,6 +293,30 @@ describe('useQueuedPrompts mid-turn reconciliation (session_mid_turn_message_que
       }
     },
   );
+
+  it('admits a message typed during a turn without asking to send it now', async () => {
+    const harness = createHarness();
+    try {
+      await harness.render({
+        streamingState: 'responding',
+        sessionHasActivePrompt: true,
+      });
+      await act(async () => {
+        harness.result().enqueuePrompt('steer later');
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(sdkMock.actions.enqueueMidTurnMessage).toHaveBeenCalledWith(
+        'steer later',
+        expect.objectContaining({ messageId: expect.any(String) }),
+      );
+      expect(sdkMock.actions.sendMidTurnMessagesNow).not.toHaveBeenCalled();
+    } finally {
+      await harness.dispose();
+    }
+  });
 
   it('still restores ordinary failed submissions beside a live draft', async () => {
     const harness = createHarness();

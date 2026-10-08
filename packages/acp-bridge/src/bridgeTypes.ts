@@ -1473,6 +1473,19 @@ export interface BridgeHeartbeatState {
  * prompts; older clients can omit it.
  */
 export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+// A drain with `userInputOnly: true` (sent for send-now) takes only messages
+// that are not queue-only; hosts that ignore the flag drain everything.
+
+/**
+ * Parent-to-agent request asking the agent to deliver the session's queued
+ * mid-turn messages now (`{ sessionId }`), sent when the user chooses to send
+ * them now. An agent streaming a model response may drain the queue at once
+ * and cut that response short, so the messages reach the model now instead of
+ * after the response and its tool batch. Advisory only: agents that do not
+ * know the method answer `-32601`, and the queue is still drained at the next
+ * tool boundary.
+ */
+export const MID_TURN_SEND_NOW_METHOD = 'craft/midTurnSendNow';
 
 /**
  * Cap on each per-session mid-turn reconciliation ring.
@@ -2828,6 +2841,18 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     sessionId: string,
     options?: { assertCanCommit?: () => void },
   ): Promise<void>;
+
+  /**
+   * Ask the agent to deliver the session's queued mid-turn messages now: a
+   * model response that is streaming is cut short so they reach the model in
+   * this round trip, while running tools still finish first. `requested` is
+   * false when no user message is waiting. Authorized like the sibling
+   * mid-turn methods.
+   */
+  sendMidTurnMessagesNow(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): { requested: boolean };
 
   /** Remove a queued or promoted mid-turn message. */
   removeMidTurnMessage(

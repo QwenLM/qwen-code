@@ -145,6 +145,7 @@ import { MultiClientPermissionMediator } from './permissionMediator.js';
 import {
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
+  MID_TURN_SEND_NOW_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
   MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
@@ -38008,6 +38009,92 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await vi.waitFor(() =>
       expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
     );
+    await bridge.shutdown();
+  });
+
+  it('asks the agent to deliver queued input only on send-now', async () => {
+    const firstTurn = deferred<void>();
+    const handle = makeChannel({
+      promptImpl: async (req: PromptRequest) => {
+        if ((req.prompt[0] as { text?: string }).text === 'work') {
+          await firstTurn.promise;
+        }
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const turn = bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'work' }],
+    });
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+    const requests = () =>
+      handle.agent.extMethodCalls.filter(
+        (call) => call.method === MID_TURN_SEND_NOW_METHOD,
+      );
+    const client = { clientId: session.clientId };
+
+    // Nothing waits yet, and queue-only steering is not the user's to send.
+    expect(bridge.sendMidTurnMessagesNow(session.sessionId, client)).toEqual({
+      requested: false,
+    });
+    bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'delegated',
+      undefined,
+      undefined,
+      { queueOnly: true },
+    );
+    expect(bridge.sendMidTurnMessagesNow(session.sessionId, client)).toEqual({
+      requested: false,
+    });
+    expect(() =>
+      bridge.sendMidTurnMessagesNow(session.sessionId, {
+        clientId: 'not-bound',
+      }),
+    ).toThrow(InvalidClientIdError);
+
+    // Typing alone keeps tool-boundary delivery.
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'steer',
+        client,
+        'typed-1',
+      ),
+    ).toEqual({ accepted: true, messageId: 'typed-1' });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(requests()).toEqual([]);
+
+    expect(bridge.sendMidTurnMessagesNow(session.sessionId, client)).toEqual({
+      requested: true,
+    });
+    await vi.waitFor(() =>
+      expect(requests()).toEqual([
+        {
+          method: MID_TURN_SEND_NOW_METHOD,
+          params: { sessionId: session.sessionId },
+        },
+      ]),
+    );
+
+    // The agent's send-now drain takes the user's message and leaves the
+    // queue-only steering for the tool boundary.
+    await expect(
+      handle.agentConnection.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
+        sessionId: session.sessionId,
+        userInputOnly: true,
+      }),
+    ).resolves.toMatchObject({ messages: ['steer'] });
+    await expect(
+      handle.agentConnection.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
+        sessionId: session.sessionId,
+      }),
+    ).resolves.toMatchObject({ messages: ['delegated'] });
+
+    firstTurn.resolve();
+    await turn;
     await bridge.shutdown();
   });
 

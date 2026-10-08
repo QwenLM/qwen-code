@@ -9993,6 +9993,25 @@ export function registerSessionRoutes(
     ),
   );
 
+  // Deliver the queued mid-turn messages now: the agent cuts a streaming
+  // model response short instead of waiting for its next tool boundary.
+  app.post(
+    '/session/:id/mid-turn-messages/send-now',
+    mutate(),
+    withOwnerMutableSession(
+      'POST /session/:id/mid-turn-messages/send-now',
+      (req, res, sessionId, runtime) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const result = runtime.bridge.sendMidTurnMessagesNow(
+          sessionId,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(result);
+      },
+    ),
+  );
+
   app.delete(
     '/session/:id/mid-turn-messages/:messageId',
     mutate(),

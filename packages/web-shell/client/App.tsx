@@ -11827,6 +11827,9 @@ export function App({
     connection.capabilities?.features.includes(
       'session_mid_turn_message_query',
     ) === true;
+  const canSendMidTurnNow =
+    connection.capabilities?.features.includes('session_mid_turn_send_now') ===
+    true;
   const canInjectMidTurnMedia =
     connection.capabilities?.features.includes('session_attachments') === true;
   const composerAttachmentsEnabled =
@@ -11838,6 +11841,7 @@ export function App({
     enqueuePrompt: rawEnqueuePrompt,
     removeQueuedPrompt,
     insertQueuedPrompt,
+    sendQueuedPromptNow,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -22301,7 +22305,9 @@ export function App({
                                 sessionHasActivePrompt
                               }
                               onDelete={removeQueuedPrompt}
+                              canSendMidTurnNow={canSendMidTurnNow}
                               onInsert={insertQueuedPrompt}
+                              onSendNow={sendQueuedPromptNow}
                               onEdit={editQueuedPrompt}
                               onImagePreview={openImagePanel}
                               onAttachmentPreview={openAttachmentPanel}

@@ -2117,6 +2117,10 @@ const EN: Messages = {
   'queue.insertFailed': 'Failed to insert queued message',
   'queue.insertTip': 'Insert into the current turn',
   'queue.insertCommandDisabled': 'Commands cannot be inserted mid-turn',
+  'queue.sendNow': 'Send now',
+  'queue.sendNowTip':
+    "Interrupt the model's current response and send queued messages now; running tools finish first",
+  'queue.sendNowFailed': 'Failed to send queued messages now',
   'queue.footer':
     'Press ↑ to edit the latest queued message · Esc to clear queue',
   'queue.imageCount': (v) => `(+${v?.count ?? 0} images)`,
@@ -6288,6 +6292,10 @@ const ZH: Messages = {
   'queue.insertFailed': '插入排队消息失败',
   'queue.insertTip': '插入当前回合',
   'queue.insertCommandDisabled': '命令不能插入当前回合',
+  'queue.sendNow': '立即发送',
+  'queue.sendNowTip':
+    '打断模型当前的回复，立即发送排队的消息；正在运行的工具会先执行完',
+  'queue.sendNowFailed': '立即发送排队消息失败',
   'queue.footer': '按 ↑ 编辑最后一条排队消息 · Esc 清空队列',
   'queue.imageCount': (v) => `（+${v?.count ?? 0} 张图片）`,
   'queue.fileCount': (v) => `（+${v?.count ?? 0} 个文件）`,
