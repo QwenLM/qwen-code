@@ -2349,10 +2349,13 @@ In `run`.
 ```text
 Failed-check annotation patterns that mean the INFRASTRUCTURE died, not the
 code — a self-hosted runner losing the server, the disk filling, a runner
-shutdown, or a git fetch/clone dying mid-transfer. Such a check is red for a
-reason unrelated to the PR and clears on a re-run (observed: #7490's E2E
-"runner lost communication"; #6506's checkout "RPC failed; curl 92" /
-"fetch-pack: invalid index-pack output" — both green on the rerun). The scan
+shutdown, a git fetch/clone dying mid-transfer, or the hosted pool never
+handing the job a runner. Such a check is red for a reason unrelated to
+the PR and clears on a re-run (observed: #7490's E2E "runner lost
+communication"; #6506's checkout "RPC failed; curl 92" / "fetch-pack:
+invalid index-pack output" — both green on the rerun; #13622's Classify
+PR, "repeatedly failed to be acquired" — the hosted pool never assigned a
+runner, so zero steps executed). The scan
 auto-reruns those failed jobs ONCE, guarded by run_attempt so a persistent
 infra problem cannot loop. Deliberately conservative — only unambiguous
 machine/transport failures, never a bare test-level timeout, which could be

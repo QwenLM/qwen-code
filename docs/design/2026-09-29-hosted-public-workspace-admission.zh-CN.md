@@ -10,18 +10,18 @@ Hosted Read/Write/Edit 已能经过生产 Broker 和 worker 执行，但目前�
 
 G0 开放随创建会话准入的一次初始文件工具轮次，使用现有公开 REST 路由及共享 service 的 WebShell 创建适配器。发现接口仍仅广播 Workspace 绑定能力，不宣称完整的 Workspace 执行支持。G0 本身无需修改 UI；后续改动唯一的 UI 变化是为创建者开放输入框与取消控件。
 
-后续改动在同一开关下为会话创建者开放后续 Turn，并允许创建者取消正在运行的 Turn，由 Hosted Harness 中止该 Turn 并按原始 Runtime 身份结算。执行时每个 Turn 都按创建者的 Workspace 授权校验，因此其他 actor 以及未开启该开关的部署仍得到现有拒绝：actor 可读取该 Workspace 时为 `workspace_unavailable`，不能读取时为 `session_not_found`。创建者也可以重命名该会话。工作区关闭通过独立的关闭能力及生命周期准入控制；归档、删除与取消归档遵循可靠工作区关闭后的独立保留能力；cwd 操作仍保持门禁。
+后续改动在同一开关下为会话创建者开放后续 Turn，并允许创建者取消正在运行的 Turn，由 Hosted Harness 中止该 Turn 并按原始 Runtime 身份结算。执行时每个 Turn 都按创建者的 Workspace 授权校验，因此其他 actor 以及未开启该开关的部署仍得到现有拒绝：actor 可读取该 Workspace 时为 `workspace_unavailable`，不能读取时为 `session_not_found`。创建者也可以重命名该会话。准入新工作要求创建者在 `ACTIVE` 的 Workspace 上持有创建授权，且 Workspace 的 generation 与存储与会话绑定时一致，因此重新注册后提交和改名会在写入任何命令之前被拒绝。取消只中止已在运行的工作：部署仍开启 Workspace 文件能力时，仍能读取该 Workspace 的创建者，即使创建授权被撤销、Workspace 进入 drain 或被重新注册，也可以取消。正常取消复用运行中 Turn 驻留在内存中的挂接。连接器缓存丢失后，按已持久化的取消请求重新挂接，验证冻结的 Session 绑定和精确的 tenant/Session 身份，不再要求可变的创建授权、registry 状态或挂载就绪。新的 API 请求仍要求创建者的读取授权；已受理的取消即使随后失去读取授权也继续重试。新工作始终重新验证执行授权，包括关闭物理恢复功能时。对 Harness 中驻留会话的 passive load，在验证租户、Workspace、Session Store URL 和冻结 profile 后返回原始 client 身份，不重新打开 writer 或驱动工作；若之前的 load 回复丢失，会再次报告未运行但仍停驻的 Runtime Turn。被动恢复可以采用原 Runtime 并查询状态，但不会 prepare 或 execute；取消路径中，已接管的租约跨丢失回复和可重试拒绝保持待归还，直到终态成功或拆除会话。这不证明 Broker/worker 进程死亡后的恢复，也不解决原始 prompt 准入回复丢失的问题。Harness 未接收的取消会在 Turn 仍处于取消中时重发。每次成功续租后，执行 owner 检查任意 API 副本受理的取消请求，并在 executor 中发送，避免网络等待阻塞续租调度器。投递失败按续租间隔重试。工作区关闭通过独立的关闭能力及生命周期准入控制；归档、删除与取消归档遵循可靠工作区关闭后的独立保留能力；cwd 操作仍保持门禁。
 
 ## 决策
 
 - 部署显式启用 `harness.workspace-files-enabled`（环境变量 `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED`），默认关闭。它要求 Hosted Harness、HTTP Session Store，以及同机、会话隔离的 local-process Broker。原有无绑定的无工具会话行为不变。关闭开关后拒绝携带输入的创建请求（包括重试）；空输入的绑定会话创建和读取保持可用。
 - 仅接受 `qwen-code` 及现已支持并冻结的 `managed-runtime-tools/1` / `preapproved-workspace-tools/1` Workspace 配置组合。服务端选择 `hosted-workspace-files/1`。公开请求不能选择 profile，也不能通过 metadata 提升权限。
 - Workspace 解析、ACTIVE 状态、创建者读取/创建权限、固定 profile 校验、会话创建、初始 Turn 和 actor 范围的幂等继续位于现有创建事务内。重试保留原身份与绑定；载荷改变产生冲突。
-- 连接有绑定的会话之前，connector 通过 `WorkspaceExecutionStore.authorize` 重新检查持久绑定。Broker 获取与执行仍保留各自的权限、代数、存储和所有权检查。任何绑定失败都不能回退到全局 Workspace 或无绑定的无工具会话。
+- 为新工作连接有绑定的会话之前，connector 通过 `WorkspaceExecutionStore.authorize` 重新检查持久绑定。Broker 获取与执行仍保留各自的权限、代数、存储和所有权检查。任何绑定失败都不能回退到全局 Workspace 或无绑定的无工具会话。
 - 私有 create 与 load 都传递所选 profile 及持久 Workspace ID，包括创建冲突和创建结果不明后回退到 load 的路径。Harness 现有的不可变 definition 检查固定 profile。
 - 冷加载未结算输入仍被阻塞。G0 不启用在飞续接、接管 worker、取消 owner 粘性，也不改动 G1 failover 门禁。
 
-- 取消运行中的 Turn 复用已准入的 Harness 连接，并由当前租约 owner 重试，不根据重新连接的拒绝伪造终态失败。已记录的重命名失败保留 `FAILED` 命令回执与摘要；相同内容重试仍是重放，不同内容继续冲突，并发成功请求仍可完成该回执。
+- 取消运行中的 Turn 复用已准入的 Harness 连接，或在连接器冷缓存下被动重新挂接，并由当前租约 owner 重试，不根据重新连接的拒绝伪造终态失败。已记录的重命名失败保留 `FAILED` 命令回执与摘要；相同内容重试仍是重放，不同内容继续冲突，并发成功请求仍可完成该回执。
 
 ## 改动与归属
 
@@ -31,10 +31,11 @@ G0 开放随创建会话准入的一次初始文件工具轮次，使用现有�
 | 创建 service 与 SQL store     | 仅在固定且获授权的 Workspace 配置下接受初始输入 | 租户、创建者及持久 Workspace  |
 | Coordinator                   | 仅在开关启用时派发已准入的绑定轮次              | 持久会话及持有租约的 Turn     |
 | Java connector 与私有 SDK DTO | 解析会话绑定，create/load 传递 profile          | 持久会话及存活 Harness owner  |
+| Hosted 私有 load 路由         | 校验冻结身份后复用驻留连接，被动报告停驻 Turn   | 存活 Session owner            |
 | 现有 Broker/worker            | 复用生产路由与 fencing                          | 所选 Runtime 及持久 Workspace |
 | 契约与 README                 | 记录有限的创建能力及剩余门禁                    | 公开 REST 与 WebShell 适配器  |
 
-生产行为在 `packages/sdk-java/managed-agent-server`、`packages/sdk-java/qwencode` 的私有 Hosted DTO，以及 WebShell 托管会话页及其 provider（`packages/web-shell`）中变化，覆盖初始 Workspace Read/Write/Edit Turn 与创建者后续 Turn 的提交、取消和重命名准入。不需要为 core authority、工具执行循环、数据库 schema 或公开请求字段新增抽象。
+生产行为在 `packages/sdk-java/managed-agent-server`、`packages/sdk-java/qwencode` 的私有 Hosted DTO、CLI Hosted 会话路由（`packages/cli`），以及 WebShell 托管会话页及其 provider（`packages/web-shell`）中变化，覆盖初始 Workspace Read/Write/Edit Turn 与创建者后续 Turn 的提交、取消和重命名准入。不需要为 core authority、工具执行循环、数据库 schema 或公开请求字段新增抽象。
 
 合入的改动还涉及该范围之外的两处，均不增加运行时行为：
 
@@ -47,8 +48,10 @@ G0 开放随创建会话准入的一次初始文件工具轮次，使用现有�
 
 初始轮次必须在所选 Workspace 的相对 cwd 下写、编辑并读取文件，产生持久工具历史和恰好一个公开终态事件，且不改动 Harness 的诱饵目录。重复创建幂等键，验证相同 Session/Turn 且无额外模型/工具副作用。验证改变载荷冲突、未授权租户/actor 无法创建或读取、不支持的 profile 与不可用 Workspace 被拒绝，以及关闭开关后保持原门禁。覆盖共享 WebShell 创建适配器、实际发生变化的后续操作门禁（创建者的后续 Turn 提交、取消与重命名被放行；关闭与保留操作遵循独立能力，cwd 操作仍受限）和无绑定无工具回归路径。
 
-SDK 序列化、connector、store/准入及 coordinator 的定向测试覆盖 create/load 身份、权限复核与关闭的门禁。本地通过 H2 跑 Hosted 集成，并加入现有 Hosted MySQL CI 套件；单独记录本地 MySQL 是否可用。完成前执行 build、typecheck、bundle、定向测试和两轮无发现的完整 diff 自查。
+SDK 序列化、connector、store/准入及 coordinator 的定向测试覆盖 create/load 身份、权限复核与关闭的门禁。真实 Hosted 链路必须在创建授权被撤销且连接器缓存清空后完成取消；只变 generation 或只变 storage 时，必须在写入任何命令之前拒绝新工作。撤销读取授权后的新取消请求仍必须隐藏会话，而已经受理的取消继续重试。本地通过 H2 跑 Hosted 集成，并加入现有 Hosted MySQL CI 套件；单独记录本地 MySQL 是否可用。完成前执行 build、typecheck、bundle、定向测试和两轮无发现的完整 diff 自查。
 
 ## 边界与待定事项
 
 本次实现把 G0 放在 #12952 下；以后调整到 D 或 W 跟踪不改变契约，也不决定 G3 的范围。Shell、审批、D8 AgentDefinition、公开 profile 选择、后续 Turn（此后已对创建者开放，见上文）、生命周期开放、分布式供给及 W0e/G1–G3 恢复均另行推进。现有 `EmbeddedRuntimeBroker` 是生产组件，可以继续使用；E2E 不得替换它或通过直接调用 store 绕过准入。
+
+晚到改名的 supersession 检查保护公开 SQL 标题与回执。该检查发生在 Harness 写入标题之后，因此不保证重叠 Harness 写入的顺序。这个继承的生命周期问题继续由 #13269 跟踪。

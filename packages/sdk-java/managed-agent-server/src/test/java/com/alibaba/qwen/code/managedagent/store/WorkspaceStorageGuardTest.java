@@ -2,10 +2,25 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+import com.alibaba.qwen.code.daemon.HarnessSessionRef;
+import com.alibaba.qwen.code.daemon.HostedHarnessCapabilities;
+import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.RuntimeBroker.WorkspaceMount;
+import com.alibaba.qwen.code.managedagent.harness.QwenHostedHarnessConnector;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -29,6 +44,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.DefaultTransactionStatus;
 
@@ -231,6 +247,162 @@ class WorkspaceStorageGuardTest {
         assertThat(unavailable.inspect("tenant", "storage"))
                 .contains("identity=unavailable", "marker=match");
         assertUnavailable(() -> unavailable.verify(binding));
+    }
+
+    @Test
+    void actionResponseRetriesAMomentaryMountReadWithoutChangingAcquireVerdicts() {
+        AtomicInteger unreadable = new AtomicInteger();
+        var manager = new DataSourceTransactionManager(dataSource);
+        var guard = new WorkspaceStorageGuard(jdbc, manager, properties, path -> {
+            if (unreadable.get() != 0) {
+                throw new IOException("momentary mount failure");
+            }
+            return new WorkspaceStorageGuard.Identity(path.toString(), "host", "device", "inode",
+                    "2026-10-07T00:00:00Z");
+        });
+        guard.register("tenant", "storage", UUID.randomUUID().toString());
+        String sessionId = UUID.randomUUID().toString();
+        var session = new SessionRecord("tenant", sessionId, "qwen-code", null,
+                null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                binding, "default", "hosted-workspace-files/1");
+        var execution = spy(new WorkspaceExecutionStore(jdbc, manager, guard));
+        doNothing().when(execution).authorizeActionResponse(session);
+        doNothing().when(execution).authorizePassiveAttachment(session);
+        var sessions = mock(AgentStateStore.class);
+        when(sessions.requireSession("tenant", sessionId)).thenReturn(session);
+        var actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant", sessionId)).thenReturn("default");
+        properties.getHarness().setToken("test-token");
+        properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        var connector = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
+        var client = mock(HostedHarnessClient.class);
+        var capabilities = mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(UUID.randomUUID().toString());
+        var attached = mock(HarnessSessionRef.class);
+        when(attached.getApprovalMode()).thenReturn("default");
+        when(client.loadSession(any())).thenReturn(attached);
+        ReflectionTestUtils.setField(connector, "client", client);
+        var response = new ObjectMapper().createObjectNode().put("optionId", "allow")
+                .put("inputRevision", 1).put("policyRevision", "policy");
+        unreadable.set(1);
+        assertThatThrownBy(() -> connector.resolveAction("tenant", sessionId, "action", response))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                    assertThat(error.isRetryable()).isTrue();
+                    assertThat(error.getCause()).isInstanceOf(IOException.class);
+                });
+        verify(client, never()).resolveAction(any(), any(), any(), anyLong(), any());
+        assertThatThrownBy(() -> guard.verify(binding))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.isRetryable()).isFalse());
+        unreadable.set(0);
+        connector.resolveAction("tenant", sessionId, "action", response);
+        verify(client).resolveAction(attached, "action", "allow", 1L, "policy");
+        // Positive control: the probe-only retry leaves the shared acquire
+        // path's verdict untouched — a settled mount still authorizes.
+        guard.verify(binding);
+    }
+
+    @Test
+    void actionResponseRetriesARevokedGrantWhileKeepingStructuralRefusalsTerminal() {
+        var manager = new DataSourceTransactionManager(dataSource);
+        var guard = new WorkspaceStorageGuard(jdbc, manager, properties, path ->
+                new WorkspaceStorageGuard.Identity(path.toString(), "host", "device", "inode",
+                        "2026-10-07T00:00:00Z"));
+        guard.register("tenant", "storage", UUID.randomUUID().toString());
+        // The action-response authority is derived from the real grant rows,
+        // not injected.
+        var execution = spy(new WorkspaceExecutionStore(jdbc, manager, guard));
+        var bound = new ContextBinding("tenant", "workspace", 1, "storage", "child",
+                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        String sessionId = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status,"
+                + " created_at, updated_at, workspace_id, workspace_generation, workspace_storage_id,"
+                + " cwd_relative, context_config_ref, context_revision, workspace_config_ref,"
+                + " workspace_policy_ref) VALUES ('tenant', ?, 'qwen-code', 'ACTIVE', 0, 0,"
+                + " 'workspace', 1, 'storage', 'child', ?, 1, ?, ?)",
+                sessionId, WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
+                WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id,"
+                + " workspace_generation, storage_id, display_name, config_ref, policy_ref, state)"
+                + " VALUES ('tenant', 'workspace', 1, 'storage', 'workspace', ?, ?, 'ACTIVE')",
+                WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
+        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id, actor_id,"
+                + " idempotency_key, request_digest, session_id, created_at)"
+                + " VALUES ('tenant', ?, 'create-1', 'digest', ?, 0)",
+                "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8), sessionId);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id,"
+                + " can_read, can_create) VALUES ('tenant', 'workspace', ?, TRUE, TRUE)",
+                "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        var session = new SessionRecord("tenant", sessionId, "qwen-code", null,
+                null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                bound, "default", "hosted-workspace-files/1");
+        var sessions = mock(AgentStateStore.class);
+        when(sessions.requireSession("tenant", sessionId)).thenReturn(session);
+        var actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant", sessionId)).thenReturn("default");
+        properties.getHarness().setToken("test-token");
+        properties.getHarness().setCapabilityDigest("sha256:" + "a".repeat(64));
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        var connector = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
+        var client = mock(HostedHarnessClient.class);
+        var capabilities = mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(UUID.randomUUID().toString());
+        var attached = mock(HarnessSessionRef.class);
+        when(attached.getApprovalMode()).thenReturn("default");
+        when(client.loadSession(any())).thenReturn(attached);
+        ReflectionTestUtils.setField(connector, "client", client);
+        var response = new ObjectMapper().createObjectNode().put("optionId", "allow")
+                .put("inputRevision", 1).put("policyRevision", "policy");
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            assertThat(jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE"
+                    + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'")).isEqualTo(1);
+            return null;
+        }).doCallRealMethod().when(execution).authorizeActionResponse(session);
+        assertThatThrownBy(() -> connector.resolveAction("tenant", sessionId, "action", response))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                    assertThat(error.isRetryable()).isTrue();
+                });
+        // A revoked creation grant is operator-reversible: the refusal must
+        // stay retryable so a restored grant still delivers the answer.
+        jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE"
+                + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'");
+        assertThatThrownBy(() -> connector.resolveAction("tenant", sessionId, "action", response))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                    assertThat(error.isRetryable()).isTrue();
+                });
+        // So is a registry that left ACTIVE.
+        jdbc.update("UPDATE managed_workspace_access SET can_create = TRUE"
+                + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'");
+        jdbc.update("UPDATE managed_workspace_registry SET state = 'DRAINING'"
+                + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'");
+        assertThatThrownBy(() -> connector.resolveAction("tenant", sessionId, "action", response))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                    assertThat(error.isRetryable()).isTrue();
+                });
+        verify(client, never()).resolveAction(any(), any(), any(), anyLong(), any());
+        // Restored, the committed decision reaches the Harness.
+        jdbc.update("UPDATE managed_workspace_registry SET state = 'ACTIVE'"
+                + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'");
+        connector.resolveAction("tenant", sessionId, "action", response);
+        verify(client).resolveAction(attached, "action", "allow", 1L, "policy");
+        // Generation drift after a re-registration stays structural: the
+        // terminal exit keeps its verdict.
+        jdbc.update("UPDATE managed_workspace_registry SET workspace_generation = 2"
+                + " WHERE tenant_id = 'tenant' AND workspace_id = 'workspace'");
+        assertThatThrownBy(() -> connector.resolveAction("tenant", sessionId, "action", response))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                    assertThat(error.isRetryable()).isFalse();
+                });
+        verify(client).resolveAction(any(), any(), any(), anyLong(), any());
     }
 
     @Test
