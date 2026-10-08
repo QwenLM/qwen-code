@@ -32,6 +32,8 @@ import java.util.UUID;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -86,6 +88,25 @@ class WorkspaceCsiSessionGuardTest {
         sessions = new JdbcRuntimeSessionRepository(source);
         executions = new JdbcToolExecutionRepository(source);
         journal = new ManagedSessionStore(jdbc);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = StoreModels.OperationKind.class, names = {"CLOSE", "DELETE"})
+    void publicLifecycleCannotFenceAnOriginalPrivateCsiSession(StoreModels.OperationKind kind) {
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        var managed = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), properties);
+        var before = jdbc.queryForMap("SELECT * FROM managed_agent_session WHERE session_id = ?", sessionId);
+        var ownership = reservations.inspect(registration);
+        assertApiCode(() -> transaction.execute(status -> managed.beginWorkspaceLifecycle("tenant", sessionId,
+                kind, "actor", "actor-digest", "public-lifecycle", "request-digest", true, 1)),
+                "workspace_unavailable");
+        assertThat(jdbc.queryForMap("SELECT * FROM managed_agent_session WHERE session_id = ?", sessionId))
+                .usingRecursiveComparison().isEqualTo(before);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_harness_drain", Integer.class)).isZero();
+        assertThat(reservations.inspect(registration)).isEqualTo(ownership);
     }
 
     @Test

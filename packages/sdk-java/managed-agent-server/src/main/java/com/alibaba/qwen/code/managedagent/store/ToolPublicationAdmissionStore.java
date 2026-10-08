@@ -351,6 +351,7 @@ public final class ToolPublicationAdmissionStore {
                     "Original manifest resource conflicts");
         }
         return transactions.execute(status -> {
+            WorkspaceLifecycleStore.lockPlacement(jdbc, text(key, "tenantId"));
             sessions.lockCsiOriginal(text(key, "tenantId"), text(key, "sessionId"));
             data.lockOriginalSettledResult(key, publicationId, finished);
             lockTenant(key);

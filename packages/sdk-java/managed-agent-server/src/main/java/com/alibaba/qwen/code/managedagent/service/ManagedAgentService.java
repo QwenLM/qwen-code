@@ -43,6 +43,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnSummary;
+import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import java.nio.charset.StandardCharsets;
@@ -95,8 +96,12 @@ public class ManagedAgentService {
     }
 
     private boolean supportsClose(SessionRecord session) {
+        if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
+            return false;
+        }
         return session.workspace() == null || store.workspaceFilesEnabled()
-                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose();
+                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
+                && harness.supportsLifecycle();
     }
 
     private boolean hasActions(SessionRecord session) {
@@ -604,7 +609,7 @@ public class ManagedAgentService {
                         true,
                         session.workspace() == null,
                         true,
-                        hasActions(session), supportsClose(session), retention, retention, retention),
+                        hasActions(session), supportsClose(session), retention, retention, supportsDelete(session, retention)),
                 publicWorkspace(session));
     }
 
@@ -673,7 +678,15 @@ public class ManagedAgentService {
                 // Stage H records its Session store holds (H0c).
                 new WebShellSessionCapabilities(true, hasArtifacts(session),
                         hasActions(session), maySubmit, supportsClose(session),
-                        retention, retention, retention));
+                        retention, retention, supportsDelete(session, retention)));
+    }
+
+    private boolean supportsDelete(SessionRecord session, boolean retention) {
+        if (CsiFilesRetirementProfile.PROFILE.equals(session.toolProfile())) {
+            return false;
+        }
+        return retention || session.workspace() != null && store.workspaceFilesEnabled()
+                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle();
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {

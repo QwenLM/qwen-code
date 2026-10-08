@@ -140,7 +140,7 @@ creation requires matching registered storage, ACTIVE Workspace, read/create
 permission, and fixed `csi-files-retirement-tools/1` and
 `csi-files-retirement-policy/1` references. The Session UUID is allocated before
 deriving its Session-isolated `kubernetes-workspace` request. Its remote mount
-root comes from the registration, without host filesystem resolution. V51 adds
+root comes from the registration, without host filesystem resolution. V52 adds
 nullable `runtime_request_key` with no legacy evidence backfill; the CREATE
 inserts it alongside `tool_profile=csi-files-retirement/1`.
 The first profile only accepts Workspace root selection (`cwdRelative="."`).
@@ -272,13 +272,15 @@ this slice does not grant generic release, seal or finalization.
 Migration and journal transactions acquire the placement domain before the
 retention tenant. Offline LOCAL migration shares these guards even when its
 storage differs from the journal's storage; taking them in reverse order
-deadlocks. Workspace lifecycle entry points take the domain before locking
-their Session and checking the migration fence. The unbound legacy lifecycle
-keeps its Session-only admission: its DELETE must commit while an extension
-UPDATE waits on another connection, so the journal's later deletion guard
-suppresses the task projection. Session workspace identity is immutable.
+deadlocks. Current main serializes deletion behind a record commit using the
+same placement domain, including unbound legacy Sessions. Every lifecycle
+entry point must take that domain before locking its Session and checking
+migration fences. A blocked extension UPDATE completes before deletion
+admission; its revision and task projection persist. Earlier reports for the
+previous main's Session-only deletion admission remain historical and do not
+establish the new ordering. Session workspace identity is immutable.
 
-Install V52 and the standalone JDBC fresh/upgrade schema with a nullable
+Install V53 and the standalone JDBC fresh/upgrade schema with a nullable
 `first_activation_journal_revision`, without legacy backfill or a caller-settable
 binding field. On the same original SQL connection, first acceptance changes
 NULL to the exact SQL journal revision and increments `record_version` once,
@@ -665,13 +667,16 @@ volume now belongs to someone else. Historical lookup must not require current
 for a released retirement. Missing original handles and ambiguous CREATE remain
 blocked; “no handle” is not proof that no mount existed.
 
-The main synchronization keeps the published Workspace migration versions
-V48–V50 unchanged and renumbers this Draft's unpublished Session request and
-first activation migrations to V51 and V52. Their SQL bytes and ordering do not
-change. Upgrade checks start from main V50 and request-only V51, retain legacy
-rows and versions, and require a NULL first-activation pin rather than
-backfilling authority. Earlier local qualification databases were owned and
-cleaned; this change does not rewrite any applied shared migration history.
+The current main synchronization keeps published migrations V48–V51 unchanged,
+including the Workspace lifecycle V51, and renumbers this Draft's unpublished
+Session request and first activation migrations to V52 and V53. Their SQL bytes
+and ordering do not change. Fresh upgrade checks must start from main V51 and
+request-only V52, retain legacy rows and versions, and require a NULL
+first-activation pin rather than backfilling authority. Earlier local
+qualification databases used the previous V51/V52 numbering and were owned and
+cleaned; their evidence is historical. This is not a shared database upgrade
+from unpublished versions and does not rewrite applied migration history.
+See the [lifecycle main synchronization design](2026-10-08-k2-lifecycle-main-sync.md).
 
 Add migrations using the next free version at implementation time. Preserve
 legacy LOCAL rows, existing CSI identity bytes and ACK digests. Never backfill

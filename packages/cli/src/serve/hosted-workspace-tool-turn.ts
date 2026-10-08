@@ -71,6 +71,7 @@ import {
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
+import { MANAGED_WORKSPACE_CONTEXT_FILES } from './managed-runtime-provider-protocol.js';
 import type { HostedMcpSession } from './hosted-mcp-session.js';
 import type {
   HostedHookSession,
@@ -150,11 +151,23 @@ export interface HostedShellTurnOptions {
 /**
  * The attached Session's fetched Workspace project instructions. `read`
  * returns undefined until the first fetch attempt completes; '' means the
- * Workspace has none. Written at most once per attached Session.
+ * Workspace has none. Written once per fetch; `invalidate` returns the slot
+ * to undefined so the next native tool turn fetches again.
  */
 export interface HostedWorkspaceContextSlot {
   read(): string | undefined;
   write(context: string): void;
+  invalidate(): void;
+}
+
+/**
+ * Whether any Session-relative path names a file the Workspace context read
+ * returns, so a change to it must invalidate the cached text (#13564).
+ */
+export function touchesWorkspaceContext(paths: readonly string[]): boolean {
+  return paths.some((file) =>
+    (MANAGED_WORKSPACE_CONTEXT_FILES as readonly string[]).includes(file),
+  );
 }
 
 function shellHistoryId(executionCallId: string): string {
@@ -1468,6 +1481,10 @@ export class HostedWorkspaceToolTurn {
         paths.length = 0;
       }
     }
+    // A Write/Edit about to change an instruction file makes the cached
+    // context stale whatever its outcome; the next turn reads it again. A
+    // refused batch emptied `paths` above and changes nothing.
+    if (touchesWorkspaceContext(paths)) this.context?.invalidate();
     if (refusals.every((reason) => reason !== undefined)) {
       const responses = requests.flatMap((_, index) => refusal(index)!);
       try {
