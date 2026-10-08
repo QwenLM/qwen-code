@@ -98,8 +98,9 @@ local Host setup. Initialization idempotently installs or reuses the launcher
 and manifests for existing browser roots, then the transport discovers a live
 Host and validates its extension, protocol and profile handshake. A configured
 `QWEN_BROWSER_USE_SOCKET_PATH` or `QWEN_BROWSER_USE_DISCOVERY_DIR` keeps using its
-externally managed setup. Where neither applies, initialization attempts no
-registration.
+externally managed setup. Where no Native Messaging Host can be registered, or
+where a `QWEN_BROWSER_USE_SOCKET_PATH` or `QWEN_BROWSER_USE_DISCOVERY_DIR`
+override is configured, initialization attempts no registration.
 
 Initialization does not read `Secure Preferences` or `Preferences` to detect
 an installed extension. Those private configuration files may be unreadable,
