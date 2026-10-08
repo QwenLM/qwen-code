@@ -460,6 +460,16 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js).not.toMatch(/["'`]settings\./);
   });
 
+  it('keeps trajectory filter strings in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]trajectory\.filter\./);
+    expect(readPackageJavascript()).toContain('trajectory.filter.search');
+    expect(readPackageJavascript()).toContain('Search loaded records');
+  });
+
   it('still carries what a transcript actually renders', () => {
     const bundle = readTranscriptBundle();
     expect(bundle).toContain('react-markdown');
