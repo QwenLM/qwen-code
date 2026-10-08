@@ -19,6 +19,37 @@ const run = (chunks: string[], completed = true): string => {
     .join('');
 };
 
+/** Splits `text` into single characters. */
+const byChar = (text: string): string[] => [...text];
+
+/**
+ * Every chunking of `text` that uses at most `maxCuts` cut points, including
+ * the unsplit one. Chunk-invariance is a property, so the exhaustive set is
+ * the evidence rather than a seeded sample.
+ */
+const chunkingsUpTo = (text: string, maxCuts: number): string[][] => {
+  const out: string[][] = [];
+  const build = (cuts: number[]): string[] => {
+    const points = [0, ...cuts, text.length];
+    const chunks: string[] = [];
+    for (let index = 0; index < points.length - 1; index++) {
+      const end = points[index + 1]!;
+      const start = points[index]!;
+      if (end > start) chunks.push(text.slice(start, end));
+    }
+    return chunks;
+  };
+  const walk = (start: number, acc: number[]): void => {
+    out.push(build(acc));
+    if (acc.length === maxCuts) return;
+    for (let cut = start; cut < text.length; cut++) {
+      walk(cut + 1, [...acc, cut]);
+    }
+  };
+  walk(1, []);
+  return out;
+};
+
 describe('TrailingThinkingTagFilter', () => {
   it('holds a trailing candidate and drops it on a normal finish', () => {
     const filter = new TrailingThinkingTagFilter();
@@ -74,5 +105,41 @@ describe('TrailingThinkingTagFilter', () => {
 
   it('ignores the cap on the final call', () => {
     expect(run(['Answer.\n</thinking>' + ' '.repeat(200)])).toBe('Answer.');
+  });
+
+  it('keeps a repeated closer however the deltas were cut', () => {
+    // One-shot is the reference; the earlier closer lands at index 0 in the
+    // split framings, so a prefix-only check saw an empty string and let the
+    // identical suffix be deleted.
+    const input = '\n</thinking>\nAnswer.\n</thinking>';
+    expect(run([input])).toBe(input);
+    expect(run(['\n</thinking>', '\nAnswer.', '\n</thinking>'])).toBe(input);
+    expect(run(byChar(input))).toBe(input);
+  });
+
+  it('keeps a repeated closer behind an HTML comment at any framing', () => {
+    const input = '<!-- </thinking> -->\nTail.\n</thinking>';
+    expect(run([input])).toBe(input);
+    expect(run(byChar(input))).toBe(input);
+    // Split inside the earlier closer: neither half alone is a closer.
+    expect(run(['<!-- </thi', 'nking> -->\nTail.\n</thinking>'])).toBe(input);
+  });
+
+  it('is invariant to chunk boundaries when a closer repeats', () => {
+    // Identical model bytes must not keep or lose their final closing tag
+    // depending on where the provider cut the SSE deltas.
+    const inputs = [
+      '\n</thinking>\n</thinking>',
+      '</thinking>\nAnswer.\n</thinking>',
+      '<!-- </thinking> -->\nTail.\n</thinking>',
+      'First the closer:\n</thinking>\nthen again:\n</thinking>',
+      'Answer.\n</thinking>',
+    ];
+    for (const input of inputs) {
+      const oneShot = run([input]);
+      for (const chunks of chunkingsUpTo(input, 2)) {
+        expect(run(chunks)).toBe(oneShot);
+      }
+    }
   });
 });

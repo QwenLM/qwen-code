@@ -5,13 +5,22 @@
  */
 
 const CLOSING_TAG_LINE = /\r?\n[ \t]*<\/(think|thinking)[ \t]*>[ \t\r\n]*$/i;
+/** An already-released closer, matched anywhere rather than only at line end. */
+const CLOSING_TAG_INLINE = /<\/(?:think|thinking)[ \t]*>/i;
 const MAX_PENDING_LENGTH = 128;
+/**
+ * Rolling window over released text. Wide enough to hold a closer split
+ * across calls, so the ambiguity latch below does not depend on where the
+ * provider happened to cut the deltas.
+ */
+const EMITTED_TAIL_LENGTH = 12;
 
 export class TrailingThinkingTagFilter {
   private pending = '';
   private hasVisibleText = false;
   private literalContent = false;
   private markerTail = '';
+  private emittedTail = '';
   private previousLineBlank = true;
   private currentLineBlank = true;
   private lineIndent = 0;
@@ -75,8 +84,10 @@ export class TrailingThinkingTagFilter {
         ? this.pending.slice(0, candidateStart)
         : this.pending;
     // An earlier, already nonterminal closer makes a later identical suffix
-    // ambiguous. Inspect only the prefix, never the withheld candidate itself.
-    this.literalContent ||= /<\/(?:think|thinking)[ \t]*>/i.test(prefix);
+    // ambiguous. The closer can straddle a release boundary, so test it over
+    // a cumulative view of what this filter has handed over plus this call's
+    // prefix -- never the withheld candidate itself.
+    this.literalContent ||= CLOSING_TAG_INLINE.test(this.emittedTail + prefix);
     const eligible =
       !this.literalContent &&
       candidateStart >= 0 &&
@@ -92,12 +103,25 @@ export class TrailingThinkingTagFilter {
       }
       this.pending = final ? '' : this.pending.slice(candidateStart);
       this.hasVisibleText ||= /\S/.test(prefix);
+      this.noteReleased(prefix);
       return prefix;
     }
 
     const result = this.pending;
     this.pending = '';
     this.hasVisibleText ||= /\S/.test(result);
+    this.noteReleased(result);
     return result;
+  }
+
+  /**
+   * Records text this filter has handed to the consumer. A release can be
+   * split across calls, so the earlier-closer latch needs a rolling view of
+   * everything emitted rather than one call's prefix. Only released text is
+   * fed here: a withheld candidate must never arm the latch, or the ordinary
+   * strip would disable itself.
+   */
+  private noteReleased(text: string): void {
+    this.emittedTail = (this.emittedTail + text).slice(-EMITTED_TAIL_LENGTH);
   }
 }
