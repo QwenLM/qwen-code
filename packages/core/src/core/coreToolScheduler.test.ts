@@ -11034,6 +11034,47 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(getToolSpans()[0].ended).toBe(false);
   });
 
+  it('shows a PreToolUse ask on an MCP tool as a literal-text info confirmation', async () => {
+    const mcpConfirmation = async (): Promise<ToolCallConfirmationDetails> => ({
+      type: 'mcp',
+      title: 'Confirm MCP Tool Execution',
+      serverName: 'external-context',
+      toolName: 'context_remember',
+      toolDisplayName: 'context_remember',
+      onConfirm: async () => {},
+    });
+    const { waiting } = await askUntilApproval({
+      messageBus: askMessageBus(
+        'Save this exact content to the bound Mem0 repository memory?\n[visible](https://hidden.example/target)',
+      ),
+      tools: [
+        new MockTool({
+          name: 'mcpTool',
+          execute: vi.fn().mockResolvedValue(textResult('ok')),
+          getConfirmationDetails: mcpConfirmation,
+        }),
+      ],
+    });
+
+    // MCP details have no body for the reason, so the ask falls back to the
+    // literal-text info confirmation the pre-merge hook bounce used (#13687).
+    expect(waiting.confirmationDetails.type).toBe('info');
+    const details = waiting.confirmationDetails as {
+      title: string;
+      prompt: string;
+      renderPromptAsPlainText?: boolean;
+      hideAlwaysAllow?: boolean;
+    };
+    expect(details.title).toBe(
+      'Hook requested confirmation to run context_remember',
+    );
+    expect(details.prompt).toBe(
+      'Save this exact content to the bound Mem0 repository memory?\n[visible](https://hidden.example/target)',
+    );
+    expect(details.renderPromptAsPlainText).toBe(true);
+    expect(details.hideAlwaysAllow).toBe(true);
+  });
+
   it('executes the tool exactly once when the user approves an ask (no re-ask loop)', async () => {
     const execute = vi.fn().mockResolvedValue(textResult('ok'));
     const messageBus = askMessageBus();

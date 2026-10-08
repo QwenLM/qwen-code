@@ -1608,6 +1608,17 @@ function withPreToolUseAskReason(
         prompt: `${reason}\n\n${details.prompt}`,
         renderPromptAsPlainText: true,
       };
+    case 'mcp':
+      // MCP details have no body that can carry the reason, so the ask falls
+      // back to a literal-text info confirmation, as the pre-merge bounce did.
+      return {
+        type: 'info',
+        title: `Hook requested confirmation to run ${details.toolName}`,
+        prompt: reason,
+        renderPromptAsPlainText: true,
+        hideAlwaysAllow: true,
+        onConfirm: details.onConfirm,
+      };
     default:
       return details;
   }
