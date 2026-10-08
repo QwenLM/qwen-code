@@ -22,6 +22,10 @@ import {
   type ManagedSessionCommitReceipt,
 } from './managed-session-authority.js';
 import {
+  publishManagedMessageBody,
+  readManagedMessageBody,
+} from './managed-message-chunks.js';
+import {
   LocalManagedSessionResourceStore,
   readManagedBranchCheckpoint,
 } from './managed-session-resources.js';
@@ -63,7 +67,7 @@ export class ManagedSessionMessageProjection {
       );
     }
     const body = Buffer.from(JSON.stringify(record), 'utf8');
-    const contentRef = await this.resources.publish('managed-message', body);
+    const contentRef = await publishManagedMessageBody(this.resources, body);
     const subject =
       actor.class === 'harness' && actor.activation !== undefined
         ? {
@@ -154,7 +158,8 @@ async function readRecordBody(
   resources: ManagedSessionResourceStore,
   ref: ManagedSessionEvent['payload'][string],
 ): Promise<ChatRecord> {
-  const body = await resources.read(
+  const body = await readManagedMessageBody(
+    (bodyRef) => resources.read(bodyRef),
     ref as unknown as Parameters<ManagedSessionResourceStore['read']>[0],
   );
   return JSON.parse(body.toString('utf8')) as ChatRecord;

@@ -205,9 +205,7 @@ function computeExampleRanges(
     // prose-opened example range running to the end of the text and filter out
     // every real call after it. See #13492.
     if (
-      (masked
-        ? !closes
-        : !skipLexer && !tagPositions.has(tagPosition)) ||
+      (masked ? !closes : !skipLexer && !tagPositions.has(tagPosition)) ||
       positionInsideFence(text, tagPosition, parameterRanges)
     ) {
       continue;

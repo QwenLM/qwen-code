@@ -5,6 +5,7 @@
  */
 
 import path from 'node:path';
+import { promises as fs } from 'node:fs';
 import { lstat, readlink, realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import {
@@ -13,6 +14,11 @@ import {
 } from './hosted-glob-pattern.js';
 import { ManagedRuntimeFileHistory } from './managed-runtime-file-history.js';
 import type { RawFileHistoryOperation } from './hosted-file-history-protocol.js';
+import {
+  MANAGED_WORKSPACE_CONTEXT_FILES,
+  MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
+  type ManagedWorkspaceContextFile,
+} from './managed-runtime-provider-protocol.js';
 import { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
 import { ReadFileTool } from '@qwen-code/qwen-code-core/tools/read-file.js';
@@ -35,6 +41,14 @@ import {
   registerSessionProjectDir,
   sessionIdContext,
 } from '@qwen-code/qwen-code-core/utils/sessionIdContext.js';
+import {
+  CLOSE_SWEEP_TIMEOUT_MS,
+  GROUP_EXIT_EVIDENCE_TIMEOUT_MS,
+  type ManagedRuntimeLedger,
+  type ProcessLiveness,
+  signalProcessGroup,
+} from './managed-runtime-ledger.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { getShellConfiguration } from '@qwen-code/qwen-code-core/utils/shell-utils.js';
 import { getShellContextEnvVars } from '@qwen-code/qwen-code-core/services/shellContextEnv.js';
 import type {
@@ -73,6 +87,8 @@ import { ManagedBackgroundShellRegistry } from './managed-background-shell-regis
 import { ManagedMonitorRegistry } from './managed-monitor-registry.js';
 import { ManagedMonitorWatcher } from './managed-monitor-watcher.js';
 
+const debugLogger = createDebugLogger('MANAGED_TOOL_EXECUTOR');
+
 export class ManagedMcpToolUnknownError extends Error {}
 
 const ISOLATION_REFUSAL_CLAUSES: Record<
@@ -108,6 +124,33 @@ function isolationRefusal(
     message: `${tool} requires a delegated Linux cgroup v2 directory: ${ISOLATION_REFUSAL_CLAUSES[reason]}.`,
     type: `managed_isolation_${reason}`,
   };
+}
+
+/**
+ * Byte budget for reading one project instruction file. The reply is capped in
+ * characters, but `fs.readFile` materialises the whole file first: a sparse
+ * 400 Mi `AGENTS.md` costs no disk and still allocates. Reading only the prefix
+ * that can yield that many UTF-16 code units bounds the allocation too; four
+ * bytes per unit keeps astral content at the full character cap.
+ */
+const MANAGED_WORKSPACE_CONTEXT_FILE_BYTES =
+  MANAGED_WORKSPACE_CONTEXT_FILE_CHARS * 4;
+
+/** Reads at most {@link MANAGED_WORKSPACE_CONTEXT_FILE_BYTES} bytes of a file. */
+async function readContextFilePrefix(file: string): Promise<string> {
+  const handle = await fs.open(file, 'r');
+  try {
+    const buffer = Buffer.allocUnsafe(MANAGED_WORKSPACE_CONTEXT_FILE_BYTES);
+    const { bytesRead } = await handle.read(
+      buffer,
+      0,
+      MANAGED_WORKSPACE_CONTEXT_FILE_BYTES,
+      0,
+    );
+    return buffer.toString('utf8', 0, bytesRead);
+  } finally {
+    await handle.close();
+  }
 }
 
 export interface ManagedToolReference {
@@ -521,6 +564,114 @@ export class ManagedToolExecutor {
     }
   }
 
+  /**
+   * Reads the Session's project instruction files outside the execution
+   * ledger: they are the harness's own context, not a model tool call, so
+   * they reserve no execution and leave nothing to recover. A missing,
+   * unreadable or out-of-Workspace file is simply absent from the result.
+   */
+  async readWorkspaceContext(
+    sessionId: string,
+  ): Promise<{ files: ManagedWorkspaceContextFile[] }> {
+    return this.trackStart(() => this.readWorkspaceContextAdmitted(sessionId));
+  }
+
+  private async readWorkspaceContextAdmitted(
+    sessionId: string,
+  ): Promise<{ files: ManagedWorkspaceContextFile[] }> {
+    // Not `assertLegacySession`: this control reserves nothing in the
+    // execution ledger, and the Harness issues it from inside `acquire()`, so
+    // the Session is already claimed by the time it arrives. Only a released
+    // Session refuses.
+    if (this.closedSessions.has(sessionId))
+      throw new ManagedToolUnavailableError(
+        'Workspace context is unavailable.',
+      );
+    const tools = await this.toolsFor({
+      sessionId,
+      promptId: sessionId,
+      callId: 'workspace-context',
+      argsDigest: '',
+    });
+    if (
+      !this.isAdmissionOpen ||
+      !tools?.directory ||
+      tools.isActive?.() === false
+    )
+      throw new ManagedToolUnavailableError(
+        'Workspace context is unavailable.',
+      );
+    // Confine to the Session directory, not the whole mount: a symlink to a
+    // sibling Session's instruction file stays inside the mount root but
+    // must not be promoted into this Session's system instruction. A
+    // directory that stops resolving answers the declared error: a raw
+    // ENOENT would carry the runtime host's absolute path to the Broker as a
+    // 409 provider failure.
+    let boundary: string;
+    try {
+      boundary = await fs.realpath(tools.directory);
+    } catch {
+      throw new ManagedToolUnavailableError(
+        'Workspace context is unavailable.',
+      );
+    }
+    const files: ManagedWorkspaceContextFile[] = [];
+    const seen = new Set<string>();
+    for (const name of MANAGED_WORKSPACE_CONTEXT_FILES) {
+      let text: string;
+      try {
+        // A symlink planted in the Workspace (git preserves them) must not
+        // promote a host file into the system instruction.
+        const real = await fs.realpath(path.join(tools.directory, name));
+        const rel = path.relative(boundary, real);
+        if (
+          rel === '..' ||
+          rel.startsWith(`..${path.sep}`) ||
+          path.isAbsolute(rel)
+        )
+          continue;
+        // Staying inside the boundary is not ownership: a Session bound at the
+        // mount root (a Workspace selection without `cwd_relative`) has every
+        // sibling inside it, so the same arm the file tools consult judges this
+        // read too. Same three arguments as those call sites.
+        if (await this.ownsAnotherSessionDir?.(tools.sessionId, real, boundary))
+          continue;
+        // One physical file under both names (`AGENTS.md -> QWEN.md`) is
+        // injected once, as core's memory loader does (#9597).
+        if (seen.has(real)) continue;
+        seen.add(real);
+        // Gate on the type before opening: `fs.readFile` on a FIFO blocks in
+        // open(2) forever, pinning one libuv threadpool thread per attachment
+        // until unrelated reads in this worker stall, while every other
+        // unreadable candidate here is simply absent from the result.
+        const stat = await fs.stat(real);
+        if (!stat.isFile()) continue;
+        // The character cap bounds the reply, not the allocation: read only
+        // what can fill it.
+        text =
+          stat.size > MANAGED_WORKSPACE_CONTEXT_FILE_BYTES
+            ? await readContextFilePrefix(real)
+            : await fs.readFile(real, 'utf8');
+      } catch {
+        continue;
+      }
+      if (text.length > MANAGED_WORKSPACE_CONTEXT_FILE_CHARS) {
+        const note =
+          '\n[Truncated: the file exceeds the Hosted context limit.]';
+        text = text.slice(
+          0,
+          MANAGED_WORKSPACE_CONTEXT_FILE_CHARS - note.length,
+        );
+        // Cut on a code-point boundary: the Java Broker's writer sends a lone
+        // surrogate as '?'.
+        if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+        text += note;
+      }
+      files.push({ name, text });
+    }
+    return { files };
+  }
+
   constructor(
     private readonly toolsFor: ManagedToolSetResolver,
     private readonly capturePublisher?: ManagedShellCapturePublisher,
@@ -545,6 +696,14 @@ export class ManagedToolExecutor {
     private readonly backgroundSupervisor?: ManagedChildRunSupervisor,
     backgroundRegistry?: ManagedBackgroundShellRegistry,
     monitorRegistry?: ManagedMonitorRegistry,
+    private readonly options: {
+      /**
+       * The worker's ledger of its Shell process groups. Present only in a
+       * Managed session's Runtime worker (boot v1), never in a Hosted one.
+       */
+      readonly ledger?: ManagedRuntimeLedger;
+      readonly groupEvidenceTimeoutMs?: number;
+    } = {},
   ) {
     this.backgroundRegistry =
       backgroundRegistry ?? new ManagedBackgroundShellRegistry();
@@ -554,10 +713,27 @@ export class ManagedToolExecutor {
       : undefined;
   }
 
-  static forWorkspace(workspaceCwd: string, runtimeInstanceId: string) {
+  static forWorkspace(
+    workspaceCwd: string,
+    runtimeInstanceId: string,
+    options?: {
+      readonly ledger?: ManagedRuntimeLedger;
+      readonly groupEvidenceTimeoutMs?: number;
+    },
+  ) {
     // Boot v1 configures its one directory at startup, as it always has.
     const tools = createManagedToolSet(workspaceCwd, runtimeInstanceId);
-    return new ManagedToolExecutor(async () => tools);
+    return new ManagedToolExecutor(
+      async () => tools,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      options,
+    );
   }
 
   hasTool(toolName: string): boolean {
@@ -1656,6 +1832,33 @@ export class ManagedToolExecutor {
       this.backgroundRegistry.stopAll(5_000),
       this.monitorRegistry.stopAll(5_000),
     ]);
+    if (this.options.ledger) {
+      // Leave nothing behind: what a call's own cancellation did not stop,
+      // SIGKILL does, and only a proven-empty ledger is deleted. An unproven
+      // group keeps the ledger truth on disk for the host's sweep to judge —
+      // and a bookkeeping filesystem failure keeps it too, contained, never
+      // a reason to make the shutdown itself reject.
+      try {
+        const remaining = await this.options.ledger.killOutstanding();
+        if (remaining.length === 0) {
+          this.options.ledger.complete();
+        } else {
+          debugLogger.warn(
+            `Managed Runtime worker could not prove ${
+              remaining.length
+            } Shell process group(s) stopped: ${remaining
+              .map((group) => group.pgid)
+              .join(', ')}`,
+          );
+        }
+      } catch (error) {
+        debugLogger.warn(
+          `Managed Runtime worker could not sweep its ledger on close: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
   }
 
   /**
@@ -1709,6 +1912,8 @@ export class ManagedToolExecutor {
     entry.state = 'executing';
     entry.lastSequence += 1;
     let payload: ManagedToolResultPayload;
+    /** The Shell's process-group leader, when this call is one with a ledger. */
+    let shellPgid: number | undefined;
     let invocationStarted = false;
     try {
       // Runs start only from a fresh journal entry, which still carries its
@@ -1879,17 +2084,46 @@ export class ManagedToolExecutor {
         return sessionIdContext.run(sessionId, () => {
           const invocation = fileInvocation ?? tool.build(params);
           invocationStarted = true;
-          return entry.version === 3 && entry.captureSink
-            ? (invocation as ShellToolInvocation).execute(
-                entry.controller.signal,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                undefined,
-                entry.captureSink,
-              )
-            : invocation.execute(entry.controller.signal);
+          if (entry.version === 3 && entry.captureSink) {
+            return (invocation as ShellToolInvocation).execute(
+              entry.controller.signal,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              entry.captureSink,
+            );
+          }
+          if (entry.toolName === ShellTool.Name && this.options.ledger) {
+            const ledger = this.options.ledger;
+            return (invocation as ShellToolInvocation).execute(
+              entry.controller.signal,
+              undefined,
+              undefined,
+              (pid) => {
+                // Before any settle step of this call can run, the group is
+                // durable for the host's sweeps: the pid leads the group.
+                shellPgid = pid;
+                try {
+                  ledger.addGroup({
+                    pgid: pid,
+                    callId: entry.reference.callId,
+                    startedAt: Date.now(),
+                  });
+                } catch (error) {
+                  // A group that could not get into the ledger must not
+                  // outlive the failure: stop it first, then let the call
+                  // fail loudly instead of settling an outcome nothing
+                  // recorded.
+                  signalProcessGroup(pid, 'SIGKILL');
+                  void ledger.waitForGroupExit(pid, CLOSE_SWEEP_TIMEOUT_MS);
+                  throw error;
+                }
+              },
+            );
+          }
+          return invocation.execute(entry.controller.signal);
         });
       };
       const history = this.fileHistories.get(entry.reference.sessionId);
@@ -1993,6 +2227,37 @@ export class ManagedToolExecutor {
               : message,
         },
       };
+    }
+    if (
+      entry.version === 2 &&
+      shellPgid !== undefined &&
+      entry.controller.signal.aborted &&
+      this.options.ledger
+    ) {
+      // A settled cancel carries the group's exit evidence: the call is
+      // journaled settled only once no member of the Shell's process group
+      // answers. A group that outlives the budget makes the outcome unknown:
+      // the session blocks and the ledger entry keeps naming the group. The
+      // ledger's own filesystem failure can never un-prove the stop either:
+      // unknown is the only honest next state.
+      let state: ProcessLiveness = 'denied';
+      try {
+        state = await this.options.ledger.waitForGroupExit(
+          shellPgid,
+          this.options.groupEvidenceTimeoutMs ?? GROUP_EXIT_EVIDENCE_TIMEOUT_MS,
+        );
+      } catch (error) {
+        debugLogger.warn(
+          `Managed Runtime group-exit evidence failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      if (state !== 'gone') {
+        entry.state = 'unknown';
+        entry.lastSequence++;
+        return;
+      }
     }
     if (entry.version === 3) {
       try {

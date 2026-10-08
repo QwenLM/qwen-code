@@ -992,8 +992,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
     const { runQwenServe } = await import('../serve/run-qwen-serve.js');
     try {
       const serveOptions = {
-        // A joined runtime is a worker too: it runs work for the coordinator
-        // and must not also host its own collaboration routes.
+        // A joined runtime is a worker: it runs turns for the coordinator. It
+        // may still coordinate its own workspace if that workspace opts in.
         agentHostWorker: Boolean(argv['agent-host-server'] || argv['join']),
         port: argv.port,
         hostname: argv.hostname,
@@ -1191,6 +1191,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           throw error;
         }
       }
+      // Saved Host connections (`qwen agents join`) of every trusted
+      // workspace are restored by the daemon itself (serve/server.ts).
       // Open the Web Shell in a browser once the listener is up (best-effort;
       // never throws — see maybeOpenWebShellBrowser).
       if (argv['local-control']) {

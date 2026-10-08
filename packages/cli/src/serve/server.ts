@@ -164,6 +164,15 @@ import {
 import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
 import { registerWorkspaceAgentRoutes } from './routes/workspace-agents.js';
+import { registerSessionAgentSquadRoutes } from './routes/session-agent-squads.js';
+import {
+  registerSessionAgentRoutes,
+  registerSessionAgentSendRoute,
+} from './routes/session-agents.js';
+import {
+  normalizeAgentChainLimit,
+  normalizeAgentTokenBudget,
+} from '@qwen-code/qwen-code-core/agents/session-agents/chain.js';
 import { strandLocalRuns } from '@qwen-code/qwen-code-core';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
@@ -217,7 +226,11 @@ import {
 import { registerWorkspaceModelsRoutes } from './routes/workspace-models.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
-import { setRateLimiter } from './rate-limit.js';
+import {
+  createRateLimiter,
+  setRateLimiter,
+  type RateLimiterInstance,
+} from './rate-limit.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
 import { VirtualSubagentSessions } from './virtual-subagent-sessions.js';
 import {
@@ -339,7 +352,15 @@ import {
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
-import { registerAgentHostTransportRoutes } from './routes/agent-hosts.js';
+import {
+  AGENT_HOST_RATE_LIMIT,
+  registerAgentHostTransportRoutes,
+} from './routes/agent-hosts.js';
+import { registerAgentHostRuntimeRoutes } from './routes/agent-host-connection.js';
+import {
+  registerAgentHostRelayRoutes,
+  relayBaseUrl,
+} from './agent-host-relay.js';
 import { registerA2ATransportRoutes } from './routes/a2a.js';
 import type {
   ChannelDeliveryAccepted,
@@ -1585,8 +1606,9 @@ export function createServeApp(
   // session sees (workspace scope wins), and the env var stays the
   // operator's process-wide override. The predicate is consulted at request
   // time, so a workspace registered or reconfigured after boot is seen
-  // without a daemon restart. A daemon running as another coordinator's
-  // Agent Host never serves collaboration itself.
+  // without a daemon restart. A daemon that joined another coordinator as an
+  // Agent Host may still coordinate its own workspace when that workspace
+  // opts in (plan decision 5: being a runtime is independent of the flag).
   // A settings file caught mid-edit (half-written JSON) keeps the last answer
   // read for that workspace: reading it as "off" would strand every live run
   // there within one recovery tick. The load asks the loader to report a
@@ -1596,7 +1618,6 @@ export function createServeApp(
   // throw on a parse error.
   const lastAgentCollaborationSetting = new Map<string, boolean>();
   const isAgentCollaborationEnabledFor = (workspaceCwd: string): boolean => {
-    if (opts.agentHostWorker) return false;
     if (process.env['QWEN_CODE_ENABLE_AGENT_COLLABORATION'] === '1')
       return true;
     try {
@@ -1613,6 +1634,38 @@ export function createServeApp(
       return enabled;
     } catch {
       return lastAgentCollaborationSetting.get(workspaceCwd) ?? false;
+    }
+  };
+  // `experimental.agentChainLimit` for session agents, read per use like the
+  // opt-in above. Unreadable settings fall back to the default (unlimited).
+  const agentChainLimitFor = (workspaceCwd: string): number => {
+    try {
+      const settings = runWithoutDebugLogSession(() =>
+        loadSettings(workspaceCwd, {
+          preserveInvalidWorkspaceSettings: true,
+        }),
+      );
+      return normalizeAgentChainLimit(
+        settings.merged.experimental?.agentChainLimit,
+      );
+    } catch {
+      return normalizeAgentChainLimit(undefined);
+    }
+  };
+  // `experimental.agentTokenBudget`: tokens agents may spend in a chat
+  // session between two human messages before they stop waking each other.
+  const agentTokenBudgetFor = (workspaceCwd: string): number => {
+    try {
+      const settings = runWithoutDebugLogSession(() =>
+        loadSettings(workspaceCwd, {
+          preserveInvalidWorkspaceSettings: true,
+        }),
+      );
+      return normalizeAgentTokenBudget(
+        settings.merged.experimental?.agentTokenBudget,
+      );
+    } catch {
+      return normalizeAgentTokenBudget(undefined);
     }
   };
   // Whether the routes and recovery exist at all. Evaluated at call time over
@@ -2362,6 +2415,26 @@ export function createServeApp(
     });
   }
 
+  let agentHostRateLimiter: RateLimiterInstance | undefined;
+  // `session_send` relay for agent turns this daemon runs as a Host. Before
+  // the bearer gate: the MCP child holds only a per-run token, and the route
+  // answers loopback peers only. Mounted whatever the collaboration flag
+  // says, like the rest of being a runtime.
+  registerAgentHostRelayRoutes(app, {
+    hostname: opts.hostname,
+    getPort,
+    tls: Boolean(opts.tlsCert && opts.tlsKey),
+  });
+  // The URL this daemon's own loopback-only routes are reached on, for the
+  // `session_send` MCP child of an agent this daemon runs (read lazily: the
+  // port is 0 until `listen()` resolves).
+  const daemonLoopbackBaseUrl = () =>
+    relayBaseUrl({
+      hostname: opts.hostname,
+      port: getPort(),
+      tls: Boolean(opts.tlsCert && opts.tlsKey),
+    });
+
   if (anyAgentCollaborationEnabled()) {
     registerA2ATransportRoutes(
       app,
@@ -2369,12 +2442,33 @@ export function createServeApp(
       rateLimiter,
       isAgentCollaborationEnabledFor,
     );
+    // Host traffic (events every 250 ms per turn, heartbeats, polls) gets
+    // its own budget per authenticated Host instead of the general `read`
+    // tier; same opt-in as the general limiter.
+    agentHostRateLimiter = rateLimiter
+      ? createRateLimiter({
+          tiers: {
+            prompt: AGENT_HOST_RATE_LIMIT,
+            mutation: AGENT_HOST_RATE_LIMIT,
+            read: AGENT_HOST_RATE_LIMIT,
+          },
+          hostname: opts.hostname,
+        })
+      : undefined;
     registerAgentHostTransportRoutes(
       app,
       workspaceRegistry,
       rateLimiter,
       isAgentCollaborationEnabledFor,
+      agentHostRateLimiter,
     );
+    // `session_send` from a local session agent's MCP child: per-binding
+    // token, loopback peers only, so it sits before the daemon bearer gate.
+    registerSessionAgentSendRoute(app, {
+      workspaceRegistry,
+      isAgentCollaborationEnabledFor,
+      ...(rateLimiter ? { rateLimiter } : {}),
+    });
   }
 
   // Credentials are a listener-scoped set, not one token: while Local Control
@@ -3588,6 +3682,58 @@ export function createServeApp(
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
 
+  // Being joined as a runtime (`hosts/service`, `hosts/connect`) needs only
+  // the bearer gate, a trusted workspace and the mutation gate — not the
+  // collaboration opt-in, so a running daemon can join without a restart.
+  registerAgentHostRuntimeRoutes(
+    app,
+    '/workspaces/:workspace/agent',
+    (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) {
+        return undefined;
+      }
+      return runtime;
+    },
+    () => mutate(),
+  );
+
+  // Reconnect, in the background, every saved Host connection (`qwen agents
+  // join`, `hosts/connect`) of every trusted workspace, including ones
+  // registered or trusted after boot. The real daemon only, like
+  // scheduled-task residency below: tests and embeds that call
+  // createServeApp must not dial out on the strength of ~/.qwen.
+  if (deps.manageScheduledTaskSessions) {
+    const agentHostRestore = new AbortController();
+    (app.locals as { stopAgentHostRestore?: () => void }).stopAgentHostRestore =
+      () => agentHostRestore.abort();
+    void import('./agent-host-connections.js')
+      .then(({ restoreAgentHostConnections }) =>
+        restoreAgentHostConnections({
+          signal: agentHostRestore.signal,
+          runtimeFor: (workspaceCwd) => {
+            const runtime = workspaceRegistry.getByWorkspaceCwd(workspaceCwd);
+            if (!runtime?.generationGuard || runtime.generationGuard.closed) {
+              return undefined;
+            }
+            const trusted = runtime.primary
+              ? isPrimaryWorkspaceTrusted()
+              : runtime.trusted;
+            return trusted ? runtime : undefined;
+          },
+        }),
+      )
+      .catch((error: unknown) =>
+        writeStderrLine(
+          `qwen serve: could not restore Agent Host connections: ${error instanceof Error ? error.message : String(error)}`,
+        ),
+      );
+  }
+
   // Gated on the opt-in, and gated by *not registering* rather than by
   // refusing inside the handlers: `registerWorkspaceAgentRoutes` runs a
   // `recover()` sweep and arms a 5s interval as a side effect of registration,
@@ -3597,6 +3743,23 @@ export function createServeApp(
   // also what the absent `agent_collaboration_v1` capability tells clients.
   if (anyAgentCollaborationEnabled()) {
     registerWorkspaceAgentRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      isAgentCollaborationEnabledFor,
+    });
+    // Session multi-agent (agents answering @-mentions in a chat session),
+    // built next to the thread routes until those are removed.
+    registerSessionAgentRoutes(app, {
+      workspaceRegistry,
+      mutate,
+      isAgentCollaborationEnabledFor,
+      agentChainLimitFor,
+      agentTokenBudgetFor,
+      daemonLoopbackBaseUrl,
+      standaloneSessionService: () => standaloneSessionService,
+    });
+    // Squads: a leader agent that coordinates member agents in a session.
+    registerSessionAgentSquadRoutes(app, {
       workspaceRegistry,
       mutate,
       isAgentCollaborationEnabledFor,
@@ -4079,15 +4242,22 @@ export function createServeApp(
         stopWorkspaceGitState?: () => void;
         stopExtensionGenerationReconciler?: () => void;
         stopWorkspaceAgentRecovery?: () => void;
+        stopSessionAgentOrchestrators?: () => void;
       };
       stopAppResource(locals.stopMcpAppSandbox);
       stopAppResource(locals.stopScheduledTaskKeepalive);
       stopAppResource(locals.stopWorkspaceGitState);
       stopAppResource(locals.stopExtensionGenerationReconciler);
       stopAppResource(locals.stopWorkspaceAgentRecovery);
+      stopAppResource(locals.stopSessionAgentOrchestrators);
       stopAppResource(() => deviceFlowRegistry.dispose());
       stopAppResource(() => rateLimiter?.setDraining(true));
       stopAppResource(() => rateLimiter?.dispose());
+      stopAppResource(() => agentHostRateLimiter?.dispose());
+      stopAppResource(
+        (app.locals as { stopAgentHostRestore?: () => void })
+          .stopAgentHostRestore,
+      );
       stopAppResource(() => webTerminalRegistry.dispose());
       const drains = await Promise.allSettled(pendingDrains);
       stopAppResource(() => acpHandleRef.current?.dispose());
