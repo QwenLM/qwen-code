@@ -34,6 +34,12 @@ import type {
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { lspServerConfigHash } from './configHash.js';
+import {
+  getLspServerExtensions,
+  getLspWorkspaceRoots,
+} from './file-routing.js';
+import { isSubpaths } from '../utils/paths.js';
+import { resolveWorkspacePath } from '../utils/workspaceContext.js';
 
 const debugLogger = createDebugLogger('LSP');
 const SECURITY_SENSITIVE_ENV_KEYS = new Set([
@@ -282,7 +288,7 @@ export class LspServerManager {
       return;
     }
     const connection = handle.connection;
-    const tsFile = this.findFirstTypescriptFile();
+    const tsFile = this.findFirstTypescriptFile(handle);
     if (!tsFile) {
       return;
     }
@@ -292,13 +298,17 @@ export class LspServerManager {
     if (force) handle.warmedUp = false;
 
     const uri = pathToFileURL(tsFile).toString();
-    const languageId = tsFile.endsWith('.tsx')
-      ? 'typescriptreact'
-      : tsFile.endsWith('.jsx')
-        ? 'javascriptreact'
-        : tsFile.endsWith('.js')
-          ? 'javascript'
-          : 'typescript';
+    const extension = path.extname(tsFile).slice(1).toLowerCase();
+    const languageId =
+      handle.config.extensionToLanguage?.[extension] ??
+      handle.config.extensionToLanguage?.[`.${extension}`] ??
+      (extension === 'tsx'
+        ? 'typescriptreact'
+        : extension === 'jsx'
+          ? 'javascriptreact'
+          : ['js', 'mjs', 'cjs'].includes(extension)
+            ? 'javascript'
+            : 'typescript');
     try {
       const sent = synchronizeDocument(uri, languageId);
       const { change, openClose } = resolveTextDocumentSync(
@@ -1353,8 +1363,11 @@ export class LspServerManager {
   /**
    * Find a representative TypeScript/JavaScript file to warm up tsserver.
    */
-  private findFirstTypescriptFile(): string | undefined {
-    const patterns = ['**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx'];
+  private findFirstTypescriptFile(handle: LspServerHandle): string | undefined {
+    const patterns = getLspServerExtensions({
+      ...handle.config,
+      languages: ['typescript'],
+    }).map((extension) => `**/*.${extension}`);
     const excludePatterns = [
       '**/node_modules/**',
       '**/.git/**',
@@ -1362,7 +1375,12 @@ export class LspServerManager {
       '**/build/**',
     ];
 
-    for (const root of this.workspaceContext.getDirectories()) {
+    const roots = getLspWorkspaceRoots(
+      handle.config,
+      resolveWorkspacePath(this.workspaceRoot),
+      this.workspaceContext.getDirectories(),
+    );
+    for (const root of roots) {
       for (const pattern of patterns) {
         try {
           const matches = globSync(pattern, {
@@ -1372,7 +1390,10 @@ export class LspServerManager {
             nodir: true,
           });
           for (const file of matches) {
-            if (this.fileDiscoveryService.shouldIgnoreFile(file)) {
+            if (
+              this.fileDiscoveryService.shouldIgnoreFile(file) ||
+              !isSubpaths(roots, resolveWorkspacePath(file))
+            ) {
               continue;
             }
             return file;

@@ -317,6 +317,7 @@ describe('NativeLspService', () => {
     reconcileServerConfigs: unknown,
     extra: object = {},
   ) {
+    mockWorkspace.rootPath = dir;
     const service = newService(configAt(dir), { workspaceRoot: dir });
     internalsOf(service).serverManager = { reconcileServerConfigs, ...extra };
     return service;

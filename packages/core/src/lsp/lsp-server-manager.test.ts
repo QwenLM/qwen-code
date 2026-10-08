@@ -64,7 +64,7 @@ type ManagerPrivates = {
     config: LspServerConfig,
   ) => Promise<LspConnectionResult>;
   initializeLspServer: () => Promise<void>;
-  findFirstTypescriptFile(): string | undefined;
+  findFirstTypescriptFile(handle: LspServerHandle): string | undefined;
   buildProcessEnv(env: Record<string, string>): NodeJS.ProcessEnv;
   buildCommandProbeEnv(env: Record<string, string>): NodeJS.ProcessEnv;
   waitForSocketProcessSpawn(

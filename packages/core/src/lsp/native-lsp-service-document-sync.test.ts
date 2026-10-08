@@ -27,7 +27,7 @@ import {
   WorkspaceContext,
   resolveWorkspacePath,
 } from '../utils/workspaceContext.js';
-import { isSubpath } from '../utils/paths.js';
+import * as pathUtils from '../utils/paths.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { IdeContextStore } from '../ide/ideContext.js';
 import type {
@@ -123,14 +123,7 @@ describe('NativeLspService disk document synchronization', () => {
         getProjectRoot: () => directory,
         isTrustedFolder: () => true,
       } as unknown as Config,
-      {
-        getDirectories: () => [directory],
-        isPathWithinWorkspace: (target: string) =>
-          isSubpath(
-            resolveWorkspacePath(directory),
-            resolveWorkspacePath(target),
-          ),
-      } as unknown as WorkspaceContext,
+      new WorkspaceContext(directory),
       new EventEmitter(),
       { shouldIgnoreFile: () => false } as unknown as FileDiscoveryService,
       {} as IdeContextStore,
@@ -292,6 +285,9 @@ describe('NativeLspService disk document synchronization', () => {
       getProjectRoot: () => directory,
       isLspEnabled: () => true,
       getLspClient: () => new NativeLspClient(service),
+      getWorkspaceContext: () =>
+        (service as unknown as { workspaceContext: WorkspaceContext })
+          .workspaceContext,
     } as unknown as Config);
   }
   const execute = (tool: LspTool, params: LspToolParams) =>
@@ -492,6 +488,71 @@ describe('NativeLspService disk document synchronization', () => {
       },
     );
 
+    it.each([
+      ['terraform', 'main.tf'],
+      ['ruby', 'Gemfile'],
+      ['ruby', 'Rakefile'],
+      ['makefile', 'Makefile'],
+      ['ruby', 'Podfile'],
+      ['ruby', 'Vagrantfile'],
+      ['plaintext', 'Procfile'],
+      ['groovy', 'Jenkinsfile'],
+      ['starlark', 'BUILD'],
+      ['starlark', 'WORKSPACE'],
+      ['just', 'justfile'],
+      ['cmake', 'CMakeLists.txt'],
+      ['protobuf', 'main.proto'],
+      ['elixir', 'main.exs'],
+      ['json', 'main.jsonc'],
+      ['shellscript', 'main.zsh'],
+      ['solidity', 'main.sol'],
+      ['scss', 'main.scss'],
+      ['kotlin', 'build.gradle.kts'],
+      ['typescript-language-server', 'custom.ts'],
+      ['constructor', 'custom.extension'],
+      ['__proto__', 'custom.extension'],
+      ['typescript', 'main.js'],
+      ['typescript', 'main.jsx'],
+      ['typescript', 'main.mjs'],
+      ['typescript', 'main.cjs'],
+    ])(
+      'preserves scope-checked dispatch for %s / %s',
+      async (language, name) => {
+        handle.config.languages = [language];
+        const [, target] = addFile(name, 'text');
+
+        await run(service.diagnostics(target));
+
+        expect(connection.send).toHaveBeenCalledWith(
+          didOpen('text', 1, target, language),
+        );
+        expect(connection.request).toHaveBeenCalledWith(
+          'textDocument/diagnostic',
+          { textDocument: { uri: target } },
+        );
+      },
+    );
+
+    it.each(['missing', 'unready', 'disconnected'])(
+      'reports an explicit %s server as unavailable, not a clean file',
+      async (state) => {
+        if (state === 'unready') handle.status = 'IN_PROGRESS';
+        if (state === 'disconnected') handle.connection = undefined;
+        const result = await execute(lspTool(), {
+          operation: 'diagnostics',
+          filePath: file,
+          serverName: state === 'missing' ? 'missing' : 'test',
+        });
+
+        expect(result.llmContent).toContain(
+          state === 'missing' ? 'not configured' : 'not ready',
+        );
+        expect(result.llmContent).not.toContain('No diagnostics found');
+        expect(connection.send).not.toHaveBeenCalled();
+        expect(connection.request).not.toHaveBeenCalled();
+      },
+    );
+
     it('does not infer Cython as ordinary Python', async () => {
       handle.config.languages = ['python'];
       const [, target] = addFile('sample.pyx', 'text');
@@ -587,7 +648,15 @@ describe('NativeLspService disk document synchronization', () => {
       );
     });
 
-    it.each(['clangd', path.join(path.sep, 'tools', 'clangd'), 'clangd.exe'])(
+    it.each([
+      'clangd',
+      path.join(path.sep, 'tools', 'clangd'),
+      'clangd.exe',
+      'clangd-18',
+      'clangd-19.1',
+      'clangd-18.exe',
+      path.join(path.sep, 'tools', 'clangd-18'),
+    ])(
       'routes C files with the documented cpp configuration and %s command',
       async (command) => {
         useRealManager();
@@ -638,6 +707,61 @@ describe('NativeLspService disk document synchronization', () => {
         query: 'main',
       });
     });
+
+    it.each(
+      (['cpp', 'typescript'] as const).flatMap((language) =>
+        [false, true].map((inside) => ({ language, inside })),
+      ),
+    )(
+      'keeps $language symbol warmup inside its subroot, inside file $inside',
+      async ({ language, inside }) => {
+        const sub = path.join(directory, 'sub');
+        fs.mkdirSync(sub);
+        const extension = language === 'cpp' ? 'c' : 'ts';
+        addFile(`outside.${extension}`, 'outside');
+        const insideFile = path.join(sub, `inside.${extension}`);
+        if (inside) fs.writeFileSync(insideFile, 'inside');
+        handle.config.languages = [language];
+        handle.config.command =
+          language === 'cpp' ? 'clangd-18' : 'typescript-language-server';
+        handle.config.workspaceFolder = sub;
+        if (language === 'typescript') {
+          vi.mocked(manager.warmupTypescriptServer).mockRestore();
+          connection.request.mockResolvedValue({ message: 'No Project' });
+        }
+
+        await run(service.workspaceSymbols('main'));
+
+        expect(openedUris(connection)).toEqual(
+          inside ? [pathToFileURL(insideFile).toString()] : [],
+        );
+        expect([...(openedDocuments().get('test')?.keys() ?? [])]).toEqual(
+          inside ? [pathToFileURL(insideFile).toString()] : [],
+        );
+        connection.send.mockClear();
+        await workspaceDiagnostics();
+        expect(connection.send).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      ['cpp', 'cxx'],
+      ['cpp', 'hpp'],
+      ['python', 'py'],
+    ])(
+      'discovers the sole .%s / .%s symbol warmup candidate',
+      async (language, extension) => {
+        fs.unlinkSync(file);
+        handle.config.languages = [language];
+        const [, target] = addFile(`sample.${extension}`, 'text');
+
+        await run(service.workspaceSymbols('main'));
+
+        expect(connection.send).toHaveBeenCalledWith(
+          didOpen('text', 1, target, language),
+        );
+      },
+    );
 
     it.each(['cpp-only-lsp', 'clangd-wrapper'])(
       'does not assume %s supports C because its language is cpp',
@@ -701,6 +825,8 @@ describe('NativeLspService disk document synchronization', () => {
           {} as IdeContextStore,
         );
         handle.config.rootUri = pathToFileURL(primary).toString();
+        manager = (service as unknown as { serverManager: LspServerManager })
+          .serverManager;
         useHandles([['test', handle]]);
       });
 
@@ -721,6 +847,354 @@ describe('NativeLspService disk document synchronization', () => {
           );
         },
       );
+
+      it.each([false, true])(
+        'drops revoked tracked URIs and preserves survivors, connection replaced %s',
+        async (replacement) => {
+          const targetFile = path.join(primary, 'main.ts');
+          fs.writeFileSync(targetFile, 'primary');
+          const primaryUri = pathToFileURL(targetFile).toString();
+          await run(service.diagnostics(extraUri));
+          await run(service.diagnostics(primaryUri));
+          workspace.removeDirectory(extra);
+          fs.writeFileSync(path.join(extra, 'source file.ts'), 'revoked');
+          const active = replacement ? replaceConnection() : connection;
+          active.send.mockClear();
+          const read = vi.spyOn(fs, 'readFileSync');
+          try {
+            await workspaceDiagnostics();
+            expect(
+              read.mock.calls.some(
+                ([target]) => target === path.join(extra, 'source file.ts'),
+              ),
+            ).toBe(false);
+            expect(
+              active.send.mock.calls.some(
+                ([message]) => docUri(message) === extraUri,
+              ),
+            ).toBe(false);
+            expect(openedDocuments().get('test')?.has(extraUri)).toBe(false);
+            if (replacement) expect(openedUris(active)).toEqual([primaryUri]);
+            const replay = (
+              service as unknown as { replayUris: Map<string, Set<string>> }
+            ).replayUris;
+            expect(replay.get('test')?.has(extraUri)).toBeFalsy();
+          } finally {
+            read.mockRestore();
+          }
+
+          workspace.addDirectory(extra);
+          active.send.mockClear();
+          await run(service.diagnostics(extraUri));
+          expect(openedUris(active)).toEqual([extraUri]);
+          expectLastSent(
+            didOpen('revoked', replacement ? 1 : 2, extraUri),
+            active,
+          );
+          expect(
+            active.send.mock.calls
+              .filter(([message]) => message.method === 'textDocument/didClose')
+              .map(([message]) => docUri(message)),
+          ).toEqual(replacement ? [] : [extraUri]);
+        },
+      );
+
+      it.each(
+        ([1, 2] as const).flatMap((sync) =>
+          ['removed', 'unresolvable'].flatMap((scope) =>
+            ['hover', 'workspace'].map((recovery) => ({
+              sync,
+              scope,
+              recovery,
+            })),
+          ),
+        ),
+      )(
+        'balances same-connection sync $sync after $scope scope loss via $recovery',
+        async ({ sync, scope, recovery }) => {
+          handle.textDocumentSync = sync;
+          const buffers = new Map<string, string>();
+          const send = connection.send.getMockImplementation()!;
+          connection.send.mockImplementation((message) => {
+            const params = message.params as {
+              textDocument: { uri: string; text?: string };
+              contentChanges?: Array<{ text: string }>;
+            };
+            const target = params.textDocument.uri;
+            if (message.method === 'textDocument/didOpen') {
+              if (buffers.has(target)) return;
+              buffers.set(target, params.textDocument.text!);
+            } else if (message.method === 'textDocument/didClose') {
+              buffers.delete(target);
+            } else if (message.method === 'textDocument/didChange') {
+              buffers.set(target, params.contentChanges![0]!.text);
+            }
+            send(message);
+          });
+          connection.request.mockImplementation(async (method, params) =>
+            method === 'textDocument/hover'
+              ? {
+                  contents: buffers.get(
+                    (params as { textDocument: { uri: string } }).textDocument
+                      .uri,
+                  ),
+                }
+              : [],
+          );
+          expect((await hover(extraUri))?.contents).toBe('extra');
+          const parked = `${extra}-parked`;
+          if (scope === 'removed') {
+            workspace.removeDirectory(extra);
+          } else {
+            fs.renameSync(extra, parked);
+            fs.writeFileSync(extra, 'not a directory');
+          }
+          connection.send.mockClear();
+          const read = vi.spyOn(fs, 'readFileSync');
+          try {
+            await workspaceDiagnostics();
+            await workspaceDiagnostics();
+            expect(read).not.toHaveBeenCalled();
+            expect(connection.send).not.toHaveBeenCalled();
+            expect(openedDocuments().get('test')?.has(extraUri)).toBe(false);
+          } finally {
+            read.mockRestore();
+          }
+          if (scope === 'removed') {
+            workspace.addDirectory(extra);
+          } else {
+            fs.unlinkSync(extra);
+            fs.renameSync(parked, extra);
+          }
+          fs.writeFileSync(path.join(extra, 'source file.ts'), 'current');
+          if (recovery === 'workspace') {
+            await workspaceDiagnostics();
+            expect(buffers.get(extraUri)).toBe('current');
+          }
+
+          expect((await hover(extraUri))?.contents).toBe('current');
+          expect(buffers.get(extraUri)).toBe('current');
+          expect(
+            connection.send.mock.calls.map(([message]) => message),
+          ).toEqual([
+            {
+              jsonrpc: '2.0',
+              method: 'textDocument/didClose',
+              params: { textDocument: { uri: extraUri } },
+            },
+            didOpen('current', 2, extraUri),
+          ]);
+        },
+      );
+
+      it('does not revive hierarchy tokens after same-text scope restoration', async () => {
+        const [previous] = await prepare(extraUri);
+        workspace.removeDirectory(extra);
+        await workspaceDiagnostics();
+        workspace.addDirectory(extra);
+        const [current] = await prepare(extraUri);
+
+        expect(current!.documentRevision).not.toBe(previous!.documentRevision);
+        await expect(service.incomingCalls(previous!)).rejects.toThrow(AGAIN);
+      });
+
+      it.each(['query', 'workspace'])(
+        'discards an obsolete close after connection replacement via %s',
+        async (recovery) => {
+          await run(service.diagnostics(extraUri));
+          workspace.removeDirectory(extra);
+          await workspaceDiagnostics();
+          const replacement = replaceConnection();
+          workspace.addDirectory(extra);
+          if (recovery === 'workspace') await workspaceDiagnostics();
+          else await run(service.diagnostics(extraUri));
+
+          expect(replacement.send).toHaveBeenCalledExactlyOnceWith(
+            didOpen('extra', 1, extraUri),
+          );
+        },
+      );
+
+      it('defers a revoked pending close without stranding a healthy survivor', async () => {
+        const targetFile = path.join(primary, 'main.ts');
+        fs.writeFileSync(targetFile, 'primary');
+        const primaryUri = pathToFileURL(targetFile).toString();
+        await run(service.diagnostics(extraUri));
+        await run(service.diagnostics(primaryUri));
+        fs.unlinkSync(path.join(extra, 'source file.ts'));
+        const send = connection.send.getMockImplementation()!;
+        connection.send.mockImplementation((message) => {
+          if (message.method === 'textDocument/didClose')
+            throw new Error('close failed');
+          send(message);
+        });
+        await expect(run(service.diagnostics(extraUri))).rejects.toThrow(
+          'ENOENT',
+        );
+        workspace.removeDirectory(extra);
+        fs.writeFileSync(targetFile, 'survivor');
+        connection.send.mockClear();
+
+        await workspaceDiagnostics();
+
+        expect(connection.send).toHaveBeenCalledExactlyOnceWith({
+          jsonrpc: '2.0',
+          method: 'textDocument/didChange',
+          params: {
+            textDocument: { uri: primaryUri, version: 2 },
+            contentChanges: [{ text: 'survivor' }],
+          },
+        });
+        const lifecycles = (
+          service as unknown as {
+            documentLifecycles: Map<string, Map<string, unknown>>;
+          }
+        ).documentLifecycles;
+        expect(lifecycles.get('test')?.get(extraUri)).toEqual({
+          version: 1,
+          readFailures: 1,
+          pendingClose: { error: expect.any(Error) },
+        });
+        fs.writeFileSync(path.join(extra, 'source file.ts'), 'restored');
+        workspace.addDirectory(extra);
+        connection.send.mockClear();
+        connection.request.mockClear();
+        const read = vi.spyOn(fs, 'readFileSync');
+        try {
+          await expect(run(service.diagnostics(extraUri))).rejects.toThrow(
+            'still cannot close',
+          );
+          expect(read).not.toHaveBeenCalled();
+          expect(connection.request).not.toHaveBeenCalled();
+          expect(openedUris(connection)).toEqual([]);
+        } finally {
+          read.mockRestore();
+        }
+        fs.writeFileSync(targetFile, 'next survivor');
+        await expect(workspaceDiagnostics()).rejects.toThrow(
+          'still cannot close',
+        );
+        expect(connection.send).toHaveBeenCalledWith(
+          didChange('next survivor', 3, primaryUri),
+        );
+        connection.send.mockImplementation(send);
+        connection.send.mockClear();
+        await workspaceDiagnostics();
+        expect(connection.send.mock.calls.map(([message]) => message)).toEqual([
+          {
+            jsonrpc: '2.0',
+            method: 'textDocument/didClose',
+            params: { textDocument: { uri: extraUri } },
+          },
+          didOpen('restored', 2, extraUri),
+        ]);
+      });
+
+      it('does not replay revoked files during configuration reload', async () => {
+        const targetFile = path.join(primary, 'main.ts');
+        fs.writeFileSync(targetFile, 'primary');
+        const primaryUri = pathToFileURL(targetFile).toString();
+        await run(service.diagnostics(extraUri));
+        await run(service.diagnostics(primaryUri));
+        workspace.removeDirectory(extra);
+        const replacement = createConnection();
+        vi.spyOn(manager, 'reconcileServerConfigs').mockImplementation(
+          async () => {
+            handle.connection = replacement;
+            return {
+              added: [],
+              removed: [],
+              restarted: ['test'],
+              unchanged: [],
+              failed: [],
+            };
+          },
+        );
+
+        await run(service.reinitialize());
+
+        expect(openedUris(replacement)).toEqual([primaryUri]);
+        expect(openedDocuments().get('test')?.has(extraUri)).toBe(false);
+      });
+
+      it.each(['incomingCalls', 'outgoingCalls'] as const)(
+        'does not read a revoked hierarchy target before %s',
+        async (method) => {
+          const [item] = await prepare(extraUri);
+          workspace.removeDirectory(extra);
+          connection.request.mockClear();
+          const read = vi.spyOn(fs, 'readFileSync');
+          try {
+            await expect(service[method](item!)).rejects.toThrow(AGAIN);
+            expect(read).not.toHaveBeenCalled();
+            expect(connection.request).not.toHaveBeenCalled();
+          } finally {
+            read.mockRestore();
+          }
+        },
+      );
+
+      it('explains an external navigation target and its follow-up refusal', async () => {
+        const targetFile = path.join(primary, 'main.ts');
+        fs.writeFileSync(targetFile, 'primary');
+        workspace.removeDirectory(extra);
+        connection.request.mockImplementation(async (method) =>
+          method === 'textDocument/definition'
+            ? [{ uri: extraUri, range }]
+            : method === 'textDocument/hover'
+              ? { contents: 'hover answer' }
+              : [],
+        );
+        const tool = lspTool();
+        const definitions = await execute(tool, {
+          operation: 'goToDefinition',
+          filePath: targetFile,
+          line: 1,
+        });
+        expect(definitions.llmContent).toContain('outside workspace');
+        expect(definitions.llmContent).toContain('/directory add');
+        connection.request.mockClear();
+        const refused = await execute(tool, {
+          operation: 'hover',
+          filePath: path.join(extra, 'source file.ts'),
+          line: 1,
+        });
+        expect(refused.llmContent).toContain(
+          'outside the current workspace directories',
+        );
+        expect(refused.llmContent).not.toContain(
+          'No ready LSP server matches document',
+        );
+        expect(connection.request).not.toHaveBeenCalled();
+
+        workspace.addDirectory(extra);
+        const allowed = await execute(tool, {
+          operation: 'hover',
+          filePath: path.join(extra, 'source file.ts'),
+          line: 1,
+        });
+        expect(allowed.llmContent).toContain('hover answer');
+      });
+
+      it('registers a raw root alias as a resolved directory', async () => {
+        const alias = path.join(directory, 'primary-alias');
+        fs.symlinkSync(primary, alias, 'junction');
+        workspace = new WorkspaceContext(alias);
+        (
+          service as unknown as { workspaceContext: WorkspaceContext }
+        ).workspaceContext = workspace;
+        const targetFile = path.join(primary, 'main.ts');
+        fs.writeFileSync(targetFile, 'primary');
+        const target = pathToFileURL(targetFile).toString();
+
+        await run(service.documentSymbols(target));
+
+        expect(workspace.getDirectories()).toEqual([primary]);
+        expect(connection.request).toHaveBeenCalledWith(
+          'textDocument/documentSymbol',
+          { textDocument: { uri: target } },
+        );
+      });
 
       it('resolves an included directory alias through WorkspaceContext', async () => {
         const alias = path.join(fs.realpathSync(directory), 'extra-alias');
@@ -743,7 +1217,7 @@ describe('NativeLspService disk document synchronization', () => {
       it('honors runtime directory additions and removals even for an open document', async () => {
         expect(workspace.removeDirectory(extra)).toBe(true);
         await expect(run(service.diagnostics(extraUri))).rejects.toThrow(
-          'No ready LSP server matches document',
+          'outside the current workspace directories',
         );
         expect(connection.send).not.toHaveBeenCalled();
         expect(connection.request).not.toHaveBeenCalled();
@@ -762,7 +1236,7 @@ describe('NativeLspService disk document synchronization', () => {
 
         expect(workspace.removeDirectory(extra)).toBe(true);
         await expect(run(service.diagnostics(extraUri))).rejects.toThrow(
-          'No ready LSP server matches document',
+          'outside the current workspace directories',
         );
         expect(connection.send).not.toHaveBeenCalled();
         expect(connection.request).not.toHaveBeenCalled();
@@ -792,7 +1266,7 @@ describe('NativeLspService disk document synchronization', () => {
             pathToFileURL(path.join(primary, 'main.ts')).toString(),
           ]) {
             await expect(run(service.diagnostics(rejected))).rejects.toThrow(
-              'No ready LSP server matches document',
+              "outside every ready LSP server's workspaceFolder",
             );
           }
           expect(connection.send).not.toHaveBeenCalled();
@@ -840,7 +1314,9 @@ describe('NativeLspService disk document synchronization', () => {
           ).toString();
 
           await expect(run(service.diagnostics(target))).rejects.toThrow(
-            'No ready LSP server matches document',
+            destination === 'included'
+              ? "outside every ready LSP server's workspaceFolder"
+              : 'outside the current workspace directories',
           );
           expect(connection.send).not.toHaveBeenCalled();
           expect(connection.request).not.toHaveBeenCalled();
@@ -873,7 +1349,7 @@ describe('NativeLspService disk document synchronization', () => {
         expect(workspace.removeDirectory(extra)).toBe(true);
 
         await expect(run(service.diagnostics(extraUri))).rejects.toThrow(
-          'No ready LSP server matches document',
+          'outside the current workspace directories',
         );
         expect(connection.send).not.toHaveBeenCalled();
         expect(connection.request).not.toHaveBeenCalled();
@@ -902,7 +1378,7 @@ describe('NativeLspService disk document synchronization', () => {
         expect(workspace.isPathWithinWorkspace(targetFile)).toBe(true);
 
         await expect(run(service.diagnostics(target))).rejects.toThrow(
-          'No ready LSP server matches document',
+          'outside the current workspace directories',
         );
         expect(connection.send).not.toHaveBeenCalled();
         expect(connection.request).not.toHaveBeenCalled();
@@ -938,7 +1414,7 @@ describe('NativeLspService disk document synchronization', () => {
         ).toBe(false);
 
         await expect(run(service.diagnostics(target))).rejects.toThrow(
-          'No ready LSP server matches document',
+          'outside the current workspace directories',
         );
         expect(connection.send).not.toHaveBeenCalled();
         expect(connection.request).not.toHaveBeenCalled();
@@ -959,6 +1435,22 @@ describe('NativeLspService disk document synchronization', () => {
         expect(connection.request).not.toHaveBeenCalled();
       });
 
+      it('rejects an explicit server override outside workspace before reading', async () => {
+        workspace.removeDirectory(extra);
+        handle.config.workspaceFolder = extra;
+        const read = vi.spyOn(fs, 'readFileSync');
+        try {
+          await expect(
+            run(service.diagnostics(extraUri, 'test')),
+          ).rejects.toThrow('outside the current workspace directories');
+          expect(read).not.toHaveBeenCalled();
+          expect(connection.send).not.toHaveBeenCalled();
+          expect(connection.request).not.toHaveBeenCalled();
+        } finally {
+          read.mockRestore();
+        }
+      });
+
       it('rejects an unregistered sibling directory', async () => {
         const outside = `${extra}-other`;
         fs.mkdirSync(outside);
@@ -967,7 +1459,7 @@ describe('NativeLspService disk document synchronization', () => {
 
         await expect(
           run(service.diagnostics(pathToFileURL(targetFile).toString())),
-        ).rejects.toThrow('No ready LSP server matches document');
+        ).rejects.toThrow('outside the current workspace directories');
         expect(connection.send).not.toHaveBeenCalled();
         expect(connection.request).not.toHaveBeenCalled();
       });
@@ -1094,6 +1586,92 @@ describe('NativeLspService disk document synchronization', () => {
       await run(service.diagnostics(uri, 'test'));
 
       expect(connection.request).toHaveBeenCalled();
+    });
+
+    it.each(
+      ['ELOOP', 'EACCES'].flatMap((code) =>
+        [false, true].map((badFirst) => ({ code, badFirst })),
+      ),
+    )(
+      'isolates a handle root with $code, bad handle first $badFirst',
+      async ({ code, badFirst }) => {
+        const badRoot = path.join(directory, 'bad-root');
+        const badConnection = createConnection();
+        const bad = {
+          ...handle,
+          config: { ...handle.config, workspaceFolder: badRoot },
+          connection: badConnection,
+        };
+        const realpath = fs.realpathSync;
+        const resolve = vi
+          .spyOn(fs, 'realpathSync')
+          .mockImplementation((target) => {
+            if (target === badRoot) {
+              throw Object.assign(new Error('unusable root'), {
+                code,
+                path: badRoot,
+              });
+            }
+            return realpath(target);
+          });
+        try {
+          const entries: Array<[string, LspServerHandle]> = [
+            ['test', handle],
+            ['bad', bad],
+          ];
+          useHandles(badFirst ? entries.reverse() : entries);
+          await run(service.diagnostics(uri));
+          expect(connection.request).toHaveBeenCalledOnce();
+          expect(badConnection.send).not.toHaveBeenCalled();
+          expect(badConnection.request).not.toHaveBeenCalled();
+          expect(logger.warn).toHaveBeenCalledWith(
+            expect.stringContaining('unusable root'),
+            expect.any(Error),
+          );
+        } finally {
+          resolve.mockRestore();
+        }
+      },
+    );
+
+    it('names document resolution failures without reading or querying', async () => {
+      const regular = path.join(directory, 'regular');
+      fs.writeFileSync(regular, 'not a directory');
+      const read = vi.spyOn(fs, 'readFileSync');
+      try {
+        for (const target of [
+          pathToFileURL(path.join(regular, 'main.ts')).toString(),
+          'file://[invalid',
+        ]) {
+          await expect(run(service.diagnostics(target))).rejects.toThrow(
+            'Cannot resolve LSP document',
+          );
+        }
+        expect(read).not.toHaveBeenCalled();
+        expect(connection.send).not.toHaveBeenCalled();
+        expect(connection.request).not.toHaveBeenCalled();
+      } finally {
+        read.mockRestore();
+      }
+    });
+
+    it('reads workspace directories once for a multi-server routing filter', () => {
+      useHandles([
+        ['test', handle],
+        ['second', { ...handle }],
+        ['third', { ...handle }],
+      ]);
+      const workspace = (
+        service as unknown as { workspaceContext: WorkspaceContext }
+      ).workspaceContext;
+      const directories = vi.spyOn(workspace, 'getDirectories');
+      const containment = vi.spyOn(pathUtils, 'isSubpaths');
+      const router = service as unknown as {
+        getReadyHandles(serverName?: string, target?: string): unknown[];
+      };
+      expect(router.getReadyHandles(undefined, uri)).toHaveLength(3);
+      expect(directories).toHaveBeenCalledOnce();
+      expect(containment).toHaveBeenCalledOnce();
     });
 
     it('keeps workspace diagnostics querying all ready servers', async () => {
@@ -1696,6 +2274,38 @@ describe('NativeLspService disk document synchronization', () => {
       expect.stringContaining(
         'typescript warm-up delivered no notification (textDocumentSync=undefined)',
       ),
+    );
+  });
+
+  it.each([
+    ['mts', 'typescript'],
+    ['cts', 'typescript'],
+    ['mjs', 'javascript'],
+    ['cjs', 'javascript'],
+  ])(
+    'warms a .%s-only TypeScript workspace using %s',
+    async (extension, languageId) => {
+      fs.unlinkSync(file);
+      const [, target] = addFile(`module.${extension}`, 'module');
+      useTypescriptManager();
+
+      await run(service.workspaceSymbols('module'));
+
+      expect(connection.send).toHaveBeenCalledExactlyOnceWith(
+        didOpen('module', 1, target, languageId),
+      );
+    },
+  );
+
+  it('honors an explicit TypeScript warmup extension map and language ID', async () => {
+    const [, target] = addFile('component.jsx', 'component');
+    handle.config.extensionToLanguage = { jsx: 'custom-jsx' };
+    useTypescriptManager();
+
+    await run(service.workspaceSymbols('component'));
+
+    expect(connection.send).toHaveBeenCalledExactlyOnceWith(
+      didOpen('component', 1, target, 'custom-jsx'),
     );
   });
 
@@ -2583,7 +3193,9 @@ describe('NativeLspService disk document synchronization', () => {
     expect(discovery).toHaveBeenCalledTimes(1);
     // A runtime directory removal does not replace the connection, so the WeakMap
     // entry survives and must be revalidated against the current roots.
-    const secondRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-root-'));
+    const secondRoot = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-root-')),
+    );
     fs.writeFileSync(path.join(secondRoot, 'other.ts'), 'other');
     (
       service as unknown as { workspaceContext: WorkspaceContext }

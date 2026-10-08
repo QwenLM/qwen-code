@@ -9,7 +9,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
-import { unescapePath } from '../utils/paths.js';
+import { isSubpaths, unescapePath } from '../utils/paths.js';
+import { resolveWorkspacePath } from '../utils/workspaceContext.js';
 import type { Config } from '../config/config.js';
 import type {
   LspCallHierarchyIncomingCall,
@@ -864,10 +865,22 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
   ): string {
     const start = location.range.start;
     let filePath = location.uri;
+    let scopeSuffix = '';
 
-    if (filePath.startsWith('file://')) {
-      filePath = fileURLToPath(filePath);
-      filePath = path.relative(workspaceRoot, filePath) || '.';
+    if (/^file:/i.test(filePath)) {
+      try {
+        const absolutePath = fileURLToPath(filePath);
+        filePath = path.relative(workspaceRoot, absolutePath) || '.';
+        const directories = this.config
+          .getWorkspaceContext?.()
+          .getDirectories() ?? [resolveWorkspacePath(workspaceRoot)];
+        if (!isSubpaths(directories, resolveWorkspacePath(absolutePath))) {
+          scopeSuffix =
+            ' [outside workspace; add its directory with /directory add before file queries]';
+        }
+      } catch {
+        scopeSuffix = ' [unresolvable file; cannot query]';
+      }
     }
 
     const serverSuffix =
@@ -875,22 +888,17 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
         ? ` [${location.serverName}]`
         : '';
 
-    return `${filePath}:${(start.line ?? 0) + 1}:${(start.character ?? 0) + 1}${serverSuffix}`;
+    return `${filePath}:${(start.line ?? 0) + 1}:${(start.character ?? 0) + 1}${serverSuffix}${scopeSuffix}`;
   }
 
   private formatLocationWithoutServer(
     location: LspLocation,
     workspaceRoot: string,
   ): string {
-    const { uri, range } = location;
-    let filePath = uri;
-    if (uri.startsWith('file://')) {
-      filePath = fileURLToPath(uri);
-      filePath = path.relative(workspaceRoot, filePath) || '.';
-    }
-    const line = (range.start.line ?? 0) + 1;
-    const character = (range.start.character ?? 0) + 1;
-    return `${filePath}:${line}:${character}`;
+    return this.formatLocationWithServer(
+      { uri: location.uri, range: location.range },
+      workspaceRoot,
+    );
   }
 
   private formatCallHierarchyItemLine(

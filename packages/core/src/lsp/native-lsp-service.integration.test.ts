@@ -527,7 +527,7 @@ describe('NativeLspService Integration Tests', () => {
     it('should report unavailable diagnostics when no server is ready', async () => {
       const uri = 'file:///test/workspace/src/app.ts';
       await expect(lspService.diagnostics(uri)).rejects.toThrow(
-        `No ready LSP server matches document ${uri}`,
+        'No LSP servers are configured',
       );
     });
 
@@ -541,7 +541,7 @@ describe('NativeLspService Integration Tests', () => {
 
       await expect(
         lspService.codeActions(uri, range(0, 0, 0, 10), context),
-      ).rejects.toThrow(`No ready LSP server matches document ${uri}`);
+      ).rejects.toThrow('No LSP servers are configured');
     });
   });
 

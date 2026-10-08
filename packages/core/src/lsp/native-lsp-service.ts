@@ -53,33 +53,17 @@ import * as fs from 'node:fs';
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import { promises as fsp } from 'node:fs';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
-import { getLanguageFromFilePath } from '../utils/language-detection.js';
-import { isSubpath } from '../utils/paths.js';
+import { isSubpaths } from '../utils/paths.js';
+import {
+  getLspServerExtensions,
+  getLspWorkspaceRoots,
+  isLspDocumentApplicable,
+} from './file-routing.js';
 import { resolveWorkspacePath } from '../utils/workspaceContext.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { globSync } from 'glob';
 
 const debugLogger = createDebugLogger('LSP');
-
-/**
- * Mapping from LSP language identifiers to their standard file extensions.
- * Languages whose ID is already a valid extension (e.g. "java", "go")
- * are handled by the fallback in getWorkspaceSymbolExtensions().
- */
-const LANGUAGE_ID_TO_EXTENSIONS: Record<string, string[]> = {
-  typescript: ['ts', 'tsx', 'mts', 'cts'],
-  typescriptreact: ['tsx'],
-  javascript: ['js', 'jsx'],
-  javascriptreact: ['jsx'],
-  python: ['py', 'pyi', 'pyw'],
-  cpp: ['cpp', 'cc', 'cxx', 'h', 'hpp', 'hh', 'hxx', 'inl', 'tpp'],
-  'objective-c': ['m'],
-  'objective-cpp': ['mm'],
-  csharp: ['cs'],
-  fsharp: ['fs', 'fsi', 'fsx'],
-  ruby: ['rb'],
-  shellscript: ['sh'],
-};
 
 const DEFAULT_EXCLUDE_PATTERNS = [
   '**/node_modules/**',
@@ -345,11 +329,14 @@ export class NativeLspService {
     }
   }
 
-  /** The tracked set for one server: delivered documents and durable replay obligations. */
+  /** Delivered documents, replay obligations and unfinished closes. */
   private trackedUrisFor(serverName: string): Set<string> {
     return new Set([
       ...(this.openedDocuments.get(serverName)?.keys() ?? []),
       ...(this.replayUris.get(serverName) ?? []),
+      ...[...(this.documentLifecycles.get(serverName) ?? [])].flatMap(
+        ([uri, lifecycle]) => (lifecycle.pendingClose ? [uri] : []),
+      ),
     ]);
   }
 
@@ -533,7 +520,7 @@ export class NativeLspService {
    * Get ready server handles filtered by optional server name.
    * Each handle is guaranteed to have a valid connection.
    *
-   * @param serverName - Explicit server override, bypassing automatic routing
+   * @param serverName - Explicit override of language and server root, not workspace containment
    * @param uri - Document URI for automatic file-scoped routing
    * @returns Array of [serverName, handle] tuples with active connections
    */
@@ -541,78 +528,80 @@ export class NativeLspService {
     serverName?: string,
     uri?: string,
   ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
-    const filePath =
-      uri && /^file:/i.test(uri) && !serverName
-        ? fileURLToPath(uri)
-        : undefined;
-    const extension = filePath
-      ? path.extname(filePath).slice(1).toLowerCase()
-      : '';
-    const languages =
-      extension === 'mm'
-        ? ['objective-cpp']
-        : filePath
-          ? getLanguageFromFilePath(filePath)?.toLowerCase().split('/')
-          : undefined;
-    const resolvedFilePath = filePath
-      ? resolveWorkspacePath(filePath)
-      : undefined;
-    const primaryRoot = filePath
-      ? resolveWorkspacePath(this.workspaceRoot)
-      : this.workspaceRoot;
-    const handles = Array.from(
-      this.serverManager.getHandles().entries(),
-    ).filter(
+    const configured = this.serverManager.getHandles();
+    const handles = Array.from(configured.entries()).filter(
       (
         entry,
       ): entry is [
         string,
         LspServerHandle & { connection: LspConnectionInterface },
-      ] => {
-        const [name, handle] = entry;
-        if (
-          handle.status !== 'READY' ||
-          !handle.connection ||
-          (serverName && name !== serverName)
-        ) {
-          return false;
-        }
-        if (!resolvedFilePath) return true;
-        if (
-          !this.workspaceContext
-            .getDirectories()
-            .some((directory) => isSubpath(directory, resolvedFilePath))
-        ) {
-          return false;
-        }
-        const root = resolveWorkspacePath(
-          handle.config.workspaceFolder ??
-            (handle.config.rootUri
-              ? fileURLToPath(handle.config.rootUri)
-              : this.workspaceRoot),
-        );
-        const isPrimaryRoot =
-          isSubpath(root, primaryRoot) && isSubpath(primaryRoot, root);
-        if (!isPrimaryRoot && !isSubpath(root, resolvedFilePath)) {
-          return false;
-        }
-        return (
-          this.getWorkspaceSymbolExtensions(handle).includes(extension) ||
-          (Object.keys(handle.config.extensionToLanguage ?? {}).length === 0 &&
-            languages !== undefined &&
-            handle.config.languages.some((id) =>
-              languages.includes(
-                getLanguageFromFilePath(`file.${id}`)?.toLowerCase() ??
-                  id.toLowerCase(),
-              ),
-            ))
-        );
-      },
+      ] =>
+        entry[1].status === 'READY' &&
+        entry[1].connection !== undefined &&
+        (!serverName || entry[0] === serverName),
     );
-    if (filePath && handles.length === 0) {
-      throw new Error(`No ready LSP server matches document ${uri}`);
+    if (!uri) return handles;
+
+    const directories = /^file:/i.test(uri)
+      ? this.workspaceContext.getDirectories()
+      : [];
+    const resolvedFilePath = /^file:/i.test(uri)
+      ? this.resolveWorkspaceDocument(uri, directories)
+      : undefined;
+    if (handles.length === 0) {
+      const message = serverName
+        ? `LSP server ${serverName} is ${configured.has(serverName) ? 'not ready' : 'not configured'}; check /lsp`
+        : configured.size === 0
+          ? 'No LSP servers are configured; configure .lsp.json and check /lsp'
+          : 'No LSP servers are ready; check /lsp';
+      debugLogger.warn(message);
+      throw new Error(message);
     }
-    return handles;
+    if (!resolvedFilePath || serverName) return handles;
+
+    const primaryRoot = resolveWorkspacePath(this.workspaceRoot);
+    const scoped = handles.filter(([, handle]) => {
+      const roots = getLspWorkspaceRoots(
+        handle.config,
+        primaryRoot,
+        directories,
+      );
+      return roots === directories || isSubpaths(roots, resolvedFilePath);
+    });
+    if (scoped.length === 0) {
+      const message = `Document ${uri} is outside every ready LSP server's workspaceFolder or its root is unusable`;
+      debugLogger.warn(message);
+      throw new Error(message);
+    }
+    const applicable = scoped.filter(([, handle]) =>
+      isLspDocumentApplicable(handle.config, fileURLToPath(uri)),
+    );
+    if (applicable.length === 0) {
+      const message = `No ready LSP server matches document ${uri}; check extensionToLanguage and the configured languages`;
+      debugLogger.warn(message);
+      throw new Error(message);
+    }
+    return applicable;
+  }
+
+  private resolveWorkspaceDocument(
+    uri: string,
+    directories: readonly string[],
+  ): string {
+    let resolved: string;
+    try {
+      resolved = resolveWorkspacePath(fileURLToPath(uri));
+    } catch (error) {
+      const message = `Cannot resolve LSP document ${uri} inside the current workspace directories`;
+      debugLogger.warn(message, error);
+      throw new Error(message, { cause: error });
+    }
+    if (!isSubpaths(directories, resolved)) {
+      const message = `${uri} is outside the current workspace directories; add a directory with /directory add before querying`;
+      debugLogger.warn(message);
+      throw new Error(message);
+    }
+    return resolved;
   }
 
   /** Synchronize disk text before a query; only a new didOpen needs warmup delay. */
@@ -640,7 +629,29 @@ export class NativeLspService {
     languageId?: string,
     force = false,
   ): { sent: boolean; opened: boolean } {
-    if (!uri.startsWith('file://')) {
+    if (!/^file:/i.test(uri)) {
+      return { sent: false, opened: false };
+    }
+    try {
+      this.resolveWorkspaceDocument(
+        uri,
+        this.workspaceContext.getDirectories(),
+      );
+    } catch (error) {
+      // Losing scope does not close the peer's buffer; defer closure until scope returns.
+      const previous = this.openedDocuments.get(serverName)?.get(uri);
+      if (previous) {
+        this.documentLifecycles.get(serverName)?.set(uri, {
+          version: previous.version,
+          pendingClose: {
+            error: new Error('Document must be closed before reopening', {
+              cause: error,
+            }),
+          },
+        });
+      }
+      this.openedDocuments.get(serverName)?.delete(uri);
+      this.replayUris.get(serverName)?.delete(uri);
       return { sent: false, opened: false };
     }
     if (
@@ -831,14 +842,16 @@ export class NativeLspService {
     if (
       this.lastConnections.get(serverName) === handle.connection &&
       openedForServer &&
-      openedForServer.size > 0
+      [...openedForServer.keys()].some((uri) =>
+        this.isUsableWorkspaceSymbolFile(fileURLToPath(uri), handle),
+      )
     ) {
       return true;
     }
 
     const connection = handle.connection;
     let filePath = this.workspaceSymbolFiles.get(connection);
-    if (filePath && !this.isUsableWorkspaceSymbolFile(filePath)) {
+    if (filePath && !this.isUsableWorkspaceSymbolFile(filePath, handle)) {
       this.workspaceSymbolFiles.delete(connection);
       filePath = undefined;
     }
@@ -849,7 +862,7 @@ export class NativeLspService {
     try {
       // Even disk-reading servers need a readable discovery candidate, but
       // ordinary queries need not read text that cannot be delivered.
-      if (!this.isUsableWorkspaceSymbolFile(filePath)) {
+      if (!this.isUsableWorkspaceSymbolFile(filePath, handle)) {
         throw new Error(
           'Workspace symbol warmup candidate is no longer usable.',
         );
@@ -876,21 +889,26 @@ export class NativeLspService {
     return handle.connection === connection;
   }
 
-  private isUsableWorkspaceSymbolFile(filePath: string): boolean {
+  private isUsableWorkspaceSymbolFile(
+    filePath: string,
+    handle: LspServerHandle,
+  ): boolean {
     try {
       if (!fs.statSync(filePath).isFile()) return false;
       fs.accessSync(filePath, fs.constants.R_OK);
+      // Removing a directory does not replace the connection, so cached candidates
+      // must be revalidated against current workspace and server roots.
+      return isSubpaths(
+        getLspWorkspaceRoots(
+          handle.config,
+          resolveWorkspacePath(this.workspaceRoot),
+          this.workspaceContext.getDirectories(),
+        ),
+        resolveWorkspacePath(filePath),
+      );
     } catch {
       return false;
     }
-    // A cached candidate must still live under a current workspace root: removing
-    // a directory at runtime does not replace the connection, so without this the
-    // stale entry would re-open a file inside a root the user just revoked.
-    return this.workspaceContext
-      .getDirectories()
-      .some((root) =>
-        filePath.startsWith(root.endsWith(path.sep) ? root : root + path.sep),
-      );
   }
 
   /**
@@ -911,7 +929,11 @@ export class NativeLspService {
     const extGlob =
       extensions.length === 1 ? extensions[0]! : `{${extensions.join(',')}}`;
     const pattern = `**/*.${extGlob}`;
-    const roots = this.workspaceContext.getDirectories();
+    const roots = getLspWorkspaceRoots(
+      handle.config,
+      resolveWorkspacePath(this.workspaceRoot),
+      this.workspaceContext.getDirectories(),
+    );
 
     for (const root of roots) {
       try {
@@ -926,6 +948,15 @@ export class NativeLspService {
         });
         for (const match of matches) {
           if (this.fileDiscoveryService.shouldIgnoreFile(match)) {
+            continue;
+          }
+          if (!this.isUsableWorkspaceSymbolFile(match, handle)) {
+            debugLogger.warn(
+              `LSP workspace symbol warmup skipped for ${match}:`,
+              new Error(
+                'Workspace symbol warmup candidate is no longer usable.',
+              ),
+            );
             continue;
           }
           return match;
@@ -946,42 +977,7 @@ export class NativeLspService {
    *      back to treating the language ID itself as a file extension
    */
   private getWorkspaceSymbolExtensions(handle: LspServerHandle): string[] {
-    const extensions = new Set<string>();
-
-    // Prefer explicit extension-to-language mapping from server config
-    const extMapping = handle.config.extensionToLanguage;
-    if (extMapping) {
-      for (const key of Object.keys(extMapping)) {
-        const normalized = key.startsWith('.') ? key.slice(1) : key;
-        if (normalized) {
-          extensions.add(normalized.toLowerCase());
-        }
-      }
-    }
-
-    // Fall back to deriving extensions from language identifiers
-    if (extensions.size === 0) {
-      for (const language of handle.config.languages) {
-        const mapped = LANGUAGE_ID_TO_EXTENSIONS[language];
-        if (mapped) {
-          for (const ext of mapped) {
-            extensions.add(ext);
-          }
-        } else {
-          // For languages like "java", "go", "rust" etc.,
-          // the language ID itself is a valid file extension
-          extensions.add(language.toLowerCase());
-        }
-        if (
-          language === 'cpp' &&
-          /^clangd(?:\.exe)?$/i.test(path.basename(handle.config.command ?? ''))
-        ) {
-          extensions.add('c');
-        }
-      }
-    }
-
-    return Array.from(extensions);
+    return getLspServerExtensions(handle.config);
   }
 
   /**
@@ -1474,6 +1470,10 @@ export class NativeLspService {
     assertActive();
     const readText = (target: string): string | undefined => {
       try {
+        this.resolveWorkspaceDocument(
+          target,
+          this.workspaceContext.getDirectories(),
+        );
         return fs.readFileSync(fileURLToPath(target), 'utf-8');
       } catch {
         return undefined;
@@ -1626,6 +1626,10 @@ export class NativeLspService {
           if (originalText !== undefined) {
             let current: string;
             try {
+              this.resolveWorkspaceDocument(
+                location.uri,
+                this.workspaceContext.getDirectories(),
+              );
               current = fs.readFileSync(fileURLToPath(location.uri), 'utf-8');
             } catch {
               throw new StaleCallHierarchyItemError();
@@ -1901,20 +1905,6 @@ export class NativeLspService {
       if (this.lastConnections.get(name) !== connection) {
         this.parkTrackedUris(name);
         this.lastConnections.set(name, connection);
-      }
-      for (const [uri, lifecycle] of this.documentLifecycles.get(name) ?? []) {
-        if (lifecycle.pendingClose) {
-          try {
-            this.closeUnsynchronizableDocument(name, handle, uri);
-          } catch (error) {
-            // Name the close that is actually holding the document shut; rethrowing
-            // the retained read error reports a stale ENOENT for a file now present.
-            throw new Error(
-              `LSP server ${name} still cannot close ${uri}; refusing to reopen it (${(error as Error).message})`,
-              { cause: error },
-            );
-          }
-        }
       }
       let openedAny = false;
       let syncError: unknown;

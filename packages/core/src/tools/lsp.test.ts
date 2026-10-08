@@ -86,11 +86,16 @@ const createMockClient = () => ({
 });
 type MockClient = ReturnType<typeof createMockClient>;
 
-const createTool = (client?: MockClient, enabled = true) =>
+const createTool = (
+  client?: MockClient,
+  enabled = true,
+  directories = [workspaceRoot],
+) =>
   new LspTool({
     getLspClient: () => client,
     isLspEnabled: () => enabled,
     getProjectRoot: () => workspaceRoot,
+    getWorkspaceContext: () => ({ getDirectories: () => directories }),
   } as unknown as Config);
 
 /** Location params: src/app.ts at 1-based 5:10 unless overridden. */
@@ -300,6 +305,70 @@ describe('LspTool', () => {
   });
 
   describe('execute', () => {
+    it.each([
+      ['goToDefinition', 'definitions'],
+      ['goToImplementation', 'implementations'],
+      ['findReferences', 'references'],
+    ] as const)(
+      'marks outside-workspace %s targets as requiring authorization',
+      async (operation, method) => {
+        const outside = createLocation(
+          path.resolve(workspaceRoot, '../outside/lib.ts'),
+          1,
+          2,
+        );
+        const { result } = await run(at(operation), (client) =>
+          client[method].mockResolvedValue([
+            { ...outside, serverName: 'test' },
+          ]),
+        );
+
+        expectContains(
+          result.llmContent,
+          '../outside/lib.ts:2:3 [test]',
+          'outside workspace',
+          '/directory add',
+        );
+        expectContains(
+          result.returnDisplay,
+          'outside workspace',
+          '/directory add',
+        );
+      },
+    );
+
+    it('does not mark an authorized included-directory target as outside', async () => {
+      const extra = path.resolve(workspaceRoot, '../extra');
+      const client = createMockClient();
+      client.definitions.mockResolvedValue([
+        createLocation(path.join(extra, 'lib.ts'), 0, 0),
+      ]);
+      const result = await createTool(client, true, [workspaceRoot, extra])
+        .build(at('goToDefinition'))
+        .execute(abortSignal);
+
+      expect(result.llmContent).toContain('../extra/lib.ts:1:1');
+      expect(result.llmContent).not.toContain('outside workspace');
+    });
+
+    it('marks an invalid server-produced file URI without failing formatting', async () => {
+      const { result } = await run(at('goToDefinition'), (client) =>
+        client.definitions.mockResolvedValue([
+          {
+            uri: 'file://[invalid',
+            range: lineSpan(0, 0, 1),
+          },
+        ]),
+      );
+
+      expectContains(
+        result.llmContent,
+        'file://[invalid',
+        'unresolvable file',
+        'cannot query',
+      );
+    });
+
     describe('LSP disabled or unavailable', () => {
       it('returns unavailable message when LSP is disabled', async () => {
         const result = await createTool(undefined, false)
