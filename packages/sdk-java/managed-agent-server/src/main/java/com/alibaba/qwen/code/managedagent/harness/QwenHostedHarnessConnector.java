@@ -401,7 +401,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         try {
             requireReadyForNewWork(tenantId, sessionId);
             return client().runChannelOperation(
-                    attachment(tenantId, sessionId, true), body);
+                    channelAttachment(tenantId, sessionId), body);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -435,6 +435,36 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
         attachments.clear();
         pendingRecovery.clear();
+    }
+
+    /**
+     * A channel route's Session is created without input, so the Harness
+     * holds no journal for it until its first channel operation: create it
+     * then. A Session the Harness already holds answers the create with 409,
+     * which create() turns into a load.
+     */
+    private HarnessSessionRef channelAttachment(String tenantId,
+            String sessionId) {
+        AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+        HarnessSessionRef attachment = attachments.get(key);
+        if (attachment == null) {
+            SessionRecord session = sessions.requireSession(tenantId,
+                    sessionId);
+            try {
+                createOrLoad(tenantId, sessionId,
+                        session.harnessBootId() != null, false);
+            } catch (DaemonHttpException error) {
+                // The Harness still holds the Session this control plane
+                // attached before it restarted: re-take it passively, the
+                // way the other cold attachments re-acquire a live one.
+                if (error.getStatusCode() != 409) {
+                    throw error;
+                }
+                createOrLoad(tenantId, sessionId, true, true);
+            }
+            attachment = attachments.get(key);
+        }
+        return attachment;
     }
 
     private HarnessSessionRef attachment(String tenantId, String sessionId, boolean newWork) {

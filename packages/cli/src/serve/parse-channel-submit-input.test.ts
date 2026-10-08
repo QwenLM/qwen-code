@@ -59,3 +59,32 @@ describe('parseChannelSubmitInput reply context bound', () => {
     });
   });
 });
+
+describe('parseChannelSubmitInput over the Java control plane wire', () => {
+  it('admits the body the Java client sends, whose null members are dropped', () => {
+    // HostedHarnessClient encodes with fastjson2, which omits null map
+    // values: scope.senderId, subject and replyContext never arrive.
+    const wire = body(null);
+    wire['scope'] = {
+      kind: 'chat_thread',
+      chatId: 'alice@example.com',
+      threadId: 'thread-1',
+    };
+    delete wire['replyContext'];
+    expect(parseChannelSubmitInput(wire)).toMatchObject({
+      scope: {
+        kind: 'chat_thread',
+        senderId: null,
+        chatId: 'alice@example.com',
+        threadId: 'thread-1',
+      },
+      replyContext: null,
+    });
+  });
+
+  it('still refuses a scope with a key outside the closed shape', () => {
+    const wire = body(null);
+    wire['scope'] = { kind: 'chat_thread', chatId: 'a', extra: 1 };
+    expect(parseChannelSubmitInput(wire)).toBeUndefined();
+  });
+});

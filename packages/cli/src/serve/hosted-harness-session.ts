@@ -322,7 +322,14 @@ export function parseChannelSubmitInput(
   let scope: import('@qwen-code/qwen-code-core/managed-runtime/managed-channel-record.js').ChannelRouteScope;
   let policy: import('@qwen-code/qwen-code-core/managed-runtime/managed-channel-operations.js').ChannelPolicy;
   try {
-    scope = assertChannelRouteScope(body?.['scope']);
+    // The Java control plane's JSON encoder drops null map values, so a
+    // scope's absent senderId/chatId/threadId arrives as a missing key.
+    const rawScope = object(body?.['scope']);
+    scope = assertChannelRouteScope(
+      rawScope === null
+        ? body?.['scope']
+        : { senderId: null, chatId: null, threadId: null, ...rawScope },
+    );
     policy = assertChannelPolicy(body?.['policy']);
   } catch {
     return undefined;

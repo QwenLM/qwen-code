@@ -244,6 +244,11 @@ export class ManagedEmailAdapter {
   async tick(): Promise<void> {
     if (!this.imap?.usable) await this.openMailbox();
     await this.poll();
+    // A receipt whose HTTP answer died is re-driven from the persisted
+    // outcome on every poll, not only at restart, so the window where
+    // the ledger says unknown about a proven send stays far below the
+    // claim lease.
+    await this.reportOrphanedOutbound();
     await this.pullOutbox();
   }
 
@@ -797,26 +802,6 @@ export class ManagedEmailAdapter {
     }
     for (const segment of delivery.segments) {
       if (!this.running || !this.smtp) return;
-      const claimed = state.outbound.find(
-        (candidate) =>
-          candidate.deliveryId === delivery.deliveryId &&
-          candidate.ordinal === segment.ordinal,
-      );
-      if (claimed !== undefined) {
-        // This segment already crossed the network once: only its
-        // persisted receipt can prove the provider's state, so that —
-        // never a second copy — is what the control plane is told.
-        await this.controlPlane.receipt(
-          delivery.deliveryId,
-          claimed.receipt ?? { outcome: 'unknown' },
-        );
-        state.outbound = state.outbound.filter(
-          (candidate) => candidate !== claimed,
-        );
-        this.persist();
-        if (claimed.receipt?.outcome !== 'accepted') return;
-        continue;
-      }
       const messageId = `<${randomUUID()}@${this.settings.address.split('@')[1]}>`;
       // The thread route learns our Message-ID before the send, so a reply
       // referencing it maps back to the same thread.

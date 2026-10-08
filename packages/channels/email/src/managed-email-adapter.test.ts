@@ -729,46 +729,34 @@ describe('managed email outbound', () => {
     expect(sent).toHaveBeenCalledTimes(1);
   });
 
-  it('replays its own claim for a re-offered segment instead of sending it twice', async () => {
+  it('re-drives a persisted receipt from the tick loop, without a restart', async () => {
     const adapter = make();
     await adapter.connect();
-    const multi: ManagedClaimedDelivery = {
-      deliveryId: 'd-multi',
-      replyContext: delivery().replyContext,
-      segments: [
-        { ordinal: 0, segmentId: 'd-multi:0', text: 'Part one.' },
-        { ordinal: 1, segmentId: 'd-multi:1', text: 'Part two.' },
-      ],
-    };
-    plane.outbox = [multi];
-    // Segment 0 commits its receipt; segment 1 crosses the network but the
-    // control plane's own answer never lands.
+    plane.outbox = [delivery('d-blip')];
+    // The one HTTP call of the receipt dies after the provider accepted.
     const original = plane.receipt.bind(plane);
-    plane.receipt = async (deliveryId: string, receipt: ManagedReceipt) => {
-      if (receipt.outcome === 'accepted' && receipt.ordinal === 1) {
-        throw new Error('answer lost');
-      }
-      await original(deliveryId, receipt);
+    plane.receipt = async () => {
+      throw new Error('control plane blip');
     };
-    await expect(adapter.tick()).rejects.toThrow('answer lost');
-    // The control plane re-offers the delivery's outstanding segment — the
-    // segment it has no receipt for — on the next poll.
+    await expect(adapter.tick()).rejects.toThrow('control plane blip');
+    expect(state(adapter).outbound).toHaveLength(1);
+    // The next tick re-drives the persisted receipt; the ledger converges
+    // without waiting for a restart.
     plane.receipt = original;
-    plane.outbox = [{ ...multi, segments: multi.segments.slice(1) }];
     await adapter.tick();
-    // The persisted claim answers for segment 1: no second copy, just the
-    // idempotent replay of what the send already proved.
-    expect(sent).toHaveBeenCalledTimes(2);
-    expect(plane.receipts).toHaveLength(2);
-    expect(plane.receipts[0]!.receipt).toMatchObject({
-      outcome: 'accepted',
-      ordinal: 0,
-    });
-    expect(plane.receipts[1]!.receipt).toMatchObject({
-      outcome: 'accepted',
-      ordinal: 1,
-    });
     expect(state(adapter).outbound).toEqual([]);
+    expect(plane.receipts).toEqual([
+      {
+        deliveryId: 'd-blip',
+        receipt: {
+          outcome: 'accepted',
+          ordinal: 0,
+          providerMessageId: expect.any(String),
+          acceptedAt: 1_750_000_000_000,
+        },
+      },
+    ]);
+    expect(sent).toHaveBeenCalledTimes(1);
   });
 
   it('replays the persisted provider receipt on restart instead of settling unknown', async () => {
