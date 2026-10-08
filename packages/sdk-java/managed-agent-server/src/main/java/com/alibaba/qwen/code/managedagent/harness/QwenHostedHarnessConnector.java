@@ -453,7 +453,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 throw new IllegalStateException("Hosted Workspace files are disabled");
             }
             if (actionResponse) {
-                workspaceExecution.authorizePassiveAttachment(session);
+                workspaceExecution.authorizeActionResponse(session);
                 workspaceExecution.verifyMountForProbe(session.workspace());
             } else {
                 workspaceExecution.authorize(session);

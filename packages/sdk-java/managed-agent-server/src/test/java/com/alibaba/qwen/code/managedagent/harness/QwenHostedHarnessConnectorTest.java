@@ -425,7 +425,7 @@ class QwenHostedHarnessConnectorTest {
                 .put("inputRevision", 7L).put("policyRevision", "hosted-tool-approval/1");
 
         doThrow(WorkspaceExecutionStore.unavailable()).doNothing()
-                .when(execution).authorizePassiveAttachment(session);
+                .when(execution).authorizeActionResponse(session);
         assertThatThrownBy(() -> connector.resolveAction("tenant-a", SESSION_ID, actionId, response))
                 .hasMessageContaining("Workspace execution authority is unavailable");
         verify(client, never()).loadSession(any());
@@ -451,7 +451,7 @@ class QwenHostedHarnessConnectorTest {
         verify(execution, times(2)).verifyMountForProbe(session.workspace());
         verify(client, never()).createSession(any());
 
-        doThrow(WorkspaceExecutionStore.unavailable()).when(execution).authorizePassiveAttachment(session);
+        doThrow(WorkspaceExecutionStore.unavailable()).when(execution).authorizeActionResponse(session);
         assertThatThrownBy(() -> connector.resolveAction("tenant-a", SESSION_ID, actionId, response))
                 .hasMessageContaining("Workspace execution authority is unavailable");
         verify(client, times(1)).resolveAction(any(), any(), any(), anyLong(), any());
