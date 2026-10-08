@@ -2885,7 +2885,14 @@ export function registerHostedHarnessSessionRoutes(
                   writeStderrLineSafe(
                     `qwen serve: Hosted channel reply of turn ${turnId} could not be planned: ${String(cause)}`,
                   );
-                  scheduleReplyPlanRetry(turnId, Math.min(delayMs * 2, 60_000));
+                  // A sealed Session is nobody else's planner: the
+                  // open-path reconcile owns the reply from the next
+                  // detach, not this timer.
+                  if (!session.managed.authority.writesStopped)
+                    scheduleReplyPlanRetry(
+                      turnId,
+                      Math.min(delayMs * 2, 60_000),
+                    );
                 });
               }, delayMs);
               timer.unref();
