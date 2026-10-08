@@ -121,8 +121,6 @@ export interface A2ASessionRun {
   recorded?: boolean;
   /** Interrupted by a restart; the workspace owner may retry it. */
   retryable?: boolean;
-  /** The run that replaced this one when the owner retried it. */
-  retriedAsRunId?: string;
 }
 
 /** A finished run's `agent_message` record, read from the transcript. */
@@ -146,6 +144,11 @@ export interface A2ASessionPort {
     title: string;
   }): Promise<string>;
   /**
+   * Closes and removes a session {@link createSession} made that no task
+   * could be recorded against.
+   */
+  discardSession(sessionId: string): Promise<void>;
+  /**
    * Posts `text` into the session; the agents it @-mentions answer.
    * Idempotent on `clientMessageId`.
    */
@@ -164,7 +167,10 @@ export interface A2ASessionPort {
     sessionId: string,
     runId: string,
   ): Promise<A2ARecordedReply | undefined>;
-  /** Cancels a live run. False when it is not live. */
+  /**
+   * Cancels a live run, or dismisses one offered for a retry. False when it
+   * is neither.
+   */
   cancel(sessionId: string, runId: string): Promise<boolean>;
 }
 
@@ -201,11 +207,23 @@ const REPLY_PENDING_STATUS_TEXT =
 const RETRYABLE_STATUS_TEXT =
   'The run was interrupted by a daemon restart; the workspace owner can retry it.';
 const UNTRACKED_RUN_ERROR = 'The run is no longer tracked by this workspace.';
+const REPLY_NOT_RECORDED_ERROR =
+  'The agent finished, but its reply is not in the session.';
 /** Owner retries followed from a task's run to the run that replaced it. */
 const MAX_RETRY_HOPS = 10;
 
-/** What a poll saw; `retryable` results may still change, so are not kept. */
-type Observation = ExternalTaskResult & { retryable?: boolean };
+/**
+ * What a poll saw; `retryable` results may still change, so are not kept.
+ * `runId` is the run observed: the task's own, or the one an owner retry
+ * replaced it with.
+ */
+type Observation = ExternalTaskResult & { retryable?: boolean; runId?: string };
+
+function sessionFailure(error: A2ASessionError): A2AFailure {
+  return error.kind === 'refused'
+    ? { kind: 'refused' }
+    : { kind: 'unavailable' };
+}
 
 function viewOf(entry: ExternalTaskEntry, observed: Observation): A2ATaskView {
   const metadata: QwenA2ATaskMetadata = {
@@ -218,11 +236,11 @@ function viewOf(entry: ExternalTaskEntry, observed: Observation): A2ATaskView {
   const statusText =
     observed.localStatus === 'awaiting_approval'
       ? APPROVAL_STATUS_TEXT
-      : observed.state === 'TASK_STATE_WORKING' &&
-          observed.localStatus === 'completed'
-        ? REPLY_PENDING_STATUS_TEXT
-        : observed.retryable
-          ? RETRYABLE_STATUS_TEXT
+      : observed.retryable
+        ? RETRYABLE_STATUS_TEXT
+        : observed.state === 'TASK_STATE_WORKING' &&
+            observed.localStatus === 'completed'
+          ? REPLY_PENDING_STATUS_TEXT
           : observed.error;
   return {
     id: entry.taskId ?? '',
@@ -238,11 +256,12 @@ function viewOf(entry: ExternalTaskEntry, observed: Observation): A2ATaskView {
 }
 
 /**
- * Where the run is now. In order: what the orchestrator still reports (live,
- * or finished but not settled); the reply record in the transcript; the run
- * as last persisted in the session's agent file. A run the workspace owner
- * retried is followed to the run that replaced it: the caller's task is the
- * work, not one attempt at it.
+ * Where the run is now. A run the workspace owner retried is followed to the
+ * run that replaced it: the caller's task is the work, not one attempt at it.
+ * The retry is read from the session's agent file, where it is persisted
+ * with `retryOf` before it runs. Then, in order: what the orchestrator still
+ * reports (live, or finished but not settled); the reply record in the
+ * transcript; the run as last persisted in the agent file.
  */
 async function observeRun(
   projectRoot: string,
@@ -252,33 +271,35 @@ async function observeRun(
   fallbackAt: number,
   hops = 0,
 ): Promise<Observation> {
-  const follow = (nextRunId: string) =>
-    observeRun(projectRoot, port, sessionId, nextRunId, fallbackAt, hops + 1);
-  const live = await port.liveRun(sessionId, runId);
-  if (live?.retriedAsRunId && hops < MAX_RETRY_HOPS) {
-    return follow(live.retriedAsRunId);
+  const file = await readSessionAgents(projectRoot, sessionId);
+  const retry = file.runs.find((candidate) => candidate.retryOf === runId);
+  if (retry && hops < MAX_RETRY_HOPS) {
+    return observeRun(
+      projectRoot,
+      port,
+      sessionId,
+      retry.id,
+      fallbackAt,
+      hops + 1,
+    );
   }
+  const live = await port.liveRun(sessionId, runId);
   if (live && live.recorded !== true) {
-    const tokens =
-      live.totalTokens !== undefined ? { tokensUsed: live.totalTokens } : {};
-    const at = live.activityAt ?? fallbackAt;
-    // Finished, reply record still on its way: never COMPLETED without the
-    // answer the caller is waiting for.
-    if (live.status === 'completed') {
-      return {
-        state: 'TASK_STATE_WORKING',
-        at,
-        localStatus: live.status,
-        ...tokens,
-      };
-    }
     return {
-      state: toA2ATaskState(live.status),
-      at,
+      // Finished, reply record still on its way: never COMPLETED without the
+      // answer the caller is waiting for.
+      state:
+        live.status === 'completed'
+          ? 'TASK_STATE_WORKING'
+          : toA2ATaskState(live.status),
+      at: live.activityAt ?? fallbackAt,
+      runId,
       localStatus: live.status,
       ...(live.error ? { error: live.error } : {}),
       ...(live.retryable ? { retryable: true } : {}),
-      ...tokens,
+      ...(live.totalTokens !== undefined
+        ? { tokensUsed: live.totalTokens }
+        : {}),
     };
   }
   const reply = await port.recordedReply(sessionId, runId);
@@ -287,6 +308,7 @@ async function observeRun(
     return {
       state: toA2ATaskState(payload.status),
       at: reply.at ?? Date.now(),
+      runId,
       localStatus: payload.status,
       ...(payload.displayText.trim() ? { answer: payload.displayText } : {}),
       ...(payload.error ? { error: payload.error } : {}),
@@ -295,9 +317,6 @@ async function observeRun(
         : {}),
     };
   }
-  const file = await readSessionAgents(projectRoot, sessionId);
-  const retry = file.runs.find((candidate) => candidate.retryOf === runId);
-  if (retry && hops < MAX_RETRY_HOPS) return follow(retry.id);
   const run = file.runs.find((candidate) => candidate.id === runId);
   if (!run) {
     return {
@@ -307,26 +326,25 @@ async function observeRun(
     };
   }
   const at = run.endedAt ?? run.startedAt ?? run.createdAt;
-  const tokens =
-    run.totalTokens !== undefined ? { tokensUsed: run.totalTokens } : {};
-  // Finished without a reply record and no longer watched by the
-  // orchestrator. With an error, writing the record failed for good; without
-  // one, the record was deferred behind a main-model turn and lands when that
-  // turn settles.
+  // Not reported by the orchestrator. `recorded: false` marks a finished run
+  // whose record had not landed when the daemon stopped: startup recovery
+  // offers it to the owner for a retry, so it is not final yet. Any other
+  // finished run without a record will not get one.
+  const offered = run.recorded === false;
+  const common = {
+    at,
+    runId,
+    localStatus: run.status,
+    ...(offered ? { retryable: true } : {}),
+    ...(run.totalTokens !== undefined ? { tokensUsed: run.totalTokens } : {}),
+  };
   if (run.status === 'completed') {
-    return run.error
-      ? {
-          state: 'TASK_STATE_FAILED',
-          at,
-          localStatus: run.status,
-          error: run.error,
-          ...tokens,
-        }
+    return offered && !run.error
+      ? { state: 'TASK_STATE_WORKING', ...common }
       : {
-          state: 'TASK_STATE_WORKING',
-          at,
-          localStatus: run.status,
-          ...tokens,
+          state: 'TASK_STATE_FAILED',
+          error: run.error ?? REPLY_NOT_RECORDED_ERROR,
+          ...common,
         };
   }
   return {
@@ -335,11 +353,57 @@ async function observeRun(
       : // On disk but not reported: the orchestrator is starting up and has
         // not adopted it yet. Its recovery settles it.
         'TASK_STATE_WORKING',
-    at,
-    localStatus: run.status,
     ...(run.error ? { error: run.error } : {}),
-    ...tokens,
+    ...common,
   };
+}
+
+/**
+ * The task as a poll sees it: its kept result, or its run now. A kept
+ * failure is not final while the owner can retry the run, so one whose run
+ * was retried since is observed again and its new outcome kept instead.
+ */
+async function observeTask(
+  projectRoot: string,
+  port: A2ASessionPort,
+  callerId: string,
+  entry: ExternalTaskEntry,
+): Promise<Observation> {
+  const { sessionId, taskId } = entry;
+  if (!sessionId || !taskId) {
+    throw new Error('External task has no run.');
+  }
+  if (
+    entry.result &&
+    (entry.result.state !== 'TASK_STATE_FAILED' ||
+      !(await readSessionAgents(projectRoot, sessionId)).runs.some(
+        (candidate) => candidate.retryOf === taskId,
+      ))
+  ) {
+    return entry.result;
+  }
+  const observed = await observeRun(
+    projectRoot,
+    port,
+    sessionId,
+    taskId,
+    entry.createdAt,
+  );
+  if (!isTerminalA2ATaskState(observed.state) || observed.retryable) {
+    return observed;
+  }
+  if (
+    entry.result?.state === observed.state &&
+    entry.result.at === observed.at
+  ) {
+    return entry.result;
+  }
+  // Kept on first sight: the run is trimmed from the session's agent file
+  // after 50 newer ones, and the owner may delete the session.
+  const { runId: _runId, retryable: _retryable, ...result } = observed;
+  return recordExternalTaskResult(projectRoot, callerId, taskId, result, {
+    replace: entry.result !== undefined,
+  });
 }
 
 async function taskView(
@@ -348,29 +412,7 @@ async function taskView(
   callerId: string,
   entry: ExternalTaskEntry,
 ): Promise<A2ATaskView> {
-  if (!entry.sessionId || !entry.taskId) {
-    throw new Error('External task has no run.');
-  }
-  if (entry.result) return viewOf(entry, entry.result);
-  const observed = await observeRun(
-    projectRoot,
-    port,
-    entry.sessionId,
-    entry.taskId,
-    entry.createdAt,
-  );
-  if (!isTerminalA2ATaskState(observed.state) || observed.retryable) {
-    return viewOf(entry, observed);
-  }
-  // Kept on first sight: the run is trimmed from the session's agent file
-  // after 50 newer ones, and the owner may delete the session.
-  const kept = await recordExternalTaskResult(
-    projectRoot,
-    callerId,
-    entry.taskId,
-    observed,
-  );
-  return viewOf(entry, kept);
+  return viewOf(entry, await observeTask(projectRoot, port, callerId, entry));
 }
 
 /**
@@ -522,17 +564,25 @@ export async function a2aSendMessage(
           }
           let sessionId = entry.sessionId;
           if (!sessionId) {
-            sessionId = await port.createSession({
+            const created = await port.createSession({
               callerId: caller.callerId,
               agentId: agent.id,
               title: a2aSessionTitle(caller.callerId),
             });
-            await attachExternalSession(
-              projectRoot,
-              caller.callerId,
-              entry.key,
-              sessionId,
-            );
+            try {
+              await attachExternalSession(
+                projectRoot,
+                caller.callerId,
+                entry.key,
+                created,
+              );
+            } catch (error) {
+              // Not recorded, so a retry would create another: remove this
+              // one rather than leave it in the owner's session list.
+              await port.discardSession(created).catch(() => {});
+              throw error;
+            }
+            sessionId = created;
           }
           const posted = await port.mention(sessionId, {
             text,
@@ -552,9 +602,7 @@ export async function a2aSendMessage(
           );
         } catch (error) {
           if (error instanceof A2ASessionError) {
-            return error.kind === 'refused'
-              ? { ok: false, kind: 'refused' }
-              : { ok: false, kind: 'unavailable' };
+            return { ok: false, ...sessionFailure(error) };
           }
           throw error;
         }
@@ -630,12 +678,13 @@ export async function a2aListTasks(
 /**
  * `cancelTask` — withdraw work.
  *
- * A queued run is cancelled at once. An executing one is asked to stop and
- * reaches `CANCELED` when its program has stopped, so the returned task may
- * still be working: `runsStillLive` says so, keeping the receipt and the
- * actual stop separate. A task already finished is reported as it ended,
- * never rewritten to `CANCELED`. A run shared by coalesced messages is one
- * task; cancelling it cancels it for both.
+ * Cancels the run the task denotes now, which after an owner retry is the
+ * replacement. A queued run is cancelled at once. An executing one is asked
+ * to stop and reaches `CANCELED` when its program has stopped, so the
+ * returned task may still be working: `runsStillLive` says so, keeping the
+ * receipt and the actual stop separate. A task already finished is reported
+ * as it ended, never rewritten to `CANCELED`. A run shared by coalesced
+ * messages is one task; cancelling it cancels it for both.
  */
 export async function a2aCancelTask(
   projectRoot: string,
@@ -647,13 +696,29 @@ export async function a2aCancelTask(
   if (!entry?.sessionId || !entry.taskId) {
     return { ok: false, kind: 'not_found' };
   }
-  if (!entry.result) await port.cancel(entry.sessionId, entry.taskId);
+  const observed = await observeTask(projectRoot, port, caller.callerId, entry);
+  let cancelled = false;
+  if (
+    observed.runId &&
+    (!isTerminalA2ATaskState(observed.state) || observed.retryable)
+  ) {
+    try {
+      cancelled = await port.cancel(entry.sessionId, observed.runId);
+    } catch (error) {
+      if (error instanceof A2ASessionError) {
+        return { ok: false, ...sessionFailure(error) };
+      }
+      throw error;
+    }
+  }
   const task = await taskView(projectRoot, port, caller.callerId, entry);
   return {
     ok: true,
     value: {
       task,
-      runsStillLive: isTerminalA2ATaskState(task.status.state) ? 0 : 1,
+      // Still live only when a run was asked to stop and has not yet.
+      runsStillLive:
+        cancelled && !isTerminalA2ATaskState(task.status.state) ? 1 : 0,
     },
   };
 }

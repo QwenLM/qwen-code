@@ -42,6 +42,7 @@ function fakeSessions() {
       sessions.push(id);
       return id;
     },
+    async discardSession() {},
     async mention(_sessionId, input) {
       posts.push(input.text);
       const runId = `sr_${runs.size + 1}`;

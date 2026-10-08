@@ -17,6 +17,7 @@ import type {
 } from '../session-agents/contract.js';
 import { updateSessionAgents } from '../session-agents/binding-store.js';
 import { QWEN_A2A_EXTENSION_URI } from './a2a-contract.js';
+import { getExternalCallerFilePath } from './external-intake.js';
 import { issueA2AGrant, revokeA2AGrant } from './a2a-grants.js';
 import {
   A2ASessionError,
@@ -48,7 +49,10 @@ class FakeSessions implements A2ASessionPort {
   readonly live = new Map<string, A2ASessionRun>();
   readonly replies = new Map<string, A2ARecordedReply>();
   readonly cancelled: string[] = [];
+  readonly discarded: string[] = [];
   createFailure?: A2ASessionError;
+  /** Runs once a session is made, before the caller's mapping records it. */
+  afterCreate?: () => Promise<void>;
   mentionFailure?: A2ASessionError;
   /** When set, every post joins this run (the orchestrator coalesced it). */
   coalesceInto?: string;
@@ -62,7 +66,12 @@ class FakeSessions implements A2ASessionPort {
     if (this.createFailure) throw this.createFailure;
     const id = randomUUID();
     this.sessions.push({ id, callerId: input.callerId, title: input.title });
+    await this.afterCreate?.();
     return id;
+  }
+
+  async discardSession(sessionId: string): Promise<void> {
+    this.discarded.push(sessionId);
   }
 
   async mention(
@@ -126,6 +135,11 @@ async function persistRun(
   run: Partial<SessionAgentRun> & { id: string; status: SessionAgentRunStatus },
 ) {
   await updateSessionAgents(PROJECT_ROOT, sessionId, (file) => {
+    const index = file.runs.findIndex((candidate) => candidate.id === run.id);
+    if (index >= 0) {
+      file.runs[index] = { ...file.runs[index]!, ...run };
+      return;
+    }
     file.runs.push({
       agentId: 'ag_lead',
       triggerRecordIds: [],
@@ -273,6 +287,16 @@ describe('A2A send', () => {
     expect(task.contextId).toBe(port.sessions[0]!.id);
   });
 
+  it('removes a session it could not record', async () => {
+    const caller = await grant();
+    // The reservation is gone by the time the session would be recorded.
+    port.afterCreate = () =>
+      fs.rm(getExternalCallerFilePath(PROJECT_ROOT, caller.callerId));
+
+    await expect(send(caller)).rejects.toThrow('disappeared');
+    expect(port.discarded).toEqual([port.sessions[0]!.id]);
+  });
+
   it('refuses work for a retired agent but keeps its tasks readable', async () => {
     const caller = await grant();
     const task = await sent(caller);
@@ -349,17 +373,35 @@ describe('A2A task state', () => {
     const caller = await grant();
     const task = await sent(caller);
     port.live.delete(task.id);
-    // Finished, but its record is deferred behind a main-model turn.
+    // Finished before a restart with its record not yet landed: recovery
+    // offers it to the owner, and the record may still land.
     await persistRun(task.contextId, {
       id: task.id,
       status: 'completed',
       endedAt: 2_000,
+      recorded: false,
     });
     await expect(
       a2aGetTask(PROJECT_ROOT, port, caller, task.id),
     ).resolves.toMatchObject({
       ok: true,
       value: { status: { state: 'TASK_STATE_WORKING' } },
+    });
+
+    // Dismissed (`recorded` dropped) with no record: none is coming.
+    await persistRun(task.contextId, {
+      id: task.id,
+      status: 'completed',
+      recorded: undefined,
+    });
+    await expect(
+      a2aGetTask(PROJECT_ROOT, port, caller, task.id),
+    ).resolves.toMatchObject({
+      ok: true,
+      value: {
+        status: { state: 'TASK_STATE_FAILED' },
+        statusText: expect.stringContaining('not in the session'),
+      },
     });
 
     const second = await sent(caller, 'msg-2', 'Again.', task.contextId);
@@ -423,17 +465,8 @@ describe('A2A task state', () => {
       },
     });
 
-    // Retried: the old frame names its replacement, which is persisted with
-    // `retryOf` once the old frame is gone.
-    port.live.set(task.id, { status: 'failed', retriedAsRunId: 'sr_9' });
-    port.live.set('sr_9', { status: 'running', activityAt: 4_000 });
-    await expect(
-      a2aGetTask(PROJECT_ROOT, port, caller, task.id),
-    ).resolves.toMatchObject({
-      ok: true,
-      value: { id: task.id, status: { state: 'TASK_STATE_WORKING' } },
-    });
-
+    // Retried: the old frame is dropped and the replacement is persisted
+    // with `retryOf`.
     port.live.delete(task.id);
     await persistRun(task.contextId, {
       id: task.id,
@@ -442,9 +475,18 @@ describe('A2A task state', () => {
     });
     await persistRun(task.contextId, {
       id: 'sr_9',
-      status: 'completed',
+      status: 'running',
       retryOf: task.id,
     });
+    port.live.set('sr_9', { status: 'running', activityAt: 4_000 });
+    await expect(
+      a2aGetTask(PROJECT_ROOT, port, caller, task.id),
+    ).resolves.toMatchObject({
+      ok: true,
+      value: { id: task.id, status: { state: 'TASK_STATE_WORKING' } },
+    });
+
+    await persistRun(task.contextId, { id: 'sr_9', status: 'completed' });
     port.reply('sr_9', 'completed', 'Done after the retry.');
     await expect(
       a2aGetTask(PROJECT_ROOT, port, caller, task.id),
@@ -456,6 +498,108 @@ describe('A2A task state', () => {
         status: { state: 'TASK_STATE_COMPLETED' },
       },
     });
+  });
+
+  it('reports a finished run a restart left unrecorded as retryable', async () => {
+    const caller = await grant();
+    const task = await sent(caller);
+    port.live.set(task.id, {
+      status: 'completed',
+      activityAt: 2_000,
+      error: 'the reply was not recorded before the daemon stopped',
+      recorded: false,
+      retryable: true,
+    });
+
+    await expect(
+      a2aGetTask(PROJECT_ROOT, port, caller, task.id),
+    ).resolves.toMatchObject({
+      ok: true,
+      value: {
+        status: { state: 'TASK_STATE_WORKING' },
+        statusText: expect.stringContaining('retry'),
+        metadata: {
+          [QWEN_A2A_EXTENSION_URI]: {
+            error: 'the reply was not recorded before the daemon stopped',
+          },
+        },
+      },
+    });
+  });
+
+  it('does not keep a failure the owner may still retry', async () => {
+    const caller = await grant();
+    const task = await sent(caller);
+    port.live.delete(task.id);
+    // Interrupted by a restart; no orchestrator reports it (yet).
+    await persistRun(task.contextId, {
+      id: task.id,
+      status: 'failed',
+      error: 'daemon restarted',
+      recorded: false,
+    });
+    await expect(
+      a2aGetTask(PROJECT_ROOT, port, caller, task.id),
+    ).resolves.toMatchObject({
+      ok: true,
+      value: {
+        status: { state: 'TASK_STATE_FAILED' },
+        statusText: expect.stringContaining('retry'),
+      },
+    });
+
+    await persistRun(task.contextId, {
+      id: 'sr_9',
+      status: 'running',
+      retryOf: task.id,
+    });
+    port.live.set('sr_9', { status: 'running', activityAt: 4_000 });
+    await expect(
+      a2aGetTask(PROJECT_ROOT, port, caller, task.id),
+    ).resolves.toMatchObject({
+      ok: true,
+      value: { status: { state: 'TASK_STATE_WORKING' } },
+    });
+  });
+
+  it('follows an owner retry of a failure it already kept', async () => {
+    const caller = await grant();
+    const task = await sent(caller);
+    port.reply(task.id, 'failed', '', 'model error');
+    await expect(
+      a2aGetTask(PROJECT_ROOT, port, caller, task.id),
+    ).resolves.toMatchObject({
+      ok: true,
+      value: { status: { state: 'TASK_STATE_FAILED' } },
+    });
+
+    await persistRun(task.contextId, {
+      id: 'sr_9',
+      status: 'running',
+      retryOf: task.id,
+    });
+    port.live.set('sr_9', { status: 'running', activityAt: 4_000 });
+    await expect(
+      a2aGetTask(PROJECT_ROOT, port, caller, task.id),
+    ).resolves.toMatchObject({
+      ok: true,
+      value: { status: { state: 'TASK_STATE_WORKING' } },
+    });
+
+    port.reply('sr_9', 'completed', 'Done after the retry.');
+    const done = await a2aGetTask(PROJECT_ROOT, port, caller, task.id);
+    expect(done).toMatchObject({
+      ok: true,
+      value: {
+        answer: 'Done after the retry.',
+        status: { state: 'TASK_STATE_COMPLETED' },
+      },
+    });
+    // The new outcome replaced the kept failure.
+    port.replies.clear();
+    await expect(
+      a2aGetTask(PROJECT_ROOT, port, caller, task.id),
+    ).resolves.toEqual(done);
   });
 
   it('fails a run nothing tracks any more', async () => {
@@ -544,6 +688,63 @@ describe('A2A isolation and cancel', () => {
       },
     });
     expect(port.cancelled).toEqual([]);
+  });
+
+  it('cancels the run an owner retry replaced the task with', async () => {
+    const caller = await grant();
+    const task = await sent(caller);
+    port.reply(task.id, 'failed', '', 'model error');
+    await persistRun(task.contextId, {
+      id: 'sr_9',
+      status: 'queued',
+      retryOf: task.id,
+    });
+    port.live.set('sr_9', { status: 'queued', activityAt: 4_000 });
+
+    await expect(
+      a2aCancelTask(PROJECT_ROOT, port, caller, task.id),
+    ).resolves.toMatchObject({
+      ok: true,
+      value: {
+        task: { id: task.id, status: { state: 'TASK_STATE_CANCELED' } },
+        runsStillLive: 0,
+      },
+    });
+    expect(port.cancelled).toEqual(['sr_9']);
+  });
+
+  it('reports nothing live when the cancel stopped no run', async () => {
+    const caller = await grant();
+    const task = await sent(caller);
+    // Finished, its record still pending: nothing to stop.
+    port.live.set(task.id, {
+      status: 'completed',
+      activityAt: 2_000,
+      recorded: false,
+    });
+    port.cancel = async () => false;
+
+    await expect(
+      a2aCancelTask(PROJECT_ROOT, port, caller, task.id),
+    ).resolves.toMatchObject({
+      ok: true,
+      value: {
+        task: { status: { state: 'TASK_STATE_WORKING' } },
+        runsStillLive: 0,
+      },
+    });
+  });
+
+  it('answers unavailable when the orchestrator cannot cancel', async () => {
+    const caller = await grant();
+    const task = await sent(caller);
+    port.cancel = async () => {
+      throw new A2ASessionError('unavailable', 'not running');
+    };
+
+    await expect(
+      a2aCancelTask(PROJECT_ROOT, port, caller, task.id),
+    ).resolves.toEqual({ ok: false, kind: 'unavailable' });
   });
 
   it('reports an executing run as still live after the request', async () => {

@@ -224,7 +224,7 @@ function isValidContextEntry(value: unknown): value is ExternalContextEntry {
 export function parseExternalCallerFile(
   value: unknown,
   callerId: string,
-  filePath = '<memory>',
+  filePath: string,
 ): ExternalCallerFile {
   if (!isRecord(value)) {
     throw new Error(`Malformed A2A caller file ${filePath}.`);
@@ -338,7 +338,6 @@ function contentHashOf(submission: ExternalSubmission): string {
 export async function reserveExternalSubmission(
   projectRoot: string,
   submission: ExternalSubmission,
-  now = Date.now(),
 ): Promise<ExternalReservation> {
   const key = externalRequestKey({
     callerId: submission.callerId,
@@ -376,7 +375,7 @@ export async function reserveExternalSubmission(
         contentHash,
         agentId: submission.targetAgentId,
         messageId: submission.messageId,
-        createdAt: now,
+        createdAt: Date.now(),
         ...(submission.contextId ? { sessionId: submission.contextId } : {}),
       };
       file.tasks.push(entry);
@@ -395,14 +394,17 @@ export async function attachExternalSession(
   callerId: string,
   key: string,
   sessionId: string,
-  now = Date.now(),
 ): Promise<void> {
   await updateExternalCallerFile(projectRoot, callerId, (file) => {
     const entry = file.tasks.find((candidate) => candidate.key === key);
     if (!entry) throw new Error('External reservation disappeared.');
     entry.sessionId = sessionId;
     if (!file.contexts.some((context) => context.sessionId === sessionId)) {
-      file.contexts.push({ sessionId, agentId: entry.agentId, createdAt: now });
+      file.contexts.push({
+        sessionId,
+        agentId: entry.agentId,
+        createdAt: Date.now(),
+      });
     }
   });
 }
@@ -424,17 +426,22 @@ export async function completeExternalSubmission(
 
 /**
  * Keeps the first terminal view of a task, on every entry that names it.
- * Never overwrites one already kept: how a task ended does not change.
+ * Never overwrites one already kept unless `replace`: the owner retried a
+ * failed run and the retry has ended.
  */
 export async function recordExternalTaskResult(
   projectRoot: string,
   callerId: string,
   taskId: string,
   result: ExternalTaskResult,
+  options: { replace?: boolean } = {},
 ): Promise<ExternalTaskResult> {
   return updateExternalCallerFile(projectRoot, callerId, (file) => {
     const entries = file.tasks.filter((entry) => entry.taskId === taskId);
-    const kept = entries.find((entry) => entry.result)?.result ?? result;
+    const kept =
+      (options.replace
+        ? undefined
+        : entries.find((entry) => entry.result)?.result) ?? result;
     for (const entry of entries) entry.result = kept;
     return kept;
   });

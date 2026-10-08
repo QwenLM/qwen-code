@@ -139,6 +139,7 @@ export type A2ASessionPortFactory = (
 function defaultSessionPort(runtime: WorkspaceRuntime): A2ASessionPort {
   return createA2ASessionPort({
     workspaceCwd: runtime.workspaceCwd,
+    runtimeBaseDir: runtime.sessionRuntimeBaseDir,
     bridge: runtime.bridge,
     orchestrator: getSessionAgentOrchestrator(runtime.workspaceCwd),
   });

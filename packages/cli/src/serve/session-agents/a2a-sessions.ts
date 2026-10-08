@@ -40,7 +40,10 @@ import {
 export const A2A_SESSION_SOURCE_TYPE = 'default';
 export const A2A_SESSION_SOURCE_ID_PREFIX = 'a2a:';
 
-/** Archived transcripts larger than this are not read for a reply. */
+/**
+ * Archived transcripts larger than this are refused, not read: the reply
+ * lookup rejects (the poll fails) rather than take the run for unanswered.
+ */
 const MAX_ARCHIVED_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
 
 export function a2aSessionSourceId(callerId: string): string {
@@ -55,7 +58,7 @@ export type A2AOrchestrator = Pick<
 
 export type A2ASessionBridge = Pick<
   AcpSessionBridge,
-  'spawnOrAttach' | 'updateSessionMetadata'
+  'spawnOrAttach' | 'updateSessionMetadata' | 'killSession'
 >;
 
 /** The record fields a reply lookup reads. */
@@ -67,6 +70,12 @@ export interface A2ATranscriptRecord {
 
 export interface A2ASessionPortOptions {
   workspaceCwd: string;
+  /**
+   * The workspace's own session runtime dir (`sessionRuntimeBaseDir`), where
+   * its transcripts are. Without it the process default is used, which is
+   * the primary workspace's.
+   */
+  runtimeBaseDir?: string;
   /** The workspace runtime's current bridge. */
   bridge: A2ASessionBridge;
   /**
@@ -82,11 +91,18 @@ export interface A2ASessionPortOptions {
   ) => Promise<readonly A2ATranscriptRecord[] | undefined>;
 }
 
-function defaultLoadRecords(workspaceCwd: string) {
+function sessionService(workspaceCwd: string, runtimeBaseDir?: string) {
+  return new SessionService(
+    workspaceCwd,
+    runtimeBaseDir !== undefined ? { runtimeBaseDir } : {},
+  );
+}
+
+function defaultLoadRecords(workspaceCwd: string, runtimeBaseDir?: string) {
   return async (
     sessionId: string,
   ): Promise<readonly A2ATranscriptRecord[] | undefined> => {
-    const service = new SessionService(workspaceCwd);
+    const service = sessionService(workspaceCwd, runtimeBaseDir);
     const data =
       (await service.loadSession(sessionId)) ??
       (await service.loadArchivedSession(sessionId, {
@@ -139,7 +155,9 @@ export function createA2ASessionPort(
   options: A2ASessionPortOptions,
 ): A2ASessionPort {
   const { workspaceCwd, bridge, orchestrator } = options;
-  const loadRecords = options.loadRecords ?? defaultLoadRecords(workspaceCwd);
+  const loadRecords =
+    options.loadRecords ??
+    defaultLoadRecords(workspaceCwd, options.runtimeBaseDir);
 
   /** The orchestrator, when it runs on this runtime's bridge. */
   const current = (): A2AOrchestrator => {
@@ -175,6 +193,13 @@ export function createA2ASessionPort(
       return session.sessionId;
     },
 
+    async discardSession(sessionId) {
+      await bridge.killSession(sessionId, { requireZeroAttaches: true });
+      await sessionService(workspaceCwd, options.runtimeBaseDir).removeSession(
+        sessionId,
+      );
+    },
+
     async mention(sessionId, input) {
       try {
         const result = await current().mention(sessionId, input);
@@ -206,9 +231,6 @@ export function createA2ASessionPort(
           : {}),
         ...(frame.recorded !== undefined ? { recorded: frame.recorded } : {}),
         ...(frame.retryable ? { retryable: true } : {}),
-        ...(frame.retriedAsRunId
-          ? { retriedAsRunId: frame.retriedAsRunId }
-          : {}),
       };
     },
 
