@@ -23,6 +23,7 @@ import {
   HOSTED_AGENT_TOOL,
 } from './hosted-workspace-tool-turn.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 
 // H4b: the kind gate admits `child_agent` for real, so this suite runs
 // without an enablement mock. The Broker is mocked as in the sibling
@@ -466,3 +467,109 @@ it('admits a batch of only agent calls, foregrounded or queued', async () => {
   expect(JSON.stringify(responses)).not.toContain('cannot share a batch');
   expect(broker.acquire).not.toHaveBeenCalled();
 });
+
+// The 1292-refusal must key off the Session's actual mount owners, not
+// only the turn's own `acquired` flag: the Hook catalog or MCP owner can
+// retain the mount until their Session-scoped close, and an agent-only
+// foreground batch then still blocks the child on that mount.
+it('refuses a foreground agent call while a Session owner holds the mount', async () => {
+  const mountRefusal = 'unavailable while this Turn holds the Workspace mount';
+  for (const owner of ['hooks', 'mcp'] as const) {
+    const turn = createTurnWithOwnerMount(owner, true);
+    const refused = await executeAgent(
+      turn,
+      call({
+        description: 'audit the diff',
+        prompt: 'review the change',
+        run_in_background: false,
+      }),
+    );
+    expect(JSON.stringify(refused)).toContain(mountRefusal);
+    expect(JSON.stringify(refused)).not.toContain('audit-started');
+  }
+  // The same Session owners without the hold admit the batch.
+  const unheld = createTurnWithOwnerMount('hooks', false);
+  const driving = (async () => {
+    const childRunId = 'prompt:call-1';
+    for (;;) {
+      if (children.record(childRunId) !== undefined) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    await children.settleFailed(childRunId, {
+      stopReason: 'creation_failed',
+      reason: null,
+      started: false,
+    });
+  })();
+  const admitted = (
+    await Promise.all([
+      executeAgent(
+        unheld,
+        call(
+          {
+            description: 'audit the diff',
+            prompt: 'review the change',
+            run_in_background: false,
+          },
+          'call-1',
+        ),
+      ),
+      driving,
+    ])
+  )[0];
+  expect(JSON.stringify(admitted)).not.toContain(mountRefusal);
+});
+
+function createTurnWithOwnerMount(
+  owner: 'hooks' | 'mcp',
+  held: boolean,
+): HostedWorkspaceToolTurn {
+  const ownerBroker = new (HostedWorkspaceBroker as unknown as new (
+    ...args: unknown[]
+  ) => HostedWorkspaceBroker)(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    sessionKey,
+    'owner',
+  );
+  const sessionOwner = {
+    broker: ownerBroker,
+    mountHeld: held,
+    ensureReady: () => Promise.resolve(),
+    acquire: () => Promise.resolve(),
+    refresh: () => Promise.resolve(),
+    tools: () => [],
+    toolInput: () => undefined,
+    fire: () => Promise.resolve([]),
+    close: () => Promise.resolve(),
+  };
+  return new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    createManagedHarnessHandle(session),
+    'prompt',
+    async () => randomUUID(),
+    messageFitsInline,
+    undefined,
+    {
+      resources: session.resources,
+      assertWritable: async () => undefined,
+    },
+    undefined,
+    {
+      profile: 'hosted-workspace-shell/1',
+      childAgents: {
+        funnel: children,
+        depth: 0,
+        queueConsumption: (childRunId) => consumption.push(childRunId),
+      },
+      ...(owner === 'hooks'
+        ? {
+            hooks:
+              sessionOwner as unknown as import('./hosted-hook-session.js').HostedHookSession,
+          }
+        : {
+            mcp: sessionOwner as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+          }),
+    },
+  );
+}

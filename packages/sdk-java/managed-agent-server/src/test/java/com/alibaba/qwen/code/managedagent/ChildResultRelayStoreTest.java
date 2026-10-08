@@ -157,7 +157,7 @@ class ChildResultRelayStoreTest {
                         + " updated_at) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1,"
                         + " 1)",
                 TENANT, session);
-        List<PendingChild> pending = relayStore.findPendingChildren(10);
+        List<PendingChild> pending = relayStore.findPendingChildren("probe", 10);
         assertThat(pending).extracting(PendingChild::childRunId)
                 .containsExactly("run-live");
         // Every column the relay binds to is selected and mapped (the
@@ -179,11 +179,11 @@ class ChildResultRelayStoreTest {
         RelayRow claimed = relayStore.claim(TENANT, session, "run-live",
                 "key-live", "owner", 30_000, 100);
         assertThat(claimed).isNotNull();
-        assertThat(relayStore.findPendingChildren(10))
+        assertThat(relayStore.findPendingChildren("probe", 10))
                 .extracting(PendingChild::childRunId)
                 .containsExactly("run-live");
         relayStore.classify(claimed, "owner", "done", null, 200);
-        assertThat(relayStore.findPendingChildren(10)).isEmpty();
+        assertThat(relayStore.findPendingChildren("probe", 10)).isEmpty();
         // A record the consumer already advanced owes the delivering
         // ledger its owed step: it surfaces, until classify retires it.
         jdbc.update("UPDATE qwen_managed_session_extension_record SET"
@@ -195,12 +195,12 @@ class ChildResultRelayStoreTest {
         assertThat(delivering).isNotNull();
         relayStore.advance(delivering, "owner", "delivering", null, 0, null,
                 30_000, 400);
-        assertThat(relayStore.findPendingChildren(10))
+        assertThat(relayStore.findPendingChildren("probe", 10))
                 .extracting(PendingChild::childRunId)
                 .containsExactly("run-settled");
         relayStore.classify(relayStore.find(TENANT, session, "run-settled"),
                 "owner", "done", null, 500);
-        assertThat(relayStore.findPendingChildren(10)).isEmpty();
+        assertThat(relayStore.findPendingChildren("probe", 10)).isEmpty();
         // A parked backoff row and a lease-ahead row stay out of the
         // bounded window; each resurfaces exactly when owed.
         RelayRow parked = relayStore.claim(TENANT, session, "run-parked",
@@ -209,13 +209,17 @@ class ChildResultRelayStoreTest {
                 "planned", "pending");
         relayStore.defer(parked, "owner",
                 System.currentTimeMillis() + 60_000, "flap", 30_000, 100);
-        assertThat(relayStore.findPendingChildren(10)).isEmpty();
+        assertThat(relayStore.findPendingChildren("probe", 10)).isEmpty();
         RelayRow leased = relayStore.claim(TENANT, session, "run-leased",
                 "key-leased", "owner",
                 System.currentTimeMillis() + 60_000, 100);
         insertRecordRow("scope-x", session, "run-leased", "child_agent",
                 "planned", "pending");
-        assertThat(relayStore.findPendingChildren(10)).isEmpty();
+        assertThat(relayStore.findPendingChildren("probe", 10)).isEmpty();
+        // ...but the claimant itself always sees its own live claim.
+        assertThat(relayStore.findPendingChildren("owner", 10))
+                .extracting(PendingChild::childRunId)
+                .containsExactly("run-leased");
         relayStore.classify(leased, "owner", "done", null, 100);
         // And classify respects the claimant: a stale writer mutates nothing.
         RelayRow guarded = relayStore.claim(TENANT, session, "run-guarded",
@@ -281,6 +285,100 @@ class ChildResultRelayStoreTest {
                 "key-y", "owner-b", now + 30_000, now + 2_000);
         assertThat(taken).isNotNull();
         assertThat(taken.claimedBy()).isEqualTo("owner-b");
+    }
+
+    // R4-2: the accepted/consumed arm obeys the same due/lease
+    // eligibility as the launch arm — a backed-off or foreign-leased
+    // watching row must not squat a slot ahead of a newer due launch.
+    @Test
+    void appliesEligibilityToTheAcceptedArmToo() {
+        long now = 200_000L;
+        String session = UUID.randomUUID().toString();
+        insertRecordRow("scope-z", session, "run-accepted-backed-off",
+                "child_agent", "accepted", "pending");
+        insertRecordRow("scope-z", session, "run-accepted-leased",
+                "child_agent", "accepted", "pending");
+        insertRecordRow("scope-z", session, "run-due", "child_agent",
+                "planned", "pending");
+        RelayRow backedOff = relayStore.claim(TENANT, session,
+                "run-accepted-backed-off", "key-b", "owner", now + 30_000,
+                now);
+        relayStore.advance(backedOff, "owner", "watching", "child-b", 0,
+                null, now + 30_000, now);
+        relayStore.defer(relayStore.find(TENANT, session,
+                "run-accepted-backed-off"), "owner", now + 300_000, "flap",
+                now + 30_000, now);
+        RelayRow foreign = relayStore.claim(TENANT, session,
+                "run-accepted-leased", "key-l", "foreign-owner",
+                now + 60_000, now);
+        relayStore.advance(foreign, "foreign-owner", "watching", "child-l",
+                0, null, now + 60_000, now);
+        assertThat(relayStore.findPendingChildren("owner", now + 1_000, 10))
+                .extracting(PendingChild::childRunId)
+                .containsExactly("run-due");
+        // Retire the fixture rows: the discovery page is fleet-wide, so a
+        // leftover would leak into this class's other probes.
+        relayStore.classify(relayStore.find(TENANT, session,
+                "run-accepted-backed-off"), "owner", "done", null,
+                now + 2_000);
+        relayStore.classify(relayStore.find(TENANT, session,
+                "run-accepted-leased"), "foreign-owner", "done", null,
+                now + 2_000);
+        relayStore.classify(relayStore.claim(TENANT, session, "run-due",
+                "key-due", "owner", now + 30_000, now + 1_000), "owner",
+                "done", null, now + 2_000);
+    }
+
+    // R4-4: claim() lets the current owner continue immediately, so the
+    // page must not hide a due row behind its own live lease — that is
+    // what the five-second heartbeat paces against.
+    @Test
+    void hidesLiveClaimsFromOtherWorkersButNotTheirOwner() {
+        long now = 100_000L;
+        String session = UUID.randomUUID().toString();
+        insertRecordRow("scope-y", session, "run-owned", "child_agent",
+                "planned", "pending");
+        RelayRow row = relayStore.claim(TENANT, session, "run-owned",
+                "key-owned", "owner", now + 30_000, now);
+        relayStore.advance(row, "owner", "watching", "child-1",
+                now + 5_000, null, now + 30_000, now);
+        // Due at +5s: visible to the claimant, hidden from everyone else.
+        assertThat(relayStore.findPendingChildren("owner", now + 5_000, 10))
+                .extracting(PendingChild::childRunId)
+                .containsExactly("run-owned");
+        assertThat(relayStore.findPendingChildren("stranger", now + 5_000,
+                10)).isEmpty();
+        // Lease expiry admits the rest of the fleet.
+        assertThat(relayStore.findPendingChildren("stranger", now + 30_000,
+                10)).extracting(PendingChild::childRunId)
+                .containsExactly("run-owned");
+        relayStore.classify(relayStore.find(TENANT, session, "run-owned"),
+                "owner", "done", null, now + 31_000);
+    }
+
+    // R4-3: the fail commit of a FAILED/CANCELLED Turn moves delivery to
+    // `cancelled`; while the watching ledger still owes the close
+    // admission, the row must stay discoverable until classify lands.
+    @Test
+    void keepsAFailedChildDiscoverableUntilCloseAdmits() {
+        long now = 300_000L;
+        String session = UUID.randomUUID().toString();
+        insertRecordRow("scope-c", session, "run-cancelled", "child_agent",
+                "cancelled", "failed");
+        RelayRow row = relayStore.claim(TENANT, session, "run-cancelled",
+                "key-cancelled", "owner", now + 30_000, now);
+        relayStore.advance(row, "owner", "watching", "child-c", 0, null,
+                now + 30_000, now);
+        assertThat(relayStore.findPendingChildren("owner", now + 1_000, 10))
+                .extracting(PendingChild::childRunId)
+                .containsExactly("run-cancelled");
+        // A live lease still hides it from the rest of the fleet.
+        assertThat(relayStore.findPendingChildren("stranger", now + 1_000,
+                10)).isEmpty();
+        relayStore.classify(relayStore.find(TENANT, session, "run-cancelled"),
+                "owner", "done", null, now + 2_000);
+        assertThat(relayStore.findPendingChildren("owner", now + 3_000, 10))
+                .isEmpty();
     }
 
     @Test

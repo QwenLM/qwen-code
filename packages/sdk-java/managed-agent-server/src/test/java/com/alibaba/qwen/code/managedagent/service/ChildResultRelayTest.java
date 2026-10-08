@@ -114,7 +114,7 @@ class ChildResultRelayTest {
         row = new AtomicReference<>(new RelayRow(TENANT, PARENT, RUN,
                 "creation-key", null, "creating", "owner", now + 30_000, 0, 0,
                 null, now, now));
-        when(store.findPendingChildren(Mockito.anyInt()))
+        when(store.findPendingChildren(Mockito.anyString(), Mockito.anyInt()))
                 .thenAnswer(ignored -> List.of(pending));
         when(store.claim(anyString(), anyString(), anyString(), anyString(),
                 anyString(), anyLong(), anyLong()))
@@ -330,6 +330,43 @@ class ChildResultRelayTest {
         assertThat(fail).containsEntry("stopReason", "child_failed")
                 .containsEntry("started", true);
         verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+    }
+
+    // R4-3: a faltered close admission parks the row BEFORE the fail
+    // commit, so nothing moves delivery to `cancelled` while the child
+    // Session is still owed its durable close; the recovered retry
+    // closes first, then commits exactly once.
+    @Test
+    void aFalteredCloseDelaysTheFailCommitUntilAdmitted() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "FAILED", now + 1L, "model"));
+        Mockito.doThrow(new IllegalStateException("admission refused"))
+                .when(childCloses).admitChildClose(TENANT, PARENT, CHILD,
+                        RUN);
+
+        relay.scan();
+        assertThat(harness.operations).isEmpty();
+        assertThat(row.get().state()).isEqualTo("watching");
+        assertThat(row.get().attempts()).isEqualTo(1);
+
+        Mockito.doReturn(null).when(childCloses).admitChildClose(TENANT,
+                PARENT, CHILD, RUN);
+        // The retry window arrived: the parked row is due again.
+        RelayRow parked = row.get();
+        row.set(new RelayRow(parked.tenantId(), parked.parentSessionId(),
+                parked.childRunId(), parked.creationKey(),
+                parked.childSessionId(), parked.state(), parked.claimedBy(),
+                now + 30_000, parked.attempts(), 0, parked.lastError(),
+                parked.createdAt(), now));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+        verify(childCloses, Mockito.times(2)).admitChildClose(TENANT, PARENT,
+                CHILD, RUN);
     }
 
     @Test

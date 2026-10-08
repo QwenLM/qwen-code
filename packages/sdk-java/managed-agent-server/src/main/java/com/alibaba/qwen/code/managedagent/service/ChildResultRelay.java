@@ -84,7 +84,7 @@ public class ChildResultRelay {
             return;
         }
         for (PendingChild pending : relayStore
-                .findPendingChildren(SCAN_LIMIT)) {
+                .findPendingChildren(owner, SCAN_LIMIT)) {
             try {
                 work(pending);
             } catch (RuntimeException error) {
@@ -216,6 +216,12 @@ public class ChildResultRelay {
         switch (turn.status()) {
             case "COMPLETED" -> complete(row, pending, turn, now);
             case "CANCELLED", "FAILED" -> {
+                // Close before the fail commit: a faltered admission now
+                // parks the row while delivery is still discoverable; the
+                // fail commit itself moves delivery to `cancelled`, which
+                // the discovery page keeps surfacing until the close has
+                // durably admitted and classify lands.
+                closeFinishedChild(row, now);
                 Map<String, Object> fail = new LinkedHashMap<>();
                 fail.put("operationId", UUID.randomUUID().toString());
                 fail.put("kind", "fail");
@@ -224,7 +230,6 @@ public class ChildResultRelay {
                 fail.put("started", true);
                 harness.runChildOperation(row.tenantId(),
                         row.parentSessionId(), fail);
-                closeFinishedChild(row, now);
                 relayStore.classify(row, owner, "done",
                         "child Turn " + turn.status(), now);
             }

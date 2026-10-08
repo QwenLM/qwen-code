@@ -39,13 +39,20 @@ public class ChildResultRelayStore {
     // drops every row whose classification is terminal (delivered,
     // orphaned or given up), because the bounded discovery set is for
     // work still owed — accumulated terminal rows would otherwise starve
-    // the fleet-wide scan behind an ORDER BY created_at LIMIT. A row not
-    // owed yet either a retry backoff or a live lease lying ahead must
-    // not squat a slot either — this set is created_at-ordered and
-    // bounded fleet-wide. A record whose delivery already advanced (the
-    // consumer raced ahead) owes its watching/delivering ledger the
-    // terminal-mark step, so that arm surfaces too — the final classify
-    // retires it next scan.
+    // the fleet-wide scan behind an ORDER BY created_at LIMIT. The
+    // eligibility halves apply to both delivery arms: an unfiltered
+    // accepted/consumed arm lets backed-off or foreign-leased rows squat
+    // every slot of the bounded page, so a newer due launch is never
+    // reached. A lease hides a row from other workers, never from its
+    // claimant (claim() lets that owner continue immediately, and the
+    // five-second heartbeat would otherwise wait out the thirty-second
+    // lease). A record whose delivery already advanced (the consumer
+    // raced ahead) owes its watching/delivering ledger the terminal-mark
+    // step, so that arm surfaces too — the final classify retires it
+    // next scan. The cancelled arm is the same debt: the FAILED/CANCELLED
+    // arm's fail commit moves delivery to `cancelled` while the close
+    // admission may still be owed, and this page is the only thing that
+    // can ever drive that admission again.
     private static final String PENDING_SQL =
             "SELECT r.tenant_id, r.session_id, r.record_id, r.revision,"
                     + " r.delivery_state, r.record_resource_id"
@@ -56,12 +63,13 @@ public class ChildResultRelayStore {
                     + " WHERE r.domain = 'child_run'"
                     + " AND ((r.delivery_state IN ('planned', 'accepting',"
                     + " 'unknown') AND (l.state IS NULL OR l.state NOT IN"
-                    + " ('done', 'orphaned', 'unknown'))"
+                    + " ('done', 'orphaned', 'unknown')))"
+                    + " OR (r.delivery_state IN ('accepted', 'consumed',"
+                    + " 'cancelled') AND l.state IN ('watching',"
+                    + " 'delivering')))"
                     + " AND (l.next_retry_at IS NULL OR l.next_retry_at <= ?)"
                     + " AND (l.claimed_until IS NULL OR l.claimed_until <="
-                    + " ?))"
-                    + " OR (r.delivery_state IN ('accepted', 'consumed')"
-                    + " AND l.state IN ('watching', 'delivering')))"
+                    + " ? OR l.claimed_by = ?)"
                     + " ORDER BY r.created_at, r.session_id, r.record_id"
                     + " LIMIT ?";
 
@@ -71,18 +79,22 @@ public class ChildResultRelayStore {
         this.jdbc = jdbc;
     }
 
-    public List<PendingChild> findPendingChildren(int limit) {
-        return findPendingChildren(System.currentTimeMillis(), limit);
+    public List<PendingChild> findPendingChildren(String workerId, int limit) {
+        return findPendingChildren(workerId, System.currentTimeMillis(),
+                limit);
     }
 
-    /** The owed-work page: not terminal, not parked ahead, not leased
-     * ahead, plus the delivering arm whose consumer raced past it. */
-    public List<PendingChild> findPendingChildren(long now, int limit) {
+    /** The owed-work page for one worker: either arm, not terminal, not
+     * parked ahead, never leased to another worker — the scanning worker's
+     * own claim stays visible, so the heartbeat can fire on time. */
+    public List<PendingChild> findPendingChildren(String workerId, long now,
+            int limit) {
         return jdbc.query(PENDING_SQL, (result, row) -> new PendingChild(
                 result.getString("tenant_id"), result.getString("session_id"),
                 result.getString("record_id"), result.getLong("revision"),
                 result.getString("delivery_state"),
-                result.getString("record_resource_id")), now, now, limit);
+                result.getString("record_resource_id")), now, now, workerId,
+                limit);
     }
 
     /** One inline resource's bytes, or null when it is not inline-held. */

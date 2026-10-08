@@ -563,6 +563,19 @@ export class HostedWorkspaceToolTurn {
     return this.advertised;
   }
 
+  // The mount the Session already holds counts exactly like this Turn's
+  // own acquisition: `acquired` tracks only what this Turn took through
+  // the (possibly shared) broker, while the Hook catalog or MCP owner can
+  // hold the same Workspace mount until their Session-scoped close. A
+  // foreground child must not launch against either hold.
+  private sessionHoldsMount(): boolean {
+    return (
+      this.acquired ||
+      (this.mcp?.mountHeld ?? false) ||
+      (this.hooks?.mountHeld ?? false)
+    );
+  }
+
   async resumeCommittedResults(signal?: AbortSignal): Promise<void> {
     if (this.acquired) return;
     await this.warmed;
@@ -1289,11 +1302,15 @@ export class HostedWorkspaceToolTurn {
           } else if (backgroundIllFormed) {
             validationError =
               'Hosted child agent run_in_background must be a boolean.';
-          } else if (!agentBackground && this.acquired) {
+          } else if (!agentBackground && this.sessionHoldsMount()) {
             // v1: a foreground child waits out the parent's own wait, and
             // the shared Workspace's mount is held by exactly that wait —
-            // its child could never borrow it. Refuse before the deadlock
-            // rather than let both Turns burn down to the deadline.
+            // its child could never borrow it. The hold can belong to an
+            // owner this Turn never counts on its own flag: the Session's
+            // Hook catalog or MCP owner acquired and retains the mount
+            // until their Session-scoped close. Refuse before the
+            // deadlock rather than let both Turns burn down to the
+            // deadline.
             validationError =
               'Hosted child agent run_in_background=false is unavailable while this Turn holds the Workspace mount; run it in the background or let the current tool work finish first in a fresh turn.';
           } else if (

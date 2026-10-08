@@ -399,8 +399,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     @Override
     public void runChildOperation(String tenantId, String sessionId,
             Map<String, Object> body) {
-        client().runChildOperation(attachment(tenantId, sessionId, true),
-                body);
+        try {
+            client().runChildOperation(attachment(tenantId, sessionId, true),
+                    body);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
     }
 
     @Override

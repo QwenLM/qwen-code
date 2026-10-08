@@ -357,10 +357,19 @@ function acceptedInputSequence(
 
 // H3: a monitor notification input is never a parked Turn — the wake pump
 // owns its consumption, so reopen and takeover arithmetic skips it exactly
-// like the close path settles it model-free.
-function isMonitorInput(event: ManagedSessionEvent): boolean {
+// like the close path settles it model-free. H4b: the child run's
+// acceptance notification is the same shape — its consumption rides the
+// wake turn, so exempting only `monitor` here wedges the Session: the
+// pending notification counts as an unsettled Turn on every load while
+// the pump that would deliver it can never run.
+function isWakeOwnedInput(event: ManagedSessionEvent): boolean {
+  if (event.kind !== 'input.accepted') return false;
+  if (event.payload['source'] === 'monitor') return true;
+  const turnId = event.payload['turnId'];
   return (
-    event.kind === 'input.accepted' && event.payload['source'] === 'monitor'
+    event.payload['source'] === 'child_agent' &&
+    typeof turnId === 'string' &&
+    turnId.endsWith(':accept:notify')
   );
 }
 
@@ -371,7 +380,7 @@ function unsettledInputsThrough(
   const accepted = new Set<string>();
   const authority = session.managed.authority;
   for (const event of authority.eventsInSequenceRange(1, throughSequence)) {
-    if (event.kind === 'input.accepted' && !isMonitorInput(event))
+    if (event.kind === 'input.accepted' && !isWakeOwnedInput(event))
       accepted.add(event.payload['turnId'] as string);
     if (event.kind === 'turn.settled')
       accepted.delete(event.payload['turnId'] as string);
@@ -704,7 +713,7 @@ export async function settleCancelledHookTurn(
       if (event.kind === 'input.accepted') {
         const turnId = event.payload['turnId'];
         const queuedOnly =
-          isMonitorInput(event) &&
+          isWakeOwnedInput(event) &&
           (typeof turnId !== 'string' ||
             !wakeHasPriorAttempt(projected, turnId));
         if (!queuedOnly && typeof turnId === 'string')
@@ -1299,7 +1308,7 @@ export function attributeShellReceipts(
   for (const event of events) {
     if (event.kind === 'input.accepted') {
       const turnId = event.payload['turnId'];
-      if (typeof turnId === 'string' && !isMonitorInput(event)) {
+      if (typeof turnId === 'string' && !isWakeOwnedInput(event)) {
         pending.add(turnId);
         currentPrompt = turnId;
       }
@@ -2727,7 +2736,7 @@ export function registerHostedHarnessSessionRoutes(
           1,
           restore.throughSequence,
         )) {
-          if (event.kind === 'input.accepted' && !isMonitorInput(event))
+          if (event.kind === 'input.accepted' && !isWakeOwnedInput(event))
             pendingInputs.add(event.payload['turnId'] as string);
           if (event.kind === 'turn.settled')
             pendingInputs.delete(event.payload['turnId'] as string);
