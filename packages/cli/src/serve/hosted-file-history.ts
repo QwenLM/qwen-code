@@ -12,7 +12,7 @@ import type {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
-import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
+import { sanitizeDaemonLogLine } from '../utils/stdioHelpers.js';
 import {
   parseHostedFileHistoryRecord,
   type HostedFileHistoryRecord,
@@ -156,7 +156,7 @@ export async function canSettleHostedFileHistory(
           detail:
             authorization.message === undefined
               ? undefined
-              : stripAnsiAndControl(authorization.message).slice(0, 4096),
+              : sanitizeDaemonLogLine(authorization.message),
         }
       : { blocker: `authorization_${authorization.status}` };
   const checkpoint = authorization.checkpoint;

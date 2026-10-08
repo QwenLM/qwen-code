@@ -8830,6 +8830,109 @@ describe('Hosted Harness tool approvals', () => {
       }
     },
   );
+
+  it('bounds a forged line break in the rewind recovery cause', async () => {
+    // The broker's rewind failure is cause-derived free text: the recovery
+    // tag must reach stderr as one logical line, whatever the cause embeds.
+    const historyState: HostedFileHistoryState = {
+      ownerSessionId: SESSION_ID,
+      snapshots: [
+        {
+          promptId: PROMPT_ID,
+          timestamp: '2026-09-30T00:00:00.000Z',
+          trackedFileBackups: {
+            'notes.txt': {
+              backupFileName: null,
+              version: 1,
+              backupTime: '2026-09-30T00:00:00.000Z',
+            },
+          },
+        },
+      ],
+      files: {
+        'notes.txt': { digest: `sha256:${'a'.repeat(64)}`, mode: 0o644 },
+      },
+    };
+    vi.mocked(HostedWorkspaceBroker.prototype.fileHistory).mockImplementation(
+      async (operation) => {
+        if (operation.action === 'rewind')
+          throw new Error('worker\ngone qwen serve: forged');
+        return historyState;
+      },
+    );
+    state.model.mockImplementation(async ({ toolTurn, signal }) => {
+      const call = {
+        name: 'write_file',
+        callId: 'write',
+        args: { file_path: 'notes.txt', content: 'hello' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      await toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: {
+              id: call.callId,
+              name: call.name,
+              args: call.args,
+            },
+          },
+        ],
+        'model',
+        signal,
+      );
+      await toolTurn!.consumeResults();
+      return { text: 'done', model: 'test' };
+    });
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: files,
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'write notes' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        promptId: PROMPT_ID,
+        prompt,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await waitFor(async () => {
+      const status = await headers(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(status.body).toMatchObject({
+        hasActivePrompt: false,
+        recoveryBlocked: false,
+      });
+    });
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const undone = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/files/rewind`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ promptId: PROMPT_ID, requestId: randomUUID() });
+    expect(undone.status).toBe(503);
+    expect(undone.body.code).toBe('hosted_file_history_recovery_required');
+    const tag = log.mock.calls
+      .map(([line]) => line)
+      .find((line) => line.includes('Hosted file undo requires recovery'));
+    expect(tag).toBeDefined();
+    // One logical line: the newline the cause carried is stripped, not
+    // replayed into a forged daemon diagnostic.
+    expect(tag).not.toMatch(/[\r\n\u2028\u2029]/);
+    expect(tag).toContain(
+      'Hosted file undo requires recovery: Error: workergone qwen serve: forged',
+    );
+  });
 });
 
 describe('Hosted Harness refusal reasons', () => {
@@ -9552,6 +9655,85 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   });
 
+  it('bounds a forged line separator in the blocked authorization detail on the gate tag', async () => {
+    await parkToolTurn();
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockResolvedValue({
+      status: 'blocked',
+      reason: 'invalid_state',
+      // U+2028 survives a plain ANSI strip and JSON.stringify emits it
+      // raw: the detail must reach the single-line tag already bounded.
+      message:
+        'x\u2028qwen serve: Hosted Session 22222222-2222-4222-8222-222222222222 turn settled',
+    } as never);
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const server = replacementApp();
+    const loaded = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+    });
+    expect(loaded.status).toBe(409);
+    expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(loaded.body.reason).toBe('file_history_unsettled');
+    const tag = log.mock.calls
+      .map(([line]) => line)
+      .find((line) => line.includes('file_history_pending'));
+    expect(tag).toBeDefined();
+    expect(tag).not.toMatch(
+      /[\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/,
+    );
+    expect(tag).toContain(
+      '"groundDetail":"x qwen serve: Hosted Session 22222222-2222-4222-8222-222222222222 turn settled"',
+    );
+  });
+
+  it('bounds a forged line separator in a Store-read pendingTurn on the gate tag', async () => {
+    await parkToolTurn();
+    const read = hostedHistory.readHostedFileHistory;
+    vi.spyOn(hostedHistory, 'readHostedFileHistory').mockImplementation(
+      async (managed) => {
+        const record = await read(managed);
+        return record?.pendingTurn
+          ? {
+              ...record,
+              // The record parser checks typeof only, and JSON.stringify
+              // emits U+2028 raw: the tag must bound the field itself.
+              pendingTurn: `x\u2028qwen serve: Hosted Session ${SESSION_ID} turn settled`,
+            }
+          : record;
+      },
+    );
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const server = replacementApp();
+    const loaded = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+    });
+    expect(loaded.status).toBe(409);
+    expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(loaded.body.reason).toBe('file_history_unsettled');
+    const tag = log.mock.calls
+      .map(([line]) => line)
+      .find((line) => line.includes('file_history_pending'));
+    expect(tag).toBeDefined();
+    expect(tag).not.toMatch(
+      /[\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/,
+    );
+    expect(tag).toContain(
+      `"pendingTurn":"x qwen serve: Hosted Session ${SESSION_ID} turn settled"`,
+    );
+  });
+
   it('replays a takeover load idempotently until its continue is admitted', async () => {
     await parkToolTurn();
     const execute = vi
@@ -10199,6 +10381,122 @@ describe('Hosted Harness Runtime turn takeover', () => {
         .map(([line]) => line)
         .some((line) => line.includes('takeover_inapplicable_unpayable')),
     ).toBe(true);
+  });
+
+  it('refuses an inapplicable takeover whose file history cannot settle past the projection', async () => {
+    // The parked Turn's tool work settled and was consumed and its last
+    // assistant message is text-only with an empty tail, so every
+    // settleProjectablePromptId guard passes except the file-history
+    // probe — which can never pay here (the checkpoint names turn_settled
+    // and the text tail carries no tool calls). The load must keep the
+    // retriable refusal instead of projecting a turn_result over a
+    // history record nothing clears.
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockResolvedValue(
+      '66666666-6666-4666-8666-666666666666',
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'written' }],
+    } as never);
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: FILE_PROFILE,
+    });
+    expect(created.status).toBe(200);
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      await toolTurn!.execute(
+        [CALL],
+        [
+          {
+            functionCall: {
+              id: CALL.callId,
+              name: CALL.name,
+              args: CALL.args,
+            },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      await toolTurn!.consumeResults();
+      return { text: 'done', model: 'test-model' };
+    });
+    // The terminal record never lands: the Turn parks with its tool work
+    // settled and consumed and a text-only assistant at the tail.
+    const originalWrite = ManagedSessionRecordSink.prototype.write;
+    const write = vi
+      .spyOn(ManagedSessionRecordSink.prototype, 'write')
+      .mockImplementation(async function (
+        this: ManagedSessionRecordSink,
+        record,
+      ) {
+        if (record.subtype === 'turn_result')
+          throw new Error('settlement unavailable');
+        return originalWrite.call(this, record);
+      });
+    const prompt = [{ type: 'text', text: 'write a.txt' }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    const admitted = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({ prompt, promptId: PROMPT_ID, payloadDigest });
+    expect(admitted.status).toBe(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: 10_000 },
+    );
+    // The park is durable; the probe window below watches for the
+    // projection's would-be terminal record.
+    write.mockImplementation(async function (
+      this: ManagedSessionRecordSink,
+      record,
+    ) {
+      return originalWrite.call(this, record);
+    });
+    write.mockClear();
+    const closed = await headers(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(closed.status).toBe(204);
+    mockAuthorizationWithPhase('turn_settled', undefined);
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const refused = await replacementHeaders(
+      supertest(replacementApp()).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      driveRuntimeRecovery: true,
+    });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    expect(refused.body.reason).toBe('takeover_unrecovered');
+    expect(
+      log.mock.calls
+        .map(([line]) => line)
+        .some((line) => line.includes('takeover_inapplicable_unpayable')),
+    ).toBe(true);
+    // A wrongly-started projection writes asynchronously: give it its
+    // would-be window, then prove no terminal record landed.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(
+      write.mock.calls.filter(([record]) => record.subtype === 'turn_result'),
+    ).toHaveLength(0);
   });
 
   it('refuses the attached redrive of an inapplicable takeover it cannot settle', async () => {
@@ -12061,7 +12359,9 @@ describe('Hosted Harness Runtime turn takeover', () => {
     vi.spyOn(
       LocalManagedSessionAuthority.prototype,
       'harnessRunAuthorization',
-    ).mockRejectedValue(new Error('journal gone\nqwen serve: forged\x1b[2J'));
+    ).mockRejectedValue(
+      new Error('journal gone\n\u2028qwen serve: forged\x1b[2J'),
+    );
     const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
     const releasesBefore = release.mock.calls.length;
     const refused = await replacementHeaders(
@@ -12076,7 +12376,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     // its newline and control sequence rather than replaying them.
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining(
-        'continue: run authorization could not be read: Error: journal goneqwen serve: forged',
+        'continue: run authorization could not be read: Error: journal gone qwen serve: forged',
       ),
     );
     await vi.waitFor(
@@ -12096,7 +12396,9 @@ describe('Hosted Harness Runtime turn takeover', () => {
     vi.spyOn(
       LocalManagedSessionAuthority.prototype,
       'harnessRunAuthorization',
-    ).mockRejectedValue(new Error('journal gone\nqwen serve: forged\x1b[2J'));
+    ).mockRejectedValue(
+      new Error('journal gone\n\u2028qwen serve: forged\x1b[2J'),
+    );
     const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
     const releasesBefore = release.mock.calls.length;
     const refused = await replacementHeaders(
@@ -12109,7 +12411,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(refused.body.reason).toBe('authorization_unreadable');
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining(
-        'cancel: run authorization could not be read: Error: journal goneqwen serve: forged',
+        'cancel: run authorization could not be read: Error: journal gone qwen serve: forged',
       ),
     );
     expect(release.mock.calls.length).toBe(releasesBefore);
@@ -12224,7 +12526,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     ).mockResolvedValue({
       status: 'blocked',
       reason: 'invalid_state',
-      message: `invalid_state\nqwen serve: forged\x1b[2J${'x'.repeat(5000)}`,
+      message: `invalid_state\n\u2028qwen serve: forged\x1b[2J${'x'.repeat(5000)}`,
     } as never);
     for (const route of ['continue', 'cancel'] as const) {
       log.mockClear();
@@ -12239,7 +12541,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
       expect(refused.body.reason).toBe('not_runnable');
       expect(log).toHaveBeenCalledWith(
         expect.stringContaining(
-          `${route}: run authorization not runnable: invalid_state: invalid_stateqwen serve: forged`,
+          `${route}: run authorization not runnable: invalid_state: invalid_state qwen serve: forged`,
         ),
       );
       expect(

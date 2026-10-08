@@ -66,8 +66,10 @@ import {
   assertManagedSessionStableId,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
-import { stripAnsiAndControl } from '@qwen-code/qwen-code-core/utils/textUtils.js';
-import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
+import {
+  sanitizeDaemonLogLine,
+  writeStderrLineSafe,
+} from '../utils/stdioHelpers.js';
 import {
   ACCESS_LOG_ERROR_CODE_LOCAL,
   ACCESS_LOG_ERROR_REASON_LOCAL,
@@ -316,7 +318,7 @@ function harnessAuthorizationDetail(
   if (authorization.status !== 'blocked') return authorization.status;
   return authorization.message === undefined
     ? authorization.reason
-    : `${authorization.reason}: ${stripAnsiAndControl(authorization.message).slice(0, 4096)}`;
+    : `${authorization.reason}: ${sanitizeDaemonLogLine(authorization.message)}`;
 }
 
 /** A takeover refusal that cannot change under retry: distinct from
@@ -874,11 +876,11 @@ async function settleProjectablePromptId(
     return null;
   if (
     fileHistory &&
-    !(await canSettleHostedFileHistory(managed, {
+    (await canSettleHostedFileHistory(managed, {
       ...fileHistory,
       pendingTurn: promptId,
       pendingMessageId: current[lastAssistant].uuid,
-    }))
+    })) !== null
   )
     return null;
   return promptId;
@@ -922,7 +924,7 @@ function runSettleProjection(
       session.blocked = true;
       writeStderrLineSafe(
         'qwen serve: Hosted Harness final settlement remained blocked: ' +
-          String(cause),
+          sanitizeDaemonLogLine(String(cause)),
       );
     })
     .finally(() => {
@@ -1997,7 +1999,7 @@ export function registerHostedHarnessSessionRoutes(
               return;
             } catch (cause) {
               writeStderrLineSafe(
-                `qwen serve: Hosted Session ${sessionId} redrive refused (takeover_unavailable): profile=${attached.toolProfile ?? 'none'} broker=${brokerOptions ? 'ready' : 'none'} settle=${String(cause)}`,
+                `qwen serve: Hosted Session ${sessionId} redrive refused (takeover_unavailable): profile=${attached.toolProfile ?? 'none'} broker=${brokerOptions ? 'ready' : 'none'} settle=${sanitizeDaemonLogLine(String(cause))}`,
               );
               error(res, 409, 'hosted_turn_recovery_required');
               return;
@@ -2078,7 +2080,7 @@ export function registerHostedHarnessSessionRoutes(
             return;
           } catch (cause) {
             writeStderrLineSafe(
-              `qwen serve: Hosted Harness recovery re-answer of session ${sessionId} failed: ${String(cause)}`,
+              `qwen serve: Hosted Harness recovery re-answer of session ${sessionId} failed: ${sanitizeDaemonLogLine(String(cause))}`,
             );
             // Retry-inviting, like the first load's recovery failure; the
             // attached Session keeps its owed lease for the next redrive.
@@ -2410,8 +2412,13 @@ export function registerHostedHarnessSessionRoutes(
             : await canSettleHostedFileHistory(managed, fileHistory)
           : null;
       if (fileHistory?.pendingUndo || settle !== null) {
+        // The pending ids pass the record parser with a typeof check only,
+        // and JSON.stringify emits U+2028/U+2029 raw: every Store-read field
+        // is bounded before it reaches the single-line tag.
+        const tagField = (value: string | null | undefined): string | null =>
+          value == null ? null : sanitizeDaemonLogLine(value);
         writeStderrLineSafe(
-          `qwen serve: Hosted Session ${sessionId} load refused (file_history_pending): ${JSON.stringify({ pendingTurn: fileHistory?.pendingTurn ?? null, pendingUndo: fileHistory?.pendingUndo ?? null, unsettled: unsettled ?? null, takeover, ground: settle?.blocker ?? null, groundDetail: settle?.detail ?? null })}`,
+          `qwen serve: Hosted Session ${sessionId} load refused (file_history_pending): ${JSON.stringify({ pendingTurn: tagField(fileHistory?.pendingTurn), pendingUndo: fileHistory?.pendingUndo ? { requestId: sanitizeDaemonLogLine(fileHistory.pendingUndo.requestId), promptId: sanitizeDaemonLogLine(fileHistory.pendingUndo.promptId) } : null, unsettled: unsettled ?? null, takeover, ground: settle?.blocker ?? null, groundDetail: settle?.detail ?? null })}`,
         );
         await managed.close();
         const pendingUndo = fileHistory?.pendingUndo != null;
@@ -2448,7 +2455,7 @@ export function registerHostedHarnessSessionRoutes(
           verdict?.status === 'blocked'
             ? ` reason=${verdict.reason}` +
               (verdict.message !== undefined
-                ? ` message=${stripAnsiAndControl(verdict.message).slice(0, 4096)}`
+                ? ` message=${sanitizeDaemonLogLine(verdict.message)}`
                 : '')
             : '';
         writeStderrLineSafe(
@@ -2483,7 +2490,7 @@ export function registerHostedHarnessSessionRoutes(
           );
         } catch (cause) {
           writeStderrLineSafe(
-            `qwen serve: Hosted Session ${sessionId} load refused (workspace_verify): ${stripAnsiAndControl(String(cause)).slice(0, 4096)}`,
+            `qwen serve: Hosted Session ${sessionId} load refused (workspace_verify): ${sanitizeDaemonLogLine(String(cause))}`,
           );
           await managed.close();
           error(
@@ -2498,7 +2505,7 @@ export function registerHostedHarnessSessionRoutes(
           await stores.assertWritable();
         } catch (cause) {
           writeStderrLineSafe(
-            `qwen serve: Hosted Session ${sessionId} load refused (workspace_writable): ${stripAnsiAndControl(String(cause)).slice(0, 4096)}`,
+            `qwen serve: Hosted Session ${sessionId} load refused (workspace_writable): ${sanitizeDaemonLogLine(String(cause))}`,
           );
           await managed.close();
           error(
@@ -2569,7 +2576,7 @@ export function registerHostedHarnessSessionRoutes(
             cancellationSettled = true;
           } catch (cause) {
             writeStderrLineSafe(
-              `qwen serve: Hosted Session ${sessionId} load refused (takeover_unavailable): profile=${toolProfile ?? 'none'} broker=${brokerOptions ? 'ready' : 'none'} settle=${String(cause)}`,
+              `qwen serve: Hosted Session ${sessionId} load refused (takeover_unavailable): profile=${toolProfile ?? 'none'} broker=${brokerOptions ? 'ready' : 'none'} settle=${sanitizeDaemonLogLine(String(cause))}`,
             );
             await managed.close();
             error(res, 409, 'hosted_turn_recovery_required');
@@ -2661,7 +2668,7 @@ export function registerHostedHarnessSessionRoutes(
           } catch (cause) {
             await managed.close();
             writeStderrLineSafe(
-              `qwen serve: Hosted Harness recovery of session ${sessionId} failed: ${String(cause)}`,
+              `qwen serve: Hosted Harness recovery of session ${sessionId} failed: ${sanitizeDaemonLogLine(String(cause))}`,
             );
             // A failed takeover keeps the turn parked for the next attempt:
             // refuse exactly like a plain recovery refusal so the coordinator
@@ -2799,7 +2806,7 @@ export function registerHostedHarnessSessionRoutes(
           // Same owed-lease discipline as the refusal above.
           noteOwedAdoption(session, sessionId);
           writeStderrLineSafe(
-            `qwen serve: Hosted Session ${sessionId} load refused (workspace_writable): ${stripAnsiAndControl(String(cause)).slice(0, 4096)}`,
+            `qwen serve: Hosted Session ${sessionId} load refused (workspace_writable): ${sanitizeDaemonLogLine(String(cause))}`,
           );
           await managed.close();
           error(
@@ -3715,7 +3722,7 @@ export function registerHostedHarnessSessionRoutes(
     if (!continueAuthorization.ok) {
       releaseRecoveredRuntime(session);
       writeStderrLineSafe(
-        `qwen serve: Hosted Session ${req.params['id']} continue: run authorization could not be read: ${stripAnsiAndControl(String(continueAuthorization.cause)).slice(0, 4096)}`,
+        `qwen serve: Hosted Session ${req.params['id']} continue: run authorization could not be read: ${sanitizeDaemonLogLine(String(continueAuthorization.cause))}`,
       );
       return error(
         res,
@@ -4035,7 +4042,7 @@ export function registerHostedHarnessSessionRoutes(
     if (session.active) return error(res, 409, 'hosted_turn_active');
     if (!cancelAuthorization.ok) {
       writeStderrLineSafe(
-        `qwen serve: Hosted Session ${sessionId} cancel: run authorization could not be read: ${stripAnsiAndControl(String(cancelAuthorization.cause)).slice(0, 4096)}`,
+        `qwen serve: Hosted Session ${sessionId} cancel: run authorization could not be read: ${sanitizeDaemonLogLine(String(cancelAuthorization.cause))}`,
       );
       // Retry-inviting refusal: keep the adopted lease owed (see the
       // blocked refusal above).
@@ -4490,7 +4497,7 @@ export function registerHostedHarnessSessionRoutes(
       .catch((cause: unknown) => {
         session.blocked = true;
         writeStderrLineSafe(
-          `qwen serve: Hosted file undo requires recovery: ${String(cause)}`,
+          `qwen serve: Hosted file undo requires recovery: ${sanitizeDaemonLogLine(String(cause))}`,
         );
         error(
           res,

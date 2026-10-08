@@ -601,13 +601,18 @@ describe('canSettleHostedFileHistory grounds', () => {
     mockAuthorization({
       status: 'blocked',
       reason: 'invalid_state',
-      message: `core detail\nqwen serve: forged\x1b[2J${'x'.repeat(5000)}`,
+      message: `core detail\n\u2028qwen serve: forged\x1b[2J\u202e${'x'.repeat(5000)}`,
     });
     const settle = await canSettleHostedFileHistory(session, pendingRecord());
     expect(settle).toEqual({
       blocker: 'authorization_blocked_invalid_state',
-      detail: expect.stringContaining('core detailqwen serve: forged'),
+      detail: expect.stringContaining('core detail qwen serve: forged'),
     });
     expect(settle?.detail).toHaveLength(4096);
+    // An oracle independent of the implementation: no code point of the
+    // log-line-unsafe class may survive into the detail.
+    expect(settle?.detail).not.toMatch(
+      /[\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/,
+    );
   });
 });
