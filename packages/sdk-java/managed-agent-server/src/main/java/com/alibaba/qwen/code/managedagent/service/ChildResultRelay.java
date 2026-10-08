@@ -189,13 +189,17 @@ public class ChildResultRelay {
         }
     }
 
-    /** The parent record's settlement already committed — a terminal
-     * delivery that the close cascade's live-scope walk can no longer
-     * see. Only such rows can hide an unadmitted close. */
+    /** The task's settlement already committed — delivery does not have
+     * to be terminal: `commitChildResult` settles the run and projects
+     * task `completed` the moment delivery reaches `accepting`, while
+     * the close cascade's live-scope walk already excludes that task —
+     * and `planned`/`unknown` leave the cascade's ownership intact.
+     * Only task-settled rows can hide an unadmitted close. */
     private static boolean isSettledDelivery(String deliveryState) {
-        return "cancelled".equals(deliveryState)
+        return "accepting".equals(deliveryState)
                 || "accepted".equals(deliveryState)
-                || "consumed".equals(deliveryState);
+                || "consumed".equals(deliveryState)
+                || "cancelled".equals(deliveryState);
     }
 
     /** The child Session still stands in an owning state: its row must

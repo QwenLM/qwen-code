@@ -572,6 +572,37 @@ class ChildResultRelayTest {
                 anyString(), anyString());
     }
 
+    // Task settlement leads delivery settlement: `commitChildResult`
+    // already projects task `completed` (out of the close cascade's live
+    // scopes) the moment delivery reaches `accepting`, and a lost reply
+    // or a failed acceptance call interrupts before `accepted`. A parent
+    // closing in that walk must not orphan the owed close either — the
+    // same retention parks and discharges it.
+    @Test
+    void anAcceptingDeliveryRetainsItsCloseAcrossParentClose() {
+        when(store.findPendingChildren(Mockito.anyString(), Mockito.anyInt()))
+                .thenAnswer(ignored -> List.of(new PendingChild(TENANT,
+                        PARENT, RUN, 1, "accepting", "resource-body")));
+        when(store.sessionStatus(TENANT, PARENT)).thenReturn("DELETED");
+        when(store.sessionStatus(TENANT, CHILD)).thenReturn("ACTIVE");
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "delivering", "owner", now + 30_000, 0, 0, null, now, now));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("close_debt");
+        assertThat(harness.operations).isEmpty();
+        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
+                anyString(), anyString());
+        RelayRow parked = row.get();
+        row.set(new RelayRow(parked.tenantId(), parked.parentSessionId(),
+                parked.childRunId(), parked.creationKey(),
+                parked.childSessionId(), parked.state(), parked.claimedBy(),
+                now + 30_000, parked.attempts(), 0, parked.lastError(),
+                parked.createdAt(), now));
+        relay.scan();
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(row.get().state()).isEqualTo("done");
+    }
+
     // R4-3: a faltered close admission parks the row BEFORE the fail
     // commit, so nothing moves delivery to `cancelled` while the child
     // Session is still owed its durable close; the recovered retry

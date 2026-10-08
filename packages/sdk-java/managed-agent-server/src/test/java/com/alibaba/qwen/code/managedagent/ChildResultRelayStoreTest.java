@@ -405,6 +405,30 @@ class ChildResultRelayStoreTest {
                 .isEmpty();
     }
 
+    // A give-up whose settle committed and whose close_debt write then
+    // failed leaves delivery `cancelled` against a ledger still walking
+    // the earliest arms (`binding`): narrower arm-2 state lists made
+    // this combination permanently undiscoverable even before a parent
+    // close, so no reconciliation could ever find it.
+    @Test
+    void keepsABindingRowDiscoverableAfterSettlement() {
+        long now = 500_000L;
+        String session = UUID.randomUUID().toString();
+        insertRecordRow("scope-b", session, "run-binding", "child_agent",
+                "cancelled", "failed");
+        RelayRow row = relayStore.claim(TENANT, session, "run-binding",
+                "key-binding", "owner", now + 30_000, now);
+        relayStore.advance(row, "owner", "binding", "child-b", 0, null,
+                now + 30_000, now);
+        assertThat(relayStore.findPendingChildren("owner", now + 1_000, 10))
+                .extracting(PendingChild::childRunId)
+                .containsExactly("run-binding");
+        relayStore.classify(relayStore.find(TENANT, session, "run-binding"),
+                "owner", "done", null, now + 2_000);
+        assertThat(relayStore.findPendingChildren("owner", now + 3_000, 10))
+                .isEmpty();
+    }
+
     @Test
     void readsInlineResourcesOnly() {
         jdbc.update("INSERT INTO qwen_managed_session_resource"

@@ -47,15 +47,19 @@ public class ChildResultRelayStore {
     // claimant (claim() lets that owner continue immediately, and the
     // five-second heartbeat would otherwise wait out the thirty-second
     // lease). A record whose delivery already advanced (the consumer
-    // raced ahead) owes its watching/delivering ledger the terminal-mark
-    // step, so that arm surfaces too — the final classify retires it
-    // next scan. The cancelled arm is the same debt: the FAILED/CANCELLED
-    // arm's fail commit moves delivery to `cancelled` while the close
-    // admission may still be owed, and this page is the only thing that
-    // can ever drive that admission again. `close_debt` rides the same
-    // arm: the parent's settlement commits first so quota never waits on
-    // a host's close capability, and the ledger row keeps the retained
-    // close admission discoverable until a capable scan discharges it.
+    // raced ahead) owes its ledger the owed-work walk no matter which
+    // intermediate state an interruption left it in — a watching or
+    // delivering row owes mark_accepted/close/classify; a binding row
+    // whose settle committed (and whose close_debt write then failed) is
+    // owed exactly the same retention, so the arm admits every
+    // non-terminal state. The cancelled arm is the same debt: the
+    // FAILED/CANCELLED arm's fail commit moves delivery to `cancelled`
+    // while the close admission may still be owed, and this page is the
+    // only thing that can ever drive that admission again. `close_debt`
+    // rides the same arm: the parent's settlement commits first so
+    // quota never waits on a host's close capability, and the ledger
+    // row keeps the retained close admission discoverable until a
+    // capable scan discharges it.
     private static final String PENDING_SQL =
             "SELECT r.tenant_id, r.session_id, r.record_id, r.revision,"
                     + " r.delivery_state, r.record_resource_id"
@@ -68,8 +72,8 @@ public class ChildResultRelayStore {
                     + " 'unknown') AND (l.state IS NULL OR l.state NOT IN"
                     + " ('done', 'orphaned', 'unknown')))"
                     + " OR (r.delivery_state IN ('accepted', 'consumed',"
-                    + " 'cancelled') AND l.state IN ('watching',"
-                    + " 'delivering', 'close_debt')))"
+                    + " 'cancelled') AND l.state NOT IN ('done',"
+                    + " 'orphaned', 'unknown')))"
                     + " AND (l.next_retry_at IS NULL OR l.next_retry_at <= ?)"
                     + " AND (l.claimed_until IS NULL OR l.claimed_until <="
                     + " ? OR l.claimed_by = ?)"
