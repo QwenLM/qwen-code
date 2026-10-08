@@ -181,10 +181,28 @@ public class ChildResultRelay {
                         now + LEASE_MS, now);
                 return;
             }
-            relayStore.classify(row, owner, "orphaned",
-                    parentStatus == null ? "parent session is gone"
-                            : "parent session is " + parentStatus,
-                    now);
+            // Between this walk's read and the classification commit,
+            // any worker can still settle — the verdict holds the record
+            // row's lock across both reads, and losing that race only
+            // means the truth just settled: evaluate retention against
+            // THAT, once, instead of orphaning the owed close anyway.
+            String orphanReason = parentStatus == null
+                    ? "parent session is gone"
+                    : "parent session is " + parentStatus;
+            if (!relayStore.classifyOrphanedWithoutSettlement(row, owner,
+                    orphanReason, now)) {
+                if (child != null
+                        && childSessionNeedsClose(row.tenantId(), child)) {
+                    relayStore.advance(row, owner, "close_debt", child,
+                            now + HEARTBEAT_MS,
+                            "close debt retained over a race-losing settle"
+                                    + " at parent " + parentStatus,
+                            now + LEASE_MS, now);
+                    return;
+                }
+                relayStore.classify(row, owner, "orphaned", orphanReason,
+                        now);
+            }
             return;
         }
         // A settled-failed record whose terminal-classification write
@@ -563,6 +581,20 @@ public class ChildResultRelay {
                     : relayStore.findLineageChild(row.tenantId(),
                             row.parentSessionId(), row.childRunId());
             boolean started = reconcileAttach(row, child);
+            // A no-child proof read before the create side resumed is only
+            // pre-collapse evidence: a creation committing between that
+            // read and this request turns creation_failed into a wrong
+            // verdict over a running child. At the commit seam, re-read
+            // what the file side can prove now; new evidence owes one more
+            // bounded wait instead of the confidently wrong pairing.
+            if (!started) {
+                String lateChild = relayStore.findLineageChild(row.tenantId(),
+                        row.parentSessionId(), row.childRunId());
+                if (lateChild != null && !lateChild.equals(child)) {
+                    throw new RelayRetry("child lineage materialized after"
+                            + " the no-child proof");
+                }
+            }
             // One read of the capability feeds both decisions: reading it
             // twice could flip between the admit order and the retention
             // flag and silently lose the debt either way.

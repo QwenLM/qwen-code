@@ -655,10 +655,81 @@ class ChildResultRelayTest {
         when(store.sessionStatus(TENANT, PARENT)).thenReturn("CLOSED");
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.classifyOrphanedWithoutSettlement(any(RelayRow.class),
+                anyString(), any(), anyLong())).thenAnswer(args -> {
+                    RelayRow before = row.get();
+                    row.set(new RelayRow(before.tenantId(),
+                            before.parentSessionId(), before.childRunId(),
+                            before.creationKey(), before.childSessionId(),
+                            "orphaned", null, 0, before.attempts(),
+                            before.nextRetryAt(),
+                            (String) args.getArgument(2), before.createdAt(),
+                            now));
+                    return true;
+                });
         relay.scan();
         assertThat(row.get().state()).isEqualTo("orphaned");
         verify(childCloses, never()).admitChildClose(anyString(), anyString(),
                 anyString(), anyString());
+    }
+
+    // A settlement that lands between the walk's read and the verdict
+    // commit no longer orphan-buries the child: the verdict's locked
+    // re-read loses the race, and one fresh evaluation assigns the owed
+    // close debt instead of retirement.
+    @Test
+    void aRaceLosingVerdictRetainsInsteadOfOrphaning() {
+        when(store.sessionStatus(TENANT, PARENT)).thenReturn("CLOSED");
+        when(store.sessionStatus(TENANT, CHILD)).thenReturn("ACTIVE");
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        when(store.classifyOrphanedWithoutSettlement(any(RelayRow.class),
+                anyString(), any(), anyLong())).thenReturn(false);
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("close_debt");
+        assertThat(harness.operations).isEmpty();
+        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
+    // The no-child proof is pre-collapse evidence only: if the create
+    // side's lineage shows up after the veto, the give-up owes the
+    // bounded wait and never commits a `creation_failed` verdict over a
+    // now-provable running child.
+    @Test
+    void aGiveUpDefersALateLifecycleChildRatherThanMisclassifyIt() {
+        when(store.findLineageChild(TENANT, PARENT, RUN))
+                .thenReturn(null, CHILD, CHILD, CHILD);
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "RUNNING", null, null));
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
+                "creating", "owner", now + 30_000, 63, 0, null, now, now));
+        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+                .thenReturn(null);
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("creating");
+        assertThat(row.get().attempts()).isEqualTo(64);
+        assertThat(harness.operations).isEmpty();
+        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
+                anyString(), anyString());
+        RelayRow parked = row.get();
+        row.set(new RelayRow(parked.tenantId(), parked.parentSessionId(),
+                parked.childRunId(), parked.creationKey(),
+                parked.childSessionId(), parked.state(), parked.claimedBy(),
+                now + 30_000, parked.attempts(), 0, parked.lastError(),
+                parked.createdAt(), now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1, null));
+        harness.refuseRecord = "attach";
+        relay.scan();
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+        assertThat(harness.operations.get(0))
+                .containsEntry("stopReason", "child_failed")
+                .containsEntry("started", true);
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(row.get().state()).isEqualTo("unknown");
     }
 
     // And nothing is owed a close that already happened: a settled row
