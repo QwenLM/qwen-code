@@ -2,8 +2,9 @@
 
 [English](2026-10-04-managed-channels.md) | [简体中文](2026-10-04-managed-channels.zh-CN.md)
 
-Status: proposed design; nothing in this document is implemented, and no domain
-it names is enabled for submission. This is the design for slice H5 of
+Status: slice H5a (the record contract of both domains) is implemented; slices
+H5b and H5c remain proposed, and no domain this document names is enabled for
+submission. This is the design for slice H5 of
 [#12827](https://github.com/QwenLM/qwen-code/issues/12827), stage H of the
 Managed Agent proposal [#12380](https://github.com/QwenLM/qwen-code/issues/12380).
 It builds on the task contract of H0a
@@ -209,25 +210,66 @@ The facts below are from `main` at `5ddfacc9d4`.
    `send` result; SMTP provides no delivery query, so outbound is governed
    by decision 5.
 
-## Record bodies (H5a contract direction)
+## Record bodies (H5a)
 
-Both bodies embed the H0b run block unchanged. The closed field sets,
-validators and transition rules are pinned by the H5a change in the shared
-schema and fixture files that TypeScript and Java both replay. This section
-fixes the direction, not the byte-level schema.
+Both bodies embed the H0b run block unchanged, both register in
+`MANAGED_EXTENSION_RECORD_BODIES` with `taskKind: null` — a Channel
+route or delivery is not a Session task — and both stay absent from
+`MANAGED_SESSION_ENABLED_DOMAINS`. The byte-level contract lives in
+`packages/core/src/managed-runtime/managed-channel-record.ts`, is mirrored
+by `ManagedChannelRecords` in `packages/sdk-java/managed-agent-server`, and
+is pinned by the shared corpus
+`contracts/managed-channel-record-v1.fixtures.json` (92 shape cases and 57
+successor cases), which TypeScript and Java replay identically.
 
-- `managed-channel_route` (chain identity `routeId`): the channel instance
-  identity, the account identity and its current generation, the
-  route-binding revision, `rootSessionId`/`sessionId` of the bound Session,
-  and the admission policy reference (allowed senders, gates) as a durable
-  configuration pin. Its run tracks the binding's lifecycle only; a route
-  has no execution line.
-- `managed-channel_delivery` (chain identity `deliveryId`): the route and
-  its revision, the producing Session and Turn references, the `replyRef`
-  or result Artifact references, the segment plan (`segmentId`/`ordinal`
-  layout), per-segment receipt state, and the delivery line of target
-  `channel` from H0b. Terminal receipts commit before the delivery line
-  leaves `sending`/`partial`.
+- `managed-channel_route` (chain identity `routeId`): closed keys
+  `routeId`, `channelInstanceId`, `accountId`, `accountGeneration`,
+  `routeRevision`, `rootSessionId`, `sessionId`, `scope`, `policyRef`,
+  `run`. The scope carries exactly what the Legacy routing key derives from
+  its kind: `user` keys on the sender inside its chat (`senderId` and
+  `chatId` set, `threadId` null); `thread` keys on the thread, falling back
+  to the chat (exactly one of `threadId`/`chatId` set, `senderId` null);
+  `chat_thread` keys on the chat and only refines to one of its threads
+  (`chatId` set, `threadId` optional, `senderId` null); `single` keys on
+  the instance alone (all three null). The run pins `effectId: routeId` and
+  nothing else: no definition, execution, Runtime, dispatch or delivery —
+  the binding's lifecycle is the only state.
+- Route successor: the identity (`routeId`, `channelInstanceId`,
+  `accountId`, `scope`) never changes. At the same `routeRevision` the
+  rebind set — `accountGeneration`, `rootSessionId`, `sessionId`,
+  `policyRef` — is byte-identical; a rebind or rollover raises
+  `routeRevision` by exactly one and may then change the set, except that
+  `accountGeneration` never moves backwards (decision 6). A terminal run
+  freezes the record.
+- `managed-channel_delivery` (chain identity `deliveryId`): closed keys
+  `deliveryId`, `routeId`, `routeRevision`, `sourceTurnId`, `contentRef`,
+  `segments`, `cancelRequested`, `run`. The segment plan carries 1–64
+  segments of `{segmentId, ordinal, contentRef, receipt}` with distinct
+  `segmentId`s and ordinals dense from zero; a receipt is
+  `{providerMessageId, acceptedAt, proofRef|null}`. The run pins
+  `effectId`/`deliveryId` to the chain identity and carries the H0b
+  delivery line of target `channel`, nothing else.
+- Delivery consistency: the delivery line, the run line and the settled
+  receipts agree at every revision — `planned` with the run `admitted` and
+  no receipts; `sending` or `partial` with the run in flight (`running`,
+  `waiting` or `recovery_blocked`) and, for `partial`, at least one
+  receipt settled but still short of full; `delivered` with the run
+  `settled` and every receipt set;
+  `unknown` exactly with the run `waiting` without a reason (the provider
+  may hold the rest); `rejected` with the run `failed`; `cancelled` with
+  the run `cancelled` and no receipts. A blocked run blocks only while the
+  delivery is provably `sending`/`partial`; given the run pins, the only
+  recovery reason that parses is `handler_unavailable`.
+- Delivery successor: the plan, the producing Turn and the pinned route
+  revision never change; each segment's receipt is set once and never
+  rewritten; `cancelRequested` is never revoked. The H0b line steps then
+  rule the rest: an `unknown` delivery never returns to `sending` (a
+  resend is a new `deliveryId`, decision 5), and a terminal run freezes
+  the record, so an already-delivered message cannot be edited after the
+  fact, while late receipts that resolve an `unknown` stay commitable. To
+  keep that invariant against the two-step path `unknown → partial →
+sending`, leaving `unknown` for `partial` itself takes proof: the
+  `partial` revision must settle a segment the `unknown` one did not.
 - The ingress dedupe tuple of decision 2 is recorded with the admitted
   input (the `input.accepted` content), and a redelivery under a committed
   tuple answers with the original `inputId` without a new turn — the exact
@@ -236,11 +278,11 @@ fixes the direction, not the byte-level schema.
 
 ## Slice plan
 
-| Slice | Scope                                                                                                                                                                                                                                     | Exit gates                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| H5a   | Record contract: both bodies, validators, fixed-field rules and transition witnesses, added to the shared schema and `managed-extension-record-v1` fixtures; `MANAGED_EXTENSION_RECORD_BODIES` entries; Java replay.                      | TypeScript and Java produce and refuse identical chains from the fixtures. Both domains stay absent from `MANAGED_SESSION_ENABLED_DOMAINS`; `commitExtensionRecord` still refuses them. The Java store ships the bodies before any writer can commit (H0c open question 7). No production caller constructs either body.                                                                                                                                     |
-| H5b   | Email inbound vertical: `channel_route` commitment, ingress dedupe on the four-part identity, attachment → Artifact staging, routed input admission with wake. Domains enabled for submission for this adapter only.                      | A provider redelivery commits one input; two identical-text messages commit two. An admission crash leaves staged bytes retained and the original `inputId` queryable; no event is admitted twice and none is silently dropped. A `uidValidity` rollover takes a route revision and the old generation admits nothing new. The email adapter passes its existing behavioral suite against the managed path.                                                  |
-| H5c   | Email outbound vertical: `channel_delivery` commitment, outbox dispatcher, per-send receipts, `partial`/`unknown` recovery, explicit user resend with a new `deliveryId`. Public `/v1/agent-channels` and `.../deliveries` shapes served. | A reply interrupted mid-send resumes with only proven-unsent work; a post-send disconnect records `delivery_unknown` and never auto-resends; an explicit resend warns about possible duplication. Model completion and external delivery are projected separately, and a Channel send failure never re-runs the model (reference section 14, item 6). The two planned routes move to `partial` with their H5-owned shapes, covered by the API contract test. |
+| Slice      | Scope                                                                                                                                                                                                                                     | Exit gates                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| H5a (done) | Record contract: both bodies, validators, fixed-field rules and transition witnesses, with their own `managed-channel-record-v1` fixture corpus; `MANAGED_EXTENSION_RECORD_BODIES` entries; Java replay.                                  | TypeScript and Java produce and refuse identical chains from the fixtures. Both domains stay absent from `MANAGED_SESSION_ENABLED_DOMAINS`; `commitExtensionRecord` still refuses them. The Java store ships the bodies before any writer can commit (H0c open question 7). No production caller constructs either body.                                                                                                                                     |
+| H5b        | Email inbound vertical: `channel_route` commitment, ingress dedupe on the four-part identity, attachment → Artifact staging, routed input admission with wake. Domains enabled for submission for this adapter only.                      | A provider redelivery commits one input; two identical-text messages commit two. An admission crash leaves staged bytes retained and the original `inputId` queryable; no event is admitted twice and none is silently dropped. A `uidValidity` rollover takes a route revision and the old generation admits nothing new. The email adapter passes its existing behavioral suite against the managed path.                                                  |
+| H5c        | Email outbound vertical: `channel_delivery` commitment, outbox dispatcher, per-send receipts, `partial`/`unknown` recovery, explicit user resend with a new `deliveryId`. Public `/v1/agent-channels` and `.../deliveries` shapes served. | A reply interrupted mid-send resumes with only proven-unsent work; a post-send disconnect records `delivery_unknown` and never auto-resends; an explicit resend warns about possible duplication. Model completion and external delivery are projected separately, and a Channel send failure never re-runs the model (reference section 14, item 6). The two planned routes move to `partial` with their H5-owned shapes, covered by the API contract test. |
 
 Later H5 slices (not scheduled here): a second adapter (chosen by product
 priority); card-style segmented surfaces where a provider supports them;
@@ -248,11 +290,14 @@ attachment kinds beyond the O2/O3 staging the email slice uses.
 
 ## Validation plan
 
-- Fixture parity for both bodies, replayed by TypeScript and by Java.
-- Authority suites for route rollover, dedupe-tuple admission and replay,
-  delivery segment transitions and the `unknown` recovery affordances.
-- Java store materialization (a Flyway migration after main's V34), with
-  refusal rollback and outbox columns exercised.
+- Fixture parity for both bodies, replayed by TypeScript and by Java (H5a).
+- Authority suites for route rollover, replay refusal, chain rebuild and
+  the delivery-line affordances: dispatch, partial, `unknown` and its
+  no-resend rule (H5a). Cross-record checks — a delivery binding to a
+  committed route at its pinned revision — belong to the slice that
+  enforces them (H5b/H5c), like MCP's and Hooks' enablement-time checks.
+- Java store materialization for the public Channel resources (Flyway
+  V47), exercised when H5c serves them.
 - Adapter fault injection: redelivery storms, admission-crash windows,
   send-then-disconnect, generation rollover mid-delivery, and dispatcher
   restart between segment receipts — each ends in one input per event or a

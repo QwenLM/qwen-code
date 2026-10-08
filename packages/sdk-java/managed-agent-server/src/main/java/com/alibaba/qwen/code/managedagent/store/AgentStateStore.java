@@ -104,6 +104,14 @@ public interface AgentStateStore {
             OperationKind kind, String actorId, String actorDigest, String key,
             String digest, boolean closeSupported);
 
+    default OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId, OperationKind kind,
+            String actorId, String actorDigest, String key, String digest, boolean supported, int protocolVersion) {
+        if (protocolVersion != 0) {
+            throw new UnsupportedOperationException("Workspace lifecycle protocol is unavailable");
+        }
+        return beginWorkspaceLifecycle(tenantId, sessionId, kind, actorId, actorDigest, key, digest, supported);
+    }
+
     boolean hasCompletedWorkspaceClose(String tenantId, String sessionId);
 
     /** The given Sessions with a completed workspace close, in one read. */
@@ -274,12 +282,16 @@ public interface AgentStateStore {
     void markSubmissionAttempted(String tenantId, String sessionId,
             String turnId, String owner);
 
+    boolean withdrawSubmissionAttempted(String tenantId, String sessionId,
+            String turnId, String owner);
+
     void recordAdmission(String tenantId, String sessionId, String turnId,
             String owner, String eventEpoch, long lastEventId);
 
     void recordRecoveryAdmission(String tenantId, String sessionId,
-            String turnId, String owner, String expectedEventEpoch,
-            String eventEpoch, long lastEventId);
+            String turnId, String owner, String expectedTurnEventEpoch,
+            String expectedSessionEventEpoch, String eventEpoch,
+            long lastEventId);
 
     /**
      * Clears non-terminal text from a continuation epoch that did not reach

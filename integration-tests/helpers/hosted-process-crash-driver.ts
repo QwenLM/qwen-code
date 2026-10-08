@@ -13,6 +13,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
+import { relayUpstream } from './hosted-relay-headers.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -249,11 +250,7 @@ const proxy = createServer(async (req, res) => {
       }
       injected = true;
     }
-    for (const [name, value] of upstream.headers)
-      if (!['content-length', 'transfer-encoding', 'connection'].includes(name))
-        res.setHeader(name, value);
-    res.writeHead(upstream.status);
-    res.end(bytes);
+    relayUpstream(res, upstream, bytes);
   } catch (cause) {
     if (!serviceKilled || !(cause instanceof TypeError)) proxyFailure = cause;
     res.destroy();
