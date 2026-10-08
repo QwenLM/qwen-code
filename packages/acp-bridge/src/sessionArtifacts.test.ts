@@ -8742,7 +8742,13 @@ describe('SessionArtifactStore', () => {
         },
       },
     });
-    await restored.restore(snapshots.at(-1)!);
+    const recorded = snapshots.at(-1)!;
+    await restored.restore({
+      ...recorded,
+      tombstonedIds: recorded.tombstonedIds ?? [],
+      stickyEphemeralIds: recorded.stickyEphemeralIds ?? [],
+      warnings: [],
+    });
     await restored.upsertMany(
       [{ ...published, title: 'Hosted report renamed' }],
       { strict: true, trustedPublisher: true },
