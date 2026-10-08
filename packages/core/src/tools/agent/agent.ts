@@ -770,6 +770,9 @@ export function stampBackgroundPromptPolicy(
 const AGENT_DESCRIPTION_FIRST_LINE =
   'Delegate complex, independent work to specialized agents for explicit parallel requests or broad codebase research that clearly needs more than 3 searches.';
 
+/** AgentTool's own char budget; the scheduler truncates past it tail-first. */
+const AGENT_TOOL_MAX_OUTPUT_CHARS = 32_000;
+
 /**
  * Agent tool that enables primary agents to delegate tasks to specialized agents.
  * The tool dynamically loads available agents and includes them in its description
@@ -779,7 +782,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
   static readonly Name: string = ToolNames.AGENT;
 
   override get maxOutputChars(): number {
-    return 32_000;
+    return AGENT_TOOL_MAX_OUTPUT_CHARS;
   }
 
   override get truncateKeep(): 'tail' {
@@ -1421,6 +1424,34 @@ The background-agent rules above apply to background forks unchanged.${delegatio
  */
 type SubagentOutcomeSink = (metadata: SubagentSpanMetadata) => void;
 
+const EARLIER_OUTPUT_OMITTED = '[earlier output omitted]\n';
+
+/**
+ * Compose `reason` + `header` + `text` + `suffix` inside the tool's own budget.
+ * `truncateKeep: 'tail'` deletes the head of an oversized result outright, and
+ * the head is exactly the reason line, so a long partial would hand the parent
+ * the #13597 shape again. Trim the text from its front instead, keeping its
+ * tail as the scheduler would.
+ */
+function composeIncompleteResult(
+  reason: string,
+  header: string,
+  text: string,
+  suffix: string,
+): string {
+  if (!text) return reason + suffix;
+  const prefix = `${reason}\n\n${header}\n\n`;
+  const room = AGENT_TOOL_MAX_OUTPUT_CHARS - prefix.length - suffix.length;
+  const body =
+    text.length <= room
+      ? text
+      : EARLIER_OUTPUT_OMITTED +
+        text.slice(
+          text.length - Math.max(0, room - EARLIER_OUTPUT_OMITTED.length),
+        );
+  return prefix + body + suffix;
+}
+
 /**
  * The model-visible reason line for a foreground subagent that ended on
  * anything but GOAL (CANCELLED has its own branch at the call site).
@@ -1446,11 +1477,11 @@ function subagentTerminalReason(
   const head = `Subagent did not complete (terminate mode: ${terminateMode}).`;
   switch (terminateMode) {
     case AgentTerminateMode.TIMEOUT:
-      return `${head} It ran out of time, so re-running the same call will time out again; raise the agent's \`max_time_minutes\` instead.`;
+      return `${head} It ran out of time, so re-running the same call will time out again; raise the agent's \`runConfig.max_time_minutes\` instead.`;
     case AgentTerminateMode.MAX_TURNS:
       return externalExecutor
         ? `${head} It ran out of turns, so re-running the same call will stop at the same point; the peer owns that budget, so narrow the task instead.`
-        : `${head} It ran out of turns, so re-running the same call will stop at the same point; raise the agent's \`max_turns\` instead.`;
+        : `${head} It ran out of turns, so re-running the same call will stop at the same point; raise the agent's \`maxTurns\` (or \`runConfig.max_turns\`) instead.`;
     default:
       return lastError ? `${head} ${lastError}` : head;
   }
@@ -4762,11 +4793,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             terminateMode,
             subagent.getLastError?.(),
           );
+          // Not 'Partial result follows:': an external executor (Codex) puts
+          // its failure diagnostic in finalText, which is not work product.
           return {
-            llmContent:
-              (finalText
-                ? `${reason}\n\nPartial result follows:\n\n${finalText}`
-                : reason) + wtSuffix,
+            llmContent: composeIncompleteResult(
+              reason,
+              'Output captured before the failure follows:',
+              finalText,
+              wtSuffix,
+            ),
             returnDisplay: this.currentDisplay!,
           };
         }
@@ -4816,9 +4851,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               // and then hands over a framework string the parent can quote as
               // the subagent's finding. The ERROR branch above omits the section
               // on the same empty input; do the same here.
-              text: finalText
-                ? `${reason}\n\nPartial result follows:\n\n${finalText}${wtSuffix}`
-                : `${reason}${wtSuffix}`,
+              text: composeIncompleteResult(
+                reason,
+                'Partial result follows:',
+                finalText,
+                wtSuffix,
+              ),
             },
           ],
           returnDisplay: this.currentDisplay!,

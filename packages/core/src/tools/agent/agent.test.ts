@@ -5531,13 +5531,21 @@ describe('AgentTool', () => {
       [
         AgentTerminateMode.MAX_TURNS,
         'failed',
-        ['terminate mode: MAX_TURNS', 'max_turns', 'halfway through'],
+        [
+          'terminate mode: MAX_TURNS',
+          '`maxTurns` (or `runConfig.max_turns`)',
+          'halfway through',
+        ],
         ['Subagent execution failed.'],
       ],
       [
         AgentTerminateMode.TIMEOUT,
         'failed',
-        ['terminate mode: TIMEOUT', 'max_time_minutes', 'halfway through'],
+        [
+          'terminate mode: TIMEOUT',
+          '`runConfig.max_time_minutes`',
+          'halfway through',
+        ],
         ['Subagent execution failed.'],
       ],
       // The fall-through's own comment names these two as incomplete runs as
@@ -5598,7 +5606,7 @@ describe('AgentTool', () => {
       expectText(
         textOf(await invoke(fg()).execute()),
         ['terminate mode: MAX_TURNS', 'halfway through', 'External executor'],
-        ['max_turns', 'Subagent execution failed.'],
+        ['max_turns', 'maxTurns', 'Subagent execution failed.'],
       );
     });
 
@@ -5623,7 +5631,7 @@ describe('AgentTool', () => {
       expectText(
         textOf(await invoke(fg()).execute()),
         ['terminate mode: MAX_TURNS', 'halfway through', 'External executor'],
-        ['max_turns', 'Subagent execution failed.'],
+        ['max_turns', 'maxTurns', 'Subagent execution failed.'],
       );
     });
 
@@ -5642,6 +5650,51 @@ describe('AgentTool', () => {
         ['undefined', 'Subagent execution failed.'],
       );
     });
+
+    it('foreground ERROR on Codex does not call its failure diagnostic a partial result', async () => {
+      // CodexSubagentExecutor writes the error message into finalText, so the
+      // ERROR header must not claim it is work product; the raw text still has
+      // to reach the parent verbatim (#13597).
+      loadAs({
+        name: 'file-search',
+        background: undefined,
+        executor: { kind: 'codex', command: 'codex' },
+      });
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        'codex exited with code 1',
+      );
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.ERROR,
+      );
+      vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
+      expectText(
+        textOf(await invoke(fg()).execute()),
+        ['terminate mode: ERROR', 'codex exited with code 1'],
+        ['Partial result follows'],
+      );
+    });
+
+    it.each([AgentTerminateMode.MAX_TURNS, AgentTerminateMode.ERROR])(
+      'foreground %s keeps its reason line inside the tool budget for a long partial',
+      async (mode) => {
+        // AgentTool truncates tail-first at maxOutputChars, which deletes the
+        // head — the reason line — of an oversized result. The composition
+        // has to fit the budget itself and keep the partial's tail (#13597).
+        loadForeground();
+        const partial = 'x'.repeat(60_000) + 'TAIL-MARKER';
+        vi.mocked(mockAgent.getFinalText).mockReturnValue(partial);
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(mode);
+        vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
+        const text = textOf(await invoke(fg()).execute());
+        expect(text.length).toBeLessThanOrEqual(agentTool.maxOutputChars);
+        expect(
+          text.startsWith(
+            `Subagent did not complete (terminate mode: ${mode}).`,
+          ),
+        ).toBe(true);
+        expectText(text, ['[earlier output omitted]', 'TAIL-MARKER']);
+      },
+    );
 
     it('foreground TIMEOUT with nothing captured announces no partial result', async () => {
       // A run that stops during its first turn has getFinalText() === '', so the
