@@ -442,6 +442,8 @@ it('names Windows as unsupported instead of advising an extension install', () =
   for (const message of [windows, other]) {
     expect(message).not.toContain('install the extension from');
     expect(message).not.toContain('chrome://extensions');
+    // The real diagnostic stays visible on this branch too.
+    expect(message).toContain('Chrome extension disconnected');
   }
   for (const platform of ['darwin', 'linux'] as const) {
     expect(
@@ -475,6 +477,20 @@ it('reports Windows as unsupported when discovery finds no host', async () => {
     vi.restoreAllMocks();
   }
   expect(transport.isConnected()).toBe(false);
+});
+
+it('lists no browsers on an unsupported platform instead of throwing', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-client-'));
+  roots.push(root);
+  const transport = discovering(root, 200);
+  const platform = vi
+    .spyOn(process, 'platform', 'get')
+    .mockReturnValue('win32');
+  try {
+    await expect(transport.profiles()).resolves.toEqual([]);
+  } finally {
+    platform.mockRestore();
+  }
 });
 
 it('explicit endpoint listing reports no browsers when nothing listens', async () => {

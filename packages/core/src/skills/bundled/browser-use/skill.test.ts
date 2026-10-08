@@ -80,6 +80,12 @@ describe('bundled browser-use skill', () => {
     expect(prose).toContain(
       'tell them Browser Use needs macOS or Linux and stop',
     );
+    expect(prose).toContain(
+      'Do not retry, and do not send them to the Chrome Web Store',
+    );
+    expect(prose).toContain(
+      'If the extension does not connect on macOS or Linux',
+    );
   });
 
   it('uses the current Browser SDK contract', () => {
