@@ -911,6 +911,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_display_name',
   'scratch_workspace_registration',
   'workspace_runtime_removal',
+  'workspace_pinning',
   'native_directory_picker',
   'workspace_runtime',
   'workspace_runtime_stop',
@@ -6046,6 +6047,8 @@ describe('createServeApp', () => {
           primary: true,
           trusted: true,
           workflowsEnabled: false,
+          registrationIds: [],
+          isPinned: false,
         },
       ]);
 
@@ -6207,6 +6210,8 @@ describe('createServeApp', () => {
         trusted: true,
         workflowsEnabled: false,
         kind: 'live',
+        registrationIds: [],
+        isPinned: false,
       });
       expect(response.body.features).not.toContain('multi_workspace_sessions');
       expect(response.body.limits).toHaveProperty('maxSessionsPerWorkspace');
