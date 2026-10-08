@@ -20,10 +20,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.LinkOption;
-import java.nio.file.Path;
 import java.util.Map;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -35,6 +31,7 @@ import java.util.concurrent.CompletableFuture;
 final class WorkspaceRuntimeTransport implements RuntimeTransport {
     private final HttpRuntimeTransport delegate;
     private final WorkspaceRuntimeResolver resolver;
+    private final java.util.function.Function<String, ContextBinding> savedBindings;
     private final WorkspaceExecutionStore ownership;
     private final RuntimeBindingRepository bindings;
     private final RuntimeSessionRepository sessions;
@@ -44,9 +41,21 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             RuntimeSessionRepository sessions) {
         this.delegate = delegate;
         this.resolver = resolver;
+        this.savedBindings = resolver::savedBinding;
         this.ownership = ownership;
         this.bindings = bindings;
         this.sessions = sessions;
+    }
+
+    WorkspaceRuntimeTransport(HttpRuntimeTransport delegate, WorkspaceExecutionStore ownership,
+            RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
+            java.util.function.Function<String, ContextBinding> savedBindings) {
+        this.delegate = delegate;
+        this.resolver = null;
+        this.ownership = ownership;
+        this.bindings = bindings;
+        this.sessions = sessions;
+        this.savedBindings = savedBindings;
     }
 
     @Override
@@ -62,7 +71,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         }
         Context context = context(lease, session, true);
         // Reject a missing directory before a new claim can strand storage ownership.
-        requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
+        WorkspaceRuntimeResolver.requireDirectory(session.getScope().getCanonicalCwd(), context.binding().getCwdRelative());
         ownership.claim(context.binding(), context.session());
         // Failure retains ownership: a missing response cannot prove the worker did nothing.
         try {
@@ -188,7 +197,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         if (!managed(session)) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        Context context = context(lease, session, false, true);
+        Context context = context(lease, session, false, false, true);
         var runtime = context.runtime();
         if (!"kubernetes-workspace".equals(runtime.getRequest().getProvisionerKind())
                 || runtime.getState() != RuntimeBindingRecord.State.DRAINING || !runtime.isDrainRequested()
@@ -323,7 +332,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             }
             boolean recovery = ManagedMcpProtocol.isRecovery(operation) || ManagedHookProtocol.isRecovery(operation)
                     || ManagedShellProtocol.isRecovery(operation);
-            Context context = context(lease, session, !recovery);
+            Context context = context(lease, session, !recovery, ManagedHookProtocol.isOperation(operation));
             if (context.runtime().getState() != RuntimeBindingRecord.State.READY
                     && !(recovery && context.runtime().getState() == RuntimeBindingRecord.State.DRAINING)) {
                 throw WorkspaceExecutionStore.unavailable();
@@ -371,16 +380,22 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         return context(lease, session, authorize, false);
     }
 
-    private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize, boolean originalCsi) {
+    private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize, boolean hook) {
+        return context(lease, session, authorize, hook, false);
+    }
+
+    private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize,
+            boolean hook, boolean originalCsi) {
         ContextBinding binding;
         if (authorize) {
-            var resolved = resolver.resolve(session.getHarnessSessionId());
+            var resolved = hook ? resolver.resolveHook(session.getHarnessSessionId(), session.getScope().getLifecycleAuthority())
+                    : resolver.resolve(session.getHarnessSessionId(), session.getScope().getLifecycleAuthority());
             if (!resolved.scope().equals(session.getScope())) {
                 throw WorkspaceExecutionStore.unavailable();
             }
             binding = resolved.binding();
         } else {
-            binding = resolver.savedBinding(session.getHarnessSessionId());
+            binding = savedBindings.apply(session.getHarnessSessionId());
         }
         RuntimeSessionRecord record = sessions.findById(session.getScope(), session.getRuntimeSessionId());
         RuntimeBindingRecord runtime = record == null ? null : bindings.findById(record.getBindingId());
@@ -401,19 +416,6 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             throw WorkspaceExecutionStore.unavailable();
         }
         return new Context(binding, record, runtime);
-    }
-
-    private static void requireDirectory(String root, String cwdRelative) {
-        try {
-            Path base = Path.of(root);
-            Path directory = base.resolve(cwdRelative).normalize();
-            if (!directory.startsWith(base) || !Files.isDirectory(directory, LinkOption.NOFOLLOW_LINKS)
-                    || !directory.toRealPath().equals(directory)) {
-                throw WorkspaceExecutionStore.unavailable();
-            }
-        } catch (IOException error) {
-            throw WorkspaceExecutionStore.unavailable();
-        }
     }
 
     private static boolean managed(RuntimeSession session) {

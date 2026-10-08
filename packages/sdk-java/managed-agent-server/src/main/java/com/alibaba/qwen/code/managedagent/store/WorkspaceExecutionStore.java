@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.store;
 
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -50,9 +51,53 @@ public class WorkspaceExecutionStore {
         }
     }
 
+    public void authorizeLifecycle(SessionRecord session, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        try {
+            WorkspaceLifecycleStore.requireClaim(jdbc, session.tenantId(), session.sessionId(), authority, false);
+        } catch (ApiException error) {
+            throw new RuntimeBrokerException(error.getStatus().value(), error.getCode(), error.getMessage(), false, error);
+        }
+        authorizePassiveAttachment(session, authority);
+        if (storageGuard != null) {
+            storageGuard.verify(session.workspace());
+        }
+    }
+
+    public void authorizeLegacyClose(SessionRecord session) {
+        if (!WorkspaceLifecycleStore.legacyClose(jdbc, session.tenantId(), session.sessionId())) {
+            throw unavailable();
+        }
+        authorizePassiveAttachment(session, null, true);
+        if (storageGuard != null) {
+            storageGuard.verify(session.workspace());
+        }
+    }
+
+    // The mount guard of an execution authority, without the Session-level
+    // checks; the W2 settlement probe must not fail a Session it only
+    // reads. It uses the guard's probe-only entry: momentary I/O failures
+    // classify retryable-with-cause, structural refusals keep the terminal
+    // verdict, and the shared acquire path (claim/assertHeld) is untouched.
+    public void verifyMountForProbe(ContextBinding binding) {
+        if (storageGuard != null) {
+            storageGuard.verifyProbe(binding);
+        }
+    }
+
     public void authorizePassiveAttachment(SessionRecord session) {
+        authorizePassiveAttachment(session, null);
+    }
+
+    private void authorizePassiveAttachment(SessionRecord session, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
+        authorizePassiveAttachment(session, authority, false);
+    }
+
+    private void authorizePassiveAttachment(SessionRecord session, com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority,
+            boolean legacyClose) {
         ContextBinding binding = session.workspace();
-        if (binding == null || !"ACTIVE".equals(session.status())
+        String expectedStatus = authority == null && !legacyClose ? "ACTIVE" : session.status();
+        if (binding == null || !(legacyClose ? "CLOSING".equals(session.status()) : authority == null ? "ACTIVE".equals(session.status())
+                : java.util.List.of("CLOSING", "DELETING").contains(session.status()))
                 || session.deletedAt() != null || !"qwen-code".equals(session.agentId())
                 || !session.tenantId().equals(binding.getTenantId())
                 || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
@@ -85,7 +130,7 @@ public class WorkspaceExecutionStore {
                 (row, index) -> session.tenantId().equals(row.getString("tenant_id"))
                         && session.sessionId().equals(row.getString("session_id"))
                         && "qwen-code".equals(row.getString("session_agent"))
-                        && "ACTIVE".equals(row.getString("session_status"))
+                        && expectedStatus.equals(row.getString("session_status"))
                         && row.getObject("session_deleted_at") == null
                         && binding.getWorkspaceId().equals(row.getString("session_workspace"))
                         && binding.getWorkspaceGeneration() == row.getLong("session_generation")
@@ -280,6 +325,17 @@ public class WorkspaceExecutionStore {
     public static RuntimeBrokerException unavailable() {
         return new RuntimeBrokerException(409, "workspace_unavailable",
                 "Workspace execution authority is unavailable.", false);
+    }
+
+    // A probe's momentary I/O failure is not the structural verdict the
+    // terminal refusal promises: it retries through the delivery machine,
+    // keeping the cause for the log. Structural refusals keep
+    // unavailable().
+    public static RuntimeBrokerException unavailableTransient(
+            Throwable cause) {
+        return new RuntimeBrokerException(409, "workspace_unavailable",
+                "Workspace mount cannot be verified right now.", true,
+                cause);
     }
 
     private static RuntimeBrokerException busy() {

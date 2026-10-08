@@ -3158,6 +3158,12 @@ export class LlmClient {
     if (messageType !== SendMessageType.UserQuery) {
       return;
     }
+    // A session agent's hidden session is agent-to-agent work, not the
+    // person's conversation: extracting from it would add a model call to
+    // every agent turn and feed agent chatter into the person's memory.
+    if (this.config.isSessionAgentSession?.() === true) {
+      return;
+    }
 
     const sessionId = this.config.getSessionId();
     const history = this.getHistoryShallow();

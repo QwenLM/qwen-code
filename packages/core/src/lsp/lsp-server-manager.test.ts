@@ -355,7 +355,7 @@ describe('LspServerManager', () => {
     { openClose: true, change: 2 },
     { openClose: false, change: 0 },
   ])(
-    'retains initialize textDocumentSync %j on the ready handle',
+    'retains textDocumentSync %j without advertising dynamic registration',
     async (textDocumentSync) => {
       const manager = createTrustedManager();
       const connection = createMockConnection({
@@ -380,7 +380,21 @@ describe('LspServerManager', () => {
           status: 'READY',
           textDocumentSync,
         });
-        expect(connection.initialize).toHaveBeenCalledOnce();
+        expect(connection.initialize).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            capabilities: {
+              textDocument: {
+                completion: { dynamicRegistration: false },
+                hover: { dynamicRegistration: false },
+                definition: { dynamicRegistration: false },
+                references: { dynamicRegistration: false },
+                documentSymbol: { dynamicRegistration: false },
+                codeAction: { dynamicRegistration: false },
+              },
+              workspace: { workspaceFolders: true },
+            },
+          }),
+        );
         expect(connection.send).toHaveBeenCalledWith(
           expect.objectContaining({ method: 'initialized' }),
         );

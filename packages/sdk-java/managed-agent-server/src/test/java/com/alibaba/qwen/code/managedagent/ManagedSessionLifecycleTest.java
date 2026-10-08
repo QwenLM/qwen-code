@@ -672,15 +672,14 @@ class ManagedSessionLifecycleTest {
                         .principal(actor(tenant, "actor-a")), tenant, "bound-close")
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
-        for (MockHttpServletRequestBuilder request : List.of(
-                post("/v1/agents/sessions/{id}/archive", sessionId),
-                delete("/v1/agents/sessions/{id}", sessionId))) {
-            lifecycle(request.principal(actor(tenant, "actor-a")), tenant,
-                    "bound-" + UUID.randomUUID())
-                    .andExpect(status().isConflict())
-                    .andExpect(jsonPath("$.error.code")
-                            .value("session_state_conflict"));
-        }
+        lifecycle(post("/v1/agents/sessions/{id}/archive", sessionId)
+                        .principal(actor(tenant, "actor-a")), tenant, "bound-archive")
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("session_state_conflict"));
+        lifecycle(delete("/v1/agents/sessions/{id}", sessionId)
+                        .principal(actor(tenant, "actor-a")), tenant, "bound-delete")
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code").value("workspace_unavailable"));
         mvc.perform(post(WEB_SHELL + "/sessions/delete").header(TENANT, tenant)
                         .principal(actor(tenant, "actor-b"))
                         .contentType(MediaType.APPLICATION_JSON)
