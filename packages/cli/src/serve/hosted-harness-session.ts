@@ -46,6 +46,7 @@ import {
   parseToolResultManifestBytes,
   type ToolResultManifest,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
+import { readManagedMessageBody } from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
 import { parseChildRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
 import { parseMonitorRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
@@ -113,6 +114,7 @@ import {
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
   isRetryableWorkspaceAcquisition,
+  touchesWorkspaceContext,
   type HostedWorkspaceContextSlot,
   type HostedWorkspaceToolProfile,
   type HostedShellTurnOptions,
@@ -1487,7 +1489,8 @@ async function eventEnvelope(
     if (ref && typeof ref === 'object') {
       const message = JSON.parse(
         (
-          await session.managed.resources.read(
+          await readManagedMessageBody(
+            (bodyRef) => session.managed.resources.read(bodyRef),
             ref as unknown as ManagedSessionDurableRef,
           )
         ).toString('utf8'),
@@ -1650,6 +1653,9 @@ async function executeHostedTurn(
           read: () => session.workspaceContext,
           write: (context) => {
             session.workspaceContext = context;
+          },
+          invalidate: () => {
+            session.workspaceContext = undefined;
           },
         };
         toolTurn =
@@ -4020,6 +4026,9 @@ export function registerHostedHarnessSessionRoutes(
           write: (context) => {
             session.workspaceContext = context;
           },
+          invalidate: () => {
+            session.workspaceContext = undefined;
+          },
         };
         toolTurn = new HostedWorkspaceToolTurn(
           brokerOptions,
@@ -4608,6 +4617,10 @@ export function registerHostedHarnessSessionRoutes(
         action: 'rewind',
         promptId,
       });
+      // The rewind already changed the files: a restored instruction file
+      // makes the cached context stale (#13564).
+      if (touchesWorkspaceContext(result.filesChanged))
+        session.workspaceContext = undefined;
       if (result.filesFailed.length)
         throw new Error('Hosted file undo only partially completed.');
       const undo = {

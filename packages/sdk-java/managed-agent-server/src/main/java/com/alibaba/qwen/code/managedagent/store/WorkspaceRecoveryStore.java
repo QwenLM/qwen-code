@@ -37,6 +37,7 @@ public final class WorkspaceRecoveryStore {
     private final String id;
     private final String tenant;
     private final String storage;
+    private boolean lockSources;
 
     public WorkspaceRecoveryStore(JdbcTemplate jdbc, PlatformTransactionManager manager,
             WorkspaceStorageGuard guard, ToolPublicationObjectStore objects, String mode, byte[] requestBytes) {
@@ -471,9 +472,26 @@ public final class WorkspaceRecoveryStore {
         return new SourceCut(HexFormat.of().formatHex(digest.digest()), count);
     }
 
+    public void assertCompatible() {
+        recheckBoundary();
+        var row = ownedOperation();
+        lockSources = true;
+        try {
+            SourceCut cut = scanSources(false);
+            check(cut.digest().equals(row.get("source_digest"))
+                    && cut.count() == ((Number) row.get("session_count")).longValue(), "source_drift");
+        } finally {
+            lockSources = false;
+        }
+    }
+
     private JsonNode currentSource(String session) {
+        return currentSource(jdbc, tenant, storage, session, lockSources);
+    }
+
+    static JsonNode currentSource(JdbcTemplate jdbc, String tenant, String storage, String session, boolean lockSources) {
         var rows = jdbc.queryForList("SELECT * FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?"
-                + " AND workspace_storage_id = ?", tenant, session, storage);
+                + " AND workspace_storage_id = ?" + (lockSources ? " FOR UPDATE" : ""), tenant, session, storage);
         check(rows.size() == 1, "source_drift");
         Map<String, Object> row = rows.getFirst();
         check("qwen-code".equals(row.get("agent_id")) && Set.of("ACTIVE", "CLOSED", "ARCHIVED", "DELETED")
@@ -481,9 +499,9 @@ public final class WorkspaceRecoveryStore {
         var receipts = jdbc.queryForList("SELECT actor_id, idempotency_key, request_digest, turn_id, created_at"
                 + " FROM managed_workspace_create_command WHERE tenant_id = ? AND session_id = ?", tenant, session);
         check(receipts.size() == 1, "source_drift");
-        check(count("SELECT COUNT(*) FROM managed_agent_turn WHERE tenant_id = ? AND session_id = ?"
+        check(count(jdbc, "SELECT COUNT(*) FROM managed_agent_turn WHERE tenant_id = ? AND session_id = ?"
                 + " AND status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')", tenant, session) == 0, "source_drift");
-        check(count("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?"
+        check(count(jdbc, "SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?"
                 + " AND state NOT IN ('COMPLETED', 'FAILED')", tenant, session) == 0, "source_drift");
         ObjectNode source = JSON.createObjectNode().put("sessionId", session);
         ObjectNode binding = source.putObject("binding").put("tenantId", tenant);
@@ -506,7 +524,12 @@ public final class WorkspaceRecoveryStore {
                 .put("actorIdHex", HexFormat.of().formatHex((byte[]) receipt.get("actor_id")));
         fields(creation, receipt, "idempotencyKey", "idempotency_key", "requestDigest", "request_digest",
                 "turnId", "turn_id", "createdAt", "created_at");
-        var heads = jdbc.query("SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
+        // Missing keys gap-lock other tenants; the retention authority lock prevents new writers here.
+        boolean lockHead = lockSources && count(jdbc,
+                "SELECT COUNT(*) FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
+                tenant, session) != 0;
+        var heads = jdbc.query("SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?"
+                + (lockHead ? " FOR UPDATE" : ""),
                 (result, index) -> {
                     var value = new ColumnMapRowMapper().mapRow(result, index);
                     value.put("writer_lease_until", result.getTimestamp("writer_lease_until"));
@@ -520,7 +543,7 @@ public final class WorkspaceRecoveryStore {
         } else {
             Map<String, Object> head = heads.getFirst();
             Timestamp lease = (Timestamp) head.get("writer_lease_until");
-            check(!"ACTIVE".equals(head.get("state")) || lease != null && !lease.after(now()), "source_drift");
+            check(!"ACTIVE".equals(head.get("state")) || lease != null && !lease.after(now(jdbc)), "source_drift");
             check(Set.of("ACTIVE", "SEALED", "DELETING", "DELETED").contains(head.get("state"))
                     && ((Number) head.get("storage_version")).intValue() == 1
                     && ((Number) head.get("compacted_through_revision")).longValue() == 0
@@ -551,7 +574,7 @@ public final class WorkspaceRecoveryStore {
             check(retiredHead.isNull() || "DELETED".equals(retiredHead.path("state").asText())
                     && retiredHead.path("latestCheckpointResourceId").isNull()
                     && retiredHead.path("writerId").isNull() && retiredHead.path("writerLeaseUntil").isNull(), "source_drift");
-            check(count("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?"
+            check(count(jdbc, "SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?"
                     + " AND operation_id = ? AND operation_kind = 'DELETE' AND state = 'COMPLETED'"
                     + " AND delivery_state = 'CONFIRMED' AND completed_at IS NOT NULL",
                     tenant, session, retirement.get("operation_id")) == 1, "source_drift");
@@ -635,10 +658,18 @@ public final class WorkspaceRecoveryStore {
     }
 
     private long count(String sql, Object... args) {
+        return count(jdbc, sql, args);
+    }
+
+    private static long count(JdbcTemplate jdbc, String sql, Object... args) {
         return Objects.requireNonNull(jdbc.queryForObject(sql, Long.class, args));
     }
 
     private Timestamp now() {
+        return now(jdbc);
+    }
+
+    private static Timestamp now(JdbcTemplate jdbc) {
         return Objects.requireNonNull(jdbc.queryForObject("SELECT CURRENT_TIMESTAMP(6)", Timestamp.class));
     }
 
@@ -671,7 +702,7 @@ public final class WorkspaceRecoveryStore {
         return value.asLong();
     }
 
-    private static String uuid(JsonNode node, String field) {
+    static String uuid(JsonNode node, String field) {
         String value = text(node, field);
         try {
             check(UUID.fromString(value).toString().equals(value), "invalid_request");
@@ -701,6 +732,20 @@ public final class WorkspaceRecoveryStore {
         if (!condition) {
             throw failure(code);
         }
+    }
+
+    public static String errorCode(Throwable error) {
+        Throwable current = error;
+        while (current.getCause() != null && current.getCause() != current) {
+            current = current.getCause();
+        }
+        if (current instanceof RecoveryFailure failure) {
+            return failure.code;
+        }
+        if (current instanceof RuntimeBrokerException failure) {
+            return failure.getCode();
+        }
+        return "migration_failed";
     }
 
     static RecoveryFailure failure(String code) {

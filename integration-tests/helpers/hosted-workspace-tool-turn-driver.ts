@@ -16,6 +16,7 @@ import {
   type FakeOpenAIHandler,
 } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
+import { relayUpstream } from './hosted-relay-headers.js';
 
 const config = JSON.parse(await readFile(process.argv[2], 'utf8')) as {
   tenantId: string;
@@ -57,26 +58,6 @@ async function bytes(req: import('node:http').IncomingMessage) {
   const chunks: Buffer[] = [];
   for await (const chunk of req) chunks.push(Buffer.from(chunk));
   return Buffer.concat(chunks);
-}
-// Hop-by-hop headers describe the upstream connection, not this proxy's.
-// Relaying Spring's `Keep-Alive: timeout=60` let the daemon's fetch pool reuse
-// a socket this server had just closed at its own 5 s idle timeout, and the
-// cold load's parallel resource reads failed with "other side closed".
-function endToEndHeaders(headers: Headers) {
-  const hop = new Set([
-    'connection',
-    'keep-alive',
-    'proxy-connection',
-    'te',
-    'trailer',
-    'transfer-encoding',
-    'upgrade',
-    ...(headers.get('connection') ?? '')
-      .split(',')
-      .map((name) => name.trim().toLowerCase())
-      .filter(Boolean),
-  ]);
-  return Object.fromEntries([...headers].filter(([name]) => !hop.has(name)));
 }
 const publisherRelay = createServer(async (req, res) => {
   try {
@@ -184,8 +165,7 @@ const storeProxy = createServer(async (req, res) => {
           durableReceipts.push(record.managedSession);
       }
     }
-    res.writeHead(response.status, endToEndHeaders(response.headers));
-    res.end(output);
+    relayUpstream(res, response, output);
   } catch (cause) {
     res.writeHead(503);
     res.end(String(cause));

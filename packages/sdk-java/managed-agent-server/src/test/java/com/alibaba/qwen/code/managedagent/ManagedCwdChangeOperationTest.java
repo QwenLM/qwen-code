@@ -19,6 +19,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -109,6 +110,61 @@ class ManagedCwdChangeOperationTest {
         assertThat(replay.replayed()).isTrue();
         assertThat(replay.operation().state()).isEqualTo("COMPLETED");
         assertThat(replay.operation().resultContextRevision()).isEqualTo(2);
+    }
+
+    @Test
+    void migrationFenceRefusesFreshCwdChangesButPreservesReceiptsAndOtherStorage() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        String other = fixture.createBoundSession(TENANT, "ws-other");
+        fixture.jdbc.update("UPDATE managed_workspace_registry SET storage_id = 'other-storage'"
+                + " WHERE workspace_id = 'ws-other'");
+        fixture.jdbc.update("UPDATE managed_agent_session SET workspace_storage_id = 'other-storage'"
+                + " WHERE session_id = ?", other);
+        OperationAdmission first = begin(fixture, sessionId, "old", "digest", "services/b", 1);
+        OperationRecord claimed = claim(fixture, sessionId, first.operation().operationId(), "owner");
+        assertThat(settle(fixture, sessionId, claimed.operationId(), "owner", claimed.claimGeneration()).completed()).isTrue();
+        var binding = fixture.store.findSession(TENANT, sessionId).orElseThrow().workspace();
+        installMigrationFence(fixture);
+        OperationAdmission replay = begin(fixture, sessionId, "old", "digest", "services/b", 1);
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.operation().operationId()).isEqualTo(first.operation().operationId());
+        assertThatThrownBy(() -> begin(fixture, sessionId, "fresh", "digest", "services/c", 2))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getStatusCode()).isEqualTo(409);
+                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                    assertThat(error.isRetryable()).isFalse();
+                });
+        assertThat(fixture.store.findSession(TENANT, sessionId).orElseThrow().workspace()).isEqualTo(binding);
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE session_id = ?",
+                Integer.class, sessionId)).isEqualTo(1);
+        OperationRecord otherClaim = claim(fixture, other,
+                begin(fixture, other, "fresh", "digest", "services/b", 1).operation().operationId(), "other-owner");
+        assertThat(settle(fixture, other, otherClaim.operationId(), "other-owner", otherClaim.claimGeneration()).completed()).isTrue();
+    }
+
+    @Test
+    void fenceInstalledAfterProbeFailsSettlementWithoutChangingTheBinding() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        var binding = fixture.store.findSession(TENANT, sessionId).orElseThrow().workspace();
+        OperationRecord claimed = claim(fixture, sessionId,
+                begin(fixture, sessionId, "key", "digest", "services/b", 1).operation().operationId(), "owner");
+        installMigrationFence(fixture);
+        CwdChangeOutcome outcome = settle(fixture, sessionId, claimed.operationId(), "owner", claimed.claimGeneration());
+        assertThat(outcome.completed()).isFalse();
+        assertThat(outcome.failureCode()).isEqualTo("workspace_unavailable");
+        assertFailed(fixture, sessionId, claimed.operationId(), "workspace_unavailable");
+        assertThat(fixture.store.findOperation(TENANT, sessionId, claimed.operationId()).orElseThrow().leaseOwner()).isNull();
+        assertThat(fixture.store.findSession(TENANT, sessionId).orElseThrow().workspace()).isEqualTo(binding);
+        assertThat(fixture.events(sessionId).stream().map(fixture::event)
+                .filter(event -> "session.context.changed".equals(event.path("type").asText()))).isEmpty();
+    }
+
+    private void installMigrationFence(Fixture fixture) {
+        fixture.jdbc.update("INSERT INTO qwen_runtime_storage_fence VALUES (?, ?, ?, ?, ?)",
+                JdbcRuntimeBindingRepository.storageFenceKey(TENANT), JdbcRuntimeBindingRepository.storageFenceKey(STORAGE),
+                TENANT, STORAGE, UUID.randomUUID().toString());
     }
 
     @Test
