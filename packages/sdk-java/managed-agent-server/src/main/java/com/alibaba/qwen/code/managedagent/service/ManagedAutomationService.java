@@ -417,10 +417,15 @@ public class ManagedAutomationService {
     }
 
     /**
-     * The relay of a claimed mutation. A definitive refusal committed
-     * nothing on the Harness — the funnel validates before it commits —
+     * The relay of a claimed mutation. A definitive 4xx whose code only
+     * ever answers before any commit — not found, mode gate, conflict,
+     * stale revision, retired, quota — committed nothing on the Harness,
      * so the claim goes back instead of burning the key on a request the
-     * caller may fix and re-send.
+     * caller may fix and re-send. `invalid_automation_operation` proves
+     * no such thing: it also answers a read of committed data that failed
+     * integrity (the original operation may well have committed), and
+     * releasing there would orphan exactly the definition the claim
+     * protects.
      */
     private Map<String, Object> relayClaimed(String tenantId,
             String idempotencyKey, String requestDigest, String actorId,
@@ -428,7 +433,9 @@ public class ManagedAutomationService {
         try {
             return relay(session.tenantId(), session.sessionId(), body);
         } catch (ApiException refusal) {
-            if (refusal.getStatus().is4xxClientError()) {
+            if (refusal.getStatus().is4xxClientError()
+                    && !"invalid_automation_operation".equals(
+                            refusal.getCode())) {
                 ledger.releaseCommand(tenantId, idempotencyKey, requestDigest,
                         actorId);
             }

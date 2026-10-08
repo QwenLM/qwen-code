@@ -43,6 +43,8 @@ public final class AutomationHarnessFake {
     public volatile RuntimeException failAfterNextDefineCommit;
     /** The same seam for retire_schedule. */
     public volatile RuntimeException failAfterNextRetireCommit;
+    /** A test seam: the next define/retire is refused before any commit. */
+    public volatile RuntimeException failNextMutation;
 
     public synchronized Map<String, Object> run(String sessionId,
             Map<String, Object> body) {
@@ -53,6 +55,11 @@ public final class AutomationHarnessFake {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("operationId", body.get("operationId"));
         result.put("state", "settled");
+        RuntimeException mutationFailure = failNextMutation;
+        if (mutationFailure != null && !"fire_run".equals(kind)) {
+            failNextMutation = null;
+            throw mutationFailure;
+        }
         switch (kind) {
             case "define_schedule" -> {
                 String mutationKey = sessionId + "|define|"

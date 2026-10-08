@@ -1385,6 +1385,57 @@ class AutomationScannerTest {
     }
 
     @Test
+    void aProoflessRefusalKeepsTheClaimAndBlocksAnotherRequest() {
+        String key = "read-" + UUID.randomUUID();
+        String scheduleId = ManagedAutomationService.scheduleIdFor(tenant,
+                key);
+        AutomationDefinitionRequest requestA = new AutomationDefinitionRequest(
+                sessionId, "Goal", "0 2 * * *", "UTC", "Run it.", null, null,
+                null, null, null);
+        // invalid_automation_operation is also the code a broken read of
+        // committed data produces: it proves nothing about the operation,
+        // so the claim must outlive it.
+        fake.failNextMutation = AutomationHarnessFake.refusal(400,
+                "invalid_automation_operation");
+        assertThatThrownBy(() -> service.create(tenant, ACTOR, key, requestA))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus())
+                            .isEqualTo(HttpStatus.BAD_REQUEST);
+                    assertThat(error.getCode())
+                            .isEqualTo("invalid_automation_operation");
+                });
+        assertThat(ledger.findCommand(tenant, key).orElseThrow().resultJson())
+                .isEmpty();
+        // Another request under the key meets the binding, not a relay.
+        String otherSession = sessions.createWorkspaceSession(tenant, ACTOR,
+                "create-" + UUID.randomUUID(), "qwen-code", null, "Other",
+                Map.of(), List.of(), new WorkspaceSelection(WORKSPACE, "."))
+                .sessionId();
+        jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE'"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant,
+                otherSession);
+        assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
+                new AutomationDefinitionRequest(otherSession, "Goal 2",
+                        "15 3 * * *", "UTC", "Run that.", null, null, null,
+                        null, null)))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("idempotency_conflict");
+                });
+        assertThat(fake.scheduleOf(otherSession, scheduleId)).isNull();
+        // The claim's owner re-drives: this time the relay commits, and
+        // the claim settles its own answer.
+        var retried = service.create(tenant, ACTOR, key, requestA);
+        assertThat(retried.replayed()).isFalse();
+        assertThat(retried.body().id()).isEqualTo(scheduleId);
+        assertThat(ledger.findCommand(tenant, key).orElseThrow().resultJson())
+                .isNotEmpty();
+        assertThat(ledger.findSchedule(tenant, scheduleId).orElseThrow()
+                .sessionId()).isEqualTo(sessionId);
+    }
+
+    @Test
     void aManualRunsDefinitiveRefusalAnswers409AndItsRetryTheDecision() {
         PublicAutomation automation = define("0 2 * * *", "allow", "none",
                 null, true);
