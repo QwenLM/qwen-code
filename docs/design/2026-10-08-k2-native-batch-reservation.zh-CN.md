@@ -180,9 +180,9 @@ handle 本身不能串行整个 Session。Private native grammar 获资格前，
 显式调用原 `submitInput`，由原 prompt blocks 与 admission bytes 将
 input.accepted/wake.requested 同事务提交。Sink 写 user message 或空 initial
 checkpoint 都不代表 input 获准。原 model caller 返回最终 assistant，不会代提交；
-runner 必须把返回 message 与原 turn_result 通过 sink 提交。当前 no-tool 路径只返回
-text/model，丢失 provider 完整 Parts；tool 路径保留真实 model-history Parts，却按
-promptId warm 普通 Runtime Session。私有 caller 必须保留实际 Parts 并使用固定原
+runner 必须把返回 message 与原 turn_result 通过 sink 提交。模型调用方通过
+[原生 Parts 前置](2026-10-08-hosted-native-parts.zh-CN.md) 在两个分支保留实际完整
+Parts，但 tool 路径仍按 promptId warm 普通 Runtime Session。私有 caller 必须使用固定原
 Runtime Session；private 字符串或空 tool callback 无法接通这些消费方。保留精确
 message parent chain。Model function partIndex 指完整 parts 位置，ordinal 指
 function requests 位置；tool definition 包含真实 name/description/

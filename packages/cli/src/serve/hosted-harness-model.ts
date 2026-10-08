@@ -492,11 +492,16 @@ export async function runHostedHarnessTextTurn(input: {
         suppressDisplay = display?.suppressOutput ?? false;
         if (suppressDisplay) text = '';
       }
-      if (!input.toolTurn) return { text, model: config.getModel() };
       const output = client.getHistory().at(-1);
       if (output?.role !== 'model' || !output.parts)
         throw new Error('Hosted model output is unavailable.');
       const parts = structuredClone(output.parts);
+      if (!input.toolTurn)
+        return {
+          text,
+          parts: suppressDisplay ? [] : parts,
+          model: config.getModel(),
+        };
       const functions = parts.filter((part) => part.functionCall);
       if (functions.length !== calls.length)
         throw new Error('Hosted model call history is inconsistent.');

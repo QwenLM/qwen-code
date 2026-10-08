@@ -234,11 +234,11 @@ together from original prompt blocks and admission bytes. A sink-written user
 message and an empty initial checkpoint do not admit input. The existing model
 caller returns the final assistant instead of committing it; the runner must
 commit that returned message and the original turn_result through the sink.
-Its no-tool path currently returns only text/model and loses the provider's
-full Parts, while its tool path retains the actual model-history Parts but
-warms an ordinary Runtime Session keyed by promptId. The private caller must
-preserve actual Parts and use the fixed original Runtime Session; a private
-string or an empty tool callback does not connect these consumers.
+The model caller preserves actual full Parts in both branches through the
+[native Parts prerequisite](2026-10-08-hosted-native-parts.md), but its tool path
+still warms an ordinary Runtime Session keyed by promptId. The private caller
+must use the fixed original Runtime Session; a private string or an empty tool
+callback does not connect these consumers.
 Preserve the exact message parent chain. Model function partIndex
 indexes full parts, ordinal indexes function requests, and tool definitions
 contain real name/description/parametersJsonSchema rather than `{name}` alone.
