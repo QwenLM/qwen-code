@@ -648,6 +648,8 @@ export interface components {
                 replay_floor_sequence?: number | null;
                 /** Format: int64 */
                 snapshot_through_sequence?: number | null;
+                /** @description Names the definition field that cannot take effect on 409 agent_definition_unsupported; other errors may omit this field. */
+                field?: string;
             };
         };
         /**
