@@ -14459,6 +14459,41 @@ export class Session implements SessionContext {
           }
           let wasAutoModeManualFallback = false;
           let autoModeFallback: AutoModeFallbackConfirmation | undefined;
+          // Recovery state follows the input whose classification was last
+          // decided, so approving a fallback resets the right counters.
+          const updateAutoModeFallback = (
+            outcome?: ReturnType<typeof applyAutoModeDecision>,
+            denialState?: Parameters<typeof applyAutoModeDecision>[2],
+          ) => {
+            wasAutoModeManualFallback = false;
+            autoModeFallback = undefined;
+            if (outcome?.kind !== 'fallback') return;
+            wasAutoModeManualFallback =
+              isDenialFallbackReason(outcome.reason) ||
+              outcome.reason === 'classifier_unavailable' ||
+              outcome.reason === 'external_write' ||
+              outcome.reason === 'external_directory';
+
+            if (
+              outcome.message &&
+              (outcome.reason === 'classifier_unavailable' ||
+                outcome.reason === 'external_write' ||
+                outcome.reason === 'external_directory' ||
+                isDenialFallbackReason(outcome.reason))
+            ) {
+              autoModeFallback = {
+                reason: outcome.reason,
+                message: outcome.message,
+              };
+            }
+
+            if (wasAutoModeManualFallback && denialState) {
+              debugLogger.warn(
+                `Auto mode fallback to manual approval (${outcome.reason}): ` +
+                  formatDenialStateLog(denialState),
+              );
+            }
+          };
 
           // Blocked early-returns; approved skips requestPermission;
           // fallback drops through to the existing manual-approval flow.
@@ -14490,31 +14525,7 @@ export class Session implements SessionContext {
                 );
               case 'fallback':
                 // Drop through to the manual-approval flow below.
-                wasAutoModeManualFallback =
-                  isDenialFallbackReason(outcome.reason) ||
-                  outcome.reason === 'classifier_unavailable' ||
-                  outcome.reason === 'external_write' ||
-                  outcome.reason === 'external_directory';
-
-                if (
-                  outcome.message &&
-                  (outcome.reason === 'classifier_unavailable' ||
-                    outcome.reason === 'external_write' ||
-                    outcome.reason === 'external_directory' ||
-                    isDenialFallbackReason(outcome.reason))
-                ) {
-                  autoModeFallback = {
-                    reason: outcome.reason,
-                    message: outcome.message,
-                  };
-                }
-
-                if (wasAutoModeManualFallback) {
-                  debugLogger.warn(
-                    `Auto mode fallback to manual approval (${outcome.reason}): ` +
-                      formatDenialStateLog(denialState),
-                  );
-                }
+                updateAutoModeFallback(outcome, denialState);
                 break;
               default: {
                 const _exhaustive: never = outcome;
@@ -14886,6 +14897,7 @@ export class Session implements SessionContext {
                         approvalMode === ApprovalMode.AUTO
                       ) {
                         recordAutoModeAllow(replacementParams);
+                        updateAutoModeFallback();
                       } else if (
                         !replacementAllowed &&
                         shouldRunAutoModeForCall(approvalMode, policyToolName)
@@ -14901,6 +14913,10 @@ export class Session implements SessionContext {
                         if (classified.outcome.kind === 'blocked') {
                           return reject(classified.outcome.errorMessage);
                         }
+                        updateAutoModeFallback(
+                          classified.outcome,
+                          classified.denialState,
+                        );
                       }
                       cleanupSubAgentTracking();
                       invocation = replacement;

@@ -566,7 +566,7 @@ The `permissionDecision` value controls whether the tool runs:
 
 - `"allow"` — let the call continue; the usual permission checks and approval prompt still apply.
 - `"deny"` — block the tool; it does not execute and an error is returned to the model.
-- `"ask"` — pause and ask the user to confirm the tool call in the TUI before it runs. Confirming runs the tool once; declining cancels it. This confirmation takes the place of the usual approval prompt, and no permission rule, approval mode (including YOLO) or PermissionRequest hook approves the call instead. In contexts that cannot prompt for confirmation — headless (`--prompt`) runs and background subagents — `"ask"` falls back to `"deny"`.
+- `"ask"` — pause and ask the user to confirm the tool call in the TUI before it runs. Confirming runs the tool once; declining cancels it. This confirmation takes the place of the usual approval prompt, and no permission rule, approval mode (including YOLO) or PermissionRequest hook approves the call instead; a PermissionRequest hook can still deny it, or replace its input, which the user then confirms. In contexts that cannot prompt for confirmation — headless (`--prompt`) runs and background subagents — `"ask"` falls back to `"deny"`.
 
 For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather than interpreting inline Markdown. This keeps formatting markers and link targets visible to the user.
 

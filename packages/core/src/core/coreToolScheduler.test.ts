@@ -4680,7 +4680,86 @@ describe('CoreToolScheduler', () => {
       expect(execute).toHaveBeenCalledOnce();
       expect(execute.mock.calls[0][0]).toEqual({ value: 'b' });
       expect(hookEvents(messageBus, 'PreToolUse')).toHaveLength(1);
-      expect(hookEvents(messageBus, 'PermissionRequest')).toHaveLength(0);
+      // The PermissionRequest hook ran but made no decision.
+      expect(hookEvents(messageBus, 'PermissionRequest')).toHaveLength(1);
+    });
+
+    describe('PreToolUse ask with a PermissionRequest hook', () => {
+      const askTool = (execute: Mock) =>
+        valueTool({
+          execute,
+          getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+          getConfirmationDetails: async () => ({
+            type: 'info',
+            title: 'Confirm',
+            prompt: 'run',
+            onConfirm: async () => {},
+          }),
+        });
+      const ask = {
+        permissionDecision: 'ask',
+        permissionDecisionReason: 'check',
+      };
+
+      it('applies the PermissionRequest deny', async () => {
+        const execute = vi.fn();
+        const messageBus = rewriteHookBus(ask, {
+          behavior: 'deny',
+          message: 'policy says no',
+        });
+        const { onToolCallsUpdate, onAllToolCallsComplete } = await runOne(
+          askTool(execute),
+          messageBus,
+          { value: 'a' },
+          { approvalMode: ApprovalMode.DEFAULT },
+        );
+
+        const call = await completedCall(onAllToolCallsComplete);
+        expect(call.status).toBe('error');
+        expect(call.response.error?.message).toBe('policy says no');
+        expect(
+          reportedCalls(onToolCallsUpdate).some(
+            (update) => update.status === 'awaiting_approval',
+          ),
+        ).toBe(false);
+        expect(hookEvents(messageBus, 'PermissionRequest')).toHaveLength(1);
+        expect(execute).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['an allow', { behavior: 'allow' }, { value: 'a' }],
+        [
+          'an allow with a replacement',
+          { behavior: 'allow', updatedInput: { value: 'c' } },
+          { value: 'c' },
+        ],
+      ])(
+        'still asks the user after %s',
+        async (_label, decision, expectedArgs) => {
+          const execute = vi.fn().mockResolvedValue(textResult('ran'));
+          const messageBus = rewriteHookBus(ask, decision);
+          const { onToolCallsUpdate, onAllToolCallsComplete } = await runOne(
+            askTool(execute),
+            messageBus,
+            { value: 'a' },
+            { approvalMode: ApprovalMode.YOLO },
+          );
+
+          const waiting = await waitForApproval(onToolCallsUpdate);
+          expect(waiting.request.args).toEqual(expectedArgs);
+          expect(execute).not.toHaveBeenCalled();
+          await waiting.confirmationDetails.onConfirm(
+            ToolConfirmationOutcome.ProceedOnce,
+          );
+
+          expect((await completedCall(onAllToolCallsComplete)).status).toBe(
+            'success',
+          );
+          expect(execute.mock.calls).toEqual([[expectedArgs]]);
+          expect(hookEvents(messageBus, 'PreToolUse')).toHaveLength(1);
+          expect(hookEvents(messageBus, 'PermissionRequest')).toHaveLength(1);
+        },
+      );
     });
 
     it('refuses a replacement for a fixed_policy invocation', async () => {
@@ -4809,6 +4888,26 @@ describe('CoreToolScheduler', () => {
       ).toEqual({ file_path: unescapePath('a\\ b') });
       expect(build.mock.calls).toEqual([[{ file_path: 'c\\ d' }]]);
       expect(call.request.args).toEqual({ file_path: unescapePath('c\\ d') });
+    });
+
+    it('releases the batch abort listener when scheduling throws', async () => {
+      const tracing = await import('../telemetry/session-tracing.js');
+      vi.mocked(tracing.startToolSpan).mockImplementationOnce(() => {
+        throw new Error('tracer failed');
+      });
+      const { scheduler } = createSchedulerForLegacyToolTests({
+        toolsByName: toolMap(valueTool()),
+      });
+      const controller = new AbortController();
+      const remove = vi.spyOn(controller.signal, 'removeEventListener');
+
+      await expect(
+        scheduler.schedule(
+          [toolRequest('throws', 'value-tool', { value: 'a' }, 'p')],
+          controller.signal,
+        ),
+      ).rejects.toThrow('tracer failed');
+      expect(remove).toHaveBeenCalledWith('abort', expect.any(Function));
     });
 
     it('keeps cancellation working for a sibling after an earlier call is denied by its hook', async () => {

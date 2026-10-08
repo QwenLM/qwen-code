@@ -37330,6 +37330,42 @@ describe('Session', () => {
               },
             );
 
+            it("resets AUTO recovery from the replacement's fallback once it is approved", async () => {
+              let denialState: core.AutoModeDenialState = {
+                consecutiveBlock: 0,
+                consecutiveUnavailable: 1,
+                totalBlock: 0,
+                totalUnavailable: 1,
+              };
+              mockConfig.getCwd = vi.fn().mockReturnValue('/repo');
+              mockConfig.getAutoModeSettings = vi.fn().mockReturnValue({});
+              mockConfig.getAutoModeDenialState = vi.fn(() => denialState);
+              mockConfig.setAutoModeDenialState = vi.fn((next) => {
+                denialState = next;
+              });
+              mockConfig.getLlmClient = vi.fn().mockReturnValue({
+                ...mockLlmClient,
+                getHistoryTail: () => [],
+              });
+              vi.spyOn(core, 'evaluateAutoMode')
+                // The original input needs an ask-rule confirmation...
+                .mockResolvedValueOnce({ via: 'fallback', reason: 'ask_rule' })
+                // ...while the replacement meets an unavailable classifier.
+                .mockResolvedValueOnce({
+                  via: 'classifier',
+                  shouldBlock: true,
+                  unavailable: true,
+                  reason: 'classifier timeout',
+                  stage: 'fast',
+                  durationMs: 1,
+                });
+              const { executed } = writeTool();
+              await promptWith({ path: '/tmp/a.txt' }, ApprovalMode.AUTO);
+
+              expect(executed).toEqual(['/tmp/c.txt']);
+              expect(denialState.consecutiveUnavailable).toBe(0);
+            });
+
             it.each([null, false, 0, ''])(
               'rejects an invalid replacement %j without running any input',
               async (updatedInput) => {
@@ -44835,7 +44871,12 @@ describe('Session', () => {
         'info',
       );
       tool.kind = core.Kind.Read;
-      tool.build().params = { file_path: originalPath };
+      // A replacement input is rebuilt, so each build carries its own params.
+      const invocation = tool.build();
+      tool.build.mockImplementation((params: Record<string, unknown>) => ({
+        ...invocation,
+        params,
+      }));
       mockToolRegistry.getTool.mockReturnValue(tool);
 
       try {

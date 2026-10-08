@@ -3095,6 +3095,7 @@ export class CoreToolScheduler {
       }
     }
     this.isScheduling = true;
+    let preparedBatch: BatchAbortState | undefined;
     try {
       if (this.isRunning()) {
         throw new Error(
@@ -3176,6 +3177,7 @@ export class CoreToolScheduler {
         callIds: new Set<string>(),
         preparing: true,
       };
+      preparedBatch = batchState;
       signal.addEventListener('abort', batchState.onAbort, { once: true });
 
       for (const [requestIndex, reqInfo] of requestsToProcess.entries()) {
@@ -4253,10 +4255,7 @@ export class CoreToolScheduler {
             const permissionRequestGrant = permissionRequestGrants.has(
               reqInfo.callId,
             );
-            if (
-              (hooksEnabled && messageBus && !preToolUseAsk) ||
-              permissionRequestGrant
-            ) {
+            if ((hooksEnabled && messageBus) || permissionRequestGrant) {
               const permissionMode = String(this.config.getApprovalMode());
               const hookResult: PermissionRequestHookResult =
                 permissionRequestGrant
@@ -4282,9 +4281,19 @@ export class CoreToolScheduler {
                 continue;
               }
 
+              // A deny always applies. An allow never replaces a confirmation
+              // the user must give (an interactive tool or a PreToolUse
+              // 'ask'); under an 'ask' it only has a replacement checked,
+              // which the user then confirms.
+              const allowApplies =
+                hookResult.shouldAllow === true &&
+                !requiresUserInteraction &&
+                (!preToolUseAsk ||
+                  (hookResult.updatedInput !== undefined &&
+                    planShellDecision.classification === 'not-applicable'));
               if (
                 hookResult.hasDecision &&
-                (!hookResult.shouldAllow || !requiresUserInteraction)
+                (!hookResult.shouldAllow || allowApplies)
               ) {
                 if (hookResult.shouldAllow) {
                   if (planShellDecision.classification !== 'not-applicable') {
@@ -4672,7 +4681,6 @@ export class CoreToolScheduler {
         }
       }
       batchState.preparing = false;
-      this.releaseIdleBatchListener(batchState);
       await this.attemptExecutionOfScheduledCalls(signal);
       void this.checkAndNotifyCompletion().catch((error: unknown) => {
         debugLogger.warn(
@@ -4681,11 +4689,15 @@ export class CoreToolScheduler {
           }`,
         );
       });
-      // Listener removal otherwise happens inside `finalizeToolSpan` →
-      // `releaseBatchListenerIfDrained` for every callId, and above once
-      // preparation ends (which also covers a batch whose calls all
-      // failed pre-validation and never opened a span).
     } finally {
+      // Listener removal otherwise happens inside `finalizeToolSpan` →
+      // `releaseBatchListenerIfDrained` for every callId. Releasing here as
+      // well covers a batch whose calls never opened a span, and a throw
+      // during preparation, which must not leave the listener pinned.
+      if (preparedBatch) {
+        preparedBatch.preparing = false;
+        this.releaseIdleBatchListener(preparedBatch);
+      }
       this.isScheduling = false;
       this.drainRequestQueueIfIdle();
     }
