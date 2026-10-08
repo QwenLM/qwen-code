@@ -1948,16 +1948,6 @@ export function WebShellSidebar({
     });
     return [...pinned, ...unpinned];
   }, [displayedWorkspaces]);
-  const projectConversations = useProjectConversations(
-    projectWorkspaces
-      .filter((ws) => ws.primary || ws.trusted)
-      .map((ws) => ws.cwd),
-  );
-  const collaborationSessions = useMemo(
-    () =>
-      selectedSessionSource === 'channel' ? [] : projectConversations.sessions,
-    [selectedSessionSource, projectConversations.sessions],
-  );
   const resolveSessionWorkspaceScope = useCallback(
     (session: DaemonSessionSummary): SessionWorkspaceScope => {
       const explicitCwd = session.workspaceCwd;

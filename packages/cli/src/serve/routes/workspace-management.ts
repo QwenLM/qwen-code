@@ -2238,16 +2238,14 @@ export function registerWorkspaceManagementRoutes(
         // Also match by workspaceId to handle cases where the client sends
         // the canonical path hash instead of a stored path hash (alias paths).
         let targetEntry: WorkspaceEntry | undefined;
-        if (typeof workspaceRegistry.listAllEntries === 'function') {
-          const entries = workspaceRegistry.listAllEntries();
-          for (const entry of entries) {
-            if (
-              entry.registrationIds.includes(requestedId) ||
-              entry.workspaceId === requestedId
-            ) {
-              targetEntry = entry;
-              break;
-            }
+        const entries = workspaceRegistry.listAllEntries();
+        for (const entry of entries) {
+          if (
+            entry.registrationIds.includes(requestedId) ||
+            entry.workspaceId === requestedId
+          ) {
+            targetEntry = entry;
+            break;
           }
         }
         if (!targetEntry) {
@@ -2275,8 +2273,25 @@ export function registerWorkspaceManagementRoutes(
         }
 
         // Update pin state for ALL registration IDs of this entry.
+        let anyApplied = false;
         for (const regId of targetEntry.registrationIds) {
-          await workspaceRegistrationStore.setPinned(regId, isPinned);
+          const applied = await workspaceRegistrationStore.setPinned(
+            regId,
+            isPinned,
+          );
+          if (applied) anyApplied = true;
+        }
+        if (!anyApplied && !isPinned) {
+          // No-op unpin — already unpinned, return current state.
+          res.json({ id: requestedId, isPinned: false });
+          return;
+        }
+        if (!anyApplied) {
+          res.status(404).json({
+            error: 'Workspace registration not found in store',
+            code: 'workspace_registration_not_found',
+          });
+          return;
         }
 
         // Read back the pinnedAt for the requested ID (may be an alias).
@@ -2304,18 +2319,16 @@ export function registerWorkspaceManagementRoutes(
           let pinnedAt = snapshot.pinnedAts?.[requestedId];
           if (pinnedAt === undefined) {
             // Fallback: scan all entries for this requestedId.
-            if (typeof workspaceRegistry.listAllEntries === 'function') {
-              const entries = workspaceRegistry.listAllEntries();
-              for (const entry of entries) {
-                if (entry.registrationIds.includes(requestedId)) {
-                  for (const regId of entry.registrationIds) {
-                    if (snapshot.pinnedAts?.[regId] !== undefined) {
-                      pinnedAt = snapshot.pinnedAts[regId];
-                      break;
-                    }
+            const entries = workspaceRegistry.listAllEntries();
+            for (const entry of entries) {
+              if (entry.registrationIds.includes(requestedId)) {
+                for (const regId of entry.registrationIds) {
+                  if (snapshot.pinnedAts?.[regId] !== undefined) {
+                    pinnedAt = snapshot.pinnedAts[regId];
+                    break;
                   }
-                  break;
                 }
+                break;
               }
             }
           }

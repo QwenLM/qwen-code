@@ -516,6 +516,8 @@ export interface CapabilitiesEnvelope {
     workflowsEnabled?: boolean;
     removable?: boolean;
     kind?: 'live';
+    /** Stable registration IDs for this workspace (may contain multiple entries for alias paths). */
+    registrationIds?: readonly string[];
     /** Present when the workspace is pinned in the sidebar. */
     isPinned?: boolean;
     /** ISO-8601 timestamp of when the workspace was pinned. */

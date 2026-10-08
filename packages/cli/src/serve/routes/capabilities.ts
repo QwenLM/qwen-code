@@ -99,6 +99,7 @@ export function registerCapabilitiesRoutes(
       ? hostedPersonaServeFeatures()
       : deps.currentServeFeatures();
     const runtimeRemoval = features.includes('workspace_runtime_removal');
+    const workspacePinning = features.includes('workspace_pinning');
     let pinnedAts: Record<string, string> | undefined;
     if (deps.workspaceRegistrationStore) {
       try {
@@ -197,9 +198,13 @@ export function registerCapabilitiesRoutes(
           ...(entry.current?.runtime.provenance === 'live-conversation'
             ? { kind: 'live' as const }
             : {}),
-          registrationIds: entry.registrationIds,
-          isPinned: pinnedAt !== undefined,
-          ...(pinnedAt !== undefined ? { pinnedAt } : {}),
+          ...(workspacePinning
+            ? {
+                registrationIds: entry.registrationIds,
+                isPinned: pinnedAt !== undefined,
+                ...(pinnedAt !== undefined ? { pinnedAt } : {}),
+              }
+            : {}),
         };
       }),
       supportedLanguages: deps.languageCodes,
