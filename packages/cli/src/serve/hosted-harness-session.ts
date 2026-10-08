@@ -33,6 +33,7 @@ import {
   createHttpManagedSessionStores,
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
   ManagedSessionStoreHttpError,
+  ManagedSessionStoreTransportError,
   type HttpToolPublicationOwner,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
@@ -4676,6 +4677,18 @@ export function registerHostedHarnessSessionRoutes(
       if (cause instanceof ManagedSessionWritesStoppedError) {
         writeStderrLineSafe(
           `qwen serve: Hosted automation operation ${String(kind)} of session ${req.params['id']} found the journal dead: ${message}`,
+        );
+        return error(res, 503, 'automation_operation_failed', message);
+      }
+      // A store HTTP or transport fault is infrastructure, not the
+      // request's shape: answer a retryable 503 — settling it as a 4xx
+      // would skip the occurrence while the fault is quite recoverable.
+      if (
+        cause instanceof ManagedSessionStoreHttpError ||
+        cause instanceof ManagedSessionStoreTransportError
+      ) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted automation operation ${String(kind)} of session ${req.params['id']} lost its store: ${message}`,
         );
         return error(res, 503, 'automation_operation_failed', message);
       }

@@ -65,6 +65,13 @@ public final class AutomationHarnessFake {
                     result.put("replayed", true);
                     break;
                 }
+                // One idempotency key is one operation on the public
+                // surface; the journal is the recoverable record, so a
+                // cross-kind reuse conflicts instead of committing twice.
+                if (mutations.containsKey(sessionId + "|retire|"
+                        + body.get("operationId"))) {
+                    throw refusal(409, "automation_operation_conflict");
+                }
                 Map<String, Object> schedule = schedules.get(key);
                 boolean replayed = false;
                 if (schedule == null) {
@@ -124,6 +131,12 @@ public final class AutomationHarnessFake {
                     result.put("schedule", new LinkedHashMap<>(prior));
                     result.put("replayed", true);
                     break;
+                }
+                // Same cross-kind rule as define: reusing the key for the
+                // other operation kind conflicts, never commits.
+                if (mutations.containsKey(sessionId + "|define|"
+                        + body.get("operationId"))) {
+                    throw refusal(409, "automation_operation_conflict");
                 }
                 Map<String, Object> schedule = schedules.get(key);
                 if (schedule == null) {

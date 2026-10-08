@@ -105,6 +105,12 @@ export interface HostedAutomationStore {
       operation: string,
       commandId: string,
     ): CommittedExtensionOperation | undefined;
+    committedExtensionOperationByCommandId(commandId: string):
+      | {
+          readonly operation: string;
+          readonly result: CommittedExtensionOperation;
+        }
+      | undefined;
   };
   readonly resources: {
     publish(kind: string, bytes: Buffer): Promise<ManagedSessionDurableRef>;
@@ -646,7 +652,19 @@ export class HostedAutomationSession {
       operation,
       operationId,
     );
-    if (prior === undefined) return undefined;
+    if (prior === undefined) {
+      const other =
+        this.store.authority.committedExtensionOperationByCommandId(
+          operationId,
+        );
+      if (other !== undefined && other.operation !== operation) {
+        throw new AutomationOperationConflictError(
+          operationId,
+          `it answers for ${other.operation}, not ${operation}`,
+        );
+      }
+      return undefined;
+    }
     const conflict = (reason: string): never => {
       throw new AutomationOperationConflictError(operationId, reason);
     };
@@ -684,13 +702,17 @@ export class HostedAutomationSession {
     conflict: (reason: string) => never,
   ): Promise<void> {
     if (definition === null) return;
+    // Read the committed prompt outside the validation try: a store HTTP
+    // or transport fault here is infrastructure, not a conflict — the
+    // route keeps it retryable as a 503, it is never the request's shape.
+    const prompt = await this.promptOf(recorded);
     let merged: AutomationDefinition;
     try {
       merged = assertAutomationDefinition(definition, {
         goal: recorded.goal,
         cron: recorded.cron,
         timezone: recorded.timezone,
-        prompt: await this.promptOf(recorded),
+        prompt,
         sessionMode: recorded.sessionMode,
         overlap: recorded.overlap,
         catchUp: recorded.catchUp,

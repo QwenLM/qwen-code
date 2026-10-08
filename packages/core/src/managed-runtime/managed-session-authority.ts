@@ -1592,6 +1592,40 @@ export class LocalManagedSessionAuthority {
     if (previous === undefined) {
       return undefined;
     }
+    return this.operationFromTransaction(previous);
+  }
+
+  /**
+   * The same lookup without the operation-name key: an idempotency key is
+   * one operation on the public surface, so a retry under a different
+   * operation kind must find the landing and conflict, not slip past into
+   * a second commit. The transactions map is rebuilt from the journal on
+   * reopen, so the check survives the control plane losing its own row.
+   */
+  committedExtensionOperationByCommandId(commandId: string):
+    | {
+        readonly operation: string;
+        readonly result: CommittedExtensionOperation;
+      }
+    | undefined {
+    for (const [key, previous] of this.transactions) {
+      if (!key.endsWith(`\u0000${commandId}`)) {
+        continue;
+      }
+      const result = this.operationFromTransaction(previous);
+      if (result !== undefined) {
+        return {
+          operation: key.slice(0, key.length - commandId.length - 1),
+          result,
+        };
+      }
+    }
+    return undefined;
+  }
+
+  private operationFromTransaction(
+    previous: ManagedSessionCommittedTransaction,
+  ): CommittedExtensionOperation | undefined {
     for (
       let sequence = previous.receipt.firstSequence;
       sequence <= previous.receipt.lastSequence;

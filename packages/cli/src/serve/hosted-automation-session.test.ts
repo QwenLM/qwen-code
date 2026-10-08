@@ -20,6 +20,7 @@ import {
   ManagedSessionRecordError,
   assertManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { ManagedSessionStoreHttpError } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
   AUTOMATION_INPUT_SOURCE,
   AUTOMATION_RUN_INSTRUCTION,
@@ -678,6 +679,95 @@ describe('hosted automation definitions', () => {
       const retried = await automations.define({
         scheduleId: SCHEDULE_ID,
         operationId: createA,
+        definition,
+      });
+      expect(retried.replayed).toBe(true);
+      expect(retried.revision).toBe(1);
+    });
+  });
+
+  it('refuses a mutation retried under the other operation kind with the same identity', async () => {
+    const harness = await createHarness();
+    const createOp = randomUUID();
+    await withSession(harness, async (automations, authority) => {
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: createOp,
+        definition,
+      });
+      // One idempotency key is one operation on the public surface: the
+      // same identity under the other kind conflicts, never retires.
+      await expect(
+        automations.retire(SCHEDULE_ID, createOp),
+      ).rejects.toBeInstanceOf(AutomationOperationConflictError);
+      expect(automations.schedule(SCHEDULE_ID)?.run.state).not.toBe(
+        'cancelled',
+      );
+      expect(authority.extensionRecord('schedule', SCHEDULE_ID)?.revision).toBe(
+        1,
+      );
+    });
+    await withSession(
+      harness,
+      async (automations, authority) => {
+        // Across a reopen the journal still holds the operation, so a
+        // control plane that lost its own command row sees the same
+        // refusal instead of cancelling the definition.
+        await expect(
+          automations.retire(SCHEDULE_ID, createOp),
+        ).rejects.toBeInstanceOf(AutomationOperationConflictError);
+        expect(
+          authority.extensionRecord('schedule', SCHEDULE_ID)?.revision,
+        ).toBe(1);
+        const retried = await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: createOp,
+          definition,
+        });
+        expect(retried.replayed).toBe(true);
+        expect(retried.revision).toBe(1);
+      },
+      { create: false },
+    );
+  });
+
+  it('lets a store fault through a replay content check as itself, never a conflict', async () => {
+    const harness = await createHarness();
+    const createOp = randomUUID();
+    await withSession(harness, async (automations) => {
+      const opened = await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: createOp,
+        definition,
+      });
+      const promptResourceId = opened.schedule.promptRef.resourceId;
+      const read = harness.store.read.bind(harness.store);
+      harness.store.read = async (ref) => {
+        if (ref.resourceId === promptResourceId) {
+          throw new ManagedSessionStoreHttpError(
+            503,
+            'store_unavailable',
+            'store down',
+          );
+        }
+        return read(ref);
+      };
+      try {
+        // The retry cannot re-read the committed prompt: infrastructure —
+        // the store's own 503 travels upward, never a conflict.
+        await expect(
+          automations.define({
+            scheduleId: SCHEDULE_ID,
+            operationId: createOp,
+            definition,
+          }),
+        ).rejects.toBeInstanceOf(ManagedSessionStoreHttpError);
+      } finally {
+        harness.store.read = read;
+      }
+      const retried = await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: createOp,
         definition,
       });
       expect(retried.replayed).toBe(true);

@@ -1180,6 +1180,52 @@ class AutomationScannerTest {
     }
 
     @Test
+    void aTransientStoreFaultKeepsTheClaimFiringForRedrive() {
+        PublicAutomation automation = define("* * * * *", "skip", "none", null,
+                true);
+        // A store-fault 503 from the route is infrastructure, not a
+        // refusal: the claim waits the fault out instead of settling
+        // skipped, which no redrive would ever revisit.
+        fake.failNextFire = AutomationHarnessFake.refusal(503,
+                "automation_operation_failed");
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        assertThat(outcomes(automation.id()))
+                .containsOnlyKeys(AutomationLedgerStore.OUTCOME_FIRING);
+        clock.set(T0 + MINUTE + 11_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(outcomes(automation.id()))
+                .containsOnlyKeys(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(fake.firedOccurrences()).containsExactly(
+                "schedule:2026-06-01T10:01:00Z",
+                "schedule:2026-06-01T10:01:00Z");
+    }
+
+    @Test
+    void aCrossKindRetryAfterTheCommandRowWasLostConflicts() {
+        String key = "key-" + UUID.randomUUID();
+        PublicAutomation automation = service.create(tenant, ACTOR, key,
+                new AutomationDefinitionRequest(sessionId, "Goal",
+                        "0 2 * * *", "UTC", "Run it.", null, "skip", "none",
+                        null, true)).body();
+        // The crash window the funnel's journal closes: the control plane
+        // lost its command row after the Harness committed the create.
+        jdbc.update("DELETE FROM qwen_managed_automation_command"
+                + " WHERE tenant_id = ? AND idempotency_key = ?", tenant, key);
+        assertThatThrownBy(
+                () -> service.retire(tenant, ACTOR, automation.id(), key))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("automation_operation_conflict");
+                });
+        ScheduleRow mirror = ledger.findSchedule(tenant, automation.id())
+                .orElseThrow();
+        assertThat(mirror.state()).isEqualTo(AutomationLedgerStore.STATE_LIVE);
+        assertThat(mirror.definitionRevision()).isEqualTo(1L);
+    }
+
+    @Test
     void aManualRunsDefinitiveRefusalAnswers409AndItsRetryTheDecision() {
         PublicAutomation automation = define("0 2 * * *", "allow", "none",
                 null, true);

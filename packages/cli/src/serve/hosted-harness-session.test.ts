@@ -44,6 +44,7 @@ import {
   assertManagedSessionDurableRef,
   ManagedSessionRecordError,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { ManagedSessionStoreHttpError } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
   createHostedHarnessContract,
   installHostedHarnessContractMiddleware,
@@ -166,6 +167,12 @@ vi.mock(
       ) {
         super(message);
         this.name = 'ManagedSessionStoreHttpError';
+      }
+    },
+    ManagedSessionStoreTransportError: class ManagedSessionStoreTransportError extends Error {
+      constructor(message: string) {
+        super(message);
+        this.name = 'ManagedSessionStoreTransportError';
       }
     },
     createHttpManagedSessionStores: (options: {
@@ -1443,6 +1450,64 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 10_000, interval: 50 },
     );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
+  it('answers a fire that lost its store with a retryable 503, and fires after recovery', async () => {
+    await prewriteAutomationSession();
+    const server = await app();
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    const operations = (body: Record<string, unknown>) =>
+      authorize(
+        supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
+      ).send({ operationId: randomUUID(), ...body });
+    // The queued slot from the prewrite settles first, so nothing but the
+    // fire under test reads the store once the fault is armed.
+    await vi.waitFor(
+      async () => {
+        expect((await operations(fireBody())).body.run.state).toBe('settled');
+      },
+      { timeout: 10_000, interval: 50 },
+    );
+    const read = vi
+      .spyOn(LocalManagedSessionResourceStore.prototype, 'read')
+      .mockRejectedValueOnce(
+        new ManagedSessionStoreHttpError(
+          503,
+          'store_unavailable',
+          'store down',
+        ),
+      );
+    const slot = 'schedule:2026-03-08T09:00:00Z';
+    const refused = await operations(fireBody(1, slot));
+    expect(refused.status).toBe(503);
+    expect(refused.body.code).toBe('automation_operation_failed');
+    read.mockRestore();
+    // The transient fault never settled the occurrence: the claim
+    // committed, so the re-drive dispatches that same run.
+    const recovered = await operations(fireBody(1, slot));
+    expect(recovered.status).toBe(202);
+    expect(recovered.body.replayed).toBe(true);
+    const runId = recovered.body.run.automationRunId as string;
+    const journal = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+    );
+    expect(
+      journal.events
+        .filter(
+          (event) =>
+            event.kind === 'domain.committed' &&
+            event.payload['domain'] === 'automation_run' &&
+            String(event.payload['operationId']).startsWith(`${runId}:`),
+        )
+        .map((event) => event.payload['operationId']),
+    ).toEqual([`${runId}:1`, `${runId}:2`]);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
