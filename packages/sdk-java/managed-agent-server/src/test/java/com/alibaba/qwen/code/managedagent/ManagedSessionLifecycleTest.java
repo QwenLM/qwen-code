@@ -518,10 +518,10 @@ class ManagedSessionLifecycleTest {
                 sessionId, SessionMutationKind.RENAME);
         store.abandonSessionMutation(tenant, "RENAME_SESSION", "k1", sessionId);
         if (legacyReceipt) {
-            jdbc.update("UPDATE managed_agent_command SET mutation_attempt_sequence"
+            assertThat(jdbc.update("UPDATE managed_agent_command SET mutation_attempt_sequence"
                             + " = NULL WHERE tenant_id = ? AND operation = ?"
                             + " AND idempotency_key = ?",
-                    tenant, "RENAME_SESSION", "k1");
+                    tenant, "RENAME_SESSION", "k1")).isEqualTo(1);
         }
         store.beginSessionMutation(tenant, "RENAME_SESSION", "k2", second,
                 sessionId, SessionMutationKind.RENAME);
@@ -576,9 +576,9 @@ class ManagedSessionLifecycleTest {
         store.completeSessionMutation(tenant, "RENAME_SESSION", "k2", sessionId,
                 SessionMutationKind.RENAME, "B", bootId);
         if (recreatedReceipt) {
-            jdbc.update("DELETE FROM managed_agent_command WHERE tenant_id = ?"
+            assertThat(jdbc.update("DELETE FROM managed_agent_command WHERE tenant_id = ?"
                             + " AND operation = ? AND idempotency_key = ?",
-                    tenant, "RENAME_SESSION", "k1");
+                    tenant, "RENAME_SESSION", "k1")).isEqualTo(1);
         }
         store.beginSessionMutation(tenant, "RENAME_SESSION", "k1", first,
                 sessionId, SessionMutationKind.RENAME);

@@ -300,6 +300,9 @@ class WorkspaceStorageGuardTest {
         unreadable.set(0);
         connector.resolveAction("tenant", sessionId, "action", response);
         verify(client).resolveAction(attached, "action", "allow", 1L, "policy");
+        // Positive control: the probe-only retry leaves the shared acquire
+        // path's verdict untouched — a settled mount still authorizes.
+        guard.verify(binding);
     }
 
     @Test
