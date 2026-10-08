@@ -556,15 +556,34 @@ export async function settleCrashedWakeTurnAftermath(params: {
               `qwen serve: Hosted wake turn ${turnId} park is deterministically unrecoverable by the Broker; its cancelled tool results and run are settled anyway, and the wake session's lease stays the system's re-admitted kind: ${String(cause)}`,
             );
           }
-          await settleParkedTurnCancelled({
-            session: session.managed,
-            sessionId,
-            cwd,
-            promptId: turnId,
-          });
+          // The cancelled tool results journal like every route write: a
+          // concurrent route claim can move the journal mid-write, and a
+          // transcript-changed failure of one attempt is a retry, not a
+          // drop, or the re-block loop this path exists to end comes back
+          // with an unconsumed input.
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            try {
+              await settleParkedTurnCancelled({
+                session: session.managed,
+                sessionId,
+                cwd,
+                promptId: turnId,
+              });
+              break;
+            } catch (cause) {
+              if (!(cause instanceof SessionTranscriptChangedError))
+                throw cause;
+              if (attempt === 2) throw cause;
+              await new Promise((resolve) =>
+                setTimeout(resolve, 50 * (attempt + 1)),
+              );
+            }
+          }
         }
         // Release on every pass: the journal cannot say whether an
         // earlier pass's release landed after the checkpoint moved on.
+        // A released identity refuses the adoption a cold Broker needs —
+        // which is exactly the durable answer, so nothing remains to ask.
         if (runtimeItems.length > 0) {
           try {
             broker ??= await originalRuntimeBroker(
@@ -573,7 +592,22 @@ export async function settleCrashedWakeTurnAftermath(params: {
               items,
               brokerOptions,
             );
-            await broker.release();
+            let adoptable = true;
+            try {
+              await broker.acquire();
+            } catch (cause) {
+              if (
+                !(
+                  cause instanceof HostedWorkspaceBrokerRejection &&
+                  cause.status === 409 &&
+                  cause.code === 'runtime_session_not_acquirable'
+                )
+              ) {
+                throw cause;
+              }
+              adoptable = false;
+            }
+            if (adoptable) await broker.release();
           } catch (cause) {
             if (!(cause instanceof RecoveryDeclined)) throw cause;
             writeStderrLineSafe(

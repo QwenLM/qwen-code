@@ -1701,8 +1701,13 @@ export class HostedWorkspaceToolTurn {
           this.publisher!.register(
             {
               reference: {
-                sessionId: this.promptId,
-                promptId: this.promptId,
+                // The Runtime identity, not the logical turn id: the
+                // Broker recorded this execution under its mapped
+                // session (a wake turn's arun_…:input id maps to
+                // wake-<sha256>), and the v3 reserve/publisher compare
+                // their stored execution against exactly those fields.
+                sessionId: this.broker.runtimeSessionId,
+                promptId: this.broker.runtimeSessionId,
                 callId: request.runtimeCallId,
                 argsDigest: request.inputDigest!,
               },
@@ -1761,8 +1766,12 @@ export class HostedWorkspaceToolTurn {
             modelCallId: saved.modelCallId,
             runtimeBindingId: saved.runtimeBindingId,
             reference: {
-              sessionId: this.promptId,
-              promptId: this.promptId,
+              // The Runtime identity, not the logical turn id: the
+              // Broker stored this execution under its mapped session
+              // (the wake-turn id maps to wake-<sha256>), and the v3
+              // reserve's execution compare refuses anything else.
+              sessionId: this.broker.runtimeSessionId,
+              promptId: this.broker.runtimeSessionId,
               callId: saved.runtimeCallId,
               argsDigest: saved.argsDigest,
             },

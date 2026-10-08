@@ -1705,6 +1705,7 @@ describe('Hosted Harness no-tool session', () => {
 
   async function prewriteAutomationSession(
     toolProfile?: string,
+    captureBytes?: number,
   ): Promise<string> {
     const key = {
       tenantId: 'tenant',
@@ -1739,6 +1740,7 @@ describe('Hosted Harness no-tool session', () => {
               engine: 'managed',
               sessionId: SESSION_ID,
               ...(toolProfile === undefined ? {} : { toolProfile }),
+              ...(captureBytes === undefined ? {} : { captureBytes }),
             }),
           ),
         ),
@@ -2045,8 +2047,9 @@ describe('Hosted Harness no-tool session', () => {
         firedAt: Date.parse('2026-03-08T07:00:05Z'),
       });
       const inputId = fired.inputId;
-      // The attempt the owner died inside: prompt, intent, checkpoint.
-      await managed.sink.write({
+      // The attempt the owner died inside: prompt, intent, checkpoint —
+      // and the assistant's functionCall the checkpoint's item names.
+      const userRecord = {
         uuid: randomUUID(),
         parentUuid: null,
         sessionId: SESSION_ID,
@@ -2056,6 +2059,26 @@ describe('Hosted Harness no-tool session', () => {
         version: 'hosted-harness/1',
         daemonPromptId: inputId,
         message: { role: 'user', parts: [{ text: 'queued' }] },
+      };
+      await managed.sink.write(userRecord as never);
+      const callName = shellArg ? 'run_shell_command' : 'read_file';
+      await managed.sink.write({
+        uuid: 'msg-wake-1',
+        parentUuid: userRecord.uuid,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: state.root,
+        version: 'hosted-harness/1',
+        daemonPromptId: inputId,
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: { id: 'fc-wake-1', name: callName, args: {} },
+            },
+          ],
+        },
       } as never);
       const argsRef = await resources.publish(
         shellArg ? 'managed-tool-args' : 'managed-tool-input',
@@ -2134,18 +2157,40 @@ describe('Hosted Harness no-tool session', () => {
 
   // The Broker answers each status poll once in the order given: TypeError
   // entries throw, then {@link mockRepairBroker.unlatch} lets the rest
-  // play out, so a wedge and its recovery share one fixture run.
+  // play out, so a wedge and its recovery share one fixture run. Statuses
+  // on the cold surface (`acquire` never called) answer 404 — the old
+  // tails — while recorded calls keep `acquire`/`status`/`release` order.
   function mockRepairBroker() {
     mockBrokerBroker();
     const repair = {
       script: [] as Array<{ state: 'running' } | { state: 'settled' }>,
       latched: true,
+      order: [] as string[],
       unlatch: () => {
         repair.latched = false;
       },
     };
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        repair.order.push('acquire');
+        this.runtime = {
+          bindingId: 'binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
     vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
       () => {
+        repair.order.push('status');
+        if (!repair.order.includes('acquire')) {
+          return Promise.reject(
+            new HostedWorkspaceBrokerRejection(
+              404,
+              'runtime_session_not_found',
+            ),
+          );
+        }
         if (repair.latched) {
           return Promise.reject(
             new TypeError('Runtime Broker status lost to a 503'),
@@ -2153,6 +2198,12 @@ describe('Hosted Harness no-tool session', () => {
         }
         const next = repair.script.shift() ?? { state: 'settled' as const };
         return Promise.resolve(next as never);
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
+      () => {
+        repair.order.push('release');
+        return Promise.resolve();
       },
     );
     vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
@@ -2479,6 +2530,15 @@ describe('Hosted Harness no-tool session', () => {
       { timeout: 15_000 },
     );
     expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalled();
+    // The cold Broker's space is not assumed: an adoption must precede
+    // every status poll and every release on it (audit round: the parked
+    // status query and the release otherwise answer 404 and 503).
+    expect(repair.order.indexOf('acquire')).toBeLessThan(
+      repair.order.indexOf('status'),
+    );
+    expect(repair.order.indexOf('acquire')).toBeLessThan(
+      repair.order.indexOf('release'),
+    );
     await vi.waitFor(
       async () => {
         const replayed = await authorize(
@@ -2981,6 +3041,103 @@ describe('Hosted Harness no-tool session', () => {
     );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
+
+  it('keeps the mapped Runtime identity through the Tool v3 publication lane of a wake shell turn', async () => {
+    const inputId = await prewriteAutomationSession(
+      'hosted-workspace-shell/1',
+      1024 * 1024,
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        this.runtime = {
+          bindingId: 'binding-1',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepareV3').mockResolvedValue({
+      executionCallId: 'shell-execution',
+      runtimeBindingId: 'binding-1',
+      bindingGeneration: '1',
+    });
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'executeV3').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'hi' }],
+      capture: {
+        captureStatus: 'detached',
+        captureReason: null,
+        manifest: null,
+        previewTruncated: false,
+        deliveryStatus: 'pending',
+      },
+    });
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'acknowledgeV3',
+    ).mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    const grants: Array<{ binding?: { reference?: Record<string, unknown> } }> =
+      [];
+    state.publicationRequest.mockImplementation(
+      async (_resources, route, body) => {
+        if (route === '/grants') {
+          grants.push(
+            body as {
+              binding?: { reference?: Record<string, unknown> };
+            },
+          );
+          return { state: 'OPEN' };
+        }
+        throw new Error('Unexpected publication route ' + route);
+      },
+    );
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      const call = {
+        name: 'run_shell_command',
+        callId: 'wake-shell',
+        args: { command: 'cat wake-target.txt' },
+        isClientInitiated: false,
+        prompt_id: inputId,
+      };
+      await toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      return { text: 'read it', model: 'test-model' };
+    });
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    await vi.waitFor(() => expect(grants.length).toBeGreaterThan(0), {
+      timeout: 15_000,
+    });
+    // The discriminating point of the Tool v3 identity wall: binding
+    // reference must mirror what the Broker recorded (the mapped wake
+    // identity), never the raw logical prompt id whose `/grants`
+    // admission the real store refuses. The logical turn id keeps its own.
+    const runId = automationRunId(AUTOMATION_ID, AUTOMATION_SLOT);
+    const mapped = `wake-${createHash('sha256').update(`${runId}:input`).digest('hex')}`;
+    const references = grants
+      .filter((grant) => grant.binding !== undefined)
+      .map((grant) => grant.binding!.reference ?? {});
+    for (const reference of references) {
+      expect(reference['sessionId']).toBe(mapped);
+      expect(reference['promptId']).toBe(mapped);
+      expect(reference['sessionId']).not.toBe(`${runId}:input`);
+      expect(reference['promptId']).not.toBe(`${runId}:input`);
+    }
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  }, 45_000);
 
   it('settles an automation run as failed/unknown when its turn went recovery-blocked', async () => {
     await prewriteAutomationCrashedTurnSession();
