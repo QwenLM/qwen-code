@@ -275,7 +275,7 @@ export async function projectManagedSessionRecords(options: {
     }
     const carried = managedSessionReaderFacingBody(event);
     if (carried === undefined) continue;
-    const body = await readRecordBody(
+    const body: unknown = await readRecordBody(
       resources,
       carried.ref,
       `${event.kind} event ${event.eventId} ref`,
@@ -283,7 +283,9 @@ export async function projectManagedSessionRecords(options: {
     records.push(
       requireProjectedRecord(
         carried.inDomainEnvelope
-          ? (body as unknown as { record: ChatRecord }).record
+          ? body !== null && typeof body === 'object'
+            ? (body as { readonly record?: unknown }).record
+            : undefined
           : body,
         scan.header.sessionKey.sessionId,
         `${event.kind} event ${event.eventId} ref`,

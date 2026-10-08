@@ -488,6 +488,75 @@ describe('managed session message projection', () => {
     );
   });
 
+  it('refuses a stored domain envelope whose record body is null', async () => {
+    const harness = await createHarness();
+    await harness.close();
+
+    // A hand-composed envelope spliced into the committed log: the cold
+    // reader must refuse it with the typed record error, not an untyped
+    // TypeError from reading `record` off null.
+    const recordRef = await harness.store.publish(
+      'managed-file_history',
+      Buffer.from('null', 'utf8'),
+    );
+    const scan = await readManagedSessionLog(
+      harness.transcriptPath,
+      sessionKey,
+    );
+    const event = parseManagedSessionEvent({
+      v: 1,
+      sequence: scan.committed + 1,
+      eventId: 'domain:file_history:null-record',
+      sessionKey,
+      kind: 'domain.committed',
+      occurredAt: 1,
+      subject: {
+        type: 'activation',
+        scopeId: 'act-1',
+        activationId: 'act-1',
+        epoch: 1,
+      },
+      payload: {
+        domain: 'file_history',
+        version: 1,
+        operationId: 'cmd-domain-null-record',
+        recordRef,
+      },
+    });
+    const marker = {
+      transactionId: 'null-record',
+      commandId: 'null-record',
+      operation: 'commitDomainRecord',
+      contentDigest: DIGEST,
+      firstSequence: event.sequence,
+      lastSequence: event.sequence,
+      eventCount: 1,
+      eventsDigest: managedSessionEventsDigest([event]),
+      previousCommitDigest: scan.lastMarkerDigest,
+    };
+    await fs.appendFile(
+      harness.transcriptPath,
+      [
+        JSON.stringify({
+          subtype: 'managed_session_event_v1',
+          managedSession: event,
+        }),
+        JSON.stringify({
+          subtype: 'managed_session_commit_v1',
+          managedSession: marker,
+        }),
+      ].join('\n') + '\n',
+    );
+
+    await expect(
+      readManagedSessionRecords({
+        transcriptPath: harness.transcriptPath,
+        runtimeBaseDir: harness.runtimeBaseDir,
+        sessionKey,
+      }),
+    ).rejects.toThrow(/invalid reader-facing record/);
+  });
+
   it('projects a committed compaction summary back to the reader', async () => {
     const harness = await createHarness();
     try {

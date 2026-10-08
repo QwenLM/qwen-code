@@ -32,6 +32,7 @@ import {
   HARNESS_TURN_COMPLETE_BOUNDARY,
   parseHarnessCheckpointV1,
 } from './managed-harness-checkpoint.js';
+import { readManagedSessionRecords } from './managed-session-message-projection.js';
 import {
   ManagedSessionRecordError,
   MANAGED_SESSION_FORMAT_VERSION,
@@ -3003,7 +3004,7 @@ describe('managed session checkpoints', () => {
       detail: () => 'record is not valid JSON.',
     },
     {
-      label: 'a body nested deeper than the reader accepts',
+      label: 'a deep wrapper that hides the record shape',
       body: () => {
         let text = turnResultBody().toString('utf8');
         for (let depth = 0; depth < 65; depth++) {
@@ -3011,21 +3012,7 @@ describe('managed session checkpoints', () => {
         }
         return Buffer.from(text, 'utf8');
       },
-      detail: () => 'record exceeds the maximum JSON depth of 64.',
-    },
-    {
-      label: 'a body with a duplicate wire key',
-      body: () =>
-        Buffer.from(
-          turnResultBody()
-            .toString('utf8')
-            .replace(
-              '"uuid":"rec-turn-1"',
-              '"uuid":"rec-turn-1","uuid":"rec-turn-1"',
-            ),
-          'utf8',
-        ),
-      detail: () => 'record has the duplicate JSON key "uuid".',
+      detail: () => 'Skipped a transcript record with invalid identity fields.',
     },
   ])(
     'rejects a turn-complete whose result body is $label',
@@ -3077,6 +3064,82 @@ describe('managed session checkpoints', () => {
         assertMessage(message);
       }
       expect(harness.authority.committedSequence).toBe(before);
+      await harness.close();
+    },
+  );
+
+  // The fence decodes the way the cold reader does, so a body JSON.parse
+  // accepts must commit: a fence stricter than its reader refuses a valid
+  // body and the refusal latches the session writer off.
+  it.each([
+    {
+      label: 'nested past the wire depth cap the reader does not share',
+      body: () => {
+        let recording: unknown = {};
+        for (let level = 0; level < 66; level++) {
+          recording = { nested: recording };
+        }
+        return turnResultBody({ recording });
+      },
+    },
+    {
+      label: 'carrying a duplicate wire key that JSON.parse collapses',
+      body: () =>
+        Buffer.from(
+          turnResultBody()
+            .toString('utf8')
+            .replace(
+              '"uuid":"rec-turn-1"',
+              '"uuid":"rec-turn-1","uuid":"rec-turn-1"',
+            ),
+          'utf8',
+        ),
+    },
+  ])(
+    'commits a turn-complete whose result body is $label',
+    async ({ body }) => {
+      const harness = await openRunnableHarness();
+      const resultRef = await harness.store.publish(
+        'managed-turn-result',
+        body(),
+      );
+      const before = harness.authority.committedSequence;
+      await harness.authority.commitTurnComplete(
+        inputCommand(harness.fixture, {
+          operation: 'settleTurn',
+          commandId: 'cmd-turn-reader-shaped-body',
+        }),
+        {
+          turn: {
+            turnId: 'turn-1',
+            outcome: 'completed',
+            stopReason: 'end_turn',
+            resultRef,
+            occurredAt: 1,
+            eventId: 'turn:turn-1',
+          },
+          boundary: HARNESS_TURN_COMPLETE_BOUNDARY,
+          state: (identity, previous) =>
+            encodeHarnessCheckpointV1(
+              createNextTurnReadyHarnessCheckpoint({
+                previous,
+                ...identity,
+                activationId: HOLDS.activation.activationId,
+                turnId: 'turn-1',
+                promptId: 'turn-1',
+              }),
+            ),
+        },
+        HOLDS,
+      );
+      expect(harness.authority.committedSequence).toBeGreaterThan(before);
+      // The cold reader restores the body the fence admitted.
+      const restored = await readManagedSessionRecords({
+        transcriptPath: harness.fixture.transcriptPath,
+        runtimeBaseDir: harness.fixture.runtimeBaseDir,
+        sessionKey: sessionKeyFor(harness.fixture),
+      });
+      expect(restored.map((record) => record.uuid)).toContain('rec-turn-1');
       await harness.close();
     },
   );
@@ -3190,6 +3253,42 @@ describe('managed session checkpoints', () => {
             domain: 'file_history',
             version: 1,
             operationId: 'cmd-domain-no-record',
+            recordRef,
+          },
+        }),
+        { class: 'trusted_entry' },
+      ),
+    ).rejects.toThrow(/invalid reader-facing record/);
+    expect(harness.authority.committedSequence).toBe(before);
+    await harness.close();
+  });
+
+  it('rejects a committed domain envelope whose record body is null', async () => {
+    const harness = await openRunnableHarness();
+    // JSON.parse accepts a null body, so the unwrap must shape-check
+    // before reading `record` off the parsed value.
+    const recordRef = await harness.store.publish(
+      'managed-file_history',
+      Buffer.from('null', 'utf8'),
+    );
+    const before = harness.authority.committedSequence;
+    await expect(
+      harness.authority.appendExecutionEvent(
+        inputCommand(harness.fixture, {
+          operation: 'commitDomainRecord',
+          commandId: 'cmd-domain-null-record',
+        }),
+        (sequence) => ({
+          v: 1,
+          sequence,
+          eventId: 'domain:file_history:null-record',
+          sessionKey: sessionKeyFor(harness.fixture),
+          kind: 'domain.committed',
+          occurredAt: 1,
+          payload: {
+            domain: 'file_history',
+            version: 1,
+            operationId: 'cmd-domain-null-record',
             recordRef,
           },
         }),

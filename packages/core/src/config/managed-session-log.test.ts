@@ -1058,7 +1058,19 @@ describe('Managed Session log recording', () => {
         subtype: 'file_history_snapshot',
         cwd: projectDir,
         version: 'test',
-        systemPayload: { snapshots: [null] },
+        // A mixed batch pins the skip granularity: the guard is per record,
+        // so the healthy sibling entry is dropped with the torn one rather
+        // than restored on its own.
+        systemPayload: {
+          snapshots: [
+            {
+              promptId: 'prompt-torn-sibling',
+              trackedFileBackups: {},
+              timestamp: new Date().toISOString(),
+            },
+            null,
+          ],
+        },
       } as unknown as ChatRecord);
       // A healthy record after the damaged one: a whole-loop catch would
       // truncate the projection to the prefix before the damage.

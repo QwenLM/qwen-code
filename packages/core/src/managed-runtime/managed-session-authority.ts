@@ -2717,20 +2717,21 @@ export class LocalManagedSessionAuthority {
     });
     let value: unknown;
     try {
-      // Decode the way the cold reader does: duplicate wire keys and deep
-      // nesting that JSON.parse would wave through must refuse here too.
-      value = parseManagedSessionRecordJson(
-        body.toString('utf8'),
-        body.byteLength,
-      );
-    } catch (error) {
+      // Decode the way the cold reader does: plain JSON.parse, with no wire
+      // strictness the reader lacks. A fence stricter than its reader
+      // refuses a body the reader accepts, and the refusal latches the
+      // session writer off.
+      value = JSON.parse(body.toString('utf8'));
+    } catch {
       throw new ManagedSessionRecordError(
-        `${noun} resource ${ref.resourceId} contains an invalid reader-facing record: ${error instanceof Error ? error.message : String(error)}`,
+        `${noun} resource ${ref.resourceId} contains an invalid reader-facing record: record is not valid JSON.`,
       );
     }
     const validated = validateManagedReaderFacingRecord(
       carried.inDomainEnvelope
-        ? (value as { readonly record?: unknown }).record
+        ? value !== null && typeof value === 'object'
+          ? (value as { readonly record?: unknown }).record
+          : undefined
         : value,
       this.sessionKey.sessionId,
     );
