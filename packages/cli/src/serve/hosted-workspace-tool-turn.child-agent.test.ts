@@ -588,6 +588,24 @@ it('refuses a foreground agent call while a Session owner holds the mount', asyn
   expect(JSON.stringify(admitted)).not.toContain(mountRefusal);
 });
 
+// R1-62: an admitted agent launch dispatches like any executed call —
+// the agent path bypasses the Broker pipeline that would have written
+// its tool.intent, so PostToolUse must fire for it, not only PreToolUse.
+it('fires PostToolUse for an admitted agent launch', async () => {
+  const events: string[] = [];
+  const turn = createTurnWithOwnerMount('hooks', false, undefined, events);
+  await executeAgent(
+    turn,
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: true,
+    }),
+  );
+  expect(events).toContain('PreToolUse');
+  expect(events).toContain('PostToolUse');
+});
+
 // The window between the admission-time check and the PreToolUse fire:
 // a restored command Hook acquires and retains the mount inside fire(),
 // and the revalidation must still refuse the launch even when the Hook
@@ -614,6 +632,7 @@ function createTurnWithOwnerMount(
   owner: 'hooks' | 'mcp',
   held: boolean,
   onFire?: (sessionOwner: { mountHeld: boolean }) => void,
+  fireEvents?: string[],
 ): HostedWorkspaceToolTurn {
   const ownerBroker = new (HostedWorkspaceBroker as unknown as new (
     ...args: unknown[]
@@ -630,7 +649,8 @@ function createTurnWithOwnerMount(
     refresh: () => Promise.resolve(),
     tools: () => [],
     toolInput: () => undefined,
-    fire: () => {
+    fire: (eventName: string) => {
+      fireEvents?.push(eventName);
       onFire?.(sessionOwner);
       return Promise.resolve([]);
     },

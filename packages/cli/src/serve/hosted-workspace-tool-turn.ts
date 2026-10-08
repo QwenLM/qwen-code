@@ -425,6 +425,11 @@ export class HostedWorkspaceToolTurn {
   private readonly warmed: Promise<void>;
   private acquired = false;
   private uncertain = false;
+  // Agent calls never write a `tool.intent` (the Broker pipeline they
+  // bypass owns that marker), so completeHookResults needs the admitted
+  // launches this turn recorded directly — it is how PostToolUse learns
+  // an agent call actually ran (R1-62).
+  private readonly agentDispatched = new Set<string>();
   private publisher?: HostedShellPublisher;
   private bindingGeneration?: string;
   private advertised?: FunctionDeclaration[];
@@ -876,9 +881,9 @@ export class HostedWorkspaceToolTurn {
       }),
     );
     for (const [ordinal, call] of effective.entries()) {
-      const dispatched = intents.some(
-        (entry) => entry.payload['ordinal'] === ordinal,
-      );
+      const dispatched =
+        this.agentDispatched.has(call.callId) ||
+        intents.some((entry) => entry.payload['ordinal'] === ordinal);
       const response = responses.find(
         (part) => part.functionResponse?.id === call.callId,
       )?.functionResponse?.response;
@@ -1033,6 +1038,7 @@ export class HostedWorkspaceToolTurn {
     if (this.mcp) await waitForTurn(this.warmed, signal);
     const declarations = this.advertised ?? (await this.declarations(signal));
     this.hookPermission.clear();
+    this.agentDispatched.clear();
     if (this.hooks && this.approval) {
       calls = await Promise.all(
         calls.map(async (call) => {
@@ -2649,6 +2655,7 @@ export class HostedWorkspaceToolTurn {
       workingDirectory: '.',
       executionCallId: childRunId,
     });
+    this.agentDispatched.add(request.call.callId);
     if (!request.agentBackground) {
       return await this.awaitChildToolResult(
         children,
