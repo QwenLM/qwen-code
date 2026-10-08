@@ -1133,6 +1133,112 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordExternalAgentRecordStrict', () => {
+    const mention = (recordKey = 'mention:client-1') => ({
+      kind: 'agent_mention' as const,
+      recordKey,
+      modelText: '<agent_mention>hi</agent_mention>',
+      payload: { displayText: '@claude hi', mentionedAgentIds: ['agent-1'] },
+    });
+    const persistedMention: ChatRecord = {
+      ...branchTestRecord('mention-0', null, 'user', [{ text: 'hi' }]),
+      subtype: 'agent_mention',
+      provenance: 'real_user',
+      externalRecordKey: 'mention:client-1',
+      systemPayload: { displayText: '@claude hi', mentionedAgentIds: [] },
+    };
+    const resumeWith = (messages: ChatRecord[]) => {
+      const loadSession = vi
+        .fn()
+        .mockResolvedValue({ conversation: { messages } });
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: { messages },
+        lastCompletedUuid: messages.at(-1)?.uuid ?? null,
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      vi.mocked(mockConfig.getSessionService).mockReturnValue({
+        loadSession,
+      } as unknown as ReturnType<Config['getSessionService']>);
+      return loadSession;
+    };
+
+    it('persists the key and returns the record uuid and timestamp', async () => {
+      const result = await svc.recordExternalAgentRecordStrict(mention());
+      expect(written()).toMatchObject({
+        type: 'user',
+        subtype: 'agent_mention',
+        externalRecordKey: 'mention:client-1',
+      });
+      expect(result).toEqual({
+        uuid: written().uuid,
+        timestamp: written().timestamp,
+        created: true,
+      });
+    });
+
+    it('returns the first record for a repeated key without writing', async () => {
+      const first = await svc.recordExternalAgentRecordStrict(mention());
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        svc.recordExternalAgentRecordStrict(mention()),
+      ).resolves.toEqual({ ...first, created: false });
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('does not read a fresh transcript to build its index', async () => {
+      const loadSession = vi.fn();
+      vi.mocked(mockConfig.getSessionService).mockReturnValue({
+        loadSession,
+      } as unknown as ReturnType<Config['getSessionService']>);
+      await svc.recordExternalAgentRecordStrict(mention());
+      expect(loadSession).not.toHaveBeenCalled();
+    });
+
+    it('finds a key persisted before a restart', async () => {
+      const loadSession = resumeWith([persistedMention]);
+      const restarted = activateRecording(new ChatRecordingService(mockConfig));
+
+      await expect(
+        restarted.findExternalAgentRecord('mention:client-1'),
+      ).resolves.toEqual({
+        uuid: 'mention-0',
+        timestamp: persistedMention.timestamp,
+      });
+      await expect(
+        restarted.recordExternalAgentRecordStrict(mention()),
+      ).resolves.toEqual({
+        uuid: 'mention-0',
+        timestamp: persistedMention.timestamp,
+        created: false,
+      });
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+
+      // A new key is written and joins the index; the transcript is read once.
+      const other = await restarted.recordExternalAgentRecordStrict(
+        mention('mention:client-2'),
+      );
+      expect(other.created).toBe(true);
+      await expect(
+        restarted.findExternalAgentRecord('mention:client-2'),
+      ).resolves.toEqual({ uuid: other.uuid, timestamp: other.timestamp });
+      expect(loadSession).toHaveBeenCalledOnce();
+    });
+
+    it('fails closed when the transcript cannot be read', async () => {
+      const loadSession = resumeWith([persistedMention]);
+      loadSession.mockRejectedValueOnce(new Error('EIO'));
+      const restarted = activateRecording(new ChatRecordingService(mockConfig));
+
+      await expect(
+        restarted.recordExternalAgentRecordStrict(mention()),
+      ).rejects.toThrow('EIO');
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      // The next attempt reads again and finds the record.
+      await expect(
+        restarted.recordExternalAgentRecordStrict(mention()),
+      ).resolves.toMatchObject({ uuid: 'mention-0', created: false });
+    });
+  });
+
   describe('recordNotificationStrict', () => {
     const workerTask = {
       taskId: 'worker-1',

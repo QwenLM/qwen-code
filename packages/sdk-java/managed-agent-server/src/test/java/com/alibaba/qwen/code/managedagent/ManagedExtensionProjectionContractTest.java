@@ -34,11 +34,40 @@ class ManagedExtensionProjectionContractTest {
     void pinsTheBodiesStatesAndOutbox() throws IOException {
         JsonNode fixtures = fixtures();
         assertEquals(1, fixtures.required("contractVersion").intValue());
-        Map<String, String> bodies = new TreeMap<>();
-        ManagedExtensionProjection.RECORD_BODIES.forEach(
-                (domain, body) -> bodies.put(domain, body.taskKind()));
-        assertEquals(JSON.convertValue(fixtures.required("recordBodies"),
-                TreeMap.class), bodies);
+        Map<String, Object> bodies = new TreeMap<>();
+        ManagedExtensionProjection.RECORD_BODIES.forEach((domain, body) -> {
+            // child_run's task kind follows the body's own kind; every
+            // other body is a constant or projects no task at all.
+            if (domain.equals("child_run")) {
+                bodies.put(domain, JSON.createObjectNode()
+                        .put("shell", body.taskKindOf().apply(
+                                JSON.createObjectNode().put("kind", "shell")))
+                        .put("child_agent", body.taskKindOf().apply(
+                                JSON.createObjectNode()
+                                        .put("kind", "child_agent"))));
+            } else {
+                // Probe with a record-shaped node carrying the identity
+                // fields a mapping could regress into reading — the real
+                // names of the managed records, not an invented one.
+                String kind = body.taskKindOf().apply(JSON.createObjectNode()
+                        .put("configurationId", "probe")
+                        .put("registrationId", "probe")
+                        .put("occurrenceId", "probe")
+                        .put("serverId", "probe"));
+                bodies.put(domain, kind == null
+                        ? com.fasterxml.jackson.databind.node.NullNode
+                                .getInstance()
+                        : com.fasterxml.jackson.databind.node.TextNode
+                                .valueOf(kind));
+            }
+        });
+        Map<String, Object> expected = new TreeMap<>(JSON.convertValue(
+                fixtures.required("recordBodies"), TreeMap.class));
+        // The bodies H6 added to the projection contract after H4.
+        expected.putAll(JSON.convertValue(
+                fixtures.required("additionalRecordBodies"), TreeMap.class));
+        assertEquals(JSON.convertValue(expected, TreeMap.class),
+                JSON.convertValue(bodies, TreeMap.class));
         assertEquals(JSON.convertValue(fixtures.required("taskStates"),
                 List.class), ManagedExtensionProjection.TASK_STATES);
         List<String> runtimeStates = new ArrayList<>(

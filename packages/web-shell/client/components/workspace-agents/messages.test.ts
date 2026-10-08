@@ -9,11 +9,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { getTranslator } from '../../i18n';
-import {
-  formatElapsed,
-  statusReasonLabel,
-  triggerLabel,
-} from './agents-view-logic';
+import { formatElapsed } from './agents-view-logic';
 import { COLLAB_MESSAGES_EN, COLLAB_MESSAGES_ZH } from './messages';
 import * as transcriptStub from './messages.transcript-stub';
 
@@ -24,40 +20,15 @@ describe('collaboration messages', () => {
     expect(getTranslator('en')('collab.agent.new')).toBe('New agent');
     expect(getTranslator('zh-CN')('collab.agent.new')).toBe('新建 Agent');
     expect(
-      getTranslator('zh-CN')('collab.run.queuedBehind', {
-        agent: 'lead',
-        count: 2,
+      getTranslator('zh-CN')('collab.runtime.joinConnected', {
+        server: 'https://coordinator:4170',
       }),
-    ).toBe('lead 排队中，前面还有 2 个');
+    ).toBe('这台电脑已作为 Runtime 加入 https://coordinator:4170。');
   });
 
-  it("translate the server's triggers, status reasons and durations", () => {
-    // The server words triggers in English; a Chinese page showed them raw.
-    const zh = getTranslator('zh-CN');
-    expect(triggerLabel('mentioned by you', zh)).toBe('你 @ 了它');
-    expect(triggerLabel('mentioned by lead', zh)).toBe('lead @ 了它');
-    expect(triggerLabel('something new', zh)).toBe('something new');
-    expect(formatElapsed(405_000, zh)).toBe('6 分 45 秒');
-    // Status reasons arrive in English and are translated by exact form.
-    const en = getTranslator('en');
-    expect(statusReasonLabel('3 Agents are running, 1 queued', en)).toBe(
-      '3 working, 1 queued',
-    );
-    expect(statusReasonLabel('1 Agent is running', zh)).toBe(
-      '1 个 Agent 正在工作',
-    );
-    expect(statusReasonLabel('2 Agents are queued and not started', zh)).toBe(
-      '2 个 Agent 排队中，还没开始',
-    );
-    expect(
-      statusReasonLabel(
-        'an Agent run was parked when collaboration was turned off and is waiting for you',
-        zh,
-      ),
-    ).toBe('协作关闭时有一次运行被搁置了，回复即可继续');
-    expect(statusReasonLabel('no outstanding close obligation', zh)).toBe(
-      '没有待处理的事',
-    );
+  it("format durations in the reader's language", () => {
+    expect(formatElapsed(405_000, getTranslator('zh-CN'))).toBe('6 分 45 秒');
+    expect(formatElapsed(45_000, getTranslator('en'))).toBe('45s');
   });
 
   it('hold only workspace-agent keys, translated one for one', () => {

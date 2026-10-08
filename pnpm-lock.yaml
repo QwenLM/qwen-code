@@ -1553,6 +1553,9 @@ importers:
       '@playwright/test':
         specifier: 1.61.1
         version: 1.61.1
+      '@qwen-code/acp-bridge':
+        specifier: workspace:*
+        version: link:../acp-bridge
       '@qwen-code/sdk':
         specifier: workspace:*
         version: link:../sdk-typescript
