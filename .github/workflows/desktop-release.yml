@@ -816,6 +816,8 @@ jobs:
           else
             gh release create "$FEED_TAG" "${feed_assets[@]}" --title 'Qwen Code Desktop latest' --notes 'Stable desktop updater feed.' --latest=false
           fi
+          node .github/scripts/update-desktop-downloads.mjs \
+            --assets release-assets --version "$RELEASE_VERSION" --repository "$GITHUB_REPOSITORY"
 
       - name: 'Publish release summary'
         env:

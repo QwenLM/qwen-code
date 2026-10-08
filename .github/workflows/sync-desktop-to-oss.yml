@@ -209,6 +209,8 @@ jobs:
           expected="$(jq -r '.version' dist/desktop/desktop-latest.json)"
           actual="$(jq -r '.version' "$directory/desktop-latest.json")"
           if [ "$actual" = "$expected" ]; then
+            node .github/scripts/update-desktop-downloads.mjs \
+              --assets dist/desktop --version "$expected" --repository "$GITHUB_REPOSITORY" --verify
             echo 'matches=true' >> "$GITHUB_OUTPUT"
           elif [[ "$actual" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ "$(printf '%s\n%s\n' "$expected" "$actual" | sort -V | tail -n 1)" = "$actual" ]; then
             echo 'matches=false' >> "$GITHUB_OUTPUT"
