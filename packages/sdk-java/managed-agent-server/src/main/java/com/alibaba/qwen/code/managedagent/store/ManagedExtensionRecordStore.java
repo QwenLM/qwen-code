@@ -332,13 +332,25 @@ public class ManagedExtensionRecordStore {
                 continue;
             }
             String domain = payload.path("domain").asText();
-            if (!List.of("hook_execution", "hook_registration").contains(domain)) {
+            // A lifecycle-claimed owner also owes its own child-cleanup
+            // records (dispatch, attach, cancel, close_scope): they are
+            // lifecycle work, never new ordinary work — but they never
+            // enter the hook dispatch analysis or its network re-verify.
+            boolean hookDomain = "hook_execution".equals(domain)
+                    || "hook_registration".equals(domain);
+            if (!hookDomain
+                    && !"child_run".equals(domain)
+                    && !"child_acceptance".equals(domain)) {
                 throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
             }
-            JsonNode next = readBody(resources.apply(payload.path("recordRef").path("resourceId").asText()));
-            JsonNode previous = previousLifecycleRecord(tenantId, sessionId, domain, next, revisions);
-            if (requiresLifecycleDispatch(previous, next)) {
-                dispatch = true;
+            if (hookDomain) {
+                JsonNode next = readBody(resources.apply(
+                        payload.path("recordRef").path("resourceId").asText()));
+                JsonNode previous = previousLifecycleRecord(tenantId,
+                        sessionId, domain, next, revisions);
+                if (requiresLifecycleDispatch(previous, next)) {
+                    dispatch = true;
+                }
             }
         }
         return dispatch;

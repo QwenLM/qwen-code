@@ -3121,15 +3121,20 @@ export function registerHostedHarnessSessionRoutes(
             session.stores!.setLifecycleAuthority(authority);
             await session.stores!.authorizeLifecycle(kind);
           } catch (lifecycleCause) {
+            session.stores!.setLifecycleAuthority(previousAuthority);
             if (
               lifecycleCause instanceof ManagedSessionStoreHttpError &&
               lifecycleCause.status === 409
             )
               return error(res, 409, 'hosted_lifecycle_operation_conflict');
             return ordinaryAuthorizationError(res, lifecycleCause);
-          } finally {
-            session.stores!.setLifecycleAuthority(previousAuthority);
           }
+          // The claim stays stamped through the route handler's own
+          // durable writes — the children/operations route is the only
+          // boundary that closes it (restores the prior stamp), so a
+          // claimed cleanup revision reaches the store with the claim,
+          // and nothing after it inherits noise.
+          res.locals['lifecycleRestoreAuthority'] = previousAuthority;
           return next();
         }
         return ordinaryAuthorizationError(res, cause);
@@ -3980,165 +3985,179 @@ export function registerHostedHarnessSessionRoutes(
       return error(res, 400, 'invalid_child_operation');
     }
     const children = session.childAgents;
+    // A claimed cleanup keeps its stamped authority on this route's
+    // durable writes and restores the prior stamp on every exit —
+    // `try/finally` because a `return` inside any case must close too.
+    const claimedRestore = res.locals as {
+      lifecycleRestoreAuthority?: ManagedSessionLifecycleAuthority;
+    };
     try {
-      switch (kind) {
-        case 'dispatch_started': {
-          const dispatchId = body?.['dispatchId'];
-          const runtimeBindingId = body?.['runtimeBindingId'];
-          const generationValue = body?.['generation'];
-          if (
-            typeof dispatchId !== 'string' ||
-            dispatchId.length < 1 ||
-            typeof runtimeBindingId !== 'string' ||
-            runtimeBindingId.length < 1 ||
-            typeof generationValue !== 'string' ||
-            !/^[1-9][0-9]{0,18}$/.test(generationValue)
-          ) {
-            return error(res, 400, 'invalid_child_operation');
+      try {
+        switch (kind) {
+          case 'dispatch_started': {
+            const dispatchId = body?.['dispatchId'];
+            const runtimeBindingId = body?.['runtimeBindingId'];
+            const generationValue = body?.['generation'];
+            if (
+              typeof dispatchId !== 'string' ||
+              dispatchId.length < 1 ||
+              typeof runtimeBindingId !== 'string' ||
+              runtimeBindingId.length < 1 ||
+              typeof generationValue !== 'string' ||
+              !/^[1-9][0-9]{0,18}$/.test(generationValue)
+            ) {
+              return error(res, 400, 'invalid_child_operation');
+            }
+            await children.dispatchStarted(childRunId, {
+              dispatchId,
+              runtime: {
+                runtimeBindingId,
+                generation: generationValue,
+              },
+            });
+            break;
           }
-          await children.dispatchStarted(childRunId, {
-            dispatchId,
-            runtime: {
-              runtimeBindingId,
-              generation: generationValue,
-            },
-          });
-          break;
+          case 'attach': {
+            const childSessionId = body?.['childSessionId'];
+            if (
+              typeof childSessionId !== 'string' ||
+              !HOSTED_UUID.test(childSessionId)
+            ) {
+              return error(res, 400, 'invalid_child_operation');
+            }
+            await children.attach(childRunId, childSessionId);
+            break;
+          }
+          case 'commit_result': {
+            const result = body?.['result'];
+            const receipt = body?.['receipt'];
+            if (
+              typeof result !== 'string' ||
+              Buffer.byteLength(result, 'utf8') < 1 ||
+              receipt === undefined
+            ) {
+              return error(res, 400, 'invalid_child_operation');
+            }
+            await children.settleCompleted(childRunId, {
+              result: Buffer.from(result, 'utf8'),
+              receipt: Buffer.from(
+                typeof receipt === 'string' ? receipt : JSON.stringify(receipt),
+                'utf8',
+              ),
+            });
+            break;
+          }
+          case 'accept': {
+            const rawNotification = body?.['notification'];
+            if (
+              rawNotification !== undefined &&
+              rawNotification !== null &&
+              typeof rawNotification !== 'object'
+            ) {
+              return error(res, 400, 'invalid_child_operation');
+            }
+            const notification = object(rawNotification);
+            if (
+              notification !== null &&
+              notification !== undefined &&
+              typeof notification['description'] !== 'string'
+            ) {
+              return error(res, 400, 'invalid_child_operation');
+            }
+            await children.accept(
+              childRunId,
+              notification
+                ? {
+                    notification: {
+                      description: notification['description'] as string,
+                    },
+                  }
+                : {},
+            );
+            session.monitorWake?.kick();
+            break;
+          }
+          case 'mark_accepted':
+            await children.markAccepted(childRunId);
+            break;
+          case 'fail': {
+            const stopReason = body?.['stopReason'];
+            const reason = body?.['reason'];
+            const started = body?.['started'];
+            const QUOTA = [
+              'count_limit',
+              'rate_limit',
+              'depth_limit',
+              'byte_limit',
+              'budget_exhausted',
+              'duration_limit',
+            ];
+            if (
+              typeof stopReason !== 'string' ||
+              !['creation_failed', 'child_failed', 'quota_exceeded'].includes(
+                stopReason,
+              ) ||
+              typeof started !== 'boolean' ||
+              !(
+                reason === null ||
+                reason === undefined ||
+                (typeof reason === 'string' && QUOTA.includes(reason))
+              )
+            ) {
+              return error(res, 400, 'invalid_child_operation');
+            }
+            await children.settleFailed(childRunId, {
+              stopReason: stopReason as
+                | 'creation_failed'
+                | 'child_failed'
+                | 'quota_exceeded',
+              reason:
+                (reason as
+                  | 'count_limit'
+                  | 'rate_limit'
+                  | 'depth_limit'
+                  | 'byte_limit'
+                  | 'budget_exhausted'
+                  | 'duration_limit') ?? null,
+              started,
+            });
+            break;
+          }
+          case 'cancel':
+            await children.requestStop(childRunId);
+            break;
+          case 'close_scope': {
+            const started = body?.['started'];
+            if (typeof started !== 'boolean') {
+              return error(res, 400, 'invalid_child_operation');
+            }
+            await children.settleCancelled(childRunId, { started });
+            break;
+          }
+          default:
+            return error(res, 400, 'invalid_child_operation');
         }
-        case 'attach': {
-          const childSessionId = body?.['childSessionId'];
-          if (
-            typeof childSessionId !== 'string' ||
-            !HOSTED_UUID.test(childSessionId)
-          ) {
-            return error(res, 400, 'invalid_child_operation');
-          }
-          await children.attach(childRunId, childSessionId);
-          break;
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        if (cause instanceof ManagedSessionConflictError) {
+          return error(res, 409, 'child_operation_conflict', message);
         }
-        case 'commit_result': {
-          const result = body?.['result'];
-          const receipt = body?.['receipt'];
-          if (
-            typeof result !== 'string' ||
-            Buffer.byteLength(result, 'utf8') < 1 ||
-            receipt === undefined
-          ) {
-            return error(res, 400, 'invalid_child_operation');
-          }
-          await children.settleCompleted(childRunId, {
-            result: Buffer.from(result, 'utf8'),
-            receipt: Buffer.from(
-              typeof receipt === 'string' ? receipt : JSON.stringify(receipt),
-              'utf8',
-            ),
-          });
-          break;
+        if (cause instanceof ManagedSessionRecordError) {
+          return error(res, 409, 'child_operation_record', message);
         }
-        case 'accept': {
-          const rawNotification = body?.['notification'];
-          if (
-            rawNotification !== undefined &&
-            rawNotification !== null &&
-            typeof rawNotification !== 'object'
-          ) {
-            return error(res, 400, 'invalid_child_operation');
-          }
-          const notification = object(rawNotification);
-          if (
-            notification !== null &&
-            notification !== undefined &&
-            typeof notification['description'] !== 'string'
-          ) {
-            return error(res, 400, 'invalid_child_operation');
-          }
-          await children.accept(
-            childRunId,
-            notification
-              ? {
-                  notification: {
-                    description: notification['description'] as string,
-                  },
-                }
-              : {},
-          );
-          session.monitorWake?.kick();
-          break;
-        }
-        case 'mark_accepted':
-          await children.markAccepted(childRunId);
-          break;
-        case 'fail': {
-          const stopReason = body?.['stopReason'];
-          const reason = body?.['reason'];
-          const started = body?.['started'];
-          const QUOTA = [
-            'count_limit',
-            'rate_limit',
-            'depth_limit',
-            'byte_limit',
-            'budget_exhausted',
-            'duration_limit',
-          ];
-          if (
-            typeof stopReason !== 'string' ||
-            !['creation_failed', 'child_failed', 'quota_exceeded'].includes(
-              stopReason,
-            ) ||
-            typeof started !== 'boolean' ||
-            !(
-              reason === null ||
-              reason === undefined ||
-              (typeof reason === 'string' && QUOTA.includes(reason))
-            )
-          ) {
-            return error(res, 400, 'invalid_child_operation');
-          }
-          await children.settleFailed(childRunId, {
-            stopReason: stopReason as
-              | 'creation_failed'
-              | 'child_failed'
-              | 'quota_exceeded',
-            reason:
-              (reason as
-                | 'count_limit'
-                | 'rate_limit'
-                | 'depth_limit'
-                | 'byte_limit'
-                | 'budget_exhausted'
-                | 'duration_limit') ?? null,
-            started,
-          });
-          break;
-        }
-        case 'cancel':
-          await children.requestStop(childRunId);
-          break;
-        case 'close_scope': {
-          const started = body?.['started'];
-          if (typeof started !== 'boolean') {
-            return error(res, 400, 'invalid_child_operation');
-          }
-          await children.settleCancelled(childRunId, { started });
-          break;
-        }
-        default:
-          return error(res, 400, 'invalid_child_operation');
+        writeStderrLineSafe(
+          `qwen serve: Hosted child operation ${kind} of session ${req.params['id']} failed: ${message}`,
+        );
+        return error(res, 503, 'child_operation_failed', message);
       }
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      if (cause instanceof ManagedSessionConflictError) {
-        return error(res, 409, 'child_operation_conflict', message);
+      res.status(202).json({ operationId, state: 'settled' });
+    } finally {
+      if ('lifecycleRestoreAuthority' in claimedRestore) {
+        session.stores!.setLifecycleAuthority(
+          claimedRestore.lifecycleRestoreAuthority,
+        );
       }
-      if (cause instanceof ManagedSessionRecordError) {
-        return error(res, 409, 'child_operation_record', message);
-      }
-      writeStderrLineSafe(
-        `qwen serve: Hosted child operation ${kind} of session ${req.params['id']} failed: ${message}`,
-      );
-      return error(res, 503, 'child_operation_failed', message);
     }
-    res.status(202).json({ operationId, state: 'settled' });
   });
 
   app.post('/session/:id/managed-runtime/continue', async (req, res) => {
