@@ -24,7 +24,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 
-/** Narrow original native activation and initial checkpoint proof for CSI. */
+/** Narrow original native activation, input/wake and initial checkpoint proof for CSI. */
 public final class CsiNativeActivationProof {
     private static final long MAX_SAFE = 9_007_199_254_740_990L;
     private static final Set<String> ENVELOPE = Set.of("uuid", "parentUuid", "sessionId", "timestamp",
@@ -50,6 +50,9 @@ public final class CsiNativeActivationProof {
 
     public record Activation(String activationId, String workerId, JsonNode installRef,
             long leaseDurationMs, long expiresAt, long renewalSequence) {
+    }
+
+    public record Prefix(String inputId, String checkpointResourceId) {
     }
 
     public static List<JsonNode> records(byte[] bytes) {
@@ -149,6 +152,75 @@ public final class CsiNativeActivationProof {
         events.forEach(array::add);
         require(sha256(canonical(array).getBytes(StandardCharsets.UTF_8)).equals(text(metadata, "eventsDigest")));
         return new Transaction(List.copyOf(events), parentUuid);
+    }
+
+    public static Prefix advance(Transaction transaction, JsonNode metadata,
+            RuntimeProvisionRequest original, String writerId, Genesis genesis, Activation activation,
+            long previousSequence, Prefix previous, Function<JsonNode, byte[]> resources) {
+        require(activation != null && writerId.equals(activation.workerId())
+                && writerId.equals(text(metadata, "writerId"))
+                && number(metadata.get("writerGeneration")) == 1 && number(metadata.get("activationEpoch")) == 1);
+        if ("submitInput".equals(text(metadata, "operation"))) {
+            require(previous.inputId() == null);
+            return new Prefix(input(transaction, metadata, original, activation, previousSequence, resources),
+                    previous.checkpointResourceId());
+        }
+        require(previous.checkpointResourceId() == null);
+        return new Prefix(previous.inputId(), initialCheckpoint(transaction, metadata, original, writerId,
+                genesis, activation, previousSequence, resources));
+    }
+
+    private static String input(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
+            Activation activation, long previousSequence, Function<JsonNode, byte[]> resources) {
+        require(transaction.events().size() == 2 && metadata.path("latestCheckpointResourceId").isNull());
+        JsonNode accepted = transaction.events().getFirst();
+        JsonNode wake = transaction.events().getLast();
+        for (JsonNode event : transaction.events()) {
+            closed(event, Set.of("v", "sequence", "eventId", "sessionKey", "kind", "occurredAt", "payload"));
+            key(event.path("sessionKey"), original);
+            require(number(event.get("v")) == 1);
+        }
+        require("input.accepted".equals(text(accepted, "kind")) && "wake.requested".equals(text(wake, "kind"))
+                && number(accepted.get("sequence")) == previousSequence + 1
+                && number(wake.get("sequence")) == previousSequence + 2
+                && time(accepted.get("occurredAt")) < activation.expiresAt()
+                && time(wake.get("occurredAt")) == time(accepted.get("occurredAt")));
+        JsonNode payload = accepted.path("payload");
+        closed(payload, Set.of("inputId", "turnId", "source", "contentRef", "deadline", "admissionRef"));
+        String inputId = id(payload, "inputId");
+        require(inputId.matches("[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+                && inputId.equals(id(payload, "turnId")) && inputId.equals(id(metadata, "commandId"))
+                && "hosted-harness".equals(text(payload, "source"))
+                && (inputId + ":accepted").equals(id(accepted, "eventId")));
+        if (!payload.path("deadline").isNull()) {
+            time(payload.get("deadline"));
+        }
+        byte[] inputBytes = reference(payload.path("contentRef"), "managed-input", resources);
+        require(inputBytes.length <= 64 * 1024 && sha256(inputBytes).equals(text(metadata, "contentDigest")));
+        JsonNode blocks = readJson(inputBytes);
+        require(blocks != null && blocks.isArray() && !blocks.isEmpty());
+        for (JsonNode block : blocks) {
+            closed(block, Set.of("type", "text"));
+            require("text".equals(text(block, "type")) && block.path("text").isTextual()
+                    && !block.path("text").textValue().isEmpty());
+        }
+        byte[] admissionBytes = reference(payload.path("admissionRef"), "managed-admission", resources);
+        require(admissionBytes.length <= 64 * 1024);
+        JsonNode admission = readObject(admissionBytes);
+        closed(admission, Set.of("promptId", "digest"));
+        require(inputId.equals(id(admission, "promptId"))
+                && ("sha256:" + sha256(inputBytes)).equals(text(admission, "digest")));
+        JsonNode wakePayload = wake.path("payload");
+        closed(wakePayload, Set.of("wakeId", "reason", "subject", "sourceEventId", "requiredSequence"));
+        require((inputId + ":wake").equals(id(wake, "eventId"))
+                && (inputId + ":wake").equals(id(wakePayload, "wakeId"))
+                && "input".equals(text(wakePayload, "reason"))
+                && (inputId + ":accepted").equals(id(wakePayload, "sourceEventId"))
+                && number(wakePayload.get("requiredSequence")) == previousSequence + 1);
+        JsonNode subject = wakePayload.path("subject");
+        closed(subject, Set.of("type", "turnId"));
+        require("turn".equals(text(subject, "type")) && inputId.equals(id(subject, "turnId")));
+        return inputId;
     }
 
     public static String initialCheckpoint(Transaction transaction, JsonNode metadata,
@@ -302,11 +374,15 @@ public final class CsiNativeActivationProof {
     }
 
     public static JsonNode readObject(byte[] bytes) {
+        return object(readJson(bytes));
+    }
+
+    private static JsonNode readJson(byte[] bytes) {
         require(bytes != null && bytes.length > 0 && bytes.length <= 8 * 1024 * 1024);
         try {
             String text = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                     .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString();
-            return object(JSON.readTree(text));
+            return JSON.readTree(text);
         } catch (IOException error) {
             throw invalid();
         }

@@ -195,6 +195,117 @@ class WorkspaceCsiNativeActivationGate {
     }
 
     @Test
+    void nativeInputReplayAndRenewalRetainCheckpointAndUnsettledInputFence() throws Exception {
+        ready();
+        commit(2);
+        commit(3);
+        commit(4);
+        String checkpoint = nativeFixture.path("commits").get(3).path("request")
+                .path("latestCheckpointResourceId").textValue();
+        assertThat(commit(5).replayed()).isFalse();
+        var before = authorityRows();
+        assertThat(commit(5).replayed()).isTrue();
+        assertThat(authorityRows()).isEqualTo(before);
+        commit(6);
+        assertThat(pin()).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT latest_checkpoint_resource_id FROM qwen_managed_session_journal_head",
+                String.class)).isEqualTo(checkpoint);
+        before = authorityRows();
+        rejectedCommit((ObjectNode) nativeFixture.path("commits").get(7).path("request"));
+        assertThat(authorityRows()).isEqualTo(before);
+        retire();
+        before = authorityRows();
+        assertThat(commit(5).replayed()).isTrue();
+        assertThat(authorityRows()).isEqualTo(before);
+        var second = JSON.treeToValue(nativeFixture.path("commits").get(7).path("request"),
+                ManagedSessionStoreModels.CommitTransactionRequest.class);
+        rejected(() -> transaction.execute(status -> journal.commit("tenant", sessionId, token, second)),
+                "runtime_admission_closed");
+        assertThat(authorityRows()).isEqualTo(before);
+    }
+
+    @Test
+    void nativeInputRequiresClosedOriginalPromptAndAdmissionBytes() throws Exception {
+        ready();
+        commit(2);
+        commit(3);
+        commit(4);
+        var before = authorityRows();
+        for (String input : List.of("[]", "[{\"type\":\"text\",\"text\":\"\"}]",
+                "[{\"type\":\"image\",\"text\":\"value\"}]", "[{\"type\":\"text\",\"text\":\"value\",\"extra\":true}]",
+                "[{\"type\":\"text\",\"text\":\"a\",\"text\":\"b\"}]", "[] []")) {
+            rejectedCommit(changedInputBytes(input.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    admission -> {}));
+            assertThat(authorityRows()).as(input.substring(0, Math.min(input.length(), 60))).isEqualTo(before);
+        }
+        byte[] original = Base64.getDecoder().decode(nativeFixture.path("commits").get(5)
+                .path("request").path("resources").get(0).path("bytesBase64").textValue());
+        for (String field : List.of("promptId", "digest", "extra")) {
+            rejectedCommit(changedInputBytes(original, admission -> admission.put(field, "foreign")));
+            assertThat(authorityRows()).as(field).isEqualTo(before);
+        }
+        rejectedCommit(changedInputBytes(new byte[] {(byte) 0xff}, admission -> {}));
+        assertThat(authorityRows()).isEqualTo(before);
+        var oversized = JSON.treeToValue(changedInputBytes(
+                ("[{\"type\":\"text\",\"text\":\"" + "a".repeat(64 * 1024) + "\"}]")
+                        .getBytes(java.nio.charset.StandardCharsets.UTF_8), admission -> {}),
+                ManagedSessionStoreModels.CommitTransactionRequest.class);
+        assertThatThrownBy(() -> transaction.execute(status -> journal.commit("tenant", sessionId, token, oversized)))
+                .isInstanceOf(com.alibaba.qwen.code.managedagent.api.ApiException.class)
+                .hasMessage("Resources larger than 64 KiB require the disabled OSS storage path.");
+        assertThat(authorityRows()).isEqualTo(before);
+        assertThat(commit(5).replayed()).isFalse();
+    }
+
+    @Test
+    void nativeInputRefusesSemanticMismatchesEvenWithValidTransactionIntegrity() throws Exception {
+        ready();
+        commit(2);
+        commit(3);
+        commit(4);
+        var before = authorityRows();
+        for (String field : List.of("inputId", "turnId", "source")) {
+            rejectedCommit(changedInput(event -> ((ObjectNode) event.path("payload")).put(field, "foreign"),
+                    event -> {}));
+            assertThat(authorityRows()).as(field).isEqualTo(before);
+        }
+        for (String field : List.of("wakeId", "reason", "sourceEventId")) {
+            rejectedCommit(changedInput(event -> {},
+                    event -> ((ObjectNode) event.path("payload")).put(field, "foreign")));
+            assertThat(authorityRows()).as(field).isEqualTo(before);
+        }
+        rejectedCommit(changedInput(event -> event.putObject("subject"), event -> {}));
+        rejectedCommit(changedInput(event -> {}, event -> ((ObjectNode) event.path("payload"))
+                .put("requiredSequence", 1)));
+        rejectedCommit(changedInput(event -> {}, event -> ((ObjectNode) event.path("payload").path("subject"))
+                .put("turnId", UUID.randomUUID().toString())));
+        rejectedCommit(changedInput(event -> {}, event -> event.put("occurredAt", 1)));
+        rejectedCommit(changedInput(event -> ((ObjectNode) event.path("payload"))
+                .put("deadline", -1), event -> {}));
+        rejectedCommit(changedInput(event -> ((ObjectNode) event.path("payload"))
+                .put("extra", true), event -> {}));
+        assertThat(authorityRows()).isEqualTo(before);
+        assertThat(commit(5).replayed()).isFalse();
+    }
+
+    @Test
+    void corruptInputRevisionClosureRefusesReplayRenewalAndExecution() throws Exception {
+        ready();
+        commit(2);
+        commit(3);
+        commit(4);
+        commit(5);
+        String resource = nativeFixture.path("commits").get(5).path("request").path("resources").get(0)
+                .path("resourceId").textValue();
+        jdbc.update("UPDATE qwen_managed_session_resource_ref SET journal_revision = 1 WHERE resource_id = ?", resource);
+        var before = authorityRows();
+        rejectedCommit((ObjectNode) nativeFixture.path("commits").get(5).path("request"));
+        rejectedCommit((ObjectNode) nativeFixture.path("commits").get(6).path("request"));
+        rejected(() -> admit("corrupt-input-resource"), "csi_original_activation_unavailable");
+        assertThat(authorityRows()).isEqualTo(before);
+    }
+
+    @Test
     void initialNativeCheckpointRetainsOriginalPinRenewalAndExecutionContinuation() throws Exception {
         ready();
         commit(2);
@@ -656,10 +767,26 @@ class WorkspaceCsiNativeActivationGate {
                 .put("byteLength", stateBytes.length).put("digest", digest);
         ((ObjectNode) event.path("payload").path("stateRef")).put("byteLength", stateBytes.length).put("digest", digest);
         changeEvent.accept(event);
-        request.put("contentDigest", digest).put("eventsDigest",
-                CsiNativeActivationProof.sha256(JSON.writeValueAsBytes(List.of(sorted(event)))));
+        request.put("contentDigest", digest);
+        return resign(request, records);
+    }
+
+    private ObjectNode changedInput(java.util.function.Consumer<ObjectNode> changeAccepted,
+            java.util.function.Consumer<ObjectNode> changeWake) throws Exception {
+        ObjectNode request = nativeFixture.path("commits").get(5).path("request").deepCopy();
+        var records = CsiNativeActivationProof.records(Base64.getDecoder().decode(request.path("recordBytesBase64").textValue()));
+        changeAccepted.accept((ObjectNode) records.get(0).path("managedSession"));
+        changeWake.accept((ObjectNode) records.get(1).path("managedSession"));
+        return resign(request, records);
+    }
+
+    private ObjectNode resign(ObjectNode request, List<JsonNode> records) throws Exception {
+        var events = records.subList(0, records.size() - 1).stream()
+                .map(record -> sorted(record.path("managedSession"))).toList();
+        request.put("eventsDigest", CsiNativeActivationProof.sha256(JSON.writeValueAsBytes(events)));
         ObjectNode marker = (ObjectNode) records.getLast().path("managedSession");
-        marker.put("contentDigest", digest).put("eventsDigest", request.path("eventsDigest").textValue());
+        marker.put("contentDigest", request.path("contentDigest").textValue())
+                .put("eventsDigest", request.path("eventsDigest").textValue());
         request.put("commitDigest", CsiNativeActivationProof.sha256(JSON.writeValueAsBytes(sorted(marker))));
         StringBuilder text = new StringBuilder();
         for (JsonNode record : records) {
@@ -668,7 +795,31 @@ class WorkspaceCsiNativeActivationGate {
         byte[] bytes = text.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
         request.put("recordBytesBase64", Base64.getEncoder().encodeToString(bytes))
                 .put("recordDigest", CsiNativeActivationProof.sha256(bytes));
+        CsiNativeActivationProof.transaction(records, request, this.request,
+                records.getFirst().path("parentUuid").textValue());
         return request;
+    }
+
+    private ObjectNode changedInputBytes(byte[] input, java.util.function.Consumer<ObjectNode> changeAdmission)
+            throws Exception {
+        ObjectNode request = nativeFixture.path("commits").get(5).path("request").deepCopy();
+        var records = CsiNativeActivationProof.records(Base64.getDecoder().decode(request.path("recordBytesBase64").textValue()));
+        ObjectNode payload = (ObjectNode) records.getFirst().path("managedSession").path("payload");
+        String digest = CsiNativeActivationProof.sha256(input);
+        ObjectNode admission = JSON.createObjectNode().put("promptId", payload.path("inputId").textValue())
+                .put("digest", "sha256:" + digest);
+        changeAdmission.accept(admission);
+        byte[][] bytes = {input, JSON.writeValueAsBytes(admission)};
+        String[] refs = {"contentRef", "admissionRef"};
+        for (int index = 0; index < bytes.length; index++) {
+            ((ObjectNode) request.path("resources").get(index))
+                    .put("bytesBase64", Base64.getEncoder().encodeToString(bytes[index]))
+                    .put("byteLength", bytes[index].length).put("digest", CsiNativeActivationProof.sha256(bytes[index]));
+            ((ObjectNode) payload.path(refs[index])).put("byteLength", bytes[index].length)
+                    .put("digest", CsiNativeActivationProof.sha256(bytes[index]));
+        }
+        request.put("contentDigest", digest);
+        return resign(request, records);
     }
 
     private static Object sorted(JsonNode node) {

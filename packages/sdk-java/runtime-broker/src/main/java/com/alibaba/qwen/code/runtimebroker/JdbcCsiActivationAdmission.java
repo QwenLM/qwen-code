@@ -128,9 +128,9 @@ public final class JdbcCsiActivationAdmission {
         boolean first = history.activation() == null;
         if (!CsiNativeActivationProof.hasActivation(parsed)) {
             original.requireAdmission();
-            require(!first && history.checkpointResourceId() == null && history.activation().expiresAt() > now);
-            CsiNativeActivationProof.initialCheckpoint(parsed, metadata, original.request(), writerId,
-                    history.genesis(), history.activation(), previousSequence,
+            require(!first && history.activation().expiresAt() > now);
+            CsiNativeActivationProof.advance(parsed, metadata, original.request(), writerId,
+                    history.genesis(), history.activation(), previousSequence, history.prefix(),
                     ref -> resource(connection, original, ref, previousRevision + 1));
             return;
         }
@@ -199,7 +199,7 @@ public final class JdbcCsiActivationAdmission {
         String digest = null;
         String lastUuid = null;
         CsiNativeActivationProof.Genesis genesis = null;
-        String checkpointResourceId = null;
+        var prefix = new CsiNativeActivationProof.Prefix(null, null);
         CsiNativeActivationProof.Activation activation = null;
         while (true) {
             int count = 0;
@@ -241,9 +241,8 @@ public final class JdbcCsiActivationAdmission {
                                         writerId, genesis.definitionDigest(), activation,
                                         ref -> resource(connection, original, ref, rowRevision));
                             } else {
-                                require(activation != null && checkpointResourceId == null);
-                                checkpointResourceId = CsiNativeActivationProof.initialCheckpoint(transaction, metadata,
-                                        original.request(), writerId, genesis, activation, sequence,
+                                prefix = CsiNativeActivationProof.advance(transaction, metadata,
+                                        original.request(), writerId, genesis, activation, sequence, prefix,
                                         ref -> resource(connection, original, ref, rowRevision));
                             }
                             lastUuid = transaction.lastRecordUuid();
@@ -268,10 +267,10 @@ public final class JdbcCsiActivationAdmission {
             statement.setString(1, original.request().getScope().getTenantId());
             statement.setString(2, original.request().getIsolationKey());
             try (ResultSet row = statement.executeQuery()) {
-                require(row.next() && Objects.equals(checkpointResourceId, row.getString("latest_checkpoint_resource_id")));
+                require(row.next() && Objects.equals(prefix.checkpointResourceId(), row.getString("latest_checkpoint_resource_id")));
             }
         }
-        return new History(genesis, lastUuid, activation, checkpointResourceId);
+        return new History(genesis, lastUuid, activation, prefix);
     }
 
     private static void noEarlierAuthorization(Connection connection, JdbcCsiFilesRetirementGuard.Original original)
@@ -396,6 +395,6 @@ public final class JdbcCsiActivationAdmission {
     }
 
     private record History(CsiNativeActivationProof.Genesis genesis, String lastUuid,
-            CsiNativeActivationProof.Activation activation, String checkpointResourceId) {
+            CsiNativeActivationProof.Activation activation, CsiNativeActivationProof.Prefix prefix) {
     }
 }

@@ -3,15 +3,16 @@
 [English](2026-10-08-k2-native-batch-reservation.md) |
 [简体中文](2026-10-08-k2-native-batch-reservation.zh-CN.md)
 
-状态：提案，尚未实现或验证。源码基线为
-`76a7ae4b8724532eaf4026ddd5a89b636b3cf297`。这是
+状态：batch 预约仍为提案，尚未实现或验证。源码基线为
+`b23b4c22a8b1fbc2e790f8c424ae9466186a6b66`。下文有界 input/wake 前置依赖
+已实现并完成独立本地验证。这是
 [原生文件链路](2026-10-07-k2-native-file-execution.zh-CN.md) 的下一项依赖，
 属于完整 K2 目标与 Draft PR #13526。预约成功不替代原生 history、执行、消费、
 退休或物理资格。Proposal #12380 与 tracker #13395 保持开放。
 
 ## 1. 问题与当前状态
 
-当前私有 proof 只准入 genesis、activation install/renew 和一次性初始 checkpoint。
+当前私有 proof 准入 genesis、activation install/renew、原 input/wake 和一次性初始 checkpoint。
 通用数字事务 hash 已可验证，但 committed assistant、file-history intent 与 tool
 outcome 尚无私有语义准入。Worker 不构造文件 history 或 executor。
 
@@ -23,10 +24,10 @@ tool intent 前崩溃，还会丢失随机 call/ref ID 及内存字节。
 
 原 SQL reference 保存 Session、prompt、call 与 request digest，却不区分同 prompt
 的两个 assistant batch。锁住调用者列出的 execution ID 不能证明没有漏掉已接受的
-Read、Write 或 Edit。先筛 PREPARED 会隐藏已接受的冲突/终态 row。当前私有重试
-比较新生成的服务端候选 ID 与原 ID，精确请求重放也会被拒绝。
+Read、Write 或 Edit。先筛 PREPARED 会隐藏已接受的冲突/终态 row。前一项有界修复前，
+私有重试比较新生成的服务端候选 ID 与原 ID，精确请求重放也会被拒绝。
 
-同批的小范围 bugfix 在所有现有 live admission 检查之后，将已有重试比较改为
+前一项有界 bugfix 已在所有现有 live admission 检查之后，将已有重试比较改为
 不可变 request 身份；只读返回原 receipt 的当前状态，不再分配或授予权限。
 这不代表下文所提 batch/reference/resource 契约已实现。
 
@@ -178,8 +179,11 @@ handle 本身不能串行整个 Session。Private native grammar 获资格前，
 
 显式调用原 `submitInput`，由原 prompt blocks 与 admission bytes 将
 input.accepted/wake.requested 同事务提交。Sink 写 user message 或空 initial
-checkpoint 都不代表 input 获准。原 model caller 返回最终 text-only assistant，
-不会代提交；runner 必须把返回 message 与原 turn_result 通过 sink 提交。保留精确
+checkpoint 都不代表 input 获准。原 model caller 返回最终 assistant，不会代提交；
+runner 必须把返回 message 与原 turn_result 通过 sink 提交。当前 no-tool 路径只返回
+text/model，丢失 provider 完整 Parts；tool 路径保留真实 model-history Parts，却按
+promptId warm 普通 Runtime Session。私有 caller 必须保留实际 Parts 并使用固定原
+Runtime Session；private 字符串或空 tool callback 无法接通这些消费方。保留精确
 message parent chain。Model function partIndex 指完整 parts 位置，ordinal 指
 function requests 位置；tool definition 包含真实 name/description/
 parametersJsonSchema，不能仅为 `{name}`。
@@ -210,6 +214,29 @@ declarations、execution 和 `consumeResults` 通过原 model caller 接通。
 `JdbcCsiActivationAdmission`、`ManagedSessionStore`、`WorkspaceRecoveryReader` 和
 `WorkspaceCsiCheckpointSnapshotStore`。
 
+已实现的首项有界 conversation 片段仅接纳真实原 `submitInput` 事务。它按顺序包含
+`input.accepted` 与 `wake.requested`，发生时间相同，均无顶层 subject。封闭 payload
+绑定同一个原 prompt/input UUID、`hosted-harness` 来源、`input` wake reason、原 accepted
+事件 ID/sequence 和嵌套 turn subject。Deadline 为 null 或原有界时间戳。Command ID 为 prompt UUID，content digest 为原
+`managed-input` 字节的裸 SHA-256；原 `managed-admission` 内容精确为
+`{promptId,digest}`，其中 digest 为同一 hash 加 `sha256:` 前缀。Input 字节包含非空
+text block 数组，每项封闭为 `{type:"text",text}` 且 text 非空。保留任意文本，包括
+Unicode、换行与超过结构 ID 长度限制的文本；每份原资源仍以 64 KiB 为限。事务摘要匹配
+不能代替这些检查或原 revision/ref 关联。
+
+Fresh 接纳仍在原 READY binding、native writer 和 live activation 栅栏内。Fresh 与
+historical 共用一项转移校验，完整历史从原 journal 派生并保留已接受 input UUID，不新增
+权威表或信任调用方 projection。不得在未结算 input 上叠加另一个 fresh input。一次性
+空 Harness checkpoint 可以在 input/wake 后按实际 coverage 提交，turn/prompt identity
+仍为 null；activation renew 保留 input/checkpoint。非 checkpoint metadata 不复述
+head 保留的 checkpoint。Replay 以完整原历史派生同一状态且只读，包括 DRAINING；不会
+将当前 READY 或当前到期时间重新施加于历史事件。DRAINING 中的新 input 仍拒绝。
+
+这段实现不接纳 user/assistant 消息、model attempt、turn 结算或后续 checkpoint phase。
+这些真实生产方及转移仍需独立验证与所选真实私有 runner。原结算尚未获资格时，不能清除
+或替换未结算 input 栅栏。Input/wake 与空 checkpoint 本身不识别 assistant batch、
+不预约文件调用，也不授予 worker I/O。
+
 先连接原 conversation 准入及原子持久预约，包括完整成员恢复；再由 schema2
 intent/prepared 和可信 worker readback 消费同一证据。最后将同一 composer/history
 接到真实 execution、完整 outcomes/results/messages、checkpoint 和 Hosted
@@ -222,6 +249,14 @@ intent/prepared 和可信 worker readback 消费同一证据。最后将同一 c
 脚本替代。使用真实 native assistant/input/definition/transaction producer、真实
 Broker service/HTTP/JDBC 和 Session Store commit/read。注入 helper 返回值不证明
 前缀获资格。
+
+有界 input/wake 前置依赖已有独立本地证据，覆盖两种真实 producer 顺序：先 input/wake
+再空 initial checkpoint，以及先 checkpoint 再长 Unicode/换行 input。Renewal 保留
+input/checkpoint，精确重放保持全部 53 表只读，另一个未结算 input 和 DRAINING 中
+fresh input 拒绝；摘要有效但语义不符及原 revision/bytes 损坏也拒绝。Historical
+renewal replay 与真正 fresh renewal 分别验证。测试使用实际 native HTTP adapter/
+collector 与生产 Spring transaction/JDBC 方法、专属 H2 fixture、synthetic Pod 元数据，
+worker I/O 为零。这仅验证有界前置依赖；下述 batch 矩阵仍为必需且尚未验证。
 
 | 组        | 必须观察的行为                                                                                                       |
 | --------- | -------------------------------------------------------------------------------------------------------------------- |

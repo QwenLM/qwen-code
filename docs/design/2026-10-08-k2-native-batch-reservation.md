@@ -3,8 +3,10 @@
 [English](2026-10-08-k2-native-batch-reservation.md) |
 [简体中文](2026-10-08-k2-native-batch-reservation.zh-CN.md)
 
-Status: proposed, not implemented or verified. Source baseline:
-`76a7ae4b8724532eaf4026ddd5a89b636b3cf297`. This is the next dependency of
+Status: batch reservation remains proposed, not implemented or verified. Source
+baseline: `b23b4c22a8b1fbc2e790f8c424ae9466186a6b66`. The bounded input/wake
+prerequisite described below is implemented and independently verified locally.
+This is the next dependency of
 the [native file chain](2026-10-07-k2-native-file-execution.md), within the
 full K2 objective and Draft PR #13526. It does not replace native history,
 execution, consumption, retirement or physical qualification with allocation
@@ -12,8 +14,8 @@ success. Proposal #12380 and tracker #13395 remain open.
 
 ## 1. Problem and current state
 
-The current private proof admits genesis, activation install/renew and the
-once-only initial checkpoint. Generic numeric transaction hashes now verify,
+The current private proof admits genesis, activation install/renew, original
+input/wake and the once-only initial checkpoint. Generic numeric transaction hashes now verify,
 but a committed assistant, file-history intent and tool outcome still have no
 private semantic admission. The worker constructs no file history or executor.
 
@@ -30,10 +32,10 @@ The original SQL reference stores Session, prompt, call and request digest, but
 does not distinguish two assistant batches in one prompt. Locking the caller's
 listed execution IDs cannot prove that no accepted Read, Write or Edit was
 omitted. Filtering to PREPARED first can conceal accepted conflicting/terminal
-rows. Existing private retries compare the newly minted server candidate ID
-with the original ID; exact request replay can therefore refuse.
+rows. Before the preceding bounded fix, private retries compared the newly
+minted server candidate ID with the original ID and could refuse exact replay.
 
-The accompanying bounded bugfix changes that existing retry comparison to the
+The preceding bounded bugfix changed that existing retry comparison to the
 immutable request identity, after all current live admission checks. It returns
 the original receipt in its current state without another allocation or grant.
 This does not implement the proposed batch/reference/resource contract below.
@@ -230,9 +232,14 @@ can progress. No optional text-delta or Hook producer is implicitly required.
 Explicitly use original `submitInput` to commit input.accepted/wake.requested
 together from original prompt blocks and admission bytes. A sink-written user
 message and an empty initial checkpoint do not admit input. The existing model
-caller returns the final text-only assistant instead of committing it; the
-runner must commit that returned message and the original turn_result through
-the sink. Preserve the exact message parent chain. Model function partIndex
+caller returns the final assistant instead of committing it; the runner must
+commit that returned message and the original turn_result through the sink.
+Its no-tool path currently returns only text/model and loses the provider's
+full Parts, while its tool path retains the actual model-history Parts but
+warms an ordinary Runtime Session keyed by promptId. The private caller must
+preserve actual Parts and use the fixed original Runtime Session; a private
+string or an empty tool callback does not connect these consumers.
+Preserve the exact message parent chain. Model function partIndex
 indexes full parts, ordinal indexes function requests, and tool definitions
 contain real name/description/parametersJsonSchema rather than `{name}` alone.
 
@@ -264,6 +271,39 @@ Concrete source consumers include `hosted-workspace-tool-turn.ts`,
 `JdbcCsiActivationAdmission`, `ManagedSessionStore`,
 `WorkspaceRecoveryReader` and `WorkspaceCsiCheckpointSnapshotStore`.
 
+The implemented first bounded conversation increment accepts only the actual
+original `submitInput` transaction. Its two events are `input.accepted` followed
+by `wake.requested`, with the same occurrence time and no top-level subject.
+Their closed payloads bind the same original prompt/input UUID, `hosted-harness`
+source, `input` wake reason, original accepted-event ID and sequence, and the
+nested turn subject. Deadline is null or an original bounded timestamp. The command ID is the prompt UUID; its content digest is
+the bare SHA-256 of the original `managed-input` bytes. The original
+`managed-admission` body is exactly `{promptId,digest}`, where `digest` is that
+same hash with the `sha256:` prefix. Input bytes contain a nonempty array of
+closed `{type:"text",text}` blocks, each with nonempty text. Preserve arbitrary
+text, including Unicode, newlines and text longer than structural ID limits;
+each original resource remains limited to 64 KiB. A matching transaction hash
+does not replace these checks or the original revision/ref association.
+
+Fresh acceptance remains inside the original READY binding, native writer and
+live activation fence. Fresh and historical validation use one transition
+function; the historical fold remembers the accepted input UUID as derived
+state, without another table or caller-supplied projection. Another fresh input
+cannot stack on that unsettled input. The once-only empty Harness checkpoint
+may follow input/wake using their actual coverage, with null turn/prompt identity;
+activation renewals preserve the input and checkpoint. Non-checkpoint metadata
+does not repeat the retained head checkpoint. Replay derives the same state
+from the full original journal and stays read-only, including during DRAINING;
+it does not impose current READY or current expiry on historical events. New
+input during DRAINING still refuses.
+
+This increment does not admit user/assistant messages, model attempts, turn
+settlement or later checkpoint phases. Those actual producers and their
+transitions still need independent qualification and the chosen real private
+runner. Until original settlement is qualified, the unsettled-input fence cannot
+be cleared or replaced. Input/wake and an empty checkpoint alone identify no
+assistant batch, allocate no file call and grant no worker I/O.
+
 First connect original conversation admission and atomic durable reservations,
 including full-member recovery. Next consume that same evidence in schema2
 intent/prepared and the trusted worker readback protocol. Finally connect the
@@ -278,6 +318,18 @@ entry gap and use a production-entry script fallback where necessary. Use the
 actual native assistant/input/definition and transaction producers, actual
 Broker service/HTTP/JDBC and Session Store commit/read paths. An injected
 helper return value is not proof of any qualified prefix.
+
+The bounded input/wake prerequisite has local independent evidence for both
+actual producer orders: input/wake before the initial empty checkpoint, and the
+checkpoint before long Unicode/newline input. It retains input/checkpoint across
+renewal, keeps exact replay read-only across all 53 tables, refuses another
+unsettled input and fresh input during DRAINING, and refuses digest-valid
+semantic mutations and damaged original revision/bytes. Historical renewal
+replay and a genuinely fresh renewal were checked separately. This used the
+actual native HTTP adapter/collector and production Spring transaction/JDBC
+methods on owned H2 fixtures, with synthetic Pod metadata and zero worker I/O.
+It qualifies this bounded prerequisite only; the batch matrix below is still
+required and unverified.
 
 | Group           | Required observation                                                                                                                                                                     |
 | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

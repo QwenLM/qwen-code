@@ -253,6 +253,42 @@ try {
   const afterCheckpointRenewal = await authority.renewActivation({
     leaseDurationMs: 90000,
   });
+  async function submitInput(prompt) {
+    const promptId = randomUUID();
+    const bytes = Buffer.from(JSON.stringify(prompt));
+    const digest = hash(bytes);
+    const contentRef = await stores.resourceStore.publish(
+      'managed-input',
+      bytes,
+    );
+    const admissionRef = await stores.resourceStore.publish(
+      'managed-admission',
+      Buffer.from(JSON.stringify({ promptId, digest: 'sha256:' + digest })),
+    );
+    return authority.submitInput(
+      {
+        operation: 'submitInput',
+        commandId: promptId,
+        sessionKey: input.sessionKey,
+        contentDigest: digest,
+      },
+      {
+        inputId: promptId,
+        turnId: promptId,
+        source: 'hosted-harness',
+        contentRef,
+        admissionRef,
+        deadline: null,
+        wakeReason: 'input',
+      },
+    );
+  }
+  await submitInput([
+    { type: 'text', text: '原始输入\n' + '文'.repeat(5000) },
+    { type: 'text', text: 'second block' },
+  ]);
+  await authority.renewActivation({ leaseDurationMs: 90000 });
+  await submitInput([{ type: 'text', text: 'unsettled second input' }]);
   const fixture = {
     format: 'csi-native-activation-test-generator/1',
     generatedAt: new Date().toISOString(),
