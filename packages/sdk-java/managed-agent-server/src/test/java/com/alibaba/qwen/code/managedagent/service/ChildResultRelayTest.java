@@ -396,36 +396,39 @@ class ChildResultRelayTest {
         verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
     }
 
-    // R1-12: a give-up owes the parent its settlement before the ledger
-    // retires — an attached child fails started, and the foreground
-    // waiter exits on that terminal record instead of polling forever.
+    // R1-7/12: an attached give-up closes the child BEFORE the parent
+    // settlement — and `started` names exactly what the parent's
+    // committed attach proves, so the funnel accepts the transition.
     @Test
-    void persistentProbeFailuresSettleFailedBeforeGivingUp() {
+    void anAttachedGiveUpClosesSettlesAndClassifies() {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
-                "binding", "owner", now + 30_000, 63, 0, null, now, now));
-        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
-                .thenReturn(null);
+                "watching", "owner", now + 30_000, 63, 0, null, now, now));
+        // A settled Turn that yields no Turn line at all retried 64
+        // times: the watcher defers until the give-up chain runs.
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(null);
         relay.scan();
         assertThat(row.get().state()).isEqualTo("unknown");
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
         assertThat(harness.operations)
                 .extracting(operation -> operation.get("kind"))
                 .containsExactly("fail");
         assertThat(harness.operations.get(0))
                 .containsEntry("stopReason", "child_failed")
                 .containsEntry("started", true);
-        verify(store, atLeastOnce()).classify(any(RelayRow.class),
-                anyString(), anyString(), any(), anyLong());
     }
 
-    // R1-12: a run whose creation never provably started takes the
-    // creation_failed pairing the validator requires, not a lie that it
-    // ran.
+    // R1-7/12: an unattached give-up still closes the Session its ledger
+    // named, but settles creation_failed/started:false — the parent
+    // record carries no attach to prove otherwise.
     @Test
-    void anUnprovenCreationSettlesCreationFailedAtGiveUp() {
-        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
-                "creating", "owner", now + 30_000, 63, 0, null, now, now));
+    void anUnattachedGiveUpClosesAndSettlesUnstarted() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 63, 0, null, now, now));
+        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+                .thenReturn(null);
         relay.scan();
         assertThat(row.get().state()).isEqualTo("unknown");
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
         assertThat(harness.operations)
                 .extracting(operation -> operation.get("kind"))
                 .containsExactly("fail");
@@ -434,18 +437,81 @@ class ChildResultRelayTest {
                 .containsEntry("started", false);
     }
 
-    // R1-12: a refused settlement commit never blocks or widens the
-    // classification — the row still retires unknown.
+    // R1-7/12: a creation the control plane never proved has no close
+    // obligation and takes the never-started pairing only.
     @Test
-    void aRefusedGiveUpSettlementNeverLosesTheClassification() {
+    void anUnprovenCreationSettlesCreationFailedWithoutAClose() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
+                "creating", "owner", now + 30_000, 63, 0, null, now, now));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        verify(childCloses, never()).admitChildClose(anyString(),
+                anyString(), anyString(), anyString());
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+        assertThat(harness.operations.get(0))
+                .containsEntry("stopReason", "creation_failed")
+                .containsEntry("started", false);
+    }
+
+    // R1-7/12: a refusal anywhere in the give-up chain keeps the row as
+    // the settlement's durable holder — no speculative retirement; the
+    // recovered retry closes, settles and only then classifies.
+    @Test
+    void aRefusedGiveUpChainKeepsItsDebtRecoverable() {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "binding", "owner", now + 30_000, 63, 0, null, now, now));
         harness.refuseKind = "fail";
         relay.scan();
-        assertThat(row.get().state()).isEqualTo("unknown");
+        assertThat(row.get().state()).isEqualTo("binding");
         assertThat(harness.operations).isEmpty();
-        verify(store, atLeastOnce()).classify(any(RelayRow.class),
-                anyString(), anyString(), any(), anyLong());
+        verify(store, never()).classify(any(RelayRow.class), anyString(),
+                anyString(), any(), anyLong());
+        harness.refuseKind = null;
+        dueAgain();
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        // The close replays idempotently under its stable key each round.
+        verify(childCloses, Mockito.times(2)).admitChildClose(TENANT,
+                PARENT, CHILD, RUN);
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+    }
+
+    // R1-7/12: the same debt ordering guards the close gate itself — a
+    // faltered admission parks before any settlement reaches the wire.
+    @Test
+    void aFalteredGiveUpCloseRetainsTheCleanupDebt() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 63, 0, null, now, now));
+        Mockito.doThrow(new IllegalStateException("admission refused"))
+                .when(childCloses).admitChildClose(TENANT, PARENT, CHILD,
+                        RUN);
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("binding");
+        assertThat(harness.operations).isEmpty();
+        Mockito.doReturn(null).when(childCloses).admitChildClose(TENANT,
+                PARENT, CHILD, RUN);
+        dueAgain();
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        verify(childCloses, Mockito.times(2)).admitChildClose(TENANT, PARENT,
+                CHILD, RUN);
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+    }
+
+    /** The retry window arrived: the parked row is due again. */
+    private void dueAgain() {
+        RelayRow parked = row.get();
+        row.set(new RelayRow(parked.tenantId(), parked.parentSessionId(),
+                parked.childRunId(), parked.creationKey(),
+                parked.childSessionId(), parked.state(), parked.claimedBy(),
+                now + 30_000, parked.attempts(), 0, parked.lastError(),
+                parked.createdAt(), now));
     }
 
     // R1-66: the relay's page of sequential harness calls must not ride

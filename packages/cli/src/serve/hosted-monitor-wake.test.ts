@@ -405,8 +405,11 @@ describe('createMonitorWakeRunTurn', () => {
         session: access,
         sessionId,
         cwd: '/workspace',
+        // The completed settle the wake's result contract classifies —
+        // 'settled' now answers only a completed turn's settle shape.
         executeHostedTurn: async (promptId) => {
           ran = promptId;
+          return { systemPayload: { state: 'completed' } };
         },
         busy: () => access.active !== undefined,
         needsRecovery,

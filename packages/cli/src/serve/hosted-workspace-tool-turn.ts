@@ -883,6 +883,12 @@ export class HostedWorkspaceToolTurn {
     for (const [ordinal, call] of effective.entries()) {
       const dispatched =
         this.agentDispatched.has(call.callId) ||
+        // A resumed committed result never re-drives the launch, so the
+        // durable child_run record is the dispatch evidence that
+        // survives restart: it exists exactly because the admission
+        // committed (R1-62's recovery arm).
+        this.childAgents?.record(`${this.promptId}:${call.callId}`) !==
+          undefined ||
         intents.some((entry) => entry.payload['ordinal'] === ordinal);
       const response = responses.find(
         (part) => part.functionResponse?.id === call.callId,

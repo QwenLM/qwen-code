@@ -85,7 +85,7 @@ function call(
   } as ToolCallRequestInfo;
 }
 
-function createTurn(depth = 0): HostedWorkspaceToolTurn {
+function createTurn(depth = 0, hookEvents?: string[]): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
@@ -124,6 +124,30 @@ function createTurn(depth = 0): HostedWorkspaceToolTurn {
         depth,
         queueConsumption: (childRunId) => consumption.push(childRunId),
       },
+      ...(hookEvents
+        ? {
+            hooks: {
+              broker: new (HostedWorkspaceBroker as unknown as new (
+                ...args: unknown[]
+              ) => HostedWorkspaceBroker)(
+                { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+                sessionKey,
+                'hook-owner',
+              ),
+              mountHeld: false,
+              ensureReady: () => Promise.resolve(),
+              acquire: () => Promise.resolve(),
+              refresh: () => Promise.resolve(),
+              tools: () => [],
+              toolInput: () => undefined,
+              fire: (eventName: string) => {
+                hookEvents.push(eventName);
+                return Promise.resolve([]);
+              },
+              close: () => Promise.resolve(),
+            } as unknown as import('./hosted-hook-session.js').HostedHookSession,
+          }
+        : {}),
     },
   );
 }
@@ -604,6 +628,31 @@ it('fires PostToolUse for an admitted agent launch', async () => {
   );
   expect(events).toContain('PreToolUse');
   expect(events).toContain('PostToolUse');
+});
+
+// R1-62's recovery arm: a resumed committed result never re-drives the
+// launch, and a reconstructed turn's in-memory dispatch set starts empty
+// — the durable child_run record is the dispatch evidence that survives.
+it('fires PostToolUse on resumed results through the durable launch record', async () => {
+  const firstEvents: string[] = [];
+  const first = createTurn(0, firstEvents);
+  const saved = await executeAgent(
+    first,
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: true,
+    }),
+  );
+  expect(firstEvents).toContain('PostToolUse');
+  const recoveredEvents: string[] = [];
+  const recovered = createTurn(0, recoveredEvents);
+  await recovered.resumeHookResults(
+    saved,
+    'model',
+    new AbortController().signal,
+  );
+  expect(recoveredEvents).toContain('PostToolUse');
 });
 
 // The window between the admission-time check and the PreToolUse fire:

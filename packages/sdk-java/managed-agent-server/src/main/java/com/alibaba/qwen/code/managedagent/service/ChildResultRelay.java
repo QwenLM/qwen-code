@@ -361,19 +361,11 @@ public class ChildResultRelay {
 
     private void defer(RelayRow row, RuntimeException error, long now) {
         if (row.attempts() + 1 >= MAX_ATTEMPTS) {
-            // A give-up still owes the parent its settlement: the
-            // foreground waiter only exits on a terminal run, and a run
-            // left mid-delivery squats one launch slot for the parent's
-            // lifetime. `creation_failed` pairs with the never-started
-            // proof (no answer and no lineage child); anything else
-            // honestly started. The classification never waits on the
-            // settle commit.
-            settleGaveUp(row);
-            relayStore.classify(row, owner, "unknown", error.getMessage(), now);
-            LOG.warn("child result relay gives up tenant={} parent={}"
-                    + " run={} after={} failure={}", row.tenantId(),
-                    row.parentSessionId(), row.childRunId(), row.attempts(),
-                    error.getMessage());
+            // The close and the parent settlement outlive the bounded
+            // retries, and this row is their only durable holder: the
+            // give-up chain owes and retries on any refusal instead of
+            // retiring the ledger with the debt still airborne.
+            settleThenClassifyGaveUp(row, error, now);
             return;
         }
         long delay = Math.min(300_000L,
@@ -382,29 +374,53 @@ public class ChildResultRelay {
                 now + LEASE_MS, now);
     }
 
-    /** The give-up's parent-side settlement, best-effort: a refused commit
-     * is owed evidence that survives the row's owner, so it never blocks
-     * or widens the `unknown` classification that retires the ledger. */
-    private void settleGaveUp(RelayRow row) {
-        boolean started = row.childSessionId() != null
-                || relayStore.findLineageChild(row.tenantId(),
-                        row.parentSessionId(), row.childRunId()) != null;
-        Map<String, Object> fail = new LinkedHashMap<>();
-        fail.put("operationId", UUID.randomUUID().toString());
-        fail.put("kind", "fail");
-        fail.put("childRunId", row.childRunId());
-        fail.put("stopReason", started ? "child_failed" : "creation_failed");
-        fail.put("started", started);
+    /**
+     * The give-up chain, close first: the child Session's close admission
+     * (the row's admitted id, falling back to the lineage the creation
+     * stamped, which needs no answer to name it), then the parent's fail
+     * settlement with the stopReason×started pairing the parent's
+     * committed dispatch/attach proves — attach only commits past
+     * `watching`, so an unattached give-up must not claim `started` —
+     * and only then the classification. Any refusal anywhere owes through
+     * the ordinary defer; the row never retires with the debt airborne.
+     */
+    private void settleThenClassifyGaveUp(RelayRow row,
+            RuntimeException error, long now) {
         try {
+            String child = row.childSessionId() != null ? row.childSessionId()
+                    : relayStore.findLineageChild(row.tenantId(),
+                            row.parentSessionId(), row.childRunId());
+            if (child != null) {
+                childCloses.admitChildClose(row.tenantId(),
+                        row.parentSessionId(), child, row.childRunId());
+            }
+            boolean started = "watching".equals(row.state())
+                    || "delivering".equals(row.state());
+            Map<String, Object> fail = new LinkedHashMap<>();
+            fail.put("operationId", UUID.randomUUID().toString());
+            fail.put("kind", "fail");
+            fail.put("childRunId", row.childRunId());
+            fail.put("stopReason", started ? "child_failed" : "creation_failed");
+            fail.put("started", started);
             harness.runChildOperation(row.tenantId(), row.parentSessionId(),
                     fail);
         } catch (RuntimeException settlementError) {
-            LOG.warn("child result relay's give-up settlement failed"
-                            + " tenant={} parent={} run={} — the unknown"
-                            + " classification still lands; failure={}",
-                    row.tenantId(), row.parentSessionId(), row.childRunId(),
+            LOG.warn("child result relay's give-up chain owes and retries"
+                            + " tenant={} parent={} run={} — the row keeps"
+                            + " the debt; failure={}", row.tenantId(),
+                    row.parentSessionId(), row.childRunId(),
                     settlementError.getMessage(), settlementError);
+            relayStore.defer(row, owner,
+                    now + Math.min(300_000L,
+                            1_000L * (1L << Math.min(row.attempts(), 8))),
+                    settlementError.getMessage(), now + LEASE_MS, now);
+            return;
         }
+        relayStore.classify(row, owner, "unknown", error.getMessage(), now);
+        LOG.warn("child result relay gives up tenant={} parent={}"
+                + " run={} after={} failure={}", row.tenantId(),
+                row.parentSessionId(), row.childRunId(), row.attempts(),
+                error.getMessage());
     }
 
     private JsonNode readJson(String content, String label) {
