@@ -25,6 +25,13 @@ describe('readLanguage', () => {
   });
 });
 
+describe('createChromeStrings', () => {
+  it('keeps the Chinese untitled-session label localized', () => {
+    const strings = createChromeStrings('zh-CN');
+    expect(strings('session.untitled')).toBe('未命名');
+  });
+});
+
 describe('boot.preAuthHostGate', () => {
   // The 403 fires exactly when the client-side forwarded port differs from
   // the daemon's bound port, so its arrival proves the forward destination
