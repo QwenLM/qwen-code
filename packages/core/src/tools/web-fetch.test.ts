@@ -998,6 +998,22 @@ describe('WebFetchTool', () => {
       expect(mockGenerateContent).toHaveBeenCalled();
       expect(result.llmContent).toContain('Summary');
     });
+
+    it('should not pass through a preapproved page the producer already truncated', async () => {
+      // The size check cannot stand in for "nothing was reduced": truncation
+      // lands its stub just under the cap, so gating on length alone hands the
+      // side query's job to a cut-off stub and never answers `params.prompt`.
+      stubSummary({
+        contentType: 'text/markdown',
+        body: Buffer.from('# Docs\n' + 'word '.repeat(30_000)),
+        finalUrl: 'https://docs.python.org/3/library/json.md',
+      });
+
+      const result = await run('https://docs.python.org/3/library/json.md');
+
+      expect(mockGenerateContent).toHaveBeenCalled();
+      expect(result.llmContent).toContain('Summary');
+    });
   });
 
   describe('cache', () => {

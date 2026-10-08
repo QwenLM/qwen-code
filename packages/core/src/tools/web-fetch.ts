@@ -600,7 +600,11 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
       if (
         preapproved &&
         entry.contentType.includes('text/markdown') &&
-        entry.content.length <= MAX_CONTENT_CHARS
+        entry.content.length <= MAX_CONTENT_CHARS &&
+        // Length alone is not "nothing was reduced": the producer's stub lands
+        // just under the cap, and a spill path means this content WAS cut — so
+        // hand it to the side query that answers the prompt instead.
+        !entry.persistedTextPath
       ) {
         return {
           llmContent: `${header}\n\n${entry.content}${binaryNote}`,
