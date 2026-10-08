@@ -652,6 +652,12 @@ jobs:
           mvn --batch-mode --no-transfer-progress -Pmysql-integration \
             -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
             -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check
+          # Close the cache loop inside the same lock: the one-way seed
+          # above leaves cache: 'maven' saving only the runtime-broker tree
+          # after a pom key rotation. The exclude keeps the in-house fixed
+          # release coordinates out of the host-shared ~/.m2.
+          tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba -cf - . \
+            | tar -C "${HOME}/.m2/repository" --skip-old-files -xf -
 
       # Maven passes a selection narrowed by a profile, MAVEN_ARGS or
       # .mvn/maven.config, so compare what ran with the source tree.

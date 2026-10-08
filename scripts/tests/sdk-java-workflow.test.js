@@ -76,16 +76,21 @@ describe('SDK Java self-hosted workflow guards', () => {
       expect(block).toContain(
         "settings-path: '${{ runner.temp }}/setup-java-m2'",
       );
-      // A prefix match: mysql-integration appends a job-local
-      // -Dmaven.repo.local to two of its three MAVEN_ARGS, pinned by the
-      // 'installs and verifies against one job-local Maven repository' test.
-      expect(
-        block.match(
-          /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml/g,
-        ),
-      ).toHaveLength(
+      // Two tail-anchored forms, no prefix match: mysql-integration appends
+      // a job-local -Dmaven.repo.local to two of its three MAVEN_ARGS
+      // (pinned by the 'installs and verifies against one job-local Maven
+      // repository' test); the other jobs must carry no suffix at all — an
+      // appended -DskipTests would be word-split live by the mvn launcher.
+      const exact = block.match(
+        /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
+      );
+      const jobLocal = block.match(
+        /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml -Dmaven\.repo\.local=\$\{\{ runner\.temp \}\}\/m2-repo'/g,
+      );
+      expect((exact?.length ?? 0) + (jobLocal?.length ?? 0)).toBe(
         { test: 6, 'mysql-integration': 3, 'daemon-e2e': 1 }[name],
       );
+      if (name !== 'mysql-integration') expect(jobLocal).toBeNull();
       expect(block).not.toContain('Drop shared Maven toolchains.xml');
       expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
     },
@@ -286,6 +291,17 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     }
     expect(install.run).toContain(
       'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
+    );
+    // The write-back closes the cache: 'maven' loop — the seed above only
+    // reads the cache-saved ~/.m2, so without it a pom key rotation saves a
+    // thin entry that never recaptures the managed-agent-server tree. The
+    // exclude keeps the in-house fixed release coordinates out of the
+    // host-shared repo.
+    expect(verify.run).toContain(
+      'tar -C "${RUNNER_TEMP}/m2-repo" --exclude=./com/alibaba -cf - .',
+    );
+    expect(verify.run).toContain(
+      'tar -C "${HOME}/.m2/repository" --skip-old-files -xf -',
     );
   });
 });
