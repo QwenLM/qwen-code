@@ -9,6 +9,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import { goalTurnContext } from './goal-turn-context.js';
 import {
   ambientGoalToolResultProvenance,
+  codeModeToolResultStamp,
   goalToolResultProvenance,
 } from './goal-tool-result-provenance.js';
 
@@ -217,5 +218,15 @@ describe('ambientGoalToolResultProvenance', () => {
 
   it('stamps nothing outside a Goal turn', () => {
     expect(ambientGoalToolResultProvenance('read_file')).toBeUndefined();
+  });
+});
+
+describe('codeModeToolResultStamp', () => {
+  it('marks a nested Code Mode result as the recording subtype', () => {
+    // The expectation keeps the bare literal: building it from the helper
+    // would make the assertion tautological.
+    expect(codeModeToolResultStamp()).toEqual({
+      subtype: 'code_mode_tool_result',
+    });
   });
 });

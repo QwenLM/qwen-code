@@ -6,6 +6,7 @@
 
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { isToolCallConcurrencySafe } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
+import { codeModeToolResultStamp } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import {
   captureHookExecutionOwner,
@@ -12917,9 +12918,7 @@ export class Session implements SessionContext {
       target.push({
         ...record,
         // Calls outside the model's batch are nested Code Mode originals.
-        ...(ordinal === -1
-          ? { subtype: 'code_mode_tool_result' as const }
-          : {}),
+        ...(ordinal === -1 ? codeModeToolResultStamp() : {}),
         toolArgs: (fc.args ?? {}) as Record<string, unknown>,
         ordinal: Math.max(0, ordinal),
         sequence: toolResultRecordSequence++,
