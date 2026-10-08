@@ -4166,6 +4166,10 @@ export class CoreToolScheduler {
               throw new Error('Unable to prepare shell confirmation.');
             }
 
+            // Plan mode judges the tool's own confirmation shape: the ask
+            // rewrite must not turn a blocked MCP call into an approvable
+            // `info` dialog.
+            const planModeDetails = confirmationDetails;
             if (preToolUseAsk) {
               confirmationDetails = withPreToolUseAskReason(
                 confirmationDetails,
@@ -4182,7 +4186,7 @@ export class CoreToolScheduler {
                 isPlanMode,
                 isExitPlanModeTool,
                 isAskUserQuestionTool,
-                confirmationDetails,
+                planModeDetails,
                 isEnterPlanModeTool,
               )
             ) {

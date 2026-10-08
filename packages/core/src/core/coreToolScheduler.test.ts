@@ -11075,6 +11075,39 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(details.hideAlwaysAllow).toBe(true);
   });
 
+  it('still blocks a hook-asked MCP tool call in plan mode', async () => {
+    const mcpConfirmation = async (): Promise<ToolCallConfirmationDetails> => ({
+      type: 'mcp',
+      title: 'Confirm MCP Tool Execution',
+      serverName: 'external-context',
+      toolName: 'context_remember',
+      toolDisplayName: 'context_remember',
+      onConfirm: async () => {},
+    });
+    const { onAllToolCallsComplete } = await scheduleWithAsk({
+      approvalMode: ApprovalMode.PLAN,
+      configOverrides: { getSdkMode: () => false },
+      messageBus: askMessageBus('Save this exact content?'),
+      tools: [
+        new MockTool({
+          name: 'mcpTool',
+          execute: vi.fn().mockResolvedValue(textResult('ok')),
+          getConfirmationDetails: mcpConfirmation,
+        }),
+      ],
+    });
+
+    // The ask rewrite must not turn the blocked MCP call into an approvable
+    // `info` dialog: plan mode blocks it before any prompt is shown.
+    const [completed] = (await settledLastBatch(
+      onAllToolCallsComplete,
+    )) as CompletedToolCall[];
+    expectStatus(completed, 'error');
+    expect(JSON.stringify(completed.response.responseParts)).toContain(
+      'Tool blocked by plan mode',
+    );
+  });
+
   it('executes the tool exactly once when the user approves an ask (no re-ask loop)', async () => {
     const execute = vi.fn().mockResolvedValue(textResult('ok'));
     const messageBus = askMessageBus();
