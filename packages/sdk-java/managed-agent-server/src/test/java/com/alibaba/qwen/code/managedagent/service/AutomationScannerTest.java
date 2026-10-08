@@ -1187,6 +1187,29 @@ class AutomationScannerTest {
     }
 
     @Test
+    void aRecoveryBlockedSessionAnswers409AndItsSlotIsSkipped() {
+        PublicAutomation automation = define("* * * * *", "allow", "none",
+                null, true);
+        fake.failNextFire = AutomationHarnessFake.refusal(409,
+                "hosted_session_blocked");
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        AutomationLedgerStore.OccurrenceRow row = ledger.findOccurrence(
+                tenant, automation.id(), "schedule:2026-06-01T10:01:00Z")
+                .orElseThrow();
+        assertThat(row.outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+        assertThat(row.reason()).isEqualTo("hosted_session_blocked");
+        assertThat(row.attempts()).isZero();
+        // The refusal parks no zombie: after recovery the next slot fires.
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(fake.firedOccurrences()).containsExactly(
+                "schedule:2026-06-01T10:01:00Z",
+                "schedule:2026-06-01T10:02:00Z");
+    }
+
+    @Test
     void aTransientStoreFaultKeepsTheClaimFiringForRedrive() {
         PublicAutomation automation = define("* * * * *", "skip", "none", null,
                 true);

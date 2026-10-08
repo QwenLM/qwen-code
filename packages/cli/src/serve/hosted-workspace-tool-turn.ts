@@ -354,6 +354,21 @@ function physicalToolStatus(
   return response?.['error'] ? 'error' : 'success';
 }
 
+/**
+ * The Broker admits only path-safe Runtime Session ids, while a wake
+ * turn's id is an input id (`arun_…:input`, `<monitor>:notify:<n>`):
+ * such an id is mapped to a stable path-safe digest instead of being
+ * refused at acquire. The mapped form is path-safe itself, so layering
+ * this over an id that was already mapped stays idempotent.
+ */
+export function hostedRuntimeSessionId(promptId: string): string {
+  return /^[A-Za-z0-9._-]{1,512}$/.test(promptId) &&
+    promptId !== '.' &&
+    !promptId.includes('..')
+    ? promptId
+    : `wake-${createHash('sha256').update(promptId).digest('hex')}`;
+}
+
 export class HostedToolRecoveryRequiredError extends Error {
   constructor(cause: unknown) {
     super(
@@ -445,7 +460,7 @@ export class HostedWorkspaceToolTurn {
       new HostedWorkspaceBroker(
         options,
         session.authority.sessionHeader.sessionKey,
-        promptId,
+        hostedRuntimeSessionId(promptId),
       );
     this.warmed = this.mcp ? this.mcp.ensureReady() : this.broker.warm();
     // Warmup runs alongside inference; a text-only answer need not wait for it.

@@ -75,6 +75,7 @@ import { HostedShellPublisher } from './hosted-shell-publisher.js';
 import type { ShellPublisherDescriptor } from './managed-shell-publisher.js';
 import {
   HostedToolRecoveryRequiredError,
+  hostedRuntimeSessionId,
   HostedWorkspaceToolTurn,
 } from './hosted-workspace-tool-turn.js';
 import {
@@ -91,7 +92,10 @@ import type {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-protocol.js';
 import { HostedMonitorSession } from './hosted-monitor-session.js';
 import { HostedAutomationSession } from './hosted-automation-session.js';
-import { AUTOMATION_INPUT_SOURCE } from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-operations.js';
+import {
+  AUTOMATION_INPUT_SOURCE,
+  automationRunId,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-operations.js';
 import { HostedMonitorLoop } from './hosted-monitor-loop.js';
 import { HostedMonitorWakeScheduler } from './hosted-monitor-wake.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
@@ -2063,6 +2067,100 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(204);
   });
 
+  it('maps non-path-safe turn ids to stable path-safe Broker ids', () => {
+    const colon = `arun_${'a'.repeat(32)}:input`;
+    const mapped = hostedRuntimeSessionId(colon);
+    expect(mapped).toMatch(/^wake-[0-9a-f]{64}$/);
+    expect(mapped).toBe(hostedRuntimeSessionId(colon));
+    // The mapped form is path-safe itself, so a second layer is inert.
+    expect(hostedRuntimeSessionId(mapped)).toBe(mapped);
+    expect(hostedRuntimeSessionId('<mon_1>:notify:3')).toMatch(
+      /^wake-[0-9a-f]{64}$/,
+    );
+    const plain = 'prompt-1_ok.2';
+    expect(hostedRuntimeSessionId(plain)).toBe(plain);
+    expect(hostedRuntimeSessionId('..')).not.toBe('..');
+  });
+
+  it('runs a tool-calling wake turn under a path-safe Broker session id', async () => {
+    const inputId = await prewriteAutomationSession('hosted-workspace-files/1');
+    await writeFile(
+      path.join(state.root, 'wake-target.txt'),
+      'the wake file content',
+    );
+    const acquired: string[] = [];
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        acquired.push(this.runtimeSessionId);
+        this.runtime = {
+          bindingId: 'binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    // The wake turn's model asks for a file: the tool turn must not die
+    // at the Broker's path-safe Runtime Session id rule.
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      const call = {
+        name: 'read_file',
+        callId: 'wake-tool',
+        args: { file_path: 'wake-target.txt' },
+        isClientInitiated: false,
+        prompt_id: inputId,
+      };
+      await toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      return { text: 'read it', model: 'test-model' };
+    });
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    const runId = automationRunId(AUTOMATION_ID, AUTOMATION_SLOT);
+    // The discriminating point of the F6 wall: which id reaches acquire.
+    await vi.waitFor(() => expect(acquired.length).toBeGreaterThan(0), {
+      timeout: 10_000,
+      interval: 50,
+    });
+    const expected = `wake-${createHash('sha256').update(`${runId}:input`).digest('hex')}`;
+    expect(acquired).toContain(expected);
+    expect(acquired).not.toContain(`${runId}:input`);
+    expect(acquired.every((id) => /^[A-Za-z0-9._-]{1,512}$/.test(id))).toBe(
+      true,
+    );
+    // The turn went past the acquisition the production refusal stopped:
+    // in this brokerless test bed the turn ends recovery-blocked instead
+    // of passing acquisition at all, and the F3 path settles the run.
+    await vi.waitFor(
+      async () => {
+        const replayed = await authorize(
+          supertest(server).post(
+            `/session/${SESSION_ID}/automations/operations`,
+          ),
+        ).send({ operationId: randomUUID(), ...fireBody() });
+        expect(replayed.status).toBe(202);
+        expect(replayed.body.run.state).toBe('failed');
+        expect(replayed.body.run.execution).toBe('outcome_unknown');
+      },
+      { timeout: 15_000, interval: 50 },
+    );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
   it('settles an automation run as failed/unknown when its turn went recovery-blocked', async () => {
     await prewriteAutomationCrashedTurnSession();
     mockBrokerBroker();
@@ -2086,6 +2184,96 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 10_000, interval: 50 },
     );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
+  it('refuses fires while blocked, and stops re-blocking once the crash is consumed', async () => {
+    await prewriteAutomationCrashedTurnSession();
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    // The crashed wake turn settles failed/unknown first.
+    await vi.waitFor(
+      async () => {
+        const replayed = await authorize(
+          supertest(server).post(
+            `/session/${SESSION_ID}/automations/operations`,
+          ),
+        ).send({ operationId: randomUUID(), ...fireBody() });
+        expect(replayed.status).toBe(202);
+        expect(replayed.body.run.state).toBe('failed');
+      },
+      { timeout: 10_000, interval: 50 },
+    );
+    // A fire into the still-blocked Session is refused, never committed.
+    const slot = 'schedule:2026-03-08T11:00:00Z';
+    const refused = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
+    ).send({ operationId: randomUUID(), ...fireBody(1, slot) });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_session_blocked');
+    const zombieRun = automationRunId(AUTOMATION_ID, slot);
+    // The crashed input is consumed: a turn.settled covers its turnId.
+    const runId = automationRunId(AUTOMATION_ID, AUTOMATION_SLOT);
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    let journal = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      key,
+    );
+    expect(
+      journal.events.some(
+        (event) =>
+          event.kind === 'turn.settled' &&
+          event.payload['turnId'] === `${runId}:input`,
+      ),
+    ).toBe(true);
+    expect(
+      journal.events.some(
+        (event) =>
+          event.kind === 'domain.committed' &&
+          String(event.payload['operationId']).startsWith(`${zombieRun}:`),
+      ),
+    ).toBe(false);
+    // Reload: the same crash no longer re-blocks, and the slot fires.
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+    const reloaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(reloaded.status).toBe(200);
+    const authorizeReloaded = (request: supertest.Test) =>
+      headers(request).set(
+        'X-Qwen-Client-Id',
+        reloaded.body.clientId as string,
+      );
+    const fired = await authorizeReloaded(
+      supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
+    ).send({ operationId: randomUUID(), ...fireBody(1, slot) });
+    expect(fired.status).toBe(202);
+    expect(fired.body.replayed).toBe(false);
+    journal = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      key,
+    );
+    // Once, after the reload: the refused attempt committed nothing.
+    expect(
+      journal.events.filter(
+        (event) =>
+          event.kind === 'domain.committed' &&
+          String(event.payload['operationId']).startsWith(`${zombieRun}:`),
+      ),
+    ).toHaveLength(2);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 

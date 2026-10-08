@@ -91,7 +91,10 @@ import {
   isAutomationScheduleId,
   isAutomationTrigger,
 } from './hosted-automation-session.js';
-import { AUTOMATION_INPUT_SOURCE } from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-operations.js';
+import {
+  AUTOMATION_INPUT_SOURCE,
+  automationRunId,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-operations.js';
 import type {
   AutomationRun,
   Schedule,
@@ -129,6 +132,7 @@ import {
 import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HostedToolRecoveryRequiredError,
+  hostedRuntimeSessionId,
   HostedWorkspaceToolTurn,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
@@ -919,7 +923,7 @@ function runSettleProjection(
         await new HostedWorkspaceBroker(
           brokerOptions!,
           session.managed.authority.sessionHeader.sessionKey,
-          promptId,
+          hostedRuntimeSessionId(promptId),
         ).release();
       await session.managed.sink.write(
         record(session, sessionId, 'system', null, {
@@ -2488,9 +2492,31 @@ export function registerHostedHarnessSessionRoutes(
                   // pump must not re-drive): the run fails, its execution
                   // outcome unknown — or its definition never fires again.
                   try {
-                    await session.automations?.settleRunFailedUnknown(
-                      turn.turnId,
-                    );
+                    const settled =
+                      await session.automations?.settleRunFailedUnknown(
+                        turn.turnId,
+                      );
+                    if (settled !== undefined) {
+                      // Consume the crashed input too: until its turnId
+                      // settles, every reload re-classifies it as recovery
+                      // and re-blocks the Session over the same crash.
+                      await session.managed.sink.write({
+                        uuid: randomUUID(),
+                        parentUuid: null,
+                        sessionId,
+                        timestamp: new Date().toISOString(),
+                        type: 'system',
+                        cwd: session.cwd,
+                        version: 'hosted-harness/1',
+                        subtype: 'turn_result',
+                        systemPayload: {
+                          promptId: turn.turnId,
+                          state: 'error',
+                          stopReason: 'error',
+                          endedAt: Date.now(),
+                        },
+                      });
+                    }
                   } catch (cause) {
                     writeStderrLineSafe(
                       `qwen serve: Hosted automation run of turn ${turn.turnId} could not be settled failed/unknown: ${String(cause)}`,
@@ -3826,7 +3852,7 @@ export function registerHostedHarnessSessionRoutes(
     new HostedWorkspaceBroker(
       brokerOptions,
       session.managed.authority.sessionHeader.sessionKey,
-      promptId,
+      hostedRuntimeSessionId(promptId),
     )
       .release()
       .then(
@@ -3851,7 +3877,7 @@ export function registerHostedHarnessSessionRoutes(
     await new HostedWorkspaceBroker(
       brokerOptions,
       session.managed.authority.sessionHeader.sessionKey,
-      promptId,
+      hostedRuntimeSessionId(promptId),
     )
       .release()
       .then(() => {
@@ -4891,6 +4917,24 @@ export function registerHostedHarnessSessionRoutes(
             (firedAt as number) < 0
           ) {
             return error(res, 400, 'invalid_automation_operation');
+          }
+          // A recovery-blocked Session cannot run what a fire dispatches:
+          // refuse anything that would commit a new fact into it. The one
+          // answer that carries none is the replay of a dispatched run.
+          if (session.blocked) {
+            const committed = automations
+              .runs()
+              .find(
+                (each) =>
+                  each.automationRunId ===
+                  automationRunId(scheduleId, occurrenceKey as string),
+              );
+            if (
+              committed === undefined ||
+              committed.run.execution === 'intent'
+            ) {
+              return error(res, 409, 'hosted_session_blocked');
+            }
           }
           const fired = await automations.fire({
             scheduleId,
