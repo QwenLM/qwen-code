@@ -767,6 +767,32 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     }
 
     @Test
+    void recoveryReaderAnswersResourceCorruptForANonCollectedCatalogEntry() {
+        initSession();
+        publish("inflight", MANIFEST, new byte[64], "REFERENCED", "MYSQL_INLINE");
+        reference("inflight");
+        // A cataloged publication object in a state the admission path actually leaves
+        // behind (VERIFIED) is not evidence of collection: the byte loss stays fail-closed.
+        jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = NULL"
+                + " WHERE session_scope_key = ? AND resource_id = 'inflight'", resScope);
+        jdbc.update("INSERT INTO qwen_tool_publication_object (scope_key, publication_id, slot_key,"
+                + " resource_id, byte_length, sha256, state, operation_id, created_at)"
+                + " VALUES (?, 'pub-inflight', 'segment:stdout:0', 'inflight', 64, ?, 'VERIFIED',"
+                + " 'op-1', CURRENT_TIMESTAMP(6))",
+                ToolPublicationDataStore.scope(tenant, "workspace-1", session),
+                ToolPublicationContract.sha256(new byte[64]));
+        var reader = new WorkspaceRecoveryReader(jdbc, null);
+        var source = new ObjectMapper().createObjectNode();
+        source.putObject("head").put("tenantId", tenant).put("workspaceId", "workspace-1")
+                .put("sessionId", session).put("journalRevision", 10)
+                .putNull("latest_checkpoint_resource_id");
+        var ref = new ObjectMapper().createObjectNode().put("resourceId", "inflight")
+                .put("kind", MANIFEST).put("schemaVersion", 1).put("byteLength", 64)
+                .put("digest", ToolPublicationContract.sha256(new byte[64]));
+        assertThatThrownBy(() -> reader.resource(source, ref)).hasMessageContaining("resource_corrupt");
+    }
+
+    @Test
     void ledgerScanRescansAtTheCadenceOnAMonotonicClock() {
         initSession();
         head(session);

@@ -29,7 +29,7 @@ background captures alike). The Session-rooted retirement tombstone
 when a Session is permanently deleted; what is missing is the collection pass
 that frees these rows' bytes under the same policy. This is #13534 P1.
 
-Baseline: `main` = `ac497aeed9`. The V30/V34 lifecycle (`PINNED → RETIRING →
+Baseline: `main` = `2e962b6121`. The V30/V34 lifecycle (`PINNED → RETIRING →
 DELETING → COLLECTED`), the candidate predicate in
 `ToolPublicationRetentionStore.candidate`, and the `ToolPublicationCollector`
 claim/page/confirm shape stay unchanged.
@@ -101,7 +101,7 @@ not added: `retention_until` stays unused.
 ## Collection and accounting
 
 One new table records one collection ledger per Session scope
-(migration V51):
+(migration V53):
 
 ```
 qwen_managed_session_resource_collection
@@ -121,7 +121,7 @@ qwen_managed_session_resource_collection
 
 Completed rows leave `gc_next_at = -1`, outside the claim scan's
 `gc_next_at >= 0` range, so the per-tick scan stays proportional to unfinished
-work although ledger rows are kept forever. V51 also adds
+work although ledger rows are kept forever. V53 also adds
 `idx_output_session_retirement_due (retired_at)` so the due-candidate scan
 (`r.retired_at <= now - grace`) is index-served: tombstones are never deleted,
 and an unindexed scan would otherwise cost O(retired Sessions) on every
@@ -231,18 +231,18 @@ Rollout notes:
   gains one paragraph: enabling GC now also frees stream-capture bytes; its
   deployment gates (upgrade of Java writers first, isolated OSS, database
   gates) already apply.
-- Older broker versions without V51 never start the pass. The first upgraded
+- Older broker versions without V53 never start the pass. The first upgraded
   broker starts collecting as soon as `gc-enabled` is already true, since
   there is no version handshake; pre-upgrade brokers misname legitimately
   collected rows as `resource_layout_unsupported`, so a fleet that may roll
-  workloads during the upgrade keeps the flag off until every broker runs V51
+  workloads during the upgrade keeps the flag off until every broker runs V53
   — the same every-writer-first order the O4 rollout already requires.
 
 ## Affected layers and delivery
 
 | Layer                                                     | Change                                                                                                              |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Migration V51                                             | New `qwen_managed_session_resource_collection` ledger table; `retired_at` index on `qwen_output_session_retirement` |
+| Migration V53                                             | New `qwen_managed_session_resource_collection` ledger table; `retired_at` index on `qwen_output_session_retirement` |
 | `store/SessionResourceCollectionCollector.java` (new)     | Tick, candidate scan, claim, paging, byte accounting                                                                |
 | `store/WorkspaceRecoveryReader.java`                      | `resource_collected` named check                                                                                    |
 | `config/ToolPublicationConfiguration.java`                | Collector bean on the existing scheduler                                                                            |

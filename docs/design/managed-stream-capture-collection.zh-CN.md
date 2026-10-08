@@ -22,7 +22,7 @@ MySQL 里。Session 级退役墓碑（`qwen_output_session_retirement`，V30）�
 Session 被永久删除时证明写入者已关闭；缺的是在同一策略下释放这些行字节的回收通道。
 这就是 #13534 的 P1。
 
-基线：`main` = `ac497aeed9`。V30/V34 的生命周期（`PINNED → RETIRING → DELETING →
+基线：`main` = `2e962b6121`。V30/V34 的生命周期（`PINNED → RETIRING → DELETING →
 COLLECTED`）、`ToolPublicationRetentionStore.candidate` 中的候选谓词、以及
 `ToolPublicationCollector` 的 claim/分页/确认形状全部保持不变。
 
@@ -77,7 +77,7 @@ Session 删除之外的场景）：`retention_until` 继续闲置。
 
 ## 回收与记账
 
-一张新表按 Session scope 记录一份回收账本（迁移 V51）：
+一张新表按 Session scope 记录一份回收账本（迁移 V53）：
 
 ```
 qwen_managed_session_resource_collection
@@ -97,7 +97,7 @@ qwen_managed_session_resource_collection
 
 已完成的行以 `gc_next_at = -1` 落在 claim 扫描的 `gc_next_at >= 0` 区间之
 外，因此即使账本行永久保留，每 tick 扫描的开销也只与未完成工作量成正
-比。V51 同时新增 `idx_output_session_retirement_due (retired_at)`，使到
+比。V53 同时新增 `idx_output_session_retirement_due (retired_at)`，使到
 期候选扫描（`r.retired_at <= now - grace`）走索引：墓碑永不删除，没有
 索引时每个 60 秒节律周期的扫描代价将永久为 O（已退役 Session 数）。
 
@@ -179,17 +179,17 @@ head 为 `DELETED` 之后才可能进入 `COLLECTED`，而 `ManagedSessionStore`
 - 运维文档（`managed-tool-output-retention-operations.md`）补一段：开启 GC 现在同时
   会释放流式捕获字节；其部署门禁（先升级 Java 写者、隔离 OSS、数据库门禁）照旧适
   用。
-- 没有 V51 的旧版 broker 不会启动本通道。由于没有版本握手，第一台升级的 broker 在
-  `gc-enabled` 已为 true 时立刻开始回收；低于 V51 的 broker 会把合法回收的行误报
+- 没有 V53 的旧版 broker 不会启动本通道。由于没有版本握手，第一台升级的 broker 在
+  `gc-enabled` 已为 true 时立刻开始回收；低于 V53 的 broker 会把合法回收的行误报
   为 `resource_layout_unsupported`，因此升级期间仍可能回滚工作负载的集群应保持该
-  开关关闭，直到全部 broker 跑上 V51 —— 与 O4 发布已要求的「先升级全部写者」顺
+  开关关闭，直到全部 broker 跑上 V53 —— 与 O4 发布已要求的「先升级全部写者」顺
   序一致。
 
 ## 影响面与交付
 
 | 层                                                        | 变化                                                                                                          |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| 迁移 V51                                                  | 新增 `qwen_managed_session_resource_collection` 账本表；`qwen_output_session_retirement` 的 `retired_at` 索引 |
+| 迁移 V53                                                  | 新增 `qwen_managed_session_resource_collection` 账本表；`qwen_output_session_retirement` 的 `retired_at` 索引 |
 | `store/SessionResourceCollectionCollector.java`（新）     | tick、候选扫描、claim、分页、字节记账                                                                         |
 | `store/WorkspaceRecoveryReader.java`                      | `resource_collected` 命名检查                                                                                 |
 | `config/ToolPublicationConfiguration.java`                | 复用现有调度器的回收器 bean                                                                                   |
