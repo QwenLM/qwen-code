@@ -762,10 +762,33 @@ export class ManagedEmailAdapter {
       // receipt — the control plane may already hold it (its answer was
       // lost) and settles idempotently. Only a segment whose send never
       // produced an outcome settles unknown.
-      await this.controlPlane.receipt(
-        entry.deliveryId,
-        entry.receipt ?? { outcome: 'unknown' },
-      );
+      try {
+        await this.controlPlane.receipt(
+          entry.deliveryId,
+          entry.receipt ?? { outcome: 'unknown' },
+        );
+      } catch (error) {
+        const status = (error as { status?: unknown }).status;
+        const code = (error as { code?: unknown }).code;
+        // A deterministic refusal (the route Session closed, the delivery
+        // is unknown to the control plane) never converges on re-drive, and
+        // a held entry runs before every outbox pull: it would stall every
+        // later delivery and fail the next connect. Drop it visibly; the
+        // lease reconciler records the delivery unknown.
+        if (
+          !(
+            status === 400 ||
+            status === 403 ||
+            status === 409 ||
+            (status === 404 && code === 'delivery_not_found')
+          )
+        ) {
+          throw error;
+        }
+        this.log(
+          `Managed email receipt for ${entry.deliveryId} was refused (${String(status)}); it is dropped.`,
+        );
+      }
       state.outbound = state.outbound.filter(
         (candidate) => candidate !== entry,
       );

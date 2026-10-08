@@ -759,6 +759,32 @@ describe('managed email outbound', () => {
     expect(sent).toHaveBeenCalledTimes(1);
   });
 
+  it('drops a persisted receipt the control plane refuses for good, so later deliveries still send', async () => {
+    const adapter = make();
+    await adapter.connect();
+    plane.outbox = [delivery('d-closed')];
+    // The route Session closed while its reply was in flight: every receipt
+    // for that delivery is refused deterministically.
+    const original = plane.receipt.bind(plane);
+    plane.receipt = async (deliveryId: string, receipt: ManagedReceipt) => {
+      if (deliveryId === 'd-closed') {
+        throw Object.assign(new Error('HTTP 409'), {
+          status: 409,
+          code: 'workspace_unavailable',
+        });
+      }
+      await original(deliveryId, receipt);
+    };
+    await expect(adapter.tick()).rejects.toThrow('HTTP 409');
+    expect(state(adapter).outbound).toHaveLength(1);
+    // Another thread's reply must not wait behind the refused receipt.
+    plane.outbox = [delivery('d-next')];
+    await adapter.tick();
+    expect(state(adapter).outbound).toEqual([]);
+    expect(sent).toHaveBeenCalledTimes(2);
+    expect(plane.receipts.map((entry) => entry.deliveryId)).toEqual(['d-next']);
+  });
+
   it('replays the persisted provider receipt on restart instead of settling unknown', async () => {
     const adapter = make();
     await adapter.connect();

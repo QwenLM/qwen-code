@@ -385,6 +385,51 @@ class ManagedChannelServiceTest {
     }
 
     @Test
+    void crossesASelfHealingHarnessConflictAsRetryable() {
+        // A crashed Harness's writer lease outlives it for its duration: the
+        // re-attach answers 409 until the lease lapses. The adapter drops
+        // every 409, so this one must cross as the retryable 503, while a
+        // deterministic channel 409 keeps its class.
+        harness.submitErrors.add(harnessError(409,
+                "{\"error\":\"managed_session_writer_conflict\","
+                        + "\"code\":\"managed_session_writer_conflict\"}"));
+        harness.submitErrors.add(harnessError(409,
+                "{\"error\":\"channel_operation_conflict\","
+                        + "\"code\":\"channel_operation_conflict\"}"));
+        assertThatThrownBy(() -> service.submitInbound(TENANT, channel,
+                event(1, "1700:97", "hello")))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus())
+                            .isEqualTo(org.springframework.http.HttpStatus
+                                    .SERVICE_UNAVAILABLE);
+                    assertThat(error.getCode())
+                            .isEqualTo("managed_session_writer_conflict");
+                });
+        assertThatThrownBy(() -> service.submitInbound(TENANT, channel,
+                event(1, "1700:97", "hello")))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus())
+                            .isEqualTo(org.springframework.http.HttpStatus
+                                    .CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("channel_operation_conflict");
+                });
+        // Once the lease lapses the same event admits: nothing was lost.
+        assertThat(service.submitInbound(TENANT, channel,
+                event(1, "1700:97", "hello")).replayed()).isFalse();
+    }
+
+    private static com.alibaba.qwen.code.daemon.DaemonHttpException harnessError(
+            int status, String body) {
+        com.alibaba.qwen.code.daemon.DaemonHttpException error =
+                org.mockito.Mockito.mock(
+                        com.alibaba.qwen.code.daemon.DaemonHttpException.class);
+        org.mockito.Mockito.when(error.getStatusCode()).thenReturn(status);
+        org.mockito.Mockito.when(error.getResponseBody()).thenReturn(body);
+        return error;
+    }
+
+    @Test
     void translatesADaemonGenerationFailureIntoTheRetryableEnvelope() {
         // A generation clash at the Hosted Harness is a transient daemon
         // failure, not an HTTP answer: the adapter still takes the same

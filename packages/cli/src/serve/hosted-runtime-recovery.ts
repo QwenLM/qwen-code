@@ -27,6 +27,10 @@ import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.j
 import { truncateHostedGlobResponse } from './hosted-workspace-tool-turn.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
+  commitHostedFileHistory,
+  readHostedFileHistory,
+} from './hosted-file-history.js';
+import {
   HostedWorkspaceBroker,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
@@ -356,6 +360,69 @@ export async function stopParkedRuntimeExecutions(input: {
       }
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
+  }
+  return broker;
+}
+
+/**
+ * H5/F5 follow-up: the Runtime-facing settlement of an interrupted Turn
+ * ahead of its terminal record. A Turn that died inside a tool call parked
+ * its checkpoint in `await_runtime`, and a terminal record advances the
+ * checkpoint from a model-start phase alone — settling only the record
+ * wedges the Session on the next `requireModelStart`. Mirrors the takeover
+ * cancellation: prove the parked executions stopped, settle them cancelled
+ * (their functionCall must meet a functionResponse before the next model
+ * round), and drop the dead Turn's pending file-history obligation. The
+ * returned Broker releases after the caller's terminal record is durable,
+ * never before. Throws with nothing settled when the wait is not this
+ * path's to end — a pending approval resolves through its own route — or
+ * when the stop cannot be proven, leaving the Turn to the recovery fleet.
+ */
+export async function settleInterruptedTurnRuntime(input: {
+  session: ManagedSession;
+  sessionId: string;
+  cwd: string;
+  promptId: string;
+  brokerOptions: HostedWorkspaceBrokerOptions | undefined;
+  toolProfile: boolean;
+}): Promise<HostedWorkspaceBroker | undefined> {
+  const authorization = await input.session.authority.harnessRunAuthorization();
+  // Owes only the parked Turn the interruption names: a mismatched or
+  // already model-start checkpoint has no Runtime wait left to end.
+  if (
+    authorization.status !== 'runnable' ||
+    authorization.checkpoint.identity.turnId !== input.promptId ||
+    HARNESS_MODEL_START_PHASES.has(authorization.checkpoint.continuation.phase)
+  )
+    return undefined;
+  if (authorization.checkpoint.continuation.phase !== 'await_runtime')
+    throw new RecoveryDeclined();
+  // Symmetric with the continue/cancel routes: without the tool profile
+  // or the Broker there is no way to prove the parked executions stopped.
+  if (!input.toolProfile || input.brokerOptions === undefined)
+    throw new RecoveryDeclined();
+  const broker = await stopParkedRuntimeExecutions({
+    session: input.session,
+    promptId: input.promptId,
+    brokerOptions: input.brokerOptions,
+  });
+  await settleParkedTurnCancelled({
+    session: input.session,
+    sessionId: input.sessionId,
+    cwd: input.cwd,
+    promptId: input.promptId,
+  });
+  // The cancelled Turn never continues, so its pending file-history
+  // obligation dies with it — keep the snapshots, drop the marker, or
+  // every later load stays refused.
+  const savedHistory = await readHostedFileHistory(input.session);
+  if (savedHistory?.pendingTurn === input.promptId) {
+    await commitHostedFileHistory(input.session, {
+      schemaVersion: 1,
+      state: savedHistory.state,
+      pendingTurn: null,
+      pendingUndo: null,
+    });
   }
   return broker;
 }

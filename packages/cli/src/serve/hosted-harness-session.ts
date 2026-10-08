@@ -114,6 +114,7 @@ import { HostedTextDeltaStream } from './hosted-text-deltas.js';
 import {
   isDurableBlockedVerdict,
   recoverHostedRuntimeTurn,
+  settleInterruptedTurnRuntime,
   settleParkedTurnCancelled,
   stopParkedRuntimeExecutions,
   type HostedRecoveryDeclineReason,
@@ -2562,10 +2563,57 @@ export function registerHostedHarnessSessionRoutes(
               // F5/direction (a): channel turns interrupted mid-flight get
               // terminal settlement from their own funnel; monitor turns
               // keep the recovery-blocked freeze their fleet owns.
-              settleInterrupted: (turn) =>
-                turn.source === CHANNEL_INPUT_SOURCE && session.channels
-                  ? session.channels.settleInterruptedWake(turn.turnId)
-                  : Promise.resolve(false),
+              settleInterrupted: async (turn) => {
+                if (turn.source !== CHANNEL_INPUT_SOURCE || !session.channels)
+                  return false;
+                // F5 follow-up: a turn that died inside a tool call parked
+                // its checkpoint in `await_runtime`, where the terminal
+                // record cannot advance it — the next wake turn's
+                // requireModelStart refuses and the Session wedges. Stop
+                // and settle the parked executions first, mirroring the
+                // takeover cancellation; a wait that cannot be proven
+                // stopped — or a pending approval — stays with the
+                // recovery fleet instead of settling into a wedge.
+                let broker: HostedWorkspaceBroker | undefined;
+                try {
+                  broker = await settleInterruptedTurnRuntime({
+                    session: session.managed,
+                    sessionId,
+                    cwd,
+                    promptId: turn.turnId,
+                    brokerOptions,
+                    toolProfile: session.toolProfile !== undefined,
+                  });
+                } catch (cause) {
+                  writeStderrLineSafe(
+                    'qwen serve: Interrupted channel wake turn ' +
+                      turn.turnId +
+                      ' keeps its durable wait for the recovery fleet: ' +
+                      String(cause),
+                  );
+                  return false;
+                }
+                const settled = await session.channels.settleInterruptedWake(
+                  turn.turnId,
+                );
+                // The recovered lease hands back only once the terminal
+                // record is durable: a release persisted earlier would
+                // wedge the retry on runtime_session_not_acquirable.
+                await broker?.release().catch((cause: unknown) => {
+                  if (
+                    cause instanceof HostedWorkspaceBrokerRejection &&
+                    cause.status === 404
+                  )
+                    return;
+                  writeStderrLineSafe(
+                    'qwen serve: Interrupted channel wake turn ' +
+                      turn.turnId +
+                      ' could not hand back its recovered Runtime: ' +
+                      String(cause),
+                  );
+                });
+                return settled;
+              },
               writeStderr: writeStderrLineSafe,
             });
             // H5c: the channel turn settled; its reply plans from the

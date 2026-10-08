@@ -19,9 +19,15 @@ import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-co
 import {
   stopParkedRuntimeExecutions,
   recoverHostedRuntimeTurn,
+  settleInterruptedTurnRuntime,
   type HostedRecoveryTurn,
   type HostedRuntimeRecoveryOutcome,
 } from './hosted-runtime-recovery.js';
+import {
+  commitHostedFileHistory,
+  readHostedFileHistory,
+} from './hosted-file-history.js';
+import { HARNESS_MODEL_START_PHASES } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
@@ -1118,6 +1124,170 @@ describe('recoverHostedRuntimeTurn', () => {
       });
       expect(acquire).not.toHaveBeenCalled();
       expect(execute).not.toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('takes a turn killed between the tool call and its result out of the durable wait', async () => {
+    // The H5/F5 follow-up witness: a channel turn died with its Shell
+    // execution in flight, and settling only its terminal record wedged
+    // the Session — `await_runtime` is not a model-start phase.
+    await parkAtAwaitRuntime('run_shell_command');
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'settled',
+    });
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      const parked = await replacement.authority.harnessRunAuthorization();
+      expect(
+        parked.status === 'runnable' && parked.checkpoint.continuation.phase,
+      ).toBe('await_runtime');
+      const broker = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: true,
+      });
+      expect(broker?.runtimeSessionId).toBe(PROMPT_ID);
+      // The assistant's functionCall meets a cancelled functionResponse,
+      // or the resumed thread's next model round is malformed.
+      const projected = await replacement.sink.project();
+      const response = projected
+        .filter(
+          (entry) =>
+            entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+        )
+        .flatMap((entry) => entry.message?.parts ?? [])
+        .map((part) => part.functionResponse)
+        .find(Boolean);
+      expect(response).toMatchObject({
+        id: 'call-1',
+        name: 'run_shell_command',
+      });
+      expect(response?.response).toMatchObject({
+        executionStatus: 'cancelled',
+      });
+      // The durable wait is gone: the phase the next turn reads starts a
+      // model request again.
+      const authorization =
+        await replacement.authority.harnessRunAuthorization();
+      expect(authorization.status).toBe('runnable');
+      if (authorization.status === 'runnable')
+        expect(
+          HARNESS_MODEL_START_PHASES.has(
+            authorization.checkpoint.continuation.phase,
+          ),
+        ).toBe(true);
+      // The lease hands back only after the caller's terminal record is
+      // durable, so it is not this helper's to release.
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('drops the interrupted turn’s pending file-history obligation', async () => {
+    await parkAtAwaitRuntime('write_file', true);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'settled',
+    });
+    const replacement = await open('boot-2', false);
+    try {
+      await commitHostedFileHistory(replacement, {
+        schemaVersion: 1,
+        state: { ownerSessionId: SESSION_ID, snapshots: [], files: {} },
+        pendingTurn: PROMPT_ID,
+        pendingUndo: null,
+      });
+      await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: true,
+      });
+      expect(
+        (await readHostedFileHistory(replacement))?.pendingTurn,
+      ).toBeNull();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('owes no Broker for a turn whose wait already settled', async () => {
+    await parkAtAwaitRuntime('write_file', false, true);
+    const status = vi.spyOn(HostedWorkspaceBroker.prototype, 'status');
+    const replacement = await open('boot-2', false);
+    try {
+      await expect(
+        settleInterruptedTurnRuntime({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          toolProfile: true,
+        }),
+      ).resolves.toBeUndefined();
+      expect(status).not.toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('owns only the interrupted turn it names', async () => {
+    await parkAtAwaitRuntime();
+    const status = vi.spyOn(HostedWorkspaceBroker.prototype, 'status');
+    const replacement = await open('boot-2', false);
+    try {
+      await expect(
+        settleInterruptedTurnRuntime({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: '44444444-4444-4444-8444-444444444444',
+          brokerOptions,
+          toolProfile: true,
+        }),
+      ).resolves.toBeUndefined();
+      expect(status).not.toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('keeps a turn with the recovery fleet when the stop cannot be proven', async () => {
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'unknown',
+    });
+    const replacement = await open('boot-2', false);
+    try {
+      await expect(
+        settleInterruptedTurnRuntime({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          toolProfile: true,
+        }),
+      ).rejects.toThrow('unknown');
+      // Nothing settles on the refused path.
+      const projected = await replacement.sink.project();
+      expect(
+        projected.filter(
+          (entry) =>
+            entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+        ),
+      ).toHaveLength(0);
     } finally {
       await replacement.close();
     }
