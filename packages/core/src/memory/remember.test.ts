@@ -333,6 +333,26 @@ describe('remember memory helper', () => {
     expect(systemPrompt).not.toContain('decide which directory it belongs in');
   });
 
+  it.each([undefined, 'project'] as const)(
+    'inlines the existing project index into the remember prompt (scope=%s)',
+    async (scope) => {
+      // The remember fork gets no request-tail catalog, so the inline index
+      // is its only view of entries it should update instead of duplicating.
+      const entry = '- [Seeded](project/seeded.md) — seeded remember entry.';
+      await fs.mkdir(path.dirname(projMem('MEMORY.md')), { recursive: true });
+      await fs.writeFile(projMem('MEMORY.md'), `${entry}\n`, 'utf-8');
+      agentWrites([projMem('project', 'seeded.md')], 'Saved.');
+
+      await run(TARGET_CONTENT.project, scope);
+
+      const { systemPrompt } = forkParams();
+      expect(systemPrompt).toContain(
+        `## ${getAutoMemoryRoot(projectRoot)}/MEMORY.md\n\n${entry}`,
+      );
+      expect(systemPrompt).not.toContain('supplied as catalog data');
+    },
+  );
+
   it('rejects a project-targeted result that mixes project and user writes', async () => {
     agentWrites(
       [

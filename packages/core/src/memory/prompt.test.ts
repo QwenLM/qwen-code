@@ -422,6 +422,19 @@ describe('managed auto-memory prompt helpers', () => {
     expect(prompt).toContain('## Before recommending from memory');
   });
 
+  it('renders a whitespace-only index as the empty placeholder', () => {
+    // store.ts returns MEMORY.md untrimmed, so a file holding only a newline
+    // must still read as empty rather than as a heading with no body.
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      '  \n\t\n',
+    );
+
+    expect(prompt).toContain(
+      '## /tmp/project/.qwen/memory/MEMORY.md\n\nYour MEMORY.md is currently empty.',
+    );
+  });
+
   it('emits full prompt when only userSection has content (project index empty)', () => {
     const prompt = buildManagedAutoMemoryPrompt(
       '/tmp/project/.qwen/memory',
