@@ -254,6 +254,7 @@ import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 import {
   createAgentHostToolInvocationGuard,
   createAgentToolInvocationGuard,
+  createSessionAgentToolInvocationGuard,
 } from '../agents/workspace-agents/capability.js';
 import type {
   ExecutionSandboxPolicy,
@@ -565,6 +566,14 @@ export class TrustGateError extends Error {
     this.name = 'TrustGateError';
   }
 }
+
+/**
+ * Why `Config.setApprovalMode` refuses a privileged mode in a session-agents
+ * session: every write or command an agent runs there asks the person in the
+ * chat session (see `Config.markSessionAgentSession`).
+ */
+const SESSION_AGENT_APPROVAL_MODE_ERROR =
+  'A session agent always asks before writing or running commands; its approval mode stays "default".';
 
 /**
  * Information about an approval mode including display name and description.
@@ -1040,10 +1049,17 @@ export interface AgentsCollabSettings {
    */
   maxParallelAgents?: number;
   /**
-   * Per-model maximum number of background sub-agents running concurrently,
-   * keyed by concrete model ID. Overrides the global `maxParallelAgents` for
-   * the matched model; models not listed here fall back to the global limit.
-   * Useful when a model has a lower concurrency capacity than the rest.
+   * Per-model maximum number of top-level sub-agents running concurrently,
+   * keyed by concrete model ID. Bounds both background and foreground
+   * launches. For background launches the tighter of this cap and the global
+   * `maxParallelAgents` binds; foreground launches are bounded by this cap
+   * alone. Applies to top-level launches only — nested sub-agents, teammate
+   * fan-out, foreground interactive forks, external-executor subagents, and
+   * agents dispatched by a workflow script are not capped. Models not listed
+   * here fall back to the global limit for background launches and are
+   * uncapped for foreground launches — list a model here to bound its
+   * foreground fan-out. Useful when a model has a lower concurrency capacity
+   * than the rest.
    */
   maxParallelAgentsByModel?: Record<string, number>;
   /** Display mode for multi-agent sessions ('in-process' | 'tmux' | 'iterm2') */
@@ -1109,6 +1125,13 @@ export interface ConfigParameters {
    * Managed session has no tools.
    */
   managedRuntimeEnvironment?: (config: Config) => ExecutionEnvironment;
+  /**
+   * Called by a Managed session's Runtime machinery when a worker's stop
+   * could not be proven (`quarantined: true`) and when the reaper proves it
+   * (`false`, with the same reason). The host quarantines the engine on the
+   * first and lifts it on the second. Ignored for any other engine.
+   */
+  onManagedEngineQuarantine?: (quarantined: boolean, reason: Error) => void;
   embeddingModel?: string;
   sandbox?: SandboxConfig;
   targetDir: string;
@@ -2633,12 +2656,16 @@ export function deriveAgentConfig(
   };
 }
 
+/**
+ * A subagent of an untrusted folder, or of a session-agents session (which
+ * always asks, see `Config.markSessionAgentSession`), gets no privileged mode.
+ */
 function getTrustedDerivedApprovalMode(
   base: Config,
   requestedMode: ApprovalMode,
 ): ApprovalMode {
   if (
-    !base.isTrustedFolder() &&
+    (!base.isTrustedFolder() || base.isSessionAgentSession?.() === true) &&
     requestedMode !== ApprovalMode.DEFAULT &&
     requestedMode !== ApprovalMode.PLAN
   ) {
@@ -2741,6 +2768,10 @@ export class Config {
     config: Config,
   ) => ExecutionEnvironment;
   private managedRuntimeEnvironment?: ExecutionEnvironment;
+  private readonly onManagedEngineQuarantine?: (
+    quarantined: boolean,
+    reason: Error,
+  ) => void;
   private managedRuntimeClosing?: Promise<void>;
   private managedSessionBlock?: Error;
   private restoredFileHistory = false;
@@ -2847,6 +2878,14 @@ export class Config {
   private systemPrompt: string | undefined;
   private workspaceAgentName: string | undefined;
   private workspaceAgentExecutionAllowedTools: ReadonlySet<string> | undefined;
+  /** The persona's `disallowedTools`; enforced for session-agents sessions. */
+  private workspaceAgentDisallowedTools: readonly string[] | undefined;
+  /**
+   * Set when this `agent` session was started by the session-agents
+   * orchestrator rather than the thread dispatcher. See
+   * {@link markSessionAgentSession}.
+   */
+  private sessionAgentSession = false;
   private readonly appendSystemPrompt: string | undefined;
   private liveAppendSystemPrompt: string | undefined;
   private outputStyle: OutputStyleDefinition | undefined;
@@ -3306,6 +3345,10 @@ export class Config {
     this.managedRuntimeEnvironmentFactory =
       params.sessionExecutionEngine === 'managed'
         ? params.managedRuntimeEnvironment
+        : undefined;
+    this.onManagedEngineQuarantine =
+      params.sessionExecutionEngine === 'managed'
+        ? params.onManagedEngineQuarantine
         : undefined;
     this.setSessionRestoreProjection(params.sessionRestoreProjection);
     // Daemon Configs use sessionIdContext and must not replace the
@@ -5984,6 +6027,33 @@ export class Config {
   }
 
   /**
+   * Quarantines the engine that hosts this Managed session: a Runtime
+   * worker's stop could not be proven, so no new Managed session may run
+   * beside work nobody can account for. Cleared with the same reason once
+   * the reaper proves the stop.
+   */
+  reportManagedEngineQuarantine(reason: Error): void {
+    if (isDerivedConfig(this)) {
+      (Object.getPrototypeOf(this) as Config).reportManagedEngineQuarantine(
+        reason,
+      );
+      return;
+    }
+    this.onManagedEngineQuarantine?.(true, reason);
+  }
+
+  /** Lifts a quarantine reported with this very reason. */
+  clearManagedEngineQuarantine(reason: Error): void {
+    if (isDerivedConfig(this)) {
+      (Object.getPrototypeOf(this) as Config).clearManagedEngineQuarantine(
+        reason,
+      );
+      return;
+    }
+    this.onManagedEngineQuarantine?.(false, reason);
+  }
+
+  /**
    * The durable outcome writer for this session's Runtime-backed tools, built
    * once the log is open. A Managed session that records no log has none; a
    * derived Config has none either, as its tools would need an execution
@@ -6083,6 +6153,7 @@ export class Config {
     systemPrompt: string,
     agentName: string,
     executionAllowedTools?: readonly string[],
+    disallowedTools?: readonly string[],
   ): void {
     if (this.sessionSourceType !== 'agent') {
       throw new Error(
@@ -6099,6 +6170,9 @@ export class Config {
     this.workspaceAgentExecutionAllowedTools = executionAllowedTools
       ? new Set(executionAllowedTools)
       : undefined;
+    this.workspaceAgentDisallowedTools = disallowedTools
+      ? [...disallowedTools]
+      : undefined;
   }
 
   /**
@@ -6110,6 +6184,41 @@ export class Config {
    */
   getWorkspaceAgentName(): string | undefined {
     return this.workspaceAgentName;
+  }
+
+  /**
+   * Marks this agent session as one the session-agents orchestrator drives
+   * (an agent answering @-mentions in a chat session), not a thread run.
+   *
+   * Must be called before `initialize()`: it decides whether the thread tools
+   * are registered at all. The caller sets it only after finding a persisted
+   * session-agents binding that names this session for this agent, so it is
+   * a server-side decision, never a client claim.
+   *
+   * Effects (product decision 2026-10-05, session-multi-agent design §8-1): no thread tools, and no
+   * read-only ceiling — every tool is available and writes / command
+   * execution go through the session's ordinary approval flow, which the
+   * orchestrator relays to the chat session. That flow is the only gate, so
+   * the session is pinned to `default` approval whatever the settings say,
+   * and {@link setApprovalMode} refuses a privileged mode for it later.
+   */
+  markSessionAgentSession(): void {
+    if (this.sessionSourceType !== 'agent') {
+      throw new Error(
+        'Only an agent session can be marked as a session-agents session.',
+      );
+    }
+    this.sessionAgentSession = true;
+    // Assigned rather than set: before `initialize()` there is no permission
+    // manager to adjust, and a fresh hidden session has no mode history.
+    this.approvalMode = ApprovalMode.DEFAULT;
+    this.prePlanMode = undefined;
+    this.planExecutionMode = undefined;
+  }
+
+  /** Whether {@link markSessionAgentSession} was applied to this session. */
+  isSessionAgentSession(): boolean {
+    return this.sessionAgentSession && this.sessionSourceType === 'agent';
   }
 
   setSessionSource(sourceType: string, sourceId?: string): void {
@@ -9248,6 +9357,12 @@ export class Config {
     if (executionMode === ApprovalMode.PLAN) {
       throw new Error('Plan is not an execution approval mode');
     }
+    if (
+      this.isSessionAgentSession?.() === true &&
+      executionMode !== ApprovalMode.DEFAULT
+    ) {
+      throw new Error(SESSION_AGENT_APPROVAL_MODE_ERROR);
+    }
     if (!this.isTrustedFolder() && executionMode !== ApprovalMode.DEFAULT) {
       throw new TrustGateError(
         'Cannot enable privileged approval modes in an untrusted folder.',
@@ -9328,6 +9443,15 @@ export class Config {
       !Object.prototype.hasOwnProperty.call(this, 'setApprovalMode')
     ) {
       throw new Error('Derived Configs cannot change approval mode');
+    }
+    if (
+      // Optional call: per-agent configs built over a partial parent (e.g.
+      // InProcessBackend's) may not carry the method.
+      this.isSessionAgentSession?.() === true &&
+      mode !== ApprovalMode.DEFAULT &&
+      mode !== ApprovalMode.PLAN
+    ) {
+      throw new Error(SESSION_AGENT_APPROVAL_MODE_ERROR);
     }
     if (
       !this.isTrustedFolder() &&
@@ -12132,6 +12256,14 @@ export class Config {
           this.getWorkspaceContext().isPathWithinWorkspace(candidate),
       );
     }
+    if (this.isWorkspaceAgentSession() && this.isSessionAgentSession()) {
+      // Session-agents sessions skip the read-only ceiling (session-multi-agent design §8-1).
+      return createSessionAgentToolInvocationGuard(
+        this.toolInvocationGuard,
+        this.workspaceAgentExecutionAllowedTools,
+        this.workspaceAgentDisallowedTools,
+      );
+    }
     return this.isWorkspaceAgentSession()
       ? createAgentToolInvocationGuard(
           this.toolInvocationGuard,
@@ -12823,7 +12955,9 @@ export class Config {
     // run context" on first use. Observed both ways with the six-combination
     // probe: dropping the clause takes the plain-subagent row from six tools
     // to zero and leaves the agent-subagent row at six.
-    if (this.isWorkspaceAgentSession()) {
+    // A session-agents session has no thread behind it; its thread tools
+    // would only ever throw "requires an active agent run context".
+    if (this.isWorkspaceAgentSession() && !this.isSessionAgentSession()) {
       await registerLazy(ToolNames.THREAD_POST, async () => {
         const { ThreadPostTool } = await import('../tools/thread-tools.js');
         return new ThreadPostTool(this);

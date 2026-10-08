@@ -1885,7 +1885,7 @@
         "maxParallelAgents": {
           "type": "integer",
           "minimum": 1,
-          "description": "Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Use maxParallelAgentsByModel to cap a specific model below this global limit."
+          "description": "Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Foreground per-model launches are bounded by maxParallelAgentsByModel and do not consume this global background budget. Use maxParallelAgentsByModel to cap a specific model below this global limit."
         },
         "maxParallelAgentsByModel": {
           "type": "object",
@@ -1893,7 +1893,7 @@
             "type": "integer",
             "minimum": 1
           },
-          "description": "Per-model maximum number of background sub-agents that can run concurrently, keyed by model ID (e.g. { \"qwen3-max\": 2 }). Useful when a model has a lower concurrency capacity. Takes precedence over the global maxParallelAgents for the matched model; models not listed here fall back to the global limit."
+          "description": "Per-model maximum number of top-level sub-agents that can run concurrently on a given model, keyed by model ID (e.g. { \"qwen3-max\": 2 }). Bounds both background and foreground launches: a foreground launch on a capped model queues inline (showing \"Waiting for a model slot\") until a slot frees. Applies to top-level launches only — nested sub-agents, teammate fan-out, foreground interactive forks, external-executor subagents, and agents dispatched by a workflow script are not capped by this setting. For background launches the tighter of this cap and the global maxParallelAgents binds; foreground launches are bounded by this cap alone. Models not listed here fall back to the global maxParallelAgents for background launches and are uncapped for foreground launches — list a model here to bound its foreground fan-out."
         },
         "displayMode": {
           "description": "Display mode for multi-agent sessions. Currently only \"in-process\" is supported. Options: in-process",
@@ -4489,9 +4489,21 @@
           "default": false
         },
         "agentCollaboration": {
-          "description": "Enable persistent workspace Agents collaborating on shared task threads (experimental). Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.",
+          "description": "Enable persistent workspace Agents that you can @-mention in a chat session (experimental). Each mentioned Agent answers in the same session from its own native session. Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.",
           "type": "boolean",
           "default": false
+        },
+        "agentChainLimit": {
+          "description": "Maximum number of agent-to-agent hops when Agents @-mention each other in a chat session (experimental). A message from you resets the count. 0 means unlimited; every hop is a separate paid Agent run, and \"Stop all agents\" is always available.",
+          "type": "number",
+          "default": 0,
+          "minimum": 0
+        },
+        "agentTokenBudget": {
+          "description": "Tokens Agents may spend in one chat session between two of your messages before they stop waking each other (experimental). Agents still answer what they were asked; your next message resets the budget. 0 means unlimited.",
+          "type": "number",
+          "default": 1000000,
+          "minimum": 0
         },
         "artifact": {
           "description": "Enable artifact tools. Enabled by default. In interactive, non-SDK sessions, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Non-SDK daemon sessions can use the metadata-only record_artifact tool. Set this to false or use QWEN_CODE_DISABLE_ARTIFACT=1 to disable both.",

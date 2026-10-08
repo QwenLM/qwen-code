@@ -154,6 +154,8 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'turn_result',
   'turn_attempt',
   'user_text_elements',
+  'agent_mention',
+  'agent_message',
   ...ARTIFACT_RECORD_SUBTYPES,
   ...MANAGED_SESSION_RECORD_SUBTYPES,
 ]);

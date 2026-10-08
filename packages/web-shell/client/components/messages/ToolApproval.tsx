@@ -18,6 +18,7 @@ import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
 import {
   getEmptyMcpToolTitleDescription,
   localizeToolDisplayName,
+  sanitizeControlChars,
 } from './toolFormatting';
 import {
   ThinkingTranslateButton,
@@ -564,6 +565,21 @@ export function ToolApproval({
     [request.content, hostOwnsEditDiffPreview],
   );
   const command = getCommandFromRawInput(request);
+  // `rawInput.command` is model-supplied and reaches this block verbatim, so
+  // neutralise the invisible controls `sanitizeControlChars` covers — C0/ANSI,
+  // C1, and the bidi embedding/isolate controls — before an approver reads it.
+  // That is the whole of its coverage: zero-width and line/paragraph separator
+  // code points are not in its character class and still pass through here.
+  // The raw `command` is kept for execution and for the explain button below.
+  const commandDisplay = sanitizeControlChars(command ?? '');
+  // The description is model-supplied too (`rawInput.description`, or a title
+  // built from the tool's own `getDescription()`), and renders one element
+  // above the command block, in its tooltip and in the `aria-describedby`
+  // target. Sanitise the text only: the element gate below must stay on the
+  // raw value or the IDREF dangles.
+  const descriptionDisplay = descriptionText
+    ? sanitizeControlChars(descriptionText)
+    : undefined;
   const showsCommandBlock =
     !isGoal && Boolean((isExec && command) || showsContent);
   // Exec warnings (e.g. command-substitution notices) arrive as real content
@@ -573,6 +589,11 @@ export function ToolApproval({
     isExec && command && showsContent && !request.contentIsInput
       ? contentText
       : null;
+  // The warnings text interpolates the model's raw `directory` argument
+  // (see `buildOutsideWorkspaceWarning`), so treat it like the command.
+  const execWarningsDisplay = execWarningsText
+    ? sanitizeControlChars(execWarningsText)
+    : undefined;
   const questionText = isGoal
     ? t('approval.goal.hint')
     : showsPlanWorkflow
@@ -625,8 +646,8 @@ export function ToolApproval({
       </div>
 
       {descriptionText && (
-        <div className={styles.desc} id={descId} title={descriptionText}>
-          {descriptionText}
+        <div className={styles.desc} id={descId} title={descriptionDisplay}>
+          {descriptionDisplay}
         </div>
       )}
 
@@ -640,17 +661,21 @@ export function ToolApproval({
       ) : isExec && command ? (
         <>
           <div className={styles.code}>
-            <pre className={styles.codeBlock} id={commandId} title={command}>
-              {command}
+            <pre
+              className={styles.codeBlock}
+              id={commandId}
+              title={commandDisplay}
+            >
+              {commandDisplay}
             </pre>
           </div>
           {execWarningsText && (
             <pre
               className={styles.content}
               id={contentId}
-              title={execWarningsText}
+              title={execWarningsDisplay}
             >
-              {execWarningsText}
+              {execWarningsDisplay}
             </pre>
           )}
         </>

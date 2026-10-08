@@ -35,6 +35,11 @@ import type {
   ThreadRun,
 } from '@qwen-code/qwen-code-core';
 import {
+  HOST_PROTOCOL_VERSION,
+  type SessionAgentProgram,
+} from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
+import { updateWorkspaceAgentsWithSquads } from '@qwen-code/qwen-code-core/agents/session-agents/squad-store.js';
+import {
   assignThread,
   createAssignedThread,
   postMessage,
@@ -59,7 +64,6 @@ import {
   maxConcurrentRunsFor,
   updateWorkspaceAgent,
   threadTokens,
-  updateWorkspaceAgents,
   withAgentStoreTransaction,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
 import { strandLocalRuns } from '@qwen-code/qwen-code-core/agents/workspace-agents/stranded-runs.js';
@@ -71,10 +75,10 @@ import {
   DEFAULT_THREAD_AUTO_TURN_BUDGET,
   DEFAULT_THREAD_TOKEN_BUDGET,
   AGENT_PROGRAM_LABELS,
-  hostOffersProgram,
+  hostAvailablePrograms,
+  type AgentHostView,
   isAgentProgram,
   isThreadTerminal,
-  type AgentProgram,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/types.js';
 import {
   decideDispatch,
@@ -109,7 +113,13 @@ import {
   subscribeAgentEvents,
   type AgentLiveEvent,
 } from '../workspace-agents/agent-events.js';
-import { registerAgentHostConnectionRoutes } from './agent-host-connection.js';
+import {
+  getSessionAgentOrchestrator,
+  type SessionAgentLiveRunSummary,
+} from '../session-agents/orchestrator.js';
+import { probeAgentPrograms } from '../session-agents/program-probe.js';
+import { availablePrograms } from '../agent-host-programs.js';
+import { registerAgentHostRemoteConnectRoute } from './agent-host-connection.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -139,6 +149,47 @@ const LIVE_RUN_STATUSES = new Set([
   'cancelling',
 ]);
 const ACTIVE_RUN_STATUSES = new Set(['running', 'finishing', 'cancelling']);
+
+/** Executing (not queued) session-agent run statuses. */
+const EXECUTING_SESSION_RUN_STATUSES: ReadonlySet<string> = new Set([
+  'running',
+  'awaiting_approval',
+]);
+
+function sessionHostPrograms(host: AgentHostView): SessionAgentProgram[] {
+  return host.protocol === HOST_PROTOCOL_VERSION
+    ? hostAvailablePrograms(host)
+    : [];
+}
+
+/** The programs this machine can run agents with, as ids. */
+async function localPrograms(): Promise<SessionAgentProgram[]> {
+  return availablePrograms(await probeAgentPrograms());
+}
+
+/**
+ * This workspace's live session-agent runs; none without an orchestrator.
+ *
+ * Both collaboration surfaces exist while the thread subsystem is being
+ * retired: thread runs live in the store, session-agent runs in the daemon's
+ * orchestrator. Roster status and roster changes consult both.
+ * TODO(multi-agent): only this source remains once the thread subsystem goes.
+ */
+async function sessionLiveRunsOf(
+  runtime: WorkspaceRuntime,
+): Promise<SessionAgentLiveRunSummary[]> {
+  const orchestrator = getSessionAgentOrchestrator(runtime.workspaceCwd);
+  return orchestrator ? orchestrator.liveRuns() : [];
+}
+
+async function hasSessionLiveRuns(
+  runtime: WorkspaceRuntime,
+  agentId: string,
+): Promise<boolean> {
+  return (await sessionLiveRunsOf(runtime)).some(
+    (run) => run.agentId === agentId,
+  );
+}
 
 function liveRunCount(thread: Thread): number {
   return thread.runs.filter((run) => LIVE_RUN_STATUSES.has(run.status)).length;
@@ -240,9 +291,12 @@ function readAgentExecution(
   if (value === undefined) return undefined;
   if (typeof value !== 'object' || value === null) return 'invalid';
   const input = value as Record<string, unknown>;
-  if (input['mode'] === 'local') return { mode: 'local' };
-  const hostIds = input['hostIds'];
   const provider = input['provider'];
+  if (input['mode'] === 'local') {
+    if (provider !== undefined && !isAgentProgram(provider)) return 'invalid';
+    return { mode: 'local', ...(provider ? { provider } : {}) };
+  }
+  const hostIds = input['hostIds'];
   if (
     input['mode'] !== 'managed-host' ||
     !Array.isArray(hostIds) ||
@@ -379,7 +433,10 @@ export function registerWorkspaceAgentRoutes(
     return runtime;
   };
 
-  registerAgentHostConnectionRoutes(app, prefix, runtimeFor, deps.mutate);
+  // `hosts/service` and `hosts/connect` (being joined as a runtime) are
+  // mounted by server.ts regardless of the opt-in; only the coordinator-side
+  // pull stays behind it.
+  registerAgentHostRemoteConnectRoute(app, prefix, runtimeFor, deps.mutate);
 
   const dispatch = async (runtime: WorkspaceRuntime): Promise<void> => {
     runtime.generationGuard?.assertOpen();
@@ -649,16 +706,36 @@ export function registerWorkspaceAgentRoutes(
     if (!runtime) return;
     const root = runtime.workspaceCwd;
     try {
-      const [agents, { threads }, workspace, hosts] = await Promise.all([
-        readWorkspaceAgents(root),
-        listThreads(root),
-        readAgentWorkspace(root),
-        readAgentHosts(root),
-      ]);
+      const [agents, { threads }, workspace, hosts, liveRuns, programs] =
+        await Promise.all([
+          readWorkspaceAgents(root),
+          listThreads(root),
+          readAgentWorkspace(root),
+          readAgentHosts(root),
+          sessionLiveRunsOf(runtime),
+          localPrograms(),
+        ]);
       const sessions = runtime.bridge.listWorkspaceSessions(root);
       const agentSessions = sessions.filter(
         (candidate) => candidate.sourceType === AGENT_SESSION_SOURCE_TYPE,
       );
+      // Session-agent runs on a runtime: executing ones count where they run,
+      // a queued one (no runtime yet) where its agent lives. Added to the
+      // thread runs counted below.
+      const sessionRunsOf = (
+        agentIds: ReadonlySet<string>,
+        hostId?: string,
+      ) => ({
+        running: liveRuns.filter(
+          (run) =>
+            agentIds.has(run.agentId) &&
+            (hostId === undefined ? !run.hostId : run.hostId === hostId) &&
+            EXECUTING_SESSION_RUN_STATUSES.has(run.status),
+        ).length,
+        queued: liveRuns.filter(
+          (run) => agentIds.has(run.agentId) && run.status === 'queued',
+        ).length,
+      });
       const lastSeenAt = workspace.hostSessionId
         ? runtime.bridge.getHeartbeatState(workspace.hostSessionId)
             ?.sessionLastSeenAt
@@ -674,7 +751,10 @@ export function registerWorkspaceAgentRoutes(
         id: LOCAL_AGENT_RUNTIME_ID,
         kind: 'local' as const,
         label: 'Local daemon',
-        provider: 'Qwen Code ACP',
+        provider: programs
+          .map((program) => AGENT_PROGRAM_LABELS[program])
+          .join(', '),
+        programs,
         status: 'online' as const,
         workspaceId: runtime.workspaceId,
         workspaceCwd: root,
@@ -684,22 +764,24 @@ export function registerWorkspaceAgentRoutes(
         ...(lastSeenAt !== undefined ? { lastSeenAt } : {}),
         agentCount: localAgentIds.size,
         sessionCount: agentSessions.length,
-        runningTaskCount: threads.filter((thread) =>
-          thread.runs.some(
-            (run) =>
-              localAgentIds.has(run.agentId) &&
-              ACTIVE_RUN_STATUSES.has(run.status),
-          ),
-        ).length,
-        queuedTaskCount: threads.reduce(
-          (count, thread) =>
-            count +
-            thread.runs.filter(
+        runningTaskCount:
+          threads.filter((thread) =>
+            thread.runs.some(
               (run) =>
-                localAgentIds.has(run.agentId) && run.status === 'queued',
-            ).length,
-          0,
-        ),
+                localAgentIds.has(run.agentId) &&
+                ACTIVE_RUN_STATUSES.has(run.status),
+            ),
+          ).length + sessionRunsOf(localAgentIds).running,
+        queuedTaskCount:
+          threads.reduce(
+            (count, thread) =>
+              count +
+              thread.runs.filter(
+                (run) =>
+                  localAgentIds.has(run.agentId) && run.status === 'queued',
+              ).length,
+            0,
+          ) + sessionRunsOf(localAgentIds).queued,
       };
       const now = Date.now();
       const hostRuntimes = hosts.map((host) => {
@@ -718,10 +800,9 @@ export function registerWorkspaceAgentRoutes(
           kind: 'external' as const,
           label: host.name,
           provider: host.providers.join(', '),
-          programs: (
-            Object.keys(AGENT_PROGRAM_LABELS) as AgentProgram[]
-          ).filter((program) => hostOffersProgram(host, program)),
+          programs: sessionHostPrograms(host),
           status:
+            host.protocol === HOST_PROTOCOL_VERSION &&
             host.lastSeenAt !== undefined &&
             now - host.lastSeenAt <= AGENT_HOST_ONLINE_WINDOW_MS
               ? ('online' as const)
@@ -733,22 +814,24 @@ export function registerWorkspaceAgentRoutes(
             : {}),
           agentCount: agentIds.size,
           sessionCount: 0,
-          runningTaskCount: threads.filter((thread) =>
-            thread.runs.some(
-              (run) =>
-                agentIds.has(run.agentId) &&
-                run.lease?.hostId === host.id &&
-                ACTIVE_RUN_STATUSES.has(run.status),
-            ),
-          ).length,
-          queuedTaskCount: threads.reduce(
-            (count, thread) =>
-              count +
-              thread.runs.filter(
-                (run) => agentIds.has(run.agentId) && run.status === 'queued',
-              ).length,
-            0,
-          ),
+          runningTaskCount:
+            threads.filter((thread) =>
+              thread.runs.some(
+                (run) =>
+                  agentIds.has(run.agentId) &&
+                  run.lease?.hostId === host.id &&
+                  ACTIVE_RUN_STATUSES.has(run.status),
+              ),
+            ).length + sessionRunsOf(agentIds, host.id).running,
+          queuedTaskCount:
+            threads.reduce(
+              (count, thread) =>
+                count +
+                thread.runs.filter(
+                  (run) => agentIds.has(run.agentId) && run.status === 'queued',
+                ).length,
+              0,
+            ) + sessionRunsOf(agentIds, host.id).queued,
         };
       });
       res.json({
@@ -763,14 +846,25 @@ export function registerWorkspaceAgentRoutes(
             (run) =>
               run.agentId === agent.id && ACTIVE_RUN_STATUSES.has(run.status),
           );
-          const waiting = threads.reduce(
-            (count, thread) =>
-              count +
-              thread.runs.filter(
-                (run) => run.agentId === agent.id && run.status === 'queued',
-              ).length,
-            0,
+          const sessionRuns = liveRuns.filter(
+            (run) => run.agentId === agent.id,
           );
+          const executing = sessionRuns.find((run) =>
+            EXECUTING_SESSION_RUN_STATUSES.has(run.status),
+          );
+          // TODO(multi-agent): a remote agent's queued thread run never runs
+          // (no Host v1 pickup; see the TODO in dispatcher.ts
+          // `selectCandidates`). New ones are refused at A2A intake, so only
+          // runs queued before that refusal are counted here as waiting.
+          const waiting =
+            threads.reduce(
+              (count, thread) =>
+                count +
+                thread.runs.filter(
+                  (run) => run.agentId === agent.id && run.status === 'queued',
+                ).length,
+              0,
+            ) + sessionRuns.filter((run) => run.status === 'queued').length;
           const sessionsForAgent = agentSessions.filter(
             (candidate) => candidate.sourceId === agent.id,
           );
@@ -787,6 +881,7 @@ export function registerWorkspaceAgentRoutes(
               : undefined;
           const selectedHostId =
             activeRun?.lease?.hostId ??
+            executing?.hostId ??
             availableHost?.id ??
             (execution.mode === 'managed-host'
               ? execution.hostIds[0]
@@ -795,7 +890,9 @@ export function registerWorkspaceAgentRoutes(
             (host) => host.id === selectedHostId,
           );
           const runtimeAvailable =
-            execution.mode === 'local' || availableHost !== undefined;
+            execution.mode === 'local'
+              ? !execution.provider || programs.includes(execution.provider)
+              : availableHost !== undefined;
           const blocked = threads.some(
             (thread) =>
               resolve(thread, threads).status === 'blocked' &&
@@ -820,14 +917,16 @@ export function registerWorkspaceAgentRoutes(
             !runtimeAvailable
               ? 'offline'
               : active ||
+                  executing ||
                   sessionsForAgent.some((entry) => entry.hasActivePrompt)
                 ? 'working'
-                : blocked
-                  ? 'blocked'
-                  : failed ||
-                      sessionsForAgent.some((entry) => entry.hasTurnError)
-                    ? 'error'
-                    : 'idle';
+                : // A blocked agent needs attention the same way a failed
+                  // one does; the web shell has no separate "blocked" badge.
+                  blocked ||
+                    failed ||
+                    sessionsForAgent.some((entry) => entry.hasTurnError)
+                  ? 'error'
+                  : 'idle';
           return {
             id: agent.id,
             name: agent.name,
@@ -943,6 +1042,9 @@ export function registerWorkspaceAgentRoutes(
           res.status(404).json({ error: 'host_not_found' });
           return;
         }
+        // TODO(multi-agent): `runsEnded` covers thread runs only. A
+        // session-agent run this Host holds is not ended here; it fails when
+        // its lease expires in the session-agents orchestrator.
         res.json({
           agentsMadeLocal: result.agentsMadeLocal,
           runsEnded: result.runsEnded,
@@ -1469,6 +1571,14 @@ export function registerWorkspaceAgentRoutes(
           res.status(400).json({ error: 'execution_invalid' });
           return;
         }
+        if (
+          execution?.mode === 'local' &&
+          execution.provider !== undefined &&
+          !(await localPrograms()).includes(execution.provider)
+        ) {
+          res.status(400).json({ error: 'program_unavailable' });
+          return;
+        }
         if (execution?.mode === 'managed-host') {
           if (
             (typeof payload.agentType === 'string' &&
@@ -1485,10 +1595,13 @@ export function registerWorkspaceAgentRoutes(
             res.status(400).json({ error: 'agent_host_not_found' });
             return;
           }
-          const { provider } = execution;
           if (
-            provider &&
-            !placed.some((host) => hostOffersProgram(host, provider))
+            !placed.some((host) => {
+              const programs = sessionHostPrograms(host);
+              return execution.provider === undefined
+                ? programs.length > 0
+                : programs.includes(execution.provider);
+            })
           ) {
             res.status(400).json({ error: 'program_unavailable' });
             return;
@@ -1509,7 +1622,19 @@ export function registerWorkspaceAgentRoutes(
         // between a person renaming and a person hunting for an agent that is
         // not in the list.
         let duplicateRetired = false;
-        await updateWorkspaceAgents(root, (agents) => {
+        let squadClash = false;
+        // Agents and squads share one @-name space; the squads are read under
+        // the same lock as this roster write, so neither can take the name in
+        // between.
+        await updateWorkspaceAgentsWithSquads(root, (agents, squads) => {
+          if (
+            squads.some(
+              (squad) => squad.name.toLowerCase() === name.toLowerCase(),
+            )
+          ) {
+            squadClash = true;
+            return agents;
+          }
           const clash = agents.find(
             (agent) => agent.name.toLowerCase() === name.toLowerCase(),
           );
@@ -1526,6 +1651,12 @@ export function registerWorkspaceAgentRoutes(
           });
           return [...agents, created];
         });
+        if (squadClash) {
+          res
+            .status(409)
+            .json({ error: `A squad named "${name}" already exists.` });
+          return;
+        }
         if (duplicate) {
           res.status(409).json({
             error: duplicateRetired
@@ -1553,6 +1684,14 @@ export function registerWorkspaceAgentRoutes(
       if (!runtime) return;
       const agentId = String(req.params['id']);
       try {
+        // An agent cannot be retired out from under a session-agent run in
+        // flight; its thread runs are checked by the store below.
+        // TODO(multi-agent): check-then-retire is not atomic with the
+        // orchestrator; a mention landing in between still starts a run.
+        if (await hasSessionLiveRuns(runtime, agentId)) {
+          res.status(409).json({ error: 'agent_has_live_work' });
+          return;
+        }
         const result = await retireWorkspaceAgent(
           runtime.workspaceCwd,
           agentId,
@@ -1742,6 +1881,45 @@ export function registerWorkspaceAgentRoutes(
       }
       try {
         const agentId = String(req.params['id']);
+        // Moving an agent under a live session-agent run would leave that run
+        // on a runtime the agent no longer names. Thread runs are checked by
+        // the store below.
+        if (
+          execution !== undefined &&
+          (await hasSessionLiveRuns(runtime, agentId))
+        ) {
+          res.status(409).json({ error: 'agent_has_live_work' });
+          return;
+        }
+        if (
+          execution?.mode === 'local' &&
+          execution.provider !== undefined &&
+          !(await localPrograms()).includes(execution.provider)
+        ) {
+          res.status(400).json({ error: 'program_unavailable' });
+          return;
+        }
+        if (execution?.mode === 'managed-host') {
+          const hosts = await readAgentHosts(runtime.workspaceCwd);
+          const placed = hosts.filter((host) =>
+            execution.hostIds.includes(host.id),
+          );
+          if (placed.length !== execution.hostIds.length) {
+            res.status(400).json({ error: 'agent_host_not_found' });
+            return;
+          }
+          if (
+            !placed.some((host) => {
+              const programs = sessionHostPrograms(host);
+              return execution.provider === undefined
+                ? programs.length > 0
+                : programs.includes(execution.provider);
+            })
+          ) {
+            res.status(400).json({ error: 'program_unavailable' });
+            return;
+          }
+        }
         const result = await updateWorkspaceAgent(
           runtime.workspaceCwd,
           agentId,

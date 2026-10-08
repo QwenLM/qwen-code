@@ -504,9 +504,12 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # Step ceilings are per-step backstops, not the budget — the 60-minute
-    # job timeout is; a healthy run measured ~20 min end to end.
-    timeout-minutes: 60
+    # The step ceilings (25 + 9×10 + 12 = 127 — the Verify step's 25
+    # sits above its failsafe fork timeout) plus ~10 minutes for the
+    # uncapped setup steps (Checkout..Install MySQL binaries, the report
+    # checks) need ~137; 140 keeps a thin margin, and each arm buys its
+    # own 10 instead of sharing an envelope.
+    timeout-minutes: 140
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -550,6 +553,12 @@ jobs:
           # These steps only stage jars; the SpotBugs gate lives on the
           # `clean verify` invocations (pinned by scripts/tests/spotbugs-gate.test.js).
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests -Dspotbugs.skip=true install
+      # The drivers' proxy header filter only shows up in the gates below as
+      # an intermittent socket-reuse failure, so pin it directly first.
+      - name: 'Check Hosted proxy header relay'
+        run: |-
+          cd integration-tests
+          npx vitest run helpers/hosted-relay-headers.test.ts
       - name: 'Verify Hosted Java, Spring and MySQL processes'
         # Must outlive the hosted-harness-mysql failsafe fork timeout (900 s)
         # plus the wrapped compile/surefire/spotbugs/checkstyle work: a step
@@ -599,6 +608,26 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-continuation-failover
+      - name: 'Run long-answer persistence E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-big-output
+      - name: 'Run Harness-restart session failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-failover
+      - name: 'Run Harness-restart in-flight failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-inflight-failover
+      - name: 'Run Harness-restart continuation failover E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-continuation-failover
+      - name: 'Run frozen former-owner fencing E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-continuation-frozen-owner-failover
       - name: 'Upload Hosted process reports'
         if: 'always()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
