@@ -10,12 +10,18 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.never;
 
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRuntimeConstructionFixture;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiReservationStore;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceCsiRuntimeAccess;
+import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.KubernetesRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.ManagedCsiProtocol;
 import com.alibaba.qwen.code.runtimebroker.ManagedCsiFilesProtocol;
@@ -31,6 +37,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -58,6 +66,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.CannotCreateTransactionException;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 class WorkspaceCsiRuntimeIdentityTest {
     private static final String IMAGE = "registry.example/worker@sha256:" + "a".repeat(64);
@@ -248,6 +258,161 @@ class WorkspaceCsiRuntimeIdentityTest {
         var request = WorkspaceCsiRuntimeConstructionFixture.create(source, registration);
         var created = bindings.findOrCreate(request);
         original = bindings.claimOperation(created.getBindingId(), "owner", Duration.ofMinutes(5));
+    }
+
+    @Test
+    void privateOriginalAcquireInstallsContextOutsideSqlAndRetainsItsReservation() {
+        RuntimeSession session = acquiringPrivateSession();
+        var reserved = storage.inspect(registration);
+        var runtimeSessions = new JdbcRuntimeSessionRepository(source);
+        var before = runtimeSessions.findById(session.getScope(), session.getRuntimeSessionId());
+        when(transport.installContext(any(), any(), any(), any())).thenAnswer(call -> {
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            RuntimeBindingRecord runtime = call.getArgument(0);
+            RuntimeSessionRecord holder = call.getArgument(1);
+            ContextBinding context = call.getArgument(3);
+            assertThat(runtime.getBindingId()).isEqualTo(original.getBindingId());
+            assertThat(holder.getRuntimeSessionId()).isEqualTo(session.getHarnessSessionId());
+            assertThat(call.<String>getArgument(2)).isEqualTo(UUID.nameUUIDFromBytes(
+                    session.getRuntimeSessionId().getBytes(StandardCharsets.UTF_8)).toString());
+            assertThat(context.getContextConfigRef()).isEqualTo(CsiFilesRetirementProfile.CONTEXT_CONFIG_REF);
+            assertThat(context.getContextRevision()).isEqualTo(1);
+            return CompletableFuture.completedFuture(Map.of());
+        });
+        var access = privateAccess();
+        assertThat(join(access.resolve(session.getHarnessSessionId()))).isEqualTo(session.getScope());
+        join(access.acquire(original.getLease(), session));
+        join(access.acquire(original.getLease(), session));
+        assertThat(storage.inspect(registration)).isEqualTo(reserved);
+        assertThat(runtimeSessions.findById(session.getScope(), session.getRuntimeSessionId()).getState())
+                .isEqualTo(before.getState());
+        assertThat(runtimeSessions.findById(session.getScope(), session.getRuntimeSessionId()).getVersion())
+                .isEqualTo(before.getVersion());
+    }
+
+    @Test
+    void privateAcquireRefusesSealBeforeDispatchAndLateSuccessAfterSeal() {
+        RuntimeSession session = acquiringPrivateSession();
+        var response = new CompletableFuture<Map<String, Object>>();
+        when(transport.installContext(any(), any(), any(), any())).thenReturn(response);
+        var access = privateAccess();
+        var pending = access.acquire(original.getLease(), session);
+        assertThat(pending.toCompletableFuture()).isNotDone();
+        var retirement = storage.beginRetirement(registration, bindings, original,
+                storage.inspect(registration), UUID.randomUUID().toString());
+        response.complete(Map.of());
+        refused(pending);
+        assertThat(storage.inspect(registration).phase()).isEqualTo("DRAINING");
+        assertThat(storage.inspectRetirement(registration, bindings,
+                bindings.findById(original.getBindingId()))).isEqualTo(retirement);
+        var runtime = new JdbcRuntimeSessionRepository(source).findById(session.getScope(), session.getRuntimeSessionId());
+        assertThat(runtime.getState()).isEqualTo(RuntimeSessionRecord.State.ACQUIRING);
+        assertThatThrownBy(() -> access.acquire(original.getLease(), session)).isInstanceOf(RuntimeBrokerException.class);
+        verify(transport).installContext(any(), any(), any(), any());
+    }
+
+    @Test
+    void privateAcquireRefusesChangedVersionAndRetainsUnknownInstallation() {
+        RuntimeSession session = acquiringPrivateSession();
+        var response = new CompletableFuture<Map<String, Object>>();
+        when(transport.installContext(any(), any(), any(), any())).thenReturn(response);
+        var reserved = storage.inspect(registration);
+        var pending = privateAccess().acquire(original.getLease(), session);
+        original = bindings.compareAndSet(original, original.withLastHealthAt(Instant.now(), Instant.now()));
+        response.complete(Map.of());
+        refused(pending);
+        assertThat(storage.inspect(registration)).isEqualTo(reserved);
+        when(transport.installContext(any(), any(), any(), any())).thenReturn(CompletableFuture.failedFuture(
+                new IllegalStateException("owned unknown response")));
+        assertThatThrownBy(() -> join(privateAccess().acquire(original.getLease(), session)))
+                .hasCauseInstanceOf(IllegalStateException.class);
+        assertThat(storage.inspect(registration)).isEqualTo(reserved);
+    }
+
+    @Test
+    void privateReadbackAndAcquireRefuseForeignIdentityPinReservationAndCallerTransaction() {
+        RuntimeSession session = acquiringPrivateSession();
+        var access = privateAccess();
+        refused(access.resolve(UUID.randomUUID().toString()));
+        var caller = new TransactionTemplate(new DataSourceTransactionManager(source));
+        caller.executeWithoutResult(status -> refused(access.resolve(session.getHarnessSessionId())));
+        for (var invalid : List.of(new RuntimeSession(session.getHarnessSessionId(), UUID.randomUUID().toString(),
+                "bootstrap", session.getScope()), new RuntimeSession(session.getHarnessSessionId(),
+                        session.getRuntimeSessionId(), "continuation", session.getScope()))) {
+            assertThatThrownBy(() -> access.acquire(original.getLease(), invalid)).isInstanceOf(RuntimeBrokerException.class);
+        }
+        var jdbc = new JdbcTemplate(source);
+        jdbc.update("UPDATE managed_agent_session SET runtime_request_key = ? WHERE session_id = ?",
+                "f".repeat(64), session.getHarnessSessionId());
+        assertThatThrownBy(() -> join(access.resolve(session.getHarnessSessionId()))).hasCauseInstanceOf(ApiException.class);
+        assertThatThrownBy(() -> access.acquire(original.getLease(), session)).isInstanceOf(RuntimeBrokerException.class);
+        jdbc.update("UPDATE managed_agent_session SET runtime_request_key = ? WHERE session_id = ?",
+                original.getRequest().requestKey(), session.getHarnessSessionId());
+        jdbc.update("UPDATE managed_workspace_execution_lease SET csi_registration_revision = 2");
+        assertThatThrownBy(() -> access.acquire(original.getLease(), session)).isInstanceOf(RuntimeBrokerException.class);
+        jdbc.update("UPDATE managed_workspace_execution_lease SET csi_registration_revision = 1");
+        jdbc.update("UPDATE managed_agent_session SET context_revision = 2 WHERE session_id = ?", session.getHarnessSessionId());
+        assertThatThrownBy(() -> access.acquire(original.getLease(), session)).isInstanceOf(RuntimeBrokerException.class);
+        verify(transport, never()).installContext(any(), any(), any(), any());
+    }
+
+    @Test
+    void privateAcquireRefusesAnotherRuntimeHolderAndForeignLeaseBeforeRpc() {
+        RuntimeSession session = acquiringPrivateSession();
+        var access = privateAccess();
+        var lease = original.getLease();
+        var foreign = new RuntimeLease(lease.getRuntimeInstanceId(), lease.getEndpoint(), lease.getToken(),
+                UUID.randomUUID().toString(), lease.getEpoch());
+        assertThatThrownBy(() -> access.acquire(foreign, session)).isInstanceOf(RuntimeBrokerException.class);
+        var jdbc = new JdbcTemplate(source);
+        jdbc.update("INSERT INTO qwen_runtime_session (runtime_session_id, scope_key, tenant_id, workspace_id,"
+                + " workspace_generation, canonical_cwd, capability_digest, isolation_class, harness_session_id,"
+                + " turn_kind, binding_id, runtime_generation, session_state, record_version, last_active_at)"
+                + " SELECT ?, scope_key, tenant_id, workspace_id, workspace_generation, canonical_cwd,"
+                + " capability_digest, isolation_class, harness_session_id, turn_kind, binding_id,"
+                + " runtime_generation, session_state, record_version, last_active_at FROM qwen_runtime_session"
+                + " WHERE runtime_session_id = ?", UUID.randomUUID().toString(), session.getRuntimeSessionId());
+        var reserved = storage.inspect(registration);
+        assertThatThrownBy(() -> access.acquire(lease, session)).isInstanceOf(RuntimeBrokerException.class);
+        assertThat(storage.inspect(registration)).isEqualTo(reserved);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_session", Integer.class)).isEqualTo(2);
+        verify(transport, never()).installContext(any(), any(), any(), any());
+    }
+
+    @Test
+    void privateContextAdmissionDoesNotAuthorizeToolsOrOrdinaryRelease() {
+        RuntimeSession session = acquiringPrivateSession();
+        var access = privateAccess();
+        refused(access.control(original.getLease(), session, Map.of("kind", "file-history")));
+        refused(access.execute(original.getLease(), session, Map.of("toolName", "write_file")));
+        refused(access.cancel(original.getLease(), session, Map.of()));
+        assertThatThrownBy(() -> join(access.release(original.getLease(), session))).hasCauseInstanceOf(RuntimeBrokerException.class)
+                .satisfies(error -> assertThat(((RuntimeBrokerException) error.getCause()).getCode()).isEqualTo("csi_finalize_required"));
+        assertThat(storage.inspect(registration).phase()).isEqualTo("RESERVED");
+    }
+
+    private RuntimeSession acquiringPrivateSession() {
+        privateRequest();
+        try (var provider = provider()) {
+            provider.reserveResource(original);
+            var handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            original = bindings.compareAndSet(original, original.withResourceHandle(handle, Instant.now()));
+            var lease = join(provider.provision(original.getRequest(), original.getProvisionSeed()));
+            original = bindings.compareAndSet(original, original.withAttestation(lease, handle, Instant.now(), Instant.now()));
+        }
+        String id = original.getRequest().getIsolationKey();
+        var session = new RuntimeSession(id, id, "bootstrap", original.getRequest().getScope());
+        bindings.admitSession(new JdbcRuntimeSessionRepository(source), new RuntimeSessionRecord(session,
+                original.getBindingId(), original.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+        return session;
+    }
+
+    private WorkspaceCsiRuntimeAccess privateAccess() {
+        var properties = new ManagedAgentProperties();
+        properties.setAgentRevision("construction-fixture/1");
+        return new WorkspaceCsiRuntimeAccess(new JdbcTemplate(source), new DataSourceTransactionManager(source),
+                new ObjectMapper(), properties, registration, original.getRequest().getIsolationKey(),
+                original.getRequest().requestKey(), bindings, new JdbcRuntimeSessionRepository(source), transport);
     }
 
     @Test

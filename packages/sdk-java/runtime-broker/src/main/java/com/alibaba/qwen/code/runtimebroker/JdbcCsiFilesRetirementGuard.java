@@ -195,7 +195,8 @@ public final class JdbcCsiFilesRetirementGuard {
         return original;
     }
 
-    static void requireSingleSession(Connection connection, Original original) throws SQLException {
+    public static void requireSingleSession(Connection connection, Original original) throws SQLException {
+        requireTransaction(connection);
         try (PreparedStatement statement = statement(connection,
                 "SELECT * FROM qwen_runtime_session WHERE binding_id = ?"
                         + " OR (tenant_id = ? AND harness_session_id = ?)"
