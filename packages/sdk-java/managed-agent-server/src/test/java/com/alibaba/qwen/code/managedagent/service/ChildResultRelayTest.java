@@ -410,6 +410,49 @@ class ChildResultRelayTest {
         assertThat(row.get().state()).isEqualTo("unknown");
     }
 
+    // A lost relay session id is not proof that execution never began:
+    // ledger `creating/null`, lineage names the child, and its own
+    // committed Turn says the run started — the give-up settles
+    // child_failed over those proofs, never creation_failed over the
+    // missing id.
+    @Test
+    void aGiveUpReadsLineageAndTurnBeforeChoosingTheFailureProof() {
+        when(store.findLineageChild(TENANT, PARENT, RUN)).thenReturn(CHILD);
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "RUNNING", null, null));
+        harness.refuseRecord = "attach";
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
+                "creating", "owner", now + 30_000, 63, 0, null, now, now));
+        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+                .thenReturn(null);
+        relay.scan();
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+        assertThat(harness.operations.get(0))
+                .containsEntry("stopReason", "child_failed")
+                .containsEntry("started", true);
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+    }
+
+    // The discovery page's own captured delivery is pre-claim evidence
+    // only: another worker's settlement landed in between must be the
+    // verdict the walk reads — a stale `planned` snapshot must never
+    // relaunch creation for a cancelled record.
+    @Test
+    void aStalePageSnapshotDoesNotRelaunchASettledRecord() {
+        when(store.deliveryState(TENANT, PARENT, RUN)).thenReturn(
+                "cancelled");
+        when(store.sessionStatus(TENANT, CHILD)).thenReturn("ACTIVE");
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("close_debt");
+        assertThat(harness.operations).isEmpty();
+        verify(sessions, never()).createChildSession(anyString(), anyString(),
+                anyString(), anyString(), anyString());
+    }
+
     // The bounded give-up on a capability-less host settles the parent's
     // record on time — the give-up and its started pairing are proven
     // facts — but never classifies `unknown` over the owed close: the

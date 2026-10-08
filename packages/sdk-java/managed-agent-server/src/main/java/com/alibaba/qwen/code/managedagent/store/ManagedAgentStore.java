@@ -335,6 +335,25 @@ public class ManagedAgentStore implements AgentStateStore {
             return new Admission(command.sessionId(), command.turnId(), true,
                     false);
         }
+        // The terminal truth fence: the relay can give up on a stalled
+        // creation and commit the run's terminal verdict (creation_failed
+        // among them), then retire — while a lease-losing worker that
+        // paused before this call is about to mint the Session anyway.
+        // The row lock serializes that verdict against this read, so a
+        // settled record refuses the mint inside its own transaction.
+        List<String> runState = jdbc.query("SELECT task_state FROM"
+                + " qwen_managed_session_extension_record WHERE tenant_id = ?"
+                + " AND session_id = ? AND domain = 'child_run'"
+                + " AND record_id = ? FOR UPDATE",
+                (result, row) -> result.getString(1), tenantId,
+                parentSessionId, lineage.parentChildRunId());
+        if (!runState.isEmpty()
+                && ("completed".equals(runState.getFirst())
+                        || "failed".equals(runState.getFirst())
+                        || "cancelled".equals(runState.getFirst()))) {
+            throw new ApiException(HttpStatus.CONFLICT, "child_run_settled",
+                    "The child run already settled; creation owes no more Session.");
+        }
         long now = clock.millis();
         String sessionId = UUID.randomUUID().toString();
         String turnId = input.isEmpty() ? null : publicId("turn");

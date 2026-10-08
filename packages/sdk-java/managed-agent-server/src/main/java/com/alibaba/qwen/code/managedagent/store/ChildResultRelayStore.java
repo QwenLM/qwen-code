@@ -108,6 +108,21 @@ public class ChildResultRelayStore {
                 limit);
     }
 
+    /** The record's delivery state as committed NOW, for the worker that
+     * claimed its ledger row: the discovery page's own captured value can
+     * be wholesale older than a settlement committed between the page
+     * and the claim — retirement authorization always reads it here. */
+    public String deliveryState(String tenantId, String parentSessionId,
+            String childRunId) {
+        List<String> rows = jdbc.query(
+                "SELECT delivery_state FROM qwen_managed_session_extension_record"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND domain = 'child_run' AND record_id = ?",
+                (result, row) -> result.getString("delivery_state"),
+                tenantId, parentSessionId, childRunId);
+        return rows.isEmpty() ? null : rows.getFirst();
+    }
+
     /** One inline resource's bytes, or null when it is not inline-held. */
     public String readResource(String tenantId, String resourceId) {
         List<byte[]> rows = jdbc.query(

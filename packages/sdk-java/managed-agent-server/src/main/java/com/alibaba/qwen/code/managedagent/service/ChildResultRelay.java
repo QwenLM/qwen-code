@@ -142,6 +142,16 @@ public class ChildResultRelay {
         if (row == null || row.nextRetryAt() > now) {
             return;
         }
+        // Retirement authorization never reads the discovery page's own
+        // captured delivery — another worker can have settled the record
+        // between the page and this claim, and a verdict on the stale
+        // snapshot either relaunches or abandons owed work. Anything
+        // below that decides by settlement reads the committed truth now.
+        String delivery = relayStore.deliveryState(row.tenantId(),
+                row.parentSessionId(), row.childRunId());
+        if (delivery == null) {
+            delivery = pending.deliveryState();
+        }
         // A parent that is closing or gone gets no acceptance, no wake and
         // no revival: the original result stays, classified, on this side.
         // A retained close debt outlives that classification — the child
@@ -161,7 +171,7 @@ public class ChildResultRelay {
                     ? row.childSessionId()
                     : relayStore.findLineageChild(row.tenantId(),
                             row.parentSessionId(), row.childRunId());
-            if (child != null && isSettledDelivery(pending.deliveryState())
+            if (child != null && isSettledDelivery(delivery)
                     && childSessionNeedsClose(row.tenantId(), child)) {
                 relayStore.advance(row, owner, "close_debt", child,
                         now + HEARTBEAT_MS,
@@ -185,7 +195,7 @@ public class ChildResultRelay {
         // record into a refusal loop. The owed residue is at most the
         // child Session's close, so it gets exactly that — parked debt
         // for a standing child, `unknown` where none stands.
-        if ("cancelled".equals(pending.deliveryState())
+        if ("cancelled".equals(delivery)
                 && !"close_debt".equals(row.state())) {
             String child = row.childSessionId() != null
                     ? row.childSessionId()
@@ -546,10 +556,13 @@ public class ChildResultRelay {
         String resolvedChild;
         boolean closed;
         try {
-            boolean started = reconcileAttach(row);
+            // Resolve the child BEFORE choosing the failure proof: a lost
+            // relay session id is not evidence that execution never
+            // began — the committed lineage row names the same child.
             String child = row.childSessionId() != null ? row.childSessionId()
                     : relayStore.findLineageChild(row.tenantId(),
                             row.parentSessionId(), row.childRunId());
+            boolean started = reconcileAttach(row, child);
             // One read of the capability feeds both decisions: reading it
             // twice could flip between the admit order and the retention
             // flag and silently lose the debt either way.
@@ -591,32 +604,40 @@ public class ChildResultRelay {
 
     /**
      * Whether the parent's committed record says this run attached: a
-     * replayed `attach` op with the row's admitted id. Rows past the
+     * replayed `attach` op with the resolved child id (the ledger's own
+     * when known, the committed lineage's otherwise). Rows past the
      * watch already proved it by their committed walk; a lost attach
      * reply or died ledger advance is exactly what the replay recovers.
-     * The refusal's shape carries the record's own answer: the record
-     * veto (`child_operation_record`) means no attach; an attach
-     * conflict (`child_operation_conflict`) means one already stands —
-     * and only transient troubles rethrow into the ordinary defer.
+     * The refusal's shape carries the record's own answer: a conflict
+     * (`child_operation_conflict`) means one already stands; a veto
+     * (`child_operation_record`) means no attach — but that is not yet
+     * proof of never-started, because the replay id itself may be the
+     * lost write. The child's own committed Turn is the second,
+     * independent evidence source consulted before `creation_failed`
+     * may be claimed.
      */
-    private boolean reconcileAttach(RelayRow row) {
+    private boolean reconcileAttach(RelayRow row, String child) {
         if ("watching".equals(row.state()) || "delivering".equals(row.state())) {
             return true;
         }
-        if (row.childSessionId() == null) {
+        if (child == null) {
             return false;
         }
         Map<String, Object> attach = new LinkedHashMap<>();
         attach.put("operationId", UUID.randomUUID().toString());
         attach.put("kind", "attach");
         attach.put("childRunId", row.childRunId());
-        attach.put("childSessionId", row.childSessionId());
+        attach.put("childSessionId", child);
         try {
             harness.runChildOperation(row.tenantId(), row.parentSessionId(),
                     attach);
             return true;
         } catch (DaemonHttpException refused) {
             if (refused.getStatusCode() == 409) {
+                if ("child_operation_record".equals(refused.getErrorCode())) {
+                    return relayStore.latestTurn(row.tenantId(), child)
+                            != null;
+                }
                 return "child_operation_conflict"
                         .equals(refused.getErrorCode());
             }
