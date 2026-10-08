@@ -1073,6 +1073,29 @@ describe('OpenTuiOutputStyleDialog', () => {
     expect(queryRow('Concise — ')).toBeNull();
   });
 
+  it('pays both catalog rows a twelve-row region fits at full width', async () => {
+    // At width 100 the title needs its margin row only and the footer hint
+    // fits one row, so the true chrome is 4 + 2 + 2 = 8 and region twelve
+    // pays four rows — two catalog rows behind the arrows. A flat charge
+    // one row higher (the title's margin counted twice) grants one row and
+    // clips a catalog entry the region could pay for.
+    mocks.state.width = 100;
+    const harness = createHarness();
+    render(
+      <OpenTuiOutputStyleDialog
+        config={harness.config}
+        settings={harness.settings}
+        onClose={vi.fn()}
+        notify={vi.fn()}
+        availableTerminalHeight={12}
+      />,
+    );
+
+    await waitFor(() => expect(queryRow('default — ')).not.toBeNull());
+    expect(queryRow('Concise — ')).not.toBeNull();
+    expect(queryRow('Proactive — ')).toBeNull();
+  });
+
   it('clips ten-row catalog labels to the columns a two-digit number column leaves', async () => {
     // DialogSelect sizes the number box from the full list's length, so a
     // ten-row catalog spends six columns on row chrome, not five. Clipped one

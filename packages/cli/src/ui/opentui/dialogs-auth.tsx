@@ -1444,13 +1444,24 @@ function AuthDialogFlow({
     ? 1 + wrappedRows(errorMessage, contentWidth)
     : 0;
   const listChromeRows = SHELL_BODY_CHROME_ROWS + hintRows + errorRows;
-  const mainChromeRows =
+  const fullMainChromeRows =
     SHELL_BODY_CHROME_ROWS +
     2 +
     1 +
     wrappedRows(tosLabel, contentWidth) +
     wrappedRows(tosUrl, contentWidth) +
     errorRows;
+  // The wizard is the first-run setup, not an optional picker: when the
+  // full main-view chrome leaves the list no row, the rule and the ToS
+  // block shed instead of the last item (they reappear as soon as the
+  // region pays for them), and the zero-row refusal below covers only what
+  // even the shed chrome cannot pay.
+  const shedMainFooter =
+    wizardListWindow(regionHeight, fullMainChromeRows, MAIN_ITEMS.length, 2) <
+    1;
+  const mainChromeRows = shedMainFooter
+    ? SHELL_BODY_CHROME_ROWS + errorRows
+    : fullMainChromeRows;
   const listWindow: StepWindow = {
     regionHeight,
     chromeRows: listChromeRows,
@@ -1581,19 +1592,23 @@ function AuthDialogFlow({
             offset={mainOffset}
             maxItems={mainWindow}
           />
-          <box marginTop={1}>
-            <text fg={C.borderDefault}>
-              {clipToWidth('─'.repeat(80), contentWidth)}
-            </text>
-          </box>
-          <box marginTop={1}>
-            <text fg={C.text}>{tosLabel}</text>
-          </box>
-          <box>
-            <text fg={C.dim} attributes={8}>
-              {tosUrl}
-            </text>
-          </box>
+          {!shedMainFooter && (
+            <>
+              <box marginTop={1}>
+                <text fg={C.borderDefault}>
+                  {clipToWidth('─'.repeat(80), contentWidth)}
+                </text>
+              </box>
+              <box marginTop={1}>
+                <text fg={C.text}>{tosLabel}</text>
+              </box>
+              <box>
+                <text fg={C.dim} attributes={8}>
+                  {tosUrl}
+                </text>
+              </box>
+            </>
+          )}
         </>
       )}
 

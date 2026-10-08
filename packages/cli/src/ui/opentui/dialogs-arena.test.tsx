@@ -19,6 +19,7 @@ import { render, screen } from '@testing-library/react';
 const mocks = vi.hoisted(() => {
   const state = {
     keyboardHandlers: [] as Array<(key: unknown) => void>,
+    width: 100,
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -71,7 +72,7 @@ vi.mock('@opentui/react', async () => {
       addInputHandler: () => {},
       removeInputHandler: () => {},
     }),
-    useTerminalDimensions: () => ({ width: 100, height: 40 }),
+    useTerminalDimensions: () => ({ width: mocks.state.width, height: 40 }),
   };
 });
 
@@ -283,6 +284,76 @@ describe('OpenTuiArenaDialog select panes at a zero-row window', () => {
 describe('OpenTuiArenaDialog select pane charging', () => {
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
+    mocks.state.width = 100;
+  });
+
+  it('clips the agent stats run to the one row its two-row charge pays', async () => {
+    // The select row is charged two physical rows (label + stats); the stats
+    // run was the one run in the row not width-bounded, so a narrow terminal
+    // wrapped it and the frame grew past the region. At width 40 the frame's
+    // content is 30 columns: the status and duration segments paint and the
+    // diff-stat tail drops.
+    mocks.state.width = 40;
+    render(
+      <OpenTuiArenaDialog
+        mode="select"
+        config={fourConfig}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={24}
+      />,
+    );
+
+    const text = document.body.textContent ?? '';
+    expect(text.includes('Done')).toBe(true);
+    expect(text.includes('+40')).toBe(false);
+  });
+
+  it('clips each detailed-diff line to the one row its charge pays', async () => {
+    // The pane is charged one row per painted line; an unclipped line wraps
+    // and the frame grows past the region for every extra row. At width 40
+    // the pane's lines own 28 columns (frame content 30, less the pane's
+    // two-column margin), so a hundred-column line paints its first 28.
+    mocks.state.width = 40;
+    const longLineManager = {
+      getAgentStates: () => [
+        {
+          agentId: 'a1',
+          model: { modelId: 'model-a1' },
+          status: AgentStatus.COMPLETED,
+          stats: { durationMs: 1000, outputTokens: 42 },
+        },
+      ],
+      getResult: () => ({
+        task: 'task',
+        agents: [
+          {
+            agentId: 'a1',
+            model: { modelId: 'model-a1' },
+            approachSummary: 'did the thing',
+            stats: { outputTokens: 42, durationMs: 1000, toolCalls: 1 },
+            diffSummary: { additions: 1, deletions: 0, files: [] },
+            diff: `+${'x'.repeat(99)}
+-second line`,
+          },
+        ],
+      }),
+    };
+    render(
+      <OpenTuiArenaDialog
+        mode="select"
+        config={{ getArenaManager: () => longLineManager } as unknown as Config}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={24}
+      />,
+    );
+
+    await press('d');
+    const text = document.body.textContent ?? '';
+    expect(text.includes(`+${'x'.repeat(27)}`)).toBe(true);
+    expect(text.includes('x'.repeat(28))).toBe(false);
+    expect(text.includes('second line')).toBe(true);
   });
 
   it('charges the preview pane to the agent window', async () => {
@@ -358,6 +429,51 @@ describe('OpenTuiArenaDialog select pane charging', () => {
     );
     expect(screen.queryByText(/L{120}/)).toBeNull();
     expect(screen.getByText(/\[openai\] L{76}…/)).toBeTruthy();
+  });
+
+  it('refuses Space when the start window pays zero rows', async () => {
+    // Region 8 pays the start chrome exactly, so the model window is zero
+    // rows: no model paints, and Space must not check a row nothing painted
+    // (Enter stays live — it only reads the checks already made, and reports
+    // the too-few-models error).
+    const twoModelConfig = {
+      getArenaManager: () => ({ getAgents: () => [] }),
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'openai',
+      }),
+      getAllConfiguredModels: () => [
+        { authType: 'openai', id: 'm1', label: 'model-1' },
+        { authType: 'openai', id: 'm2', label: 'model-2' },
+      ],
+    } as unknown as Config;
+    const { rerender } = render(
+      <OpenTuiArenaDialog
+        mode="start"
+        config={twoModelConfig}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={8}
+      />,
+    );
+
+    expect(screen.queryByText(/model-1/)).toBeNull();
+    await press('space');
+    // The check state is invisible at a zero-row window, so the observable
+    // is what a taller region paints after: a refused Space leaves the row
+    // unchecked.
+    rerender(
+      <OpenTuiArenaDialog
+        mode="start"
+        config={twoModelConfig}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={24}
+      />,
+    );
+    const text = document.body.textContent ?? '';
+    expect(text.includes('[ ] [openai] model-1')).toBe(true);
+    expect(text.includes('[x]')).toBe(false);
   });
 
   it('windows the start list, so Space only toggles a painted row', async () => {

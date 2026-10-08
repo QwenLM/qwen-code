@@ -313,13 +313,15 @@ export function mcpStepFooter(
   }
 }
 
+/** ink's VISIBLE_TOOLS_COUNT / VISIBLE_RESOURCES_COUNT. */
+const MCP_LIST_MAX_ROWS = 10;
+/** ink's ResourceListStep floors the URI column at thirty columns. */
+const MCP_RESOURCE_URI_MIN_COLUMNS = 30;
+
 /**
  * Clamp-style navigation — ink's server/tool/resource steps clamp here; the
  * server-detail action list is a radio list and wraps instead.
  */
-/** ink's VISIBLE_TOOLS_COUNT / VISIBLE_RESOURCES_COUNT. */
-const MCP_LIST_MAX_ROWS = 10;
-
 export function clampNavIndex(
   current: number,
   count: number,
@@ -577,13 +579,14 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
             : []),
         ]
       : [];
-  // The info values paint unclipped — the Error row is the only diagnostic
-  // the dialog carries — so each is charged the rows it wraps into at its
-  // column; the spacer and the action rows are one row each. The window
-  // follows the action cursor in physical rows, so Enter always commits a
-  // painted action even when a wrapped value costs more rows than one.
+  // The info values paint as many rows as they wrap into — the Error row is
+  // the only diagnostic the dialog carries — so each is charged those rows
+  // at its column; the spacer and the action rows are one row each. The
+  // window follows the action cursor in physical rows, so Enter always
+  // commits a painted action even when a wrapped value costs more rows than
+  // one.
   const detailValueWidth = Math.max(1, contentWidth - 20);
-  const detailEntryRows: number[] =
+  const naturalDetailRows: number[] =
     detailInfoRows.length === 0
       ? []
       : [
@@ -593,6 +596,27 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
           1,
           ...detailActions.map(() => 1),
         ];
+  // An info value taller than the whole window (a parse error out of a bad
+  // handshake) would make the whole-entry paint predicate below
+  // unsatisfiable — the Error row, the only diagnostics the dialog carries,
+  // would never paint while Enter still commits the action rows below it.
+  // Only that case caps: the entry charges the window minus the rows the
+  // entries below it pay, and the paint clips to the same rows, so the
+  // value's leading rows and the actions can paint together.
+  const detailWindowCap =
+    bodyWindowRows === undefined ? undefined : Math.max(1, bodyWindowRows);
+  const detailEntryRows: number[] = new Array(naturalDetailRows.length);
+  {
+    let rowsBelow = 0;
+    for (let i = naturalDetailRows.length - 1; i >= 0; i--) {
+      const natural = naturalDetailRows[i]!;
+      detailEntryRows[i] =
+        detailWindowCap !== undefined && natural > detailWindowCap
+          ? Math.max(1, detailWindowCap - rowsBelow)
+          : natural;
+      rowsBelow += detailEntryRows[i]!;
+    }
+  }
   const detailRowStarts: number[] = [];
   let detailRowCount = 0;
   for (const rows of detailEntryRows) {
@@ -865,7 +889,10 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
             return (
               <box key={row.key} flexDirection="row">
                 <text fg={C.yellow}>
-                  {ICON.REFERENCE} {t('Run qwen --debug to see error logs')}
+                  {clipToWidth(
+                    `${ICON.REFERENCE} ${t('Run qwen --debug to see error logs')}`,
+                    contentWidth,
+                  )}
                 </text>
               </box>
             );
@@ -894,6 +921,20 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
           const server = row.server;
           const isSelected = row.flatIndex === serverCursor;
           const color = mcpServerRowColor(server);
+          // The row is charged one physical row: the marker (2), the name
+          // column (30) and the ' · ' separator come off first, and the
+          // status run and the invalid-tools run split what is left, in
+          // that order.
+          const statusRun = clipToWidth(
+            sanitizeTerminalLine(
+              `${mcpStatusIcon(server.status)} ${mcpServerStatusText(server)}`,
+            ),
+            Math.max(0, contentWidth - 35),
+          );
+          const invalidRunBudget = Math.max(
+            0,
+            contentWidth - 35 - getCachedStringWidth(statusRun),
+          );
           return (
             <box
               key={row.key}
@@ -917,15 +958,17 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
                 </text>
               </box>
               <text fg={C.dim}> · </text>
-              <text fg={statusTextColor(color)}>
-                {mcpStatusIcon(server.status)} {mcpServerStatusText(server)}
-              </text>
+              <text fg={statusTextColor(color)}>{statusRun}</text>
               {server.invalidToolCount > 0 && (
                 <text fg={C.yellow}>
-                  {' '}
-                  {t('{{count}} invalid tools', {
-                    count: String(server.invalidToolCount),
-                  })}
+                  {clipToWidth(
+                    sanitizeTerminalLine(
+                      ` ${t('{{count}} invalid tools', {
+                        count: String(server.invalidToolCount),
+                      })}`,
+                    ),
+                    invalidRunBudget,
+                  )}
                 </text>
               )}
             </box>
@@ -976,19 +1019,23 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
       })),
     ];
     // Entries paint whole and only when they fit inside the window: an info
-    // row taller than the remaining budget never paints a partial wrap the
-    // frame did not pay for, and the cursor's one-row action always fits the
+    // row's charge is capped at the window above, so the predicate below is
+    // always satisfiable, and the cursor's one-row action always fits the
     // window the follow rule pins it into.
-    const visibleRows = flatRows.filter((_, index) => {
-      const start = detailRowStarts[index] ?? 0;
-      const rows = detailEntryRows[index] ?? 1;
-      return (
-        start >= detailOffset && start + rows <= detailOffset + detailWindowRows
+    const visibleRows = flatRows
+      .map((row, index) => ({
+        row,
+        start: detailRowStarts[index] ?? 0,
+        chargedRows: detailEntryRows[index] ?? 1,
+      }))
+      .filter(
+        ({ start, chargedRows }) =>
+          start >= detailOffset &&
+          start + chargedRows <= detailOffset + detailWindowRows,
       );
-    });
     return (
       <box flexDirection="column">
-        {visibleRows.map((row) => {
+        {visibleRows.map(({ row, chargedRows }) => {
           if (row.kind === 'spacer') {
             return <box key={row.key} height={1} />;
           }
@@ -999,7 +1046,10 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
                   <text fg={row.red ? C.red : C.text}>{row.label}</text>
                 </box>
                 <text fg={row.red ? C.red : C.text}>
-                  {sanitizeTerminalLine(row.value)}
+                  {clipToWidth(
+                    sanitizeTerminalLine(row.value),
+                    detailValueWidth * chargedRows,
+                  )}
                 </text>
               </box>
             );
@@ -1147,7 +1197,13 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
           const friendlyWidth = getCachedStringWidth(friendlyRun);
           const uriRun = truncateToWidth(
             sanitizeTerminalLine(resource.uri),
-            Math.max(0, contentWidth - 2 - friendlyWidth),
+            Math.min(
+              Math.max(
+                contentWidth - 2 - friendlyWidth,
+                MCP_RESOURCE_URI_MIN_COLUMNS,
+              ),
+              Math.max(0, contentWidth - 2),
+            ),
           );
           return (
             <box

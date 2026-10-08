@@ -46,6 +46,7 @@ import {
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
 import {
+  clipToWidth,
   getCachedStringWidth,
   sanitizeTerminalLine,
   truncateToWidth,
@@ -117,6 +118,7 @@ function ArenaFrame({
   hint: string;
   children?: React.ReactNode;
 }) {
+  const { width } = useTerminalDimensions();
   return (
     <box
       flexDirection="column"
@@ -143,7 +145,12 @@ function ArenaFrame({
       </box>
       {children}
       <box marginTop={1}>
-        <text fg={C.dim}>{hint}</text>
+        <text fg={C.dim}>
+          {/* The hint is charged one row, so it clips to the frame's content
+              columns (region width less border and padding) instead of
+              wrapping onto a row the chrome count never paid for. */}
+          {clipToWidth(hint, Math.max(1, dialogAreaWidth(width) - 6))}
+        </text>
       </box>
     </box>
   );
@@ -708,10 +715,13 @@ function AgentPreview({ result }: { result: ArenaAgentResult }) {
 function AgentDetailedDiff({
   result,
   maxLines,
+  lineWidth,
 }: {
   result: ArenaAgentResult;
   /** Region-paid cap on painted body rows; undefined when there is no region. */
   maxLines?: number;
+  /** The pane's content columns: every painted line is charged one row. */
+  lineWidth: number;
 }) {
   const lines = cappedDiffLines(visibleDiffLines(result.diff), maxLines);
   return (
@@ -729,7 +739,7 @@ function AgentDetailedDiff({
         <box marginLeft={2} flexDirection="column">
           {lines.map((line, index) => (
             <text key={index} fg={diffLineColor(line)}>
-              {line}
+              {clipToWidth(sanitizeTerminalLine(line), lineWidth)}
             </text>
           ))}
         </box>
@@ -962,7 +972,12 @@ function ArenaSelect({
     );
   }
 
-  const task = truncate(result?.task ?? '', MAX_TASK_DISPLAY_LENGTH);
+  const task = truncateToWidth(
+    sanitizeTerminalLine(result?.task ?? ''),
+    // Charged one row: 'Task: ' plus the two quotes come off the frame's
+    // content columns first.
+    Math.max(1, Math.min(MAX_TASK_DISPLAY_LENGTH, frameContentWidth - 8)),
+  );
 
   return (
     <ArenaFrame
@@ -981,6 +996,44 @@ function ArenaSelect({
           .slice(agentOffset, agentOffset + agentWindowRows)
           .map((row, i0) => {
             const i = agentOffset + i0;
+            const statsSegments: Array<{ text: string; color: string }> = [
+              { text: row.status.text, color: row.status.color },
+              {
+                text: ` · ${row.duration} · ${row.tokens} tokens`,
+                color: C.dim,
+              },
+            ];
+            if (row.fileCount > 0) {
+              statsSegments.push({
+                text: ` · ${row.fileCount} files`,
+                color: C.dim,
+              });
+            }
+            if (row.additions > 0 || row.deletions > 0) {
+              statsSegments.push(
+                { text: ' · ', color: C.dim },
+                { text: `+${row.additions}`, color: C.green },
+                { text: '/', color: C.dim },
+                { text: `-${row.deletions}`, color: C.red },
+                { text: ' lines', color: C.dim },
+              );
+            }
+            // The stats run is the one run in the row that is not
+            // width-bounded, and the row is charged two physical rows
+            // (label + stats); clip the segments to the columns the row
+            // owns, trailing segments first, so the run cannot wrap.
+            let statsBudget = Math.max(0, frameContentWidth - 2);
+            const statsRuns: Array<{ text: string; color: string }> = [];
+            for (const segment of statsSegments) {
+              if (statsBudget <= 0) break;
+              const clipped = clipToWidth(
+                sanitizeTerminalLine(segment.text),
+                statsBudget,
+              );
+              if (clipped === '') break;
+              statsRuns.push({ text: clipped, color: segment.color });
+              statsBudget -= getCachedStringWidth(clipped);
+            }
             return (
               <box key={row.key} flexDirection="row" alignItems="flex-start">
                 <box minWidth={2} flexShrink={0}>
@@ -998,22 +1051,11 @@ function ArenaSelect({
                     )}
                   </text>
                   <box flexDirection="row">
-                    <text fg={row.status.color}>{row.status.text}</text>
-                    <text
-                      fg={C.dim}
-                    >{` · ${row.duration} · ${row.tokens} tokens`}</text>
-                    {row.fileCount > 0 && (
-                      <text fg={C.dim}>{` · ${row.fileCount} files`}</text>
-                    )}
-                    {(row.additions > 0 || row.deletions > 0) && (
-                      <>
-                        <text fg={C.dim}>{' · '}</text>
-                        <text fg={C.green}>{`+${row.additions}`}</text>
-                        <text fg={C.dim}>{'/'}</text>
-                        <text fg={C.red}>{`-${row.deletions}`}</text>
-                        <text fg={C.dim}>{' lines'}</text>
-                      </>
-                    )}
+                    {statsRuns.map((run, runIndex) => (
+                      <text key={runIndex} fg={run.color}>
+                        {run.text}
+                      </text>
+                    ))}
                   </box>
                 </box>
               </box>
@@ -1024,7 +1066,11 @@ function ArenaSelect({
         <AgentPreview result={selectedResult} />
       )}
       {showDetailedDiff && selectedResult && (
-        <AgentDetailedDiff result={selectedResult} maxLines={diffLineCap} />
+        <AgentDetailedDiff
+          result={selectedResult}
+          maxLines={diffLineCap}
+          lineWidth={Math.max(1, frameContentWidth - 2)}
+        />
       )}
     </ArenaFrame>
   );

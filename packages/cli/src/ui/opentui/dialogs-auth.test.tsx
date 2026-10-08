@@ -1346,6 +1346,45 @@ describe('the wizard frame keeps its natural height', () => {
     expect(screen.getByText(/MiniMax API Key · Step 1\//)).toBeTruthy();
   });
 
+  it('sheds the rule and terms block before the main list loses its last row', async () => {
+    // The main chrome is eleven rows at this width. A thirteen-row region
+    // pays it and paints one item with the terms block; a twelve-row one
+    // leaves the full chrome a one-row budget and floor((1 + 1) / 3) = 0
+    // items — the first-run wizard would refuse every key while Esc, armed
+    // with the must-connect error, refuses to close. The rule and the terms
+    // block shed instead: six chrome rows leave the list two items, and the
+    // wizard stays usable.
+    const { rerenderAt } = renderDialog({ availableTerminalHeight: 13 });
+    expect(screen.getByText(/Terms of Services/)).toBeTruthy();
+    expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
+
+    rerenderAt(12);
+    expect(screen.queryByText(/Terms of Services/)).toBeNull();
+    expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
+    expect(screen.getByText('Third-party Providers')).toBeTruthy();
+
+    await press('down'); // main: THIRD_PARTY_PROVIDERS — a painted row
+    await press('return');
+    expect(screen.getByText('Third-party Providers · Provider')).toBeTruthy();
+  });
+
+  it('refuses the main-menu keys when even the shed chrome pays zero rows', async () => {
+    // With the rule and terms block shed, the main chrome is the shell's six
+    // rows, so a seven-row region leaves a one-row budget — less than an
+    // item's three-row stride. No row paints, and the arrows and Enter must
+    // not address one: the view does not move.
+    renderDialog({ availableTerminalHeight: 7 });
+    expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(screen.queryByText('Alibaba ModelStudio')).toBeNull();
+    expect(screen.queryByText('Third-party Providers')).toBeNull();
+
+    await press('down');
+    await press('return');
+
+    expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(screen.queryByText('Third-party Providers · Provider')).toBeNull();
+  });
+
   it('refuses the sub-menu keys when the region pays zero provider rows', async () => {
     // Navigated at region 13 and then shrunk past the sub-menu's chrome:
     // region 9 leaves one row — less than a provider row's three — so

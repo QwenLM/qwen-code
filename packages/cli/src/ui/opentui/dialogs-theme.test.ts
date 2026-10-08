@@ -127,6 +127,17 @@ describe('computeThemePreviewLayout', () => {
     expect(layout.codeBlockHeight).toBeGreaterThanOrEqual(layout.diffHeight);
   });
 
+  it('pins the 60/40 split to the exact pair, not just the inequality', () => {
+    // Region 40 leaves the columns 34 rows; the pane chrome pays five and
+    // the padding two, so the panes split 27 rows as ceil(27 * 0.6) = 17
+    // code and the remaining 10 diff. A `>=` pin alone cannot tell the diff
+    // pane shrinking to zero from the intended ratio.
+    const layout = computeThemePreviewLayout(40);
+    expect(layout.includePadding).toBe(true);
+    expect(layout.codeBlockHeight).toBe(17);
+    expect(layout.diffHeight).toBe(10);
+  });
+
   it('stops painting the pane when even its one-row-per-pane minimum does not fit', () => {
     // Region 12 leaves the columns 6 rows; the pane chrome pays 5, so one
     // row is left — less than the code+diff minimum of two.

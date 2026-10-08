@@ -365,9 +365,11 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
   // ink gives every row `wrap="truncate"`; an unclipped rule or path wraps
   // its row into two physical rows the window charged as one. DialogSelect
   // sizes the number box from the full list's length, so the label's budget
-  // is the area width minus the `›` box (2) and that box.
-  const rowLabelWidth = (itemCount: number) =>
-    Math.max(0, areaWidth - 2 - (String(itemCount).length + 2));
+  // is the container's width minus the `›` box (2) and that box — the bare
+  // region's width for the list views, four columns less for the scope step,
+  // whose DialogFrame pays border and padding first.
+  const rowLabelWidth = (containerWidth: number, itemCount: number) =>
+    Math.max(0, containerWidth - 2 - (String(itemCount).length + 2));
   // The scope step's chrome: frame (4), title (1), spacer (1), the rule block
   // (measured — the rule text is whatever was typed, so a flat count
   // under-pays the moment it wraps), spacer (1), the question (1) and the
@@ -669,7 +671,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
             <text fg={titleColor}>
               {truncateToWidth(
                 sanitizeTerminalLine(item.label),
-                rowLabelWidth(dirListItems.length),
+                rowLabelWidth(areaWidth, dirListItems.length),
               )}
             </text>
           )}
@@ -753,7 +755,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
               <text fg={titleColor}>
                 {clipToWidth(
                   `${item.label}    ${item.description}`,
-                  rowLabelWidth(scopeItems.length),
+                  rowLabelWidth(areaWidth - 4, scopeItems.length),
                 )}
               </text>
             )}
@@ -862,7 +864,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
           <text fg={titleColor}>
             {truncateToWidth(
               sanitizeTerminalLine(item.label),
-              rowLabelWidth(ruleListItems.length),
+              rowLabelWidth(areaWidth, ruleListItems.length),
             )}
           </text>
         )}

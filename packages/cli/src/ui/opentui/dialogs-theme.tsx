@@ -16,6 +16,7 @@
  */
 
 import { useState } from 'react';
+import { useTerminalDimensions } from '@opentui/react';
 import { C, SYNTAX } from './theme.js';
 import { t } from '../../i18n/index.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -28,12 +29,14 @@ import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
 import {
   DialogFrame,
   DialogSelect,
+  dialogContentWidth,
   FooterHint,
   useDialogFrameKeys,
   useDialogSelect,
 } from './dialogs-shared.js';
 import { regionListWindow, type DialogListItem } from './dialogs-core.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
+import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
 
 export const THEME_DIALOG_MAX_ITEMS_TO_SHOW = 12;
 
@@ -259,6 +262,18 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
   // left column's height is inert here because the windowed column never
   // exceeds the budget the region leaves.
   const layout = computeThemePreviewLayout(regionHeight);
+  // The list's chrome charges the title one row plus its margin, and the
+  // scope message shares that row, so it clips to what the title leaves in
+  // the left column (its 45% share minus the padding) instead of wrapping
+  // onto a second row the charge never paid.
+  const { width } = useTerminalDimensions();
+  const themeTitleRun = `> ${t('Select Theme')} `;
+  const scopeMessageWidth = Math.max(
+    0,
+    (layout.showPreview
+      ? Math.floor(dialogContentWidth(width) * 0.45) - 2
+      : dialogContentWidth(width)) - getCachedStringWidth(themeTitleRun),
+  );
 
   return (
     <DialogFrame>
@@ -274,7 +289,9 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
                 {'> '}
                 {t('Select Theme')}{' '}
               </text>
-              <text fg={C.dim}>{otherScopeModifiedMessage}</text>
+              <text fg={C.dim}>
+                {truncateToWidth(otherScopeModifiedMessage, scopeMessageWidth)}
+              </text>
             </box>
             <DialogSelect
               items={themeItems}

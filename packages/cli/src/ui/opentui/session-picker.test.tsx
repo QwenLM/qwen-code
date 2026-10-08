@@ -417,20 +417,52 @@ describe('OpenTuiSessionPicker', () => {
   it('clips the header title to the one physical row the budget charges', () => {
     // RESERVED_LINES pays the header one row; an unclipped title wraps onto a
     // second row the list's window thinks it owns. The box is 96 columns wide
-    // at this mocked width, and its padding takes one column per side.
+    // at this mocked width, and its border and the row's padding take two
+    // columns each side.
     renderPicker([session(1)], { title: 'T'.repeat(120) });
     expect(screen.queryByText('T'.repeat(120))).toBeNull();
-    expect(screen.getByText(`${'T'.repeat(93)}…`)).toBeTruthy();
+    expect(screen.getByText(`${'T'.repeat(91)}…`)).toBeTruthy();
+  });
+
+  it('clips the header suffix in display columns, off the padded row', () => {
+    // The header row paints inside the border (2) and its own padding (2),
+    // and the suffix budget subtracts the clipped title's display width: a
+    // double-width title measures ten UTF-16 units where it paints twenty
+    // columns, so a .length budget grants the suffix ten columns the row no
+    // longer has, and the wrap grows the frame past the region.
+    mocks.state.width = 100; // boxWidth 96
+    const branch = 'b'.repeat(70);
+    renderPicker([session(1, { gitBranch: branch })], {
+      title: '界'.repeat(10),
+      currentBranch: branch,
+    });
+    press({ name: 'b', sequence: 'b', ctrl: true });
+    const suffix = screen.getByText(/branch: /);
+    // 96 - 4 - 20 (the title's columns) - 1 (the gap) = 71 for the suffix;
+    // the 80-column branch suffix clips. A UTF-16 budget grants 81.
+    expect(getCachedStringWidth(suffix.textContent ?? '')).toBeLessThanOrEqual(
+      71,
+    );
+    expect(suffix.textContent).toMatch(/…$/);
+  });
+
+  it('clips the search query at the narrower width the same way', () => {
+    mocks.state.width = 40; // boxWidth 36
+    renderPicker([session(1)]);
+    for (let i = 0; i < 85; i++) typeChar('q');
+    // 36 - 4 - 8 ('Search: ') - 1 (the cursor block) = 23 columns.
+    expect(screen.queryByText('q'.repeat(85))).toBeNull();
+    expect(screen.getByText(`${'q'.repeat(22)}…`)).toBeTruthy();
   });
 
   it('clips the search row to its one charged row', () => {
     // The query is user-typed and unbounded; the row is charged one physical
-    // row, so it clips at 96 - 2 (padding) - 8 ('Search: ') - 1 (the cursor
-    // block) = 85 columns.
+    // row, so it clips at 96 - 4 (border + the row's padding) - 8 ('Search: ')
+    // - 1 (the cursor block) = 83 columns.
     renderPicker([session(1)]);
     for (let i = 0; i < 200; i++) typeChar('q');
     expect(screen.queryByText('q'.repeat(200))).toBeNull();
-    expect(screen.getByText(`${'q'.repeat(84)}…`)).toBeTruthy();
+    expect(screen.getByText(`${'q'.repeat(82)}…`)).toBeTruthy();
   });
 });
 

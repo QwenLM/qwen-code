@@ -21,6 +21,7 @@ import { fireEvent, render, screen } from '@testing-library/react';
 const mocks = vi.hoisted(() => {
   const state = {
     keyboardHandlers: [] as Array<(key: unknown) => void>,
+    width: 100,
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -81,7 +82,7 @@ vi.mock('@opentui/react', async () => {
       addInputHandler: () => {},
       removeInputHandler: () => {},
     }),
-    useTerminalDimensions: () => ({ width: 100, height: 40 }),
+    useTerminalDimensions: () => ({ width: mocks.state.width, height: 40 }),
   };
 });
 
@@ -158,6 +159,7 @@ const twelveServers: McpServerInfo[] = Array.from({ length: 12 }, (_, i) =>
 describe('OpenTuiMcpDialog list windows', () => {
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
+    mocks.state.width = 100;
   });
 
   it('keeps the tool window put on hover, so a click opens the row under the pointer', async () => {
@@ -269,10 +271,11 @@ describe('OpenTuiMcpDialog list windows', () => {
     await press('down');
     await press('return');
     // The detail step never opens: the footer still belongs to the server
-    // list. (A 'Status:' tell would be blind here — the detail step's own
-    // window is zero rows at this region too.)
+    // list, and the detail step's own footer never appears. (A 'Status:'
+    // tell would be blind here — the detail step's window is zero rows at
+    // this region too.)
     expect(screen.getByText(/Esc to close/)).toBeTruthy();
-    expect(screen.queryByText(/Esc to go back/)).toBeNull();
+    expect(screen.queryByText(/Esc to back/)).toBeNull();
   });
 
   it('settles instead of ping-ponging when the tool window has zero rows', async () => {
@@ -321,14 +324,20 @@ describe('OpenTuiMcpDialog list windows', () => {
     await press('return'); // server list → detail
     await press('return'); // detail → View tools → tool list
     expect(screen.getByText(`invalid: ${'x'.repeat(41)}`)).toBeTruthy();
-    expect(screen.queryByText('x'.repeat(42))).toBeNull();
+    // The painted span reads 'invalid: ' + the reason, so a bare
+    // queryByText('x'.repeat(42)) can never match anything; read the raw
+    // text content for the absence side.
+    expect((document.body.textContent ?? '').includes('x'.repeat(42))).toBe(
+      false,
+    );
   });
 
   it('clips both runs of a resource row to the one row it is charged', async () => {
     // The friendly run was painted raw while the URI's budget subtracted its
     // UTF-16 length. A double-width title makes the two disagree: fifty 界
     // are 51 units but 101 columns, so a .length budget leaves the URI 39
-    // columns the row does not have; the column measurement leaves it none.
+    // columns the row does not have; the column measurement leaves it the
+    // thirty-column floor instead — the URI is the row's identity.
     render(
       <OpenTuiMcpDialog
         servers={[serverWith({ resourceCount: 1 })]}
@@ -345,9 +354,57 @@ describe('OpenTuiMcpDialog list windows', () => {
     await press('return'); // server list → detail
     await press('return'); // detail → View resources → resource list
     const text = document.body.textContent ?? '';
-    expect(text.includes('u'.repeat(10))).toBe(false);
-    expect(text.includes(' ' + '界'.repeat(44))).toBe(true);
-    expect(text.includes('界'.repeat(45))).toBe(false);
+    // The URI keeps its floor: thirty columns is 'res://' plus twenty-three
+    // u's plus the truncation ellipsis, and the rest clips.
+    expect(text.includes('res://' + 'u'.repeat(23) + '…')).toBe(true);
+    expect(text.includes('u'.repeat(24))).toBe(false);
+    // The title gets what the URI leaves: 92 - 2 - 30 = 60 columns, which
+    // is the leading space plus twenty-nine double-width glyphs.
+    expect(text.includes(' ' + '界'.repeat(29))).toBe(true);
+    expect(text.includes('界'.repeat(30))).toBe(false);
+  });
+
+  it('clips the server row’s status run to the one row it is charged', () => {
+    // The server row is charged one physical row, but the status run painted
+    // raw: a rejected server's text runs past what the marker, the name
+    // column and the separator leave, and at width 60 the wrap painted a
+    // second row the window never paid for. The run clips at the seventeen
+    // columns the row leaves it (52 - 2 - 30 - 3).
+    mocks.state.width = 60;
+    render(
+      <OpenTuiMcpDialog
+        servers={[serverWith({ approvalState: 'rejected' })]}
+        onClose={() => {}}
+      />,
+    );
+    const text = document.body.textContent ?? '';
+    expect(text.includes('rejected — ed')).toBe(true);
+    expect(text.includes('re-approve')).toBe(false);
+  });
+
+  it('caps an info value taller than the window, so the error and its actions paint together', async () => {
+    // A bad handshake can fill the Error row with a parse dump taller than
+    // the whole window; the whole-entry paint predicate is then
+    // unsatisfiable and the error never paints, though Enter still commits
+    // the action rows below it. The entry charges the window minus the rows
+    // the entries below it pay, and the paint clips to the same rows.
+    const error = `Failed to parse: ${'e'.repeat(560)}`;
+    render(
+      <OpenTuiMcpDialog
+        servers={[serverWith({ error })]}
+        availableTerminalHeight={15}
+        onClose={() => {}}
+      />,
+    );
+    await press('return'); // server list → server detail
+
+    // The error's leading rows paint, clipped to the four rows it is
+    // charged (six-row window less the spacer and the action row).
+    expect(screen.getByText(/Failed to parse:/)).toBeTruthy();
+    const text = document.body.textContent ?? '';
+    expect(text.includes('e'.repeat(500))).toBe(false);
+    // The action row below the error still paints.
+    expect(screen.getByText('Disable')).toBeTruthy();
   });
 
   it('refuses the resource list keys at a zero-row window', async () => {

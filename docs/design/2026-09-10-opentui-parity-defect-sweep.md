@@ -2739,9 +2739,9 @@ What was verified, and how far the verification reaches:
   re-run on the tree after it.** The merge moved main into this branch, so its
   frames are not the ones the comparison above measured. Re-running the whole
   matrix on the merged tree yields the same eighty-eight legs, the same two
-  hundred sixty-six captures, the same two empty ones, the same nine idle
+  hundred sixty-six captures — two of them empty — the same nine idle
   timeouts on the same three ink legs, and a verdict for every one of the one
-  hundred thirty-five checkpoints that matches the earlier after arm exactly —
+  hundred thirty-three checkpoints that matches the earlier after arm exactly —
   except the timed spinner sample, which counts phrases and so moves between any
   two runs. The counts this section states therefore hold on the merged tree, not
   only on the one the two arms were cut from.
@@ -3124,11 +3124,12 @@ What was verified, and how far the verification reaches:
   reaches content that shrinks with the region, while a child that holds its
   own size paints past the region's bottom edge rather than being cut, and its
   border lands off the terminal's last row or over the row below when one
-  exists. Either way a tail the region cannot show — an unwindowed list such as
-  `/mcp` on a short terminal, footer hint included — has no reveal path.
+  exists. Either way a tail the region cannot show — a sized body such as
+  `/diff`'s fourteen-row scrollbox or `/subagents`' twelve-row one on a short
+  terminal, footer hint included — has no reveal path.
   Recorded rather than matched: this renderer owns the whole viewport and
-  cannot let content grow past it, so the fix is windowing those lists from the
-  region budget, the way the theme and model dialogs already do.
+  cannot let content grow past it, so the fix is windowing those bodies from
+  the region budget, the way the theme, model and MCP dialogs already do.
 - ink's `useSelectionList` bounds numeric quick-select by the list length
   alone, so on a short terminal a digit commits a row the window does not
   paint — at region twelve the approval-mode list shows two rows and `5` still
@@ -3181,10 +3182,11 @@ What was verified, and how far the verification reaches:
   terminal height only when no budget is handed over — with seven reserved
   rows and three rows per item, floored at zero rows: a region shorter than
   the reserved chrome paints no session row, and Enter and Space refuse to
-  commit one. ink's picker derives the identical window from the raw terminal
-  rows inside an equally fixed and clipped region, so on a short terminal its
-  cursor can still reach a session whose second line was never drawn — an
-  ink-side limitation this port closes rather than matches.
+  commit one. ink's picker runs the same arithmetic on the raw terminal
+  rows — a window the region's five-row reservation taller than this
+  port's — inside an equally fixed and clipped region, so on a short
+  terminal its cursor can still reach a session whose second line was never
+  drawn — an ink-side limitation this port closes rather than matches.
 - The stats dialog carries its own copy of the ref mirror rather than calling the
   shared hook, and rebuilds its writer on every render. Both are cosmetic: the copy
   performs the same double write, and nothing memoises on the writer's identity. It

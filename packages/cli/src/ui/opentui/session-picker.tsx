@@ -48,7 +48,7 @@ import {
 } from '../hooks/useSessionSearchInput.js';
 import { toOriginalKey } from './key-map.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
-import { truncateToWidth } from '../utils/textUtils.js';
+import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
@@ -612,6 +612,10 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
   }
 
   const headerTitle = title ?? t('Resume Session');
+  // The row owns boxWidth - 4 columns: the border (2) and the row's own
+  // padding (2) come off first, and the suffix measures what the clipped
+  // title actually paid, in display columns rather than UTF-16 units.
+  const shownTitle = truncateToWidth(headerTitle, Math.max(0, boxWidth - 4));
 
   return (
     // ink asks for `height - 1` here too and lets the popup region's fixed
@@ -635,14 +639,14 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
     >
       <box flexDirection="row" paddingLeft={1} paddingRight={1}>
         <text fg={C.text} attributes={1}>
-          {truncateToWidth(headerTitle, Math.max(0, boxWidth - 2))}
+          {shownTitle}
           {headerSuffix ? ' ' : ''}
         </text>
         {headerSuffix ? (
           <text fg={C.dim}>
             {truncateToWidth(
               headerSuffix,
-              Math.max(0, boxWidth - 2 - headerTitle.length - 1),
+              Math.max(0, boxWidth - 4 - getCachedStringWidth(shownTitle) - 1),
             )}
           </text>
         ) : null}
@@ -657,7 +661,10 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
             <span fg={C.text}>
               {truncateToWidth(
                 searchQuery,
-                Math.max(0, boxWidth - 2 - t('Search: ').length - 1),
+                Math.max(
+                  0,
+                  boxWidth - 4 - getCachedStringWidth(t('Search: ')) - 1,
+                ),
               )}
             </span>
             <span fg={C.dim}>{'▌'}</span>
@@ -668,7 +675,7 @@ export function OpenTuiSessionPicker(props: OpenTuiSessionPickerProps) {
             <span fg={C.text}>
               {truncateToWidth(
                 searchQuery,
-                Math.max(0, boxWidth - 2 - t('Filter: ').length),
+                Math.max(0, boxWidth - 4 - getCachedStringWidth(t('Filter: '))),
               )}
             </span>
           </text>
@@ -849,11 +856,19 @@ function SessionRow({
     typeof session.messageCount === 'number'
       ? formatMessageCount(session.messageCount)
       : undefined;
-  const meta = `${formatRelativeTime(session.mtime)}${
+  const metaLead = `${formatRelativeTime(session.mtime)}${
     messageText !== undefined ? ` · ${messageText}` : ''
-  }${session.gitBranch ? ` · ${session.gitBranch}` : ''}${
-    isDisabled && disabledHint ? ` · ${disabledHint}` : ''
-  }`;
+  }${session.gitBranch ? ` · ${session.gitBranch}` : ''}`;
+  // The clip below buys the one-physical-row guarantee; a disabled row's
+  // hint is its only on-screen explanation, so the hint survives the clip
+  // and the leading segments give way instead.
+  const meta =
+    isDisabled && disabledHint
+      ? `${truncateToWidth(
+          metaLead,
+          Math.max(0, metaWidth - getCachedStringWidth(disabledHint) - 3),
+        )} · ${disabledHint}`
+      : metaLead;
 
   return (
     <box flexDirection="column" marginBottom={isLast ? 0 : 1}>

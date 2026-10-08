@@ -619,20 +619,32 @@ export function OpenTuiEffortDialog(props: {
     label: `${tier} — ${t(EFFORT_DESCRIPTIONS[tier])}`,
   }));
   // The frame (4), the title and its margin (measured — the subtitle wraps
-  // on narrow terminals), the footer hint (2) and the unconfigured-model
-  // note (2) come off the region first; the tier list windows from what is
-  // left instead of the flat ten-row default.
+  // on narrow terminals), the footer hint and the unconfigured-model note
+  // (both measured the same way) come off the region first; the tier list
+  // windows from what is left instead of the flat ten-row default.
   const regionHeight = clampDialogHeight(props.availableTerminalHeight);
   const { width } = useTerminalDimensions();
+  const effortContentWidth = dialogContentWidth(width);
   const effortTitleRows =
     dialogTitleRows(
       t('Reasoning Effort'),
       t('(applied across all providers; clamped per model)'),
-      dialogContentWidth(width),
+      effortContentWidth,
     ) + 1;
+  const noteText = currentEffort
+    ? t(
+        '{{effort}} is not available for this model — using the model/provider default.',
+        { effort: currentEffort },
+      )
+    : t('No effort configured — using the model/provider default.');
+  const noteRows =
+    configuredIndex === -1 ? 1 + wrappedRows(noteText, effortContentWidth) : 0;
+  const effortFooterRows =
+    1 +
+    wrappedRows(t('(Use Enter to select, Esc to cancel)'), effortContentWidth);
   const tierWindow = regionListWindow(
     regionHeight,
-    7 + effortTitleRows + (configuredIndex === -1 ? 2 : 0),
+    4 + effortTitleRows + noteRows + effortFooterRows,
     items.length,
     DEFAULT_MAX_ITEMS_TO_SHOW,
   );
@@ -678,14 +690,7 @@ export function OpenTuiEffortDialog(props: {
       />
       {configuredIndex === -1 ? (
         <box marginTop={1}>
-          <text fg={C.dim}>
-            {currentEffort
-              ? t(
-                  '{{effort}} is not available for this model — using the model/provider default.',
-                  { effort: currentEffort },
-                )
-              : t('No effort configured — using the model/provider default.')}
-          </text>
+          <text fg={C.dim}>{noteText}</text>
         </box>
       ) : null}
       <FooterHint text={t('(Use Enter to select, Esc to cancel)')} />
@@ -788,19 +793,23 @@ export function OpenTuiOutputStyleDialog(props: {
   // is matched case-insensitively, like every other style lookup.
   const wanted = currentStyle?.name.toLowerCase();
   // The frame (4), the title and its margin (measured — the subtitle wraps
-  // on narrow terminals) and the footer hint (2) come off the region first;
-  // the catalog windows from what is left instead of the flat ten-row
-  // default.
+  // on narrow terminals) and the footer hint (measured the same way) come
+  // off the region first; the catalog windows from what is left instead of
+  // the flat ten-row default.
   const { width } = useTerminalDimensions();
+  const styleContentWidth = dialogContentWidth(width);
   const styleTitleRows =
     dialogTitleRows(
       t('Output Style'),
       t('(applies now and persists to settings)'),
-      dialogContentWidth(width),
+      styleContentWidth,
     ) + 1;
+  const styleFooterRows =
+    1 +
+    wrappedRows(t('(Use Enter to select, Esc to cancel)'), styleContentWidth);
   const styleWindow = regionListWindow(
     clampDialogHeight(props.availableTerminalHeight),
-    7 + styleTitleRows,
+    4 + styleTitleRows + styleFooterRows,
     items.length,
     DEFAULT_MAX_ITEMS_TO_SHOW,
   );

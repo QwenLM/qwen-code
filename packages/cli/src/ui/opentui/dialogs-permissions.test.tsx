@@ -19,6 +19,7 @@ import { render, screen } from '@testing-library/react';
 const mocks = vi.hoisted(() => {
   const state = {
     keyboardHandlers: [] as Array<(key: unknown) => void>,
+    width: 100,
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -67,7 +68,7 @@ vi.mock('@opentui/react', async () => {
         };
       }, []);
     },
-    useTerminalDimensions: () => ({ width: 100, height: 40 }),
+    useTerminalDimensions: () => ({ width: mocks.state.width, height: 40 }),
   };
 });
 
@@ -77,6 +78,7 @@ vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 import { act } from 'react';
 import { OpenTuiPermissionsDialog } from './dialogs-permissions.js';
 import type { PermissionRuleEntry } from './dialogs-permissions.js';
+import { getCachedStringWidth } from '../utils/textUtils.js';
 
 function press(name: string) {
   act(() => {
@@ -86,7 +88,10 @@ function press(name: string) {
   });
 }
 
-function renderPermissions(rules: PermissionRuleEntry[]) {
+function renderPermissions(
+  rules: PermissionRuleEntry[],
+  availableTerminalHeight?: number,
+) {
   return render(
     <OpenTuiPermissionsDialog
       rules={rules}
@@ -97,6 +102,7 @@ function renderPermissions(rules: PermissionRuleEntry[]) {
       onAddDirectory={vi.fn()}
       onRemoveDirectory={vi.fn()}
       onExit={vi.fn()}
+      availableTerminalHeight={availableTerminalHeight}
     />,
   );
 }
@@ -104,6 +110,27 @@ function renderPermissions(rules: PermissionRuleEntry[]) {
 describe('OpenTuiPermissionsDialog rule rows', () => {
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
+    mocks.state.width = 100;
+  });
+
+  it('clips the add-rule scope row to the framed width, so it cannot wrap', () => {
+    // The scope step paints inside the DialogFrame — border and padding take
+    // four columns of the area width first — but the label clip was budgeted
+    // from the bare-region width: at 62 columns the 52-column scope label
+    // fit the stale budget, wrapped onto a second physical row the window
+    // charged as one, and the frame grew past the region.
+    mocks.state.width = 62;
+    renderPermissions([], 22);
+    press('return'); // rule list → add-rule-input ('Add a new rule…' on top)
+    for (const ch of ['B', 'a', 's', 'h']) press(ch);
+    press('return'); // → add-rule-scope
+
+    const row = screen.getByText(/Project settings/);
+    // 58 area columns, less the frame (4), the marker box (2) and the number
+    // box (3), leave the label 49; the clip cuts without an ellipsis.
+    expect(getCachedStringWidth(row.textContent ?? '')).toBeLessThanOrEqual(49);
+    expect(row.textContent ?? '').not.toContain('.json');
+    expect(screen.getByText(/Enter to confirm/)).toBeTruthy();
   });
 
   it('flattens a newline inside a rule row into the one row it is charged', () => {

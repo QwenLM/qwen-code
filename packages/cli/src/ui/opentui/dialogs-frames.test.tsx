@@ -21,8 +21,9 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { render } from '@testing-library/react';
+import { render, within } from '@testing-library/react';
 import type { LoadedSettings } from '../../config/settings.js';
+import { getCachedStringWidth } from '../utils/textUtils.js';
 
 vi.mock('@opentui/react', () => ({
   useRenderer: () => ({
@@ -215,6 +216,34 @@ describe('sibling dialog frames (region clips, frame does not shrink)', () => {
     expect(
       layoutOf(container.querySelector('[data-kind="scrollbox"]')),
     ).toMatchObject({ height: 12 });
+  });
+
+  it("clips the theme title's scope message to the one row the chrome charges", () => {
+    // Both columns' chrome charge the title as one row plus its margin, but
+    // the scope message shares the title row: at width 100 the left column
+    // owns 45% of the frame's content less its padding — 39 columns — so an
+    // unclipped '(Also modified in Workspace)' wraps the row the window
+    // charge paid for into two.
+    const themeSettings = {
+      merged: { ui: { theme: 'Dark' } },
+      user: { settings: { ui: { theme: 'Dark' } } },
+      workspace: { settings: { ui: { theme: 'Dark' } } },
+      forScope: () => ({ settings: { ui: { theme: 'Dark' } } }),
+    } as unknown as LoadedSettings;
+    const { container } = render(
+      <OpenTuiThemeDialog
+        onSelect={() => {}}
+        onHighlight={() => {}}
+        settings={themeSettings}
+        availableTerminalHeight={24}
+      />,
+    );
+    const message = within(container).getByText(/Also modified in/);
+    // The row leaves the message 39 - 15 ('> Select Theme ') = 24 columns.
+    expect(getCachedStringWidth(message.textContent ?? '')).toBeLessThanOrEqual(
+      24,
+    );
+    expect(message.textContent).toMatch(/…$/);
   });
 
   it('theme list column reclaims the full width when the preview pane cannot paint', () => {
