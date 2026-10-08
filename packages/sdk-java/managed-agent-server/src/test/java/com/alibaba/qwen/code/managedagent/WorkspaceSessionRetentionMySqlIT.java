@@ -324,7 +324,7 @@ class WorkspaceSessionRetentionMySqlIT {
                 + " display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')",
                 tenant, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         // Seeded at V31, where the grant columns are still the booleans; the
-        // V51 backfill maps this (TRUE, TRUE) row to OPERATOR on upgrade.
+        // V52 backfill maps this (TRUE, TRUE) row to OPERATOR on upgrade.
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
                 + " VALUES (?, 'workspace', ?, TRUE, TRUE)", tenant, OWNER.getBytes(StandardCharsets.UTF_8));
         jdbc.update("INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"

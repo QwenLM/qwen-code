@@ -107,7 +107,7 @@ class ManagedWorkspaceRolesMigrationTest {
                 "padded-actor".getBytes(StandardCharsets.UTF_8)))
                 .isInstanceOf(DataIntegrityViolationException.class);
 
-        // A creation written after V51 keeps owner = creator on the store
+        // A creation written after V52 keeps owner = creator on the store
         // path too; the two columns now only diverge through the handover
         // command that a later slice adds.
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"

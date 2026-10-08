@@ -14,7 +14,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
 /**
- * Real-engine counterpart of the V51 role-constraint shape: utf8mb4
+ * Real-engine counterpart of the V52 role-constraint shape: utf8mb4
  * comparisons ignore trailing spaces (PAD SPACE), so an IN-list CHECK
  * would accept and preserve 'READER ' — a value the enum parser rejects
  * at read time. The REGEXP constraint must store only byte-exact enum

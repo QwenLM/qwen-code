@@ -703,7 +703,7 @@ class WorkspaceRuntimeTest {
             verify(fixture.http()).control(fixture.lease(), runtimeSession, hook);
         }
         assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, mcpControl(session, "mcp-configure")));
-        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE WHERE tenant_id = ?", session.tenantId());
+        jdbc.update("DELETE FROM managed_workspace_access WHERE tenant_id = ?", session.tenantId());
         assertUnavailable(() -> fixture.transport().control(fixture.lease(), runtimeSession, hookControl(session, "hook-execute")));
         fixture.transport().control(fixture.lease(), runtimeSession, hookControl(session, "hook-status")).toCompletableFuture().join();
         authority.assertHeld(session.workspace(), fixture.record());
