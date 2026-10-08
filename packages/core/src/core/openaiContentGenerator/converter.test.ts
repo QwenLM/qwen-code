@@ -461,6 +461,32 @@ describe('OpenAIContentConverter', () => {
       expect(partsOf(response)).toEqual([{ text: 'Answer.' }]);
     });
 
+    it('keeps a nonstreaming suffix when reasoning carried a thinking tag', () => {
+      // The reasoning conjunct of `completedNormally` is the only
+      // cross-channel guard on this path: `hasThinkingTagInReasoning` is
+      // assigned inside `convertOpenAIChunkToLlm` alone, so a non-streaming
+      // completion never carries it. Without the conjunct the tagged
+      // reasoning channel survives while the content channel is stripped,
+      // laundering the leak into clean prose.
+      const context = contentOnlyStream();
+      const response = converter.convertOpenAIResponseToLlm(
+        {
+          choices: [
+            choice({
+              content: 'Answer.\n</thinking>',
+              reasoning_content: 'Let me check <thinking>',
+            }),
+          ],
+        } as OpenAI.Chat.ChatCompletion,
+        context,
+      );
+      expect(partsOf(response)).toEqual([
+        thoughtPart('Let me check <thinking>'),
+        { text: 'Answer.\n</thinking>' },
+      ]);
+      expect(context.protocolTagSanitized).toBeUndefined();
+    });
+
     it('holds a CRLF split across chunks without leaving a carriage return', () => {
       const stream = contentOnlyStream();
       const parts = ['Answer.\r', '\n', '</think>'].flatMap(
