@@ -34,7 +34,7 @@ const headers = {
 /** Session agents as A2A sees them; a cancel ends the run at once. */
 function fakeSessions() {
   const sessions: string[] = [];
-  const runs = new Map<string, 'queued' | 'cancelled'>();
+  const runs = new Map<string, 'queued' | 'awaiting_approval' | 'cancelled'>();
   const posts: string[] = [];
   const port: A2ASessionPort = {
     async createSession() {
@@ -50,8 +50,9 @@ function fakeSessions() {
       return { runs: [{ runId, agentId: 'ag_lead' }] };
     },
     async liveRun(_sessionId, runId) {
-      return runs.get(runId) === 'queued'
-        ? { status: 'queued', activityAt: 1_000 }
+      const status = runs.get(runId);
+      return status === 'queued' || status === 'awaiting_approval'
+        ? { status, activityAt: 1_000 }
         : undefined;
     },
     async recordedReply(_sessionId, runId) {
@@ -73,7 +74,7 @@ function fakeSessions() {
       return true;
     },
   };
-  return { port, sessions, posts };
+  return { port, sessions, posts, runs };
 }
 
 let runtimeDir: string;
@@ -220,6 +221,45 @@ describe('A2A transport', () => {
       code: -32010,
       message: 'Request refused.',
     });
+  });
+
+  it('says in the status message that an approval waits on the owner', async () => {
+    const { secret } = await issueA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_1',
+      agentId: 'ag_lead',
+    });
+    const app = appFor(
+      true,
+      vi.fn(() => true),
+    );
+    const call = (method: string, params: unknown) =>
+      request(app)
+        .post('/a2a/v1')
+        .set({
+          ...headers,
+          authorization: `Bearer ${secret}`,
+          'x-qwen-caller-id': 'share_1',
+          'A2A-Version': '1.0',
+        })
+        .send({ jsonrpc: '2.0', id: 1, method, params });
+
+    const sent = await call('SendMessage', {
+      message: {
+        role: 'ROLE_USER',
+        messageId: 'msg-1',
+        parts: [{ text: 'Write the fix.' }],
+      },
+    });
+    const taskId = sent.body.result.task.id as string;
+    sessions.runs.set(taskId, 'awaiting_approval');
+
+    const polled = await call('GetTask', { id: taskId });
+    expect(polled.body.result.status.state).toBe('TASK_STATE_INPUT_REQUIRED');
+    // `localStatus` is in optional extension metadata; this is what any
+    // client reads.
+    expect(JSON.stringify(polled.body.result.status.message)).toContain(
+      'workspace owner',
+    );
   });
 
   it('rejects an untrusted primary workspace', async () => {

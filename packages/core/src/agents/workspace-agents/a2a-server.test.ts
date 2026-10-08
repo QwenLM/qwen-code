@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '../../config/storage.js';
 import type {
   AgentMessageRecordPayload,
@@ -16,11 +16,13 @@ import type {
   SessionAgentRunStatus,
 } from '../session-agents/contract.js';
 import { updateSessionAgents } from '../session-agents/binding-store.js';
+import { resolveMentionTargets } from '../session-agents/chain.js';
 import { QWEN_A2A_EXTENSION_URI } from './a2a-contract.js';
 import { getExternalCallerFilePath } from './external-intake.js';
 import { issueA2AGrant, revokeA2AGrant } from './a2a-grants.js';
 import {
   A2ASessionError,
+  a2aAgentCardForCaller,
   a2aCancelTask,
   a2aGetTask,
   a2aListTasks,
@@ -31,6 +33,15 @@ import {
   type A2ASessionRun,
 } from './a2a-server.js';
 import { updateWorkspaceAgents } from './store.js';
+
+vi.mock('../session-agents/chain.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../session-agents/chain.js')>();
+  return {
+    ...actual,
+    resolveMentionTargets: vi.fn(actual.resolveMentionTargets),
+  };
+});
 
 const PROJECT_ROOT = '/a2a-server-test';
 
@@ -56,6 +67,12 @@ class FakeSessions implements A2ASessionPort {
   mentionFailure?: A2ASessionError;
   /** When set, every post joins this run (the orchestrator coalesced it). */
   coalesceInto?: string;
+  /** The agent the post's run is for. */
+  runAgentId = 'ag_lead';
+  /** Fails the call once its post has landed, as a crash would. */
+  failAfterPost?: Error;
+  /** Posts by `clientMessageId`: a replay answers the run it started. */
+  private readonly byClientMessageId = new Map<string, string>();
   private nextRun = 1;
 
   async createSession(input: {
@@ -79,10 +96,20 @@ class FakeSessions implements A2ASessionPort {
     input: { text: string; clientMessageId: string },
   ) {
     if (this.mentionFailure) throw this.mentionFailure;
+    const replayed = this.byClientMessageId.get(input.clientMessageId);
+    if (replayed) {
+      return { runs: [{ runId: replayed, agentId: this.runAgentId }] };
+    }
     this.posts.push({ sessionId, ...input });
     const runId = this.coalesceInto ?? `sr_${this.nextRun++}`;
+    this.byClientMessageId.set(input.clientMessageId, runId);
     this.live.set(runId, { status: 'queued', activityAt: 1_000 });
-    return { runs: [{ runId, agentId: 'ag_lead' }] };
+    const failure = this.failAfterPost;
+    if (failure) {
+      delete this.failAfterPost;
+      throw failure;
+    }
+    return { runs: [{ runId, agentId: this.runAgentId }] };
   }
 
   async liveRun(_sessionId: string, runId: string) {
@@ -285,6 +312,83 @@ describe('A2A send', () => {
     const task = await sent(caller);
     expect(port.sessions).toHaveLength(1);
     expect(task.contextId).toBe(port.sessions[0]!.id);
+  });
+
+  it('does not post twice when a send dies after posting', async () => {
+    const caller = await grant();
+    port.failAfterPost = new Error('daemon stopped');
+    await expect(send(caller)).rejects.toThrow('daemon stopped');
+
+    // The retry posts into the same session with the same id, which the
+    // orchestrator answers with the run the first post started.
+    const task = await sent(caller);
+    expect(port.posts).toHaveLength(1);
+    expect(task).toMatchObject({
+      id: 'sr_1',
+      contextId: port.posts[0]!.sessionId,
+    });
+  });
+
+  it('refuses a post that would address more than the granted agent', async () => {
+    const caller = await grant();
+    const actual = await vi.importActual<
+      typeof import('../session-agents/chain.js')
+    >('../session-agents/chain.js');
+    // As if another `@name` got past the neutralization.
+    vi.mocked(resolveMentionTargets).mockImplementationOnce((text, roster) => ({
+      ...actual.resolveMentionTargets(text, roster),
+      agents: [...roster],
+    }));
+
+    await expect(send(caller)).resolves.toEqual({
+      ok: false,
+      kind: 'refused',
+    });
+    expect(port.posts).toEqual([]);
+  });
+
+  it('takes work for a remote agent and lists it only to its caller', async () => {
+    await updateWorkspaceAgents(PROJECT_ROOT, (agents) => [
+      ...agents,
+      {
+        id: 'ag_far',
+        name: 'far',
+        createdAt: 1,
+        description: 'Runs elsewhere.',
+        execution: { mode: 'managed-host', hostIds: ['ho_1'] },
+      },
+    ]);
+    const { secret } = await issueA2AGrant(PROJECT_ROOT, {
+      callerId: 'share_2',
+      agentId: 'ag_far',
+    });
+    port.runAgentId = 'ag_far';
+
+    await expect(
+      a2aSendMessage(
+        PROJECT_ROOT,
+        port,
+        { callerId: 'share_2', secret },
+        { agentId: 'ag_far', messageId: 'msg-1', text: 'Build it there.' },
+      ),
+    ).resolves.toMatchObject({
+      ok: true,
+      value: { status: { state: 'TASK_STATE_SUBMITTED' } },
+    });
+    expect(port.posts[0]?.text).toBe('@far Build it there.');
+
+    const cardFor = (cardSecret: string) =>
+      a2aAgentCardForCaller(
+        PROJECT_ROOT,
+        { callerId: 'share_2', secret: cardSecret },
+        ['ag_far'],
+        'http://localhost',
+      );
+    expect((await cardFor(secret)).skills).toEqual([
+      { id: 'ag_far', name: 'far', description: 'Runs elsewhere.' },
+    ]);
+    // A caller without a valid grant learns nothing about it.
+    expect((await cardFor('wrong')).skills).toEqual([]);
   });
 
   it('refuses when the daemon refuses the session', async () => {

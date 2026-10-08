@@ -193,6 +193,24 @@ it('refuses to retire an agent while it has a live run', async () => {
   );
 });
 
+it('refuses to move an agent while it has a live session-agent run', async () => {
+  const workspaceCwd = path.join(runtimeDir, 'move-live');
+  await updateWorkspaceAgents(workspaceCwd, () => [
+    { id: 'ag_alice', name: 'alice', createdAt: 1 },
+  ]);
+  liveRuns.value = [
+    { sessionId: 's1', runId: 'r1', agentId: 'ag_alice', status: 'running' },
+  ];
+
+  await request(appFor(runtimeAt(workspaceCwd)))
+    .patch('/workspaces/workspace/agent/agents/ag_alice')
+    .send({ execution: { mode: 'local', provider: 'claude' } })
+    .expect(409, { error: 'agent_has_live_work' });
+  expect(
+    (await readWorkspaceAgents(workspaceCwd))[0]?.execution,
+  ).toBeUndefined();
+});
+
 it("closes only the retired agent's hidden sessions", async () => {
   const workspaceCwd = path.join(runtimeDir, 'retire-sessions');
   const bridge = bridgeStub([

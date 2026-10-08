@@ -215,6 +215,32 @@ describe('external intake', () => {
     await expect(
       reserveExternalSubmission(PROJECT_ROOT, submission),
     ).rejects.toThrow('Malformed A2A caller file');
+    // A future schema fails closed instead of being read as this one.
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({
+        schemaVersion: 99,
+        callerId: 'share_1',
+        contexts: [],
+        tasks: [],
+      }),
+    );
+    await expect(
+      reserveExternalSubmission(PROJECT_ROOT, submission),
+    ).rejects.toThrow('Unsupported A2A caller file schema version');
+    // Another caller's file under this name is not this caller's.
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        callerId: 'share_2',
+        contexts: [],
+        tasks: [],
+      }),
+    );
+    await expect(
+      reserveExternalSubmission(PROJECT_ROOT, submission),
+    ).rejects.toThrow('names caller');
     expect(() => getExternalCallerFilePath(PROJECT_ROOT, '../x')).toThrow(
       'Invalid caller id',
     );
