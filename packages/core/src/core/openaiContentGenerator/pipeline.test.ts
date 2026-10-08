@@ -463,15 +463,20 @@ describe('ContentGenerationPipeline', () => {
    * calls without uninstalling implementations, so an explicit restore is what
    * keeps the suite order-independent.
    */
-  async function withRealChunkConverter(body: () => Promise<void>) {
+  async function withRealChunkConverter(
+    body: () => Promise<void>,
+    parsingOptions: Record<string, boolean> = {
+      contentOnlyThinkingTagLeaks: true,
+    },
+  ) {
     const actual =
       await vi.importActual<typeof import('./converter.js')>('./converter.js');
     vi.mocked(
       OpenAIContentConverter.convertOpenAIChunkToLlm,
     ).mockImplementation(actual.OpenAIContentConverter.convertOpenAIChunkToLlm);
-    mockProvider.getResponseParsingOptions = vi.fn().mockReturnValue({
-      contentOnlyThinkingTagLeaks: true,
-    });
+    mockProvider.getResponseParsingOptions = vi
+      .fn()
+      .mockReturnValue(parsingOptions);
     try {
       await body();
     } finally {
@@ -2728,6 +2733,120 @@ describe('ContentGenerationPipeline', () => {
             .map((part) => part.text ?? '')
             .join(''),
         ).toBe('Answer.');
+      }));
+
+    /** Joined non-thought text across everything the pipeline yielded. */
+    const visibleText = (items: GenerateContentResponse[]) =>
+      items
+        .flatMap((item) => item.candidates?.[0]?.content?.parts ?? [])
+        .filter((part) => !part.thought)
+        .map((part) => part.text ?? '')
+        .join('');
+
+    it.each(['leak verdict', 'transport error'] as const)(
+      'keeps a stranded filter tail out of a tagged-thinking turn (%s)',
+      async (termination) =>
+        withRealChunkConverter(
+          async () => {
+            // Once the stream hands off to TaggedThinkingParser,
+            // `convertOpenAITextToParts` never calls the filter again, so
+            // whatever it withheld is stranded rather than held for this
+            // turn's end.
+            const streamError = new Error('socket reset');
+            const { items, error } = await settle(
+              await streamFrom(
+                streamOf(
+                  chunkOf({ content: 'Answer.\n</thi' }),
+                  chunkOf({ reasoning_content: ' hmm' }),
+                  chunkOf({ content: '<think>\nleaked' }),
+                  ...(termination === 'transport error' ? [streamError] : []),
+                ),
+              ),
+            );
+            if (termination === 'transport error') {
+              expect(error).toBe(streamError);
+            } else {
+              expect(error).toMatchObject({ type: 'PROTOCOL_TAG_LEAK' });
+            }
+            // The prose the caller was shown survives; the stranded tag
+            // fragment does not become ordinary model prose alongside it.
+            expect(visibleText(items)).toBe('Answer.');
+          },
+          {
+            contentOnlyThinkingTagLeaks: true,
+            taggedThinkingTagsAfterReasoning: true,
+          },
+        ),
+    );
+
+    it('does not release a lone closing tag over discarded parked prose', async () =>
+      withRealChunkConverter(async () => {
+        const streamError = new Error('connection reset');
+        const { items, error } = await settle(
+          await streamFrom(
+            streamOf(
+              chunkOf({
+                content: 'Answer.\n</thinking>',
+                // A tool call with no name: the converter parks the parts it
+                // cannot attribute instead of yielding them.
+                tool_calls: [
+                  {
+                    index: 0,
+                    id: 'call_1',
+                    type: 'function',
+                    function: { arguments: '{}' },
+                  },
+                ],
+              }),
+              streamError,
+            ),
+          ),
+        );
+        expect(error).toBe(streamError);
+        // The error handler discards the parked prose, so releasing the
+        // withheld tail would leave a bare closer as the turn's only content.
+        expect(visibleText(items)).toBe('');
+      }));
+
+    it('does not release the filter tail into a cancelled turn', async () =>
+      withRealChunkConverter(async () => {
+        const abortController = new AbortController();
+        const abortError = new Error('Aborted');
+        abortError.name = 'AbortError';
+        const mockStream = {
+          async *[Symbol.asyncIterator]() {
+            yield chunkOf({ content: 'Answer.\n</thi' });
+            abortController.abort();
+            throw abortError;
+          },
+        };
+        const { items, error } = await settle(
+          await streamFrom(mockStream, abortable(abortController.signal)),
+        );
+        expect(error).toBe(abortError);
+        expect(visibleText(items)).toBe('Answer.');
+      }));
+
+    it('does not release a tail that arrived after the finish chunk', async () =>
+      withRealChunkConverter(async () => {
+        const { items, error } = await settle(
+          await streamFrom(
+            streamOf(
+              chunkOf({ content: 'Answer.' }),
+              chunkOf({}, 'stop'),
+              // Withheld by the filter, so this response carries no parts and
+              // the in-loop "continued after a finish reason" guard cannot see
+              // it; the loop ends with the tail still pending.
+              chunkOf({ content: '\n</thinking>' }),
+            ),
+          ),
+        );
+        expect(error).toBeUndefined();
+        // Nothing visible may be delivered past the terminal finish reason.
+        expect(visibleText(items)).toBe('Answer.');
+        expect(items.some((item) => item.candidates?.[0]?.finishReason)).toBe(
+          true,
+        );
       }));
 
     it('leaves the chunk-converter stub unimplemented for later tests', () => {

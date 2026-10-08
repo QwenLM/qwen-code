@@ -342,17 +342,40 @@ function hasNonThoughtCandidateParts(
 /**
  * Releases whatever the trailing-tag filter is still withholding. The
  * normal-end flush and the error-path flush both come through here so one
- * guard cannot drift from the other: a cancellation is not a stream failure to
- * recover from, and a turn whose reasoning channel carried thinking tags is a
- * cross-channel leak whose withheld tail must not be handed over as clean
- * prose. Spelled exactly as the PROTOCOL_TAG_LEAK branch in the catch below
- * spells it, so one catch does not hold two notions of "aborted".
+ * guard cannot drift from the other. Every condition below names a state in
+ * which releasing the tail is unsafe, not merely unnecessary:
+ *
+ * - a cancellation is not a stream failure to recover from, spelled exactly as
+ *   the PROTOCOL_TAG_LEAK branch in the catch below spells it so one catch does
+ *   not hold two notions of "aborted";
+ * - a turn whose reasoning channel carried thinking tags is a cross-channel
+ *   leak whose withheld tail must not be handed over as clean prose;
+ * - a turn that already reported its finish reason is terminal, so released
+ *   text would land after the chunk downstream completeness gates key on. The
+ *   converter resolves the filter with `final` on every finish chunk, so
+ *   whatever is still held afterwards arrived past that chunk;
+ * - visible prose parked behind an unattributable tool call is discarded by
+ *   the error handler, so releasing the tail alone would leave a bare closing
+ *   tag as the turn's only content;
+ * - ownership of the tags moved to the tagged-thinking parser mid-stream, so
+ *   what the filter still holds is stranded rather than withheld for this
+ *   turn's end, and the same pass may still reject the turn as a leak.
+ *
+ * The tail the filter can hold is whitespace plus a tag fragment and never
+ * prose, so withholding it in these states loses no model output.
  */
 function flushTrailingThinkingTag(
   abortSignal: AbortSignal | undefined,
   context: RequestContext,
+  finishSeen: boolean,
 ): GenerateContentResponse | undefined {
-  if (abortSignal?.aborted === true || context.hasThinkingTagInReasoning) {
+  if (
+    abortSignal?.aborted === true ||
+    context.hasThinkingTagInReasoning ||
+    finishSeen ||
+    (context.pendingUntrustedResponseParts?.length ?? 0) > 0 ||
+    context.taggedThinkingParser !== undefined
+  ) {
     return undefined;
   }
   const trailingText = context.trailingThinkingTagFilter?.parse(
@@ -685,6 +708,10 @@ export class ContentGenerationPipeline {
     // function-call parts from the finish chunk).
     let pendingFinishResponse: GenerateContentResponse | null = null;
     let finishYielded = false;
+    // Whether a chunk carrying a finish reason was seen, as opposed to whether
+    // the stream ended normally: the flush guard below has to stay shut for a
+    // tail that arrives after a finish the loop absorbed without yielding.
+    let finishSeen = false;
     // Whether any user-visible content (a non-thought part) has been yielded
     // on this stream. The error-path flush below consults it before
     // withholding a parked tool-call finish: it must mirror LlmChat's
@@ -757,6 +784,10 @@ export class ContentGenerationPipeline {
           getToolCallPreparations(response).length === 0
         ) {
           continue;
+        }
+
+        if (response.candidates?.[0]?.finishReason) {
+          finishSeen = true;
         }
 
         if (
@@ -835,15 +866,6 @@ export class ContentGenerationPipeline {
         }
       }
 
-      const flushedTail = flushTrailingThinkingTag(
-        request.config?.abortSignal,
-        context,
-      );
-      if (flushedTail) {
-        contentYielded ||= hasNonThoughtCandidateParts(flushedTail);
-        yield flushedTail;
-      }
-
       if (
         context.pendingThinkingTagCandidate &&
         !context.pendingThinkingTagCandidate.closingTagName &&
@@ -880,6 +902,20 @@ export class ContentGenerationPipeline {
         );
       }
 
+      // Below the leak verdict, so a turn about to be rejected as
+      // PROTOCOL_TAG_LEAK never has its withheld tail handed over as ordinary
+      // prose first; above the Stage 2d parked-finish yield, so released text
+      // cannot land after the `finishReason` chunk.
+      const flushedTail = flushTrailingThinkingTag(
+        request.config?.abortSignal,
+        context,
+        finishSeen,
+      );
+      if (flushedTail) {
+        contentYielded ||= hasNonThoughtCandidateParts(flushedTail);
+        yield flushedTail;
+      }
+
       // Stage 2d: If there's still a pending finish response at the end
       // (e.g. no usage chunk arrived after the finish chunk), yield it.
       if (pendingFinishResponse && !finishYielded) {
@@ -909,6 +945,7 @@ export class ContentGenerationPipeline {
       const flushedTail = flushTrailingThinkingTag(
         request.config?.abortSignal,
         context,
+        finishSeen,
       );
       if (flushedTail) {
         contentYielded ||= hasNonThoughtCandidateParts(flushedTail);
