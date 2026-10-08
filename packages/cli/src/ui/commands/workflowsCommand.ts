@@ -271,12 +271,13 @@ function detailLines(
     if (!preview) {
       lines.push('    (this snapshot did not record a result)');
     } else {
+      const sanitized = sanitizeWorkflowText(preview.text);
       const text = truncateWorkflowText(
-        sanitizeWorkflowText(preview.text),
+        sanitized,
         MAX_WORKFLOW_RESULT_PREVIEW_CHARS,
       );
       lines.push(indent(text, '    '));
-      if (preview.truncated || text !== preview.text) {
+      if (preview.truncated || text !== sanitized) {
         lines.push(
           `    (preview truncated to ${MAX_WORKFLOW_RESULT_PREVIEW_CHARS} characters)`,
         );

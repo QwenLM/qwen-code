@@ -917,6 +917,25 @@ describe('workflowsCommand', () => {
       expect(result).toContain('    Reported failed: boom');
       expect(result).not.toContain('\x1b');
       expect(result).not.toContain('\u202e');
+      // Removing controls shortened the text; nothing was truncated.
+      expect(result).not.toContain('preview truncated');
+    });
+
+    it('keeps the truncation notice a stored preview recorded', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([
+        {
+          runId: 'wf_11',
+          resultPreview: {
+            text: 'short\u2026 (truncated)',
+            truncated: true,
+            reportedFailures: [],
+          },
+        },
+      ]);
+      expect((await content(ctx, 'wf_11')).content).toContain(
+        '    (preview truncated to 25000 characters)',
+      );
     });
 
     it('prefers the live entry over a same-runId snapshot', async () => {
