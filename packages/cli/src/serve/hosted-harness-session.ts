@@ -1589,7 +1589,11 @@ async function executeHostedTurn(
         const settledPrompts = new Set(
           authority
             .eventsInSequenceRange(1, authority.committedSequence)
-            .filter((event) => event.kind === 'turn.settled')
+            .filter(
+              (event) =>
+                event.kind === 'turn.settled' &&
+                event.payload['outcome'] !== 'cancelled',
+            )
             .map((event) => event.payload['turnId']),
         );
         const history = session.toolProfile
@@ -3643,7 +3647,11 @@ export function registerHostedHarnessSessionRoutes(
               1,
               session.managed.authority.committedSequence,
             )
-            .filter((event) => event.kind === 'turn.settled')
+            .filter(
+              (event) =>
+                event.kind === 'turn.settled' &&
+                event.payload['outcome'] !== 'cancelled',
+            )
             .map((event) => event.payload['turnId']),
         );
         const turnRecords = projected.filter(
