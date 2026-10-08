@@ -1373,7 +1373,7 @@ export function createDaemonSessionActions({
         );
         // The prompt is admitted to the session here — signal it before we wait
         // out the (possibly long) turn, so an admission-only caller can proceed.
-        options?.onAdmitted?.();
+        options?.onAdmitted?.({ promptId: accepted.promptId });
         return await waitForAcceptedPromptCompletion(
           activePromptsRef.current,
           settledPromptsRef.current,
@@ -1613,6 +1613,13 @@ export function createDaemonSessionActions({
           discardAttachments,
           options?.signal,
         );
+        // Only a cancelled upload has a payload that must not be submitted.
+        // Without uploads the prompt still goes through admission so the
+        // accepted id can be removed exactly by the aborted-signal path below.
+        if (options?.signal?.aborted && uploaded.references.length > 0) {
+          await removeUploadedAttachments(session, uploaded.references);
+          options.signal.throwIfAborted();
+        }
       } catch (error) {
         if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
           store.appendLocalUserMessage(
@@ -2729,7 +2736,7 @@ export function createDaemonSessionActions({
       yield* session.generateContent(prompt, opts);
     },
 
-    async getRewindSnapshots(): Promise<{
+    async getRewindSnapshots(opts?: { silent?: boolean }): Promise<{
       snapshots: DaemonRewindSnapshotInfo[];
     }> {
       const session = requireSessionForAction(
@@ -2744,6 +2751,7 @@ export function createDaemonSessionActions({
           'Load rewind snapshots timed out',
         );
       } catch (error) {
+        if (opts?.silent) throw error;
         throw dispatchActionError(
           addNotice,
           'Load rewind snapshots failed',
@@ -2755,7 +2763,7 @@ export function createDaemonSessionActions({
 
     async rewindSession(
       promptId: string,
-      opts?: { rewindFiles?: boolean },
+      opts?: { rewindFiles?: boolean; silent?: boolean },
     ): Promise<DaemonRewindResult> {
       const session = requireSessionForAction(
         addNotice,
@@ -2769,6 +2777,7 @@ export function createDaemonSessionActions({
           'Rewind session timed out',
         );
       } catch (error) {
+        if (opts?.silent) throw error;
         throw dispatchActionError(
           addNotice,
           'Rewind session failed',

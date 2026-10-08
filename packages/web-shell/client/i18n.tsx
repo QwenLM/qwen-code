@@ -124,6 +124,8 @@ const EN: Messages = {
   'managed.cancel': 'Cancel turn',
   'managed.uncertain':
     'The request outcome is unconfirmed. Retry to check or complete the same submission.',
+  'managed.discard': 'Discard this request',
+  'managed.discarded': 'Request discarded. The draft is back in the composer.',
   'managed.newRequired': 'Start a new task to send another message.',
   'managed.truncated': '[Details truncated]',
   'managed.approval.failed':
@@ -135,6 +137,10 @@ const EN: Messages = {
     'Only the Session creator can answer this approval.',
   'managed.approval.argumentsUnavailable':
     'Tool arguments are unavailable for this approval.',
+  'managed.approval.previewComplete': (v) =>
+    `Input preview: ${v?.bytes ?? 0} bytes.`,
+  'managed.approval.previewTruncated': (v) =>
+    `Input preview truncated. Full input: ${v?.bytes ?? 0} bytes.`,
   'managed.result.range': (v) => `Bytes ${v?.start}–${v?.end} of ${v?.total}`,
   'managed.result.outputs': 'Outputs',
   'managed.result.view': 'View output',
@@ -800,6 +806,18 @@ const EN: Messages = {
   'assistant.copy': 'Copy',
   'assistant.dissatisfied': 'Not satisfied',
   'assistant.satisfied': 'Satisfied',
+  // A workspace agent's reply in a chat session. These render in exported
+  // transcripts too, so they live here rather than in the collab dictionary.
+  'agentMessage.status.failed': 'Failed',
+  'agentMessage.status.cancelled': 'Stopped',
+  'agentMessage.status.offline': 'Runtime offline',
+  'agentMessage.tokens': (v) => `${v?.count ?? 0} tokens`,
+  'agentMessage.steps': 'Steps',
+  'agentMessage.noAction': (v) => `${v?.name ?? ''} had nothing to do`,
+  'agentMessage.step.running': 'Running',
+  'agentMessage.step.completed': 'Done',
+  'agentMessage.step.failed': 'Failed',
+  'agentMessage.step.stopped': 'Stopped',
   'at.category.extensions': 'Extensions',
   'at.category.extensions.description': 'Reference active extensions',
   'at.category.files': 'Files',
@@ -4355,6 +4373,8 @@ const ZH: Messages = {
   'managed.retry': '重试同一请求',
   'managed.cancel': '取消本轮',
   'managed.uncertain': '请求结果尚未确认。重试会确认或完成同一次提交。',
+  'managed.discard': '丢弃本次请求',
+  'managed.discarded': '已丢弃本次请求。草稿已放回输入框。',
   'managed.newRequired': '请新建任务后发送消息。',
   'managed.truncated': '[详情已截断]',
   'managed.approval.failed':
@@ -4364,6 +4384,10 @@ const ZH: Messages = {
   'managed.approval.retry': '重新读取审批',
   'managed.approval.forbidden': '只有此会话的创建者可以回答这项审批。',
   'managed.approval.argumentsUnavailable': '此项审批的工具参数暂不可见。',
+  'managed.approval.previewComplete': (v) =>
+    `输入预览：${v?.bytes ?? 0} 字节。`,
+  'managed.approval.previewTruncated': (v) =>
+    `输入预览已截断，完整输入共 ${v?.bytes ?? 0} 字节。`,
   'managed.result.range': (v) => `字节 ${v?.start}–${v?.end}，共 ${v?.total}`,
   'managed.result.outputs': '输出',
   'managed.result.view': '查看输出',
@@ -5080,6 +5104,16 @@ const ZH: Messages = {
   'assistant.copy': '复制',
   'assistant.dissatisfied': '不满意',
   'assistant.satisfied': '满意',
+  'agentMessage.status.failed': '失败',
+  'agentMessage.status.cancelled': '已停止',
+  'agentMessage.status.offline': 'Runtime 离线',
+  'agentMessage.tokens': (v) => `${v?.count ?? 0} tokens`,
+  'agentMessage.steps': '步骤',
+  'agentMessage.noAction': (v) => `${v?.name ?? ''} 这次无需动作`,
+  'agentMessage.step.running': '进行中',
+  'agentMessage.step.completed': '已完成',
+  'agentMessage.step.failed': '失败',
+  'agentMessage.step.stopped': '已停止',
   'at.category.extensions': '扩展',
   'at.category.extensions.description': '引用已启用扩展',
   'at.category.files': '文件',

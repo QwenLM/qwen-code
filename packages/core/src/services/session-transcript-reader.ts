@@ -309,7 +309,7 @@ export interface SessionRestoreProjection {
   replay?: SessionRestoreReplayPage;
 }
 
-export interface ManagedSessionRestoreProjectionInput {
+interface ManagedSessionRestoreProjectionInput {
   readonly sessionId: string;
   readonly records: readonly ChatRecord[];
   readonly replay: SessionRestoreReplaySelection;
@@ -323,7 +323,7 @@ export interface ManagedSessionRestoreProjectionInput {
 }
 
 /** Rebuilds the existing runtime resume shape from a durable Managed journal. */
-export function buildManagedSessionRestoreProjection(
+function buildManagedSessionRestoreProjection(
   input: ManagedSessionRestoreProjectionInput,
 ): SessionRestoreProjection {
   validateRestoreReplaySelection(input.replay);
@@ -1170,7 +1170,9 @@ export function navigationKindForRecord(
   if (
     record.subtype === 'goal_runtime' ||
     record.subtype === 'notification' ||
-    record.subtype === 'mid_turn_user_message'
+    record.subtype === 'mid_turn_user_message' ||
+    record.subtype === 'agent_mention' ||
+    record.subtype === 'agent_message'
   ) {
     return undefined;
   }
@@ -1393,6 +1395,9 @@ const REPLAY_MID_TURN_USER_SUBTYPES: ReadonlySet<string> = new Set([
   'notification',
   'cron',
   'mid_turn_user_message',
+  // Session multi-agent records render inline and never open a turn.
+  'agent_mention',
+  'agent_message',
 ] satisfies ReadonlyArray<NonNullable<ChatRecord['subtype']>>);
 
 export function isReplayTurnStartType(
@@ -2174,8 +2179,7 @@ async function buildIndex(params: {
         const text = line.toString('utf8').trim();
         if (text.length === 0) return;
         let fragmentIndex = 0;
-        for (const value of executionEngine.parseLine(text, filePath)) {
-          const record = validateTranscriptRecord(value).record;
+        for (const { record } of executionEngine.parseLine(text, filePath)) {
           if (!record) {
             sourceReadComplete = false;
             continue;
@@ -2593,12 +2597,12 @@ export async function readSessionTranscriptSnapshot(
   const records: ChatRecord[] = [];
   let firstRecord: ChatRecord | undefined;
   await forEachLineInSnapshot(filePath, stats.size, (line) => {
-    for (const record of owner.parseLine(
+    for (const { value } of owner.parseLine(
       line.toString('utf8').trim(),
       filePath,
     )) {
-      firstRecord ??= record as ChatRecord;
-      if (collectRecords) records.push(record as ChatRecord);
+      firstRecord ??= value as ChatRecord;
+      if (collectRecords) records.push(value as ChatRecord);
     }
   });
   if (

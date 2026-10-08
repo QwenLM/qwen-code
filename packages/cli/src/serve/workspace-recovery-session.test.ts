@@ -5,6 +5,10 @@
  */
 
 import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { describe, expect, it, vi } from 'vitest';
 import {
   describeTransaction,
@@ -13,7 +17,10 @@ import {
 import { createInitialHarnessCheckpoint } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
-import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import {
+  openManagedSession,
+  type ManagedSession,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import { scanManagedSessionJournal } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-storage.js';
 import { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import { ResourceToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/resource-tool-result-store.js';
@@ -29,6 +36,14 @@ import {
   type RecoverySessionIO,
   type RecoverySessionSource,
 } from './workspace-recovery-session.js';
+import {
+  createRecoveryRpc,
+  runRecoveryWorker,
+} from './workspace-recovery-worker.js';
+import {
+  recoveryDigest,
+  type RecoveryRpc,
+} from './workspace-recovery-bundle.js';
 
 const SESSION = '6d629e8b-ceb2-4c98-9fa2-2b1a34777517';
 const KEY = {
@@ -39,7 +54,11 @@ const KEY = {
 const hash = (bytes: Buffer) =>
   createHash('sha256').update(bytes).digest('hex');
 
-function fixture() {
+function fixture(
+  definition: Record<string, unknown> = {
+    toolProfile: 'hosted-workspace-files/1',
+  },
+) {
   const resources = new Map<string, Buffer>();
   const refs = new Map<string, ManagedSessionDurableRef>();
   const complete = new Set<string>();
@@ -204,7 +223,7 @@ function fixture() {
         definitionRef: resource('managed-definition', {
           engine: 'managed',
           sessionId: SESSION,
-          toolProfile: 'hosted-workspace-files/1',
+          ...definition,
         }),
         rootSnapshotRef: resource('managed-root', { cwd: '/original/cwd' }),
         createdBy: 'hosted-harness',
@@ -265,7 +284,10 @@ function fixture() {
   };
 }
 
-async function hostedModelFixture(settled = true) {
+async function hostedModelFixture(
+  settled = true,
+  turn?: (session: ManagedSession) => Promise<void>,
+) {
   const f = fixture();
   f.transactions.length = 0;
   const records: unknown[] = [];
@@ -334,6 +356,7 @@ async function hostedModelFixture(settled = true) {
           await complete(true, [{ totalTokenCount: 7 }]);
         },
       );
+      if (turn) await turn(session);
       if (settled)
         await session.sink.write({
           uuid: 'turn-result',
@@ -632,6 +655,157 @@ async function shellFixture(
   return { ...f, localSegmentId, emptySealId, manifestRef, seals, binary };
 }
 
+async function detachedShellFixture(options: { partial?: boolean } = {}) {
+  const f = fixture();
+  const partial = options.partial === true;
+  const manifestRef = partial
+    ? f.resource('managed-tool-result-manifest', {
+        toolResult: 'managed-tool-result/1',
+        type: 'manifest',
+        tenantId: 'tenant',
+        sessionId: SESSION,
+        turnId: 'prompt',
+        executionCallId: 'execution',
+        callId: 'call',
+        invocationDigest: 'sha256:' + 'a'.repeat(64),
+        bindingGeneration: '1',
+        captureId: 'capture',
+        revision: 1,
+        executionStatus: 'error',
+        exitCode: null,
+        signal: null,
+        captureScope: 'process_pipes',
+        capturePolicy: 'complete_required',
+        captureStatus: 'partial',
+        captureReason: 'storage_failed',
+        upstreamTruncated: false,
+        contents: [
+          {
+            streamId: 'stdout',
+            role: 'stdout',
+            mimeType: 'application/octet-stream',
+            state: 'incomplete',
+            byteLength: 0,
+            digest: hash(Buffer.alloc(0)),
+            missingRanges: [{ start: 0, end: null }],
+            body: { pages: [] },
+          },
+        ],
+      })
+    : null;
+  const envelope = {
+    executionStatus: partial ? ('error' as const) : ('success' as const),
+    responseParts: [
+      { text: 'Background shell started under unit qwen-bg-call.' },
+    ],
+    capture: partial
+      ? {
+          captureStatus: 'partial' as const,
+          captureReason: 'storage_failed' as const,
+          manifest: manifestRef,
+          previewTruncated: false,
+          deliveryStatus: 'pending' as const,
+        }
+      : {
+          captureStatus: 'detached' as const,
+          captureReason: null,
+          manifest: null,
+          previewTruncated: false,
+          deliveryStatus: 'pending' as const,
+        },
+  };
+  const history = {
+    messageId: '123e4567-e89b-42d3-a456-426614174000',
+    timestamp: '2026-10-01T00:00:00.000Z',
+    model: 'model',
+    parts: [{ text: 'Background shell started under unit qwen-bg-call.' }],
+  };
+  f.append([
+    f.event('input.accepted', {
+      inputId: 'prompt',
+      turnId: 'prompt',
+      source: 'hosted-harness',
+      contentRef: f.resource('managed-input', 'prompt'),
+      admissionRef: f.resource('managed-admission', { promptId: 'prompt' }),
+      deadline: null,
+    }),
+  ]);
+  const initial = createInitialHarnessCheckpoint({
+    sessionKey: KEY,
+    checkpointId: 'initial',
+    coveredSequence: 1,
+    activationId: 'activation',
+    turnId: null,
+    promptId: null,
+    definitionRevision: 'definition',
+    configRevision: 'config',
+    inputDigest: 'a'.repeat(64),
+    previousCheckpointId: null,
+  });
+  const checkpointRef = f.resource('managed-checkpoint', initial);
+  f.append([
+    f.event('checkpoint.committed', {
+      checkpointId: 'initial',
+      coveredSequence: 1,
+      previousCheckpointId: null,
+      stateRef: checkpointRef,
+      boundary: null,
+    }),
+  ]);
+  const outcomeRef = f.resource('managed-tool-outcome', {
+    schemaVersion: 1,
+    decision: 'blocked',
+    envelope,
+    manifestRef,
+    history,
+  });
+  f.append([
+    f.event('tool.receipt', {
+      executionCallId: 'execution',
+      toolOutcomeRef: outcomeRef,
+      resultRef: manifestRef,
+      resources: manifestRef ? [manifestRef] : [],
+      historyRevision: 3,
+    }),
+  ]);
+  const state = createInitialHarnessCheckpoint({
+    sessionKey: KEY,
+    checkpointId: 'final',
+    coveredSequence: 3,
+    activationId: 'activation',
+    turnId: 'prompt',
+    promptId: 'prompt',
+    definitionRevision: 'definition',
+    configRevision: 'config',
+    inputDigest: 'a'.repeat(64),
+    previousCheckpointId: 'initial',
+  });
+  const settled = f.event('turn.settled', {
+    turnId: 'prompt',
+    outcome: 'completed',
+    stopReason: null,
+    resultRef: f.resource(
+      'managed-turn-result',
+      f.record('turn_result', { promptId: 'prompt', state: 'completed' }),
+    ),
+    usageRef: null,
+    pendingOwnersRef: null,
+  });
+  const checkpoint = {
+    ...f.event('checkpoint.committed', {
+      checkpointId: 'final',
+      coveredSequence: 3,
+      previousCheckpointId: 'initial',
+      stateRef: f.resource('managed-checkpoint', state),
+      boundary: 'turn_complete',
+    }),
+    sequence: 5,
+    eventId: 'final-checkpoint',
+  };
+  f.append([settled, checkpoint]);
+  return { ...f, outcomeRef };
+}
+
 function retiredFixture(turnId: string | null = null) {
   const f = fixture();
   f.append([
@@ -698,14 +872,17 @@ const HISTORY_RECEIPT = {
   conflict: false,
 };
 
-function hostedHistoryFixture(fields: Record<string, unknown> = {}) {
+function hostedHistoryFixture(
+  fields: Record<string, unknown> = {},
+  filePath = 'absent.txt',
+) {
   const f = fixture();
   const snapshots = [
     {
       promptId: HISTORY_PROMPT,
       timestamp: '2026-10-01T00:00:00.000Z',
       trackedFileBackups: {
-        'absent.txt': {
+        [filePath]: {
           backupFileName: null,
           version: 0,
           backupTime: '2026-10-01T00:00:00.000Z',
@@ -721,11 +898,11 @@ function hostedHistoryFixture(fields: Record<string, unknown> = {}) {
     state: {
       ownerSessionId: SESSION,
       snapshots,
-      files: { 'absent.txt': null },
+      files: { [filePath]: null },
     },
     pendingTurn: null,
     pendingUndo: null,
-    undoReceipts: [HISTORY_RECEIPT],
+    undoReceipts: [{ ...HISTORY_RECEIPT, filesChanged: [filePath] }],
     ...fields,
     record: f.record('file_history_snapshot', { snapshots }),
   });
@@ -739,6 +916,28 @@ function hostedHistoryFixture(fields: Record<string, unknown> = {}) {
   ]);
   return { ...f, historyRef };
 }
+
+describe('migration profile evidence', () => {
+  it('refuses absolute Hosted history during migration', async () => {
+    const f = hostedHistoryFixture({}, '/original/cwd/absent.txt');
+    await expect(
+      verifyRecoverySession(f.source, f.io, 'migration'),
+    ).rejects.toThrow();
+  });
+  it.each([
+    {},
+    { toolProfile: 'hosted-workspace-files/2' },
+    { toolProfile: 'hosted-workspace-shell/1' },
+    { toolProfile: 'hosted-workspace-shell/2' },
+    { toolProfile: 'hosted-workspace-files/1', hookCatalog: {} },
+    { toolProfile: 'hosted-workspace-files/1', captureBytes: 1024 },
+  ])('rejects unsupported frozen definition %j', async (definition) => {
+    const f = fixture(definition);
+    await expect(
+      verifyRecoverySession(f.source, f.io, 'migration'),
+    ).rejects.toThrow('unsupported migration profile');
+  });
+});
 
 describe('verifyRecoverySession', () => {
   it.each([
@@ -905,6 +1104,173 @@ describe('verifyRecoverySession', () => {
     const f = await hostedModelFixture(false);
     await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
       'unfinished Harness work',
+    );
+  });
+
+  it('verifies a settled turn whose assistant message is chunked past the inline limit', async () => {
+    const text = '长'.repeat(70_000);
+    const f = await hostedModelFixture(true, async (session) => {
+      await session.sink.write({
+        uuid: 'big-answer',
+        parentUuid: null,
+        sessionId: SESSION,
+        timestamp: '2026-10-02T00:00:01.000Z',
+        cwd: '/original/cwd',
+        version: 'hosted-harness/1',
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text }] },
+      });
+    });
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    // Manifest and parts were read and pinned through the reference closure.
+    const kinds = [...f.refs.values()].map((ref) => ref.kind);
+    expect(kinds).toContain('managed-message-chunks');
+    expect(kinds).toContain('managed-message-part');
+    const manifest = [...f.refs.values()].find(
+      (ref) => ref.kind === 'managed-message-chunks',
+    )!;
+    const parts = (
+      JSON.parse(f.resources.get(manifest.resourceId)!.toString('utf8')) as {
+        parts: ManagedSessionDurableRef[];
+      }
+    ).parts;
+    const reassembled = Buffer.concat(
+      parts.map((part) => f.resources.get(part.resourceId)!),
+    );
+    const record = JSON.parse(reassembled.toString('utf8')) as {
+      message?: { parts?: Array<{ text?: string }> };
+    };
+    expect(record.message?.parts?.[0]?.text).toBe(text);
+
+    const root = await mkdtemp(
+      join(await realpath(tmpdir()), 'chunked-recovery-'),
+    );
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const rpc = createRecoveryRpc(input, output);
+    const sourceJson = JSON.stringify(f.source);
+    const sourceDigest = recoveryDigest(sourceJson);
+    const context = {
+      protocol: 'workspace-recovery/1',
+      mode: 'capture',
+      request: {
+        operationId: '00000000-0000-4000-8000-000000000001',
+        tenantId: KEY.tenantId,
+        storageId: f.source.binding.storageId,
+        sourceRoot: join(root, 'source'),
+        bundleRoot: join(root, 'bundle'),
+        fileHistoryRoot: join(root, 'history'),
+        fenceOperationId: '00000000-0000-4000-8000-000000000002',
+        mountRevision: 2,
+      },
+      registration: {
+        tenantId: KEY.tenantId,
+        storageId: f.source.binding.storageId,
+        mountRevision: 2,
+      },
+      sourceDigest: recoveryDigest(`${sourceJson}\n`),
+      sessionCount: 1,
+      capture: null as null | { operationId: string; manifestDigest: string },
+    };
+    const assets = new Map<string, unknown>();
+    const authority: RecoveryRpc = async (method, value) => {
+      const params = value as Record<string, unknown>;
+      if (method === 'context') return context;
+      if (method === 'sessions')
+        return {
+          sessions: [
+            { sessionId: SESSION, source: f.source, sourceJson, sourceDigest },
+          ],
+          nextSessionId: null,
+        };
+      if (method === 'transaction')
+        return {
+          ...f.transactions[Number(params['revision']) - 1],
+          recordEncoding: 'identity',
+        };
+      if (method === 'resource') {
+        const ref = params['ref'] as ManagedSessionDurableRef;
+        return { ref, bytesBase64: (await f.io.read(ref)).toString('base64') };
+      }
+      if (method === 'enqueueRef') {
+        await f.io.enqueue(params['ref'] as ManagedSessionDurableRef);
+        return {};
+      }
+      if (method === 'nextRef') return f.io.nextReference();
+      if (method === 'completeRef') {
+        await f.io.completeReference(params['ref'] as ManagedSessionDurableRef);
+        return {};
+      }
+      if (method === 'asset') {
+        assets.set(String(params['key']), params['metadata']);
+        return params['metadata'];
+      }
+      if (method === 'assetLookup')
+        return assets.get(String(params['key'])) ?? null;
+      if (method === 'assetPage')
+        return {
+          assets: [...assets]
+            .filter(([key]) => key > String(params['afterKey'] ?? ''))
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([key, metadata]) => ({ key, metadata })),
+          nextKey: null,
+        };
+      if (method === 'sessionComplete') return {};
+      if (method === 'finish') return params;
+      throw new Error(`Unexpected recovery RPC ${method}`);
+    };
+    output.on('data', (bytes: Buffer) => {
+      const request = JSON.parse(bytes.toString()) as {
+        id: number;
+        method: string;
+        params: unknown;
+      };
+      void authority(request.method, request.params).then(
+        (result) =>
+          input.write(`${JSON.stringify({ id: request.id, result })}\n`),
+        (error: Error) =>
+          input.write(
+            `${JSON.stringify({ id: request.id, error: { code: error.message } })}\n`,
+          ),
+      );
+    });
+    try {
+      for (const directory of [
+        context.request.sourceRoot,
+        context.request.bundleRoot,
+        context.request.fileHistoryRoot,
+        join(context.request.bundleRoot, 'workspace'),
+      ])
+        await mkdir(directory);
+      f.complete.clear();
+      const capture = (await runRecoveryWorker(rpc)) as {
+        manifestDigest: string;
+        result: { sessionCount: number; entries: number; assets: number };
+      };
+      context.capture = {
+        operationId: context.request.operationId,
+        manifestDigest: capture.manifestDigest,
+      };
+      context.mode = 'verify';
+      f.complete.clear();
+      const verify = (await runRecoveryWorker(rpc)) as typeof capture;
+      expect(verify.manifestDigest).toBe(capture.manifestDigest);
+      expect(verify.result).toEqual(capture.result);
+    } finally {
+      input.destroy();
+      output.destroy();
+      await rm(root, { recursive: true, force: true });
+    }
+
+    f.resources.delete(parts[1].resourceId);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'missing_resource',
+    );
+    f.resources.set(parts[1].resourceId, Buffer.alloc(parts[1].byteLength));
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      'resource bytes conflict',
     );
   });
 
@@ -1166,6 +1532,30 @@ describe('verifyRecoverySession', () => {
       'original publication receipt conflicts',
     );
   });
+
+  it('replays a detached background start handle like the not-started family', async () => {
+    const f = await detachedShellFixture();
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    expect(f.io.publicationReceipt).not.toHaveBeenCalled();
+    expect(f.io.publicationObject).not.toHaveBeenCalled();
+    expect(f.complete.size).toBe(f.refs.size);
+  });
+
+  it('keeps refusing a blocked partial or committed-free receipt', async () => {
+    const partial = await detachedShellFixture({ partial: true });
+    await expect(
+      verifyRecoverySession(partial.source, partial.io),
+    ).rejects.toThrow('unsettled or conflicting Shell receipt');
+    const committedFree = await detachedShellFixture();
+    committedFree.resources.delete(
+      (committedFree.outcomeRef as { resourceId: string }).resourceId,
+    );
+    await expect(
+      verifyRecoverySession(committedFree.source, committedFree.io),
+    ).rejects.toThrow();
+  });
   it('uses the actual private workspace key and verifies an initial journal', async () => {
     const f = fixture();
     expect(await verifyRecoverySession(f.source, f.io)).toEqual({
@@ -1173,6 +1563,30 @@ describe('verifyRecoverySession', () => {
     });
     expect(f.complete.size).toBe(f.refs.size);
     expect(f.io.publicationReceipt).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { toolProfile: 'hosted-workspace-files/1' },
+    { toolProfile: 'hosted-workspace-files/2' },
+    { toolProfile: 'hosted-workspace-shell/1', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-shell/2', captureBytes: 1024 },
+  ])('recovers every saved Workspace profile (%j)', async (definition) => {
+    // One refused profile would abort recovery for the whole Workspace,
+    // so recovery reads the same profile vocabulary creation persists.
+    const f = fixture(definition);
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+  });
+
+  it.each([
+    { toolProfile: 'hosted-workspace-files/3' },
+    { toolProfile: 'hosted-workspace-files/2', captureBytes: 1024 },
+  ])('still refuses an unknown Hosted definition (%j)', async (definition) => {
+    const f = fixture(definition);
+    await expect(verifyRecoverySession(f.source, f.io)).rejects.toThrow(
+      /unsupported Hosted profile|invalid frozen Hosted definition/u,
+    );
   });
 
   it('rejects changed bytes even when the stored transaction metadata was not changed', async () => {
@@ -1422,5 +1836,17 @@ describe('verifyRecoverySession', () => {
     await expect(verifyRecoverySession(other.source, other.io)).rejects.toThrow(
       'invalid reader-facing record',
     );
+  });
+});
+
+describe('migration profile eligibility', () => {
+  it('accepts settled files and refuses an uninitialized retained member', async () => {
+    const f = fixture();
+    await expect(
+      verifyRecoverySession(f.source, f.io, 'migration'),
+    ).resolves.toBeDefined();
+    await expect(
+      verifyRecoverySession({ ...f.source, head: null }, f.io, 'migration'),
+    ).rejects.toThrow('uninitialized migration member');
   });
 });

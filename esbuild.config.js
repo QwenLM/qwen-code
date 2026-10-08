@@ -255,23 +255,21 @@ const mainBuild = esbuild.build({
   minifyWhitespace: true,
 });
 
-// fzf index worker — runs in its own worker_threads worker that
-// `fzfWorkerHandle.ts` spawns via `new Worker(new URL('./fzfWorker.js', ...))`.
-// Must exist as a standalone file next to `dist/cli.js` so the URL resolves
-// at runtime; we bundle it self-contained (no chunk splitting) so fzf is
-// inlined and the worker doesn't need to walk back into node_modules from
-// the published tarball. `prepare-package.js` whitelists `fzfWorker.js` in
-// the dist `files` array.
+// Worker entries must be self-contained files beside cli.js, included in
+// both package layouts, because worker_threads cannot reuse the main chunks.
 const workerBuild = esbuild.build({
-  entryPoints: ['packages/core/src/utils/filesearch/fzfWorker.ts'],
+  entryPoints: {
+    fzfWorker: 'packages/core/src/utils/filesearch/fzfWorker.ts',
+    'glob-search-worker': 'packages/core/src/tools/glob-search-worker.ts',
+  },
   bundle: true,
-  outfile: 'dist/fzfWorker.js',
+  outdir: 'dist',
   platform: 'node',
   format: 'esm',
   target: 'node22',
   external,
   packages: 'bundle',
-  // fzf is CJS — needs the same require()-shim the main bundle uses for
+  // Bundled CJS dependencies need the same require()-shim the main bundle uses for
   // CJS interop in ESM output.
   inject: [path.resolve(__dirname, 'scripts/esbuild-shims.js')],
   banner: {

@@ -65,6 +65,7 @@ public final class HostedHarnessClient implements AutoCloseable {
     private final String baseUrl;
     private final String bearerToken;
     private final Duration requestTimeout;
+    private final Duration loadTimeout;
     private final Duration heartbeatInterval;
     private final int maximumSseFrameBytes;
     private final ExecutorService httpExecutor;
@@ -87,6 +88,8 @@ public final class HostedHarnessClient implements AutoCloseable {
         String expectedDigest = requireDigest(
                 builder.capabilityDigest, "capabilityDigest");
         this.requestTimeout = builder.requestTimeout;
+        this.loadTimeout = builder.loadTimeout != null
+                ? builder.loadTimeout : builder.requestTimeout;
         this.heartbeatInterval = builder.heartbeatInterval;
         this.maximumSseFrameBytes = builder.maximumSseFrameBytes;
         long number = CLIENT_SEQUENCE.incrementAndGet();
@@ -169,10 +172,15 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
         ensureOpen();
         String path = sessionPath(request.getHarnessSessionId()) + "/load";
+        // Only a takeover load may settle parked executions and need the
+        // longer ceiling; a plain attach stays on the steady-state one
+        // (it also runs under ConcurrentHashMap bin locks in the connector).
+        Duration timeout = request.isRuntimeRecoveryLoad()
+                ? loadTimeout : requestTimeout;
         HttpSupport.Response response;
         try {
             response = sendMutation(path, request.toJson(), null,
-                    "POST /session/:id/load");
+                    "POST /session/:id/load", timeout);
         } catch (MutationOutcomeUnknownException error) {
             throw namedLoadRefusal(error);
         }
@@ -521,6 +529,58 @@ public final class HostedHarnessClient implements AutoCloseable {
                 json);
     }
 
+    public Map<String, Object> settleLifecycle(HarnessSessionRef session, Map<String, Object> request) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        if (capabilities.getLifecycleProtocolVersion() != 1) {
+            throw new DaemonProtocolException("Hosted lifecycle protocol 1 is required");
+        }
+        String operation = "POST /session/:id/lifecycle";
+        HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/lifecycle",
+                request, ref.getHarnessClientId(), operation);
+        requireMutationStatus(response, 200, operation);
+        Map<String, Object> receipt = JsonSupport.parseObject(response.getBody(), operation);
+        if (!java.util.Objects.equals(request.get("sessionKey"), receipt.get("sessionKey"))
+                || !java.util.Objects.equals(request.get("kind"), receipt.get("kind"))) {
+            throw new DaemonProtocolException("Hosted lifecycle receipt identity differs");
+        }
+        return receipt;
+    }
+
+    public void detachLifecycle(HarnessSessionRef session, Map<String, Object> authority) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        AttachmentState state = attachments.get(ref.getHarnessSessionId());
+        ActivePrompt prompt = activePrompts.get(ref.getHarnessSessionId());
+        HttpSupport.Response response = sendMutation(sessionPath(ref.getHarnessSessionId()) + "/detach",
+                Map.of("authority", authority), ref.getHarnessClientId(), "POST /session/:id/detach");
+        if (response.getStatusCode() != 404) {
+            requireMutationStatus(response, 204, "POST /session/:id/detach");
+        }
+        if (state != null && state.matches(ref) && attachments.remove(ref.getHarnessSessionId(), state)) {
+            state.cancel();
+            if (prompt != null) {
+                activePrompts.remove(ref.getHarnessSessionId(), prompt);
+            }
+        }
+    }
+
+    public void detachLifecycle(String harnessSessionId, Map<String, Object> authority) {
+        ensureOpen();
+        String sessionId = requireUuid(harnessSessionId, "harnessSessionId");
+        AttachmentState state = attachments.get(sessionId);
+        ActivePrompt prompt = activePrompts.get(sessionId);
+        HttpSupport.Response response = sendMutation(sessionPath(sessionId) + "/detach",
+                Map.of("authority", authority), null, "POST /session/:id/detach");
+        if (response.getStatusCode() != 404) {
+            requireMutationStatus(response, 204, "POST /session/:id/detach");
+        }
+        if (state != null && attachments.remove(sessionId, state)) {
+            state.cancel();
+            if (prompt != null) {
+                activePrompts.remove(sessionId, prompt);
+            }
+        }
+    }
+
     public void detachSession(HarnessSessionRef session) {
         HarnessSessionRef ref = requireSessionRef(session);
         HttpSupport.Response response = sendMutation(
@@ -711,6 +771,14 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new DaemonProtocolException(
                     "Endpoint does not advertise hosted_harness_private_v1");
         }
+        // A build that predates message.delta records cannot open the
+        // journals one now writes; refuse it once here instead of failing
+        // every Session open.
+        if (!features.contains("managed_session_journal_delta_v1")) {
+            throw new DaemonProtocolException(
+                    "Endpoint does not advertise"
+                            + " managed_session_journal_delta_v1");
+        }
         Map<String, Object> hosted = JsonSupport.requiredObject(json,
                 "hostedHarness", "capabilities");
         Map<String, Object> versions = JsonSupport.requiredObject(hosted,
@@ -750,7 +818,8 @@ public final class HostedHarnessClient implements AutoCloseable {
                     expectedDigest, digest);
         }
         return new HostedHarnessCapabilities(current, supported, bootId,
-                digest);
+                digest, hosted.containsKey("lifecycleProtocolVersion")
+                        ? JsonSupport.requiredInt(hosted, "lifecycleProtocolVersion", "capabilities.hostedHarness") : 0);
     }
 
     private HarnessSessionRef parseSession(String body,
@@ -914,9 +983,15 @@ public final class HostedHarnessClient implements AutoCloseable {
 
     private HttpSupport.Response sendMutation(String path,
             Map<String, Object> body, String clientId, String operation) {
+        return sendMutation(path, body, clientId, operation, requestTimeout);
+    }
+
+    private HttpSupport.Response sendMutation(String path,
+            Map<String, Object> body, String clientId, String operation,
+            Duration timeout) {
         HttpResponse<HttpSupport.Body> raw;
         try {
-            raw = send(path, "POST", body, clientId);
+            raw = send(path, "POST", body, clientId, timeout);
         } catch (IOException | InterruptedException e) {
             restoreInterrupt(e);
             throw new MutationOutcomeUnknownException(operation, e);
@@ -965,10 +1040,16 @@ public final class HostedHarnessClient implements AutoCloseable {
     private HttpResponse<HttpSupport.Body> send(String path, String method,
             Map<String, Object> body, String clientId)
             throws IOException, InterruptedException {
+        return send(path, method, body, clientId, requestTimeout);
+    }
+
+    private HttpResponse<HttpSupport.Body> send(String path, String method,
+            Map<String, Object> body, String clientId, Duration timeout)
+            throws IOException, InterruptedException {
         HttpRequest.Builder builder = sessionRequestBuilder(path, clientId)
                 .header("Accept", "application/json")
                 .header("Accept-Encoding", "identity")
-                .timeout(requestTimeout);
+                .timeout(timeout);
         if (body == null) {
             builder.method(method, HttpRequest.BodyPublishers.noBody());
         } else {
@@ -1105,8 +1186,19 @@ public final class HostedHarnessClient implements AutoCloseable {
             if (statusCode == 401 || statusCode == 403) {
                 return;
             }
+            // The serve delegating app answers requests with a bare
+            // pre-contract 404 while the runtime is still booting — the
+            // generation contract lives only in the runtime app, so this
+            // is "not ready yet", never a generation change.
+            if (statusCode == 404) {
+                throw new DaemonTransportException(
+                        "Hosted Harness answered a pre-contract 404"
+                                + " (still starting)",
+                        null);
+            }
             throw new DaemonProtocolException(
-                    "Hosted Harness response omitted " + BOOT_ID_HEADER);
+                    "Hosted Harness response omitted " + BOOT_ID_HEADER
+                            + " (HTTP " + statusCode + ")");
         }
         String normalized;
         try {
@@ -1276,6 +1368,7 @@ public final class HostedHarnessClient implements AutoCloseable {
         private String capabilityDigest;
         private Duration connectTimeout = Duration.ofSeconds(10);
         private Duration requestTimeout = Duration.ofSeconds(30);
+        private Duration loadTimeout;
         private Duration heartbeatInterval = Duration.ofMinutes(1);
         private int maximumSseFrameBytes = 16 * 1024 * 1024;
 
@@ -1304,6 +1397,14 @@ public final class HostedHarnessClient implements AutoCloseable {
 
         public Builder requestTimeout(Duration requestTimeout) {
             this.requestTimeout = positive(requestTimeout, "requestTimeout");
+            return this;
+        }
+
+        /** A takeover load can take far longer than a steady-state call
+         * (it may settle parked Runtime executions), so it gets its own
+         * ceiling; unset falls back to {@link #requestTimeout}. */
+        public Builder loadTimeout(Duration loadTimeout) {
+            this.loadTimeout = positive(loadTimeout, "loadTimeout");
             return this;
         }
 

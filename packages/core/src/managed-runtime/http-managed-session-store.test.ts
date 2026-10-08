@@ -20,9 +20,14 @@ import {
   ManagedSessionStoreHttpError,
   ManagedSessionStoreTransportError,
   createHttpManagedSessionStores,
+  readOnlyManagedSessionSnapshot,
 } from './http-managed-session-store.js';
 import type { McpConfiguration } from './managed-mcp-record.js';
 import type { HookExecution, HookRegistration } from './managed-hook-record.js';
+import {
+  managedSessionEventsDigest,
+  parseManagedSessionEvent,
+} from './managed-session-records.js';
 import type {
   ManagedSessionDurableRef,
   ManagedSessionKey,
@@ -72,6 +77,50 @@ const TOKEN_B = 'b'.repeat(32);
 describe('HTTP Managed Session store', () => {
   const temporaryDirectories: string[] = [];
 
+  async function createSessionOpener(server: FakeManagedSessionStore) {
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-http-store-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
+    return async (writerId: string, writerToken: string) => {
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId,
+        writerToken,
+        fetchFn: server.fetch,
+      });
+      const create =
+        writerId === 'harness-a'
+          ? {
+              definitionRef: await stores.resourceStore.publish(
+                'managed-session-definition',
+                Buffer.from('{}', 'utf8'),
+              ),
+              rootSnapshotRef: await stores.resourceStore.publish(
+                'managed-session-root-snapshot',
+                Buffer.from('{}', 'utf8'),
+              ),
+              createdBy: 'test',
+            }
+          : undefined;
+      return openManagedSession({
+        runtimeBaseDir,
+        sessionId: SESSION_KEY.sessionId,
+        transcriptPath,
+        sessionKey: SESSION_KEY,
+        cwd: '/workspace',
+        version: 'test',
+        workerId: writerId,
+        activationLeaseDurationMs: 60_000,
+        journalStore: stores.journalStore,
+        resourceStore: stores.resourceStore,
+        ...(create === undefined ? {} : { create }),
+      });
+    };
+  }
+
   afterEach(async () => {
     vi.restoreAllMocks();
     await Promise.all(
@@ -80,6 +129,92 @@ describe('HTTP Managed Session store', () => {
         .map((directory) => rm(directory, { recursive: true, force: true })),
     );
   });
+
+  async function bootStoresAndSession(
+    server: FakeManagedSessionStore,
+  ): Promise<{
+    stores: ReturnType<typeof createHttpManagedSessionStores>;
+    session: Awaited<ReturnType<typeof openManagedSession>>;
+  }> {
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-http-store-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    const definitionRef = await stores.resourceStore.publish(
+      'managed-session-definition',
+      Buffer.from('{"model":"test"}', 'utf8'),
+    );
+    const rootSnapshotRef = await stores.resourceStore.publish(
+      'managed-session-root-snapshot',
+      Buffer.from('{"version":1,"messages":[]}', 'utf8'),
+    );
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId: SESSION_KEY.sessionId,
+      transcriptPath,
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'harness-a',
+      activationLeaseDurationMs: 60_000,
+      journalStore: stores.journalStore,
+      resourceStore: stores.resourceStore,
+      create: {
+        definitionRef,
+        rootSnapshotRef,
+        createdBy: 'test',
+      },
+    });
+    return { stores, session };
+  }
+
+  async function appendMessage(
+    session: Awaited<ReturnType<typeof openManagedSession>>,
+    index: number,
+    contentRef: ManagedSessionDurableRef,
+  ): Promise<void> {
+    await session.authority.appendExecutionEvent(
+      {
+        operation: 'message.commit',
+        commandId: `m-${index}`,
+        sessionKey: SESSION_KEY,
+        contentDigest: 'e'.repeat(64),
+      },
+      (sequence) => ({
+        v: 1,
+        sequence,
+        eventId: `message:m-${index}`,
+        sessionKey: SESSION_KEY,
+        kind: 'message.committed',
+        occurredAt: index,
+        subject: {
+          type: 'activation',
+          scopeId: session.activation.activationId,
+          activationId: session.activation.activationId,
+          epoch: session.activation.epoch,
+        },
+        payload: {
+          messageId: `m-${index}`,
+          role: 'user',
+          contentRef,
+          parentMessageId: index === 1 ? null : `m-${index - 1}`,
+        },
+      }),
+      {
+        class: 'harness',
+        activation: session.activation,
+      },
+    );
+  }
 
   it('verifies committed publication receipts with the scoped Session writer', async () => {
     const server = new FakeManagedSessionStore();
@@ -160,6 +295,198 @@ describe('HTTP Managed Session store', () => {
       }),
     ).not.toThrow();
   });
+
+  it('scopes lifecycle authorization to the current claim and preserves writer identity', async () => {
+    const server = new FakeManagedSessionStore();
+    const observed: Array<{
+      path: string;
+      claim: string | null;
+      operation: string | null;
+    }> = [];
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'https://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        const url = new URL(requestUrl(input));
+        if (!url.pathname.endsWith(':authorize'))
+          return server.fetch(input, init);
+        const headers = new Headers(init?.headers);
+        expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          workspaceId: SESSION_KEY.workspaceId,
+          writerId: 'harness-a',
+          writerGeneration: 1,
+        });
+        observed.push({
+          path: url.pathname.split('/').at(-1)!,
+          claim: headers.get('X-Qwen-Lifecycle-Claim-Generation'),
+          operation: headers.get('X-Qwen-Lifecycle-Operation-Id'),
+        });
+        return jsonResponse({});
+      },
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      stores.setLifecycleAuthority({
+        operationId: 'delete-original',
+        claimGeneration: 1,
+      });
+      await stores.authorizeLifecycle('delete');
+      stores.setLifecycleAuthority({
+        operationId: 'delete-original',
+        claimGeneration: 2,
+      });
+      await stores.authorizeLifecycle();
+      stores.setLifecycleAuthority();
+      await stores.authorizeOrdinary();
+      expect(observed).toEqual([
+        {
+          path: 'lifecycle:authorize',
+          operation: 'delete-original',
+          claim: '1',
+        },
+        {
+          path: 'lifecycle:authorize',
+          operation: 'delete-original',
+          claim: '2',
+        },
+        { path: 'execution:authorize', operation: null, claim: null },
+      ]);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it('authorizes cleanup with the original expired or sealed writer without renewing it', async () => {
+    vi.useFakeTimers({ now: 1_790_000_000_000, toFake: ['Date'] });
+    const server = new FakeManagedSessionStore();
+    const authorize = vi.fn();
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'https://session-store.test',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: async (input, init) => {
+        const path = new URL(requestUrl(input)).pathname;
+        if (path.endsWith('/writers:renew'))
+          throw new Error('Original writer lease expired');
+        if (path.endsWith('/lifecycle:authorize')) {
+          authorize();
+          expect(JSON.parse(String(init?.body))).toEqual({
+            workspaceId: SESSION_KEY.workspaceId,
+            writerId: 'harness-a',
+            writerGeneration: 1,
+          });
+          const headers = new Headers(init?.headers);
+          expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
+          expect(headers.get('X-Qwen-Lifecycle-Operation-Id')).toBe(
+            'delete-original',
+          );
+          expect(headers.get('X-Qwen-Lifecycle-Claim-Generation')).toBe('2');
+          return jsonResponse({});
+        }
+        return server.fetch(input, init);
+      },
+    });
+    try {
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      vi.setSystemTime(1_790_000_400_000);
+      stores.setLifecycleAuthority({
+        operationId: 'delete-original',
+        claimGeneration: 2,
+      });
+      await stores.authorizeLifecycle();
+      expect(authorize).toHaveBeenCalledTimes(1);
+      await expect(stores.authorizeLifecycle('delete')).rejects.toThrow(
+        'Original writer lease expired',
+      );
+      expect(authorize).toHaveBeenCalledTimes(1);
+      await stores.close();
+      await stores.authorizeLifecycle();
+      expect(authorize).toHaveBeenCalledTimes(2);
+      await expect(stores.authorizeLifecycle('delete')).rejects.toThrow(
+        'writer is not active',
+      );
+      expect(authorize).toHaveBeenCalledTimes(2);
+    } finally {
+      await stores.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['ordinary', false],
+    ['previous', false],
+    ['same', false],
+    ['ordinary', true],
+  ] as const)(
+    'rechecks a changed claim after an in-flight %s renewal (refused=%s)',
+    async (previous, refused) => {
+      const server = new FakeManagedSessionStore();
+      const claims: Array<string | null> = [];
+      let release!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'https://session-store.test',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn: async (input, init) => {
+          if (requestUrl(input).endsWith('/writers:renew')) {
+            const headers = new Headers(init?.headers);
+            claims.push(headers.get('X-Qwen-Lifecycle-Claim-Generation'));
+            if (claims.length === 1) await barrier;
+            else if (refused)
+              return jsonResponse(
+                {
+                  error: {
+                    code: 'workspace_lifecycle_claim_fenced',
+                    message: 'The lifecycle claim is fenced.',
+                  },
+                },
+                409,
+              );
+          }
+          return server.fetch(input, init);
+        },
+      });
+      try {
+        await stores.journalStore.open({ sessionKey: SESSION_KEY });
+        if (previous !== 'ordinary')
+          stores.setLifecycleAuthority({
+            operationId: 'delete',
+            claimGeneration: previous === 'same' ? 2 : 1,
+          });
+        const old = stores.assertWritable();
+        await vi.waitFor(() => expect(claims).toHaveLength(1));
+        stores.setLifecycleAuthority({
+          operationId: 'delete',
+          claimGeneration: 2,
+        });
+        const current = stores.assertWritable();
+        release();
+        await old;
+        if (refused)
+          await expect(current).rejects.toMatchObject({
+            status: 409,
+            remoteCode: 'workspace_lifecycle_claim_fenced',
+          });
+        else await current;
+        expect(claims).toEqual(
+          previous === 'same'
+            ? ['2']
+            : [previous === 'ordinary' ? null : '1', '2'],
+        );
+      } finally {
+        release();
+        await stores.close();
+      }
+    },
+  );
 
   it('publishes bounded tool output immediately under the original writer grant', async () => {
     const server = new FakeManagedSessionStore();
@@ -368,6 +695,11 @@ describe('HTTP Managed Session store', () => {
     'exhausted-503',
     'changed-receipt',
     'invalid-json',
+    'lifecycle-403',
+    'lifecycle-409',
+    'uncertain-lifecycle-403',
+    'ordinary-lifecycle-409',
+    'uncertain-ordinary-lifecycle-409',
   ])(
     'preserves activation transaction identity and failure fencing after %s',
     async (failure) => {
@@ -381,6 +713,14 @@ describe('HTTP Managed Session store', () => {
         failure === 'uncommitted-503' ||
         failure === 'lost-commit-response' ||
         failure === 'lost-response-body';
+      const refused =
+        failure === 'lifecycle-403' ||
+        failure === 'lifecycle-409' ||
+        failure === 'ordinary-lifecycle-409';
+      const ordinaryLifecycle = failure.includes('ordinary-lifecycle-409');
+      const uncertainLifecycle =
+        failure === 'uncertain-lifecycle-403' ||
+        failure === 'uncertain-ordinary-lifecycle-409';
       let armed = false;
       let replay: unknown;
       const stores = createHttpManagedSessionStores({
@@ -396,6 +736,30 @@ describe('HTTP Managed Session store', () => {
             >;
             if (body['operation'] === 'installActivation') {
               requests.push(String(init?.body));
+              if (ordinaryLifecycle)
+                expect(
+                  new Headers(init?.headers).has(
+                    'X-Qwen-Lifecycle-Operation-Id',
+                  ),
+                ).toBe(false);
+              if (refused || uncertainLifecycle)
+                return jsonResponse(
+                  {
+                    error: {
+                      message: 'Lifecycle authorization revoked',
+                      code: ordinaryLifecycle
+                        ? 'workspace_lifecycle_admission_closed'
+                        : failure === 'lifecycle-409'
+                          ? 'workspace_lifecycle_authorization_revoked'
+                          : 'workspace_access_denied',
+                    },
+                  },
+                  uncertainLifecycle && requests.length === 1
+                    ? 503
+                    : ordinaryLifecycle || failure === 'lifecycle-409'
+                      ? 409
+                      : 403,
+                );
               if (failure === 'permanent-409' || failure === 'exhausted-503')
                 return jsonResponse(
                   { error: { code: 'commit_rejected' } },
@@ -460,6 +824,11 @@ describe('HTTP Managed Session store', () => {
         create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
       });
       try {
+        if ((refused || uncertainLifecycle) && !ordinaryLifecycle)
+          stores.setLifecycleAuthority({
+            operationId: 'lifecycle',
+            claimGeneration: 1,
+          });
         armed = true;
         const controller = new ManagedHookActivationController(session);
         const run = vi.fn(async () => 'completed');
@@ -497,16 +866,45 @@ describe('HTTP Managed Session store', () => {
           await expect(
             controller.runTurn('next-turn', async () => 'accepted'),
           ).resolves.toBe('accepted');
+        } else if (refused) {
+          await expect(operation).rejects.toThrow();
+          expect(run).not.toHaveBeenCalled();
+          expect(requests).toHaveLength(2);
+          expect(JSON.parse(requests[1])).toMatchObject({
+            firstSequence: JSON.parse(requests[0]).firstSequence,
+            previousCommitDigest: JSON.parse(requests[0]).previousCommitDigest,
+          });
+          expect(session.authority.writesStopped).toBe(false);
+          armed = false;
+          if (ordinaryLifecycle)
+            stores.setLifecycleAuthority({
+              operationId: 'lifecycle',
+              claimGeneration: 1,
+            });
+          await expect(
+            controller.runHookOperation(
+              {
+                operationId: 'notification-retry',
+                occurrenceId: 'notification-retry',
+                originTurnId: null,
+              },
+              run,
+            ),
+          ).resolves.toBe('completed');
+          expect(run).toHaveBeenCalledOnce();
         } else {
           await expect(operation).rejects.toThrow('writes stopped');
           expect(run).not.toHaveBeenCalled();
-          expect(requests).toHaveLength(failure === 'exhausted-503' ? 3 : 1);
+          expect(requests).toHaveLength(
+            failure === 'exhausted-503' ? 3 : uncertainLifecycle ? 2 : 1,
+          );
           expect(session.authority.writesStopped).toBe(true);
           await expect(controller.runTurn('next-turn', run)).rejects.toThrow(
             'current Session activation',
           );
         }
-        expect(requests.every((body) => body === requests[0])).toBe(true);
+        if (!refused)
+          expect(requests.every((body) => body === requests[0])).toBe(true);
       } finally {
         await session.close();
       }
@@ -710,6 +1108,151 @@ describe('HTTP Managed Session store', () => {
     await restored.close();
   });
 
+  it('commits Action input before a checkpoint without uploading unrelated staged input', async () => {
+    const server = new FakeManagedSessionStore();
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'managed-action-input-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    const definitionRef = await stores.resourceStore.publish(
+      'managed-session-definition',
+      Buffer.from('{}'),
+    );
+    const rootSnapshotRef = await stores.resourceStore.publish(
+      'managed-session-root-snapshot',
+      Buffer.from('{}'),
+    );
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId: SESSION_KEY.sessionId,
+      transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'harness-a',
+      activationLeaseDurationMs: 60_000,
+      journalStore: stores.journalStore,
+      resourceStore: stores.resourceStore,
+      create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
+    });
+    try {
+      const inputRef = await session.resources.publish(
+        'managed-tool-input',
+        Buffer.from('{"input":"approved"}'),
+      );
+      const unrelated = await session.resources.publish(
+        'managed-tool-input',
+        Buffer.from('{"input":"unrelated"}'),
+      );
+      const optionsRef = await session.resources.publish(
+        'managed-action-options',
+        Buffer.from(JSON.stringify({ v: 2, inputRef })),
+      );
+      await session.authority.requestToolAction(
+        {
+          operation: 'requestToolAction',
+          commandId: 'approval-first',
+          sessionKey: SESSION_KEY,
+          contentDigest: 'a'.repeat(64),
+        },
+        {
+          requestId: 'approval-first',
+          kind: 'permission',
+          inputRevision: 1,
+          optionsRef,
+        },
+        { class: 'harness', activation: session.activation },
+      );
+      expect(session.authority.latestCheckpoint).toBeUndefined();
+      const resources = server.commits.at(-1)!['resources'] as Array<{
+        resourceId: string;
+        bytesBase64?: string;
+      }>;
+      expect(resources.map(({ resourceId }) => resourceId).sort()).toEqual(
+        [optionsRef.resourceId, inputRef.resourceId].sort(),
+      );
+      expect(
+        resources.find(({ resourceId }) => resourceId === inputRef.resourceId)
+          ?.bytesBase64,
+      ).toBe(Buffer.from('{"input":"approved"}').toString('base64'));
+      expect(
+        resources.some(({ resourceId }) => resourceId === unrelated.resourceId),
+      ).toBe(false);
+
+      // The read-only snapshot inspector walks the same options -> input edge.
+      // Without it the committed input is enumerated but never referenced, so
+      // restoring a Session that raised a native approval would fail closed.
+      const snapshotResources = new Map<
+        string,
+        {
+          ref: ManagedSessionDurableRef;
+          bytesBase64: string;
+          referencedRevisions: number[];
+        }
+      >();
+      for (const [index, commit] of server.commits.entries()) {
+        for (const raw of commit['resources'] as ManagedSessionDurableRef[]) {
+          const ref = {
+            resourceId: raw.resourceId,
+            kind: raw.kind,
+            schemaVersion: raw.schemaVersion,
+            byteLength: raw.byteLength,
+            digest: raw.digest,
+          };
+          const resource = snapshotResources.get(ref.resourceId) ?? {
+            ref,
+            bytesBase64: (await session.resources.read(ref)).toString('base64'),
+            referencedRevisions: [],
+          };
+          resource.referencedRevisions.push(index + 1);
+          snapshotResources.set(ref.resourceId, resource);
+        }
+      }
+      const transactions = server.commits.map((commit, index) => ({
+        ...commit,
+        journalRevision: index + 1,
+        recordEncoding: 'identity',
+        byteLength: Buffer.from(String(commit['recordBytesBase64']), 'base64')
+          .length,
+      }));
+      const snapshot = readOnlyManagedSessionSnapshot({
+        format: 'qwen-csi-receipt-checkpoint-snapshot/1',
+        sessionKey: SESSION_KEY,
+        head: {
+          state: 'ACTIVE',
+          storageVersion: 1,
+          writerGeneration: 1,
+          journalRevision: transactions.length,
+          committedSequence: session.authority.committedSequence,
+          lastCommitDigest: session.authority.commitProof.committedPrefixHash,
+          activationEpoch: session.activation.epoch,
+          latestCheckpointResourceId: null,
+          compactedThroughRevision: 0,
+          recoveryStatus: 'READY',
+          recoveryDetailCode: null,
+        },
+        transactions,
+        resources: [...snapshotResources.values()],
+      });
+      await expect(snapshot.resources.read(inputRef)).resolves.toEqual(
+        Buffer.from('{"input":"approved"}'),
+      );
+      await expect(snapshot.resources.read(unrelated)).rejects.toThrow(
+        'Managed Session Store: snapshot resource is missing.',
+      );
+    } finally {
+      await session.close();
+    }
+  });
+
   it('commits only checkpoint resources and their dependencies for a cold owner', async () => {
     const server = new FakeManagedSessionStore();
     const runtimeBaseDir = await mkdtemp(
@@ -796,6 +1339,99 @@ describe('HTTP Managed Session store', () => {
     expect(
       committedResources.map(({ resourceId }) => resourceId).sort(),
     ).toEqual([checkpointRef.resourceId, historyRef.resourceId].sort());
+    await first.authority.appendExecutionEvent(
+      {
+        operation: 'referenceOldCheckpoint',
+        commandId: 'old-root',
+        sessionKey: SESSION_KEY,
+        contentDigest: 'd'.repeat(64),
+      },
+      (sequence) => ({
+        v: 1,
+        sequence,
+        eventId: 'old-root',
+        sessionKey: SESSION_KEY,
+        kind: 'turn.settled',
+        occurredAt: Date.now(),
+        subject: {
+          type: 'activation',
+          scopeId: first.activation.activationId,
+          ...first.activation,
+        },
+        payload: {
+          turnId: 'old-root',
+          outcome: 'completed',
+          stopReason: 'end_turn',
+          resultRef: checkpointRef,
+          usageRef: null,
+          pendingOwnersRef: null,
+        },
+      }),
+      { class: 'harness', activation: first.activation },
+    );
+    expect(server.commits.at(-1)!['resources']).toEqual([
+      {
+        ...checkpointRef,
+      },
+    ]);
+    const snapshotResources = new Map<
+      string,
+      {
+        ref: ManagedSessionDurableRef;
+        bytesBase64: string;
+        referencedRevisions: number[];
+      }
+    >();
+    for (const [index, commit] of server.commits.entries()) {
+      for (const raw of commit['resources'] as ManagedSessionDurableRef[]) {
+        const ref = {
+          resourceId: raw.resourceId,
+          kind: raw.kind,
+          schemaVersion: raw.schemaVersion,
+          byteLength: raw.byteLength,
+          digest: raw.digest,
+        };
+        const resource = snapshotResources.get(ref.resourceId) ?? {
+          ref,
+          bytesBase64: (await first.resources.read(ref)).toString('base64'),
+          referencedRevisions: [],
+        };
+        resource.referencedRevisions.push(index + 1);
+        snapshotResources.set(ref.resourceId, resource);
+      }
+    }
+    const transactions = server.commits.map((commit, index) => ({
+      ...commit,
+      journalRevision: index + 1,
+      recordEncoding: 'identity',
+      byteLength: Buffer.from(String(commit['recordBytesBase64']), 'base64')
+        .length,
+    }));
+    const fetchCount = server.fetch.mock.calls.length;
+    const snapshot = readOnlyManagedSessionSnapshot({
+      format: 'qwen-csi-receipt-checkpoint-snapshot/1',
+      sessionKey: SESSION_KEY,
+      head: {
+        state: 'ACTIVE',
+        storageVersion: 1,
+        writerGeneration: 1,
+        journalRevision: transactions.length,
+        committedSequence: first.authority.committedSequence,
+        lastCommitDigest: first.authority.commitProof.committedPrefixHash,
+        activationEpoch: first.activation.epoch,
+        latestCheckpointResourceId: checkpointRef.resourceId,
+        compactedThroughRevision: 0,
+        recoveryStatus: 'READY',
+        recoveryDetailCode: null,
+      },
+      transactions,
+      resources: [...snapshotResources.values()],
+    });
+    expect((await snapshot.journal.read()).committed).toBe(
+      first.authority.committedSequence,
+    );
+    expect(await snapshot.resources.read(historyRef)).toEqual(historyBytes);
+    expect(server.fetch.mock.calls.length).toBe(fetchCount);
     await first.close();
 
     const secondStores = createHttpManagedSessionStores({
@@ -1012,11 +1648,11 @@ describe('HTTP Managed Session store', () => {
     });
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://session-store.test',
+      allowInsecureHttp: true,
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
       leaseDurationMs: 1000,
-      allowInsecureHttp: true,
       fetchFn,
     });
     const unhandled: unknown[] = [];
@@ -1450,47 +2086,7 @@ describe('HTTP Managed Session store', () => {
 
   it('commits the resources a Stage H record names and rebuilds it cold', async () => {
     const server = new FakeManagedSessionStore();
-    const runtimeBaseDir = await mkdtemp(
-      path.join(tmpdir(), 'managed-http-store-'),
-    );
-    temporaryDirectories.push(runtimeBaseDir);
-    const transcriptPath = path.join(runtimeBaseDir, 'session.jsonl');
-    const open = async (writerId: string, writerToken: string) => {
-      const stores = createHttpManagedSessionStores({
-        baseUrl: 'http://127.0.0.1:8080',
-        sessionKey: SESSION_KEY,
-        writerId,
-        writerToken,
-        fetchFn: server.fetch,
-      });
-      const create =
-        writerId === 'harness-a'
-          ? {
-              definitionRef: await stores.resourceStore.publish(
-                'managed-session-definition',
-                Buffer.from('{}', 'utf8'),
-              ),
-              rootSnapshotRef: await stores.resourceStore.publish(
-                'managed-session-root-snapshot',
-                Buffer.from('{}', 'utf8'),
-              ),
-              createdBy: 'test',
-            }
-          : undefined;
-      return openManagedSession({
-        runtimeBaseDir,
-        sessionId: SESSION_KEY.sessionId,
-        transcriptPath,
-        sessionKey: SESSION_KEY,
-        cwd: '/workspace',
-        version: 'test',
-        workerId: writerId,
-        activationLeaseDurationMs: 60_000,
-        journalStore: stores.journalStore,
-        resourceStore: stores.resourceStore,
-        ...(create === undefined ? {} : { create }),
-      });
-    };
+    const open = await createSessionOpener(server);
     const first = await open('harness-a', TOKEN_A);
     const commandRef = await first.resources.publish(
       'managed-tool-args',
@@ -1688,6 +2284,77 @@ describe('HTTP Managed Session store', () => {
       expect(uploaded.map((ref) => ref.resourceId)).not.toContain(
         orphanRef.resourceId,
       );
+      const snapshotResources = new Map<
+        string,
+        {
+          ref: ManagedSessionDurableRef;
+          bytesBase64: string;
+          referencedRevisions: number[];
+        }
+      >();
+      for (const [revision, commit] of server.commits.entries()) {
+        for (const raw of commit['resources'] as ManagedSessionDurableRef[]) {
+          const { resourceId, kind, schemaVersion, byteLength, digest } = raw;
+          const ref = { resourceId, kind, schemaVersion, byteLength, digest };
+          const resource = snapshotResources.get(resourceId) ?? {
+            ref,
+            bytesBase64: (await first.resources.read(ref)).toString('base64'),
+            referencedRevisions: [],
+          };
+          resource.referencedRevisions.push(revision + 1);
+          snapshotResources.set(resourceId, resource);
+        }
+      }
+      const transactions = server.commits.map((commit, revision) => ({
+        ...commit,
+        journalRevision: revision + 1,
+        recordEncoding: 'identity',
+        byteLength: Buffer.from(String(commit['recordBytesBase64']), 'base64')
+          .length,
+      }));
+      const snapshotInput = {
+        format: 'qwen-csi-receipt-checkpoint-snapshot/1',
+        sessionKey: SESSION_KEY,
+        head: {
+          state: 'ACTIVE',
+          storageVersion: 1,
+          writerGeneration: 1,
+          journalRevision: transactions.length,
+          committedSequence: first.authority.committedSequence,
+          lastCommitDigest: first.authority.commitProof.committedPrefixHash,
+          activationEpoch: first.activation.epoch,
+          latestCheckpointResourceId: null,
+          compactedThroughRevision: 0,
+          recoveryStatus: 'READY',
+          recoveryDetailCode: null,
+        },
+        transactions,
+        resources: [...snapshotResources.values()],
+      };
+      const snapshot = readOnlyManagedSessionSnapshot(snapshotInput);
+      expect((await snapshot.journal.read()).committed).toBe(
+        first.authority.committedSequence,
+      );
+      expect(await snapshot.resources.read(messagesRef)).toEqual(
+        await first.resources.read(messagesRef),
+      );
+      for (const part of parts)
+        expect(await snapshot.resources.read(part)).toEqual(
+          await first.resources.read(part),
+        );
+      expect(() =>
+        readOnlyManagedSessionSnapshot({
+          ...snapshotInput,
+          resources: [
+            ...snapshotInput.resources,
+            {
+              ref: orphanRef,
+              bytesBase64: Buffer.from('{}').toString('base64'),
+              referencedRevisions: [transactions.length],
+            },
+          ],
+        }),
+      ).toThrow('snapshot resource enumeration conflicts.');
     }
     const views = first.authority.taskViews();
     expect(views).toHaveLength(1);
@@ -1871,6 +2538,284 @@ describe('HTTP Managed Session store', () => {
     }
   });
 
+  it('restores a journal spanning more than one transaction page', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const messageRef = await stores.resourceStore.publish(
+      'managed-message',
+      Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
+    );
+    for (let index = 1; index <= 105; index++) {
+      await appendMessage(session, index, messageRef);
+    }
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    const scan = await journal.read();
+    expect(scan.committed).toBe(session.authority.committedSequence);
+    // 107 transactions over a 100-per-page limit takes two page fetches.
+    expect(server.transactionReads).toBe(2);
+    await session.close();
+  });
+
+  it('rejects a journal whose stored revisions are not contiguous', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    await expect(journal.read()).resolves.toBeDefined();
+    server.editStoredTransaction(1, { journalRevision: 42 });
+    await expect(journal.read()).rejects.toThrow(/not contiguous/);
+    await session.close();
+  });
+
+  it('rejects a journal whose transaction bytes do not match their metadata', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    await expect(journal.read()).resolves.toBeDefined();
+    server.editStoredTransaction(0, { recordDigest: '0'.repeat(64) });
+    await expect(journal.read()).rejects.toThrow(/do not match their metadata/);
+    await session.close();
+  });
+
+  it.each([
+    ['committedSequence', 99],
+    ['lastCommitDigest', 'a'.repeat(64)],
+    ['activationEpoch', 7],
+  ])(
+    'rejects a journal that does not match the durable head (%s=%s)',
+    async (key, value) => {
+      const server = new FakeManagedSessionStore();
+      const { stores, session } = await bootStoresAndSession(server);
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(journal.read()).resolves.toBeDefined();
+      server.headOverrides[key] = value;
+      await expect(journal.read()).rejects.toThrow(
+        /do not match the durable head/,
+      );
+      await session.close();
+    },
+  );
+
+  it.each([
+    ['recoveryStatus', 'BLOCKED_RESOURCE'],
+    ['storageVersion', 2],
+    ['state', 'SEALED'],
+    ['writerGeneration', 2],
+    ['compactedThroughRevision', 1],
+  ])(
+    'rejects a restore head not addressable by this writer (%s=%s)',
+    async (key, value) => {
+      const server = new FakeManagedSessionStore();
+      const { stores, session } = await bootStoresAndSession(server);
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      await expect(journal.read()).resolves.toBeDefined();
+      server.headOverrides[key] = value;
+      await expect(journal.read()).rejects.toThrow(
+        /not readable by this v1 writer/,
+      );
+      await session.close();
+    },
+  );
+
+  it('rejects stored transaction metadata that disagrees with its records', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    await expect(journal.read()).resolves.toBeDefined();
+    // The metadata/records equality runs after the byte/digest check, so a
+    // eventsDigest tamper — not a byte tamper — is what reaches it.
+    server.editStoredTransaction(0, { eventsDigest: '1'.repeat(64) });
+    await expect(journal.read()).rejects.toThrow(
+      /metadata does not match its records/,
+    );
+    await session.close();
+  });
+
+  it('rejects when a page reports no more while the head is still ahead', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    await appendMessage(
+      session,
+      1,
+      await stores.resourceStore.publish(
+        'managed-message',
+        Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
+      ),
+    );
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    // A real (non-empty) page that claims to end the journal while the head
+    // says otherwise must fail the read, not silently truncate history.
+    server.pageOverrides['hasMore'] = false;
+    server.headOverrides['journalRevision'] = 99;
+    await expect(journal.read()).rejects.toThrow(
+      /ended before the journal head/,
+    );
+    await session.close();
+  });
+
+  it('rejects an empty transaction page while the journal head is ahead', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    server.pageOverrides['transactions'] = [];
+    await expect(journal.read()).rejects.toThrow(/did not advance the journal/);
+    await session.close();
+  });
+
+  it('rejects a transaction page whose nextRevision disagrees with itself', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    server.pageOverrides['nextRevision'] = 0;
+    await expect(journal.read()).rejects.toThrow(
+      /nextRevision is inconsistent/,
+    );
+    await session.close();
+  });
+
+  it('rejects a commit receipt that does not echo the submitted transaction', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    server.receiptOverrides['journalRevision'] = 42;
+    const messageRef = await stores.resourceStore.publish(
+      'managed-message',
+      Buffer.from('{"role":"user","parts":[{"text":"hi"}]}', 'utf8'),
+    );
+    await expect(appendMessage(session, 1, messageRef)).rejects.toThrow(
+      /receipt does not match/,
+    );
+    // The write-failure latch stops every later write through this authority,
+    // including the release close() would commit.
+    expect(session.authority.writesStopped).toBe(true);
+    await session.close().catch(() => undefined);
+  });
+
+  it('surfaces a typed 409 for a resource missing server-side and keeps staged bytes for retry', async () => {
+    const server = new FakeManagedSessionStore();
+    const { stores, session } = await bootStoresAndSession(server);
+    const journal = await stores.journalStore.open({ sessionKey: SESSION_KEY });
+
+    // A staged-but-never-committed body must survive the failed append.
+    const retryRef = await stores.resourceStore.publish(
+      'managed-message',
+      Buffer.from('{"retry":true}', 'utf8'),
+    );
+    // A staged ref the failed transaction actually carries, so the retry
+    // assertion below measures bytes the commit body posts, not just
+    // clear() not running.
+    const stagedRef = await stores.resourceStore.publish(
+      'managed-session_metadata',
+      Buffer.from('{"title":"t"}', 'utf8'),
+    );
+    const missingRef: ManagedSessionDurableRef = {
+      resourceId: 'res-never-staged',
+      kind: 'managed-session_metadata',
+      schemaVersion: 1,
+      byteLength: 2,
+      digest: createHash('sha256').update('{}').digest('hex'),
+    };
+    const committedSoFar = session.authority.committedSequence;
+    const events = [
+      {
+        v: 1,
+        sequence: committedSoFar + 1,
+        eventId: 'domain:missing:1',
+        sessionKey: SESSION_KEY,
+        kind: 'domain.committed' as const,
+        occurredAt: 1,
+        payload: {
+          domain: 'session_metadata',
+          version: 1,
+          operationId: 'op-missing',
+          recordRef: missingRef,
+        },
+      },
+      {
+        v: 1,
+        sequence: committedSoFar + 2,
+        eventId: 'domain:staged:2',
+        sessionKey: SESSION_KEY,
+        kind: 'domain.committed' as const,
+        occurredAt: 2,
+        payload: {
+          domain: 'session_metadata',
+          version: 1,
+          operationId: 'op-staged',
+          recordRef: stagedRef,
+        },
+      },
+    ];
+    const marker = {
+      transactionId: 'txn-missing',
+      commandId: 'op-missing',
+      operation: 'commitDomainRecord',
+      contentDigest: 'f'.repeat(64),
+      firstSequence: events[0].sequence,
+      lastSequence: events[1].sequence,
+      eventCount: 2,
+      eventsDigest: managedSessionEventsDigest(
+        events.map((event) => parseManagedSessionEvent(event)),
+      ),
+      previousCommitDigest: session.authority.commitProof.committedPrefixHash,
+    };
+    const envelope = (
+      subtype: string,
+      managedSession: unknown,
+      uuid: string,
+    ) => ({
+      uuid,
+      parentUuid: null,
+      sessionId: SESSION_KEY.sessionId,
+      timestamp: '2026-01-01T00:00:00.000Z',
+      type: 'system',
+      subtype,
+      cwd: '/workspace',
+      version: 'test',
+      managedSession,
+    });
+    await expect(
+      journal.appendTransaction([
+        envelope('managed_session_event_v1', events[0], 'rec-missing-event'),
+        envelope('managed_session_event_v1', events[1], 'rec-staged-event'),
+        envelope('managed_session_commit_v1', marker, 'rec-missing-marker'),
+      ]),
+    ).rejects.toMatchObject({
+      status: 409,
+      remoteCode: 'managed_session_resource_missing',
+    } satisfies Partial<ManagedSessionStoreHttpError>);
+
+    // Re-post the same transaction: a failed commit must not release the
+    // bytes it carries, or the retry loses them to the same 409 forever.
+    await expect(
+      journal.appendTransaction([
+        envelope('managed_session_event_v1', events[0], 'rec-retry-event'),
+        envelope('managed_session_event_v1', events[1], 'rec-retry-event-2'),
+        envelope('managed_session_commit_v1', marker, 'rec-retry-marker'),
+      ]),
+    ).rejects.toMatchObject({ status: 409 });
+    const retried = server.commits.at(-1);
+    const stagedInRetry = (
+      retried?.['resources'] as Array<Record<string, unknown>>
+    ).find(
+      (resource) => String(resource['resourceId']) === stagedRef.resourceId,
+    );
+    expect(stagedInRetry?.['bytesBase64']).toBeDefined();
+
+    // The 409 landed before anything committed, so the failed commit released
+    // nothing: the head is unmoved and the previously staged body is still
+    // readable.
+    await expect(journal.read()).resolves.toMatchObject({
+      committed: session.authority.committedSequence,
+    });
+    await expect(stores.resourceStore.read(retryRef)).resolves.toEqual(
+      Buffer.from('{"retry":true}', 'utf8'),
+    );
+    await session.close();
+  });
+
   it('rejects resources that require the unimplemented OSS path', async () => {
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://127.0.0.1:8080',
@@ -1887,13 +2832,157 @@ describe('HTTP Managed Session store', () => {
       ),
     ).rejects.toThrow(/OSS storage is not enabled/);
   });
+
+  it('commits an oversized message as chunks and projects it after a cold reopen', async () => {
+    const server = new FakeManagedSessionStore();
+    const open = await createSessionOpener(server);
+    const first = await open('harness-a', TOKEN_A);
+    const record = {
+      uuid: 'record-assistant-big',
+      parentUuid: null,
+      sessionId: SESSION_KEY.sessionId,
+      timestamp: '2026-09-22T00:00:00.000Z',
+      type: 'assistant' as const,
+      cwd: '/workspace',
+      version: 'test',
+      message: {
+        role: 'model' as const,
+        parts: [{ text: '长回答'.repeat(25_000) }],
+      },
+    };
+    await new ManagedSessionMessageProjection(
+      first.authority,
+      first.resources,
+    ).commit(
+      {
+        operation: 'message.commit',
+        commandId: 'message-big',
+        sessionKey: SESSION_KEY,
+        contentDigest: 'c'.repeat(64),
+      },
+      { record },
+      { class: 'harness', activation: first.activation },
+    );
+    const uploaded = server.commits.at(-1)?.['resources'] as Array<{
+      resourceId: string;
+      kind: string;
+      bytesBase64?: string;
+    }>;
+    const manifests = uploaded.filter(
+      (resource) => resource.kind === 'managed-message-chunks',
+    );
+    const parts = uploaded.filter(
+      (resource) => resource.kind === 'managed-message-part',
+    );
+    expect(manifests).toHaveLength(1);
+    expect(parts.length).toBeGreaterThan(1);
+    // Every part travels with the transaction, each under the inline limit.
+    for (const part of parts) {
+      expect(
+        Buffer.from(String(part.bytesBase64), 'base64').byteLength,
+      ).toBeLessThanOrEqual(64 * 1024);
+    }
+    const snapshotResources = new Map<
+      string,
+      {
+        ref: ManagedSessionDurableRef;
+        bytesBase64: string;
+        referencedRevisions: number[];
+      }
+    >();
+    for (const [index, commit] of server.commits.entries()) {
+      for (const raw of commit['resources'] as ManagedSessionDurableRef[]) {
+        const { resourceId, kind, schemaVersion, byteLength, digest } = raw;
+        const ref = { resourceId, kind, schemaVersion, byteLength, digest };
+        const resource = snapshotResources.get(resourceId) ?? {
+          ref,
+          bytesBase64: (await first.resources.read(ref)).toString('base64'),
+          referencedRevisions: [],
+        };
+        resource.referencedRevisions.push(index + 1);
+        snapshotResources.set(resourceId, resource);
+      }
+    }
+    const transactions = server.commits.map((commit, index) => ({
+      ...commit,
+      journalRevision: index + 1,
+      recordEncoding: 'identity',
+      byteLength: Buffer.from(String(commit['recordBytesBase64']), 'base64')
+        .length,
+    }));
+    const snapshotInput = {
+      format: 'qwen-csi-receipt-checkpoint-snapshot/1',
+      sessionKey: SESSION_KEY,
+      head: {
+        state: 'ACTIVE',
+        storageVersion: 1,
+        writerGeneration: 1,
+        journalRevision: transactions.length,
+        committedSequence: first.authority.committedSequence,
+        lastCommitDigest: first.authority.commitProof.committedPrefixHash,
+        activationEpoch: first.activation.epoch,
+        latestCheckpointResourceId: null,
+        compactedThroughRevision: 0,
+        recoveryStatus: 'READY',
+        recoveryDetailCode: null,
+      },
+      transactions,
+      resources: [...snapshotResources.values()],
+    };
+    const fetchCount = server.fetch.mock.calls.length;
+    const snapshot = readOnlyManagedSessionSnapshot(snapshotInput);
+    await expect(
+      projectManagedSessionRecords({
+        scan: await snapshot.journal.read(),
+        resources: snapshot.resources,
+      }),
+    ).resolves.toEqual([record]);
+    expect(server.fetch.mock.calls.length).toBe(fetchCount);
+    const partId = parts[0].resourceId;
+    expect(() =>
+      readOnlyManagedSessionSnapshot({
+        ...snapshotInput,
+        resources: snapshotInput.resources.filter(
+          ({ ref }) => ref.resourceId !== partId,
+        ),
+      }),
+    ).toThrow('snapshot resource is missing.');
+    expect(() =>
+      readOnlyManagedSessionSnapshot({
+        ...snapshotInput,
+        resources: snapshotInput.resources.map((resource) => {
+          if (resource.ref.resourceId !== partId) return resource;
+          const bytes = Buffer.from(resource.bytesBase64, 'base64');
+          bytes[0] ^= 1;
+          return { ...resource, bytesBase64: bytes.toString('base64') };
+        }),
+      }),
+    ).toThrow('snapshot resource bytes conflict.');
+    await first.close();
+
+    const second = await open('harness-b', TOKEN_B);
+    const projected = await new ManagedSessionMessageProjection(
+      second.authority,
+      second.resources,
+    ).project();
+    expect(projected).toEqual([record]);
+    await second.close();
+  });
 });
 
 class FakeManagedSessionStore {
   readonly commits: Array<Record<string, unknown>> = [];
   readonly recoveryBlocks: Array<Record<string, unknown>> = [];
+  readonly headOverrides: Record<string, unknown> = {};
+  readonly pageOverrides: Record<string, unknown> = {};
+  readonly receiptOverrides: Record<string, unknown> = {};
   transactionReads = 0;
   sealCount = 0;
+
+  editStoredTransaction(index: number, patch: Record<string, unknown>): void {
+    Object.assign(this.transactions[index]!, patch);
+  }
+
   readonly fetch = vi.fn<typeof fetch>(async (input, init) => {
     const url = new URL(requestUrl(input));
     const headers = new Headers(init?.headers);
@@ -1955,6 +3044,7 @@ class FakeManagedSessionStore {
         ...(this.recoveryDetailCode === null
           ? {}
           : { recoveryDetailCode: this.recoveryDetailCode }),
+        ...this.headOverrides,
       });
     }
     if (suffix === '/recovery:block') {
@@ -1972,11 +3062,13 @@ class FakeManagedSessionStore {
     if (suffix === '/transactions') {
       this.transactionReads++;
       const after = Number(url.searchParams.get('afterRevision') ?? 0);
-      const transactions = this.transactions.slice(after, after + 100);
+      const limit = Number(url.searchParams.get('limit') ?? 100);
+      const transactions = this.transactions.slice(after, after + limit);
       return jsonResponse({
         transactions,
         nextRevision: after + transactions.length,
         hasMore: after + transactions.length < this.transactions.length,
+        ...this.pageOverrides,
       });
     }
     if (suffix === '/transactions:commit') {
@@ -2043,6 +3135,7 @@ class FakeManagedSessionStore {
         committedSequence: body['lastSequence'],
         commitDigest: body['commitDigest'],
         replayed: false,
+        ...this.receiptOverrides,
       });
     }
     if (suffix.startsWith('/resources/')) {

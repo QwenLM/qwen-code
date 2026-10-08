@@ -3675,6 +3675,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 if (
                   event.type === 'turn_complete' ||
                   event.type === 'turn_error' ||
+                  // A rewind can drop the interrupted turn itself.
+                  event.type === 'session_rewound' ||
                   uiEvents.some((item) => item.type === 'prompt.cancelled')
                 ) {
                   const generation = advanceSessionRecoveryGeneration(
@@ -5512,11 +5514,15 @@ function promptSettledFromTurnEvent(
   }
   const promptId = eventPromptId(event);
   if (!promptId) return undefined;
+  const originator = event.originatorClientId
+    ? { originatorClientId: event.originatorClientId }
+    : {};
   if (event.type === 'turn_error') {
     const data = isRecord(event.data) ? event.data : {};
     return {
       sessionId,
       promptId,
+      ...originator,
       outcome: 'failed',
       error: {
         // Same defaults `matchTurnEvent` applies when it turns this frame into
@@ -5535,6 +5541,7 @@ function promptSettledFromTurnEvent(
   return {
     sessionId,
     promptId,
+    ...originator,
     outcome:
       stopReason === 'cancelled'
         ? 'cancelled'
