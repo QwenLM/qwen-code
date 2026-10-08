@@ -592,29 +592,35 @@ export function applyAutoModeDecision(
     case 'blocked:destructive-command': {
       const blockedState = recordBlock(denialState, actionFingerprint);
       const fallback = shouldFallback(blockedState);
+      // The guard's reason is derived from the raw model-authored command
+      // (`isDestructiveCommand` can fall back to the whole command), and it
+      // reaches both the approval-dialog banner and the tool error the main
+      // model reads next. Sanitize it once here rather than at each
+      // interpolation point — the classifier producer does the same
+      // (classifier.ts).
+      const sanitizedReason = sanitizeClassifierReason(decision.reason);
       if (fallback.fallback) {
         config.setAutoModeDenialState(consumePendingManualRetry(blockedState));
+        // The scheduler's fallback log carries only the reason code, which a
+        // classifier escalation shares; name the guard so the two routes stay
+        // distinguishable to whoever reads the log.
+        autoModeDebugLogger.warn(
+          `Auto mode: destructive-command guard escalated to manual approval (${fallback.reason}): ${sanitizedReason}`,
+        );
         return {
           kind: 'fallback',
           reason: fallback.reason,
-          // The guard's reason is derived from the raw model-authored command
-          // (`isDestructiveCommand` can fall back to the whole command), and it
-          // lands in the approval-dialog banner. The classifier producer
-          // sanitizes its own reason at the same boundary (classifier.ts); this
-          // new interpolation point needs the same defence.
           message: formatDenialFallbackMessage(
             fallback.reason,
-            sanitizeClassifierReason(decision.reason),
+            sanitizedReason,
           ),
         };
       }
       config.setAutoModeDenialState(blockedState);
       return {
         kind: 'blocked',
-        // Same guard reason as the banner above: it becomes the tool error the
-        // main model reads next, so only the interpolated reason is sanitized
-        // — the guidance below is ours and must survive intact.
-        errorMessage: `${sanitizeClassifierReason(decision.reason)}\n${AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE}`,
+        // The guidance below is ours and must survive intact.
+        errorMessage: `${sanitizedReason}\n${AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE}`,
         reason: 'classifier_blocked',
       };
     }

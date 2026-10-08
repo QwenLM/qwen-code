@@ -197,7 +197,12 @@ export function isDestructiveCommand(
 
   for (const pattern of DESTRUCTIVE_GIT_PATTERNS) {
     if (pattern.test(expanded) && !userMentionsDiscard(userPrompt)) {
-      const matched = command.match(pattern)?.[0] ?? command;
+      // `git clean -[a-zA-Z]*f` matches an unbounded run, and the fallback is
+      // the whole model-authored command. Bound the echoed fragment: the reason
+      // is clamped to 200 chars at the permission boundary, and a longer match
+      // would push this template's own recovery instruction past the clamp.
+      const match = command.match(pattern)?.[0] ?? command;
+      const matched = match.length > 80 ? `${match.slice(0, 79)}…` : match;
       return {
         blocked: true,
         reason: `Blocked destructive git command: "${matched}". To proceed, explicitly mention discarding local work in your prompt.`,

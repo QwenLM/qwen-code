@@ -924,7 +924,29 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
       kind: 'fallback',
       reason: 'total_denial',
     });
+    // The classifier's reason is what makes this banner say why, above the
+    // rate limit itself; the caller threads it in and the template renders it.
+    if (result.kind === 'fallback') {
+      expect(result.message).toContain('session denial limit (unsafe command)');
+    }
     expect(setAutoModeDenialState).toHaveBeenCalledWith(counters(1, 0, 20, 0));
+  });
+
+  it('renders the total-limit fallback without a reason when none is carried', () => {
+    // The passthrough route (denialTracking armed the fallback, so the
+    // scheduler passes skipClassifierReason) reaches this template with no
+    // reason of its own; the limit sentence is the whole banner there.
+    const { result } = apply(
+      { via: 'fallback', reason: 'total_denial' },
+      counters(0, 0, 19, 0),
+    );
+
+    expect(result).toMatchObject({ kind: 'fallback', reason: 'total_denial' });
+    if (result.kind === 'fallback') {
+      expect(result.message).toBe(
+        'Auto mode reached its session denial limit. Review this action manually.',
+      );
+    }
   });
 
   it('routes classifier infrastructure failures to manual approval', () => {
@@ -1344,6 +1366,34 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
     expect(result.kind).toBe('fallback');
     if (result.kind === 'fallback') {
       expect(result.message).toContain('Blocked destructive git command');
+    }
+  });
+
+  it('keeps the recovery instruction when a long guard match is clamped', async () => {
+    // `git clean -[a-zA-Z]*f` matches an unbounded run, so an over-long echoed
+    // fragment once pushed the template's own recovery instruction past the
+    // 200-char boundary clamp — deleting the one instruction that lets the
+    // agent self-correct. Both sinks must keep it.
+    const decision = await evaluateShell(
+      `git clean -${'a'.repeat(120)}f src`,
+      'fix the bug',
+    );
+    expect(decision.via).toBe('blocked:destructive-command');
+
+    const blocked = apply(decision, counters(0, 0, 0, 0));
+    expect(blocked.result.kind).toBe('blocked');
+    if (blocked.result.kind === 'blocked') {
+      expect(blocked.result.errorMessage).toContain(
+        'explicitly mention discarding local work in your prompt',
+      );
+    }
+
+    const escalated = apply(decision, counters(2, 0, 2, 0));
+    expect(escalated.result.kind).toBe('fallback');
+    if (escalated.result.kind === 'fallback') {
+      expect(escalated.result.message).toContain(
+        'explicitly mention discarding local work in your prompt',
+      );
     }
   });
 
