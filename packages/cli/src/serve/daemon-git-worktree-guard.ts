@@ -288,6 +288,8 @@ const DYNAMIC_RELOCATION_DENIAL =
   'Daemon shell guard denied a mutating Git command with a dynamic repository location.';
 const UNPARSEABLE_COMMAND_DENIAL =
   'Daemon shell guard denied a shell command that could not be parsed before execution.';
+const EXPANDING_HEREDOC_DENIAL =
+  "Daemon shell guard denied a shell command whose unquoted heredoc body can run commands during read-time expansion; quote the delimiter (<<'EOF') to keep the body literal.";
 const CMD_REWRITE_SYNTAX_DENIAL =
   'Daemon shell guard denied a shell command containing cmd.exe rewrite syntax it cannot evaluate before execution.';
 const WINDOWS_UNMODELLED_SYNTAX_DENIAL =
@@ -2260,42 +2262,326 @@ interface EvaluationScope {
  * A heredoc body is stdin data delivered to the command, not shell commands,
  * yet `splitCommands` has no heredoc state and would parse each body line as
  * its own segment — letting a body `cd` launder the tracked directory. Strip
- * `<<[-]WORD … WORD` bodies (quoted or not) before splitting. This is
- * best-effort: only the first heredoc on a line is handled, which is the
- * shape a model emits, and anything unrecognised is left untouched.
+ * `<<[-]WORD … WORD` bodies before splitting.
  *
- * Returns null when a body cannot be stripped safely: with an UNQUOTED
- * delimiter bash expands `$(…)`, backticks and `${…}` in the body at read
- * time, so those lines can execute commands the stripped text would hide
- * from every later stage. Quoted-delimiter bodies stay inert and strip
- * cleanly.
+ * The delimiter's quoting decides what bash does with the body. A quoted
+ * delimiter (`<<'EOF'`, `<<"EOF"`) keeps the body literal, so stripping
+ * hides only inert text from the later stages. With an UNQUOTED delimiter
+ * bash joins backslash-newline pairs and then expands the body at read time:
+ * `$(…)`, backticks and `$((…))` run commands right there, and
+ * `${GIT_DIR=…}` / `:=` assign in the shell reading the body — which for a
+ * builtin receiver such as `read` is the current shell, so the value
+ * outlives the command and a later `export GIT_DIR` (or a stuck export
+ * attribute) arms a following mutating Git command with a repository this
+ * guard never saw. Those shapes fail closed instead of being stripped.
+ * Quoting says nothing about the RECEIVER: fed to a shell or interpreter
+ * (`bash <<'EOF'`) even a literal body executes there, a gap predating this
+ * helper and tracked separately.
+ *
+ * Best-effort: only the first heredoc on a line is handled, which is the
+ * shape a model emits. A body that never reaches its delimiter runs to the
+ * end of the text, exactly what bash feeds to the receiver after its
+ * end-of-file warning; those lines never execute as commands, so they strip
+ * like any other body.
  */
-function stripHeredocBodies(command: string): string | null {
+type HeredocStrip =
+  | { readonly kind: 'ok'; readonly text: string }
+  | { readonly kind: 'expanding' };
+
+interface HeredocMarker {
+  readonly delimiter: string;
+  readonly quoted: boolean;
+  readonly stripTabs: boolean;
+}
+
+/**
+ * Finds the first real `<<[-]WORD` marker on a line, or null. A `<<` inside
+ * single quotes, a quoted string without a substitution, a comment, a
+ * herestring (`<<<`) or an arithmetic region (`$((a << b))`) is not a
+ * marker; inside `$(…)` and backticks the line is parsed again, so a `<<`
+ * there is one.
+ */
+function findHeredocMarker(line: string): HeredocMarker | null {
+  let single = false;
+  let double = false;
+  let backtick = false;
+  let substitution = 0;
+  const quoteStack: Array<[boolean, boolean]> = [];
+  // Whether a `#` here would open a comment: only at a word boundary.
+  let wordStart = true;
+  for (let index = 0; index < line.length; index++) {
+    const character = line[index]!;
+    const next = line[index + 1];
+    if (!single && character === '\\' && index + 1 < line.length) {
+      index++;
+      wordStart = false;
+      continue;
+    }
+    if (!single && character === '`') {
+      backtick = !backtick;
+      wordStart = false;
+      continue;
+    }
+    if (!single && !backtick && character === '$' && next === '(') {
+      if (line[index + 2] === '(') {
+        // `$((…))` arithmetic: a `<<` inside is a shift, never a marker. Skip
+        // the balanced region; a substitution nested inside it that carries
+        // its own heredoc is pathological enough to leave visible instead.
+        let depth = 0;
+        let cursor = index + 1;
+        while (cursor < line.length) {
+          const inner = line[cursor]!;
+          if (inner === '\\') {
+            cursor += 2;
+            continue;
+          }
+          if (inner === '(') depth++;
+          else if (inner === ')') {
+            depth--;
+            if (depth === 0) break;
+          }
+          cursor++;
+        }
+        index = cursor;
+        wordStart = false;
+        continue;
+      }
+      quoteStack.push([single, double]);
+      single = false;
+      double = false;
+      substitution++;
+      index++;
+      wordStart = true;
+      continue;
+    }
+    if (
+      !backtick &&
+      substitution > 0 &&
+      character === ')' &&
+      !single &&
+      !double
+    ) {
+      const enclosing = quoteStack.pop();
+      single = enclosing?.[0] ?? false;
+      double = enclosing?.[1] ?? false;
+      substitution--;
+      wordStart = false;
+      continue;
+    }
+    if (!backtick && character === "'" && !double) {
+      single = !single;
+      wordStart = false;
+      continue;
+    }
+    if (!backtick && character === '"' && !single) {
+      double = !double;
+      wordStart = false;
+      continue;
+    }
+    if (!single && !double && !backtick && character === '#' && wordStart) {
+      // The rest of the line is a comment; no marker can follow.
+      return null;
+    }
+    if (character === '<' && next === '<' && !single && !double) {
+      // `<<<` is a herestring: the word after it is data, not a delimiter.
+      if (line[index + 2] === '<') {
+        index += 2;
+        wordStart = false;
+        continue;
+      }
+      let cursor = index + 2;
+      let stripTabs = false;
+      if (line[cursor] === '-') {
+        stripTabs = true;
+        cursor++;
+      }
+      while (line[cursor] === ' ' || line[cursor] === '\t') cursor++;
+      const quoteChar = line[cursor];
+      if (quoteChar === "'" || quoteChar === '"') {
+        const close = line.indexOf(quoteChar, cursor + 1);
+        // An unterminated quote makes bash reject the line, so nothing here
+        // executes; leave the text visible rather than guess a delimiter.
+        if (close === -1) return null;
+        const delimiter = line.slice(cursor + 1, close);
+        if (delimiter === '') return null;
+        return { delimiter, quoted: true, stripTabs };
+      }
+      const name = /^[A-Za-z_][A-Za-z0-9_]*/.exec(line.slice(cursor));
+      if (!name) {
+        index++;
+        wordStart = false;
+        continue;
+      }
+      return { delimiter: name[0], quoted: false, stripTabs };
+    }
+    wordStart =
+      !single && !double && !backtick
+        ? character === ' ' ||
+          character === '\t' ||
+          character === ';' ||
+          character === '|' ||
+          character === '&' ||
+          character === '(' ||
+          character === ')'
+        : false;
+  }
+  return null;
+}
+
+// bash joins a live backslash-newline pair in an unquoted body before
+// expanding it, so `$\<LF>(cmd)` still runs `cmd`. Reproduce that join and
+// keep every other backslash in place, so the expansion scan reads the same
+// escape parity the shell would.
+function joinContinuations(text: string): string {
+  let result = '';
+  let index = 0;
+  while (index < text.length) {
+    const character = text[index]!;
+    if (character === '\\') {
+      const next = text[index + 1];
+      if (next === '\n') {
+        index += 2;
+        continue;
+      }
+      if (next === '$' || next === '`' || next === '\\') {
+        result += text.slice(index, index + 2);
+        index += 2;
+        continue;
+      }
+    }
+    result += character;
+    index++;
+  }
+  return result;
+}
+
+// The `}` closing a `${…}`, pairing nested `${` openings. A quote character
+// inside the word part can still throw this off; that direction fails
+// closed.
+function matchingBrace(text: string, start: number): number {
+  let depth = 1;
+  for (let index = start; index < text.length; index++) {
+    const character = text[index]!;
+    if (character === '\\') {
+      index++;
+      continue;
+    }
+    if (character === '$' && text[index + 1] === '{') {
+      depth++;
+      index++;
+      continue;
+    }
+    if (character === '}') {
+      depth--;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+// True when a `${…}` form has a side effect the stripped text would hide
+// from the tracked environment: `=` / `:=` assign in the shell reading the
+// body (with a builtin receiver such as `read` that is the current shell,
+// so the value persists and a later `export GIT_DIR` arms it), and `@P`
+// re-expands the value as a prompt string, which runs the command
+// substitutions inside it when promptvars is on.
+function parameterExpansionMutates(inner: string): boolean {
+  let cursor = 0;
+  while (inner[cursor] === '!' || inner[cursor] === '#') cursor++;
+  const name = /^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|.)/.exec(inner.slice(cursor));
+  if (!name) return true;
+  cursor += name[0].length;
+  if (inner[cursor] === '[') {
+    // The subscript's own content is checked by the caller's recursive scan;
+    // here just step past it.
+    const close = inner.indexOf(']', cursor + 1);
+    if (close === -1) return true;
+    cursor = close + 1;
+  }
+  const rest = inner.slice(cursor);
+  return rest.startsWith('=') || rest.startsWith(':=') || rest.startsWith('@P');
+}
+
+// True when expanding this unquoted heredoc body can execute a command or
+// mutate shell state. Plain `${name}` reads are value-only and stay
+// allowed; `\$` is inert because bash leaves it a literal `$`.
+function expansionCanExecute(text: string): boolean {
+  for (let index = 0; index < text.length; index++) {
+    const character = text[index]!;
+    const next = text[index + 1];
+    if (character === '\\') {
+      // A backslash in an expanding body quotes only `$`, backtick and `\`
+      // (backslash-newline was joined by the caller); before anything else it
+      // is literal and the next character is still read normally.
+      if (next === '$' || next === '`' || next === '\\') index++;
+      continue;
+    }
+    if (character === '`') return true;
+    if (character !== '$') continue;
+    if (next === '(') {
+      if (text[index + 2] !== '(') return true;
+      // `$((…))` arithmetic runs no command itself, but an array subscript
+      // inside it can hold one — scan the inside.
+      let depth = 0;
+      let cursor = index + 1;
+      while (cursor < text.length) {
+        const inner = text[cursor]!;
+        if (inner === '\\') {
+          cursor += 2;
+          continue;
+        }
+        if (inner === '(') depth++;
+        else if (inner === ')') {
+          depth--;
+          if (depth === 0) break;
+        }
+        cursor++;
+      }
+      if (depth !== 0) return true;
+      if (expansionCanExecute(text.slice(index + 3, cursor))) return true;
+      index = cursor;
+      continue;
+    }
+    if (next === '{') {
+      const close = matchingBrace(text, index + 2);
+      if (close === -1) return true;
+      const inner = text.slice(index + 2, close);
+      if (parameterExpansionMutates(inner)) return true;
+      if (expansionCanExecute(inner)) return true;
+      index = close;
+    }
+  }
+  return false;
+}
+
+function stripHeredocBodies(command: string): HeredocStrip {
   const lines = command.split('\n');
   const out: string[] = [];
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
     out.push(line);
-    const match = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(line);
-    if (!match) continue;
-    const quoted = match[1] !== '';
-    const delimiter = match[2]!;
-    const stripTabs = line.includes('<<-');
-    // Consume the body up to the delimiter line, dropping it from the output.
+    const marker = findHeredocMarker(line);
+    if (!marker) continue;
+    const bodyLines: string[] = [];
+    // Consume the body up to the delimiter line, dropping it from the
+    // output. A body that never reaches its delimiter runs to the end of the
+    // text, which is what bash does too: it warns and feeds the partial body
+    // to the receiver as stdin, so those lines never execute as commands.
     while (index + 1 < lines.length) {
       index++;
       const body = lines[index]!;
-      const trimmed = stripTabs ? body.replace(/^\t+/, '') : body;
-      if (trimmed === delimiter) break;
-      if (
-        !quoted &&
-        (body.includes('$(') || body.includes('`') || body.includes('${'))
-      ) {
-        return null;
-      }
+      const trimmed = marker.stripTabs ? body.replace(/^\t+/, '') : body;
+      if (trimmed === marker.delimiter) break;
+      bodyLines.push(body);
+    }
+    if (
+      !marker.quoted &&
+      expansionCanExecute(joinContinuations(bodyLines.join('\n')))
+    ) {
+      return { kind: 'expanding' };
     }
   }
-  return out.join('\n');
+  return { kind: 'ok', text: out.join('\n') };
 }
 
 function readTopLevelSeparators(command: string): string[] {
@@ -2538,13 +2824,16 @@ async function evaluateCommandWithCwd(
   // Heredocs are a POSIX shell construct: on the Windows lanes the marker
   // line's body lines are separate commands, so stripping them would hide
   // commands the executed text really runs.
-  const strippedCommand = windowsNative ? command : stripHeredocBodies(command);
-  if (strippedCommand === null) {
+  const heredocStrip: HeredocStrip = windowsNative
+    ? { kind: 'ok', text: command }
+    : stripHeredocBodies(command);
+  if (heredocStrip.kind !== 'ok') {
     return {
-      denial: { allowed: false, reason: UNPARSEABLE_COMMAND_DENIAL },
+      denial: { allowed: false, reason: EXPANDING_HEREDOC_DENIAL },
       cwdAfter: trackedCwd,
     };
   }
+  const strippedCommand = heredocStrip.text;
   if (containsCmdRewriteSyntax(strippedCommand, platformNow, shellNow)) {
     return {
       denial: { allowed: false, reason: CMD_REWRITE_SYNTAX_DENIAL },
