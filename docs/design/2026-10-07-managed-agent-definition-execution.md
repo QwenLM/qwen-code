@@ -17,10 +17,13 @@ uses them:
   setting `QWEN_MANAGED_AGENT_REVISION` (default `1`) as `agent_revision`, and
   any other requested revision answers `400 unsupported_feature`
   (`ManagedAgentStore.java:370-375`).
-- **`qwen-code` is hard-coded in three places:** Session admission
+- **`qwen-code` is hard-coded in four places:** Session admission
   (`ManagedAgentStore.java:266`), the Workspace execution authority
-  (`WorkspaceExecutionStore.java:67,98`) and admission of later Turns on a
-  bound Session (`ManagedAgentService.java:871`).
+  (`WorkspaceExecutionStore.java:67,98`), admission of later Turns on a
+  bound Session (`ManagedAgentService.java:871`), and the W1 recovery source
+  validator (`WorkspaceRecoveryStore.currentSource`). The last one walks every
+  Session on a storage, including closed and deleted ones, and fails the whole
+  capture with `source_drift` on any other `agent_id`.
 - **The Harness has no notion of a revision.** Java's `POST /session` to the
   Hosted Harness carries only `approvalMode`, `approvalTimeoutMs`,
   `toolProfile` and the Session Store descriptor
@@ -84,6 +87,8 @@ publishing it (decision 1 in section 7).
 - Applying `environment_template_id`, which belongs to Environment and
   Runtime templates. A non-null value refuses admission.
 - Switching the definition of an existing Session.
+- A per-definition approval timeout (`approval_timeout_ms`). v1 refuses it;
+  see section 9.
 - The reader, operator and owner role matrix from section 10 of the
   contract.
 - Any change to the behavior of the built-in `qwen-code` agent.
@@ -102,8 +107,9 @@ publishing it (decision 1 in section 7).
 
 `qwen-code` does not become a seeded definition. Seeding would need a row per
 tenant, and its behavior is defined by deployment settings, so a stored copy
-could disagree with what actually runs. The three `"qwen-code".equals(...)`
-checks become "the Session is `qwen-code` or pins an executable definition".
+could disagree with what actually runs. The four `"qwen-code".equals(...)`
+checks (section 1) become "the Session is `qwen-code` or pins an executable
+definition".
 
 ### 5.2 Session admission (D8b)
 
@@ -144,20 +150,26 @@ objects without checking them. This design leaves D8a's storage alone and
 compiles at admission, so stored definitions stay valid, and unsupported
 content fails with a precise error when a Session is created from it.
 
-| Field                     | Accepted v1 shape                                                                                                      | Effect                                                                                                                                                                 | Stage   |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `permission_policy`       | `{}` (deployment default), or `{"approval_mode": "default" \| "auto-edit" \| "yolo", "approval_timeout_ms"?: integer}` | Written to `approval_mode`. The timeout may not exceed the deployment's `QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT` and defaults to it. `plan` and any other key are refused | D8c-1   |
-| `tools`                   | `[]`, or exactly one `{"type": "hosted_profile", "profile": "<id>"}`                                                   | Written to `tool_profile`. A bound Session needs one entry; an unbound Session needs `[]` (model only)                                                                 | D8c-1   |
-| `model`                   | D8c-1: only `{}` (deployment default). D8c-2: `{}` or `{"id": "<model id>"}`                                           | D8c-2 overrides it per Session in the Harness                                                                                                                          | D8c-2   |
-| `instructions`            | D8c-1: only `""`. D8c-2: UTF-8 up to 64 KiB                                                                            | D8c-2 appends it as an agent instruction section (5.5)                                                                                                                 | D8c-2   |
-| `skills`, `mcp_servers`   | Omitted, `null` or `[]`                                                                                                | None; non-empty is refused                                                                                                                                             | Stage H |
-| `environment_template_id` | Omitted or `null`                                                                                                      | None; non-null is refused                                                                                                                                              | Later   |
-| `metadata`                | Anything                                                                                                               | Does not affect execution                                                                                                                                              | —       |
+| Field                     | Accepted v1 shape                                                                     | Effect                                                                                                                                                            | Stage   |
+| ------------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `permission_policy`       | `{}` (deployment default), or `{"approval_mode": "default" \| "auto-edit" \| "yolo"}` | Written to `approval_mode`. The timeout stays the deployment's `QWEN_MANAGED_AGENT_APPROVAL_TIMEOUT`. `plan`, `approval_timeout_ms` and any other key are refused | D8c-1   |
+| `tools`                   | `[]`, or exactly one `{"type": "hosted_profile", "profile": "<id>"}`                  | Written to `tool_profile`. A bound Session needs one entry; an unbound Session needs `[]` (model only)                                                            | D8c-1   |
+| `model`                   | D8c-1: only `{}` (deployment default). D8c-2: `{}` or `{"id": "<model id>"}`          | D8c-2 overrides it per Session in the Harness                                                                                                                     | D8c-2   |
+| `instructions`            | D8c-1: only `""`. D8c-2: UTF-8 up to 64 KiB                                           | D8c-2 appends it as an agent instruction section (5.5)                                                                                                            | D8c-2   |
+| `skills`, `mcp_servers`   | Omitted, `null` or `[]`                                                               | None; non-empty is refused                                                                                                                                        | Stage H |
+| `environment_template_id` | Omitted or `null`                                                                     | None; non-null is refused                                                                                                                                         | Later   |
+| `metadata`                | Anything                                                                              | Does not affect execution                                                                                                                                         | —       |
 
 **Selectable profiles come from a deployment allowlist**,
 `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES`, which defaults to
-`hosted-workspace-files/1,hosted-workspace-files/2`.
+`hosted-workspace-files/1` only.
 
+- **`files/2`** (glob) is an explicit operator opt-in. The worker identity
+  cannot prove glob support, so #13166 makes its rollout operator-enforced:
+  drain old workers and upgrade every provisioner before any `/2` Session.
+  Java has no switch to check, so the allowlist is the gate: the operator
+  adds `hosted-workspace-files/2` only after completing that rollout. Until
+  then a definition selecting it is refused.
 - **`shell/1` and `shell/2`** wait for public foreground Shell admission
   (#13271) and must pair with the `default` approval mode; see below.
 - **`mcp/1`** waits for Stage H.
@@ -166,8 +178,6 @@ content fails with a precise error when a Session is created from it.
 
 - A Shell profile may not pair with `yolo`. This is #13271's mandatory-asking
   gate, written into the rules before the allowlist opens Shell.
-- `files/2` (glob) requires the deployment to have enabled its workers,
-  following #13166's coordinated rollout; Java checks the same switch.
 - An unbound Session may not select a profile.
 
 ### 5.4 D8c-1: Java only
@@ -177,8 +187,11 @@ and load, where they are pinned and verified. D8c-1 therefore only:
 
 - writes the compiled values at admission, replacing the literal `files/1`
   and the deployment-default approval mode;
-- changes the `qwen-code` checks in later-Turn admission and the Workspace
-  execution authority to "`qwen-code` or a pinned, compiled definition";
+- changes the `qwen-code` checks in later-Turn admission, the Workspace
+  execution authority and the W1 recovery source validator to "`qwen-code` or
+  a pinned, compiled definition". The recovery source also records the pinned
+  `agent_revision` and `agent_definition_digest`, so a restored Session keeps
+  its pin;
 - makes `maySubmitShape` and similar checks read the Session's columns
   instead of assuming a profile.
 
@@ -232,7 +245,8 @@ Two PRs:
 1. **PR A, D8b and D8c-1 (Java only):** pinning, compilation of the approval
    mode and tool profile, the refusal rules, the new column (the next free
    Flyway version on `main` at merge time) and contract 1.34. Definitions then
-   have their first real effect: selecting `files/2` and `default` approval.
+   have their first real effect: selecting the approval mode, and `files/2`
+   on deployments that have opted in.
 2. **PR B, D8c-2 (Java and Hosted Harness):** delivery, pinning,
    verification and application of the model and instructions.
 
@@ -254,9 +268,10 @@ Each item is a recommendation, followed by who should confirm it.
    `model` and `instructions`; `skills` and `mcp_servers` with Stage H.
    → wenshao
 5. **`tools` selects one frozen profile** rather than listing individual
-   tools; profiles are limited by a deployment allowlist, and Shell requires
-   an asking mode. → doudouOUC (tool profiles), aligned with DragonnZhang's
-   #13271
+   tools; profiles are limited by a deployment allowlist that defaults to
+   `files/1`, `files/2` is an operator opt-in after #13166's rollout, and
+   Shell requires an asking mode. → doudouOUC (tool profiles), aligned with
+   DragonnZhang's #13271
 6. **Instruction placement:** after the core system instruction and before
    project context, never replacing it, up to 64 KiB. → wenshao
 7. **Ownership of D8c-2's Harness part:** yiliang114 implements it;
@@ -272,6 +287,14 @@ Each item is a recommendation, followed by who should confirm it.
   - no partially updated read under a concurrent update;
   - the refusal matrix: every unsupported shape of every field, and the
     combination rules;
+  - under the default allowlist, a definition selecting `files/2` is refused
+    with `409 agent_definition_unsupported`, and accepted once the
+    allowlist includes it;
+  - `approval_timeout_ms` is refused, and a Session from a definition gets
+    the deployment timeout;
+  - W1 recovery capture and verify on a storage holding both a `qwen-code`
+    Session and a stored-definition Session (active and deleted), with the
+    pin preserved in the bundle;
   - `404` across tenants;
   - the `qwen-code` path unchanged.
 - **Harness unit tests (PR B):**
@@ -280,7 +303,8 @@ Each item is a recommendation, followed by who should confirm it.
   - the model override applies, and an unconfigured model fails closed;
   - instructions land in the right place in the system instruction.
 - **Real-stack acceptance**, following the method used on #13101 and #13107:
-  - run MySQL, Java, the Hosted Harness and Chromium;
+  - run MySQL, Java, the Hosted Harness and Chromium, with every worker on
+    the glob build and `files/2` added to the allowlist;
   - store a definition with `files/2` and `default`, and create a bound
     Session from it;
   - confirm glob is available and a file write shows an approval card;
@@ -296,6 +320,14 @@ Each item is a recommendation, followed by who should confirm it.
 - **The default approval mode is `yolo`:** a definition with `{}` inherits
   it. That is what "deployment default" means, but the documentation must say
   so, and production deployments should change the default to `default`.
+- **An operator adds `files/2` before the rollout completes:** a glob call
+  can reach an old worker and hold the Workspace lease. The allowlist cannot
+  detect this; the deployment documentation repeats #13166's rollout steps
+  next to the setting.
+- **A per-definition approval timeout is not supported yet:** adding it later
+  needs a per-Session pin, connector delivery (the connector sends the
+  deployment value today) and bounds matching the Harness (1 s to 24 h,
+  capped by the deployment). Until then the field is refused, not ignored.
 - **Revisions stored under D8a may use shapes v1 does not support:**
   creating a Session from them is refused. This is intended (no silent
   drops), and the error names the field.
