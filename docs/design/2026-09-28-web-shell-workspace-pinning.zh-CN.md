@@ -1,5 +1,7 @@
 # Web Shell 工作区置顶功能
 
+[English](2026-09-28-web-shell-workspace-pinning.md) | [简体中文](2026-09-28-web-shell-workspace-pinning.zh-CN.md)
+
 ## 目标
 
 让 Web Shell 用户能够将重要的工作区固定在侧边栏顶部，使其始终可见且易于查找，即使存在大量其他工作区时也是如此。置顶状态在守护进程重启后持久化，并且在删除会话后仍然保留。
@@ -7,10 +9,10 @@
 ## 契约
 
 - `PATCH /workspace-registrations/:id/pin` 用于切换或设置某个持久化注册项的置顶状态。
-- `/capabilities` 中的工作区条目在被置顶时包含可选字段 `isPinned: true` 和 `pinnedAt: "<ISO-8601>"`；未置顶的条目完全省略这两个字段。
+- `/capabilities` 中的工作区条目在通告 `workspace_pinning` 时包含 `registrationIds`、`isPinned`（布尔值，功能通告时始终存在）和 `pinnedAt`（ISO-8601，仅置顶时存在）；当标签不存在时，这些字段完全省略。
 - `workspace_pinning` 能力标签用于通告支持；客户端在显示 UI 之前通过预检检查此标签。
 - Web Shell 侧边栏仅在具有持久化注册记录且守护进程通告了 `workspace_pinning` 的行上显示"置顶工作区"菜单项。
-- 已置顶的工作区在所有未置顶的工作区之上排序；在每个分组内，按最后活动时间降序排列。
+- 已置顶的工作区在所有未置顶的工作区之上排序；在置顶分组内，按置顶时间降序排列（最近置顶的在前）。未置顶分组保持守护进程目录顺序。
 - 置顶状态存储在现有工作区注册存储快照中新增的 `pinnedAts: Record<string, string>` 字段下，以稳定注册 ID 为键。
 - Schema 版本保持为 1；旧版守护进程会静默丢弃新增的 `pinnedAts` 字段（数据丢失风险见下文说明）。
 
@@ -18,22 +20,15 @@
 
 ### `PATCH /workspace-registrations/:id/pin`
 
-设置或清除某个持久化注册项的置顶状态。该路由接受可选的 JSON 请求体 `{ isPinned?: boolean }`；省略请求体表示切换当前状态。成功返回更新后的条目，包含 `isPinned` 和 `pinnedAt`（当置顶时）或两者都不包含（当取消置顶时）。
+设置或清除某个持久化注册项的置顶状态。该路由需要 JSON 请求体 `{ "isPinned": boolean }`；省略请求体或传递非布尔值返回 `400 invalid_body`。成功返回 `{ id, isPinned, pinnedAt? }` —— `pinnedAt` 仅在 `isPinned` 为 true 时存在。
 
 ```json
-// 请求（切换）
-PATCH /workspace-registrations/abc123 HTTP/1.1
-Content-Type: application/json
-
-{}
+// 请求（置顶）
+{ "isPinned": true }
 
 // 响应（现已置顶）
 {
   "id": "abc123",
-  "cwd": "/path/to/workspace",
-  "displayName": "Payments Production",
-  "active": true,
-  "persisted": true,
   "isPinned": true,
   "pinnedAt": "2026-09-28T10:30:00.000Z"
 }
@@ -41,10 +36,7 @@ Content-Type: application/json
 // 响应（现已取消置顶）
 {
   "id": "abc123",
-  "cwd": "/path/to/workspace",
-  "displayName": "Payments Production",
-  "active": true,
-  "persisted": true
+  "isPinned": false
 }
 ```
 
@@ -52,17 +44,18 @@ Content-Type: application/json
 
 ### `/capabilities` 工作区条目形状扩展
 
-当通告 `workspace_pinning` 时，每个工作区条目可能包含：
+当通告 `workspace_pinning` 时，每个工作区条目包含：
 
 ```ts
 interface WorkspaceEntry {
   // ...现有字段...
-  isPinned?: true; // 仅在置顶时出现
-  pinnedAt?: string; // ISO-8601 时间戳，仅在置顶时出现
+  registrationIds?: readonly string[]; // 稳定注册 ID（别名路径时可能包含多个）
+  isPinned: boolean; // 功能通告时始终存在（未置顶时为 false）
+  pinnedAt?: string; // ISO-8601 时间戳，仅置顶时存在
 }
 ```
 
-未置顶的条目省略这两个字段。这与 `removable` 的模式一致，后者受 `workspace_runtime_removal` 门控。
+当标签不存在时，三个字段全部省略。`isPinned` 对未置顶条目始终为 `false`（不是省略），与 `primary` 和 `trusted` 等始终存在的布尔值模式一致。
 
 ## 能力协商
 
@@ -103,11 +96,11 @@ const canPin =
 - 没有持久化注册的临时工作区
 - 未通告 `workspace_pinning` 的守护进程（旧版本）
 
-已置顶的行显示 📌 图标并排在所有其他行之上。切换操作调用 `PATCH /workspace-registrations/:id/pin` 且不携带请求体（切换语义）。
+已置顶的行显示 📌 图标并排在所有其他行之上。切换操作调用 `PATCH /workspace-registrations/:id/pin` 并传递 `{ isPinned: <目标状态> }`。
 
 ## 测试策略
 
-- 单元测试验证 `/capabilities` 对未置顶条目省略 `isPinned`/`pinnedAt`。
+- 单元测试验证 `/capabilities` 对未置顶条目发送 `isPinned: false`，且在功能标签不存在时省略这些字段。
 - 单元测试验证置顶路由对缺失的注册项返回正确的错误码。
 - 侧边栏单元测试验证 Pin 菜单不出现在不可置顶的行上。
 - 集成测试（手动）验证置顶状态在守护进程重启后持久化且排序正确。

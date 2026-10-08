@@ -1,5 +1,7 @@
 # Web Shell workspace pinning
 
+[English](2026-09-28-web-shell-workspace-pinning.md) | [简体中文](2026-09-28-web-shell-workspace-pinning.zh-CN.md)
+
 ## Goal
 
 Let Web Shell users pin important workspaces to the top of the sidebar so they are always visible and easy to find, even when many other workspaces are present. Pin state is persisted across daemon restarts and survives session deletion.
@@ -7,10 +9,10 @@ Let Web Shell users pin important workspaces to the top of the sidebar so they a
 ## Contract
 
 - `PATCH /workspace-registrations/:id/pin` toggles or sets pin state for a persisted registration.
-- `/capabilities` workspaces entries include optional `isPinned: true` and `pinnedAt: "<ISO-8601>"` when pinned; unpinned entries omit both fields entirely.
+- `/capabilities` workspaces entries include `registrationIds`, `isPinned` (boolean, always present when feature is advertised), and `pinnedAt` (ISO-8601, present only when pinned) when `workspace_pinning` is advertised; when the tag is absent, those fields are omitted entirely.
 - `workspace_pinning` capability tag advertises support; clients preflight-check this before showing UI.
 - Web Shell sidebar shows a "Pin" menu item only on rows that have persistent registration records AND the daemon advertises `workspace_pinning`.
-- Pinned workspaces sort above all unpinned workspaces in the sidebar; within each group, sort by last activity descending.
+- Pinned workspaces sort above all unpinned workspaces in the sidebar; within the pinned group, sort by pin time descending (most recently pinned first). The unpinned group preserves the daemon catalog order.
 - Pin state is stored in the existing workspace registration store snapshot under a new `pinnedAts: Record<string, string>` field keyed by stable registration id.
 - Schema version remains 1; older daemons silently drop the additive `pinnedAts` field (data loss risk documented below).
 
@@ -18,22 +20,15 @@ Let Web Shell users pin important workspaces to the top of the sidebar so they a
 
 ### `PATCH /workspace-registrations/:id/pin`
 
-Set or clear pin state for one persisted registration. The route accepts an optional JSON body `{ isPinned?: boolean }`; omitting the body toggles current state. Success returns the updated entry with `isPinned` and `pinnedAt` (when pinned) or neither field (when unpinned).
+Set or clear pin state for one persisted registration. The route requires a JSON body `{ "isPinned": boolean }`; omitting the body or passing a non-boolean returns `400 invalid_body`. Success returns `{ id, isPinned, pinnedAt? }` — `pinnedAt` is present only when `isPinned` is true.
 
 ```json
-// Request (toggle)
-PATCH /workspace-registrations/abc123 HTTP/1.1
-Content-Type: application/json
-
-{}
+// Request (pin)
+{ "isPinned": true }
 
 // Response (now pinned)
 {
   "id": "abc123",
-  "cwd": "/path/to/workspace",
-  "displayName": "Payments Production",
-  "active": true,
-  "persisted": true,
   "isPinned": true,
   "pinnedAt": "2026-09-28T10:30:00.000Z"
 }
@@ -41,10 +36,7 @@ Content-Type: application/json
 // Response (now unpinned)
 {
   "id": "abc123",
-  "cwd": "/path/to/workspace",
-  "displayName": "Payments Production",
-  "active": true,
-  "persisted": true
+  "isPinned": false
 }
 ```
 
@@ -52,17 +44,18 @@ Returns `404 workspace_registration_not_found`, `500 workspace_registration_stor
 
 ### `/capabilities` workspace entry shape extension
 
-When `workspace_pinning` is advertised, each workspace entry may include:
+When `workspace_pinning` is advertised, each workspace entry includes:
 
 ```ts
 interface WorkspaceEntry {
   // ...existing fields...
-  isPinned?: true; // present only when pinned
+  registrationIds?: readonly string[]; // stable registration IDs (may contain multiple for alias paths)
+  isPinned: boolean; // always present when feature is advertised (false when not pinned)
   pinnedAt?: string; // ISO-8601 timestamp, present only when pinned
 }
 ```
 
-Unpinned entries omit both fields. This matches the pattern used by `removable` which is gated on `workspace_runtime_removal`.
+When the tag is absent, all three fields are omitted entirely. `isPinned` is always `false` for unpinned entries (not omitted), matching the pattern of always-present booleans like `primary` and `trusted`.
 
 ## Capability negotiation
 
@@ -103,11 +96,11 @@ This prevents the menu from appearing on:
 - Temporary workspaces without persistent registration
 - Daemons that do not advertise `workspace_pinning` (older versions)
 
-Pinned rows display a 📌 icon and sort above all others. The toggle action calls `PATCH /workspace-registrations/:id/pin` with no body (toggle semantics).
+Pinned rows display a 📌 icon and sort above all others. The toggle action calls `PATCH /workspace-registrations/:id/pin` with `{ isPinned: <target state> }`.
 
 ## Testing strategy
 
-- Unit tests verify `/capabilities` omits `isPinned`/`pinnedAt` for unpinned entries.
+- Unit tests verify `/capabilities` emits `isPinned: false` for unpinned entries and omits the fields when the feature tag is absent.
 - Unit tests verify pin route returns correct error codes for missing registrations.
 - Sidebar unit tests verify Pin menu does not appear on unpinnable rows.
 - Integration tests (manual) verify pin persists across daemon restart and sorts correctly.
