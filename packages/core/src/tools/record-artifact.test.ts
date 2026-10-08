@@ -168,17 +168,59 @@ describe('RecordArtifactTool', () => {
 
     expectAll(result, [
       {
-        title: 'Workspace report',
+        title: 'summary.html',
+        description: 'Workspace report',
         storage: 'workspace',
         workspacePath: 'reports/summary.html',
         sizeBytes: '<html>ok</html>'.length,
       },
     ]);
     expectText(result, [
+      'Recorded artifact "summary.html".',
       'status: available',
       'workspacePath: reports/summary.html',
       `resolvedPath: ${path.join(ws.cwd, 'reports/summary.html')}`,
     ]);
+  });
+
+  it('keeps an explicit description for a workspace file', async () => {
+    const ws = await workspace();
+    await ws.write('reports/summary.html', 'ok');
+
+    const result = await run(
+      {
+        title: 'Workspace report',
+        description: 'Daily export',
+        workspacePath: 'reports/summary.html',
+      },
+      ws.tool,
+    );
+
+    expectFirst(result, {
+      title: 'summary.html',
+      description: 'Daily export',
+    });
+  });
+
+  it('does not copy a filename that already matches the caller title into the description', async () => {
+    const ws = await workspace();
+    await ws.write('reports/summary.html', 'ok');
+
+    const result = await ws.record('summary.html', 'reports/summary.html');
+
+    expectFirst(result, { title: 'summary.html' });
+    expect(result.artifacts?.[0]).not.toHaveProperty('description');
+  });
+
+  it('keeps the caller title when the filename is too long to store', async () => {
+    const ws = await workspace();
+    const name = 'a'.repeat(201);
+    await ws.write(name, 'x');
+
+    const result = await ws.record('Caller title', name);
+
+    expectFirst(result, { title: 'Caller title', workspacePath: name });
+    expect(result.artifacts?.[0]).not.toHaveProperty('description');
   });
 
   it('normalizes a cwd-absolute workspace path to the canonical relative path', async () => {

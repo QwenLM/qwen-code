@@ -12,12 +12,12 @@ import { extractErrorDetail } from '../../utils/errorDetail';
 import { isExternalOpenUrl } from '../../utils/externalOpen';
 import { describeCron } from '../dialogs/scheduledTasksSchedule';
 import {
+  artifactDisplayName,
   formatArtifactSize,
   downloadWorkspaceFile,
   getArtifactTypeLabel,
   getImageMimeTypeFromPath,
   isSamePath,
-  normalizePath,
   stripWorkspacePath,
 } from './artifactUtils';
 import { LineStats, sumLineStats } from './LineStats';
@@ -233,7 +233,7 @@ function TurnOutputsComponent({
       onOpenRequest({
         id: `artifact:${artifact.id}`,
         kind: 'artifact',
-        title: artifact.title ?? 'Artifact',
+        title: artifactDisplayName(artifact),
         turnId,
         artifactId: artifact.id,
         ...(artifact.managedId ? { managedId: artifact.managedId } : {}),
@@ -466,10 +466,7 @@ function ArtifactCard({
   }, []);
   const size = formatArtifactSize(artifact.sizeBytes);
   const blockedReason = getWorkspaceArtifactOpenBlockReason(artifact, t);
-  const downloadName =
-    (artifact.workspacePath &&
-      normalizePath(artifact.workspacePath).split('/').at(-1)) ||
-    artifact.title;
+  const displayName = artifactDisplayName(artifact);
   const handleDownload = async () => {
     if (!onDownload || downloading) return;
     setDownloading(true);
@@ -496,7 +493,7 @@ function ArtifactCard({
           <ArtifactIcon artifact={artifact} className={styles.iconSvg} />
         </span>
         <div className={styles.artifactInfo}>
-          <div className={styles.title}>{artifact.title}</div>
+          <div className={styles.title}>{displayName}</div>
           <div className={styles.artifactMeta}>
             {[
               artifact.metadata?.['artifactType'] === 'web_preview_snapshot'
@@ -514,7 +511,7 @@ function ArtifactCard({
               type="button"
               className={styles.reviewButton}
               onClick={() => void handleDownload()}
-              title={`${t('common.download')} ${downloadName}`}
+              title={`${t('common.download')} ${displayName}`}
               disabled={downloading}
             >
               <DownloadIcon size={16} strokeWidth={1.8} aria-hidden="true" />
@@ -523,7 +520,7 @@ function ArtifactCard({
           )}
           <span
             className={styles.openButtonWrapper}
-            title={blockedReason ?? artifact.title}
+            title={blockedReason ?? displayName}
           >
             {externalUrl ? (
               <a

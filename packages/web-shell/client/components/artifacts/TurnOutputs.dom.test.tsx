@@ -378,7 +378,7 @@ describe('TurnOutputs artifact downloads', () => {
         .querySelector<HTMLButtonElement>('button[title="changed.ts"]')
         ?.click();
       container
-        .querySelector<HTMLElement>('[title="Secondary artifact"]')
+        .querySelector<HTMLElement>('[title="report.txt"]')
         ?.querySelector('button')
         ?.click();
       container
@@ -728,6 +728,78 @@ describe('TurnOutputs artifact downloads', () => {
     act(() => root.unmount());
     delete (window as { __TAURI__?: unknown }).__TAURI__;
   });
+
+  it('shows a workspace file by its filename and keeps a link title', () => {
+    const onOpenRequest = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const workspaceArtifact = {
+      id: 'pptx',
+      kind: 'document',
+      storage: 'workspace',
+      status: 'available',
+      title: 'artifact_test 节点创建报告 PPT',
+      workspacePath: 'w/agent/artifact_test_节点创建报告.pptx',
+    } as DaemonSessionArtifact;
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-1"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              workspaceArtifact,
+              {
+                id: 'link-1',
+                kind: 'link',
+                storage: 'external_url',
+                status: 'available',
+                title: 'Table details',
+                url: 'https://example.com/orders',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onOpenRequest={onOpenRequest}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain('artifact_test_节点创建报告.pptx');
+    expect(container.textContent).not.toContain(
+      'artifact_test 节点创建报告 PPT',
+    );
+    expect(container.textContent).toContain('Table details');
+    expect(
+      container.querySelector('[title="artifact_test_节点创建报告.pptx"]'),
+    ).not.toBeNull();
+    const download = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Download',
+    );
+    expect(download?.getAttribute('title')).toBe(
+      'Download artifact_test_节点创建报告.pptx',
+    );
+
+    const open = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Open',
+    );
+    act(() => open?.click());
+    expect(onOpenRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'artifact',
+        title: 'artifact_test_节点创建报告.pptx',
+        artifact: workspaceArtifact,
+      }),
+    );
+
+    act(() => root.unmount());
+  });
 });
 
 describe('host artifact visibility', () => {
@@ -769,9 +841,9 @@ describe('host artifact visibility', () => {
         ),
       );
     render();
-    expect(container.textContent).not.toContain('Report 0');
-    expect(container.textContent).toContain('Report 2');
-    expect(container.textContent).not.toContain('Report 5');
+    expect(container.textContent).not.toContain('report-0.txt');
+    expect(container.textContent).toContain('report-2.txt');
+    expect(container.textContent).not.toContain('report-5.txt');
     expect(filterArtifact).toHaveBeenCalledWith(artifacts[0], {
       turnId: 'turn-1',
       sourceSessionId: 'session-1',
@@ -781,11 +853,11 @@ describe('host artifact visibility', () => {
     );
     expect(more).toBeDefined();
     act(() => more?.click());
-    expect(container.textContent).toContain('Report 5');
+    expect(container.textContent).toContain('report-5.txt');
     render(vi.fn(() => false));
     expect(container.textContent).toBe('');
     render();
-    expect(container.textContent).toContain('Report 2');
+    expect(container.textContent).toContain('report-2.txt');
     expect(artifacts).toEqual(originalArtifacts);
     act(() => root.unmount());
   });

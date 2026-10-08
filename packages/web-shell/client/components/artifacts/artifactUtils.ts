@@ -340,6 +340,21 @@ export function getArtifactLocation(artifact: DaemonSessionArtifact): string {
   return artifact.workspacePath ?? artifact.url ?? artifact.managedId ?? '';
 }
 
+/**
+ * Workspace files are shown by filename. Links and managed artifacts have no
+ * file, so they keep the stored title. The stored title is left unchanged.
+ */
+export function artifactDisplayName(
+  artifact: Pick<DaemonSessionArtifact, 'title'> & {
+    workspacePath?: string;
+  },
+): string {
+  const filename = artifact.workspacePath
+    ? normalizePath(artifact.workspacePath).split('/').at(-1)
+    : undefined;
+  return filename || artifact.title || 'Artifact';
+}
+
 export function normalizePath(value: string | undefined): string {
   const normalized = (value ?? '')
     .replaceAll('\\', '/')

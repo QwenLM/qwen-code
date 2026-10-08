@@ -109,11 +109,16 @@ class RecordArtifactInvocation extends BaseToolInvocation<
         return this.expandDirectoryLocator(locator);
       }
 
+      const callerTitle = this.params.title.trim();
+      const title = workspaceFileTitle(callerTitle, locator.workspacePath);
+      const description =
+        trimOptional(this.params.description) ||
+        (callerTitle !== title ? callerTitle : undefined);
       const artifact: ToolArtifact = {
-        title: this.params.title.trim(),
+        title,
         kind: this.params.kind,
         storage: 'workspace',
-        description: trimOptional(this.params.description),
+        ...(description ? { description } : {}),
         workspacePath: locator.workspacePath,
         mimeType: trimOptional(this.params.mimeType),
         sizeBytes: this.params.sizeBytes ?? locator.sizeBytes,
@@ -274,7 +279,8 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
         properties: {
           title: {
             type: 'string',
-            description: 'Concise title shown in the client artifact list.',
+            description:
+              'Concise title for a link or managed artifact. A workspace file is recorded and shown under its filename; if this title differs and description is empty, it is kept as the description.',
           },
           kind: {
             type: 'string',
@@ -770,6 +776,24 @@ function metadataExceedsBudget(
 ): boolean {
   const withMarker = { ...metadata, expandedFromDirectory: true };
   return Buffer.byteLength(JSON.stringify(withMarker), 'utf8') > 4096;
+}
+
+// A filename can be 255 bytes, while a stored title stops at 200 characters.
+// Keep the caller title instead of dropping an artifact that succeeds today.
+function workspaceFileTitle(
+  callerTitle: string,
+  workspacePath: string,
+): string {
+  const filename = path.posix.basename(workspacePath).trim();
+  if (
+    filename.length > 0 &&
+    filename.length <= ARTIFACT_TITLE_MAX_LENGTH &&
+    !hasControlCharacter(filename) &&
+    !hasUnsafeDisplayPayload(filename)
+  ) {
+    return filename;
+  }
+  return callerTitle;
 }
 
 export function isRecordableDerivedChild(
