@@ -482,7 +482,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public Map<String, Object> runChannelOperation(String tenantId,
             String sessionId, Map<String, Object> body) {
         try {
-            requireReadyForNewWork(tenantId, sessionId);
+            requireReadyForNewWork(tenantId, sessionId, false);
             return client().runChannelOperation(
                     channelAttachment(tenantId, sessionId), body);
         } catch (HostedHarnessGenerationException error) {

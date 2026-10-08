@@ -29,7 +29,7 @@ H5a 钉住了*可以提交什么*：以 `routeId` 为链身份、各修订携带
 
 ## 决策
 
-1. **三份索引，一个 authority。** Session journal 的 `channel_route` 与 `channel_delivery` 链是唯一的业务事实。控制面在旁边维护三份可重建索引，这是自动化设计"路由/任务 catalog"所允许的：V47 `qwen_managed_channel_route` 行是 ingress 出现记录——决策 2 的去重索引加准入结果；V47 `qwen_managed_channel_delivery` 行是派发器对一次交付的认领台账；V52 新增 `qwen_managed_channel_instance`（已注册连接：平台、账号、代数、状态、Workspace 选择、所属 actor、policy）、`qwen_managed_channel_binding`（scope key → `routeId` → `sessionId`，新事件所需的查找），以及 `qwen_managed_channel_claim`（每个被领取的交付一行：其 `sessionId` 与租约所依据的 `claimed_at`；`receipt` 与 `resend` 经它路由到 Harness，且它永不删除，因此也是上一次谁欠派发器的审计痕）。它们都不保存 journal 事实的第二份副本；每一份都由 journal 提交派生或结算。
+1. **三份索引，一个 authority。** Session journal 的 `channel_route` 与 `channel_delivery` 链是唯一的业务事实。控制面在旁边维护三份可重建索引，这是自动化设计"路由/任务 catalog"所允许的：V47 `qwen_managed_channel_route` 行是 ingress 出现记录——决策 2 的去重索引加准入结果；V47 `qwen_managed_channel_delivery` 行是派发器对一次交付的认领台账；V53 新增 `qwen_managed_channel_instance`（已注册连接：平台、账号、代数、状态、Workspace 选择、所属 actor、policy）、`qwen_managed_channel_binding`（scope key → `routeId` → `sessionId`，新事件所需的查找），以及 `qwen_managed_channel_claim`（每个被领取的交付一行：其 `sessionId` 与租约所依据的 `claimed_at`；`receipt` 与 `resend` 经它路由到 Harness，且它永不删除，因此也是上一次谁欠派发器的审计痕）。它们都不保存 journal 事实的第二份副本；每一份都由 journal 提交派生或结算。
 2. **ingress 身份就是 V47 的 route key。** `inputId = chin-<routeKey>`，其中 `routeKey = sha256(tenant NUL channelId NUL accountGeneration NUL platformEventId NUL semanticRevision)`——Java 与 TypeScript 同一推导。provider 重投命中同一行与同一 `inputId`；Harness 按 `inputId`（journal 的命令幂等）回答已提交的准入，不产生第二个 input 或轮次。两条真实消息即使文本相同也有不同的平台事件 ID（email：`uidValidity:uid`），仍是两个 input。email 的语义修订固定为 1。
 3. **路由链以 scope 为键，而非代数。** `routeId = chrt-<sha256(channelId NUL accountId NUL scope.kind NUL senderId NUL chatId NUL threadId)>`。某个 scope 上的首个事件在与其 input 同一事务中开启该链（修订 1，`admitted`，`effectId = routeId`）；后续事件若账号代数比已提交的更新，则在与*它的* input 同一事务中开启换代修订（routeRevision + 1，新代数）；代数比已提交更旧的事件被拒绝（`channel_generation_stale`）——旧代数不再准入任何新内容（H5 设计决策 6）。同代数下已提交路由上的事件只提交 input（`submitInput`），并在 input 信封中钉住路由及其修订。
 4. **一个路由一个 Session；创建幂等且受 actor 授权。** 控制面以连接注册的所属 actor，通过既有 `createWorkspaceSession` 路径创建路由的 Session，`Idempotency-Key = chcr-<sha256(tenant NUL channelId NUL routeId)>`，使用实例的 Workspace 选择且无输入；绑定行在准入之后插入。创建应答丢失时按该键重放——绝不产生第二个 Session。v1 中路由的 root Session 即路由自己的 Session（`rootSessionId = sessionId`）。
@@ -88,14 +88,14 @@ H5a 钉住了*可以提交什么*：以 `routeId` 为链身份、各修订携带
 - `packages/cli/src/serve/`：`hosted-channel-session.ts`（新漏斗）、`hosted-harness-session.ts`（漏斗接线、操作路由、`channel` input 的 wake 放行、结束与打开时的回复规划、关闭时结算），`hosted-wake-intake.ts` 不变。
 - `packages/cli/src/commands/channel/`：`managed-email.ts`（新子命令）、`managed-channel-client.ts`（可信面的 HTTP 客户端）、在 `channel.ts` 注册。
 - `packages/channels/email/src/`：`managed-email-adapter.ts` 与 `managed-state.ts`（新增），从 `index.ts` 导出；基于既有 fake 的测试。
-- `packages/sdk-java/managed-agent-server`：`V52__managed_channel_instance_binding.sql`、`ChannelInstanceStore`、`ManagedChannelService`、`ManagedChannelAdapterController`（内部）、`ManagedChannelController`（公开）、`HarnessConnector.runChannelOperation` 及其客户端/连接器实现、`ManagedExtensionRecordStore` 中的跨记录检查、租户过滤器前缀、OpenAPI 翻为 `partial`、`ApiModels` 记录与测试（store、service、controller、contract）。
+- `packages/sdk-java/managed-agent-server`：`V53__managed_channel_instance_binding.sql`、`ChannelInstanceStore`、`ManagedChannelService`、`ManagedChannelAdapterController`（内部）、`ManagedChannelController`（公开）、`HarnessConnector.runChannelOperation` 及其客户端/连接器实现、`ManagedExtensionRecordStore` 中的跨记录检查、租户过滤器前缀、OpenAPI 翻为 `partial`、`ApiModels` 记录与测试（store、service、controller、contract）。
 - `packages/sdk-java/qwencode`：`HostedHarnessClient.runChannelOperation`。
 - 本设计双语版本；H5 设计中切片表的状态（双语）。
 
 ## 验证计划
 
 - **TypeScript**：记录体构造器与身份套件（每个构造器产出 H5a 解析器接受且后继规则放行的记录体；每个拒绝指明原因）；authority 套件覆盖适配器门控、跨记录检查、同事务换代、陈旧代数拒绝、按 `inputId` 重放、交付 claim/receipt/unknown/rejected/cancel/resend 与重新打开重建；`packages/cli` 漏斗套件覆盖 `submit_input` 重放、附件暂存与省略、结束时回复规划与打开时对账、`channel` input 的 wake 放行；email 适配器套件基于 fake 控制面回放 Legacy 行为用例（去重窗口、重投、换代、不确定 SMTP、容量）。
-- **Java**：store 套件覆盖 V52、绑定索引与待交付查询；service 套件覆盖 ingress 去重（一个平台事件 → 一行 V47 与一个 `inputId`；两事件同文本 → 两个）、创建重放、对着记录型 Harness 的 claim/receipt/unknown/rejected/resend 迁移、对账器的租约与已关闭 Session 规则；跨记录检查给出拒绝；契约测试调用三个路由（200、400 `invalid_cursor`/`invalid_limit`、403、404）并校验 schema。
+- **Java**：store 套件覆盖 V53、绑定索引与待交付查询；service 套件覆盖 ingress 去重（一个平台事件 → 一行 V47 与一个 `inputId`；两事件同文本 → 两个）、创建重放、对着记录型 Harness 的 claim/receipt/unknown/rejected/resend 迁移、对账器的租约与已关闭 Session 规则；跨记录检查给出拒绝；契约测试调用三个路由（200、400 `invalid_cursor`/`invalid_limit`、403、404）并校验 schema。
 - **故障注入（store/authority 级）**：V47 行之前崩溃；行与 Harness 应答之间；应答与 `admitted` 之间；结束与规划之间；claim 与发送之间；发送后回执前；回执与台账之间——每种都终于每事件一个 input、每分段至多一次 provider 发送，或可见的 `unknown`。
 - **变异检查**：去重推导、代数比较、适配器门控、跨记录检查、每个交付迁移与重发过滤逐一禁用后，在两种语言中都有测试失败。
 
