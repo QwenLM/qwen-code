@@ -1336,17 +1336,19 @@ export class MemoryManager {
     }
     if (result.skippedReason) return;
     // A trailing request queued before a later skip carries older history;
-    // keep that skipped turn pending rather than treating it as extracted.
-    const previous = this.extractCadence.get(params.sessionId)?.pending;
+    // keep that skipped turn pending rather than treating it as extracted, and
+    // keep its spent skip budget: the carried turn is still un-extracted, so
+    // refunding here would let a streak reach twice the documented N.
+    const carried = this.extractCadence.get(params.sessionId);
+    const previous = carried?.pending;
+    const carry =
+      previous !== undefined && previous.history.length > params.history.length;
     this.extractCadence.set(params.sessionId, {
       armed:
         result.extractorEngaged === true && result.touchedTopics.length === 0,
-      skips: 0,
+      skips: carry ? (carried?.skips ?? 0) : 0,
       lastExtractedLength: params.history.length,
-      ...(previous &&
-        previous.history.length > params.history.length && {
-          pending: previous,
-        }),
+      ...(carry && { pending: previous }),
     });
   }
 

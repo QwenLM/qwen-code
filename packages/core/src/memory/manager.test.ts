@@ -2404,6 +2404,32 @@ describe('MemoryManager', () => {
       ).toHaveLength(6);
     });
 
+    it('keeps a carried skip pending without refunding its budget', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const releases: Array<() => void> = [];
+      const slowRun = () =>
+        new Promise<ReturnType<typeof engagedNoop>>((resolve) => {
+          releases.push(() => resolve(engagedNoop()));
+        });
+      vi.mocked(runAutoMemoryExtract)
+        .mockImplementationOnce(slowRun)
+        .mockImplementationOnce(slowRun);
+
+      const first = turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('queued');
+      releases[0]();
+      await first;
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+      releases[1]();
+      await mgr.drain();
+
+      // The trailing run (history 4) carried the history-6 skip forward, so the
+      // budget that skip spent stays spent: one skip left, then a real run.
+      expect((await turn(mgr, 8)).skippedReason).toBe('cadence');
+      expect((await turn(mgr, 10)).skippedReason).toBeUndefined();
+    });
+
     it("flush waits for another session's run on the same project", async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
       const mgr = new MemoryManager();
