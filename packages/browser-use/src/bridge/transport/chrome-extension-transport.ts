@@ -329,9 +329,7 @@ export class ChromeExtensionTransport implements ChromeBridge {
         await delay(Math.min(POLL_INTERVAL_MS, deadline - Date.now()));
     } while (Date.now() < deadline);
     if (mismatch !== undefined) throw mismatch;
-    throw disconnectedError(
-      `Qwen Chrome extension is not connected. Open Chrome and, in the profile you want to use, install the extension from ${CHROME_WEB_STORE_URL} or enable it at chrome://extensions, then retry. ${errorMessage(lastError)}`,
-    );
+    throw disconnectedError(disconnectedMessage(errorMessage(lastError)));
   }
 
   /**
@@ -634,6 +632,20 @@ function disconnectedError(
   message = 'Chrome extension disconnected',
 ): BrowserRuntimeError {
   return new BrowserRuntimeError('BROWSER_DISCONNECTED', message);
+}
+
+/**
+ * Installing or enabling the extension cannot help on Windows: no Native
+ * Messaging host is ever registered there, so Chrome has nothing to spawn and
+ * the wait always ends here. Say so instead of sending the user to the store.
+ */
+export function disconnectedMessage(
+  lastError: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform === 'win32')
+    return `Qwen Chrome extension is not connected: Browser Use does not support Windows, because its Native Messaging host is only registered on macOS and Linux. Run Qwen Code on macOS or Linux to use Browser Use. ${lastError}`;
+  return `Qwen Chrome extension is not connected. Open Chrome and, in the profile you want to use, install the extension from ${CHROME_WEB_STORE_URL} or enable it at chrome://extensions, then retry. ${lastError}`;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

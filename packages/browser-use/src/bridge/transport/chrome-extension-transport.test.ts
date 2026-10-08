@@ -18,7 +18,10 @@ import {
   defaultChromeBridgeSocketDirectory,
   type BridgeRequest,
 } from '../protocol.js';
-import { ChromeExtensionTransport } from './chrome-extension-transport.js';
+import {
+  ChromeExtensionTransport,
+  disconnectedMessage,
+} from './chrome-extension-transport.js';
 import { encodeFrame, FrameDecoder } from './framing.js';
 
 const roots: string[] = [];
@@ -427,6 +430,47 @@ it.skipIf(process.platform === 'win32')(
     expect(transport.isConnected()).toBe(false);
   },
 );
+
+it('names Windows as unsupported instead of advising an extension install', () => {
+  // No Native Messaging host is ever registered on Windows, so the Web Store
+  // advice that helps on macOS and Linux is a dead end there.
+  const windows = disconnectedMessage('Chrome extension disconnected', 'win32');
+  expect(windows).toContain('Windows');
+  expect(windows).not.toContain('install the extension from');
+  expect(windows).not.toContain('chrome://extensions');
+  for (const platform of ['darwin', 'linux'] as const) {
+    expect(
+      disconnectedMessage('Chrome extension disconnected', platform),
+    ).toContain(
+      'install the extension from https://chromewebstore.google.com/detail/qwen-code/hdhmmjclhibojdddmancfgbkleahfaph or enable it at chrome://extensions, then retry. Chrome extension disconnected',
+    );
+  }
+});
+
+it('reports Windows as unsupported when discovery finds no host', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-client-'));
+  roots.push(root);
+  const transport = discovering(root, 200);
+  // Stubbed only after construction: the constructor resolves the default
+  // socket path from the real platform, and this file never restores mocks.
+  const platform = vi
+    .spyOn(process, 'platform', 'get')
+    .mockReturnValue('win32');
+  try {
+    const error = await transport.start().then(
+      () => undefined,
+      (value: unknown) => value as Error,
+    );
+    expect(error).toMatchObject({ code: 'BROWSER_DISCONNECTED' });
+    const message = error?.message ?? '';
+    expect(message).toContain('Windows');
+    expect(message).not.toContain('install the extension from');
+  } finally {
+    platform.mockRestore();
+    vi.restoreAllMocks();
+  }
+  expect(transport.isConnected()).toBe(false);
+});
 
 it('explicit endpoint listing reports no browsers when nothing listens', async () => {
   const f = await fixture();

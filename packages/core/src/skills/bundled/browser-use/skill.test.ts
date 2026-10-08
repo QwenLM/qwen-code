@@ -69,6 +69,19 @@ describe('bundled browser-use skill', () => {
     expect(skill).toContain('Load unpacked');
   });
 
+  it('tells the agent that Windows is unsupported', () => {
+    const prose = skill.replace(/\s+/g, ' ');
+    expect(prose).toContain(
+      'Windows is not supported: no Native Messaging host is ever registered there',
+    );
+    expect(prose).toContain(
+      'every browser call fails with `BROWSER_DISCONNECTED`',
+    );
+    expect(prose).toContain(
+      'tell them Browser Use needs macOS or Linux and stop',
+    );
+  });
+
   it('uses the current Browser SDK contract', () => {
     expect(skill).toContain('setupBrowserRuntime()');
     expect(skill).toContain('nodeRepl.write');
