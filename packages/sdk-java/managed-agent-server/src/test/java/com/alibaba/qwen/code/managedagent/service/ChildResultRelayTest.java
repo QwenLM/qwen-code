@@ -394,6 +394,22 @@ class ChildResultRelayTest {
                 .containsExactly("fail");
     }
 
+    // The capability read that gates the give-up's close feeds both the
+    // admission and the retention flag: read twice, a flip between them
+    // could lose the debt either way — never admit and call it settled,
+    // or admit and still park. One read, one decision, pinned here.
+    @Test
+    void aGiveUpDecidesCloseFromASingleCapabilityRead() {
+        Mockito.when(childCloses.closeSupported()).thenReturn(true, false);
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 63, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(null);
+        relay.scan();
+        verify(childCloses, Mockito.times(1)).closeSupported();
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(row.get().state()).isEqualTo("unknown");
+    }
+
     // The bounded give-up on a capability-less host settles the parent's
     // record on time — the give-up and its started pairing are proven
     // facts — but never classifies `unknown` over the owed close: the
