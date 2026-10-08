@@ -2069,7 +2069,74 @@ describe('subagent.ts', () => {
         );
         const scope = await createAgent(config);
         await expectExecuteError(scope, 'x');
-        expect(scope.getLastError()).toContain('x'.repeat(100));
+        expect(scope.getLastError()).toContain('x'.repeat(200));
+      });
+
+      it('spends the budget on real text when the stripped message is short (#13597)', async () => {
+        // Routing only a long cleaned message through the bound left the raw
+        // error for everything shorter, and `getErrorMessage` head-caps the
+        // composed `<message> (cause: …)` at 1 000 RAW characters before the
+        // collapse: escape bytes then evicted the folded cause from a message
+        // well inside the outer 500-char bound, leaving most of it unused.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('\u001b[31mx\u001b[0m'.repeat(200)), {
+            cause: Object.assign(new Error('socket hang up'), {
+              code: 'ECONNRESET',
+            }),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'x');
+        expect(scope.getLastError()).toContain('x'.repeat(200));
+        expect(scope.getLastError()).toContain('ECONNRESET');
+        expect(scope.getLastError()).toContain('socket hang up');
+      });
+
+      it('does not split a surrogate pair when bounding the message (#13597)', async () => {
+        // The bound is a length, so an astral character can straddle it. This
+        // text is persisted into chat history and the JSONL transcript, where
+        // an unpaired surrogate serializes as a lone `\udXXX` and renders as
+        // U+FFFD — mojibake in the field #13597 added to make failures
+        // readable.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          new Error('a'.repeat(399) + '\u{1f600}' + 'b'.repeat(200)),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'a'.repeat(50));
+        const retained = scope.getLastError()!;
+        expect(retained).toBe(retained.replace(/\p{Surrogate}/gu, ''));
+      });
+
+      it('does not split a surrogate pair at the outer bound either (#13597)', async () => {
+        // Same invariant at the second cut, reached when a long cause pushes
+        // the composed string past MAX_MODEL_VISIBLE_ERROR_LENGTH.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('a'.repeat(399)), {
+            cause: new Error('c'.repeat(91) + '\u{1f600}' + 'd'.repeat(100)),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'a'.repeat(50));
+        const retained = scope.getLastError()!;
+        expect(retained).toBe(retained.replace(/\p{Surrogate}/gu, ''));
+      });
+
+      it('drops format characters that reorder or hide the retained message (#13597)', async () => {
+        // Escape/control stripping leaves the Unicode format class intact: a
+        // bidi override reorders the reason wherever it is rendered (a human
+        // auditing the transcript reads different text than is stored) and a
+        // zero-width insertion makes the stored phrase unmatchable for any
+        // consumer that greps it. The text is replayed on every later turn.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          new Error('quota exceeded \u202etni \u200bfor API key'),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'quota exceeded');
+        expect(scope.getLastError()).not.toMatch(/\p{Cf}/u);
       });
 
       it('folds `cause` into the retained message (#13597)', async () => {

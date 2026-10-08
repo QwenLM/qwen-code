@@ -66,9 +66,32 @@ const MAX_MODEL_VISIBLE_MESSAGE_LENGTH = MAX_MODEL_VISIBLE_ERROR_LENGTH - 100;
  * removes `\n`/`\r`/`\t` outright, which would weld adjacent tokens into ones
  * that never existed. The result is still single-line, so it cannot forge the
  * blank-line separator this string is later spliced into.
+ *
+ * The Unicode format class is dropped on top of the escape/control strip:
+ * `\p{Cf}` covers the characters that reorder a row (U+202E) or hide text
+ * (zero-width), which `stripAnsiAndControl` leaves alone and which would
+ * otherwise survive into text that is rendered for a human and grepped by
+ * later consumers. Same pass as `sanitizeForStderr` and `sanitizeDescription`.
  */
 function collapseModelErrorText(text: string): string {
-  return stripAnsiAndControl(text.replace(/\s+/g, ' ')).trim();
+  return stripAnsiAndControl(text.replace(/\s+/g, ' '))
+    .replace(/\p{Cf}/gu, '')
+    .trim();
+}
+
+/**
+ * Bound `text` at `max` characters, ending in `…` when it is cut. The cut is
+ * snapped off a high surrogate: the result is persisted into chat history and
+ * the JSONL transcript, where an unpaired surrogate serializes as a lone
+ * `\udXXX` and renders as U+FFFD — mojibake in the one field #13597 added to
+ * make a failure readable. `truncateWorkflowText` and
+ * `truncateNotificationLabel` hold the same invariant.
+ */
+function boundModelErrorText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const before = text.charCodeAt(max - 1);
+  const end = before >= 0xd800 && before <= 0xdbff ? max - 1 : max;
+  return `${text.slice(0, end)}…`;
 }
 
 // ─── Utilities (unchanged, re-exported for consumers) ────────
@@ -470,21 +493,27 @@ export class AgentHeadless implements SubagentExecutor {
         // text the parent actually reads. Bounding the raw message let an
         // ANSI-coloured failure fill it with escape bytes that
         // `stripAnsiAndControl` then deleted, leaving a stub of the reason.
+        // Every Error goes through the cleaned copy, not only one long enough to
+        // need the bound: `getErrorMessage` head-caps a composed
+        // `<message> (cause: …)` at 1 000 RAW characters, so escape bytes in a
+        // shorter message still evict the folded cause.
         const cleanedMessage =
           error instanceof Error ? collapseModelErrorText(error.message) : '';
         const bounded =
-          error instanceof Error &&
-          cleanedMessage.length > MAX_MODEL_VISIBLE_MESSAGE_LENGTH
+          error instanceof Error && cleanedMessage
             ? {
-                message: `${cleanedMessage.slice(0, MAX_MODEL_VISIBLE_MESSAGE_LENGTH)}…`,
+                message: boundModelErrorText(
+                  cleanedMessage,
+                  MAX_MODEL_VISIBLE_MESSAGE_LENGTH,
+                ),
                 cause: error.cause,
               }
             : error;
         const clean = collapseModelErrorText(getErrorMessage(bounded));
-        this.lastError =
-          clean.length > MAX_MODEL_VISIBLE_ERROR_LENGTH
-            ? `${clean.slice(0, MAX_MODEL_VISIBLE_ERROR_LENGTH)}…`
-            : clean;
+        this.lastError = boundModelErrorText(
+          clean,
+          MAX_MODEL_VISIBLE_ERROR_LENGTH,
+        );
         this.core.eventEmitter?.emit(AgentEventType.ERROR, {
           subagentId: this.core.subagentId,
           error: message,
