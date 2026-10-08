@@ -9,6 +9,14 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { resolveLogRoot, sliceNewLog } from './resolve-log-root.js';
+import {
+  verifyBundledRipgrep,
+  verifyRuntimeIntegrity,
+} from './runtime-smoke-checks.js';
+import {
+  findLinuxInstallers,
+  findRuntimeRoot,
+} from './smoke-linux-installers.js';
 
 const packageDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -48,6 +56,9 @@ try {
   testLinuxReleaseLegsShareGlibcFloor();
   testDesktopReleaseSigningWorkflow();
   testDesktopReleaseHardening();
+  testImmutableRuntimePatchelf(path.join(root, 'patchelf'));
+  testLinuxInstallerSmokeDiscovery(path.join(root, 'linux-installers'));
+  testRuntimeSmokeChecks(path.join(root, 'runtime-smoke'));
   testRuntimeNodePtyTargetMapping();
   testUpdaterMirrorConfiguration();
   testResolveLogRoot();
@@ -601,6 +612,188 @@ function testDesktopReleaseHardening() {
     prepareRuntime.indexOf('replaceRuntime();') >
       prepareRuntime.indexOf('writeChecksums();'),
     'runtime replacement must happen only after assembly and checksums finish',
+  );
+  assert.match(
+    workflow,
+    /PATCHELF="\$GITHUB_WORKSPACE\/packages\/desktop\/scripts\/patchelf-immutable-runtime\.sh"/,
+    'Linux installer builds must protect the checksummed runtime from post-link rewrites',
+  );
+  const buildIndex = workflow.indexOf("name: 'Build desktop installers'");
+  const installerSmokeIndex = workflow.indexOf(
+    "name: 'Verify Linux installer runtimes'",
+  );
+  const collectIndex = workflow.indexOf("name: 'Collect artifacts'");
+  assert.ok(
+    buildIndex < installerSmokeIndex && installerSmokeIndex < collectIndex,
+    'final Linux installer runtimes must be verified before artifacts are collected',
+  );
+}
+
+function testImmutableRuntimePatchelf(directory) {
+  const wrapper = path.join(
+    packageDir,
+    'scripts',
+    'patchelf-immutable-runtime.sh',
+  );
+  const fakePatchelf = path.join(directory, 'patchelf');
+  const log = path.join(directory, 'patchelf.log');
+  const runtimeElf = path.join(
+    directory,
+    'AppDir',
+    'usr',
+    'lib',
+    'Qwen Code Desktop',
+    'runtime',
+    'qwen-code',
+    'lib',
+    'vendor',
+    'ripgrep',
+    'x64-linux',
+    'rg',
+  );
+  const appElf = path.join(directory, 'AppDir', 'usr', 'bin', 'desktop');
+  fs.mkdirSync(path.dirname(runtimeElf), { recursive: true });
+  fs.mkdirSync(path.dirname(appElf), { recursive: true });
+  fs.writeFileSync(runtimeElf, 'runtime');
+  fs.writeFileSync(appElf, 'app');
+  fs.writeFileSync(log, '');
+  fs.writeFileSync(
+    fakePatchelf,
+    '#!/usr/bin/env sh\nprintf \'%s\\n\' "$*" >> "$QWEN_TEST_PATCHELF_LOG"\n',
+  );
+  fs.chmodSync(fakePatchelf, 0o755);
+  const env = {
+    ...process.env,
+    QWEN_DESKTOP_PATCHELF: fakePatchelf,
+    QWEN_TEST_PATCHELF_LOG: log,
+  };
+
+  const skipped = spawnSync(wrapper, ['--set-rpath', '$ORIGIN', runtimeElf], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(skipped.status, 0, skipped.stderr);
+  assert.equal(fs.readFileSync(log, 'utf8'), '');
+
+  const readOnly = spawnSync(wrapper, ['--print-rpath', runtimeElf], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(readOnly.status, 0, readOnly.stderr);
+  const delegated = spawnSync(wrapper, ['--set-rpath', '$ORIGIN', appElf], {
+    encoding: 'utf8',
+    env,
+  });
+  assert.equal(delegated.status, 0, delegated.stderr);
+  assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split('\n'), [
+    `--print-rpath ${runtimeElf}`,
+    `--set-rpath $ORIGIN ${appElf}`,
+  ]);
+
+  const missing = spawnSync(
+    wrapper,
+    ['--set-rpath', '$ORIGIN', path.join(runtimeElf, 'missing')],
+    { encoding: 'utf8', env },
+  );
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /Runtime ELF is missing/);
+}
+
+function testLinuxInstallerSmokeDiscovery(directory) {
+  const bundleRoot = path.join(directory, 'bundle');
+  const appImage = path.join(bundleRoot, 'appimage', 'Desktop.AppImage');
+  const deb = path.join(bundleRoot, 'deb', 'desktop.deb');
+  fs.mkdirSync(path.dirname(appImage), { recursive: true });
+  fs.mkdirSync(path.dirname(deb), { recursive: true });
+  fs.writeFileSync(appImage, 'appimage');
+  fs.writeFileSync(deb, 'deb');
+  assert.deepEqual(findLinuxInstallers(bundleRoot), { appImage, deb });
+
+  const extractedRoot = path.join(directory, 'extracted');
+  const runtimeRoot = path.join(
+    extractedRoot,
+    'usr',
+    'lib',
+    'Qwen Code Desktop',
+    'runtime',
+    'qwen-code',
+  );
+  fs.mkdirSync(runtimeRoot, { recursive: true });
+  fs.writeFileSync(path.join(runtimeRoot, 'manifest.json'), '{}');
+  assert.equal(findRuntimeRoot(extractedRoot), runtimeRoot);
+
+  fs.writeFileSync(path.join(bundleRoot, 'duplicate.AppImage'), 'duplicate');
+  assert.throws(
+    () => findLinuxInstallers(bundleRoot),
+    /Expected one AppImage, found 2/,
+  );
+}
+
+function testRuntimeSmokeChecks(directory) {
+  const runtimeRoot = path.join(directory, 'runtime', 'qwen-code');
+  const manifest = {
+    name: '@qwen-code/qwen-code',
+    desktopVersion: '0.0.0-test',
+    qwenCodeVersion: '0.0.0-test',
+    qwenCodeCommit: 'test-commit',
+    target: 'linux-x64',
+    node: process.version,
+    builtAt: '2026-10-08T00:00:00.000Z',
+  };
+  const files = new Map([
+    ['manifest.json', `${JSON.stringify(manifest)}\n`],
+    ['LICENSE', 'license\n'],
+    ['NOTICE', 'notice\n'],
+    ['node/LICENSE', 'node license\n'],
+    ['lib/cli-entry.js', ''],
+    ['lib/web-shell/index.html', '<div id="root"></div>\n'],
+    [
+      'lib/vendor/ripgrep/x64-linux/rg',
+      "#!/usr/bin/env sh\nprintf 'ripgrep 15.0.0\\n'\n",
+    ],
+  ]);
+  for (const [relative, contents] of files) {
+    const file = path.join(runtimeRoot, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, contents);
+  }
+  const ripgrep = path.join(
+    runtimeRoot,
+    'lib',
+    'vendor',
+    'ripgrep',
+    'x64-linux',
+    'rg',
+  );
+  fs.chmodSync(ripgrep, 0o755);
+  const checksums = Object.fromEntries(
+    [...files.keys()].map((relative) => [
+      relative,
+      crypto
+        .createHash('sha256')
+        .update(fs.readFileSync(path.join(runtimeRoot, relative)))
+        .digest('hex'),
+    ]),
+  );
+  fs.writeFileSync(
+    path.join(runtimeRoot, 'checksums.json'),
+    `${JSON.stringify(checksums)}\n`,
+  );
+
+  assert.deepEqual(verifyRuntimeIntegrity(runtimeRoot), manifest);
+  verifyBundledRipgrep(runtimeRoot, manifest.target);
+
+  fs.writeFileSync(path.join(runtimeRoot, 'NOTICE'), 'mutated\n');
+  assert.throws(
+    () => verifyRuntimeIntegrity(runtimeRoot),
+    /Bundled runtime checksum mismatch: NOTICE/,
+  );
+  fs.writeFileSync(path.join(runtimeRoot, 'NOTICE'), files.get('NOTICE'));
+
+  fs.writeFileSync(ripgrep, "#!/usr/bin/env sh\nprintf 'unexpected\\n'\n");
+  assert.throws(
+    () => verifyBundledRipgrep(runtimeRoot, manifest.target),
+    /Bundled ripgrep failed its version probe/,
   );
 }
 
