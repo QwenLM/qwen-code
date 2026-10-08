@@ -20,7 +20,7 @@ import {
 } from './agent-host-connections.js';
 
 const { hasCredential, startConnection, isRunning } = vi.hoisted(() => ({
-  hasCredential: vi.fn<(...args: unknown[]) => Promise<boolean>>(),
+  hasCredential: vi.fn<(...args: unknown[]) => Promise<boolean | undefined>>(),
   startConnection: vi.fn<(...args: unknown[]) => Promise<void>>(),
   isRunning: vi.fn<(...args: unknown[]) => boolean>(),
 }));
@@ -145,6 +145,23 @@ it('restores the connections of every trusted workspace and prunes one without a
   );
 });
 
+it('keeps a connection whose credential cannot be read', async () => {
+  await saveAgentHostConnection({ ...record, workspaceId: 'ws_unreadable' });
+  hasCredential.mockResolvedValue(undefined);
+  const work = runtime('/work');
+
+  await restoring(
+    (cwd) => (cwd === '/work' ? work : undefined),
+    async () => {
+      await vi.waitFor(() => expect(hasCredential).toHaveBeenCalled());
+      expect(
+        (await readAgentHostConnections()).map((entry) => entry.workspaceId),
+      ).toContain('ws_unreadable');
+      expect(startConnection).not.toHaveBeenCalled();
+    },
+  );
+});
+
 it('retries a coordinator that is down at boot', async () => {
   await saveAgentHostConnection(record);
   hasCredential.mockResolvedValue(true);
@@ -176,6 +193,28 @@ it('connects a workspace that becomes available after boot', async () => {
       expect(startConnection).not.toHaveBeenCalled();
       available = runtime('/work');
       await vi.waitFor(() => expect(startConnection).toHaveBeenCalledOnce());
+    },
+  );
+});
+
+it('supervises a connection saved after boot', async () => {
+  hasCredential.mockResolvedValue(true);
+  isRunning.mockReturnValue(true);
+  startConnection.mockResolvedValue(undefined);
+  const work = runtime('/work');
+
+  await restoring(
+    () => work,
+    async () => {
+      // `qwen agents join` against the running daemon saves the record later.
+      await saveAgentHostConnection(record);
+      await vi.waitFor(() =>
+        expect(startConnection).toHaveBeenCalledWith({
+          ...record,
+          bridge: work.bridge,
+          generationGuard: work.generationGuard,
+        }),
+      );
     },
   );
 });

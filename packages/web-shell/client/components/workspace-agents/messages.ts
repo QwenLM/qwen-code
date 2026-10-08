@@ -186,6 +186,8 @@ export const COLLAB_MESSAGES_EN: Record<string, CollabMessage> = {
     'A joined runtime works in its own folder, shown under its name. Files here are not copied to it.',
   'collab.agent.programLocal': 'Runs only on a joined runtime',
   'collab.agent.programMissing': 'Not found on this runtime',
+  'collab.error.dispatchAfterSave': (v) =>
+    `The change was saved, but background processing failed: ${v?.error}`,
   'collab.agent.afterCreate':
     'It starts working when you mention it in a conversation.',
   'collab.noWorkspace': 'Open a workspace to work with agents.',
@@ -419,6 +421,8 @@ export const COLLAB_MESSAGES_ZH: Record<string, CollabMessage> = {
     '加入的 Runtime 在它自己的目录里工作（显示在名字下方），这里的文件不会复制过去。',
   'collab.agent.programLocal': '只能在加入的 Runtime 上运行',
   'collab.agent.programMissing': '这个 Runtime 上没有检测到',
+  'collab.error.dispatchAfterSave': (v) =>
+    `更改已保存，但后台处理失败：${v?.error}`,
   'collab.agent.afterCreate': '在对话里 @ 它，它就开始工作。',
   'collab.noWorkspace': '先打开一个工作区，才能和 Agent 协作。',
   'collab.agent.empty': '还没有 Agent。新建一个，然后在任意对话里 @ 它。',

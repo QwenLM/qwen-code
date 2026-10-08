@@ -2641,6 +2641,11 @@ export class Session implements SessionContext {
     this.lastGoalSnapshot = undefined;
     this.lastGoalPublicationKey = undefined;
     this.suppressedRecoveredGoalId = undefined;
+    // `/clear` starts a new transcript chain under this long-lived Session:
+    // agent text queued for the old chain must not reach the next model turn,
+    // and record ids from the finalized chain must not answer a re-send.
+    this.pendingExternalAgentContext = [];
+    this.#externalRecordIds.clear();
     this.#bindGoalRuntime();
   }
 
@@ -11026,6 +11031,8 @@ export class Session implements SessionContext {
    */
   async appendExternalRecord(
     request: BridgeSessionExternalRecordRequest,
+    /** Internal: the deferred queue's own drain, which must not re-queue. */
+    fromDeferredQueue = false,
   ): Promise<{ recordId: string; created: boolean; deferred?: boolean }> {
     const existingId = this.#externalRecordIds.get(request.recordKey);
     if (existingId !== undefined) {
@@ -11040,7 +11047,7 @@ export class Session implements SessionContext {
         ...(first.deferred ? { deferred: true } : {}),
       };
     }
-    const write = this.#writeExternalRecord(request);
+    const write = this.#writeExternalRecord(request, fromDeferredQueue);
     this.#externalRecordWrites.set(request.recordKey, write);
     try {
       return await write;
@@ -11053,6 +11060,7 @@ export class Session implements SessionContext {
 
   async #writeExternalRecord(
     request: BridgeSessionExternalRecordRequest,
+    fromDeferredQueue: boolean,
   ): Promise<{ recordId: string; created: boolean; deferred?: boolean }> {
     if (this.disposed || this.closing) {
       throw new Error(`Session ${this.sessionId} is closing`);
@@ -11078,7 +11086,14 @@ export class Session implements SessionContext {
     // adjacency. Agents finish whenever they finish, so instead of making the
     // daemon wait (its ext call times out after ~10s) the write is deferred
     // until the turn settles and the caller is told so.
-    if (!this.isTurnIdle()) {
+    // Nor may a direct write jump records still queued (or being drained)
+    // from an earlier turn: the transcript keeps the daemon's send order.
+    if (
+      !this.isTurnIdle() ||
+      (!fromDeferredQueue &&
+        (this.#deferredExternalRecords.length > 0 ||
+          this.#drainingDeferredExternalRecords))
+    ) {
       this.#deferExternalRecord(request);
       return { recordId: '', created: true, deferred: true };
     }
@@ -11133,6 +11148,7 @@ export class Session implements SessionContext {
 
   readonly #deferredExternalRecords: BridgeSessionExternalRecordRequest[] = [];
   #deferredExternalRecordTimer: ReturnType<typeof setInterval> | undefined;
+  #drainingDeferredExternalRecords = false;
 
   /**
    * Hold an external record until no main-model turn is running, then write
@@ -11160,19 +11176,25 @@ export class Session implements SessionContext {
         this.#dropDeferredExternalRecords();
         return;
       }
-      if (!this.isTurnIdle()) return;
+      // One drain at a time, so a second batch cannot interleave the first.
+      if (!this.isTurnIdle() || this.#drainingDeferredExternalRecords) return;
       clearInterval(this.#deferredExternalRecordTimer);
       this.#deferredExternalRecordTimer = undefined;
       const pending = this.#deferredExternalRecords.splice(0);
+      this.#drainingDeferredExternalRecords = true;
       void (async () => {
-        for (const request of pending) {
-          try {
-            await this.appendExternalRecord(request);
-          } catch (error) {
-            debugLogger.warn(
-              `Deferred external record failed [session ${this.sessionId}, key ${request.recordKey}]: ${this.#formatError(error)}`,
-            );
+        try {
+          for (const request of pending) {
+            try {
+              await this.appendExternalRecord(request, true);
+            } catch (error) {
+              debugLogger.warn(
+                `Deferred external record failed [session ${this.sessionId}, key ${request.recordKey}]: ${this.#formatError(error)}`,
+              );
+            }
           }
+        } finally {
+          this.#drainingDeferredExternalRecords = false;
         }
       })();
     }, 500);

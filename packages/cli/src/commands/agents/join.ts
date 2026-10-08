@@ -70,6 +70,11 @@ export function readHiddenLine(
   write(question);
   return new Promise<string | undefined>((resolve) => {
     let line = '';
+    // Escape sequences (arrow keys, bracketed paste markers, mouse reports)
+    // are consumed whole: after ESC, a CSI runs to its final byte (@ to ~)
+    // and an SS3 to its one following byte. Dropping only the ESC byte would
+    // append the printable tail ("[A", "[200~") to the token.
+    let escape: 'none' | 'esc' | 'csi' | 'ss3' = 'none';
     const finish = (answer: string | undefined) => {
       input.off('data', onData);
       input.setRawMode?.(wasRaw);
@@ -79,7 +84,22 @@ export function readHiddenLine(
     };
     const onData = (chunk: Buffer | string) => {
       for (const char of chunk.toString('utf8')) {
+        if (escape === 'esc') {
+          escape = char === '[' ? 'csi' : char === 'O' ? 'ss3' : 'none';
+          continue;
+        }
+        if (escape === 'csi') {
+          if (char >= '@' && char <= '~') escape = 'none';
+          continue;
+        }
+        if (escape === 'ss3') {
+          escape = 'none';
+          continue;
+        }
         switch (char) {
+          case '\u001b':
+            escape = 'esc';
+            break;
           case '\r':
           case '\n':
           case '\u0004':
@@ -93,8 +113,7 @@ export function readHiddenLine(
             line = [...line].slice(0, -1).join('');
             break;
           default:
-            // Other control bytes (arrow keys, escape sequences) are not
-            // part of a token.
+            // Other control bytes are not part of a token.
             if (char >= ' ') line += char;
         }
       }

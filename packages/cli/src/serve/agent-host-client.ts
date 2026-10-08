@@ -58,6 +58,7 @@ import {
   getHostProgramProbe,
 } from './agent-host-programs.js';
 import {
+  hasAgentHostRelay,
   openAgentHostRelayRun,
   type AgentHostRelayRun,
 } from './agent-host-relay.js';
@@ -320,25 +321,35 @@ function credentialFiles(
   return { legacy, current: legacy.replace(/\.json$/, '.v2.json') };
 }
 
-/** True when a saved credential would let this connection resume. */
+/**
+ * True when a saved credential would let this connection resume, false when
+ * none exists, and undefined when one could not be read (malformed, EACCES,
+ * I/O): that is not evidence of revocation, so callers must not prune on it.
+ */
 export async function hasAgentHostCredential(target: {
   serverUrl: string;
   workspaceId: string;
   workspaceCwd: string;
   allowHttp?: boolean;
-}): Promise<boolean> {
+}): Promise<boolean | undefined> {
+  let files: { legacy: string; current: string };
   try {
-    const files = credentialFiles(
+    files = credentialFiles(
       normalizeServerUrl(target.serverUrl, target.allowHttp),
       target.workspaceId,
       target.workspaceCwd,
     );
+  } catch {
+    // A target that does not normalize can never resume.
+    return false;
+  }
+  try {
     return Boolean(
       (await readCredential(files.current)) ??
         (await readCredential(files.legacy)),
     );
   } catch {
-    return false;
+    return undefined;
   }
 }
 
@@ -645,7 +656,10 @@ async function connectAgentHost(
     const key = qwenRelayKey(assignment);
     const relayId = `qs-${createHash('sha256').update(key).digest('hex').slice(0, 32)}`;
     return {
-      isCurrent: () => qwenRelayBindings.has(key),
+      // A daemon that cannot offer a relay has no token to lose: report the
+      // binding current, or every turn would close and re-resume the hidden
+      // session. Only a lost token on a relay-capable daemon is stale.
+      isCurrent: () => !hasAgentHostRelay() || qwenRelayBindings.has(key),
       rotate: () => {
         qwenRelayBindings.get(key)?.relay.close();
         qwenRelayBindings.delete(key);
@@ -972,6 +986,15 @@ async function connectAgentHost(
     if (event.type === 'permission_resolved') {
       turn.resolved.add(event.requestId);
       turn.early.delete(event.requestId);
+      // Settled elsewhere (the adapter's own cancel): retire the waiter so the
+      // decisions poll stops advertising it. A later awaitPermission for the
+      // same id registers a fresh one.
+      const waiter = turn.waiters.get(event.requestId);
+      if (waiter) {
+        turn.waiters.delete(event.requestId);
+        waiter.reject(new Error('Permission resolved elsewhere.'));
+        refreshDecisionPoll();
+      }
     }
     turn.pending.push(event);
     scheduleFlush(turn);

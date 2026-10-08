@@ -122,6 +122,7 @@ import {
 } from '../acp-session-bridge.js';
 import {
   MAX_EXTERNAL_RECORD_ID_LENGTH,
+  MAX_EXTERNAL_RECORD_MENTION_IDS,
   MAX_EXTERNAL_RECORD_STEP_TITLE_LENGTH,
   MAX_EXTERNAL_RECORD_TEXT_LENGTH,
 } from '../../acp-integration/session-external-record-params.js';
@@ -495,6 +496,24 @@ function recordSteps(steps: Iterable<SessionAgentStep>): SessionAgentStep[] {
           }
         : step,
     );
+}
+
+/**
+ * The ACP child refuses a record listing more ids than it holds, so a
+ * message addressing more agents or squads is refused here, up front, instead
+ * of being written and lost.
+ */
+function assertMentionFitsRecord(agents: number, squads: number): void {
+  if (
+    agents > MAX_EXTERNAL_RECORD_MENTION_IDS ||
+    squads > MAX_EXTERNAL_RECORD_MENTION_IDS
+  ) {
+    throw new SessionAgentError(
+      400,
+      'too_many_mentions',
+      `A message can address at most ${MAX_EXTERNAL_RECORD_MENTION_IDS} agents and ${MAX_EXTERNAL_RECORD_MENTION_IDS} squads.`,
+    );
+  }
 }
 
 function recordWriteError(error: unknown): SessionAgentError {
@@ -899,6 +918,7 @@ export class SessionAgentOrchestrator {
       const leader = roster.find((agent) => agent.id === squad.leaderAgentId);
       return leader ? [{ squad, leader }] : [];
     });
+    assertMentionFitsRecord(targets.agents.length, squadLeaders.length);
     const squadError =
       targets.unavailableSquads.length > 0
         ? squadUnavailableError(targets.unavailableSquads)
@@ -2403,6 +2423,7 @@ export class SessionAgentOrchestrator {
       targets.squads,
       roster,
     );
+    assertMentionFitsRecord(targets.agents.length, squadTargets.length);
     const squadError =
       targets.unavailableSquads.length > 0
         ? squadUnavailableError(targets.unavailableSquads)

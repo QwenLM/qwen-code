@@ -361,11 +361,8 @@ export function useAgentChatEntry({
                     id: agent.id,
                     label: agent.name,
                     // "Program · Runtime", as on the Agents page.
-                    subtitle: `${programLabel(
-                      agent.execution?.mode === 'managed-host'
-                        ? agent.execution.provider
-                        : undefined,
-                    )} · ${
+                    // A local agent can run Claude Code or Codex too.
+                    subtitle: `${programLabel(agent.execution?.provider)} · ${
                       // An older daemon sends no runtime: it runs here.
                       !agent.runtime || agent.runtime.kind === 'local'
                         ? t('collab.agent.thisComputer')
@@ -414,6 +411,12 @@ export function useAgentChatEntry({
   sessionApiForRef.current = sessionApiFor;
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
+  // The last post whose outcome is unknown (it threw). A retry of the same
+  // text in the same session reuses its clientMessageId, so the daemon
+  // replays the record instead of writing and running it twice.
+  const unsettledMention = useRef<
+    { sessionId: string; text: string; clientMessageId: string } | undefined
+  >(undefined);
   const submit = useCallback<Submit>(
     (text, images, files, commit, metadata) => {
       const tokens = mentionTokens(text);
@@ -490,13 +493,23 @@ export function useAgentChatEntry({
                 mention.sessionId === targetSessionId &&
                 mention.text.trim() === text.trim(),
             ).length;
-          const clientMessageId = newClientMessageId();
+          const retry = unsettledMention.current;
+          const clientMessageId =
+            retry?.sessionId === targetSessionId && retry.text === text
+              ? retry.clientMessageId
+              : newClientMessageId();
+          unsettledMention.current = {
+            sessionId: targetSessionId,
+            text,
+            clientMessageId,
+          };
           // The daemon records the @-mention and streams it back as a user
           // message, live and on replay alike, so there is no local echo...
           const result = await routes.mention(targetSessionId, {
             text,
             clientMessageId,
           });
+          unsettledMention.current = undefined;
           commit?.();
           // ...unless a main-model turn is running: the record waits for it
           // to settle, and the message is shown as pending until it lands.
