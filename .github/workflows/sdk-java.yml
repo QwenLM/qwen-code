@@ -443,9 +443,10 @@ jobs:
     # pool-safe: the database is a per-job service container on a random host
     # port, and every Maven run holds the test job's per-host sdk-java lock.
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    # 15 covered the hosted lane (~12 minutes measured); the pool adds the
-    # per-host lock wait, so buy margin the way daemon-e2e's 45 does.
-    timeout-minutes: 25
+    # 15 covered the hosted lane. On the pool each locked step can wait out
+    # one full flock --wait 1200, so the ceiling is one 20-minute lock wait
+    # plus the ~12 minutes of measured Maven work, plus margin: 45.
+    timeout-minutes: 45
     services:
       mariadb:
         image: 'mariadb:10.11.18'
@@ -568,6 +569,11 @@ jobs:
                 done || true
           fi
 
+      # Deliberately the default merge-ref checkout on both legs — the
+      # flyway guard's stance, not the build lanes' head-ref checkout: this
+      # gate certifies what merging would produce, cancel-in-progress
+      # re-runs a displaced head, and the pool queue is seconds short.
+      # Pinned in scripts/tests/sdk-java-workflow.test.js.
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
@@ -610,7 +616,12 @@ jobs:
 
       - name: 'Install Managed Agent dependencies'
         env:
-          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          # Job-local repo, shared with the verify step below (pinned in
+          # scripts/tests/sdk-java-workflow.test.js): the per-step lock is
+          # released at each step boundary, so the fixed 0.1.0-alpha release
+          # coordinates must not round-trip through the host-shared ~/.m2,
+          # where another run's same-coordinate jars would win the resolve.
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"
           exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
@@ -618,6 +629,9 @@ jobs:
             echo "::error::sdk-java host lock not acquired within 20 minutes"
             exit 1
           fi
+          # Seed from the cache-restored shared repo so cache: 'maven' and
+          # the egress proxy keep paying off for the job-local copy.
+          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
           # These steps only stage jars; the SpotBugs gate lives on the
           # `clean verify` invocations (pinned by scripts/tests/spotbugs-gate.test.js).
@@ -626,7 +640,7 @@ jobs:
       - name: 'Run Managed Agent tests, Checkstyle, and MySQL integration'
         working-directory: 'packages/sdk-java/managed-agent-server'
         env:
-          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
           MYSQL_PORT: "${{ job.services.mariadb.ports['3306'] }}"
         run: |-
           mkdir -p "${HOME}/.cache/qwen-code-ci"

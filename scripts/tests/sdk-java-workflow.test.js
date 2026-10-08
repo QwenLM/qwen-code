@@ -69,22 +69,46 @@ describe('SDK Java self-hosted workflow guards', () => {
     );
   });
 
-  it.each(['test', 'daemon-e2e'])(
+  it.each(['test', 'mysql-integration', 'daemon-e2e'])(
     'keeps setup-java Maven files job-local in the %s job',
     (name) => {
       const block = job(name);
       expect(block).toContain(
         "settings-path: '${{ runner.temp }}/setup-java-m2'",
       );
+      // A prefix match: mysql-integration appends a job-local
+      // -Dmaven.repo.local to two of its three MAVEN_ARGS, pinned by the
+      // 'installs and verifies against one job-local Maven repository' test.
       expect(
         block.match(
-          /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml'/g,
+          /MAVEN_ARGS: '--settings \$\{\{ runner\.temp \}\}\/setup-java-m2\/settings\.xml --toolchains \$\{\{ runner\.temp \}\}\/setup-java-m2\/toolchains\.xml/g,
         ),
-      ).toHaveLength(name === 'test' ? 6 : 1);
+      ).toHaveLength(
+        { test: 6, 'mysql-integration': 3, 'daemon-e2e': 1 }[name],
+      );
       expect(block).not.toContain('Drop shared Maven toolchains.xml');
       expect(block).not.toContain('rm -f "${HOME}/.m2/toolchains.xml"');
     },
   );
+
+  it('keeps the self-hosted Maven bootstrap byte-identical across pool jobs', () => {
+    // A step copied between jobs and later fixed in only one is the #13506
+    // drift class; the checksum gate in this body is the security-relevant
+    // part, so pin the whole body equal — not just the step name.
+    const parsed = parse(workflow);
+    const bodies = ['test', 'mysql-integration', 'daemon-e2e'].map((name) => {
+      const s = parsed.jobs[name].steps.find(
+        (candidate) => candidate.name === 'Set up Maven (self-hosted)',
+      );
+      expect(s, name).toBeDefined();
+      expect(s.if, name).toBe("${{ runner.environment == 'self-hosted' }}");
+      return s.run;
+    });
+    expect(bodies[1]).toBe(bodies[0]);
+    expect(bodies[2]).toBe(bodies[0]);
+    expect(bodies[0]).toContain('sha512sum --check');
+    expect(bodies[0]).toContain('>> "${GITHUB_PATH}"');
+  });
 });
 
 // #12940: the duplicate-version guard is the fast lane for a collision two
@@ -175,6 +199,17 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
     ]) {
       expect(block).toContain(fragment);
     }
+    // The lane stays character-identical to the flyway guard's, which the
+    // evaluated routing inventory (.github/scripts/ci-runner-routing.test.mjs)
+    // covers: a restructured expression (e.g. a flipped connective, invisible
+    // to the fragment pins above) breaks the tie and turns this red.
+    expect(parse(workflow).jobs['mysql-integration']['runs-on']).toBe(
+      parse(workflow).jobs['flyway-migrations']['runs-on'],
+    );
+    // The default merge-ref checkout is deliberate (recorded at the job's
+    // Checkout step): never the refs/pull/N/head the build lanes use.
+    expect(block).toContain('actions/checkout@');
+    expect(block).not.toContain('refs/pull/');
   });
 
   it('keeps the MariaDB service on a random host port', () => {
@@ -192,15 +227,66 @@ describe('SDK Java MariaDB lane on the ECS pool', () => {
         /MYSQL_PORT: "\$\{\{ job\.services\.mariadb\.ports\['3306'\] \}\}"/g,
       ),
     ).toHaveLength(2);
+    // The consumer is the link that carries the random port into the tests:
+    // both mvn lines must interpolate ${MYSQL_PORT}, or the declaration is
+    // dead and the fixed-port collision returns. hosted-harness-mysql's two
+    // -Dmysql.url lines read job.services.mysql and live outside this block.
+    expect(
+      block.match(
+        /-Dmysql\.url="jdbc:mysql:\/\/127\.0\.0\.1:\$\{MYSQL_PORT\}\//g,
+      ),
+    ).toHaveLength(2);
   });
 
   it('holds the per-host sdk-java lock around every Maven run', () => {
-    const block = job('mysql-integration');
-    expect(block.match(/flock --wait 1200 9/g)).toHaveLength(3);
-    expect(block).toContain(
-      'if: "${{ runner.environment == \'self-hosted\' }}"',
+    // Derived from the parsed steps, not a string count: every Maven-bearing
+    // step must open the test job's per-host lock — the shared path pinned
+    // for the test job above is what makes the two jobs mutually exclusive
+    // on one ECS host — and wait on it with the pinned literal.
+    const parsed = parse(workflow);
+    const mavenSteps = parsed.jobs['mysql-integration'].steps.filter(
+      (s) => typeof s.run === 'string' && s.run.includes('mvn '),
     );
-    expect(block).toContain("- name: 'Set up Maven (self-hosted)'");
+    expect(mavenSteps.map((s) => s.name)).toEqual([
+      'Run Runtime Broker MySQL integration tests',
+      'Install Managed Agent dependencies',
+      'Run Managed Agent tests, Checkstyle, and MySQL integration',
+    ]);
+    for (const s of mavenSteps) {
+      expect(s.run, s.name).toContain(
+        'exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"',
+      );
+      expect(s.run, s.name).toContain('flock --wait 1200 9');
+    }
+    // The ceiling must absorb one full lock wait on top of the ~12 minutes
+    // of measured Maven work — 25 minutes already cancelled this lane on the
+    // pool (run 37692037879).
+    expect(
+      parsed.jobs['mysql-integration']['timeout-minutes'] * 60,
+    ).toBeGreaterThanOrEqual(1200 + 12 * 60);
+  });
+
+  it('installs and verifies against one job-local Maven repository', () => {
+    // The per-step lock releases at each step boundary, so the fixed
+    // 0.1.0-alpha release coordinates must not round-trip through the
+    // host-shared ~/.m2: the install step and the verify step resolve from
+    // the same job-local repo, seeded from the shared cache inside the lock.
+    const steps = parse(workflow).jobs['mysql-integration'].steps;
+    const install = steps.find(
+      (s) => s.name === 'Install Managed Agent dependencies',
+    );
+    const verify = steps.find(
+      (s) =>
+        s.name === 'Run Managed Agent tests, Checkstyle, and MySQL integration',
+    );
+    for (const s of [install, verify]) {
+      expect(s?.env?.MAVEN_ARGS, s?.name).toContain(
+        '-Dmaven.repo.local=${{ runner.temp }}/m2-repo',
+      );
+    }
+    expect(install.run).toContain(
+      'cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo"',
+    );
   });
 });
 
