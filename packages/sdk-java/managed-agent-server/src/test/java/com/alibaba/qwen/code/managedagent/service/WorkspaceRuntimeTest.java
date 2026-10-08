@@ -138,8 +138,14 @@ class WorkspaceRuntimeTest {
                         stopped.getBindingId(), stopped.getGeneration(), fixture.session().getSession().getHarnessSessionId(),
                         fixture.session().getRuntimeSessionId(), "prompt", "call", "digest",
                         Map.of("sessionId", fixture.session().getRuntimeSessionId(), "promptId", "prompt",
-                                "callId", "call", "argsDigest", "digest")).withUnknown();
+                                "callId", "call", "argsDigest", "digest"));
                 fixture.executions().findOrCreate(execution);
+                var claimed = fixture.executions().claimDispatch(execution.getExecutionCallId(),
+                        "fixture-owner", Duration.ofMinutes(5));
+                assertThat(claimed).isNotNull();
+                assertThat(fixture.executions().compareAndSet(claimed, claimed.withUnknown(),
+                        claimed.getDispatchOwner(), claimed.getDispatchGeneration()).getState())
+                        .isEqualTo(ToolExecutionRecord.State.UNKNOWN);
             }
             default -> throw new AssertionError(fault);
         }
