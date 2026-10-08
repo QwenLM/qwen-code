@@ -5,7 +5,8 @@
 状态：实现设计，2026-10-09。已调查的源码基线：
 `9582aac56085faa42d8c8fcde8f7157e9db64619`，Draft PR #13526。
 前一增量已实现派生的原始 assistant 批次保留，以及先校验全部相关行再分组当前批次。
-下述 bootstrap、schema-2 历史/资源提升、worker 准入/执行与完成仍是提案，尚未验收。
+boot-5/handle-3 authority 传播依赖已实现，正在验证。下述当前原生读回、schema-2
+历史/资源提升、worker 准入/执行与完成仍是提案，尚未验收。
 本增量细化 preparation 合同，并在缺少原生 intent/checkpoint grant 时，加入明确的
 Broker dispatch 和 JDBC authorization 拒绝；尚未实现 preparation。
 本设计细化
@@ -18,7 +19,7 @@ Broker dispatch 和 JDBC authorization 拒绝；尚未实现 preparation。
 实际私有 Hosted 调用者提交完整原始 assistant，持久预留已接受的 Read/Write/Edit
 输入与完整定义，并读取完整当前分配，随后以需要恢复的状态停止。原生新提交与历史
 回放均未准入文件历史或 tool intent。`commitResources` 在原生接受前执行，拒绝原始
-PUBLISHED 分配资源。只有四条路由的 boot-4 worker 尚无生产 composer、历史准备、
+PUBLISHED 分配资源。只有四条路由的 boot-4/boot-5 worker 尚无生产 composer、历史准备、
 执行器或结果消费调用者。
 
 连接一条原始链路：READY Session 与已安装上下文 → 保留的空历史绑定 → 包含全部
@@ -37,16 +38,26 @@ authority URL，也不得把旧 boot 重新解释为文件准入。引入执行 
 `authority` 仅含 `protocolVersion: 1` 和 `origin`。origin 是部署配置的规范 HTTPS
 origin；HTTP 仅用于自有 loopback 验证。禁止 URL 凭据、路径、query、fragment 和
 重定向。不得向 worker 传入调用方选择的 origin 或全局 Harness token。
+规范 origin 必须与 URL origin 序列化完全相等：小写 scheme 与由字母/数字/连字符
+label 组成的 ASCII DNS host、规范十进制 IPv4 或压缩的小写 IPv6（多 label DNS 的末
+label 须以字母开头），不允许 DNS 尾点、默认端口、前导零端口或端口零；显式端口
+范围为 1–65535。此私有 bootstrap 契约不支持 IDNA `xn--` label，因为 Java URI 与
+Node URL 的 IDNA 校验规则不同。origin 最长 2048 字符。共享 Java/CLI fixture 验证相同的接受与拒绝
+拼写。对于 HTTP，私有 `serve` 还在启动 listener 前要求其等于自有 listener 实际绑定
+的确切 URI，不能将任意 loopback 验证服务器作为 authority。
 
 Version-3 私有原始资源 handle 保留确切 authority 元组。provisioning producer
 将其纳入规范 boot 字节、不可变 Secret、boot digest 与 handle identity。所有保存
 handle、实时 API、attestation、transport 和重启比较，都从原始 seed 与保留的
 authority 元组推导同一 boot。配置 origin 变化不能重写或接管旧 Secret。旧 handle
-没有 authority 锚点，拒绝新的文件准入。这细化此前设计中待实现的执行 bootstrap，
+没有 authority 锚点，拒绝新的文件准入。这实现此前执行 bootstrap 的 authority
+传播依赖，
 不改变现有 boot-4 构造契约。
 Informational ready 使用 version 5，字段严格为 `type`、`version`、`managedCsi`、
 `identity`、`context`，不返回凭据，也不建立 authority origin。现有 CSI-v2 context/
-attestation/drain envelope 与新读回、执行契约保持区分。
+attestation/drain envelope 与新读回、执行契约保持区分。现有 attestation 响应不
+返回或独立证明 authority origin；精确的不可变 Secret、原 handle 与 boot-digest
+比较固定该 bootstrap 字段。仍然需要当前原生读回及其按 action 执行的准入。
 
 使用独立 `POST /internal/runtime-broker/csi/v1/native:read` handler。凭据是原始
 每 Runtime lease token，对照加密持久化 seed 与当前原始 lease，以恒定时间比较
@@ -219,7 +230,7 @@ access, ...)`；修改普通 Workspace transport 不能连接此路径。保持�
 拒绝，仅在此 access 与 Broker service 准入闭合的私有 history operation。
 
 私有 `serve` 入口从部署配置读取 `K2_RUNTIME_BROKER_ORIGIN`，按第 2 节规则校验，
-将保留元组传给 provisioning，并在同一自有 server 注册独立 lease 认证读回 handler。
+将保留元组传给 provisioning。同一自有 server 上的独立 lease 认证读回 handler 尚待实现。
 生产 HTTPS 可代理现有 loopback listener；不向 worker 安装全局 Hosted 凭据。
 reconciliation 从已保存 handle 重建 boot，不读取新进程环境来替换它。
 

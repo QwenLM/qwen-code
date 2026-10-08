@@ -125,6 +125,12 @@ class WorkspaceCsiRuntimeIdentityTest {
             afterAttestation.run();
             return CompletableFuture.completedFuture(response);
         });
+        when(transport.attestCsiFiles(any(), any(), any(), any(), any())).thenAnswer(call -> {
+            Map<String, Object> boot = call.getArgument(3);
+            ManagedCsiFilesProtocol.validateBoot(boot);
+            return transport.attestCsi(call.getArgument(0), call.getArgument(1), call.getArgument(2),
+                    WorkspaceCsiRuntimeIdentity.map(boot.get("storage")), call.getArgument(4));
+        });
     }
 
     @Test
@@ -195,6 +201,58 @@ class WorkspaceCsiRuntimeIdentityTest {
             assertThat(api.creates).isEqualTo(2);
             nested(api.objects.get("secrets"), "data").put("boot.json", "e30=");
             assertThat(join(restarted.reconcile(reloaded.getRequest(), reloaded.getProvisionSeed(), reloaded.getResourceHandle(), lease)).getOutcome())
+                    .isEqualTo(RuntimeObservation.Outcome.CONFLICT);
+            assertThat(api.creates).isEqualTo(2);
+        }
+    }
+
+    @Test
+    void privateAuthorityPersistsInHandle3AndRestartUsesOriginalBoot5DespiteChangedConfiguration() {
+        privateRequest();
+        var authority = ManagedCsiFilesProtocol.authority("https://original-broker.example");
+        RuntimeResourceHandle handle;
+        RuntimeLease lease;
+        Map<String, Object> boot;
+        try (var provider = authorityProvider(authority)) {
+            provider.reserveResource(original);
+            handle = join(provider.ensureResource(original.getRequest(), original.getProvisionSeed(), null));
+            assertThat(handle.getVersion()).isEqualTo(3);
+            assertThat(handle.getValue().get("authority")).isEqualTo(authority);
+            assertThat(provider.supportsStartupRecovery(handle)).isTrue();
+            original = bindings.compareAndSet(original, original.withResourceHandle(handle, Instant.now()));
+            lease = join(provider.provision(original.getRequest(), original.getProvisionSeed()));
+            original = bindings.compareAndSet(original, original.withAttestation(lease, handle, Instant.now(), Instant.now()));
+            boot = WorkspaceCsiRuntimeIdentity.boot(original);
+            assertThat(boot.get("version")).isEqualTo(5);
+            assertThat(boot.get("authority")).isEqualTo(authority);
+            assertThat(api.objects.get("secrets").get("immutable")).isEqualTo(true);
+            assertThat(nested(api.objects.get("secrets"), "data").get("boot.json"))
+                    .isEqualTo(Base64.getEncoder().encodeToString(WorkspaceCsiRuntimeIdentity.bytes(boot)));
+            assertThat(handle.getValue().get("bootDigest")).isEqualTo(WorkspaceCsiRuntimeIdentity.digest(boot));
+            assertThat(new String(WorkspaceCsiRuntimeIdentity.bytes(handle.getValue()), StandardCharsets.UTF_8))
+                    .doesNotContain(original.getProvisionSeed().getToken());
+        }
+        var reloaded = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])).findById(original.getBindingId());
+        WorkspaceCsiRuntimeIdentity.verify(reloaded);
+        try (var restarted = authorityProvider(ManagedCsiFilesProtocol.authority("https://replacement-broker.example"))) {
+            assertThat(join(restarted.ensureResource(reloaded.getRequest(), reloaded.getProvisionSeed(), reloaded.getResourceHandle())))
+                    .isEqualTo(handle);
+            assertThat(join(restarted.reconcile(reloaded.getRequest(), reloaded.getProvisionSeed(), handle, lease)).getOutcome())
+                    .isEqualTo(RuntimeObservation.Outcome.READY);
+            assertThat(api.creates).isEqualTo(2);
+            assertThat(WorkspaceCsiRuntimeIdentity.boot(reloaded)).isEqualTo(boot);
+            var changed = copy(handle.getValue());
+            changed.put("authority", ManagedCsiFilesProtocol.authority("https://replacement-broker.example"));
+            changed.remove("identity");
+            changed.put("identity", WorkspaceCsiRuntimeIdentity.digest(changed));
+            assertThatThrownBy(() -> WorkspaceCsiRuntimeIdentity.validate(reloaded.getRequest(), reloaded.getProvisionSeed(),
+                    new RuntimeResourceHandle("kubernetes-workspace", 3, changed))).isInstanceOf(RuntimeBrokerException.class);
+            assertThatThrownBy(() -> WorkspaceCsiRuntimeIdentity.validate(reloaded.getRequest(), reloaded.getProvisionSeed(),
+                    new RuntimeResourceHandle("kubernetes-workspace", 2, handle.getValue()))).isInstanceOf(RuntimeBrokerException.class);
+            nested(api.objects.get("secrets"), "data").put("boot.json", Base64.getEncoder().encodeToString(
+                    WorkspaceCsiRuntimeIdentity.bytes(ManagedCsiFilesProtocol.boot(reloaded.getRequest(), reloaded.getProvisionSeed(),
+                            WorkspaceCsiRuntimeIdentity.map(boot.get("storage")), ManagedCsiFilesProtocol.authority("https://replacement-broker.example")))));
+            assertThat(join(restarted.reconcile(reloaded.getRequest(), reloaded.getProvisionSeed(), handle, lease)).getOutcome())
                     .isEqualTo(RuntimeObservation.Outcome.CONFLICT);
             assertThat(api.creates).isEqualTo(2);
         }
@@ -775,6 +833,12 @@ class WorkspaceCsiRuntimeIdentityTest {
 
     private WorkspaceCsiRuntimeProvisioner provider() {
         return provider(Duration.ofSeconds(5), List.of());
+    }
+
+    private WorkspaceCsiRuntimeProvisioner authorityProvider(Map<String, Object> authority) {
+        return new WorkspaceCsiRuntimeProvisioner(storage, bindings, registration, api,
+                new WorkspaceCsiResourceGuard(api, "cluster", registration, protection), IMAGE, COMMAND,
+                Duration.ofSeconds(5), List.of(), transport, authority);
     }
 
     private WorkspaceCsiRuntimeProvisioner provider(Duration timeout, List<WorkspaceCsiRuntimeProvisioner.WorkerArtifact> artifacts) {

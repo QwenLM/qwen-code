@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.net.URI;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -38,6 +39,19 @@ class WorkspaceCsiRuntimeMainTest {
             Files.writeString(path, rejected);
             assertThatThrownBy(() -> WorkspaceCsiRuntimeMain.readRequest(path, json))
                     .isInstanceOf(IllegalArgumentException.class).hasMessage("CSI operator request could not be read");
+        }
+    }
+
+    @Test
+    void acceptsOnlyTheOwnedLoopbackListenerOrCanonicalHttpsAuthority() {
+        URI server = URI.create("http://127.0.0.1:43190/");
+        WorkspaceCsiRuntimeMain.requireAuthorityOrigin("http://127.0.0.1:43190", server);
+        WorkspaceCsiRuntimeMain.requireAuthorityOrigin("https://broker.example", server);
+        WorkspaceCsiRuntimeMain.requireAuthorityOrigin("http://[::1]:43190", URI.create("http://[::1]:43190/"));
+        WorkspaceCsiRuntimeMain.requireAuthorityOrigin("http://[::1]:43190", URI.create("http://[0:0:0:0:0:0:0:1]:43190/"));
+        for (String origin : List.of("http://127.0.0.1:43191", "http://localhost:43190", "http://[::1]:43190",
+                "https://broker.example/", "https://user@broker.example", "http://broker.example")) {
+            assertThatThrownBy(() -> WorkspaceCsiRuntimeMain.requireAuthorityOrigin(origin, server)).isInstanceOf(IllegalArgumentException.class);
         }
     }
 

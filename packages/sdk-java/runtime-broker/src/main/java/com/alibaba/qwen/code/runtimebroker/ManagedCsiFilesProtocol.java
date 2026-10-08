@@ -6,9 +6,13 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.URI;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -20,6 +24,7 @@ public final class ManagedCsiFilesProtocol {
     public static final String CONTEXT_ATTEST_PATH = PREFIX + "/context-attest";
     public static final String CONTEXT_PATH = PREFIX + "/context";
     private static final Set<String> BOOT_KEYS = Set.of("type", "version", "managedCsi", "identity", "context", "storage");
+    private static final Set<String> AUTHORITY_BOOT_KEYS = Set.of("type", "version", "managedCsi", "identity", "context", "storage", "authority");
     private static final ObjectMapper JSON = new ObjectMapper()
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -48,16 +53,113 @@ public final class ManagedCsiFilesProtocol {
 
     public static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             Map<String, Object> storage) {
-        var value = Map.<String, Object>of("type", "boot", "version", 4, "managedCsi", PROTOCOL,
-                "identity", identity(request), "context", ManagedContextProtocol.boot(request, seed),
-                "storage", BrokerValues.immutableMap(storage));
+        return boot(request, seed, storage, null);
+    }
+
+    public static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            Map<String, Object> storage, Map<String, Object> authority) {
+        var value = new LinkedHashMap<String, Object>(Map.of("type", "boot", "version", authority == null ? 4 : 5,
+                "managedCsi", PROTOCOL, "identity", identity(request), "context", ManagedContextProtocol.boot(request, seed),
+                "storage", BrokerValues.immutableMap(storage)));
+        if (authority != null) {
+            validateAuthority(authority);
+            value.put("authority", BrokerValues.immutableMap(authority));
+        }
         validateBoot(value);
-        return value;
+        return BrokerValues.immutableMap(value);
+    }
+
+    public static Map<String, Object> authority(String origin) {
+        try {
+            require(origin != null && !origin.isEmpty() && origin.length() <= 2048);
+            URI uri = URI.create(origin);
+            String scheme = uri.getScheme();
+            String host = canonicalHost(uri.getHost());
+            int port = uri.getPort();
+            require(("https".equals(scheme) || "http".equals(scheme))
+                    && uri.getRawUserInfo() == null && uri.getRawQuery() == null && uri.getRawFragment() == null
+                    && (uri.getRawPath() == null || uri.getRawPath().isEmpty())
+                    && (port == -1 || port > 0 && port <= 65535)
+                    && !("https".equals(scheme) && port == 443 || "http".equals(scheme) && port == 80)
+                    && origin.equals(scheme + "://" + host + (port == -1 ? "" : ":" + port))
+                    && ("https".equals(scheme) || "localhost".equals(host) || "[::1]".equals(host)
+                            || host.matches("127(?:\\.(?:0|[1-9][0-9]{0,2})){3}")));
+            return Map.of("protocolVersion", 1, "origin", origin);
+        } catch (RuntimeException | UnknownHostException failure) {
+            throw new IllegalArgumentException("Invalid private CSI authority origin.");
+        }
+    }
+
+    private static String canonicalHost(String host) throws UnknownHostException {
+        require(host != null && host.equals(host.toLowerCase(Locale.ROOT)) && !host.endsWith(".")
+                && !host.startsWith("xn--") && !host.contains(".xn--"));
+        if (host.startsWith("[")) {
+            require(host.endsWith("]") && host.indexOf('%') < 0);
+            byte[] address = InetAddress.getByName(host).getAddress();
+            if (address.length == 4) {
+                byte[] mapped = new byte[16];
+                mapped[10] = (byte) 0xff;
+                mapped[11] = (byte) 0xff;
+                System.arraycopy(address, 0, mapped, 12, 4);
+                address = mapped;
+            }
+            int[] parts = new int[8];
+            int bestStart = -1;
+            int bestLength = 1;
+            for (int i = 0; i < parts.length; i++) {
+                parts[i] = (Byte.toUnsignedInt(address[i * 2]) << 8) | Byte.toUnsignedInt(address[i * 2 + 1]);
+            }
+            for (int start = 0; start < parts.length; start++) {
+                int end = start;
+                while (end < parts.length && parts[end] == 0) {
+                    end++;
+                }
+                if (end - start > bestLength) {
+                    bestStart = start;
+                    bestLength = end - start;
+                }
+            }
+            var result = new StringBuilder("[");
+            for (int i = 0; i < parts.length; i++) {
+                if (i == bestStart) {
+                    result.append("::");
+                    i += bestLength - 1;
+                } else {
+                    if (i > 0 && i != bestStart + bestLength) {
+                        result.append(':');
+                    }
+                    result.append(Integer.toHexString(parts[i]));
+                }
+            }
+            return result.append(']').toString();
+        }
+        String tail = host.substring(host.lastIndexOf('.') + 1);
+        if (tail.matches("[0-9]+|0x[0-9a-f]*")) {
+            String[] parts = host.split("\\.", -1);
+            require(parts.length == 4);
+            for (String part : parts) {
+                require(part.matches("0|[1-9][0-9]{0,2}") && Integer.parseInt(part) <= 255);
+            }
+        }
+        return host;
+    }
+
+    private static void validateAuthority(Map<String, Object> value) {
+        require(value.keySet().equals(Set.of("protocolVersion", "origin"))
+                && Long.valueOf(1).equals(BrokerValues.exactLong(value.get("protocolVersion")))
+                && value.get("origin") instanceof String);
+        require(BrokerValues.sameJsonMap(value, authority((String) value.get("origin"))));
     }
 
     public static void validateBoot(Map<String, Object> boot) {
-        require(boot != null && boot.keySet().equals(BOOT_KEYS) && "boot".equals(boot.get("type"))
-                && Long.valueOf(4).equals(BrokerValues.exactLong(boot.get("version"))) && PROTOCOL.equals(boot.get("managedCsi")));
+        require(boot != null);
+        Long version = BrokerValues.exactLong(boot.get("version"));
+        boolean authorityBoot = Long.valueOf(5).equals(version);
+        require(boot.keySet().equals(authorityBoot ? AUTHORITY_BOOT_KEYS : BOOT_KEYS) && "boot".equals(boot.get("type"))
+                && (authorityBoot || Long.valueOf(4).equals(version)) && PROTOCOL.equals(boot.get("managedCsi")));
+        if (authorityBoot) {
+            validateAuthority(map(boot.get("authority")));
+        }
         ManagedCsiProtocol.validateBoot(dataBoot(boot));
         var identity = map(boot.get("identity"));
         var context = map(boot.get("context"));

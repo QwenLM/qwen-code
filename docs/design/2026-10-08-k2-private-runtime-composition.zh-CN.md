@@ -30,11 +30,18 @@ JSON 和输出均不含凭证。配置解析限制大小，拒绝重复、未知
 命令使用 `K2_JDBC_URL`、`K2_JDBC_USER`、`K2_JDBC_PASSWORD`、
 `K2_AGENT_REVISION`、`K2_CLUSTER_DOMAIN`、`K2_KUBERNETES_API_URL`、
 `K2_KUBERNETES_TOKEN_FILE`、`K2_KUBERNETES_CA_FILE`、
-`K2_RUNTIME_BROKER_TOKEN` 和既有
+`K2_RUNTIME_BROKER_TOKEN`、`K2_RUNTIME_BROKER_ORIGIN` 和既有
 `QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID` /
 `QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY` 配置。只监听 loopback，端口须明确
 选择在 1024 至 65535 之间。既有 Maven 打包另外生成本命令的 `csi-runtime`
 可执行 JAR。
+
+authority 传播依赖现在要求规范的部署 origin，生成私有 boot5/handle3。HTTPS 可以
+作为自有 loopback listener 的前端；HTTP 必须精确指向该 listener。原 authority
+被纳入不可变 Secret 和 boot/handle digest，重启时保留原值，即使进程配置已经
+改变。Boot4/handle2 保持构造兼容。该依赖正在验证，不增加原生读回、文件历史、
+dispatch grant 或公开 selector。完整方案见
+[历史集成设计](2026-10-09-k2-native-history-integration.zh-CN.md)。
 
 resolver 在原 datasource connection 的全新有界事务中通过
 `requireCsiRequest` 读取已提交的 Session，先锁 placement domain，再锁既有

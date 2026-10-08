@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.runtimebroker.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.ManagedCsiFilesProtocol;
 import com.alibaba.qwen.code.runtimebroker.KubernetesHttpRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerHttpServer;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerService;
@@ -82,6 +83,8 @@ public final class WorkspaceCsiRuntimeMain {
                 .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).build();
         var request = readRequest(Path.of(args[1]), json);
         String token = required("K2_RUNTIME_BROKER_TOKEN");
+        String authorityOrigin = required("K2_RUNTIME_BROKER_ORIGIN");
+        ManagedCsiFilesProtocol.authority(authorityOrigin);
         var source = new DriverManagerDataSource(required("K2_JDBC_URL"), required("K2_JDBC_USER"),
                 required("K2_JDBC_PASSWORD"));
         var jdbc = new JdbcTemplate(source);
@@ -102,12 +105,13 @@ public final class WorkspaceCsiRuntimeMain {
                 request.protection());
         var provider = new WorkspaceCsiRuntimeProvisioner(new WorkspaceCsiReservationStore(jdbc, manager, json),
                 bindings, request.registration(), api, guard, request.image(), request.command(),
-                Duration.ofSeconds(30), request.artifacts());
+                Duration.ofSeconds(30), request.artifacts(), authorityOrigin);
         try (var service = new RuntimeBrokerService(access, provider, access, bindings, sessions,
                 new JdbcToolExecutionRepository(source), UUID.randomUUID().toString(),
                 Duration.ofSeconds(30), Duration.ofSeconds(30));
                 var server = new RuntimeBrokerHttpServer(new InetSocketAddress(InetAddress.getLoopbackAddress(), port),
                         token, service)) {
+            requireAuthorityOrigin(authorityOrigin, server.getBaseUri());
             var stopped = new CountDownLatch(1);
             var shutdown = new Thread(() -> {
                 server.close();
@@ -118,6 +122,17 @@ public final class WorkspaceCsiRuntimeMain {
             System.out.println(json.writeValueAsString(Map.of("sessionId", request.sessionId(),
                     "runtimeRequestKey", request.runtimeRequestKey(), "baseUri", server.getBaseUri().toString())));
             stopped.await();
+        }
+    }
+
+    static void requireAuthorityOrigin(String origin, URI ownedServer) {
+        ManagedCsiFilesProtocol.authority(origin);
+        String host = ownedServer.getHost();
+        if ("[0:0:0:0:0:0:0:1]".equals(host)) {
+            host = "[::1]";
+        }
+        if (origin.startsWith("http:") && !origin.equals(ownedServer.getScheme() + "://" + host + ":" + ownedServer.getPort())) {
+            throw new IllegalArgumentException("Loopback CSI authority must name the owned Broker listener");
         }
     }
 

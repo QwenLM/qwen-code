@@ -26,11 +26,14 @@ public final class WorkspaceCsiRuntimeIdentity {
     static final String KIND = "kubernetes-workspace";
     static final int VERSION = 1;
     static final int FILES_VERSION = 2;
+    static final int FILES_AUTHORITY_VERSION = 3;
     private static final ObjectMapper JSON = new ObjectMapper().enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
     private static final Set<String> KEYS = Set.of("bindingId", "runtimeGeneration", "context", "storage",
             "placement", "protection", "artifacts", "bootDigest", "podSpecDigest", "mount", "identity");
     private static final Set<String> FILES_KEYS = Set.of("bindingId", "runtimeGeneration", "context", "storage",
             "placement", "protection", "artifacts", "bootDigest", "podSpecDigest", "mount", "identity", "profileIdentity");
+    private static final Set<String> FILES_AUTHORITY_KEYS = Set.of("bindingId", "runtimeGeneration", "context", "storage",
+            "placement", "protection", "artifacts", "bootDigest", "podSpecDigest", "mount", "identity", "profileIdentity", "authority");
     private static final Set<String> PLACEMENT_KEYS = Set.of("clusterDomain", "namespace", "namespaceUid",
             "podName", "podUid", "nodeName", "nodeUid", "containerName", "containerId", "image", "imageId",
             "podIp", "secretName", "secretUid");
@@ -50,13 +53,19 @@ public final class WorkspaceCsiRuntimeIdentity {
 
     public static Map<String, Object> boot(RuntimeBindingRecord binding) {
         verify(binding);
-        return boot(binding.getRequest(), binding.getProvisionSeed(),
-                map(binding.getResourceHandle().getValue().get("storage")));
+        return boot(binding.getRequest(), binding.getProvisionSeed(), binding.getResourceHandle());
     }
 
     static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> storage) {
         return ManagedCsiFilesProtocol.selects(request) ? ManagedCsiFilesProtocol.boot(request, seed, storage)
                 : ManagedCsiProtocol.boot(request, seed, storage);
+    }
+
+    static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, RuntimeResourceHandle handle) {
+        var value = handle.getValue();
+        return handle.getVersion() == FILES_AUTHORITY_VERSION
+                ? ManagedCsiFilesProtocol.boot(request, seed, map(value.get("storage")), map(value.get("authority")))
+                : boot(request, seed, map(value.get("storage")));
     }
 
     public static Map<String, Object> expectedPod(RuntimeBindingRecord binding) {
@@ -67,17 +76,18 @@ public final class WorkspaceCsiRuntimeIdentity {
     static void validate(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, RuntimeResourceHandle handle) {
         try {
             boolean files = ManagedCsiFilesProtocol.selects(request);
+            boolean authorityHandle = files && handle != null && handle.getVersion() == FILES_AUTHORITY_VERSION;
             require(request != null && seed != null && request.isManagedContext() && KIND.equals(request.getProvisionerKind())
                     && (files || "workspace".equals(request.getScope().getIsolationClass()) && request.getIsolationKey() == null)
-                    && handle != null && KIND.equals(handle.getKind()) && handle.getVersion() == (files ? FILES_VERSION : VERSION));
+                    && handle != null && KIND.equals(handle.getKind()) && handle.getVersion() == (authorityHandle ? FILES_AUTHORITY_VERSION : files ? FILES_VERSION : VERSION));
             var value = handle.getValue();
-            require(value.keySet().equals(files ? FILES_KEYS : KEYS));
+            require(value.keySet().equals(authorityHandle ? FILES_AUTHORITY_KEYS : files ? FILES_KEYS : KEYS));
             if (files) {
                 require(same(ManagedCsiFilesProtocol.identity(request), value.get("profileIdentity")));
             }
             text(value, "bindingId", 512);
             decimal(value, "runtimeGeneration");
-            var originalBoot = boot(request, seed, map(value.get("storage")));
+            var originalBoot = boot(request, seed, handle);
             require(digest(originalBoot).equals(value.get("bootDigest"))
                     && same(context(originalBoot), value.get("context")));
             var placement = map(value.get("placement"));

@@ -5,9 +5,9 @@
 Status: implementation design, 2026-10-09. Investigated source baseline:
 `9582aac56085faa42d8c8fcde8f7157e9db64619`, Draft PR #13526.
 The preceding increment implements derived original assistant-batch retention and
-complete related-row qualification before current-batch partitioning. Bootstrap,
-schema-2 history/promotion, worker admission/execution and completion below are
-still proposed and not accepted. This increment refines the preparation contract
+complete related-row qualification before current-batch partitioning. The boot-5/handle-3 authority propagation dependency is implemented and under
+verification. Current native readback, schema-2 history/promotion, worker
+admission/execution and completion below remain proposed and unaccepted. This increment refines the preparation contract
 and adds explicit Broker dispatch and JDBC authorization refusals while original
 native intent/checkpoint grants are absent. It does not implement preparation.
 It refines the remaining connected composition in the [native file execution design](2026-10-07-k2-native-file-execution.md)
@@ -21,7 +21,7 @@ durably reserves accepted Read/Write/Edit inputs and full definitions, and reads
 the complete current allocation. It then stops with recovery required. Native
 fresh acceptance and historical replay admit no file-history or tool-intent
 operation. `commitResources` runs before native acceptance and refuses original
-PUBLISHED allocation resources. The four-route boot-4 worker has no production
+PUBLISHED allocation resources. The four-route boot-4/boot-5 worker has no production
 composer, history preparation, executor or result-consumption caller.
 
 Connect one original chain: READY Session and installed context → retained empty
@@ -43,6 +43,16 @@ the original three-field profile identity, inner boot 2 and registered storage.
 deployment-configured canonical HTTPS origin; HTTP is restricted to owned
 loopback qualification. Credentials, path, query, fragment and redirects are
 forbidden. No caller-selected origin or global Harness token reaches the worker.
+The canonical origin must equal the URL origin serialization: lowercase scheme
+and ASCII DNS host with letter/digit/hyphen labels, canonical decimal IPv4 or
+compressed lowercase IPv6 (the last label of a multi-label DNS host starts with
+a letter), no trailing DNS dot, default port, leading-zero port or port zero;
+explicit ports are 1–65535. IDNA `xn--` labels are unsupported in this private
+bootstrap contract because Java URI and Node URL do not share IDNA validation.
+The origin is limited to 2048 characters. Shared Java/CLI fixtures enforce the
+same accepted and refused spellings. For HTTP, private `serve` additionally
+requires the exact URI of its own bound listener, before starting that listener;
+an arbitrary loopback qualification server cannot become the authority.
 
 The version-3 private original resource handle retains the exact authority
 tuple. The provisioning producer includes it in canonical boot bytes, the
@@ -50,12 +60,15 @@ immutable Secret, boot digest and handle identity. Every saved-handle, live API,
 attestation, transport and restart comparison derives the same boot from the
 original seed and retained authority tuple. A configured origin change cannot
 rewrite or adopt the old Secret. Old handles have no authority anchor and refuse
-new file admission. This refines the pending execution bootstrap in the earlier
-design; it does not change the existing boot-4 construction contract.
+new file admission. This implements the authority propagation dependency of the execution bootstrap
+in the earlier design; it does not change the existing boot-4 construction contract.
 Informational ready uses version 5 with exactly `type`, `version`, `managedCsi`,
 `identity`, `context`; it does not echo credentials or establish the authority
 origin. Existing CSI-v2 context/attestation/drain envelopes stay separate from
-the new readback and execution contracts.
+the new readback and execution contracts. Existing attestation responses do not
+echo or independently attest the authority origin; the exact immutable Secret,
+original handle and boot-digest comparison anchor that bootstrap field. Current
+native readback and its action-specific admission are still required.
 
 Use a separate `POST /internal/runtime-broker/csi/v1/native:read` handler. Its
 credential is the original per-Runtime lease token, authenticated against the
@@ -272,8 +285,8 @@ private history operation through this access and the Broker service.
 
 The private `serve` entry reads `K2_RUNTIME_BROKER_ORIGIN` from deployment
 configuration, validates the origin rules in section 2 and passes the retained
-tuple to provisioning. It registers the independent lease-authenticated
-readback handler on the same owned server. Production HTTPS can front the
+tuple to provisioning. The independent lease-authenticated readback handler on
+the same owned server is still pending. Production HTTPS can front the
 existing loopback listener; the global Hosted credential is not installed in
 the worker. Reconciliation reconstructs boot from the saved handle, never from
 the new process environment.

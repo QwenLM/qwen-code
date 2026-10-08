@@ -13,6 +13,7 @@ import {
   parseManagedCsiFileJson,
   readManagedCsiFileContext,
   readManagedCsiFileDrain,
+  readManagedCsiNativeAuthority,
   validateManagedCsiFileAttestationResponse,
   wrapManagedCsiFileContext,
 } from './managed-csi-file-envelope.js';
@@ -29,6 +30,10 @@ const fixture = JSON.parse(
 ) as {
   boot: unknown;
   ready: unknown;
+  executionBoot5: unknown;
+  executionReady5: unknown;
+  validAuthorityOrigins: string[];
+  invalidAuthorityOrigins: string[];
   expectedPod: ManagedCsiPodIdentity;
   attestationRequest: unknown;
   attestationResponse: Record<string, unknown>;
@@ -38,6 +43,55 @@ const fixture = JSON.parse(
 };
 
 describe('closed CSI file construction contract', () => {
+  it('retains the boot5 authority without exposing it in readiness or changing CSI2 attestation', () => {
+    const boot = parseManagedCsiFileBoot(fixture.executionBoot5);
+    expect(boot.version).toBe(5);
+    expect(createManagedCsiFileReady(boot, 43190)).toEqual(
+      fixture.executionReady5,
+    );
+    expect(createManagedCsiFileAttestationRequest(boot)).toEqual(
+      fixture.attestationRequest,
+    );
+    validateManagedCsiFileAttestationResponse(
+      fixture.attestationResponse,
+      boot,
+      fixture.expectedPod,
+    );
+    if (boot.version !== 5) throw new Error('Expected boot5');
+    expect(Object.isFrozen(boot.authority)).toBe(true);
+    for (const authority of [
+      undefined,
+      {},
+      { ...boot.authority, token: 'foreign' },
+      { ...boot.authority, protocolVersion: 2 },
+      { ...boot.authority, origin: null },
+    ])
+      expect(() => parseManagedCsiFileBoot({ ...boot, authority })).toThrow();
+    expect(() => parseManagedCsiFileBoot({ ...boot, version: 4 })).toThrow();
+    expect(() =>
+      parseManagedCsiFileBoot({ ...(fixture.boot as object), version: 5 }),
+    ).toThrow();
+    expect(() => parseManagedCsiBoot(boot)).toThrow();
+  });
+
+  it.each(fixture.validAuthorityOrigins)(
+    'accepts the canonical authority origin %s',
+    (origin) => {
+      expect(
+        readManagedCsiNativeAuthority({ protocolVersion: 1, origin }),
+      ).toEqual({ protocolVersion: 1, origin });
+    },
+  );
+
+  it.each(fixture.invalidAuthorityOrigins)(
+    'refuses the noncanonical authority origin %s',
+    (origin) => {
+      expect(() =>
+        readManagedCsiNativeAuthority({ protocolVersion: 1, origin }),
+      ).toThrow();
+    },
+  );
+
   it('matches the paired Java producer fixture without broadening legacy boot', () => {
     const boot = parseManagedCsiFileBoot(fixture.boot);
     expect(createManagedCsiFileReady(boot, 43190)).toEqual(fixture.ready);

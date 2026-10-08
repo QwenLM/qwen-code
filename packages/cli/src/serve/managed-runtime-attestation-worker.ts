@@ -221,7 +221,7 @@ export async function startManagedRuntimeAttestationWorker(
   remotePublishers?: ManagedShellPublisherRegistry,
   containerMode = false,
 ): Promise<ManagedRuntimeAttestationWorkerHandle | ManagedCsiFileWorkerHandle> {
-  if (bootDocument.version === 4) {
+  if (bootDocument.version === 4 || bootDocument.version === 5) {
     if (!containerMode || capturePublisher || remotePublishers)
       throw new Error(INVALID_BOOT_MESSAGE);
     return startManagedCsiFileWorker(bootDocument);
@@ -413,7 +413,7 @@ export async function readManagedRuntimeContainerBoot(
       parsed &&
       typeof parsed === 'object' &&
       'version' in parsed &&
-      parsed.version === 4
+      (parsed.version === 4 || parsed.version === 5)
     ) {
       return parseManagedCsiFileBoot(
         parseManagedCsiFileJson(
@@ -477,7 +477,9 @@ export async function runManagedRuntimeAttestationWorker(
     return;
   }
   const contextBoot =
-    boot.version === 3 || boot.version === 4 ? boot.context : boot;
+    boot.version === 3 || boot.version === 4 || boot.version === 5
+      ? boot.context
+      : boot;
   const worker = await startManagedRuntimeAttestationWorker(
     boot,
     undefined,

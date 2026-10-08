@@ -134,6 +134,36 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
+    public CompletionStage<Map<String, Object>> attestCsiFiles(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            Map<String, Object> boot, Map<String, Object> pod) {
+        if (lease == null || seed == null || !seed.matches(lease)
+                || !ManagedCsiFilesProtocol.selects(request) || client.followRedirects() != HttpClient.Redirect.NEVER) {
+            throw new IllegalArgumentException("Original CSI file boot must bind the lease.");
+        }
+        var originalBoot = BrokerValues.immutableMap(boot);
+        ManagedCsiFilesProtocol.validateBoot(originalBoot);
+        var storage = ProviderRuntimeProtocol.object(originalBoot.get("storage"));
+        var expected = ManagedCsiFilesProtocol.boot(request, seed, storage,
+                originalBoot.containsKey("authority") ? ProviderRuntimeProtocol.object(originalBoot.get("authority")) : null);
+        if (!BrokerValues.sameJsonMap(originalBoot, expected)) {
+            throw new IllegalArgumentException("Original CSI file boot differs.");
+        }
+        var expectedPod = BrokerValues.immutableMap(pod);
+        ManagedCsiProtocol.validatePodIdentity(expectedPod, (String) storage.get("namespace"));
+        return post(lease, ManagedCsiFilesProtocol.ATTEST_PATH,
+                encodeToolRequest(ManagedCsiFilesProtocol.attestationRequest(originalBoot), BODY_LIMIT_BYTES), BODY_LIMIT_BYTES,
+                seed.getGatewayIncarnation()).thenApply(bytes -> {
+                    try {
+                        return ManagedCsiFilesProtocol.verifyAttestation(ManagedCsiFilesProtocol.parse(bytes), originalBoot, expectedPod);
+                    } catch (RuntimeException failure) {
+                        throw new RuntimeBrokerException(409, "workspace_csi_identity_conflict",
+                                "Workspace CSI attestation conflicts.", false);
+                    }
+                });
+    }
+
+    @Override
     public CompletionStage<Map<String, Object>> acknowledgeCsi(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> boot, Map<String, Object> expectedPod, Map<String, Object> request,
             Map<String, Object> expectedCaptureIdentity) {

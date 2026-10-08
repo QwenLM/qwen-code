@@ -21,6 +21,56 @@ import org.junit.jupiter.api.Test;
 
 class ManagedCsiFilesHttpTransportTest {
     @Test
+    void fullBoot5AttestationBindsOriginalRequestBeforeIoAndRejectsWrongWorkerIncarnation() throws Exception {
+        var fixture = ManagedCsiFilesProtocolTest.fixtures();
+        var request = ManagedCsiFilesProtocolTest.request(fixture);
+        var seed = ManagedCsiFilesProtocolTest.seed(fixture);
+        var boot = map(fixture.get("executionBoot5"));
+        var pod = map(fixture.get("expectedPod"));
+        var calls = new AtomicInteger();
+        var errors = new ConcurrentLinkedQueue<Throwable>();
+        var header = new AtomicReference<>(seed.getGatewayIncarnation());
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            try {
+                calls.incrementAndGet();
+                assertEquals(ManagedCsiFilesProtocol.ATTEST_PATH, exchange.getRequestURI().toString());
+                assertEquals("Bearer " + seed.getToken(), exchange.getRequestHeaders().getFirst("Authorization"));
+                assertTrue(BrokerValues.sameJsonMap(map(fixture.get("attestationRequest")),
+                        ManagedCsiFilesProtocol.parse(exchange.getRequestBody().readAllBytes())));
+                byte[] bytes = JsonCodec.encode(fixture.get("attestationResponse"));
+                exchange.getResponseHeaders().set("Cache-Control", "no-store");
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.getResponseHeaders().set("X-Qwen-Managed-Runtime-Incarnation", header.get());
+                exchange.sendResponseHeaders(200, bytes.length);
+                exchange.getResponseBody().write(bytes);
+            } catch (Throwable error) {
+                errors.add(error);
+            } finally {
+                exchange.close();
+            }
+        });
+        server.start();
+        try {
+            var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:" + server.getAddress().getPort()),
+                    seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+            var transport = new HttpRuntimeTransport();
+            var foreign = new RuntimeProvisionRequest(request.getScope(), "d911c54f-ad76-420f-8c76-fb124c0ce623",
+                    request.getProvisionerKind(), request.getStorageId());
+            assertThrows(IllegalArgumentException.class, () -> transport.attestCsiFiles(lease, foreign, seed, boot, pod));
+            assertEquals(0, calls.get());
+            assertTrue(BrokerValues.sameJsonMap(map(fixture.get("attestationResponse")),
+                    transport.attestCsiFiles(lease, request, seed, boot, pod).toCompletableFuture().join()));
+            header.set("foreign-incarnation");
+            assertThrows(CompletionException.class, () -> transport.attestCsiFiles(lease, request, seed, boot, pod).toCompletableFuture().join());
+            assertEquals(2, calls.get());
+            assertEquals(List.of(), new ArrayList<>(errors));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void actualPrivateProducersUseOnlyCsi2AndVerifyOriginalIdentityAndIncarnation() throws Exception {
         var fixture = ManagedCsiFilesProtocolTest.fixtures();
         var request = ManagedCsiFilesProtocolTest.request(fixture);

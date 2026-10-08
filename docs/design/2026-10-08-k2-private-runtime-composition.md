@@ -34,11 +34,21 @@ neither request JSON nor output contains them. Configuration parsing is bounded
 and rejects duplicate, unknown and trailing JSON fields. The command uses
 `K2_JDBC_URL`, `K2_JDBC_USER`, `K2_JDBC_PASSWORD`, `K2_AGENT_REVISION`,
 `K2_CLUSTER_DOMAIN`, `K2_KUBERNETES_API_URL`, `K2_KUBERNETES_TOKEN_FILE`,
-`K2_KUBERNETES_CA_FILE`, `K2_RUNTIME_BROKER_TOKEN` and the existing
+`K2_KUBERNETES_CA_FILE`, `K2_RUNTIME_BROKER_TOKEN`, `K2_RUNTIME_BROKER_ORIGIN`
+and the existing
 `QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID` /
 `QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY` settings. It binds only loopback
 on an explicitly chosen port from 1024 through 65535. The existing Maven
 packaging produces a separate `csi-runtime` executable JAR for this command.
+
+The authority propagation dependency now requires a canonical deployment origin
+and produces private boot5/handle3. HTTPS may front the owned loopback listener;
+HTTP must exactly name that listener. The original authority is included in the
+immutable Secret and boot/handle digests and is retained across restart even if
+process configuration changes. Boot4/handle2 remains compatible for construction.
+This dependency is under verification; it does not add native readback, file
+history, dispatch grants or a public selector. See the complete
+[history integration design](2026-10-09-k2-native-history-integration.md).
 
 The resolver reads the committed Session through `requireCsiRequest` in a
 fresh, bounded transaction on the original datasource connection, locks the

@@ -54,6 +54,35 @@ class ManagedCsiFilesProtocolTest {
     }
 
     @Test
+    void sharesBoot5AndCanonicalAuthorityOriginsWithoutWideningBoot4OrAttestation() throws Exception {
+        var fixture = fixtures();
+        var expected = map(fixture.get("executionBoot5"));
+        var boot = ManagedCsiFilesProtocol.boot(request(fixture), seed(fixture), map(expected.get("storage")), map(expected.get("authority")));
+        assertTrue(BrokerValues.sameJsonMap(expected, boot));
+        assertTrue(BrokerValues.sameJsonMap(map(fixture.get("attestationRequest")), ManagedCsiFilesProtocol.attestationRequest(boot)));
+        ManagedCsiFilesProtocol.verifyAttestation(map(fixture.get("attestationResponse")), boot, map(fixture.get("expectedPod")));
+        for (Object origin : (List<?>) fixture.get("validAuthorityOrigins")) {
+            assertEquals(Map.of("protocolVersion", 1, "origin", origin), ManagedCsiFilesProtocol.authority((String) origin));
+        }
+        for (Object origin : (List<?>) fixture.get("invalidAuthorityOrigins")) {
+            assertThrows(IllegalArgumentException.class, () -> ManagedCsiFilesProtocol.authority((String) origin), (String) origin);
+        }
+        for (Map<String, Object> authority : List.<Map<String, Object>>of(Map.of(), Map.of("protocolVersion", 2, "origin", "https://broker.example"),
+                Map.of("protocolVersion", 1, "origin", "https://broker.example", "token", "foreign"))) {
+            var changed = new LinkedHashMap<>(boot);
+            changed.put("authority", authority);
+            assertThrows(IllegalArgumentException.class, () -> ManagedCsiFilesProtocol.validateBoot(changed));
+        }
+        var changed = new LinkedHashMap<>(boot);
+        changed.put("version", 4);
+        assertThrows(IllegalArgumentException.class, () -> ManagedCsiFilesProtocol.validateBoot(changed));
+        changed.remove("authority");
+        changed.put("version", 5);
+        assertThrows(IllegalArgumentException.class, () -> ManagedCsiFilesProtocol.validateBoot(changed));
+        assertThrows(IllegalArgumentException.class, () -> ManagedCsiProtocol.validateBoot(boot));
+    }
+
+    @Test
     void rejectsMissingExtraCrossedAndDowngradedIdentity() throws Exception {
         var fixture = fixtures();
         var boot = map(fixture.get("boot"));

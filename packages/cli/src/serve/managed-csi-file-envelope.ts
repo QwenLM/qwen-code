@@ -22,6 +22,7 @@ import {
   type ManagedContextReady,
 } from './managed-context-envelope.js';
 import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
+import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
 
 export const MANAGED_CSI_FILE_PROTOCOL = 'managed-csi/2';
 export const MANAGED_CSI_FILE_PREFIX = '/internal/managed-runtime/csi/v2';
@@ -40,18 +41,28 @@ export interface ManagedCsiFileIdentity {
   readonly capabilityDigest: typeof CSI_FILES_RETIREMENT_CAPABILITY_DIGEST;
 }
 
-export interface ManagedCsiFileBoot {
+interface ManagedCsiFileBootFields {
   readonly type: 'boot';
-  readonly version: 4;
   readonly managedCsi: typeof MANAGED_CSI_FILE_PROTOCOL;
   readonly identity: ManagedCsiFileIdentity;
   readonly context: ManagedContextBoot;
   readonly storage: ManagedCsiStorage;
 }
 
+export interface ManagedCsiNativeAuthority {
+  readonly protocolVersion: 1;
+  readonly origin: string;
+}
+
+export type ManagedCsiFileBoot = ManagedCsiFileBootFields &
+  (
+    | { readonly version: 4 }
+    | { readonly version: 5; readonly authority: ManagedCsiNativeAuthority }
+  );
+
 export interface ManagedCsiFileReady {
   readonly type: 'ready';
-  readonly version: 4;
+  readonly version: 4 | 5;
   readonly managedCsi: typeof MANAGED_CSI_FILE_PROTOCOL;
   readonly identity: ManagedCsiFileIdentity;
   readonly context: ManagedContextReady;
@@ -80,7 +91,13 @@ export function parseManagedCsiFileJson(
 
 export function parseManagedCsiFileBoot(value: unknown): ManagedCsiFileBoot {
   try {
+    const authorityBoot =
+      value !== null &&
+      typeof value === 'object' &&
+      'version' in value &&
+      value.version === 5;
     const boot = closed(value, [
+      ...(authorityBoot ? ['authority'] : []),
       'context',
       'identity',
       'managedCsi',
@@ -102,7 +119,7 @@ export function parseManagedCsiFileBoot(value: unknown): ManagedCsiFileBoot {
     });
     if (
       boot['type'] !== 'boot' ||
-      boot['version'] !== 4 ||
+      (boot['version'] !== 4 && !authorityBoot) ||
       boot['managedCsi'] !== MANAGED_CSI_FILE_PROTOCOL ||
       identity['profile'] !== 'csi-files-retirement/1' ||
       identity['capabilityDigest'] !== CSI_FILES_RETIREMENT_CAPABILITY_DIGEST ||
@@ -114,17 +131,53 @@ export function parseManagedCsiFileBoot(value: unknown): ManagedCsiFileBoot {
       data.context.capabilityDigest !== identity['capabilityDigest']
     )
       throw new Error();
-    return Object.freeze({
-      type: 'boot',
-      version: 4,
+    const fields: ManagedCsiFileBootFields = {
+      type: 'boot' as const,
       managedCsi: MANAGED_CSI_FILE_PROTOCOL,
       identity: Object.freeze(identity) as unknown as ManagedCsiFileIdentity,
       context: data.context,
       storage: data.storage,
-    });
+    };
+    return authorityBoot
+      ? Object.freeze({
+          ...fields,
+          version: 5 as const,
+          authority: readManagedCsiNativeAuthority(boot['authority']),
+        })
+      : Object.freeze({ ...fields, version: 4 as const });
   } catch {
     throw new Error('Managed CSI file boot document is invalid.');
   }
+}
+
+export function readManagedCsiNativeAuthority(
+  value: unknown,
+): ManagedCsiNativeAuthority {
+  const authority = closed(value, ['origin', 'protocolVersion']);
+  const origin = authority['origin'];
+  if (
+    authority['protocolVersion'] !== 1 ||
+    typeof origin !== 'string' ||
+    origin.length > 2048
+  )
+    throw new Error('Managed CSI authority origin is invalid.');
+  const url = resolveManagedRuntimeBrokerBaseUrl(origin);
+  const hostname = url.hostname;
+  if (
+    url.origin !== origin ||
+    /(^|\.)xn--/.test(hostname) ||
+    (!hostname.startsWith('[') &&
+      !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/.test(
+        hostname,
+      )) ||
+    (!hostname.startsWith('[') &&
+      hostname.includes('.') &&
+      !/^\d+\.\d+\.\d+\.\d+$/.test(hostname) &&
+      !/^[a-z]/.test(hostname.split('.').at(-1) ?? '')) ||
+    (url.port !== '' && Number(url.port) === 0)
+  )
+    throw new Error('Managed CSI authority origin is not canonical.');
+  return Object.freeze({ protocolVersion: 1, origin });
 }
 
 function dataBoot(boot: ManagedCsiFileBoot): ManagedCsiBoot {
@@ -143,7 +196,7 @@ export function createManagedCsiFileReady(
 ): ManagedCsiFileReady {
   return Object.freeze({
     type: 'ready',
-    version: 4,
+    version: boot.version,
     managedCsi: MANAGED_CSI_FILE_PROTOCOL,
     identity: boot.identity,
     context: createManagedContextReady(boot.context, port),
