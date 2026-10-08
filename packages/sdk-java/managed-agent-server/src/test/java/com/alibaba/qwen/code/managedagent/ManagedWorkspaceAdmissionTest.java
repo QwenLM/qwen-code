@@ -12,13 +12,16 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector.Attachment;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
+import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
@@ -35,6 +38,7 @@ import java.util.UUID;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import org.assertj.core.api.ThrowableAssert.ThrowingCallable;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -1165,6 +1169,257 @@ class ManagedWorkspaceAdmissionTest {
         assertCreateError(tenant, selection, "workspace_unavailable");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session"
                 + " WHERE tenant_id = ?", Integer.class, tenant)).isZero();
+    }
+
+    @Test
+    void creatorCancelsWithoutTheGrantsThatAdmitNewWork() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        grant(tenant, "ws-a", "actor-b", false);
+        ManagedAgentService enabled = boundService(true);
+        ManagedAgentService optedOut = boundService(false);
+        assertThat(enabled.getWebShellSession(tenant, "actor-a", sessionId)
+                .capabilities().workspaceTurns()).isTrue();
+        // The opt-in clause: the same creator and Session without it.
+        assertThat(optedOut.getWebShellSession(tenant, "actor-a", sessionId)
+                .capabilities().workspaceTurns()).isFalse();
+
+        jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE"
+                + " WHERE tenant_id = ?", tenant);
+        jdbc.update("UPDATE managed_workspace_registry SET state = 'DRAINING'"
+                + " WHERE tenant_id = ?", tenant);
+        assertThat(enabled.getWebShellSession(tenant, "actor-a", sessionId)
+                .capabilities().workspaceTurns()).isFalse();
+        assertRefused(() -> enabled.submitTurn(tenant, "actor-a", "submit",
+                sessionId, List.of(new InputBlock("text", "go"))),
+                "workspace_unavailable");
+        // Cancel admission passes for the creator; the refusal comes from the
+        // missing Turn, after admission.
+        assertRefused(() -> enabled.cancelTurn(tenant, "actor-a", "cancel",
+                sessionId, "turn_missing"), "turn_not_found");
+        // A reader who did not create the Session keeps the refusal, and so
+        // does the creator without the opt-in.
+        assertRefused(() -> enabled.cancelTurn(tenant, "actor-b", "cancel-b",
+                sessionId, "turn_missing"), "workspace_unavailable");
+        assertRefused(() -> optedOut.cancelTurn(tenant, "actor-a",
+                "cancel-off", sessionId, "turn_missing"),
+                "workspace_unavailable");
+    }
+
+    @Test
+    void cancelRefusesABoundSessionThatCanNoLongerExecute() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+        String turnId = service.submitTurn(tenant, "actor-a", "submit-1",
+                sessionId, List.of(new InputBlock("text", "go"))).turnId();
+
+        // Cancelling cites the admission shape, so closing the Session
+        // restores the legacy refusal instead of writing a CANCEL command
+        // for a Turn that can no longer run.
+        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED'"
+                + " WHERE tenant_id = ? AND session_id = ?",
+                tenant, sessionId);
+        assertRefused(() -> service.cancelTurn(tenant, "actor-a", "cancel-1",
+                sessionId, turnId), "workspace_unavailable");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                + " managed_agent_command WHERE tenant_id = ?"
+                + " AND operation = 'CANCEL_TURN'", Integer.class, tenant))
+                .isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void reRegistrationRefusesLaterWorkBeforeAnyCommandIsWritten(boolean storageOnly) {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        ManagedAgentService enabled = boundService(true);
+        jdbc.update("UPDATE managed_workspace_registry SET"
+                + (storageOnly ? " storage_id = 'replacement-storage'"
+                        : " workspace_generation = workspace_generation + 1")
+                + " WHERE tenant_id = ?", tenant);
+
+        assertThat(enabled.getWebShellSession(tenant, "actor-a", sessionId)
+                .capabilities().workspaceTurns()).isFalse();
+        assertRefused(() -> enabled.submitTurn(tenant, "actor-a", "submit",
+                sessionId, List.of(new InputBlock("text", "go"))),
+                "workspace_unavailable");
+        assertRefused(() -> enabled.renameSession(tenant, "actor-a",
+                "rename", sessionId, "Renamed"), "workspace_unavailable");
+        // The rename was refused before its command was written, so no
+        // PENDING command blocks a later operation.
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                + " managed_agent_command WHERE tenant_id = ? AND"
+                + " command_status = 'PENDING'", Integer.class, tenant))
+                .isZero();
+        assertRefused(() -> enabled.cancelTurn(tenant, "actor-a", "cancel",
+                sessionId, "turn_missing"), "turn_not_found");
+    }
+
+    @Test
+    void sameKeySubmitReplayRequiresWorkspaceReadAccess() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+        CommandAdmission first = service.submitTurn(tenant, "actor-a",
+                "submit-1", sessionId, input);
+        assertThat(first.replayed()).isFalse();
+        assertThat(first.turnId()).isNotBlank();
+
+        assertRefused(() -> service.submitTurn(tenant, "actor-b",
+                "submit-1", sessionId, input), "session_not_found");
+    }
+
+    @Test
+    void sameKeyReplayAnswersOnlyTheCreator() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        grant(tenant, "ws-a", "actor-b", false);
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+        service.submitTurn(tenant, "actor-a", "submit-1", sessionId, input);
+        service.renameSession(tenant, "actor-a", "rename-1", sessionId,
+                "renamed title");
+
+        // A reader who did not create the Session neither replays the
+        // creator's admissions nor learns which keys exist.
+        assertRefused(() -> service.submitTurn(tenant, "actor-b",
+                "submit-1", sessionId, input), "workspace_unavailable");
+        assertRefused(() -> service.submitTurn(tenant, "actor-b",
+                "submit-1", sessionId,
+                List.of(new InputBlock("text", "other"))),
+                "workspace_unavailable");
+        assertRefused(() -> service.renameSession(tenant, "actor-b",
+                "rename-1", sessionId, "renamed title"),
+                "workspace_unavailable");
+    }
+
+    @Test
+    void sameKeySubmitReplaysTheRecordedAdmissionAfterReRegistration() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+
+        CommandAdmission first = service.submitTurn(tenant, "actor-a",
+                "submit-1", sessionId,
+                List.of(new InputBlock("text", "go")));
+        assertThat(first.replayed()).isFalse();
+        assertThat(first.turnId()).isNotBlank();
+
+        // Re-registration flips the admission gate off; the recorded
+        // admission must still answer the same-key retry — replay is a read
+        // of the record, not a re-admission.
+        jdbc.update("UPDATE managed_workspace_registry SET"
+                + " workspace_generation = workspace_generation + 1"
+                + " WHERE tenant_id = ?", tenant);
+        assertThat(service.getWebShellSession(tenant, "actor-a", sessionId)
+                .capabilities().workspaceTurns()).isFalse();
+
+        CommandAdmission second = service.submitTurn(tenant, "actor-a",
+                "submit-1", sessionId,
+                List.of(new InputBlock("text", "go")));
+        assertThat(second.replayed()).isTrue();
+        assertThat(second.turnId()).isEqualTo(first.turnId());
+    }
+
+    @Test
+    void sameKeyRenameReplaysTheRecordedOutcomeAfterReRegistration() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        String sessionId = boundSession(tenant);
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+
+        var first = service.renameSession(tenant, "actor-a", "rename-1",
+                sessionId, "renamed title");
+        assertThat(first.replayed()).isFalse();
+        assertThat(first.body().metadata())
+                .containsEntry("title", "renamed title");
+
+        jdbc.update("UPDATE managed_workspace_registry SET"
+                + " workspace_generation = workspace_generation + 1"
+                + " WHERE tenant_id = ?", tenant);
+        assertRefused(() -> service.renameSession(tenant, "actor-a",
+                "rename-fresh", sessionId, "other"), "workspace_unavailable");
+
+        var second = service.renameSession(tenant, "actor-a", "rename-1",
+                sessionId, "renamed title");
+        assertThat(second.replayed()).isTrue();
+        assertThat(second.body().metadata())
+                .containsEntry("title", "renamed title");
+    }
+
+    private ManagedAgentService boundServiceWithWorkingHarness() {
+        return boundServiceWith(new UnavailableHarnessConnector() {
+            @Override
+            public boolean isAvailable() {
+                return true;
+            }
+
+            @Override
+            public boolean isWorkspaceFilesAvailable() {
+                return true;
+            }
+
+            @Override
+            public Attachment createOrLoad(String tenantId, String sessionId,
+                    boolean loadExisting) {
+                return new Attachment("boot");
+            }
+
+            @Override
+            public void rename(String tenantId, String sessionId,
+                    String title) {
+            }
+        });
+    }
+
+    private ManagedAgentService boundServiceWith(HarnessConnector harness) {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {
+                }, registry, properties);
+        HarnessCoordinator noopCoordinator = new HarnessCoordinator(null,
+                null, null, null, null, Clock.systemUTC(),
+                new ManagedAgentProperties()) {
+            @Override
+            public void dispatch(String tenantId, String sessionId,
+                    String turnId) {
+            }
+        };
+        return new ManagedAgentService(gated, new RequestDigests(),
+                noopCoordinator, harness, registry);
+    }
+
+    private String boundSession(String tenant) {
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        return store.insertWorkspaceSessionCommand(tenant, "actor-a",
+                "create", "sha256:" + "a".repeat(64), "qwen-code", null, null,
+                List.of(), null, new WorkspaceSelection("ws-a", "."))
+                .sessionId();
+    }
+
+    private ManagedAgentService boundService(boolean workspaceFiles) {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(workspaceFiles);
+        ManagedAgentStore gated = new ManagedAgentStore(jdbc, mapper,
+                Clock.systemUTC(), ignored -> {
+                }, registry, properties);
+        return new ManagedAgentService(gated, new RequestDigests(), null,
+                new UnavailableHarnessConnector() {
+                    @Override
+                    public boolean isWorkspaceFilesAvailable() {
+                        return workspaceFiles;
+                    }
+                }, registry);
+    }
+
+    private static void assertRefused(ThrowingCallable call, String code) {
+        assertThatThrownBy(call).isInstanceOfSatisfying(ApiException.class,
+                error -> assertThat(error.getCode()).isEqualTo(code));
     }
 
     private void assertCreateError(String tenant, WorkspaceSelection selection,

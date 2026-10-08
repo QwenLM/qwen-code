@@ -39,7 +39,12 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
     },
     environment: { state: 'ready' },
     lastSequence: 0,
-    capabilities: { tasks: true, artifacts: false, actions: false },
+    capabilities: {
+      tasks: true,
+      artifacts: false,
+      actions: false,
+      workspaceTurns: false,
+    },
   };
   function append(type: string, data: Record<string, unknown> = {}) {
     const sequence = events.length + 1;
