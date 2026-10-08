@@ -1440,22 +1440,20 @@ const EARLIER_OUTPUT_OMITTED = '[earlier output omitted]\n';
  * caller has to return this body marked `outputBudgetApplied` or that gate
  * replaces the whole composition with a `<persisted-output>` stub and the tail
  * kept below never reaches the model. `transcriptPath` is what keeps the
- * trimmed head reachable — without it the marker would be the only trace.
+ * trimmed head reachable.
  */
 function composeIncompleteResult(
   reason: string,
   header: string,
   text: string,
   suffix: string,
-  transcriptPath?: string,
+  transcriptPath: string,
 ): string {
   if (!text) return reason + suffix;
   const prefix = `${reason}\n\n${header}\n\n`;
   const room = AGENT_TOOL_MAX_OUTPUT_CHARS - prefix.length - suffix.length;
   if (text.length <= room) return prefix + text + suffix;
-  const marker = transcriptPath
-    ? `${EARLIER_OUTPUT_OMITTED}The full output is in ${transcriptPath}. Read it with the ${ToolNames.READ_FILE} tool.\n`
-    : EARLIER_OUTPUT_OMITTED;
+  const marker = `${EARLIER_OUTPUT_OMITTED}The full output is in ${transcriptPath}. Read it with the ${ToolNames.READ_FILE} tool.\n`;
   // The cut index is a length, not a content boundary, and the tail is the one
   // field this helper exists to hand over intact: snap it off a high surrogate
   // rather than starting it with an unpaired one.
