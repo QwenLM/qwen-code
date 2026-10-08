@@ -107,6 +107,21 @@ public class ManagedAgentDefinitionStore {
                 ManagedAgentDefinitionStore::row, tenantId, agentId));
     }
 
+    /**
+     * The latest revision read inside the caller's transaction with the
+     * agent's rows write-locked (D8b): a Session pinned to "latest" cannot
+     * interleave with a concurrent update writing that same next revision.
+     * FOR UPDATE stands for both engines: H2 has no FOR SHARE.
+     */
+    public Optional<DefinitionRevision> latestForUpdate(String tenantId,
+            String agentId) {
+        return first(jdbc.query("SELECT agent_id, revision, digest,"
+                + " definition_json, created_at FROM managed_agent_definition"
+                + " WHERE tenant_id = ? AND agent_id = ?"
+                + " ORDER BY revision DESC LIMIT 1 FOR UPDATE",
+                ManagedAgentDefinitionStore::row, tenantId, agentId));
+    }
+
     public Optional<DefinitionRevision> find(String tenantId, String agentId,
             long revision) {
         return first(jdbc.query("SELECT agent_id, revision, digest,"

@@ -589,6 +589,7 @@ public class ManagedAgentService {
                 "agent.session",
                 session.agentId(),
                 session.agentRevision(),
+                session.agentDefinitionDigest(),
                 session.status().toLowerCase(),
                 session.createdAt() / 1000,
                 session.updatedAt() / 1000,
@@ -874,7 +875,8 @@ public class ManagedAgentService {
         // that fails them can never execute, so admission must not certify
         // it. Empty bound creation skips that validation by design.
         return "ACTIVE".equals(session.status()) && session.deletedAt() == null
-                && "qwen-code".equals(session.agentId())
+                && ("qwen-code".equals(session.agentId())
+                        || session.agentDefinitionDigest() != null)
                 && WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         session.workspace().getContextConfigRef());
     }

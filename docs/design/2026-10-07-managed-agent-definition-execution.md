@@ -118,13 +118,13 @@ The existing creation transaction gains these steps:
 1. **Resolve the revision.** `qwen-code` keeps its current path. Otherwise:
    - an explicit `agent_revision` reads that row;
    - an omitted one reads the latest row for the agent with
-     `SELECT … FOR SHARE`, in the same transaction as the Session insert, so
+     `SELECT … FOR UPDATE`, in the same transaction as the Session insert, so
      a concurrent update cannot interleave;
    - a missing agent or revision answers `404 agent_not_found`. The create
      route already declares `404`; its description is filled in.
 2. **Compile the execution settings** by the rules in 5.3. Content that
    cannot take effect answers `409 agent_definition_unsupported`, with the
-   field in `details.field`.
+   field named in the error envelope as `error.field`.
 3. **Store** `agent_id`, `agent_revision` (decimal string) and a new column
    `agent_definition_digest CHAR(64) NULL`, and take `approval_mode` and
    `tool_profile` from the compiled settings.

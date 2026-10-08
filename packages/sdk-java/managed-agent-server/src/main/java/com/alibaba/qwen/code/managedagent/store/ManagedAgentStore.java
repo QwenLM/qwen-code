@@ -49,6 +49,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -98,12 +99,22 @@ public class ManagedAgentStore implements AgentStateStore {
         this.lifecycle = lifecycle;
     }
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setManagedAgentDefinitionStore(
+            ManagedAgentDefinitionStore definitions) {
+        this.definitions = definitions;
+    }
+
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final String approvalMode;
     private final CommittedEventPublisher eventPublisher;
     private final ManagedWorkspaceRegistry workspaces;
     private final String agentRevision;
+    private final List<String> definitionToolProfiles;
+    private ManagedAgentDefinitionStore definitions;
+    private static final Pattern DEFINITION_REVISION = Pattern.compile(
+            "^[1-9][0-9]{0,17}$");
     private final boolean workspaceFilesEnabled;
     private final List<ManagedAgentProperties.RuntimeBroker.WorkspaceMount> workspaceMounts;
     private final RowMapper<SessionRecord> sessionMapper = (result, row) ->
@@ -123,7 +134,8 @@ public class ManagedAgentStore implements AgentStateStore {
                     nullableLong(result, "deleted_at"),
                     result.getLong("version"), readBinding(result),
                     result.getString("approval_mode"),
-                    result.getString("tool_profile"));
+                    result.getString("tool_profile"),
+                    result.getString("agent_definition_digest"));
     private final RowMapper<TurnSummary> turnSummaryMapper =
             (result, row) -> new TurnSummary(result.getString("session_id"),
                     result.getString("turn_id"), result.getString("status"),
@@ -229,6 +241,7 @@ public class ManagedAgentStore implements AgentStateStore {
         this.eventPublisher = eventPublisher;
         this.workspaces = workspaces;
         this.agentRevision = properties.getAgentRevision();
+        this.definitionToolProfiles = properties.getDefinitionToolProfiles();
         this.workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
         this.workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
         if (agentRevision == null || agentRevision.isBlank()
@@ -245,11 +258,12 @@ public class ManagedAgentStore implements AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest) {
-        requireAgentRevision(requestedRevision);
+        AgentPin pin = resolveAgentPin(tenantId, agentId, requestedRevision,
+                false);
         requireCreationScope(tenantId, idempotencyKey, false);
         return insertSession(tenantId, operation, idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
-                null, actorId);
+                null, actorId, pin);
     }
 
     @Override
@@ -270,14 +284,16 @@ public class ManagedAgentStore implements AgentStateStore {
             return replayWorkspaceCommand(tenantId, actorId,
                     requestDigest, existing.getFirst());
         }
-        requireAgentRevision(requestedRevision);
+        AgentPin pin = resolveAgentPin(tenantId, agentId, requestedRevision,
+                true);
         requireCreationScope(tenantId, idempotencyKey, true);
         ResolvedBinding workspace = workspaces.resolveForCreation(
                 tenantId, actorId, selection);
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
+        // Admission already proved the agent is qwen-code or a compiled
+        // definition, so only the deployment mounts gate execution here.
         if (!input.isEmpty()
-                && (!"qwen-code".equals(agentId)
-                        || !WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
+                && (!WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
                         || workspaceMounts.stream().noneMatch(mount ->
                                 tenantId.equals(mount.tenantId())
@@ -286,7 +302,7 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         return insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
-                workspace, actorId);
+                workspace, actorId, pin);
     }
 
     @Override
@@ -379,20 +395,61 @@ public class ManagedAgentStore implements AgentStateStore {
         }
     }
 
-    // Called only for a new admission; a retry has already replayed.
-    private void requireAgentRevision(String requested) {
-        if (requested != null && !requested.equals(agentRevision)) {
-            throw new ApiException(HttpStatus.BAD_REQUEST,
-                    "unsupported_feature",
-                    "Only the current agent revision can be selected.");
+    /**
+     * The execution identity a new Session pins (D8b): for the built-in
+     * {@code qwen-code} agent the deployment revision with no definition
+     * digest; for a stored definition the resolved revision, its digest and
+     * the approval mode and tool profile compiled from its content (D8c-1).
+     */
+    private record AgentPin(String revision, String digest,
+            String approvalMode, String toolProfile) {
+    }
+
+    // Called only for a new admission; a retry has already replayed and
+    // never resolves a definition again.
+    private AgentPin resolveAgentPin(String tenantId, String agentId,
+            String requested, boolean workspaceBound) {
+        if ("qwen-code".equals(agentId)) {
+            if (requested != null && !requested.equals(agentRevision)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        "unsupported_feature",
+                        "Only the current agent revision can be selected.");
+            }
+            return new AgentPin(agentRevision, null, approvalMode,
+                    workspaceBound ? "hosted-workspace-files/1" : null);
         }
+        if (definitions == null) {
+            throw ManagedAgentDefinitionStore.notFound();
+        }
+        ManagedAgentDefinitionStore.DefinitionRevision revision =
+                resolveDefinitionRevision(tenantId, agentId, requested);
+        AgentDefinitionCompiler.Compiled compiled =
+                AgentDefinitionCompiler.compile(revision.definitionJson(),
+                        workspaceBound, approvalMode, definitionToolProfiles);
+        return new AgentPin(Long.toString(revision.revision()),
+                revision.digest(), compiled.approvalMode(),
+                compiled.toolProfile());
+    }
+
+    private ManagedAgentDefinitionStore.DefinitionRevision resolveDefinitionRevision(
+            String tenantId, String agentId, String requested) {
+        if (requested == null) {
+            return definitions.latestForUpdate(tenantId, agentId)
+                    .orElseThrow(ManagedAgentDefinitionStore::notFound);
+        }
+        if (!DEFINITION_REVISION.matcher(requested).matches()) {
+            throw ManagedAgentDefinitionStore.notFound();
+        }
+        return definitions
+                .find(tenantId, agentId, Long.parseLong(requested))
+                .orElseThrow(ManagedAgentDefinitionStore::notFound);
     }
 
     private Admission insertSession(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String agentId,
             String title, List<Map<String, Object>> input,
             String payloadDigest, ResolvedBinding resolved,
-            String actorId) {
+            String actorId, AgentPin pin) {
         ContextBinding workspace = resolved == null ? null
                 : resolved.binding();
         long now = clock.millis();
@@ -401,16 +458,18 @@ public class ManagedAgentStore implements AgentStateStore {
         String promptId = input.isEmpty() ? null
                 : UUID.randomUUID().toString();
         jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
-                        + " session_id, agent_id, agent_revision, title,"
+                        + " session_id, agent_id, agent_revision,"
+                        + " agent_definition_digest, title,"
                         + " status, created_at, updated_at, workspace_id,"
                         + " workspace_generation, workspace_storage_id,"
                         + " cwd_relative, context_config_ref,"
                         + " context_revision, workspace_config_ref,"
                         + " workspace_policy_ref, tool_profile,"
                         + " creator_actor_key) VALUES"
-                        + " (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?,"
+                        + " (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?,"
                         + " ?, ?, ?, ?, ?)",
-                tenantId, sessionId, agentId, agentRevision, title, now, now,
+                tenantId, sessionId, agentId, pin.revision(), pin.digest(),
+                title, now, now,
                 workspace == null ? null : workspace.getWorkspaceId(),
                 workspace == null ? null : workspace.getWorkspaceGeneration(),
                 workspace == null ? null : workspace.getStorageId(),
@@ -419,7 +478,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 workspace == null ? null : workspace.getContextRevision(),
                 resolved == null ? null : resolved.configRef(),
                 resolved == null ? null : resolved.policyRef(),
-                workspace == null ? null : "hosted-workspace-files/1",
+                workspace == null ? null : pin.toolProfile(),
                 actorId == null ? null
                         : ManagedWorkspaceRegistry.actorKey(tenantId,
                                 actorId));
@@ -444,11 +503,13 @@ public class ManagedAgentStore implements AgentStateStore {
                             actorId), idempotencyKey, requestDigest,
                     sessionId, turnId, now);
         }
-        if (workspace != null) {
+        // A definition pin applies to unbound Sessions too; qwen-code keeps
+        // the column default unless bound.
+        if (workspace != null || pin.digest() != null) {
             jdbc.update(
                     "UPDATE managed_agent_session SET approval_mode = ? WHERE tenant_id = ? AND"
                             + " session_id = ?",
-                    approvalMode,
+                    pin.approvalMode(),
                     tenantId,
                     sessionId);
         }

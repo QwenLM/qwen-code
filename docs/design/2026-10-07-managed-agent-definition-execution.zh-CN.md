@@ -99,12 +99,12 @@ D8a 在 `/v1/agents` 下存储不可变的定义 revision，但没有任何会�
 
 1. **解析 revision。** `qwen-code` 保持现有路径。其他情况：
    - 显式给出 `agent_revision` 时读取该行；
-   - 省略时在会话插入的同一事务中，用 `SELECT … FOR SHARE` 读取该 agent 的
+   - 省略时在会话插入的同一事务中，用 `SELECT … FOR UPDATE` 锁定读取该 agent 的
      最新一行，避免与并发更新交错；
    - agent 或 revision 不存在时返回 `404 agent_not_found`。创建路由已声明
      `404`，补上其描述。
 2. **按 5.3 的规则编译执行配置。** 无法生效的内容返回
-   `409 agent_definition_unsupported`，字段写在 `details.field` 中。
+   `409 agent_definition_unsupported`，字段写在错误信封的 `error.field` 中。
 3. **写入** `agent_id`、`agent_revision`（十进制字符串）和新增列
    `agent_definition_digest CHAR(64) NULL`，`approval_mode` 与 `tool_profile`
    取编译结果。

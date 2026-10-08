@@ -21,6 +21,10 @@ public class ManagedAgentProperties {
     private final Auth auth = new Auth();
     private final InternalServer internalServer = new InternalServer();
     private String agentRevision = "1";
+    // The tool profiles a stored AgentDefinition may select (D8c-1).
+    // hosted-workspace-files/2 joins only after the #13166 glob rollout.
+    private List<String> definitionToolProfiles =
+            List.of("hosted-workspace-files/1");
     private String trustedActorHeader = "";
 
     public Harness getHarness() {
@@ -65,6 +69,13 @@ public class ManagedAgentProperties {
 
     public void setAgentRevision(String agentRevision) {
         this.agentRevision = agentRevision;
+    }
+    public List<String> getDefinitionToolProfiles() {
+        return definitionToolProfiles;
+    }
+    public void setDefinitionToolProfiles(
+            List<String> definitionToolProfiles) {
+        this.definitionToolProfiles = definitionToolProfiles;
     }
 
     public String getTrustedActorHeader() {

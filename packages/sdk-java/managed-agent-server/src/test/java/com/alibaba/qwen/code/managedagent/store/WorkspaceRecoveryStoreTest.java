@@ -134,6 +134,98 @@ class WorkspaceRecoveryStoreTest {
     }
 
     @Test
+    void capturesAndVerifiesSessionsThatPinStoredDefinitions() throws Exception {
+        String builtin = session("workspace-a");
+        // A stored definition is compiled and pinned at admission (D8c-1);
+        // the storage also holds a deleted Session pinned to it.
+        String agentId = "agent_" + "b".repeat(32);
+        String definitionDigest = "c".repeat(64);
+        String definitionJson = "{\"model\":{},\"instructions\":\"\","
+                + "\"tools\":[{\"type\":\"hosted_profile\","
+                + "\"profile\":\"hosted-workspace-files/1\"}],"
+                + "\"permission_policy\":{\"approval_mode\":\"default\"}}";
+        sessions.setManagedAgentDefinitionStore(
+                new ManagedAgentDefinitionStore(jdbc));
+        String pinned = new TransactionTemplate(manager).execute(status -> {
+            new ManagedAgentDefinitionStore(jdbc).create("tenant", "def",
+                    "def-digest", agentId, definitionDigest, definitionJson,
+                    1L);
+            return sessions.insertWorkspaceSessionCommand("tenant", "actor",
+                    UUID.randomUUID().toString(),
+                    "sha256:" + "a".repeat(64), agentId, null, null, List.of(),
+                    null, new WorkspaceSelection("workspace-b", "."))
+                    .sessionId();
+        });
+        String deleted = new TransactionTemplate(manager).execute(status ->
+                sessions.insertWorkspaceSessionCommand("tenant", "actor",
+                        UUID.randomUUID().toString(),
+                        "sha256:" + "a".repeat(64), agentId, "1", null,
+                        List.of(), null,
+                        new WorkspaceSelection("workspace-b", "."))
+                        .sessionId());
+        head(deleted);
+        retireSession(deleted);
+        JsonNode sources = call(capture(), "sessions").path("sessions");
+        assertThat(sources).hasSize(3);
+        JsonNode pinnedSource = null;
+        JsonNode builtinSource = null;
+        JsonNode deletedSource = null;
+        for (JsonNode entry : sources) {
+            JsonNode source = entry.path("source");
+            String id = source.path("sessionId").asText();
+            if (id.equals(pinned)) {
+                pinnedSource = source;
+            } else if (id.equals(builtin)) {
+                builtinSource = source;
+            } else if (id.equals(deleted)) {
+                deletedSource = source;
+            }
+        }
+        assertThat(pinnedSource).isNotNull();
+        assertThat(deletedSource).isNotNull();
+        for (JsonNode source : List.of(pinnedSource, deletedSource)) {
+            assertThat(source.path("agentRevision").asText()).isEqualTo("1");
+            assertThat(source.path("agentDefinitionDigest").asText())
+                    .isEqualTo(definitionDigest);
+        }
+        assertThat(builtinSource.path("agentRevision").asText())
+                .isEqualTo("1");
+        assertThat(builtinSource.path("agentDefinitionDigest").isNull())
+                .isTrue();
+        // Capture and verify still pass on the mixed storage.
+        var capture = capture();
+        ObjectNode asset = object().put("key", "b".repeat(64));
+        asset.set("metadata", object().put("type", "entry").put("path",
+                "workspace").put("entryType", "directory").put("mode", 493));
+        capture.call("asset", asset);
+        for (String id : List.of(builtin, pinned, deleted)) {
+            capture.call("sessionComplete", object().put("sessionId", id)
+                    .set("summary", object()));
+        }
+        Path manifest = Files.createDirectories(bundle
+                .resolve(".w1-recovery")).resolve("manifest.json");
+        Files.writeString(manifest, manifest(capture).toString());
+        ObjectNode finish = object().put("manifestDigest",
+                WorkspaceRecoveryStore.hash(Files.readAllBytes(manifest)));
+        finish.set("result", object().put("contentVerified", true)
+                .put("activation", false));
+        assertThat(capture.call("finish", finish).path("result")
+                .path("authorityCompatible").asBoolean()).isTrue();
+        String original = request.path("operationId").asText();
+        request.put("captureOperationId", original).put("operationId",
+                UUID.randomUUID().toString());
+        Files.move(root, temporary.resolve("lost-source"));
+        var verify = store("verify");
+        for (String id : List.of(builtin, pinned, deleted)) {
+            verify.call("sessionComplete", object().put("sessionId", id)
+                    .set("summary", object()));
+        }
+        verify.call("asset", asset);
+        assertThat(verify.call("finish", finish).path("state").asText())
+                .isEqualTo("VERIFIED");
+    }
+
+    @Test
     void leaseFingerprintKeepsWallClockPrecisionAcrossConnectionTimeZones() {
         String session = session("workspace-a");
         head(session);

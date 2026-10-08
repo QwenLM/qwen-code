@@ -644,7 +644,9 @@ class HostedPublicWorkspaceIT {
                 .path("error").path("code").asText()).isEqualTo("unsupported_feature");
         Map<String, Object> unsupportedAgent = new java.util.LinkedHashMap<>(denied);
         unsupportedAgent.put("agent_id", "another-agent");
-        assertUnavailable(request("POST", "/v1/agents/sessions", unsupportedAgent, "unsupported-agent", "actor", 409));
+        // D8b: only qwen-code or a stored definition's agent may be admitted.
+        assertThat(request("POST", "/v1/agents/sessions", unsupportedAgent, "unsupported-agent", "actor", 404)
+                .path("error").path("code").asText()).isEqualTo("agent_not_found");
         Map<String, Object> unknown = new java.util.LinkedHashMap<>(denied);
         unknown.put("workspace", Map.of("workspace_id", "unknown"));
         request("POST", "/v1/agents/sessions", unknown, "unknown", "actor", 404);
