@@ -775,7 +775,7 @@ export function computeResumedPromptCountSeed(
       m.subtype !== 'mid_turn_user_message' &&
       m.subtype !== 'realtime_message',
   ).length;
-  if (userTurnCount === 0) {
+  if (records.length === 0) {
     return 0;
   }
   return Math.max(

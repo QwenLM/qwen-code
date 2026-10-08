@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ChatRecord } from './chatRecordingService.js';
+import type {
+  ChatRecord,
+  FileHistorySnapshotRecordPayload,
+} from './chatRecordingService.js';
 
 export interface SessionTurnState {
   initialTurn: number;
@@ -119,6 +122,18 @@ function getRecordPromptIds(record: ChatRecord): string[] {
   if (typeof recordPromptId === 'string') promptIds.push(recordPromptId);
   const telemetryPromptId = readTelemetryPromptId(record.systemPayload);
   if (telemetryPromptId) promptIds.push(telemetryPromptId);
+  if (record.type === 'system' && record.subtype === 'file_history_snapshot') {
+    const snapshots = (
+      record.systemPayload as FileHistorySnapshotRecordPayload | undefined
+    )?.snapshots;
+    if (Array.isArray(snapshots)) {
+      for (const snapshot of snapshots) {
+        if (typeof snapshot?.promptId === 'string') {
+          promptIds.push(snapshot.promptId);
+        }
+      }
+    }
+  }
   return promptIds;
 }
 
