@@ -1433,10 +1433,14 @@ const EARLIER_OUTPUT_OMITTED = '[earlier output omitted]\n';
  * the #13597 shape again. Trim the text from its front instead, keeping its
  * tail the way the scheduler's own tail-keep truncation would.
  *
- * Fitting the budget here does mean the scheduler never spills this result:
- * its `truncateToolOutput` returns early once `content.length <= threshold`, so
- * no `outputFile` is written for the trimmed head. `transcriptPath` is what
- * keeps that head reachable — without it the marker would be the only trace.
+ * Fitting the budget here does mean the per-tool truncation pass leaves this
+ * result alone: `truncateToolOutput` returns early once
+ * `content.length <= threshold`. The scheduler's generic single-result gate
+ * runs *earlier* though, at a ceiling below `AGENT_TOOL_MAX_OUTPUT_CHARS`, so a
+ * caller has to return this body marked `outputBudgetApplied` or that gate
+ * replaces the whole composition with a `<persisted-output>` stub and the tail
+ * kept below never reaches the model. `transcriptPath` is what keeps the
+ * trimmed head reachable — without it the marker would be the only trace.
  */
 function composeIncompleteResult(
   reason: string,
@@ -1452,12 +1456,14 @@ function composeIncompleteResult(
   const marker = transcriptPath
     ? `${EARLIER_OUTPUT_OMITTED}The full output is in ${transcriptPath}. Read it with the ${ToolNames.READ_FILE} tool.\n`
     : EARLIER_OUTPUT_OMITTED;
-  return (
-    prefix +
-    marker +
-    text.slice(text.length - Math.max(0, room - marker.length)) +
-    suffix
-  );
+  // The cut index is a length, not a content boundary, and the tail is the one
+  // field this helper exists to hand over intact: snap it off a high surrogate
+  // rather than starting it with an unpaired one.
+  const start = text.length - Math.max(0, room - marker.length);
+  const before = text.charCodeAt(start - 1);
+  const safeStart =
+    start > 0 && before >= 0xd800 && before <= 0xdbff ? start + 1 : start;
+  return prefix + marker + text.slice(safeStart) + suffix;
 }
 
 /**
@@ -4826,6 +4832,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               stopHookSuffix + wtSuffix,
               fgJsonlPath,
             ),
+            outputBudgetApplied: true,
             returnDisplay: this.currentDisplay!,
           };
         }
@@ -4847,19 +4854,22 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // scheduler strips (#13597). The empty-partial placeholder goes with
           // it: announcing 'Partial result follows:' in front of a framework
           // string promises agent output where there is none, which is what the
-          // fall-through already refuses to do.
+          // fall-through already refuses to do. The header is decided off the
+          // agent's own text and the warning rides the suffix, exactly as those
+          // two returns do.
           return {
             llmContent: [
               {
                 text: composeIncompleteResult(
                   'Agent was cancelled by the user.',
                   'Partial result follows:',
-                  finalText,
-                  wtSuffix,
+                  modelVisibleText,
+                  stopHookSuffix + wtSuffix,
                   fgJsonlPath,
                 ),
               },
             ],
+            outputBudgetApplied: true,
             returnDisplay: this.currentDisplay!,
           };
         }
@@ -4900,6 +4910,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               ),
             },
           ],
+          outputBudgetApplied: true,
           returnDisplay: this.currentDisplay!,
         };
       } finally {

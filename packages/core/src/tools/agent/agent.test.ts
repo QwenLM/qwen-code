@@ -3956,6 +3956,26 @@ describe('AgentTool', () => {
       expect(text).not.toContain('Output captured before the failure follows:');
     });
 
+    it('omits the partial-result header on CANCELLED when the cap warning is the only text', async () => {
+      // CANCELLED was the one incomplete-run return still deciding its header
+      // off framework-appended text, so a cancelled run whose only text is the
+      // cap warning handed the parent a framework sentence under a header
+      // promising the subagent's own output.
+      vi.mocked(config.getStopHookBlockingCap).mockReturnValue(2);
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockResolvedValue(
+        stopOutput('Keep working'),
+      );
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.CANCELLED,
+      );
+      const text = textOf(await runFg());
+      expect(text).toContain(
+        'SubagentStop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+      );
+      expect(text).not.toContain('Partial result follows:');
+    });
+
     it('should allow stop when SubagentStop hook fails', async () => {
       vi.mocked(mockHookSystem.fireSubagentStopEvent).mockRejectedValue(
         new Error('Stop hook failed'),
@@ -5740,17 +5760,43 @@ describe('AgentTool', () => {
         vi.mocked(mockAgent.getFinalText).mockReturnValue(partial);
         vi.mocked(mockAgent.getTerminateMode).mockReturnValue(mode);
         vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
-        const text = textOf(await invoke(fg()).execute());
+        const result = await invoke(fg()).execute();
+        const text = textOf(result);
         expect(text.length).toBeLessThanOrEqual(agentTool.maxOutputChars);
         expect(text.startsWith(expectedHead)).toBe(true);
         expectText(text, ['[earlier output omitted]', 'TAIL-MARKER']);
-        // A composition that already fits maxOutputChars never reaches
-        // `truncateAndSaveToFile`, so nothing spills the trimmed head to disk
-        // and no `outputFile` names it. The marker has to carry the one
-        // recovery path that is left: the subagent's JSONL transcript.
+        // A composition can only fit `maxOutputChars` and stay whole if the
+        // producer marks it: the scheduler's generic single-result gate runs
+        // first at a LOWER ceiling (the configured threshold plus headroom) and
+        // otherwise replaces the whole body with a `<persisted-output>` stub,
+        // dropping the tail this composition exists to keep.
+        expect(result.outputBudgetApplied).toBe(true);
+        // The marker has to carry the one recovery path that is left: the
+        // subagent's JSONL transcript.
         expect(text).toMatch(
           /subagents[\\/]test-session-id[\\/]agent-[A-Za-z0-9_-]+\.jsonl/,
         );
+      },
+    );
+
+    it.each([20_000, 19_999])(
+      'foreground TIMEOUT snaps the preserved tail off a split astral character (%i)',
+      async (emojiCount) => {
+        // The tail starts at a length-derived index, so an astral character can
+        // straddle it and leave an unpaired surrogate as the first code unit of
+        // the text this composition exists to hand over. Both parities are
+        // pinned: the parity of the cut index decides whether a given run
+        // straddles it.
+        loadForeground();
+        vi.mocked(mockAgent.getFinalText).mockReturnValue(
+          '\u{1f600}'.repeat(emojiCount),
+        );
+        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+          AgentTerminateMode.TIMEOUT,
+        );
+        vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
+        const text = textOf(await invoke(fg()).execute());
+        expect(text).toBe(text.replace(/\p{Surrogate}/gu, ''));
       },
     );
 
