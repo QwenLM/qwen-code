@@ -595,6 +595,120 @@ describe('ToolApproval accessibility', () => {
     expect(command?.textContent).toBe('ls -la');
   });
 
+  it('neutralises bidi and C0 controls in the rendered command block', () => {
+    // Mirrors what `toManagedPermissionRequest` produces for an exec tool
+    // (`rawInput: tool.args` + `contentIsInput: true`), i.e. the shape from
+    // #13517: the card takes the `isExec && command` branch and renders
+    // `rawInput.command`, so escaping the `content` producer is not enough.
+    const craftedCommand = [
+      'rm -rf /tmp/\u202eppa', // U+202E RIGHT-TO-LEFT OVERRIDE
+      'git push \u2066--force\u2069', // bidi isolates
+      'ls \u001b[31m--all\u001b[0m', // C0 ANSI escape
+    ].join('\n');
+    render(undefined, {
+      ...execRequest,
+      content: [{ type: 'text', text: JSON.stringify({ craftedCommand }) }],
+      contentIsInput: true,
+      rawInput: { command: craftedCommand },
+    });
+    const pre = container!.querySelector('pre')!;
+    const rendered = pre.textContent!;
+    // The invisible code points must not survive into the DOM, while the
+    // command stays legible and multi-line (`\n` is preserved on purpose).
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u2066');
+    expect(rendered).not.toContain('\u2069');
+    expect(rendered).not.toContain('\u001b');
+    expect(rendered).toBe(
+      [
+        'rm -rf /tmp/\\u202eppa',
+        'git push \\u2066--force\\u2069',
+        'ls \\u001b[31m--all\\u001b[0m',
+      ].join('\n'),
+    );
+    // The tooltip must not re-introduce the raw payload either.
+    expect(pre.getAttribute('title')).toBe(rendered);
+  });
+
+  it('neutralises bidi and C0 controls in the model-supplied description text', () => {
+    // `.desc` renders `getDescriptionText`, which returns `rawInput.description`
+    // verbatim and otherwise falls back to `request.title` — on the daemon/ACP
+    // path that title is built from `ShellTool.getDescription()`, i.e. the raw
+    // command. #13566: this sibling of the sanitised command block was still
+    // rendered raw, in its body, in its tooltip and in the `aria-describedby`
+    // target a screen reader reads.
+    const craftedDescription = [
+      'Delete temporary data\u202e', // U+202E RIGHT-TO-LEFT OVERRIDE
+      'ls \u001b[31m--all\u001b[0m\t--color', // C0 ANSI escape, tab kept
+      'rm -rf /tmp/data\u0007', // BEL
+    ].join('\n');
+    render(undefined, {
+      ...execRequest,
+      rawInput: {
+        command: 'rm -rf /tmp/data',
+        description: craftedDescription,
+      },
+    });
+    // `.desc` is a <div>, not a <pre>: reach it through the `aria-describedby`
+    // IDREF that references it, which also asserts the IDREF still resolves.
+    const panel = container!.querySelector('[role="alertdialog"]')!;
+    const descEl = panel
+      .getAttribute('aria-describedby')!
+      .split(' ')
+      .map((id) => document.getElementById(id))
+      .find(
+        (el): el is HTMLElement =>
+          el?.tagName === 'DIV' && el.hasAttribute('title'),
+      )!;
+    expect(descEl).toBeTruthy();
+    const rendered = descEl.textContent!;
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u001b');
+    expect(rendered).not.toContain('\u0007');
+    // `\n` and `\t` stay unescaped (the helper's own pin lives at
+    // toolFormatting.test.ts:51) so a multi-line description stays legible.
+    expect(rendered).toBe(
+      [
+        'Delete temporary data\\u202e',
+        'ls \\u001b[31m--all\\u001b[0m\t--color',
+        'rm -rf /tmp/data\\u0007',
+      ].join('\n'),
+    );
+    expect(descEl.getAttribute('title')).toBe(rendered);
+  });
+
+  it('neutralises bidi and C0 controls in the exec warnings block', () => {
+    // The warnings text is model-influenced: `buildOutsideWorkspaceWarning`
+    // (packages/core/src/utils/shell-utils.ts:2093) interpolates the raw
+    // `directory` argument verbatim, and real text content blocks reach
+    // `contentText` unescaped. #13566: this sibling <pre>, inside the same
+    // `isExec && command` fragment as the sanitised command block, was raw.
+    const craftedDirectory = '/tmp/\u202eevil\u001b[31m\u0007';
+    const warnings = `Runs outside the workspace in ${craftedDirectory}`;
+    render(undefined, {
+      ...execRequest,
+      content: [{ type: 'text', text: warnings }],
+      rawInput: { command: 'ls -la', description: 'List files' },
+    });
+    const warningPre = Array.from(container!.querySelectorAll('pre')).find(
+      (el) => el.textContent!.includes('Runs outside the workspace'),
+    )!;
+    expect(warningPre).toBeTruthy();
+    const rendered = warningPre.textContent!;
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).not.toContain('\u001b');
+    expect(rendered).not.toContain('\u0007');
+    expect(rendered).toBe(
+      'Runs outside the workspace in /tmp/\\u202eevil\\u001b[31m\\u0007',
+    );
+    expect(warningPre.getAttribute('title')).toBe(rendered);
+    // The command block next to it keeps its own, separate payload intact.
+    const commandPre = Array.from(container!.querySelectorAll('pre')).find(
+      (el) => el.textContent === 'ls -la',
+    )!;
+    expect(commandPre).toBeTruthy();
+  });
+
   it('renders exec warnings alongside the command block', () => {
     const adapted = extractPendingPermission([
       {

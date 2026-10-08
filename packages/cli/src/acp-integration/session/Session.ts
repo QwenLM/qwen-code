@@ -117,6 +117,7 @@ import {
   ToolErrorType,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  describeBridgedArgumentError,
   resolveDeferredToolCall,
   CreateSubSessionTool,
   fireNotificationHook,
@@ -305,6 +306,7 @@ import {
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  IMAGE_ONLY_PROMPT_TEXT,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
@@ -787,6 +789,7 @@ async function claimGoalTurn(
 type PendingToolResultRecord = {
   ordinal: number;
   sequence: number;
+  subtype?: 'code_mode_tool_result';
   callId: string;
   toolName: string;
   toolArgs: Record<string, unknown>;
@@ -812,7 +815,10 @@ type PendingToolResultRecord = {
 
 type QueueToolResultRecord = (
   fc: FunctionCall,
-  record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence' | 'toolArgs'>,
+  record: Omit<
+    PendingToolResultRecord,
+    'ordinal' | 'sequence' | 'toolArgs' | 'subtype'
+  >,
 ) => void;
 
 type HistoryMutationRunner = <T>(operation: () => Promise<T>) => Promise<T>;
@@ -858,6 +864,21 @@ type ManagedConversationActivation = {
   promise?: Promise<void>;
   error?: unknown;
 };
+
+/** Whether an activation failure is the liftable engine-quarantine refusal. */
+function isManagedEngineQuarantineRefusal(error: unknown): boolean {
+  // typeof null === 'object': a peer that serializes an absent `data` as
+  // null must read as no refusal at all, never throw inside the catch.
+  const data =
+    typeof error === 'object' && error !== null
+      ? (error as { data?: unknown }).data
+      : undefined;
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    (data as { errorKind?: unknown }).errorKind === 'managed_engine_quarantined'
+  );
+}
 
 function sameManagedConversationExpectation(
   left: BridgeConversationDirectoryExpectation,
@@ -1320,7 +1341,7 @@ function extractTurnPromptText(content: ContentBlock[]): string {
     if (block.type === 'image') hasImage = true;
     if (block.type === 'text' && block.text.length > 0) return block.text;
   }
-  return hasImage ? '[image]' : '';
+  return hasImage ? IMAGE_ONLY_PROMPT_TEXT : '';
 }
 
 interface InFlightTurnRecording {
@@ -4167,8 +4188,18 @@ export class Session implements SessionContext {
         activation.state = 'ready';
       })
       .catch((error: unknown) => {
-        activation.state = 'poisoned';
-        activation.error = error;
+        // A quarantined-engine refusal lifts once the stop is proven:
+        // poisoning the activation would outlive it, so the next commit
+        // retries. Any terminal refusal (the host is shutting down, the
+        // binding is broken) stays poisoned.
+        if (isManagedEngineQuarantineRefusal(error)) {
+          activation.state = 'pending';
+          activation.error = undefined;
+          activation.promise = undefined;
+        } else {
+          activation.state = 'poisoned';
+          activation.error = error;
+        }
         throw error;
       });
     activation.promise = promise;
@@ -5605,6 +5636,9 @@ export class Session implements SessionContext {
         this.config.getGoalProposalHostSupported() &&
         this.config.setGoalProposalTurnKey(undefined)
       ) {
+        this.config
+          .getToolRegistry()
+          .unrevealDeferredTool(ToolNames.PROPOSE_GOAL);
         try {
           await this.config.getLlmClient().setTools();
         } catch (error) {
@@ -6085,6 +6119,12 @@ export class Session implements SessionContext {
             responseCapture.goalProposalTurn?.turnKey,
           )
         ) {
+          // propose_goal is natively deferred: the key arms only inside a
+          // prompt, so without the reveal it would be filtered out of every
+          // announcement and never be discoverable in ACP/daemon sessions.
+          this.config
+            .getToolRegistry()
+            .revealDeferredTool(ToolNames.PROPOSE_GOAL);
           await this.config.getLlmClient().setTools();
         }
         const daemonPromptId = getInvocationContext()?.promptId;
@@ -9230,11 +9270,17 @@ export class Session implements SessionContext {
     // returned (#10953): real work advanced while the parent earned a
     // single tool turn, so the turn budget cannot come due on its own.
     // Force the reminder exactly where the progress information arrives.
-    const carriesAgentToolResult = toolRun.parts.some(
-      (part) =>
-        canonicalToolName(part.functionResponse?.name ?? '') ===
-        ToolNames.AGENT,
-    );
+    const carriesAgentToolResult =
+      toolRun.parts.some(
+        (part) =>
+          canonicalToolName(part.functionResponse?.name ?? '') ===
+          ToolNames.AGENT,
+      ) ||
+      toolRun.repeatedToolFailureBatch?.observations.some(
+        (observation) =>
+          canonicalToolName(observation.policyToolName ?? '') ===
+            ToolNames.AGENT && observation.executionStatus !== 'not_started',
+      );
     const activeTodoReminder = carriesAgentToolResult
       ? this.config.takeActiveTodoReminder(promptId, true)
       : this.config.takeActiveTodoReminder(promptId);
@@ -12596,6 +12642,10 @@ export class Session implements SessionContext {
       }
       target.push({
         ...record,
+        // Calls outside the model's batch are nested Code Mode originals.
+        ...(ordinal === -1
+          ? { subtype: 'code_mode_tool_result' as const }
+          : {}),
         toolArgs: (fc.args ?? {}) as Record<string, unknown>,
         ordinal: Math.max(0, ordinal),
         sequence: toolResultRecordSequence++,
@@ -12654,7 +12704,11 @@ export class Session implements SessionContext {
         const goalProvenance = ambientGoalToolResultProvenance(
           record.toolName,
           record.toolArgs,
+          finalized[index].responseParts,
         );
+        const options = record.subtype
+          ? { ...goalProvenance, subtype: record.subtype }
+          : goalProvenance;
         this.config.getChatRecordingService()?.recordToolResult(
           finalized[index].responseParts,
           {
@@ -12662,12 +12716,33 @@ export class Session implements SessionContext {
             persistedOutputFiles: finalized[index].persistedOutputFiles,
             artifacts: finalized[index].artifacts,
           },
-          // Passed only inside a Goal turn: outside one this call keeps its
-          // former two-argument shape, so nothing about ordinary recording
-          // changes.
-          ...(goalProvenance ? ([goalProvenance] as const) : ([] as const)),
+          ...(options ? ([options] as const) : ([] as const)),
         );
       });
+      // A Managed session's Runtime batch closes in order: the recorded
+      // results land first, then the settled receipts count as consumed and
+      // the checkpoint continuation settles. The model's next request leaves
+      // only after these commits. Test doubles without the outcome writer
+      // keep the Legacy shape.
+      const outcomes = this.config.getManagedRuntimeOutcomes?.();
+      if (outcomes !== undefined) {
+        // `ChatRecordingService` latches a write failure permanently, so a
+        // failed flush re-throws from then on (see the Goal turn flush
+        // above). Degrade like the fire-and-forget recorder does, and skip
+        // the batch close: the records never landed, and the next
+        // admission's leftover-batch repair closes it instead.
+        try {
+          await this.config.getChatRecordingService()?.flush();
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to flush Managed tool batch: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          return finalized;
+        }
+        await outcomes.finalizeBatch();
+      }
       return finalized;
     };
     const finalizeNestedToolResult = async (
@@ -12950,7 +13025,26 @@ export class Session implements SessionContext {
       // Canonical names match core's isToolCallConcurrencySafe predicate,
       // where `task` is a live alias of the agent tool; concurrent batches
       // are therefore agent-only.
-      const isAgent = canonicalToolName(fc.name ?? '') === ToolNames.AGENT;
+      let executionToolName = canonicalToolName(fc.name ?? '');
+      // Skip the awaited bridge resolution once the turn is cancelled: the
+      // execution path bails on the same signal before resolving, so work
+      // spent here would be discarded anyway.
+      if (executionToolName === ToolNames.TOOL_CALL && !abortSignal.aborted) {
+        const pm = this.config.getPermissionManager?.();
+        const bridgeEnabled =
+          !pm ||
+          (await pm.isToolEnabled(ToolNames.TOOL_CALL).catch(() => false));
+        if (bridgeEnabled) {
+          const resolution = await resolveDeferredToolCall(
+            this.config.getToolRegistry(),
+            fc.args ?? {},
+            { maxSubagentDepth: this.config.getMaxSubagentDepth() },
+          );
+          if ('tool' in resolution)
+            executionToolName = canonicalToolName(resolution.tool.name);
+        }
+      }
+      const isAgent = executionToolName === ToolNames.AGENT;
       const last = batches[batches.length - 1];
       if (isAgent && last?.kind === 'execute' && last.concurrent) {
         last.calls.push(fc);
@@ -13557,11 +13651,13 @@ export class Session implements SessionContext {
     ) => {
       const durationMs = Date.now() - startTime;
       const modelFacingError =
-        status === 'cancelled' && modelFacingToolName === ToolNames.TOOL_CALL
+        status === 'cancelled' &&
+        modelFacingToolName === ToolNames.TOOL_CALL &&
+        executionStatus === 'not_started'
           ? `${DEFERRED_TOOL_CALL_CANCELLATION_PREFIX}${error.message}`
           : status === 'error' &&
               modelFacingToolName === ToolNames.TOOL_CALL &&
-              toolName === ToolNames.TOOL_CALL &&
+              executionStatus === 'not_started' &&
               !error.message.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX)
             ? `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${error.message}`
             : error.message;
@@ -13773,6 +13869,7 @@ export class Session implements SessionContext {
     }
 
     let toolName = fc.name;
+    let bridgedThroughToolCall = false;
     if (
       !appExecution &&
       this.config.getToolMode?.() === ToolMode.CodeModeOnly &&
@@ -13847,6 +13944,7 @@ export class Session implements SessionContext {
       toolName = resolution.tool.name;
       args = resolution.arguments;
       tool = resolution.tool;
+      bridgedThroughToolCall = true;
     }
 
     if (!tool) {
@@ -13929,7 +14027,22 @@ export class Session implements SessionContext {
           isTrustedLiveSpeakToUserTool;
         const toolEnabled =
           pm && !isTrustedLiveTool
-            ? await pm.isToolEnabled(policyToolName)
+            ? await pm.isToolEnabled(
+                policyToolName,
+                // Mirror the scheduler's L1 gate: a legacy-spelled MCP deny
+                // can only name the registered tool through its advertised
+                // aliases (#10199), and the server boundary only comes from
+                // the producer's own identity (R4-2).
+                tool instanceof DiscoveredMCPTool
+                  ? tool.permissionAliases
+                  : undefined,
+                tool instanceof DiscoveredMCPTool
+                  ? {
+                      serverName: tool.serverName,
+                      serverToolName: tool.serverToolName,
+                    }
+                  : undefined,
+              )
             : true;
         const enablementCancellation = cancelBeforeExecutionIfAborted(toolName);
         if (enablementCancellation) return enablementCancellation;
@@ -14317,6 +14430,7 @@ export class Session implements SessionContext {
                     toolParams,
                     this.config.getTargetDir(),
                     invocation.permissionAliases,
+                    invocation.mcpIdentity,
                   ),
                   requiresUserInteraction: false,
                   denyMessage: undefined,
@@ -16132,7 +16246,15 @@ export class Session implements SessionContext {
         } catch (e) {
           // No failure to report: see the outer catch.
           if (e instanceof ManagedRuntimeOutcomeUnknownError) throw e;
-          const error = e instanceof Error ? e : new Error(String(e));
+          const caught = e instanceof Error ? e : new Error(String(e));
+          // Same labelling as the scheduler: a target reached through
+          // tool_call names itself when its own build() rejects the arguments.
+          const error =
+            bridgedThroughToolCall && !toolBuildSucceeded
+              ? new Error(
+                  describeBridgedArgumentError(toolName, caught.message),
+                )
+              : caught;
           const hooksEnabledForError = !this.config.getDisableAllHooks?.();
           const messageBusForError = this.config.getMessageBus?.();
           const executionTimeoutException =

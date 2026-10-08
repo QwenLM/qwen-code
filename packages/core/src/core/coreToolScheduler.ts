@@ -78,6 +78,7 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import {
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+  describeBridgedArgumentError,
   resolveDeferredToolCall,
 } from '../tools/tool-call.js';
 import type {
@@ -1156,24 +1157,32 @@ const createErrorResponse = (
   executionStatus: ToolExecutionStatus,
   artifacts?: ToolArtifact[],
   resultDisplay?: ToolResultDisplay,
-): CoreToolCallResponseInfo => ({
-  callId: request.callId,
-  error,
-  responseParts: [
-    {
-      functionResponse: {
-        id: request.callId,
-        name: getModelFacingToolName(request),
-        response: { error: error.message },
+): CoreToolCallResponseInfo => {
+  const errorMessage =
+    getModelFacingToolName(request) === ToolNames.TOOL_CALL &&
+    executionStatus === 'not_started' &&
+    !error.message.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX)
+      ? `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${error.message}`
+      : error.message;
+  return {
+    callId: request.callId,
+    error,
+    responseParts: [
+      {
+        functionResponse: {
+          id: request.callId,
+          name: getModelFacingToolName(request),
+          response: { error: errorMessage },
+        },
       },
-    },
-  ],
-  resultDisplay: resultDisplay ?? error.message,
-  errorType,
-  executionStatus,
-  contentLength: error.message.length,
-  ...(artifacts && artifacts.length > 0 ? { artifacts } : {}),
-});
+    ],
+    resultDisplay: resultDisplay ?? error.message,
+    errorType,
+    executionStatus,
+    contentLength: errorMessage.length,
+    ...(artifacts && artifacts.length > 0 ? { artifacts } : {}),
+  };
+};
 
 const createCancelledResponse = (
   request: ToolCallRequestInfo,
@@ -1186,7 +1195,8 @@ const createCancelledResponse = (
   visionBridgeNotice?: string,
 ): CoreToolCallResponseInfo => {
   const cancellationPrefix =
-    getModelFacingToolName(request) === ToolNames.TOOL_CALL
+    getModelFacingToolName(request) === ToolNames.TOOL_CALL &&
+    executionStatus === 'not_started'
       ? DEFERRED_TOOL_CALL_CANCELLATION_PREFIX
       : '';
   const errorMessage = `${cancellationPrefix}[Operation Cancelled] Reason: ${reason}`;
@@ -2171,7 +2181,6 @@ export class CoreToolScheduler {
 
           const preservedResultDisplay =
             this.compactResultDisplayForInteractiveHistory(resultDisplay);
-          const errorMessage = `[Operation Cancelled] Reason: ${auxiliaryData}`;
           const response: CoreToolCallResponseInfo = isToolCallResponseInfo(
             auxiliaryData,
           )
@@ -2185,23 +2194,12 @@ export class CoreToolScheduler {
                   auxiliaryData.resultDisplay ?? preservedResultDisplay,
               }
             : {
-                callId: currentCall.request.callId,
-                responseParts: [
-                  {
-                    functionResponse: {
-                      id: currentCall.request.callId,
-                      name: getModelFacingToolName(currentCall.request),
-                      response: {
-                        error: errorMessage,
-                      },
-                    },
-                  },
-                ],
+                ...createCancelledResponse(
+                  currentCall.request,
+                  String(auxiliaryData),
+                  executionStatus ?? 'not_started',
+                ),
                 resultDisplay: preservedResultDisplay,
-                error: undefined,
-                errorType: undefined,
-                executionStatus: executionStatus ?? 'not_started',
-                contentLength: errorMessage.length,
               };
           return {
             request: currentCall.request,
@@ -3159,13 +3157,21 @@ export class CoreToolScheduler {
           // Check if the tool is excluded due to permissions/environment restrictions
           // This check should happen before registry lookup to provide a clear permission error
           const pm = this.config.getPermissionManager?.();
+          const toolAliases = this.config
+            .getToolRegistry?.()
+            ?.getPermissionAliases?.(canonicalName);
+          const mcpIdentity = this.config
+            .getToolRegistry?.()
+            ?.getMcpToolIdentity?.(canonicalName);
           const permissionEnabled = pm
-            ? await pm.isToolEnabled(canonicalName)
+            ? await pm.isToolEnabled(canonicalName, toolAliases, mcpIdentity)
             : true;
           if (recordPrevalidationCancellation()) continue;
           if (pm && !permissionEnabled) {
             const matchingRule = pm.findMatchingDenyRule({
               toolName: canonicalName,
+              toolAliases,
+              mcpIdentity,
             });
             let permissionErrorMessage: string;
             if (matchingRule) {
@@ -3360,6 +3366,15 @@ export class CoreToolScheduler {
           );
           if (recordPrevalidationCancellation()) continue;
           if (invocationOrError instanceof Error) {
+            // A target reached through tool_call reports its own validation
+            // error; name it so the model does not blame the envelope.
+            const targetMessage =
+              reqInfo.modelFacingName !== undefined
+                ? describeBridgedArgumentError(
+                    reqInfo.name,
+                    invocationOrError.message,
+                  )
+                : invocationOrError.message;
             // Attach guidance that matches the actual cause. Both flags mean
             // the arguments arrived incomplete; only the first means the
             // output token limit did it, and claiming max_tokens when the
@@ -3371,8 +3386,10 @@ export class CoreToolScheduler {
                 ? INCOMPLETE_ARGS_PARAM_GUIDANCE
                 : undefined;
             const displayError = paramGuidance
-              ? new Error(`${invocationOrError.message} ${paramGuidance}`)
-              : invocationOrError;
+              ? new Error(`${targetMessage} ${paramGuidance}`)
+              : reqInfo.modelFacingName !== undefined
+                ? new Error(targetMessage)
+                : invocationOrError;
 
             // Track validation retry for loop detection. Counts accumulate per
             // (tool, error message) pair so a different validation mistake on
@@ -3384,9 +3401,7 @@ export class CoreToolScheduler {
 
             const finalError =
               count >= VALIDATION_RETRY_LOOP_THRESHOLD
-                ? new Error(
-                    `${invocationOrError.message}${RETRY_LOOP_STOP_DIRECTIVE}`,
-                  )
+                ? new Error(`${targetMessage}${RETRY_LOOP_STOP_DIRECTIVE}`)
                 : displayError;
 
             newToolCalls.push({
@@ -7638,7 +7653,10 @@ export class CoreToolScheduler {
         error: call.response.error,
         errorType: call.response.errorType,
       };
-      const goalProvenance = goalToolResultProvenance(call.request);
+      const goalProvenance = goalToolResultProvenance(
+        call.request,
+        call.response.responseParts,
+      );
       const options = nested
         ? { ...goalProvenance, subtype: 'code_mode_tool_result' as const }
         : goalProvenance;

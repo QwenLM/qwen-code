@@ -530,7 +530,14 @@ function getHeadlessExecutionRequest(
   }
 
   const targetName = request.args['name'];
-  const targetArgs = request.args['arguments'];
+  let targetArgs = request.args['arguments'];
+  if (typeof targetArgs === 'string') {
+    try {
+      targetArgs = JSON.parse(targetArgs) as unknown;
+    } catch {
+      return request;
+    }
+  }
   if (
     typeof targetName !== 'string' ||
     typeof targetArgs !== 'object' ||
@@ -2439,7 +2446,10 @@ export async function runNonInteractive(
             resolvedResponses[index];
           const finalizedParts = finalized[index].responseParts;
           toolResponseParts.push(...finalizedParts);
-          const goalProvenance = goalToolResultProvenance(executionRequest);
+          const goalProvenance = goalToolResultProvenance(
+            executionRequest,
+            finalizedParts,
+          );
           chatRecordingService?.recordToolResult?.(
             finalizedParts,
             {

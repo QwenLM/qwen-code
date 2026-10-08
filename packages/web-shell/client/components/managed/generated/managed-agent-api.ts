@@ -76,7 +76,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns and cancel its running Turns under the same opt-in, and may rename the Session, while the creator currently holds Workspace read and create grants on a registry row whose state is ACTIVE and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close; cwd operations remain gated. The per-caller workspaceTurns capability on this surface advertises the same rule. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
+        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns and cancel its running Turns under the same opt-in, and may rename the Session, while the creator currently holds Workspace read and create grants on a registry row whose state is ACTIVE and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.32). The per-caller workspaceTurns capability on this surface advertises the same rule. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
         post: operations["webShellCreateSession"];
         delete?: never;
         options?: never;
@@ -127,6 +127,23 @@ export interface paths {
         put?: never;
         /** @description Same authorization, paging, explicit default and pre-Session capability discovery as listWorkspaces, with camelCase fields. Listing errors must not cause silent fallback to a default directory. */
         post: operations["webShellQueryWorkspaces"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/sessions/cwd/change": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description W2, implemented: the camelCase twin of the public changeSessionCwd with the matched refusal order: 400 invalid_request for a missing or malformed field; 401 actor_required without a trusted actor; 400 invalid_idempotency_key for a malformed idempotencyKey — with two documented divergences: a key over 128 characters is refused during request validation with 400 invalid_request before the service's check, and a blank idempotencyKey is refused there too, while the public header answers 400 invalid_idempotency_key for both shapes; 400 invalid_cwd for a lexical violation and 400 invalid_request for an expectedContextRevision below 1; 404 session_not_found for an unknown Session id; 400 unsupported_feature for an unbound Session; 404 session_not_found for an unreadable Session and 403 session_operation_forbidden when a readable actor is not the creator; 409 idempotency_conflict when one key carries different content; 409 workspace_unavailable when execution is disabled; 404 session_not_found for a deleted Session — a completed change under the same key still replays instead; then 409 session_state_conflict, 409 workspace_unavailable from moved Registry facts, 409 context_revision_conflict and 409 session_context_busy exactly like the public surface. Poll the operation or await session.context.changed; do not treat 202 as activation. */
+        post: operations["webShellChangeCwd"];
         delete?: never;
         options?: never;
         head?: never;
@@ -294,6 +311,22 @@ export interface paths {
         get?: never;
         put?: never;
         post: operations["getWebShellTask"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/agent/web-shell/v1/tasks/events/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["queryWebShellTaskEvents"];
         delete?: never;
         options?: never;
         head?: never;
@@ -609,6 +642,8 @@ export interface components {
                 code: string;
                 message: string;
                 request_id: string;
+                /** @description Present on Runtime Broker refusals; true permits retry, false is a definite refusal. Other errors may omit this field. */
+                retryable?: boolean;
                 /** Format: int64 */
                 replay_floor_sequence?: number | null;
                 /** Format: int64 */
@@ -621,6 +656,8 @@ export interface components {
          * @example services/api
          */
         WorkspaceRelativePath: string;
+        /** @enum {string} */
+        CwdOperationStatus: "pending" | "installing" | "completed" | "failed";
         WebShellWorkspaceSelection: {
             workspaceId: string;
             /** @default . */
@@ -663,11 +700,36 @@ export interface components {
                 canCreateSession?: true;
             }) | null;
         };
+        WebShellChangeCwdRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            idempotencyKey: string;
+            cwdRelative: components["schemas"]["WorkspaceRelativePath"];
+            /** Format: int64 */
+            expectedContextRevision: number;
+            requestId?: string | null;
+        };
         WebShellOperationRequest: {
             /** Format: uuid */
             sessionId: string;
             operationId: string;
         };
+        /** @description A completed operation returns the committed target revision. A replay returns the same operation identity and latest durable status, with replayed=true; polling itself is not replay. */
+        WebShellCwdOperation: {
+            operationId: string;
+            /** Format: uuid */
+            sessionId: string;
+            /** @constant */
+            type: "cwd_change";
+            status: components["schemas"]["CwdOperationStatus"];
+            /** Format: int64 */
+            expectedContextRevision: number;
+            targetCwdRelative: components["schemas"]["WorkspaceRelativePath"];
+            /** Format: int64 */
+            resultContextRevision?: number | null;
+            failureCode?: string | null;
+            replayed: boolean;
+        } & (unknown & unknown);
         WebShellAction: components["schemas"]["WebShellPermissionAction"] | components["schemas"]["WebShellQuestionAction"];
         WebShellActionResolution: {
             actionId: string;
@@ -730,7 +792,7 @@ export interface components {
             decisionReceiptId?: string;
             questions: components["schemas"]["WebShellActionQuestion"][];
         } & unknown;
-        /** @description At most one requested Hosted approval per Turn. allow and deny are stable option IDs. Tool arguments are read from Items by function_call_id (functionCallId in WebShell). Public timestamps are milliseconds, as recorded by the Harness. Decision receipts are opaque product IDs. */
+        /** @description At most one requested Hosted approval per Turn. allow and deny are stable option IDs. A requested native-tool Action may carry a bounded input preview when the producer supplies an input reference. Version 1 Actions and unavailable inputs omit it. Public timestamps are milliseconds, as recorded by the Harness. Decision receipts are opaque product IDs. */
         WebShellPermissionAction: {
             actionId: string;
             /** Format: uuid */
@@ -752,6 +814,7 @@ export interface components {
             turnId?: string;
             functionCallId: string;
             toolName: string;
+            inputPreview?: components["schemas"]["WebShellActionInputPreview"];
         } & unknown;
         WebShellPermissionResponse: {
             /** @constant */
@@ -786,7 +849,7 @@ export interface components {
             policyRevision: string;
             answers: components["schemas"]["WebShellQuestionAnswer"][];
         };
-        WebShellOperation: components["schemas"]["WebShellCommandOperation"];
+        WebShellOperation: components["schemas"]["WebShellCwdOperation"] | components["schemas"]["WebShellCommandOperation"];
         WebShellActionQueryRequest: {
             /** Format: uuid */
             sessionId: string;
@@ -865,6 +928,8 @@ export interface components {
              * @description Unix epoch milliseconds.
              */
             settledAt?: number;
+            /** @description Stable task event cursor after the committed tail at view read time. No event can later appear at or before it. Pass it as after to follow only new events; recovery must instead keep its saved event page cursor so it does not skip intervening output. Normal retention may expire it. */
+            outputCursor?: string;
             /** @description The newest Artifacts that hold durable task output, at most 100, oldest first. Entries must not rotate out until older Artifacts can be enumerated and attributed to the task: an evicted Artifact stays readable by id through the Session artifact routes but is no longer discoverable from the task. */
             artifactRefs: string[];
             actionCapabilities: components["schemas"]["TaskActionCapability"][];
@@ -874,6 +939,31 @@ export interface components {
             hasMore: boolean;
             nextCursor?: string | null;
         } & unknown;
+        /** @description One task event: a logical state change, a bounded output chunk, or an Artifact reference. High-volume output goes to Artifacts or bounded chunks in this paged stream, never one Session event per raw line. The closed schema validates the server's own version; clients ignore unknown optional fields and unknown types and checkpoint their cursors. Strict response validation against an older minor version is not supported. Event identity, position, payload and accepted schema/projection versions are immutable across restart, projection rebuild and archival. */
+        WebShellTaskEvent: {
+            schemaVersion: number;
+            projectionVersion: number;
+            taskId: string;
+            /** Format: uuid */
+            sessionId: string;
+            type: components["schemas"]["TaskEventType"];
+            /** @description Stable opaque position after this event and its identity. Atomically apply the event and save this cursor to avoid duplicate application after a crash. It is never reassigned; normal retention can expire it. */
+            cursor: string;
+            /** Format: int64 */
+            createdAt: number;
+            state?: components["schemas"]["TaskState"];
+            runtimeState?: components["schemas"]["TaskRuntimeState"];
+            text?: string;
+            /** @description True when the chunk was cut to the event limit; its full output is already durably readable and discoverable in the task Artifacts when the event is published. */
+            truncated?: boolean;
+            artifactId?: string;
+        } & (unknown & unknown & unknown);
+        WebShellTaskEventPage: {
+            data: components["schemas"]["WebShellTaskEvent"][];
+            hasMore: boolean;
+            /** @description The last returned event cursor, never passing an event held back by limit. On an empty page, the requested position, or the durable retention floor if after was omitted. Required and never null, including when no events remain. No event may later become visible at or before this position. */
+            nextCursor: string;
+        };
         WebShellTaskQueryRequest: {
             /** Format: uuid */
             sessionId: string;
@@ -886,6 +976,17 @@ export interface components {
             sessionId: string;
             taskId: string;
         };
+        WebShellTaskEventQueryRequest: {
+            /** Format: uuid */
+            sessionId: string;
+            taskId: string;
+            /** @description Opaque task event cursor: an event cursor, a page nextCursor or a task outputCursor. Omit it to read from the durable retention floor. Strictly below the floor is 409 cursor_expired; equality is valid, including with no retained events. */
+            after?: string;
+            /** @default 20 */
+            limit?: number;
+        };
+        /** @description state_changed, output or artifact. The set is open: a later minor version may add types and optional fields. Clients ignore unknown optional fields and unknown types, while still checkpointing event cursors; strict validation against an older minor response schema is not supported. Existing fields forbidden for a known type cannot be repurposed on that type. */
+        TaskEventType: string;
         ToolResultPreview: {
             text: string;
             truncated: boolean;
@@ -950,6 +1051,18 @@ export interface components {
             /** @default 20 */
             limit?: number;
         };
+        /** @description Optional preview for requested native read_file, write_file, edit or run_shell_command approvals. Missing or invalid input, and internal MCP inputs, omit the preview. No general secret redaction is performed; visibility follows Session read permissions. Deploy the version 2 Java reader before a Harness producer starts writing version 2 options. */
+        WebShellActionInputPreview: {
+            /** @description Exact prefix of the stored payloadJson ({toolName,input}), at most 8192 UTF-8 bytes ending at a complete code point. Truncated text may not be valid JSON. */
+            text: string;
+            /** @description True when text is shorter than the complete UTF-8 input. */
+            truncated: boolean;
+            /**
+             * Format: int64
+             * @description Byte length of the complete payloadJson in UTF-8, before truncation.
+             */
+            byteLength: number;
+        };
     };
     responses: {
         /** @description The authenticated actor belongs to another tenant than X-Qwen-Tenant-Id or has an invalid ID (actor_scope_mismatch, which the tenant filter answers on every /v1/agents/ and WebShell route), or the resource is readable but the actor lacks this operation or the original Action responder permission. Artifact content reads may also return artifact_content_forbidden when the actor cannot read the original bytes. */
@@ -988,7 +1101,7 @@ export interface components {
                 "application/json": components["schemas"]["ErrorEnvelope"];
             };
         };
-        /** @description State, idempotency, or recovery conflict. */
+        /** @description State, idempotency, or recovery conflict. New Workspace-scoped admissions return workspace_unavailable with retryable=false while an offline Workspace migration holds the storage fence; authorized durable replays retain their existing behavior. */
         Conflict: {
             headers: {
                 [name: string]: unknown;
@@ -999,6 +1112,15 @@ export interface components {
         };
         /** @description Resource absent or outside the caller tenant scope. */
         NotFound: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description Task event cursor is strictly below the task's durable retention floor, which survives an empty retained set; equality is valid. The envelope's replay_floor_sequence and snapshot_through_sequence stay absent because task cursors are opaque. */
+        TaskCursorExpired: {
             headers: {
                 [name: string]: unknown;
             };
@@ -1263,6 +1385,36 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    webShellChangeCwd: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellChangeCwdRequest"];
+            };
+        };
+        responses: {
+            /** @description Durable cwd operation; acceptance does not mean the new cwd is active. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellCwdOperation"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
             413: components["responses"]["PayloadTooLarge"];
         };
     };
@@ -1565,6 +1717,36 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            413: components["responses"]["PayloadTooLarge"];
+        };
+    };
+    queryWebShellTaskEvents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebShellTaskEventQueryRequest"];
+            };
+        };
+        responses: {
+            /** @description Same authorized task semantics as the public task events route, including the durable retention floor, committed-prefix publication, Artifact recovery order and client tolerance of unknown optional fields and event types. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebShellTaskEventPage"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["TaskCursorExpired"];
             413: components["responses"]["PayloadTooLarge"];
         };
     };

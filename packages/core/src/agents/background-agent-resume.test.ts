@@ -612,6 +612,16 @@ describe('BackgroundAgentResumeService', () => {
     return metaPath;
   }
 
+  it('explains how to discover the roster after recovery', () => {
+    const service = new BackgroundAgentResumeService({} as Config);
+    expect(service.buildRecoveredBackgroundAgentsModelNotice(1)).toContain(
+      'In Direct mode: If the list_agents tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
+    );
+    expect(service.buildRecoveredBackgroundAgentsNotice(1)).not.toContain(
+      'tool_search',
+    );
+  });
+
   it('restores interrupted and completed background agents without notifying again', async () => {
     const sessionId = 'session-1';
     const runningAgentId = 'agent-running';

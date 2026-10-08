@@ -130,6 +130,10 @@ public class ManagedSessionStore {
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(jdbc.getDataSource()));
     }
 
+    boolean usesDataSource(javax.sql.DataSource source) {
+        return source != null && jdbc.getDataSource() == source;
+    }
+
     @Autowired(required = false)
     public void setPublicationObjects(ToolPublicationObjectStore publicationObjects) {
         this.publicationObjects = publicationObjects;
@@ -184,6 +188,7 @@ public class ManagedSessionStore {
         validateStableId(request.writerId(), "writerId");
         validateLeaseMillis(request.leaseMillis());
         ToolPublicationRetentionStore.lockTenant(jdbc, tenantId);
+        WorkspaceMigrationAdmission.sessionAdmission(jdbc, tenantId, sessionId);
         ToolPublicationRetentionStore.requireLive(jdbc, tenantId, sessionId);
         List<String> closed = jdbc.query("SELECT status FROM managed_agent_session"
                 + " WHERE tenant_id = ? AND session_id = ? AND workspace_id IS NOT NULL FOR UPDATE",
@@ -1345,7 +1350,7 @@ public class ManagedSessionStore {
                 if (lineLength == 0) {
                     throw invalid("recordBytesBase64 contains a blank line.");
                 }
-                if (lineLength > 1024 * 1024) {
+                if (lineLength > ManagedSessionStoreModels.MAX_EVENT_BYTES) {
                     throw payloadTooLarge("A Managed Session record exceeds"
                             + " its byte limit.");
                 }

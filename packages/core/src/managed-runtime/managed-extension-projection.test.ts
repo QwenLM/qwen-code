@@ -40,11 +40,18 @@ interface Revision {
   readonly run: unknown;
   readonly view: ManagedTaskProjection;
   readonly deliveryPending: boolean;
+  readonly stopRequested?: boolean;
 }
 
 interface FixtureSuite {
   readonly contractVersion: 1;
-  readonly recordBodies: Record<string, string | null>;
+  // child_run's entry is the per-kind map the body dispatches on.
+  readonly recordBodies: Record<
+    string,
+    string | null | Record<string, string | null>
+  >;
+  /** The bodies H6 added to the projection contract after H4. */
+  readonly additionalRecordBodies: Record<string, string | null>;
   readonly taskStates: readonly string[];
   readonly pendingDeliveryStates: readonly string[];
   readonly runtimeStates: readonly string[];
@@ -78,6 +85,9 @@ interface FixtureSuite {
   }>;
   readonly brokerExecutionCases: ReadonlyArray<{
     readonly id: string;
+    readonly state: string;
+    readonly executionStatus: string | null;
+    readonly dispatchGeneration: number;
     readonly execution: string;
     readonly inspection: ManagedRuntimeExecutionView;
     readonly harnessExecution: string;
@@ -101,10 +111,30 @@ describe('managed-extension-projection/1 fixtures', () => {
     expect(
       Object.fromEntries(
         Object.entries(MANAGED_EXTENSION_RECORD_BODIES).map(
-          ([domain, body]) => [domain, body?.taskKind],
+          ([domain, body]) => [
+            domain,
+            // child_run's task kind follows the body's own kind; every other
+            // body is a constant or projects no task at all. The probing
+            // record carries managed identity field names, so a mapping
+            // that regressed into reading one cannot answer constant-by-luck.
+            domain === 'child_run'
+              ? {
+                  shell: body?.taskKindOf({ kind: 'shell' }),
+                  child_agent: body?.taskKindOf({ kind: 'child_agent' }),
+                }
+              : body?.taskKindOf({
+                  configurationId: 'probe',
+                  registrationId: 'probe',
+                  occurrenceId: 'probe',
+                  serverId: 'probe',
+                }),
+          ],
         ),
       ),
-    ).toEqual(fixtures.recordBodies);
+    ).toEqual({
+      ...fixtures.recordBodies,
+      ...fixtures.additionalRecordBodies,
+    });
     expect([...MANAGED_TASK_STATES]).toEqual(fixtures.taskStates);
     expect([...MANAGED_TASK_RUNTIME_STATES].sort()).toEqual(
       fixtures.runtimeStates,
@@ -222,7 +252,14 @@ describe('managed-extension-projection/1 fixtures', () => {
 
   it.each(fixtures.viewCases)('projects one revision: $id', (each) => {
     const run = parseExtensionRun(each.run);
-    expect(projectManagedTask(null, run, each.occurredAt)).toEqual(each.view);
+    expect(
+      projectManagedTask(
+        null,
+        run,
+        each.occurredAt,
+        each.stopRequested ?? false,
+      ),
+    ).toEqual(each.view);
     expect(isExtensionDeliveryPending(run)).toBe(each.deliveryPending);
   });
 
@@ -292,11 +329,14 @@ describe('managed-extension-projection/1 fixtures', () => {
     },
   );
 
-  it('reads the Broker as Java does except where the wire hides a claim', () => {
+  // The wire folds a claimed but unsent dispatch into `executing` and
+  // carries no dispatch generation, so the record reading of Java diverges
+  // from the wire reading in exactly these two cases.
+  it('reads the Broker as Java does except where the wire hides a claim or a generation', () => {
     expect(
       fixtures.brokerExecutionCases
         .filter((each) => each.harnessExecution !== each.execution)
         .map((each) => each.id),
-    ).toEqual(['dispatching']);
+    ).toEqual(['dispatching', 'settled-cancelled-unclaimed']);
   });
 });

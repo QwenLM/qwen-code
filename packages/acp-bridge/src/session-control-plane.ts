@@ -167,6 +167,7 @@ import {
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  IMAGE_ONLY_PROMPT_TEXT,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
@@ -767,6 +768,14 @@ interface SessionEntry {
    * caller still observes the rejection on its own returned promise.
    */
   promptQueue: Promise<void>;
+  /**
+   * Settled state of the last admitted rewind. A rewind waits its turn on
+   * `promptQueue` and cannot be taken back once admitted, so a listing of
+   * rewindable history answered ahead of it would describe turns the
+   * bridge has already agreed to drop; such listings wait for this. Always
+   * resolves — a failed rewind must not block later listings.
+   */
+  rewindTail: Promise<void>;
   /** Accepted prompts that have not settled yet (queued + active). */
   pendingPromptCount: number;
   /** Invalidates continuation pre-checks when cancellation starts. */
@@ -2119,7 +2128,7 @@ function extractPromptText(
       return record['text'];
     }
   }
-  return hasImage ? '[image]' : '';
+  return hasImage ? IMAGE_ONLY_PROMPT_TEXT : '';
 }
 
 function liveTurnStatus(
@@ -7360,6 +7369,7 @@ export function createSessionControlPlane(
       closing: false,
       cwdChangeQueue: Promise.resolve(),
       promptQueue: Promise.resolve(),
+      rewindTail: Promise.resolve(),
       pendingPromptCount: 0,
       cancelGeneration: 0,
       pendingAgentNotificationCount: 0,
@@ -11032,7 +11042,7 @@ export function createSessionControlPlane(
             (req.prompt.some(
               (block) => isRecord(block) && block['type'] === 'image',
             )
-              ? '[image]'
+              ? IMAGE_ONLY_PROMPT_TEXT
               : '');
       const pendingEntry: PendingPromptEntry = {
         eventDetailMode,
@@ -14819,7 +14829,7 @@ export function createSessionControlPlane(
           const sameMedia =
             JSON.stringify(promotedMedia) === JSON.stringify(mediaBlocks);
           const promotedText =
-            promoted.text === '[image]' && trimmed.length === 0
+            promoted.text === IMAGE_ONLY_PROMPT_TEXT && trimmed.length === 0
               ? ''
               : promoted.text;
           if (
@@ -15381,6 +15391,12 @@ export function createSessionControlPlane(
     },
 
     async getRewindSnapshots(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      // Answer after any rewind admitted before this call has run: a caller
+      // asking whether a rewind landed must not be told the turn is still
+      // there while the bridge is holding that very rewind in its queue.
+      await entry.rewindTail;
       return requestSessionStatus(
         sessionId,
         SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
@@ -15554,10 +15570,12 @@ export function createSessionControlPlane(
             : {}),
         };
       });
-      entry.promptQueue = rewindResult.then(
+      const rewindSettled = rewindResult.then(
         () => undefined,
         () => undefined,
       );
+      entry.promptQueue = rewindSettled;
+      entry.rewindTail = rewindSettled;
       return rewindResult;
     },
 
