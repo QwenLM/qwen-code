@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -47,6 +48,7 @@ import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
 
 class HostedPublicWorkspaceIT {
     private static final String TOKEN = "g0-local-fixture";
@@ -438,12 +440,18 @@ class HostedPublicWorkspaceIT {
         List<Path> roots = List.of(Files.createDirectory(temporary.resolve("workspace-a")),
                 Files.createDirectory(temporary.resolve("workspace-b")));
         for (Path root : roots) Files.createDirectory(root.resolve("child"));
-        port = freePort();
-        int harnessPort = freePort();
-        int brokerPort = freePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
+        int harnessPort;
+        int brokerPort;
+        try (ServerSocket springSocket = new ServerSocket(0);
+                ServerSocket harnessSocket = new ServerSocket(0);
+                ServerSocket brokerSocket = new ServerSocket(0)) {
+            port = springSocket.getLocalPort();
+            harnessPort = harnessSocket.getLocalPort();
+            brokerPort = brokerSocket.getLocalPort();
+        }
         startSpring(cli, roots, harnessPort, brokerPort);
         startHarness(cli, harnessPort, brokerPort);
         return roots;
@@ -590,17 +598,33 @@ class HostedPublicWorkspaceIT {
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename, "rename-" + workspace,
                     "actor", 200).path("metadata").path("title").asText()).isEqualTo("Renamed " + workspace);
 
-            // A creator whose grant drops to READER keeps read access but loses
-            // admission: submit, cancel and rename all answer workspace_unavailable,
-            // nothing new executes, and no PENDING command row is left behind.
+            // A creator whose grant drops to READER, with the Workspace draining,
+            // keeps read access but loses admission of new work: submit and rename
+            // answer workspace_unavailable, and no PENDING command row is left
+            // behind. Cancelling only aborts work already running, so a Turn
+            // started before the revocation is still cancelled and stops without
+            // running another tool.
+            int beforeRevokedCancel = modelRequests.size();
+            String revokedTurn = request("POST", "/v1/agents/sessions/" + session + "/events", hold,
+                    "hold-revoked-" + workspace, "actor", 202).path("turn_id").asText();
+            await().atMost(Duration.ofSeconds(35)).until(() -> modelRequests.size() > beforeRevokedCancel);
             jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+            jdbc.update("UPDATE managed_workspace_registry SET state = 'DRAINING'"
+                    + " WHERE tenant_id = ? AND workspace_id = ?", tenant, workspace);
+            // Harness still runs the Turn, but this Java owner has lost its ref.
+            ((Map<?, ?>) ReflectionTestUtils.getField(spring.getBean(HarnessConnector.class), "attachments")).clear();
+            Map<String, Object> revokedCancel = Map.of("type", "agent.session.cancel", "turn_id", revokedTurn);
+            request("POST", "/v1/agents/sessions/" + session + "/events", revokedCancel,
+                    "nocreate-cancel-" + workspace, "actor", 202);
+            await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                    "SELECT status FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
+                    String.class, session, revokedTurn)).isEqualTo("CANCELLED"));
+            heldReply.countDown();
+            heldReply = new CountDownLatch(1);
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
                     "nocreate-later-" + workspace, "actor", 409).path("error").path("code").asText())
-                    .isEqualTo("workspace_unavailable");
-            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", cancel,
-                    "nocreate-cancel-" + workspace, "actor", 409).path("error").path("code").asText())
                     .isEqualTo("workspace_unavailable");
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename,
                     "nocreate-rename-" + workspace, "actor", 409).path("error").path("code").asText())
@@ -612,6 +636,8 @@ class HostedPublicWorkspaceIT {
             jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+            jdbc.update("UPDATE managed_workspace_registry SET state = 'ACTIVE'"
+                    + " WHERE tenant_id = ? AND workspace_id = ?", tenant, workspace);
 
             // With the running Turn settled, revoking the creator's grant hides the
             // bound Session from every later-Turn path: submit, cancel and rename all fall
@@ -631,8 +657,27 @@ class HostedPublicWorkspaceIT {
             jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES (?, ?, ?, 'OPERATOR')",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+
+            String registeredStorage = jdbc.queryForObject("SELECT storage_id FROM managed_workspace_registry"
+                    + " WHERE tenant_id = ? AND workspace_id = ?", String.class, tenant, workspace);
+            jdbc.update("UPDATE managed_workspace_registry SET "
+                    + (index == 0 ? "workspace_generation = workspace_generation + 1"
+                            : "storage_id = 'replacement-storage'")
+                    + " WHERE tenant_id = ? AND workspace_id = ?", tenant, workspace);
+            assertThat(request("POST", "/api/agent/web-shell/v1/sessions/get", Map.of("sessionId", session),
+                    null, "actor", 200).path("capabilities").path("workspaceTurns").asBoolean()).isFalse();
+            assertUnavailable(request("POST", "/v1/agents/sessions/" + session + "/events", later,
+                    "rebound-later-" + workspace, "actor", 409));
+            assertUnavailable(request("PATCH", "/v1/agents/sessions/" + session, rename,
+                    "rebound-rename-" + workspace, "actor", 409));
+            request("POST", "/v1/agents/sessions/" + session + "/events", revokedCancel,
+                    "rebound-cancel-" + workspace, "actor", 202);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
+                    + " WHERE tenant_id = ? AND command_status = 'PENDING'", Integer.class, tenant)).isZero();
+            jdbc.update("UPDATE managed_workspace_registry SET workspace_generation = 1, storage_id = ?"
+                    + " WHERE tenant_id = ? AND workspace_id = ?", registeredStorage, tenant, workspace);
         }
-        assertThat(modelRequests).hasSize(approvals ? 16 : 18);
+        assertThat(modelRequests).hasSize(approvals ? 16 : 20);
         assertThat(modelFailure.get()).isNull();
         Map<String, Object> denied = Map.of("agent_id", "qwen-code", "workspace", Map.of("workspace_id", "workspace-0"),
                 "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")));
@@ -665,7 +710,7 @@ class HostedPublicWorkspaceIT {
         assertUnavailable(request("POST", "/v1/agents/sessions", denied, "unsupported", "actor", 409));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(2);
-        assertThat(modelRequests).hasSize(approvals ? 16 : 18);
+        assertThat(modelRequests).hasSize(approvals ? 16 : 20);
     }
 
     private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) {
@@ -807,9 +852,13 @@ class HostedPublicWorkspaceIT {
             if (!harness.isAlive()) {
                 throw new AssertionError("Hosted Harness exited: " + Files.readString(log));
             }
-            assertThat(http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort + "/capabilities"))
+            HttpResponse<String> response = http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort + "/capabilities"))
                     .timeout(Duration.ofSeconds(2)).header("Authorization", "Bearer " + TOKEN).build(),
-                    HttpResponse.BodyHandlers.discarding()).statusCode()).isEqualTo(200);
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(response.statusCode())
+                    .withFailMessage("Hosted Harness port %s returned %s: %s%n%s", harnessPort,
+                            response.statusCode(), response.body(), Files.readString(log))
+                    .isEqualTo(200);
         });
     }
 
@@ -891,10 +940,6 @@ class HostedPublicWorkspaceIT {
     // Every creation refusal here shares one declared code; the fixture, not the code, selects the branch.
     private static void assertUnavailable(JsonNode refusal) {
         assertThat(refusal.path("error").path("code").asText()).isEqualTo("workspace_unavailable");
-    }
-
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) { return socket.getLocalPort(); }
     }
 
     @AfterEach
