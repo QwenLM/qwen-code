@@ -41,6 +41,8 @@ import { Skeleton } from '../ui/skeleton';
 import { LazyThreadsRoute } from '../workspace-agents/LazyThreadsRoute';
 import { Button } from '../ui/button';
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -61,6 +63,7 @@ import { normalizeTextMediaType } from '../../utils/imageIngestion';
 import { isAgentCollaborationEnabledForWorkspace } from '../../utils/workspace';
 import { DialogShell } from '../dialogs/DialogShell';
 import { FileTypeIcon } from '../FileTypeIcon';
+import { ErrorBoundary } from '../ErrorBoundary';
 import { isSafeHref, Markdown } from '../messages/Markdown';
 import {
   DropdownMenu,
@@ -87,6 +90,7 @@ import {
   getImageMimeTypeFromPath,
   getReviewDownloadMimeType,
   isDownloadOnlyWorkspaceArtifact,
+  isExcelFile,
   normalizeArtifactMimeType,
   normalizePath,
   readWorkspaceFileAsBlob,
@@ -130,6 +134,8 @@ import {
   MonitorTaskDetail,
   ShellTaskDetail,
 } from '../messages/TasksStatusMessage';
+
+const SpreadsheetPreview = lazy(() => import('./SpreadsheetPreview'));
 
 const MAX_REVIEW_SIDE_BY_SIDE_WIDTH = 700;
 const FREQUENCIES: Frequency[] = [
@@ -1278,6 +1284,10 @@ export function ArtifactPanel({
             </div>
           ) : activeTab.sourcePreview &&
             activeTab.previewData &&
+            !isExcelFile(
+              activeTab.workspacePath,
+              activeTab.previewMimeType || activeTab.previewData.type,
+            ) &&
             normalizeArtifactMimeType(
               activeTab.previewMimeType || activeTab.previewData.type,
             ) !== 'application/pdf' &&
@@ -3025,7 +3035,12 @@ function ArtifactDetail({
   }
 
   if (canPreviewWorkspaceFile && artifact.workspacePath) {
-    if (isDownloadOnlyWorkspaceArtifact(artifact)) {
+    if (
+      isDownloadOnlyWorkspaceArtifact(artifact) ||
+      (isExcelFile(artifact.workspacePath, artifact.mimeType) &&
+        artifact.status !== 'available' &&
+        artifact.status !== 'changed')
+    ) {
       return (
         <DownloadableWorkspaceArtifact
           artifact={artifact}
@@ -3040,6 +3055,7 @@ function ArtifactDetail({
         workspaceActions={workspaceActions}
         previewContent={previewContent}
         previewSizeBytes={artifact.sizeBytes}
+        previewMimeType={artifact.mimeType}
         imageMimeType={imageMimeType}
         previewKind={
           isHtmlArtifact(artifact)
@@ -3177,14 +3193,17 @@ function DownloadableWorkspaceArtifact({
   artifact,
   workspaceActions,
 }: {
-  artifact: DaemonSessionArtifact;
+  artifact: Pick<
+    DaemonSessionArtifact,
+    'kind' | 'workspacePath' | 'mimeType' | 'sizeBytes' | 'status'
+  >;
   workspaceActions: ArtifactWorkspaceActions;
 }) {
   const { t } = useI18n();
   const [error, setError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState(false);
   const mountedRef = useRef(true);
-  const location = getArtifactLocation(artifact);
+  const location = artifact.workspacePath;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -3414,6 +3433,7 @@ function SourceDetail({
           {t('common.loading')}
         </div>
       ) : data &&
+        !isExcelFile(path, data.type) &&
         data.type !== 'application/pdf' &&
         !normalizeTextMediaType(data.type, path) ? (
         <SourceBlobPreview
@@ -3514,6 +3534,59 @@ function WorkspaceFilePreview({
   previewOnly?: boolean;
   onLoadError?: (error: string) => void;
 }) {
+  const { t } = useI18n();
+  if (isExcelFile(workspacePath, previewMimeType || previewData?.type)) {
+    return (
+      <ErrorBoundary
+        resetKeys={[
+          workspacePath,
+          workspaceActions,
+          previewData,
+          artifactVersion,
+        ]}
+        fallback={
+          <div>
+            <div role="alert" className={styles.previewError}>
+              {t('excel.invalid')}
+            </div>
+            {previewData ? (
+              <SourceBlobPreview
+                data={previewData}
+                title={workspacePath.split(/[/\\]/).pop()!}
+                image={false}
+              />
+            ) : workspaceActions ? (
+              <DownloadableWorkspaceArtifact
+                key={workspacePath}
+                artifact={{
+                  workspacePath,
+                  kind: 'document',
+                  mimeType: previewMimeType,
+                  status: 'available',
+                }}
+                workspaceActions={workspaceActions}
+              />
+            ) : null}
+          </div>
+        }
+      >
+        <Suspense
+          fallback={
+            <div className={styles.empty} role="status">
+              {t('common.loading')}
+            </div>
+          }
+        >
+          <SpreadsheetPreview
+            workspacePath={workspacePath}
+            workspaceActions={workspaceActions}
+            data={previewData}
+            artifactVersion={artifactVersion}
+          />
+        </Suspense>
+      </ErrorBoundary>
+    );
+  }
   if (previewData) {
     return (
       <AttachmentBlobPreview

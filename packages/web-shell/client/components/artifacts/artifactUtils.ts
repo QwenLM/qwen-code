@@ -105,11 +105,23 @@ export function isOfficeDocumentPath(workspacePath?: string): boolean {
   return OFFICE_DOCUMENT_EXTENSIONS.has(pathExtension(workspacePath));
 }
 
+export function isExcelFile(
+  workspacePath?: string,
+  mimeType?: string,
+): boolean {
+  const extension = pathExtension(workspacePath);
+  return extension
+    ? extension === '.xlsx'
+    : normalizeArtifactMimeType(mimeType) ===
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+}
+
 export function isDownloadOnlyWorkspaceArtifact(artifact: {
   kind?: string;
   workspacePath?: string;
   mimeType?: string;
 }): boolean {
+  if (isExcelFile(artifact.workspacePath, artifact.mimeType)) return false;
   const extension = pathExtension(artifact.workspacePath);
   const mimeType = normalizeArtifactMimeType(artifact.mimeType);
   if (

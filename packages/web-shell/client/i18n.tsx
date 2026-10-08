@@ -723,6 +723,18 @@ const EN: Messages = {
   'common.downloadFailed': (v) => `Download failed: ${v?.message ?? ''}`,
   'common.open': 'Open',
   'common.openFailed': (v) => `Could not open link: ${v?.message ?? ''}`,
+  'excel.worksheet': 'Worksheet',
+  'excel.row': 'Row',
+  'excel.truncated': (v) =>
+    `Preview limited to ${v?.cells} cells per worksheet. Download the original for all content.`,
+  'excel.empty': 'This worksheet is empty.',
+  'excel.notCalculated': 'Not calculated',
+  'excel.tooLarge':
+    'Excel preview supports files up to 10 MiB. Download the original to open it.',
+  'excel.invalid':
+    'Unable to preview this workbook. It may be damaged, password protected, or unsupported by this browser. You can download the original.',
+  'excel.timeout':
+    'This workbook took too long to preview. Download the original to open it.',
   'artifact.openLink': 'Open link',
   'artifact.longDocument': 'File is large. Source is shown by default.',
   'artifact.renderFullPreview': 'Render full preview',
@@ -5008,6 +5020,16 @@ const ZH: Messages = {
   'common.downloadFailed': (v) => `下载失败：${v?.message ?? ''}`,
   'common.open': '打开',
   'common.openFailed': (v) => `无法打开链接：${v?.message ?? ''}`,
+  'excel.worksheet': '工作表',
+  'excel.row': '行',
+  'excel.truncated': (v) =>
+    `每个工作表最多预览 ${v?.cells} 个单元格。下载原文件查看全部内容。`,
+  'excel.empty': '此工作表为空。',
+  'excel.notCalculated': '未计算',
+  'excel.tooLarge': 'Excel 预览支持最大 10 MiB 的文件，请下载原文件打开。',
+  'excel.invalid':
+    '无法预览此工作簿，文件可能已损坏、受密码保护，或当前浏览器不支持。你可以下载原文件。',
+  'excel.timeout': '工作簿预览超时，请下载原文件打开。',
   'artifact.openLink': '打开链接',
   'artifact.longDocument': '文件过大，默认展示源码。',
   'artifact.renderFullPreview': '完整排版预览',
