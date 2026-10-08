@@ -85,12 +85,17 @@ function call(
   } as ToolCallRequestInfo;
 }
 
-function createTurn(depth = 0, hookEvents?: string[]): HostedWorkspaceToolTurn {
+function createTurn(
+  depth = 0,
+  hookEvents?: string[],
+  promptName = 'prompt',
+  hooksMountHeld = false,
+): HostedWorkspaceToolTurn {
   return new HostedWorkspaceToolTurn(
     { baseUrl: 'http://127.0.0.1:1', token: 'test' },
     session,
     createManagedHarnessHandle(session),
-    'prompt',
+    promptName,
     async (type, messageParts, model, identity) => {
       const uuid = identity?.uuid ?? randomUUID();
       await session.sink.write({
@@ -134,7 +139,7 @@ function createTurn(depth = 0, hookEvents?: string[]): HostedWorkspaceToolTurn {
                 sessionKey,
                 'hook-owner',
               ),
-              mountHeld: false,
+              mountHeld: hooksMountHeld,
               ensureReady: () => Promise.resolve(),
               acquire: () => Promise.resolve(),
               refresh: () => Promise.resolve(),
@@ -561,6 +566,112 @@ it('replays a re-driven batch into the original record, never a second one', asy
   expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
     1,
   );
+});
+
+// The same replay behind a full quota: counting the replayed child
+// against `count_limit` would refuse the launch it is already running —
+// quotas gate new children, and `children.admit` always had the replay
+// answer.
+it('replays an existing background child past a full quota', async () => {
+  const turn = createTurn();
+  const responses = (await executeAgent(
+    turn,
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: true,
+    }),
+  )) as Part[];
+  expect(JSON.stringify(responses)).toContain('started in the background');
+  for (const seed of ['seed-b', 'seed-c', 'seed-d']) {
+    await children.admit({
+      childRunId: `prompt:${seed}`,
+      ownerScopeId: sessionKey.sessionId,
+      rootSessionId: sessionKey.sessionId,
+      completion: 'sent',
+      description: `seed ${seed}`,
+      prompt: 'seed',
+      definition: {
+        definitionId: 'hosted-agent/hosted-workspace-shell/1',
+        definitionRevision: 1,
+        definitionDigest: session.authority.sessionHeader.definitionRef.digest,
+      },
+      workingDirectory: '.',
+      executionCallId: `prompt:${seed}`,
+    });
+  }
+  const replays = (await executeAgent(
+    createTurn(),
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: true,
+    }),
+  )) as Part[];
+  expect(JSON.stringify(replays)).toContain('started in the background');
+  expect(JSON.stringify(replays)).not.toContain('count_limit');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    4,
+  );
+});
+
+// A refused background launch on a Session-owned mount: the Hook catalog
+// (or an MCP owner) releases only at Session close, so the ordinary
+// background workaround would park the child on workspace_busy until its
+// deadline — refuse at admission instead.
+it('refuses a background agent while the Session owner holds the mount', async () => {
+  const turn = createTurn(0, [], 'prompt', true);
+  const responses = (await executeAgent(
+    turn,
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: true,
+    }),
+  )) as Part[];
+  expect(JSON.stringify(responses)).toContain(
+    'Hook catalog or MCP owner holds the Workspace mount',
+  );
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
+// The wake-turn id already embeds its commissioning run id
+// (`<childRunId>:accept:notify`); using it verbatim as the launch base
+// grows one suffix per chained hop into the 128-char lineage bound. The
+// derived key is a bounded digest of the same stable name — every hop
+// stays at 17 chars plus the call id.
+it('bounds chained background launches from wake turns', async () => {
+  const wakeOne = createTurn(0, undefined, 'root-run:accept:notify');
+  await executeAgent(
+    wakeOne,
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: true,
+    }),
+  );
+  const hopOne = session.authority.extensionRecordsInDomain('child_run')[0];
+  expect(hopOne?.recordId).toMatch(/^[0-9a-f]{16}:call-1$/);
+  const wakeTwo = createTurn(0, undefined, `${hopOne?.recordId}:accept:notify`);
+  await executeAgent(
+    wakeTwo,
+    call(
+      {
+        description: 'second hop',
+        prompt: 'review the second change',
+        run_in_background: true,
+      },
+      'call-9',
+    ),
+  );
+  const ids = session.authority
+    .extensionRecordsInDomain('child_run')
+    .map((record) => record.recordId);
+  expect(ids).toHaveLength(2);
+  expect(ids[1]).toMatch(/^[0-9a-f]{16}:call-9$/);
+  expect(ids.every((id) => id.length <= 48)).toBe(true);
 });
 
 it('refuses a foreground agent call that shares its batch with a non-agent tool', async () => {

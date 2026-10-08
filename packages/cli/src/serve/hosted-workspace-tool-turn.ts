@@ -1328,6 +1328,18 @@ export class HostedWorkspaceToolTurn {
             validationError =
               'Hosted child agent run_in_background=false is unavailable while this Turn holds the Workspace mount; run it in the background or let the current tool work finish first in a fresh turn.';
           } else if (
+            agentBackground &&
+            (this.mcp?.mountHeld === true || this.hooks?.mountHeld === true)
+          ) {
+            // The background recommendation dies with this owner: a Session
+            // -scoped mount (Hook catalog, MCP owner) survives the Turn, so
+            // the launched child cannot warm its own until the Session
+            // closes — the ordinary turn-wait workaround does not release
+            // it either. Turn-owned mounts at their finish do release, so
+            // only the Session-owned holds are gated on the background arm.
+            validationError =
+              'Hosted child agent run_in_background=true is unavailable while the Session’s Hook catalog or MCP owner holds the Workspace mount, which ends when the Session closes; launch after the owner closes or from a Session without the mount held.';
+          } else if (
             !agentBackground &&
             calls.some((other) => other.name !== 'agent')
           ) {
@@ -2622,7 +2634,17 @@ export class HostedWorkspaceToolTurn {
     const key = authority.sessionHeader.sessionKey;
     const description = (request.call.args['description'] as string).trim();
     const prompt = request.call.args['prompt'] as string;
-    const childRunId = `${this.promptId}:${request.call.callId}`;
+    // A wake turn's turn id already embeds its commissioning child run
+    // (`<childRunId>:accept:notify`), so using it verbatim as the launch
+    // base grows the next run id one suffix per hop and walks a chained
+    // helper into the 128-char lineage bound by the third hop. The
+    // replay-stable key needs determinism, not readability: collapse the
+    // wake turn's identity to a bounded digest of its own stable name
+    // instead — never grow across hops, always 17 chars plus the call id.
+    const promptKey = this.promptId.endsWith(':accept:notify')
+      ? createHash('sha256').update(this.promptId).digest('hex').slice(0, 16)
+      : this.promptId;
+    const childRunId = `${promptKey}:${request.call.callId}`;
     // The v1 pin: the parent's own definition, documented by its
     // definition resource's digest (the control plane reads the pin from
     // the committed body when it stamps the child's lineage).
@@ -2647,22 +2669,28 @@ export class HostedWorkspaceToolTurn {
       if (!(cause instanceof ManagedSessionRecordError)) throw cause;
       envelopeBytes = Number.POSITIVE_INFINITY;
     }
-    const admission = childLaunchAdmission({
-      workspaceMode: 'shared',
-      sameDefinition: true,
-      closing: authority.currentActivation?.phase !== 'active',
-      activeInScope: children.activeChildRunsOf(key.sessionId).length,
-      envelopeBytes,
-    });
-    if (!admission.admitted) {
-      const refused = convertToFunctionErrorResponse(
-        request.call.name,
-        request.call.callId,
-        [],
-        `Hosted child agent refused this launch (${admission.reason}).`,
-      );
-      await this.commit('tool_result', refused, model);
-      return refused;
+    // Quotas gate NEW children only: a re-driven batch names the same
+    // run id, and `children.admit` answers that replay identically —
+    // counting the replayed child against `count_limit` would refuse
+    // the launch it is already running.
+    if (children.record(childRunId) === undefined) {
+      const admission = childLaunchAdmission({
+        workspaceMode: 'shared',
+        sameDefinition: true,
+        closing: authority.currentActivation?.phase !== 'active',
+        activeInScope: children.activeChildRunsOf(key.sessionId).length,
+        envelopeBytes,
+      });
+      if (!admission.admitted) {
+        const refused = convertToFunctionErrorResponse(
+          request.call.name,
+          request.call.callId,
+          [],
+          `Hosted child agent refused this launch (${admission.reason}).`,
+        );
+        await this.commit('tool_result', refused, model);
+        return refused;
+      }
     }
     await children.admit({
       childRunId,
