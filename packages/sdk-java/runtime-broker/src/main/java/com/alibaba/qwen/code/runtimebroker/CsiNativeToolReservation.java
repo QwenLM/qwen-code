@@ -83,7 +83,8 @@ final class CsiNativeToolReservation {
             CsiNativeActivationProof.Prefix prefix, Map<String, Resource> resources) throws SQLException {
         List<ToolExecutionRecord> result = new ArrayList<>();
         Set<String> calls = new HashSet<>();
-        Set<Integer> ordinals = new HashSet<>();
+        Set<String> ordinals = new HashSet<>();
+        Set<String> toolCalls = new HashSet<>();
         String cursor = "";
         while (true) {
             int count = 0;
@@ -104,8 +105,11 @@ final class CsiNativeToolReservation {
                         require(canonical(stored).equals(canonical(ref)));
                         byte[] input = bytes(resources, ref.path("inputRef"), "managed-tool-input");
                         byte[] definition = bytes(resources, ref.path("toolDefinitionRef"), "managed-tool-definition");
-                        qualify(original, prefix, execution, input, definition);
-                        require(calls.add(id(ref, "functionCallId")) && ordinals.add((int) number(ref.get("ordinal"))));
+                        qualifyRelated(original, prefix, execution, input, definition);
+                        String batchId = id(ref, "batchId");
+                        require(calls.add(batchId + "\u0000" + id(ref, "functionCallId"))
+                                && ordinals.add(batchId + "\u0000" + number(ref.get("ordinal")))
+                                && toolCalls.add(execution.getToolCallId()));
                         result.add(execution);
                         cursor = rows.getString("execution_call_id_hash");
                         count++;
@@ -132,8 +136,9 @@ final class CsiNativeToolReservation {
                 return execution;
             }
             JsonNode saved = JSON.valueToTree(execution.getReference());
-            require(!id(saved, "functionCallId").equals(id(ref, "functionCallId"))
-                    && number(saved.get("ordinal")) != number(ref.get("ordinal"))
+            boolean sameBatch = id(saved, "batchId").equals(id(ref, "batchId"));
+            require((!sameBatch || !id(saved, "functionCallId").equals(id(ref, "functionCallId"))
+                    && number(saved.get("ordinal")) != number(ref.get("ordinal")))
                     && !execution.getToolCallId().equals(candidate.getToolCallId())
                     && !execution.getExecutionCallId().equals(candidate.getExecutionCallId()));
         }
@@ -151,12 +156,16 @@ final class CsiNativeToolReservation {
         List<Map<String, Object>> members = new ArrayList<>();
         for (ToolExecutionRecord execution : complete(connection, original, prefix, resources)) {
             JsonNode ref = JSON.valueToTree(execution.getReference());
+            if (!batchId.equals(id(ref, "batchId"))) {
+                continue;
+            }
             members.add(Map.of("executionCallId", execution.getExecutionCallId(),
                     "state", execution.getState().name().toLowerCase(java.util.Locale.ROOT),
                     "reference", execution.getReference(),
                     "inputBytesBase64", Base64.getEncoder().encodeToString(bytes(resources, ref.path("inputRef"), "managed-tool-input")),
                     "toolDefinitionBytesBase64", Base64.getEncoder().encodeToString(bytes(resources, ref.path("toolDefinitionRef"), "managed-tool-definition"))));
         }
+        members.sort(java.util.Comparator.comparingInt(member -> ((Number) ((Map<?, ?>) member.get("reference")).get("ordinal")).intValue()));
         String session = original.request().getIsolationKey();
         return Map.of("protocolVersion", 1, "harnessSessionId", session, "runtimeSessionId", session,
                 "promptId", promptId, "batchId", batchId, "runtimeBindingId", original.bindingId(),
@@ -165,22 +174,40 @@ final class CsiNativeToolReservation {
 
     static void qualify(JdbcCsiFilesRetirementGuard.Original original, CsiNativeActivationProof.Prefix prefix,
             ToolExecutionRecord execution, byte[] inputBytes, byte[] definitionBytes) {
-        JdbcCsiActivationAdmission.requireExecution(original, execution);
         require(original != null && prefix.input() != null && prefix.pendingBatch() != null);
+        var batch = prefix.batches().get(prefix.pendingBatch().messageId());
+        require(batch != null && batch.promptId().equals(prefix.input().inputId())
+                && batch.batch().equals(prefix.pendingBatch()));
+        qualify(original, batch, execution, inputBytes, definitionBytes);
+    }
+
+    static void qualifyRelated(JdbcCsiFilesRetirementGuard.Original original, CsiNativeActivationProof.Prefix prefix,
+            ToolExecutionRecord execution, byte[] inputBytes, byte[] definitionBytes) {
+        require(execution != null);
+        JsonNode ref = JSON.valueToTree(execution.getReference());
+        var batch = prefix.batches().get(id(ref, "batchId"));
+        require(batch != null);
+        qualify(original, batch, execution, inputBytes, definitionBytes);
+    }
+
+    private static void qualify(JdbcCsiFilesRetirementGuard.Original original, CsiNativeActivationProof.OriginalBatch batch,
+            ToolExecutionRecord execution, byte[] inputBytes, byte[] definitionBytes) {
+        JdbcCsiActivationAdmission.requireExecution(original, execution);
+        require(original != null);
         JsonNode ref = JSON.valueToTree(execution.getReference());
         closed(ref, FIELDS);
         String session = original.request().getIsolationKey();
         String callId = id(ref, "callId");
         uuid(callId);
         uuid(id(ref, "batchId"));
-        require(session.equals(id(ref, "sessionId")) && prefix.input().inputId().equals(id(ref, "promptId"))
-                && prefix.pendingBatch().messageId().equals(id(ref, "batchId"))
+        require(session.equals(id(ref, "sessionId")) && batch.promptId().equals(id(ref, "promptId"))
+                && batch.batch().messageId().equals(id(ref, "batchId"))
                 && execution.getTurnId().equals(id(ref, "promptId")) && execution.getToolCallId().equals(callId)
                 && execution.getIdempotencyKey().equals(session + ":" + callId)
                 && "deferred".equals(text(ref, "dispatchMode")));
         long ordinal = number(ref.get("ordinal"));
-        require(ordinal < prefix.pendingBatch().calls().size());
-        var call = prefix.pendingBatch().calls().get((int) ordinal);
+        require(ordinal < batch.batch().calls().size());
+        var call = batch.batch().calls().get((int) ordinal);
         require(call.id().equals(id(ref, "functionCallId")) && call.partIndex() == number(ref.get("partIndex")));
         require(inputBytes != null && inputBytes.length <= 64 * 1024
                 && definitionBytes != null && definitionBytes.length <= 64 * 1024);

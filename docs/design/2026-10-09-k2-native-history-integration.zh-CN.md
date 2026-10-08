@@ -1,0 +1,230 @@
+# K2：连接原生历史、worker 准入与文件执行
+
+[English](2026-10-09-k2-native-history-integration.md) | [简体中文](2026-10-09-k2-native-history-integration.zh-CN.md)
+
+状态：实现设计，2026-10-09。已调查的源码基线：
+`71805cf0a169fcd72a26d62ff6b41381e1fef6b8`，Draft PR #13526。
+本次增量实现派生的原始 assistant 批次保留，以及先校验全部相关行再分组当前批次。
+下述 bootstrap、schema-2 历史/资源提升、worker 准入/执行与完成仍是提案，尚未验收。
+本设计细化
+[原生文件执行设计](2026-10-07-k2-native-file-execution.zh-CN.md)与
+[原始批次预留设计](2026-10-08-k2-native-batch-reservation.zh-CN.md)
+中剩余的整体接线。完整 K2 目标、proposal #12380 和 tracker #13395 继续开放。
+
+## 1. 当前缺口与要求的结果
+
+实际私有 Hosted 调用者提交完整原始 assistant，持久预留已接受的 Read/Write/Edit
+输入与完整定义，并读取完整当前分配，随后以需要恢复的状态停止。原生新提交与历史
+回放均未准入文件历史或 tool intent。`commitResources` 在原生接受前执行，拒绝原始
+PUBLISHED 分配资源。只有四条路由的 boot-4 worker 尚无生产 composer、历史准备、
+执行器或结果消费调用者。
+
+连接一条原始链路：READY Session 与已安装上下文 → 保留的空历史绑定 → 包含全部
+已接受成员的原生 schema-2 intent → worker 读取当前原始证据并准备保留备份 →
+原生 prepared → 原始 tool intent 与 dispatch checkpoint → 不可变 grant →
+实际文件工具 → 完整 outcome 与 tool-result message → results-ready checkpoint →
+实际 Hosted 消费与完成历史。分配、prepared 历史与 SQL SETTLED 是不同事实，
+任何一个都不能单独完成 turn 或 K2。
+
+## 2. 启动信任与私有读回
+
+Boot 4 及其 version-2 原始资源 handle 继续只允许构造。不得在调用中增加可选
+authority URL，也不得把旧 boot 重新解释为文件准入。引入执行 boot 5，字段严格为
+`type`、`version`、`managedCsi`、`identity`、`context`、`storage`、`authority`；
+保持 `managed-csi/2`、原始三字段 profile 身份、内层 boot 2 与已登记存储。
+`authority` 仅含 `protocolVersion: 1` 和 `origin`。origin 是部署配置的规范 HTTPS
+origin；HTTP 仅用于自有 loopback 验证。禁止 URL 凭据、路径、query、fragment 和
+重定向。不得向 worker 传入调用方选择的 origin 或全局 Harness token。
+
+Version-3 私有原始资源 handle 保留确切 authority 元组。provisioning producer
+将其纳入规范 boot 字节、不可变 Secret、boot digest 与 handle identity。所有保存
+handle、实时 API、attestation、transport 和重启比较，都从原始 seed 与保留的
+authority 元组推导同一 boot。配置 origin 变化不能重写或接管旧 Secret。旧 handle
+没有 authority 锚点，拒绝新的文件准入。这细化此前设计中待实现的执行 bootstrap，
+不改变现有 boot-4 构造契约。
+Informational ready 使用 version 5，字段严格为 `type`、`version`、`managedCsi`、
+`identity`、`context`，不返回凭据，也不建立 authority origin。现有 CSI-v2 context/
+attestation/drain envelope 与新读回、执行契约保持区分。
+
+使用独立 `POST /internal/runtime-broker/csi/v1/native:read` handler。凭据是原始
+每 Runtime lease token，对照加密持久化 seed 与当前原始 lease，以恒定时间比较
+认证。该凭据仅认证此私有读回 handler，不能通过通用全局 Bearer handler，也不能
+授权 Store 写入。handler 不得反向调用请求它的 worker，不得跨 HTTP 保持 SQL 锁，
+以避免读回时出现 worker → Broker → 同一 worker 循环。
+
+闭合请求包含 `protocolVersion`、`requestId`、`action`、`identity`、`context`、
+`installedContext`、`subject`。`context` 重复原始非秘密 boot incarnation、lease、
+epoch 与 provision 身份。安装上下文重复原始 operation、固定 Session、digest 与
+binding。bind 的 `subject` 为 null；prepare 为原始 intent ref；execute 为原始
+execution call ID，不提供成员集合、paths 或新 grant。action 严格为 `bind`、
+`prepare`、`execute`，分别执行不同资格校验。
+`context` 使用现有完整 `ManagedContextAttestationResponse` 字段：
+`protocolVersion`、`managedContext`、`runtimeInstanceId`、`runtimeIncarnation`、
+`leaseId`、`epoch`、`provisionRequestId`、`tenantId`、`workspaceId`、
+`workspaceGeneration`、`storageId`、`mountRoot`、`capabilityDigest`、
+`isolationClass`。`installedContext` 使用现有闭合 installation request：
+`protocolVersion`、`managedContext`、`operationId`、`sessionId`、`contextDigest`、
+`binding`，包含原 binding 的全部七个字段。operation ID 是现有从原 Runtime
+Session 派生的 name UUID。Broker 从持久原始 owner 推导预期 binding，不相信请求。
+
+读回在原始选定 Runtime 内按持久 owner 作用域执行。在原始 parent、pin、native
+head 与当前 SQL 锁下，比较 boot-5 authority/handle、profile、Session、provision
+seed、lease/incarnation/epoch、原始安装上下文和 READY 准入。缺失、歧义、过期、
+draining、替换或移除的 authority 一律拒绝。旧签名响应、调用方 ref 或提供的 receipt
+不能替代当前读取。
+
+闭合响应字段严格为 `protocolVersion`、`requestId`、`action`、`identity`、`context`、
+`installedContext`、`head`、`evidence`。`head` 严格包含 `revision`、`sequence`、
+`digest`，从已验证的当前原生 head 复制。按 action 闭合 evidence 联合：
+
+- Bind：仅含 `kind: "ready"`，不添加 grant 或物理 bind 声明。
+- Prepare：严格为 `kind: "intent"`、`intentRef`、`resources`、`members`。返回资源
+  包括原始已提交 intent；members 按接受的本地 ordinal 顺序包含原始十一字段
+  execution reference，包括 Read，调用方不能用子集选择此列表。
+- Execute：严格为 `kind: "authorization"`、`executionReference`、`preparedRef`、
+  `authorizationRevision`、`authorizationSequence`、`grant`、`resources`。
+  `preparedRef` 仅在完整验证的纯 Read batch 中可以为 null。新私有 grant shape
+  定义如下；返回资源包含原始 input、declaration 以及需要的 prepared record。
+
+新私有 grant 严格包含 `protocolVersion: 1`、`runtimeBindingId`、`bindingGeneration`、
+`authorizedBindingVersion`、`executionCallId`、`dispatchGeneration`、
+`authorizationRevision`、`authorizationSequence`、`executionReference`、`intentRef`、
+`checkpointRef`、`preparedRef`、`identity`、`context`、`installedContext`。
+generation 与 binding-version counter 使用规范的正无符号十进制字符串；原生
+revision 和 sequence 使用安全正整数。execution reference 是原始十一字段
+reference。intent/checkpoint ref 是原生 tool intent 和完整 dispatch checkpoint，
+不是 worker preparation 准入。prepared 可空规则与所有重复字段必须匹配响应和
+原始合格 authorization。dispatch 授权时持久保存这份确切的联合证据；现有仅含
+两个 dispatch-generation/binding-version 列的 marker 不足。该 wire shape 与
+持久化仍待实现，构造用 worker 和通用 Tool-v3 grant 目前都不提供它。
+
+每个 resource entry 严格包含 `reference`、`bytesBase64`；reference 使用既有闭合
+资源元数据。每个资源仅出现一次，所有返回资源均为该 action 必需，所有必需资源
+均须出现。保留原始字节，不嵌入已解析 payload JSON。成员集合和 grant 都不能由
+请求 worker 提供。route 与 worker 接线前，共享 codec fixture 必须覆盖三个确切
+shape、重复/额外/缺失字段、action/kind 不一致及 prepared 可空规则。响应是事务内
+证据观察，不是操作结束后仍有效的签名 bearer capability；worker 仅在保留并加入
+生命周期的操作中使用它，响应到达后再次检查本地 seal。单个资源保持 64 KiB 上限，完整
+响应采用明确的总字节与成员界限，超限拒绝而非截断。worker 使用证据前，将每项身份
+与 boot 和已安装上下文比较。界限为 request 16 KiB、response 8 MiB、最多 4096
+个成员；原生 history resource 仍限制在 64 KiB。发送端与流式接收端均在 JSON 解码
+前执行字节限制。原资源以确切 Base64 字节传输，结构 counter 语法不能拒绝原始
+model/tool payload 内合法的任意 JSON 数值。读回成功仅准入该已加入生命周期的操作，不能执行其他
+call，也不能报告 RELEASED。
+
+## 3. 原生历史与资源提升
+
+保持原生文件设计现有 schema-2 根、目录身份、保留 preimage pin、projection 和
+`idle → intent → prepared → idle` 语法。bind 使用实际保留 backend 的空观察；
+启动与 attestation 不创建独占历史目录。bind 响应丢失后加入同一个保留 promise。
+任意历史 projection 不能证明物理绑定，后续 worker 使用必须匹配其原始 backend
+观察与目录身份。未绑定或孤立的 backend 证据阻断退休。
+
+新接受与历史回放共用一个转换校验器。向现有 native prefix 增加派生 history 与
+冻结批次证据，并贯穿每个 input、message、model、activation 和 settlement 转换。
+当前 pending batch 推进后仍保留历史 assistant/function 身份。这些状态来自原始
+journal 的派生，不另设持久 ledger。只有合格完成能退休 pending batch；续租、
+另一 model attempt 或 schema-1 清理不能擦除它。
+
+在 `commitResources` 前，same-Connection 私有 preflight 读取有界候选与当前
+prefix，先锁原始 resource inventory，再锁固定 Runtime Session 和全部可能相关
+execution row，校验整个目标转换。intent 对每个已接受成员（包括 Read）比较原始行
+的不可变字段、完整 assistant Parts、ref、原始 input、definition、request digest、
+function/part/local ordinal 与 mutation paths。随后仅将这些确切 PUBLISHED/
+MYSQL_INLINE 资源提升为 REFERENCED。现有 `commitResources` 建立下一 revision
+关联，最终 native acceptance 用原始关联检查同一转换。任何失败都同时回滚提升、
+关联、journal 与 head；此前接受的 allocation 与 PUBLISHED 字节保留。不得用新 ID
+修复已引用资源。
+
+intent collector 包含每个 invocation 的 input/definition；prepared 再加入原始
+intent ref。历史前驱仍通过各自原始 revision 校验，不在每个新事务递归复制完整链。
+HTTP resource collector、recovery reader 与 checkpoint snapshot 使用同一有限
+闭包规则。scope、state、metadata、字节、hash 与原始 revision 关联仍是必要条件。
+
+## 4. 完整成员、回放与锁序
+
+按原始 binding OR Harness owner OR Runtime Session 枚举相关行，稳定排序、每页
+100 行，保持现有 4096 条拒绝上限，包含所有状态。先将每行不可变原始 batch 与派生
+历史 prefix 比较，再按原始 assistant UUID 分组。SQL 仅筛当前 batch 会隐藏外来或
+冲突行；将所有历史行都解释为当前 pending batch 则会阻断合法第二批。
+
+冻结前，新的 intent 仅准入字节完全合格的 PREPARED 当前成员；冻结后，匹配重试
+读取原始 receipt/ref，新成员或非同一成员拒绝。阶段感知的当前 reader 区分未关联
+PUBLISHED allocation 与具有确切 native 关联的 REFERENCED 证据，不把 resource
+verifier 放宽为两种 state 的白名单。intent 前的 terminal、UNKNOWN、abandoned 或
+cancelled 成员不能消失以形成较小的成功 intent。
+
+保持锁序：原始 placement/retention/slot/binding/pin parent → native head/journal
+与 resource inventory → 不可变 retirement 证据 → 固定 Runtime Session → 完整
+稳定 execution 顺序。新 commit 与 reservation 使用同一个 parent fence，late
+insertion 无法与完整成员观察竞争。所有权威读取都在原始 Connection 上采用带锁的
+current read，包括已预热的 REPEATABLE READ。独立事务或缓存准入不足；SQL 锁
+不得跨 worker I/O。
+在所有可能阻塞的锁之后、接受或授权之前，重新读取数据库时间并校验 writer/
+activation/admission。等待 resource/execution 锁前有效的 lease，此时可能已过期。
+
+## 5. Worker 准备、grant 与 Hosted 完成
+
+在第一个 await 前登记私有操作。当前读回后，在 bind、preimage I/O 或 invocation
+前再次检查本地 seal。按原始 intent resource ID 和 digest 去重 prepare，在 I/O 前
+安装一个保留 promise。匹配重试加入，身份变化冲突；失败保留原始 backup/orphan
+证据并阻断，而非再次复制。执行器接收准备文件的同一个 composer history 对象。
+
+SQL seal 与 worker seal 是两个不同屏障。worker 开始前 seal 拒绝新 I/O；原生
+prepared 接受前 seal 留下未解决原始 intent。seal 前 pending operation 继续被加入
+生命周期并对 drain 可见，其观察不能成为 seal 后 dispatch grant。Cancel、timeout、
+身份丢失或 not-started result 不清除原生 preparation。
+
+每个 tool intent 将原始十一字段 SQL reference 与不可变 resource 字节连接到原生
+assistant 和 prepared history。任何 dispatch 前，完整 `await_runtime` checkpoint
+冻结全部已接受 intent。纯 Read batch 同样冻结完整分配，只是不需要 backup intent。
+按 execution/function/part 与 assistant 身份派生 local 到 cumulative ordinal 映射，
+保留 refusal gap 和较早 checkpoint item。不得将 assistant batch UUID 与累计
+checkpoint batch ID 混同。
+
+worker 执行针对原始不可变 grant 再次进行私有当前读回；三个工具名或较早的
+preparation 响应不足。实际工具使用时保持有限 lookup 与所有保留 descriptor/path/
+inode 检查。保留完整原始 inline result、持久 outcome、message 和 checkpoint
+覆盖；超限或省略结果阻断 settlement。此 profile 禁用普通 ACK 清空与 Runtime
+Session release。只有实际后续 Hosted model continuation 才能把 `consumed=false`
+改为 true，SQL SETTLED 不能代替。中断结果与 preparation 保留为 blocker。
+
+冷 owner 恢复复用原始 call、ref、字节与当前合格 checkpoint，不得重铸 ID、创建
+另一独占目录、接管没有 authority 的旧 boot 或构造 idle tail。固定原始 Runtime
+Session 和存储 holder 保持到合格退休。
+
+## 6. 受影响组件与实现顺序
+
+| 组件           | 必须连接的消费者                                                                                                                                                         |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Bootstrap      | `WorkspaceCsiRuntimeProvisioner`、`WorkspaceCsiRuntimeIdentity`、`ManagedCsiFilesProtocol`、container boot reader、CSI file envelope、transport、共享 fixture 与重启比较 |
+| Admission      | 独立 Broker HTTP 认证/路由、Broker service、原始 JDBC/seed/lease/context/current prefix 与完整 allocation reader                                                         |
+| Native history | `CsiNativeActivationProof`、`JdbcCsiActivationAdmission`、`CsiNativeToolReservation`、`ManagedSessionStore`、extension application 与原始 resource association           |
+| Closure 与恢复 | HTTP nested-resource collection、`WorkspaceRecoveryReader`、original file checkpoint、CSI snapshot/inventory 与 schema 感知 Hosted reader                                |
+| Execution      | 私有 worker、保留 composer/history、有限 executor、原始 intent/checkpoint/grant、outcome/result/consume 与原始 Hosted harness callback                                   |
+
+先实现验证 native schema/promotion 与锚定的读回，作为这条连接链的依赖；随后连接
+实际 producer 与 worker preparation，再连接完整 execution 和 consumption。继续
+完成冷恢复、全部 writer cut、DRAINED、物理 stop、NodeUnpublish、RELEASED、reuse
+及部署/目标环境验证。依赖完成不能替换完整目标，也不能开放公共 Hosted/Spring
+CSI selection。
+
+## 7. 验证与验收
+
+生产编辑前，由 test-engineer dry-run 全局 CLI 与实际当前原始 producer，记录真实
+缺口，不合成正向 assistant、intent、prepared history 或 grant。仅将保留 utility
+作为重新 hash 的输入使用，使用新自有 root/process/DB 并明确 fixture 边界。启动前
+锚定实际 Node chunk 与 Java origin；若无法完整预锚定，保留只有加载时证据的限制。
+
+连接后的正向运行必须由生产调用者产生实际 Read/Write/Edit preimage、原始 history
+revision 与资源提升、完整 grant、真实文件效果、原始 result、outcome/message/
+checkpoint 闭包、consumption 与合格 idle tail。负向组覆盖 omitted Read、late
+insert、多页/第二批、外来/变化身份、资源故障回滚、响应丢失、损坏 history/字节、
+容量、prepare/dispatch 前 seal 和中断结果。真实 MySQL READ COMMITTED 与预热
+REPEATABLE READ 锁竞争不同于 H2 或串行 seal；新 Linux CSI/目标集群证据不同于
+POSIX fixture。
+
+完整实现报告前执行 build/typecheck/bundle、聚焦 TS/Java 检查、独立验证、两轮干净
+自审及仓库原生 review workflow。如有原生 workflow 限制必须明示；CI 或独立 helper
+测试不能替代 maintainer approval。保持同一个 Draft PR，不自动 Ready、merge、
+物理 release 或关闭 proposal。

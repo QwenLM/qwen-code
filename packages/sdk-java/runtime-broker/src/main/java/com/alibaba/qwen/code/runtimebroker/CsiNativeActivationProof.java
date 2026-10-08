@@ -22,9 +22,11 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -76,10 +78,18 @@ public final class CsiNativeActivationProof {
     public record PendingBatch(String messageId, JsonNode contentRef, List<FunctionCall> calls) {
     }
 
+    public record OriginalBatch(String promptId, PendingBatch batch) {
+    }
+
     public record Prefix(Input input, Checkpoint checkpoint, String lastMessageId, Attempt attempt,
-            boolean assistantCommitted, Stream stream, Set<String> usedIds, PendingBatch pendingBatch) {
+            boolean assistantCommitted, Stream stream, Set<String> usedIds, PendingBatch pendingBatch,
+            Map<String, OriginalBatch> batches) {
+        public Prefix {
+            batches = Map.copyOf(batches);
+        }
+
         public static Prefix empty() {
-            return new Prefix(null, null, null, null, false, null, Set.of(), null);
+            return new Prefix(null, null, null, null, false, null, Set.of(), null, Map.of());
         }
 
         public String checkpointResourceId() {
@@ -197,14 +207,14 @@ public final class CsiNativeActivationProof {
                 require(previous.input() == null && previous.pendingBatch() == null);
                 Input input = input(transaction, metadata, original, activation, previousSequence, resources);
                 yield new Prefix(input, previous.checkpoint(), previous.lastMessageId(), null, false,
-                        null, useId(previous, input.inputId()), null);
+                        null, useId(previous, input.inputId()), null, previous.batches());
             }
             case "commitCheckpoint" -> {
                 require(previous.checkpoint() == null);
                 yield new Prefix(previous.input(), validatedInitialCheckpoint(transaction, metadata, original,
                         writerId, genesis, activation, previousSequence, resources), previous.lastMessageId(),
                         previous.attempt(), previous.assistantCommitted(), previous.stream(), previous.usedIds(),
-                        previous.pendingBatch());
+                        previous.pendingBatch(), previous.batches());
             }
             case "commitMessage" -> message(transaction, metadata, original, genesis, activation,
                     previousSequence, previous, resources);
@@ -261,7 +271,7 @@ public final class CsiNativeActivationProof {
         Stream stream = new Stream(messageId, prior == null ? previousSequence + 1 : prior.firstSequence(),
                 ordinal + 1, (prior == null ? "" : prior.text()) + fragment);
         return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(), previous.attempt(),
-                false, stream, prior == null ? useId(previous, messageId) : previous.usedIds(), null);
+                false, stream, prior == null ? useId(previous, messageId) : previous.usedIds(), null, previous.batches());
     }
 
     private static Prefix retract(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
@@ -279,7 +289,7 @@ public final class CsiNativeActivationProof {
                 && sha256(utf8(stream.messageId() + ":" + stream.firstSequence()))
                         .equals(text(metadata, "contentDigest")));
         return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(), previous.attempt(),
-                false, null, previous.usedIds(), null);
+                false, null, previous.usedIds(), null, previous.batches());
     }
 
     static byte[] utf8(String text) {
@@ -383,9 +393,16 @@ public final class CsiNativeActivationProof {
         }
         Input input = user ? new Input(previous.input().inputId(), previous.input().text(), messageId, true)
                 : previous.input();
+        PendingBatch batch = calls.isEmpty() ? null
+                : new PendingBatch(messageId, payload.path("contentRef").deepCopy(), List.copyOf(calls));
+        Map<String, OriginalBatch> batches = previous.batches();
+        if (batch != null) {
+            batches = new HashMap<>(batches);
+            require(batches.put(messageId, new OriginalBatch(input.inputId(), batch)) == null);
+        }
         return new Prefix(input, previous.checkpoint(), messageId, previous.attempt(), !user && calls.isEmpty(),
                 null, !user && previous.stream() != null ? previous.usedIds() : useId(previous, messageId),
-                calls.isEmpty() ? null : new PendingBatch(messageId, payload.path("contentRef").deepCopy(), List.copyOf(calls)));
+                batch, batches);
     }
 
     private static JsonNode messageBody(JsonNode ref, Function<JsonNode, byte[]> resources) {
@@ -477,7 +494,7 @@ public final class CsiNativeActivationProof {
         }
         return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(),
                 new Attempt(attemptId, routeRef.deepCopy(), checkpointRef.deepCopy(), route.deepCopy(), stage), false,
-                previous.stream(), ids, null);
+                previous.stream(), ids, null, previous.batches());
     }
 
     private static void usage(JsonNode usage, JsonNode route, String stage) {
@@ -571,7 +588,7 @@ public final class CsiNativeActivationProof {
                 && number(state.path("resume").get("initialTurn")) == 0
                 && canonical(expected).equals(canonical(state)));
         return new Prefix(null, new Checkpoint(stateRef.deepCopy(), state.deepCopy()), previous.lastMessageId(),
-                null, false, null, useId(previous, id(result, "uuid")), null);
+                null, false, null, useId(previous, id(result, "uuid")), null, previous.batches());
     }
 
     private static Input input(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,

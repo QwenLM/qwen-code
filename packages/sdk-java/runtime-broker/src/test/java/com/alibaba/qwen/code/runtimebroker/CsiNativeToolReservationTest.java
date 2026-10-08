@@ -9,11 +9,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
+import java.util.List;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 
 /** Tuple-validation units only; the supplied prefix does not prove native SQL admission. */
@@ -116,6 +119,123 @@ class CsiNativeToolReservationTest {
         }
     }
 
+    @Test
+    void qualifiesHistoricalRowsAgainstTheirOwnAssistantAndPrompt() throws Exception {
+        var first = prefix(capturedParts());
+        var prior = tuple(first, 0);
+        var next = prefix(capturedParts(), UUID.randomUUID().toString(), UUID.randomUUID().toString());
+        var batches = new HashMap<>(first.batches());
+        batches.putAll(next.batches());
+        var combined = new CsiNativeActivationProof.Prefix(next.input(), next.checkpoint(), next.lastMessageId(),
+                next.attempt(), next.assistantCommitted(), next.stream(), next.usedIds(), next.pendingBatch(), batches);
+        var current = tuple(combined, 0);
+        assertEquals(prior.execution().getReference().get("functionCallId"), current.execution().getReference().get("functionCallId"));
+        assertDoesNotThrow(() -> CsiNativeToolReservation.qualifyRelated(original, combined,
+                prior.execution(), prior.input(), prior.definition()));
+        assertDoesNotThrow(() -> CsiNativeToolReservation.qualify(original, combined,
+                current.execution(), current.input(), current.definition()));
+        rejects(combined, prior.execution(), prior.input(), prior.definition());
+        Map<String, Object> changed = new HashMap<>(prior.execution().getReference());
+        changed.put("promptId", next.input().inputId());
+        assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.qualifyRelated(original, combined,
+                copy(prior.execution(), changed), prior.input(), prior.definition()));
+        changed.put("batchId", UUID.randomUUID().toString());
+        assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.qualifyRelated(original, combined,
+                copy(prior.execution(), changed), prior.input(), prior.definition()));
+    }
+
+    @Test
+    void unrelatedNativeAssistantCannotQualifyAStoredFunctionOrPart() throws Exception {
+        var first = prefix(capturedParts());
+        var tuple = tuple(first, 0);
+        JsonNode changedParts = capturedParts();
+        ((ObjectNode) changedParts.get(2).path("functionCall")).put("id", "another-native-function");
+        var changed = prefix(changedParts);
+        assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.qualifyRelated(original, changed,
+                tuple.execution(), tuple.input(), tuple.definition()));
+    }
+
+    @Test
+    void currentReadChecksHistoricalUnknownRowsBeforeReturningOnlyCurrentMembers() throws Exception {
+        try (Connection connection = connection()) {
+            var first = prefix(capturedParts());
+            var prior = tuple(first, 0);
+            prepare(connection, first, prior);
+            try (var statement = connection.createStatement()) {
+                statement.executeUpdate("UPDATE qwen_tool_execution SET execution_state = 'UNKNOWN'");
+            }
+            var next = prefix(capturedParts(), UUID.randomUUID().toString(), UUID.randomUUID().toString());
+            var batches = new HashMap<>(first.batches());
+            batches.putAll(next.batches());
+            var combined = new CsiNativeActivationProof.Prefix(next.input(), null, next.lastMessageId(), null,
+                    false, null, Set.of(), next.pendingBatch(), batches);
+            for (int index = 0; index < 3; index++) {
+                prepare(connection, combined, tuple(combined, index));
+            }
+            var inventory = CsiNativeToolReservation.inventory(connection, original);
+            assertEquals(4, CsiNativeToolReservation.complete(connection, original, combined, inventory).size());
+            var result = CsiNativeToolReservation.read(connection, original, combined, inventory,
+                    combined.input().inputId(), combined.pendingBatch().messageId());
+            var members = (List<?>) result.get("members");
+            assertEquals(3, members.size());
+            for (int index = 0; index < members.size(); index++) {
+                var member = (Map<?, ?>) members.get(index);
+                var ref = (Map<?, ?>) member.get("reference");
+                assertEquals(combined.pendingBatch().messageId(), ref.get("batchId"));
+                assertEquals(index, ((Number) ref.get("ordinal")).intValue());
+            }
+            try (var statement = connection.prepareStatement("UPDATE qwen_tool_execution SET runtime_session_id = ?, runtime_session_key = ?"
+                    + " WHERE execution_call_id = ?")) {
+                statement.setString(1, "foreign-session");
+                statement.setString(2, JdbcRepositorySupport.valueKey("foreign-session"));
+                statement.setString(3, prior.execution().getExecutionCallId());
+                statement.executeUpdate();
+            }
+            assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.read(connection, original, combined,
+                    inventory, combined.input().inputId(), combined.pendingBatch().messageId()));
+        }
+    }
+
+    @Test
+    void completeReadCrossesStableExecutionPagesWithoutDroppingMembers() throws Exception {
+        var parts = JSON.createArrayNode();
+        JsonNode originalRead = capturedParts().get(2);
+        for (int index = 0; index < 101; index++) {
+            ObjectNode part = originalRead.deepCopy();
+            ((ObjectNode) part.path("functionCall")).put("id", "page-function-" + index);
+            parts.add(part);
+        }
+        var prefix = prefix(parts);
+        try (Connection connection = connection()) {
+            for (int index = 0; index < 101; index++) {
+                prepare(connection, prefix, tuple(prefix, index));
+            }
+            var inventory = CsiNativeToolReservation.inventory(connection, original);
+            assertEquals(202, inventory.size());
+            var result = CsiNativeToolReservation.read(connection, original, prefix, inventory, PROMPT, BATCH);
+            assertEquals(101, ((List<?>) result.get("members")).size());
+        }
+    }
+
+    private void prepare(Connection connection, CsiNativeActivationProof.Prefix prefix, Tuple tuple) throws Exception {
+        CsiNativeToolReservation.prepare(connection, original, prefix,
+                CsiNativeToolReservation.inventory(connection, original), tuple.execution(), tuple.input(), tuple.definition());
+    }
+
+    private static Connection connection() throws Exception {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:csi-members-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=0;DATABASE_TO_LOWER=TRUE");
+        Connection connection = source.getConnection();
+        JdbcRuntimeBrokerSchema.initialize(source);
+        try (var input = CsiNativeToolReservationTest.class.getResourceAsStream("/csi-native-resource-schema-fixture.sql");
+                var statement = connection.createStatement()) {
+            statement.execute(new String(input.readAllBytes(), StandardCharsets.UTF_8));
+        }
+        connection.setAutoCommit(false);
+        return connection;
+    }
+
     private static void rejects(CsiNativeActivationProof.Prefix prefix, ToolExecutionRecord execution, byte[] input, byte[] definition) {
         assertThrows(RuntimeException.class, () -> CsiNativeToolReservation.qualify(
                 new JdbcCsiFilesRetirementGuard.Original(CsiFilesRetirementProfile.request(new ContextBinding(
@@ -130,6 +250,10 @@ class CsiNativeToolReservationTest {
     }
 
     private static CsiNativeActivationProof.Prefix prefix(JsonNode parts) {
+        return prefix(parts, PROMPT, BATCH);
+    }
+
+    private static CsiNativeActivationProof.Prefix prefix(JsonNode parts, String prompt, String batchId) {
         var calls = new ArrayList<CsiNativeActivationProof.FunctionCall>();
         for (int index = 0; index < parts.size(); index++) {
             JsonNode call = parts.get(index).path("functionCall");
@@ -138,8 +262,10 @@ class CsiNativeToolReservationTest {
                         call.path("args").deepCopy(), index, calls.size()));
             }
         }
-        return new CsiNativeActivationProof.Prefix(new CsiNativeActivationProof.Input(PROMPT, "unit", "user", true),
-                null, BATCH, null, false, null, Set.of(), new CsiNativeActivationProof.PendingBatch(BATCH, JSON.createObjectNode(), calls));
+        var batch = new CsiNativeActivationProof.PendingBatch(batchId, JSON.createObjectNode(), calls);
+        return new CsiNativeActivationProof.Prefix(new CsiNativeActivationProof.Input(prompt, "unit", "user", true),
+                null, batchId, null, false, null, Set.of(), batch,
+                Map.of(batchId, new CsiNativeActivationProof.OriginalBatch(prompt, batch)));
     }
 
     private static Tuple tuple(CsiNativeActivationProof.Prefix prefix, int ordinal) throws Exception {
@@ -148,16 +274,22 @@ class CsiNativeToolReservationTest {
         byte[] input = JSON.writeValueAsBytes(Map.of("harnessSessionId", SESSION, "runtimeSessionId", SESSION, "payloadJson", payload));
         byte[] definition;
         try (var stream = CsiNativeToolReservationTest.class.getResourceAsStream("/csi-native-file-declarations.json")) {
-            definition = JSON.writeValueAsBytes(JSON.readTree(stream).get(ordinal));
+            JsonNode declared = null;
+            for (JsonNode candidate : JSON.readTree(stream)) {
+                if (call.name().equals(candidate.path("name").textValue())) {
+                    declared = candidate;
+                }
+            }
+            definition = JSON.writeValueAsBytes(declared);
         }
         String id = UUID.randomUUID().toString();
-        Map<String, Object> reference = new HashMap<>(Map.of("sessionId", SESSION, "promptId", PROMPT,
+        Map<String, Object> reference = new HashMap<>(Map.of("sessionId", SESSION, "promptId", prefix.input().inputId(),
                 "callId", id, "argsDigest", "sha256:" + CsiNativeActivationProof.sha256(payload.getBytes(StandardCharsets.UTF_8)),
-                "batchId", BATCH, "functionCallId", call.id(), "ordinal", ordinal, "partIndex", call.partIndex(),
+                "batchId", prefix.pendingBatch().messageId(), "functionCallId", call.id(), "ordinal", ordinal, "partIndex", call.partIndex(),
                 "inputRef", ref("managed-tool-input", input), "toolDefinitionRef", ref("managed-tool-definition", definition)));
         reference.put("dispatchMode", "deferred");
-        return new Tuple(ToolExecutionRecord.prepared("unit-execution", SESSION + ":" + id, "binding", 1,
-                SESSION, SESSION, PROMPT, id, (String) reference.get("argsDigest"), reference), input, definition);
+        return new Tuple(ToolExecutionRecord.prepared("unit-execution-" + id, SESSION + ":" + id, "binding", 1,
+                SESSION, SESSION, prefix.input().inputId(), id, (String) reference.get("argsDigest"), reference), input, definition);
     }
 
     private static Map<String, Object> ref(String kind, byte[] bytes) {
