@@ -249,6 +249,26 @@ it('refuses a malformed background flag and an oversized description', async () 
   );
 });
 
+// R1-8: a prompt inside the generic inline budget but past the launch
+// envelope's own bound is a model-correctable argument error — the
+// refusal the admission contract names, never a recovery-blocked Turn.
+it('answers an over-size prompt with the byte_limit refusal, not recovery', async () => {
+  const turn = createTurn();
+  const responses = await executeAgent(
+    turn,
+    call({
+      description: 'audit',
+      prompt: 'p'.repeat(33 * 1024),
+      run_in_background: true,
+    }),
+  );
+  expect(JSON.stringify(responses)).toContain('byte_limit');
+  expect(JSON.stringify(responses)).not.toContain('audit-started');
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
 it('commits the launch intent on the sent arm and answers with the task id', async () => {
   const turn = createTurn();
   const responses = await executeAgent(

@@ -84,6 +84,7 @@ import {
   encodeChildLaunchEnvelope,
   MANAGED_CHILD_LIMITS,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
+import { ManagedSessionRecordError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   managedExtensionRecordKey,
   managedTaskId,
@@ -2603,16 +2604,28 @@ export class HostedWorkspaceToolTurn {
       definitionRevision: 1,
       definitionDigest: authority.sessionHeader.definitionRef.digest,
     };
+    // The envelope bound is enforced by the admission's byte_limit
+    // refusal — but the encoder throws a size error before that branch
+    // can ever answer. Translate the throw into the same refusal: an
+    // over-size prompt is a model-correctable argument error, never a
+    // recovery-blocked Turn.
+    let envelopeBytes: number;
+    try {
+      envelopeBytes = encodeChildLaunchEnvelope({
+        description,
+        prompt,
+        definition,
+      }).byteLength;
+    } catch (cause) {
+      if (!(cause instanceof ManagedSessionRecordError)) throw cause;
+      envelopeBytes = Number.POSITIVE_INFINITY;
+    }
     const admission = childLaunchAdmission({
       workspaceMode: 'shared',
       sameDefinition: true,
       closing: authority.currentActivation?.phase !== 'active',
       activeInScope: children.activeChildRunsOf(key.sessionId).length,
-      envelopeBytes: encodeChildLaunchEnvelope({
-        description,
-        prompt,
-        definition,
-      }).byteLength,
+      envelopeBytes,
     });
     if (!admission.admitted) {
       const refused = convertToFunctionErrorResponse(
