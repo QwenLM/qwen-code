@@ -428,7 +428,54 @@ class ChildResultRelayStoreTest {
                         + " VALUES (?, ?, 'item-1', 'part-1', 'output_text',"
                         + " '审阅通过', 2, 2, 1, 1, 1)",
                 TENANT, session);
+        // R1-90: pin the two decisions the result query makes — the
+        // NEWEST assistant message wins over an older assistant and over
+        // a newer non-assistant row, and the chosen item's output_text
+        // parts join in sequence order.
+        jdbc.update("INSERT INTO managed_agent_item (tenant_id, session_id,"
+                        + " item_id, turn_id, item_type, item_role,"
+                        + " item_status, attributes_json, first_sequence,"
+                        + " last_sequence, created_at, updated_at, revision)"
+                        + " VALUES (?, ?, 'item-0', 'turn-1', 'message',"
+                        + " 'assistant', 'completed', '{}', 1, 1, 1, 1, 1)",
+                TENANT, session);
+        jdbc.update("INSERT INTO managed_agent_item_part (tenant_id,"
+                        + " session_id, item_id, part_id, part_type,"
+                        + " part_text, first_sequence, last_sequence,"
+                        + " created_at, updated_at, revision)"
+                        + " VALUES (?, ?, 'item-0', 'part-0', 'output_text',"
+                        + " 'older answer', 1, 1, 1, 1, 1)",
+                TENANT, session);
+        jdbc.update("INSERT INTO managed_agent_item (tenant_id, session_id,"
+                        + " item_id, turn_id, item_type, item_role,"
+                        + " item_status, attributes_json, first_sequence,"
+                        + " last_sequence, created_at, updated_at, revision)"
+                        + " VALUES (?, ?, 'item-2', 'turn-1', 'message', 'user',"
+                        + " 'completed', '{}', 4, 4, 1, 1, 1)",
+                TENANT, session);
+        jdbc.update("INSERT INTO managed_agent_item_part (tenant_id,"
+                        + " session_id, item_id, part_id, part_type,"
+                        + " part_text, first_sequence, last_sequence,"
+                        + " created_at, updated_at, revision)"
+                        + " VALUES (?, ?, 'item-2', 'part-2', 'output_text',"
+                        + " 'newer but not the child answer', 4, 4, 1, 1, 1)",
+                TENANT, session);
+        jdbc.update("INSERT INTO managed_agent_item_part (tenant_id,"
+                        + " session_id, item_id, part_id, part_type,"
+                        + " part_text, first_sequence, last_sequence,"
+                        + " created_at, updated_at, revision)"
+                        + " VALUES (?, ?, 'item-1', 'part-3', 'output_text',"
+                        + " '第二段', 3, 3, 1, 1, 1)",
+                TENANT, session);
+        jdbc.update("INSERT INTO managed_agent_item_part (tenant_id,"
+                        + " session_id, item_id, part_id, part_type,"
+                        + " part_text, first_sequence, last_sequence,"
+                        + " created_at, updated_at, revision)"
+                        + " VALUES (?, ?, 'item-1', 'part-4',"
+                        + " 'reasoning_text', 'not the answer', 5, 5, 1, 1,"
+                        + " 1)",
+                TENANT, session);
         assertThat(relayStore.terminalResultText(TENANT, session, "turn-1"))
-                .isEqualTo("审阅通过");
+                .isEqualTo("审阅通过\n第二段");
     }
 }
