@@ -262,6 +262,14 @@ function outcomeBytes(item: HarnessToolItem, parts: Part[]): Buffer {
  * Settles every parked Runtime execution of a cancelled turn with a cancelled
  * outcome, so the checkpoint can leave `await_runtime` and the following
  * terminal record can advance the session to a model-start phase.
+ *
+ * The report distinguishes the three exits a caller must not conflate:
+ * `settled` journaled the parked executions; `noop` was a legitimate
+ * idempotent retry — the checkpoint no longer names the Turn or nothing
+ * parked remains, either way the settle's work is already done;
+ * `not-runnable` could not even verify the park (the authorization read
+ * came back blocked), so nothing was journaled and the caller must treat
+ * the settle as a retry-inviting failure, never as a completed one.
  */
 export async function settleParkedTurnCancelled(input: {
   session: ManagedSession;
@@ -272,15 +280,15 @@ export async function settleParkedTurnCancelled(input: {
    * — no stop was ever observed for them, so they journal an honest
    * unobservable outcome instead of a cancellation nobody witnessed. */
   unobserved?: ReadonlySet<string>;
-}): Promise<void> {
+}): Promise<'settled' | 'noop' | 'not-runnable'> {
   const authorization = await input.session.authority.harnessRunAuthorization();
-  if (authorization.status !== 'runnable') return;
+  if (authorization.status !== 'runnable') return 'not-runnable';
   const checkpoint = authorization.checkpoint;
-  if (checkpoint.identity.turnId !== input.promptId) return;
+  if (checkpoint.identity.turnId !== input.promptId) return 'noop';
   const pending = (checkpoint.tools?.items ?? []).filter(
     (item) => item.state === 'in_progress' && item.outcomeSource === 'runtime',
   );
-  if (pending.length === 0) return;
+  if (pending.length === 0) return 'noop';
   const harness = createManagedHarnessHandle(input.session);
   // A write-then-resolve crash window must not journal a tool_result twice
   // when the cancel retries: collect what is already durable.
@@ -334,6 +342,7 @@ export async function settleParkedTurnCancelled(input: {
     }
     await harness.resolveAwaitRuntime(item.executionCallId, outcomeRef);
   }
+  return 'settled';
 }
 
 /**
@@ -370,11 +379,14 @@ export async function stopParkedRuntimeExecutions(input: {
     authorization.checkpoint.tools?.items ?? [],
     input.brokerOptions,
   );
-  // Terminal for the stop's purposes — the Broker never knew it or the
-  // result is durable. A permanently fenced record ends the wait too, but
-  // the stop was never observed for it, so it is reported separately rather
-  // than certified. The pre-cancel skip and the post-cancel poll must agree
-  // on this or one side lies.
+  // Terminal for the pre-cancel skip — an execution the Broker never knew
+  // (a definitive not-found) is already stopped, and a settled result is
+  // durable. A permanently fenced record ends the wait too, but the stop
+  // was never observed for it, so it is reported separately rather than
+  // certified. The post-cancel poll shares only the `settled` half: a
+  // record that vanishes after the cancel was issued is one the Broker
+  // provably knew one read earlier, so it joins the fenced executions in
+  // the unobserved set instead of being certified as a witnessed stop.
   const stopComplete = (state: { state: string } | undefined): boolean =>
     state === undefined || state.state === 'settled';
   const unobserved = new Set<string>();
@@ -395,11 +407,11 @@ export async function stopParkedRuntimeExecutions(input: {
       const status = await broker.status(item.executionCallId);
       if (status?.state === 'unknown')
         throw new Error('Runtime execution outcome is unknown.');
-      if (status?.state === 'abandoned') {
+      if (status === undefined || status.state === 'abandoned') {
         unobserved.add(item.executionCallId);
         break;
       }
-      if (stopComplete(status)) break;
+      if (status.state === 'settled') break;
       if (Date.now() >= deadline) {
         throw new Error(
           'Runtime execution did not reach a terminal state after cancellation.',

@@ -1453,6 +1453,53 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
+  it('counts an execution that vanishes mid-cancel as unobserved', async () => {
+    await parkAtAwaitRuntime();
+    // The pre-cancel read proves the Broker knew the execution; the record
+    // then vanishes (a reclaimed owner answers a definitive not-found, not
+    // a terminal fence) before the first post-cancel poll.
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status')
+      .mockResolvedValueOnce({ state: 'executing' })
+      .mockResolvedValue(undefined);
+    const cancel = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'cancel')
+      .mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      const { unobserved } = await stopParkedRuntimeExecutions({
+        session: replacement,
+        promptId: PROMPT_ID,
+        brokerOptions,
+      });
+      expect(cancel).toHaveBeenCalledTimes(1);
+      // A record the Broker knew one read earlier and then lost is not a
+      // witnessed stop: it joins the fenced executions in the unobserved
+      // set instead of being certified as a cancellation.
+      expect([...unobserved]).toEqual([EXECUTION_ID]);
+      await settleParkedTurnCancelled({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        unobserved,
+      });
+      const journaled = (await replacement.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+      );
+      expect(journaled).toHaveLength(1);
+      const response = journaled[0]?.message?.parts?.[0]?.functionResponse
+        ?.response as Record<string, unknown> | undefined;
+      expect(response?.['executionStatus']).toBe('unknown');
+      expect(String(response?.['error'])).toContain('could not be observed');
+      expect(String(response?.['error'])).not.toContain(
+        'cancelled with its owner',
+      );
+    } finally {
+      await replacement.close();
+    }
+  });
+
   it('does not journal a tool result twice across a recovery retry', async () => {
     await parkAtAwaitRuntime('write_file', true);
     vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();

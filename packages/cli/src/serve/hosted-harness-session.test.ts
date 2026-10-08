@@ -37,6 +37,7 @@ import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-co
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { ManagedSessionStoreHttpError } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { openManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
+import { createManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
 import { LocalShellResultCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-capture.js';
 import { parseToolResultManifestBytes } from '@qwen-code/qwen-code-core/managed-runtime/managed-tool-result.js';
 import type {
@@ -92,6 +93,7 @@ import type {
 import { HostedMonitorSession } from './hosted-monitor-session.js';
 import { HostedMonitorLoop } from './hosted-monitor-loop.js';
 import { HostedMonitorWakeScheduler } from './hosted-monitor-wake.js';
+import { recoverHostedRuntimeTurn } from './hosted-runtime-recovery.js';
 import { HostedChildRunSession } from './hosted-child-run-session.js';
 import { LocalShellStreamCapture } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-stream-capture.js';
 import { monitorWakeNeedsRecovery } from './hosted-monitor-wake-turn.js';
@@ -11418,6 +11420,79 @@ describe('Hosted Harness Runtime turn takeover', () => {
     }
   });
 
+  it('keeps the Monitor wake pump parked after an undrivable redrive disarms the marker', async () => {
+    domainEnablement.monitorRun = true;
+    try {
+      await parkToolTurn([CALL], 'hosted-workspace-shell/1');
+      const notificationTurnId = 'monitor-1:notify:1';
+      await commitMonitorNotification(notificationTurnId);
+      // A drivable passive takeover arms the undriven marker; the load
+      // registration also kicks the wake pump that owns the notification.
+      const status = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'status')
+        .mockResolvedValue({ state: 'executing' });
+      wakeDeps.last = undefined;
+      state.model.mockClear();
+      const kick = vi.spyOn(HostedMonitorWakeScheduler.prototype, 'kick');
+      const { server, loaded } = await loadReplacement(
+        true,
+        'hosted-workspace-shell/1',
+      );
+      expect(loaded.status).toBe(200);
+      const clientId = loaded.body.clientId as string;
+      const armed = await replacementHeaders(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(armed.body.hasActivePrompt).toBe(true);
+      // The lost reply is redriven once the Broker can no longer account
+      // for the execution: the undrivable re-answer disarms the marker,
+      // but the parked input is still unsettled in the journal, so the
+      // pump must stay parked exactly like /prompt keeps refusing.
+      status.mockResolvedValue({ state: 'unknown' });
+      const redriven = await replacementHeaders(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({
+        managedSessionStore: storeFor(BOOT_ID_2),
+        toolProfile: 'hosted-workspace-shell/1',
+        passiveManagedRuntimeRecovery: true,
+      });
+      expect(redriven.status).toBe(200);
+      const disarmed = await replacementHeaders(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', clientId);
+      expect(disarmed.body.hasActivePrompt).toBe(false);
+      // A negative assertion can only wait on the clock: past two 500 ms
+      // retry intervals the pump must still not have run the notification
+      // Turn — no model call, and no turn.settled for a notification no
+      // model ever saw. (A fired pump wedges the Session blocked, which
+      // stops the kicks, so a kick-count gate would read the buggy arm as
+      // a pass.)
+      expect(kick.mock.calls.length).toBeGreaterThan(0);
+      await new Promise((resolve) => setTimeout(resolve, 1_200));
+      expect(state.model).not.toHaveBeenCalled();
+      const journal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+      );
+      expect(
+        journal.events.some(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === notificationTurnId,
+        ),
+      ).toBe(false);
+      await replacementHeaders(
+        supertest(server).delete(`/session/${SESSION_ID}`),
+      );
+    } finally {
+      domainEnablement.monitorRun = false;
+    }
+  });
+
   it('keeps the held Runtime lease when a redriven load fails transiently', async () => {
     await parkToolTurn();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
@@ -11455,6 +11530,132 @@ describe('Hosted Harness Runtime turn takeover', () => {
     expect(redriven.body.clientId).toBe(loaded.body.clientId);
     expect(redriven.body._meta?.['qwen.daemon.managedRuntimeRecovery']).toEqual(
       loaded.body._meta?.['qwen.daemon.managedRuntimeRecovery'],
+    );
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  /** Drives the parked Turn into the consume/settle crash window: the
+   * committed results are consumed into the continuation (checkpoint
+   * results_ready, every runtime item settled and consumed) while the
+   * journal never lands the terminal record — the state a drive load's
+   * lost reply leaves behind. */
+  async function consumeParkedToolResults(): Promise<void> {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      }),
+    });
+    try {
+      const outcome = await recoverHostedRuntimeTurn({
+        session: managed,
+        sessionId: SESSION_ID,
+        cwd: state.root,
+        promptId: PROMPT_ID,
+        brokerOptions: { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        passive: false,
+      });
+      if (outcome.kind !== 'recovered')
+        throw new Error(`expected a recovery, got ${outcome.kind}`);
+      await createManagedHarnessHandle(managed).consumeRuntimeResults();
+    } finally {
+      await managed.close();
+    }
+  }
+
+  it('disarms the undriven marker when a redriven load settles the cancelled park', async () => {
+    await parkToolTurn();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'written' }],
+    } as never);
+    // The owner dies between consumeRuntimeResults() and
+    // settleConsumedRuntimeContinuation(): results_ready with every runtime
+    // item settled and consumed, the journal input still unsettled.
+    await consumeParkedToolResults();
+    const { server, loaded } = await loadReplacement();
+    expect(loaded.status).toBe(200);
+    const clientId = loaded.body.clientId as string;
+    const armed = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/status`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(armed.body.hasActivePrompt).toBe(true);
+    // The lost-reply redrive carrying the coordinator's cancellation
+    // settles the park without the kernel — and must discharge the marker
+    // with it, or /prompt refuses this Session for the rest of the
+    // incarnation.
+    const redriven = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      driveRuntimeRecovery: true,
+      cancellationTakeover: true,
+    });
+    expect(redriven.status).toBe(200);
+    const settled = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/status`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(settled.body.hasActivePrompt).toBe(false);
+    const transcript = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(transcript.body.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'turn_complete',
+          promptId: PROMPT_ID,
+          data: expect.objectContaining({ stopReason: 'cancelled' }),
+        }),
+      ]),
+    );
+    // A user cancel over the settled Turn keeps the plain 204: the
+    // client's cancel flow hard-requires it before streaming the terminal
+    // record, and a definitive refusal would be retried forever.
+    const userCancelled = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/cancel`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(userCancelled.status).toBe(204);
+    // The Session is usable again: a fresh prompt is admitted and settles.
+    const nextPrompt = [{ type: 'text', text: 'after the redriven settle' }];
+    const prompted = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt: nextPrompt,
+        promptId: '99999999-9999-4999-8999-999999999999',
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
+      });
+    expect(prompted.status).toBe(202);
+    await vi.waitFor(
+      async () => {
+        const idle = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(idle.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
     );
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
@@ -12121,6 +12322,89 @@ describe('Hosted Harness Runtime turn takeover', () => {
       },
       { timeout: 10_000 },
     );
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('keeps the cancellation re-drivable when the settle cannot verify the park', async () => {
+    await parkToolTurn();
+    // The stop proves quickly (the execution is already settled), so only
+    // the settle's own authorization read — tens of seconds after the
+    // admission and stop reads — comes back non-runnable.
+    const status = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'status')
+      .mockResolvedValue({ state: 'settled' });
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    const { server, loaded } = await loadReplacement(true);
+    expect(loaded.status).toBe(200);
+    const clientId = loaded.body.clientId as string;
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as { checkpointId: string; activationId: string };
+    const original =
+      LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
+    let authorizationReads = 0;
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
+      authorizationReads += 1;
+      if (authorizationReads === 3)
+        return { status: 'blocked', reason: 'missing_state' } as never;
+      return original.call(this);
+    });
+    const send = () =>
+      replacementHeaders(
+        supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: recovery.checkpointId,
+          activationId: recovery.activationId,
+        });
+    const cancelled = await send();
+    // A settle that could not verify the park journaled nothing, so the
+    // route must answer the retry-inviting refusal — never a 200 over a
+    // terminal record the parked executions did not earn.
+    expect(cancelled.status).toBe(503);
+    expect(cancelled.body.code).toBe('managed_runtime_cancel_failed');
+    const transcript = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(
+      (
+        transcript.body.events as Array<{ type: string; promptId?: string }>
+      ).filter(
+        (event) =>
+          event.type === 'turn_complete' && event.promptId === PROMPT_ID,
+      ),
+    ).toHaveLength(0);
+    const between = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/status`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(between.body.hasActivePrompt).toBe(true);
+    // The admission was dropped with the failure, so the coordinator's
+    // retry re-drives the stop instead of replaying a watermark — the
+    // broker read proves the drive re-ran.
+    status.mockClear();
+    const retried = await send();
+    expect(retried.status).toBe(200);
+    expect(retried.body.accepted).toBe(true);
+    expect(status).toHaveBeenCalled();
+    const settled = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', clientId);
+    expect(
+      (
+        settled.body.events as Array<{ type: string; promptId?: string }>
+      ).filter(
+        (event) =>
+          event.type === 'turn_complete' && event.promptId === PROMPT_ID,
+      ),
+    ).toHaveLength(1);
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );
@@ -13707,6 +13991,76 @@ describe('Hosted Harness Runtime turn takeover', () => {
       supertest(server).delete(`/session/${SESSION_ID}`),
     ).expect(204);
     expect(release).toHaveBeenCalledTimes(4);
+  });
+
+  it('keeps the owed lease when a fresh prompt exits recovery-blocked', async () => {
+    await parkToolTurn();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'settled',
+    });
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockRejectedValueOnce(
+        new HostedWorkspaceBrokerRejection(
+          503,
+          'runtime_reconciliation_required',
+        ),
+      )
+      .mockResolvedValue();
+    const { server, loaded } = await loadReplacement(true);
+    expect(loaded.status).toBe(200);
+    const clientId = loaded.body.clientId as string;
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as { checkpointId: string; activationId: string };
+    const cancelled = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(cancelled.status).toBe(200);
+    // The cancelled Turn settled, but the handback was refused: the lease
+    // is owed to the next terminal route.
+    expect(release).toHaveBeenCalledTimes(1);
+    // The fresh prompt's Turn exits recovery-blocked: the parked Turn owns
+    // the owed lease now, so the settle-tail retry must NOT fire — a
+    // release would persist RELEASED and wedge the later takeover's
+    // same-identity re-acquire on runtime_session_not_acquirable.
+    state.model.mockRejectedValueOnce(
+      new HostedToolRecoveryRequiredError(new Error('store gone')),
+    );
+    const nextPrompt = [{ type: 'text', text: 'blocked exit' }];
+    const admitted = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt: nextPrompt,
+        promptId: '55555555-5555-4555-8555-555555555555',
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(nextPrompt)).digest('hex')}`,
+      });
+    expect(admitted.status).toBe(202);
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.recoveryBlocked).toBe(true);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
+    expect(release).toHaveBeenCalledTimes(1);
+    // The owed lease survives to close(), whose handback is the
+    // discharger of last resort — proof the blocked exit never fired it.
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    ).expect(204);
+    expect(release).toHaveBeenCalledTimes(2);
   });
 
   it('continues a turn parked in a second tool round without corrupting history', async () => {
