@@ -468,12 +468,13 @@ it('admits a batch of only agent calls, foregrounded or queued', async () => {
   expect(broker.acquire).not.toHaveBeenCalled();
 });
 
+const mountRefusal = 'unavailable while this Turn holds the Workspace mount';
+
 // The 1292-refusal must key off the Session's actual mount owners, not
 // only the turn's own `acquired` flag: the Hook catalog or MCP owner can
 // retain the mount until their Session-scoped close, and an agent-only
 // foreground batch then still blocks the child on that mount.
 it('refuses a foreground agent call while a Session owner holds the mount', async () => {
-  const mountRefusal = 'unavailable while this Turn holds the Workspace mount';
   for (const owner of ['hooks', 'mcp'] as const) {
     const turn = createTurnWithOwnerMount(owner, true);
     const refused = await executeAgent(
@@ -520,9 +521,32 @@ it('refuses a foreground agent call while a Session owner holds the mount', asyn
   expect(JSON.stringify(admitted)).not.toContain(mountRefusal);
 });
 
+// The window between the admission-time check and the PreToolUse fire:
+// a restored command Hook acquires and retains the mount inside fire(),
+// and the revalidation must still refuse the launch even when the Hook
+// changed none of the call's arguments.
+it('refuses a foreground agent call whose PreToolUse Hook took the mount', async () => {
+  const turn = createTurnWithOwnerMount('hooks', false, (hook) => {
+    hook.mountHeld = true;
+  });
+  const refused = await executeAgent(
+    turn,
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: false,
+    }),
+  );
+  expect(JSON.stringify(refused)).toContain(mountRefusal);
+  expect(session.authority.extensionRecordsInDomain('child_run')).toHaveLength(
+    0,
+  );
+});
+
 function createTurnWithOwnerMount(
   owner: 'hooks' | 'mcp',
   held: boolean,
+  onFire?: (sessionOwner: { mountHeld: boolean }) => void,
 ): HostedWorkspaceToolTurn {
   const ownerBroker = new (HostedWorkspaceBroker as unknown as new (
     ...args: unknown[]
@@ -539,7 +563,10 @@ function createTurnWithOwnerMount(
     refresh: () => Promise.resolve(),
     tools: () => [],
     toolInput: () => undefined,
-    fire: () => Promise.resolve([]),
+    fire: () => {
+      onFire?.(sessionOwner);
+      return Promise.resolve([]);
+    },
     close: () => Promise.resolve(),
   };
   return new HostedWorkspaceToolTurn(

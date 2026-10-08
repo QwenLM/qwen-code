@@ -1562,9 +1562,20 @@ export class HostedWorkspaceToolTurn {
           if (permission === 'ask') askAgain.add(index);
         }
         const revised = prepareRequests(updated);
-        requests = requests.map((request, index) =>
-          updated[index] === request.call ? request : revised[index],
-        );
+        requests = requests.map((request, index) => {
+          if (updated[index] !== request.call) return revised[index];
+          // An unchanged call keeps its prepared request, but not its
+          // stale verdict: the PreToolUse fire may have acquired the
+          // Workspace mount (the Session's Hook owner retains it until
+          // close), and prepareRequests re-evaluated the call against
+          // that current Session. A refusal found only now must still
+          // block the admission; a verdict never found is never invented.
+          if (revised[index].validationError === undefined) return request;
+          return {
+            ...request,
+            validationError: revised[index].validationError,
+          };
+        });
         for (const [index, request] of requests.entries()) {
           if (refusals[index]) continue;
           if (request.validationError) {

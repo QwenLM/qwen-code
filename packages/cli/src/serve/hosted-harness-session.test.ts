@@ -992,7 +992,7 @@ describe('Hosted Harness no-tool session', () => {
   // wedge exactly the pump that was supposed to deliver it.
   it('loads a Session whose only owed input is a child acceptance notification', async () => {
     domainEnablement.childRun = true;
-    await prewriteChildNotificationSession();
+    const notificationTurnId = await prewriteChildNotificationSession();
     mockBrokerBroker();
     const log = vi
       .spyOn(stdio, 'writeStderrLineSafe')
@@ -1003,6 +1003,30 @@ describe('Hosted Harness no-tool session', () => {
     ).send({ managedSessionStore: store() });
     expect(loaded.status).toBe(200);
     expect(JSON.stringify(log.mock.calls)).not.toContain('unsettled_input');
+    // The load made the queued notification runnable: let its wake settle
+    // before the close route executes, or DELETE races an active wake turn
+    // (409 hosted_turn_active) and the fixture teardown races its journal
+    // writes.
+    await vi.waitFor(
+      async () => {
+        const journal = await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
+        );
+        expect(
+          journal.events.some(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === notificationTurnId,
+          ),
+        ).toBe(true);
+      },
+      { timeout: 15_000, interval: 100 },
+    );
     expect(
       (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
         .status,
