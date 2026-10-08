@@ -27459,6 +27459,40 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     await agentPromise;
   });
 
+  it('does not let a memory flush size the disposal drain', async () => {
+    const recording = makeRecordingService();
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    // A flush that never settles stands in for a forked extraction: nothing
+    // bounds the disposal drain from outside, so awaiting it here would hold
+    // process exit — and every session MCP subprocess — open for the whole
+    // SESSION_DRAIN_TIMEOUT_MS.
+    const flushPendingExtract = vi
+      .fn()
+      .mockReturnValue(new Promise<boolean>(() => {}));
+    (
+      innerConfig as unknown as { getMemoryManager: () => unknown }
+    ).getMemoryManager = vi.fn().mockReturnValue({ flushPendingExtract });
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const settled = await Promise.race([
+      (agent as unknown as { disposeSessions: () => Promise<void> })
+        .disposeSessions()
+        .then(() => 'disposed' as const),
+      new Promise<'timeout'>((resolve) => {
+        setTimeout(() => resolve('timeout'), 2_000);
+      }),
+    ]);
+
+    expect(settled).toBe('disposed');
+    expect(flushPendingExtract).not.toHaveBeenCalled();
+    // The close still ran to completion — only the flush was skipped.
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('times out a stuck close drain without releasing the live writer', async () => {
     const recording = makeRecordingService();
     const innerConfig = makeLiveSessionInnerConfig(recording);
