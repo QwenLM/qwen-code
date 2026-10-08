@@ -6947,6 +6947,7 @@ export function createSessionControlPlane(
       throwOnFailure?: boolean;
       requireFlush?: boolean;
       timeoutMs?: number;
+      cancelReason?: 'user';
     },
   ): Promise<boolean> => {
     if (!ci || ci.channel !== entry.channel) {
@@ -6970,6 +6971,7 @@ export function createSessionControlPlane(
             opts?.timeoutMs ?? initTimeoutMs,
           ),
           ...(opts?.requireFlush === true ? { requireFlush: true } : {}),
+          ...(opts?.cancelReason ? { cancelReason: opts.cancelReason } : {}),
         },
       );
       const observedCloseRequest = opts?.timeoutMs
@@ -9584,6 +9586,10 @@ export function createSessionControlPlane(
         {
           throwOnFailure: true,
           requireFlush: closeOpts?.requireAgentClose === true,
+          cancelReason:
+            closeOpts?.cause === 'workspace_runtime_stop'
+              ? undefined
+              : closeOpts?.cancelReason,
           ...(closeOpts?.agentCloseTimeoutMs !== undefined
             ? { timeoutMs: closeOpts.agentCloseTimeoutMs }
             : {}),

@@ -26089,6 +26089,10 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
           getConfig: vi.fn().mockReturnValue(innerConfig),
           cancelMcpAppCalls: vi.fn(),
           cancelPendingPrompt: liveCancelPendingPrompt,
+          cancelPromptAdmission: vi.fn(
+            (controller: AbortController, reason: string) =>
+              controller.abort(reason),
+          ),
           beginClose: liveBeginClose,
           beginCloseIfAvailable: liveBeginCloseIfAvailable,
           waitForCloseGateToRelease: liveWaitForCloseGateToRelease,
@@ -27401,6 +27405,34 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
         .map((session) => session.getId()),
     ).not.toContain(liveSessionId);
 
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('passes explicit client close intent through the close gate', async () => {
+    const recording = makeRecordingService();
+    const { agent, agentPromise } = await bootAgent(
+      makeLiveSessionInnerConfig(recording),
+    );
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const admission = new AbortController();
+    (
+      agent as unknown as {
+        activePromptCalls: Map<string, Set<{ controller: AbortController }>>;
+      }
+    ).activePromptCalls.set(
+      liveSessionId,
+      new Set([{ controller: admission }]),
+    );
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionClose, {
+        sessionId: liveSessionId,
+        cancelReason: 'user',
+      }),
+    ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
+    expect(liveBeginClose).toHaveBeenCalledWith('user');
+    expect(admission.signal.reason).toBe('qwen:user-cancel');
+    expect(liveCancelPendingPrompt).toHaveBeenCalledOnce();
     mockConnectionState.resolve();
     await agentPromise;
   });

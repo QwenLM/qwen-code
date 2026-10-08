@@ -11839,6 +11839,84 @@ describe('Session', () => {
         },
       );
 
+      it.each([undefined, 'user'] as const)(
+        'settles an admission-waiting close with its provenance: %s',
+        async (cancelReason) => {
+          let releaseAdmission!: () => void;
+          mockConfig.assertCanStartTurn = vi.fn().mockReturnValue(
+            new Promise<void>((resolve) => {
+              releaseAdmission = resolve;
+            }),
+          );
+          const admission = new AbortController();
+          const prompt = session.prompt(
+            {
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'waiting for admission' }],
+            },
+            trustedContext,
+            admission.signal,
+          );
+          await vi.waitFor(() =>
+            expect(mockConfig.assertCanStartTurn).toHaveBeenCalledOnce(),
+          );
+          const releaseClose = session.beginClose(cancelReason);
+          session.cancelPromptAdmission(admission, 'qwen:user-cancel');
+          releaseAdmission();
+          try {
+            await expect(prompt).resolves.toMatchObject({
+              stopReason: 'cancelled',
+            });
+            expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+            const payload =
+              mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+            expect(payload.state).toBe('cancelled');
+            if (cancelReason) {
+              expect(payload.cancelledAt).toEqual(expect.any(Number));
+            } else {
+              expect(payload).not.toHaveProperty('cancelledAt');
+            }
+          } finally {
+            releaseClose();
+          }
+        },
+      );
+
+      it.each([undefined, 'user'] as const)(
+        'records active close cancellation only for client intent: %s',
+        async (cancelReason) => {
+          let releaseClose: (() => void) | undefined;
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createFailingStream('Request was aborted.', () => {
+              releaseClose = session.beginClose(cancelReason);
+              void session.cancelPendingPrompt();
+            }),
+          );
+          try {
+            await expect(
+              session.prompt(
+                {
+                  sessionId: 'test-session-id',
+                  prompt: [{ type: 'text', text: 'unfinished' }],
+                },
+                trustedContext,
+              ),
+            ).resolves.toMatchObject({ stopReason: 'cancelled' });
+            const payload =
+              mockChatRecordingService.recordTurnResult.mock.calls[0][0];
+            expect(payload.state).toBe('cancelled');
+            if (cancelReason) {
+              expect(payload.cancelledAt).toEqual(expect.any(Number));
+            } else {
+              expect(payload).not.toHaveProperty('cancelledAt');
+              expect(mockChat.markLastTurnCancelled).not.toHaveBeenCalled();
+            }
+          } finally {
+            releaseClose?.();
+          }
+        },
+      );
+
       it('settles a forwarded interruption as a cancellation, not a failure', async () => {
         const cancellation = new AbortController();
         mockChat.sendMessageStream = vi.fn().mockResolvedValue(

@@ -1237,6 +1237,8 @@ export interface SessionMetadataUpdate {
 
 export interface CloseSessionOpts {
   cause?: 'workspace_runtime_stop';
+  /** Explicit client close cancels active work as user intent. */
+  cancelReason?: 'user';
   /** Override the default `'client_close'` reason in the `session_closed` event. */
   reason?: string;
   /**

@@ -2289,6 +2289,7 @@ export class Session implements SessionContext {
   // on a session whose registries are already unregistered.
   private disposed = false;
   private closing = false;
+  private closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
   private historyMutationActive = false;
   private closeGateCompletion: Promise<void> | null = null;
   private resolveCloseGate: (() => void) | null = null;
@@ -4478,7 +4479,7 @@ export class Session implements SessionContext {
     };
   }
 
-  beginClose(): () => void {
+  beginClose(cancelReason?: 'user'): () => void {
     if (this.closing) {
       throw RequestError.invalidParams(
         undefined,
@@ -4486,6 +4487,10 @@ export class Session implements SessionContext {
       );
     }
     this.closing = true;
+    this.closeAbortReason =
+      cancelReason === 'user'
+        ? USER_CANCEL_ABORT_REASON
+        : SESSION_DISPOSE_ABORT_REASON;
 
     let resolveGate!: () => void;
     const completion = new Promise<void>((resolve) => {
@@ -4504,6 +4509,7 @@ export class Session implements SessionContext {
       resolveGate();
       if (this.disposed) return;
       this.closing = false;
+      this.closeAbortReason = SESSION_DISPOSE_ABORT_REASON;
       void this.#drainGoalQueue();
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -4881,9 +4887,8 @@ export class Session implements SessionContext {
   }
 
   #classifyPromptCancelAbortReason(requestedReason: string): string {
-    return this.closing || this.disposed
-      ? SESSION_DISPOSE_ABORT_REASON
-      : requestedReason;
+    if (this.disposed) return SESSION_DISPOSE_ABORT_REASON;
+    return this.closing ? this.closeAbortReason : requestedReason;
   }
 
   cancelPromptAdmission(
@@ -5116,7 +5121,11 @@ export class Session implements SessionContext {
           MANAGED_RUNTIME_OUTCOME_UNKNOWN;
       const controlledAbort =
         !managedOutcomeUnknown &&
-        (abortReason === USER_CANCEL_ABORT_REASON ||
+        ((this.closing &&
+          admissionCancellation?.aborted === true &&
+          (this.#isUserPromptCancellation(admissionCancellation) ||
+            admissionCancellation.reason === SESSION_DISPOSE_ABORT_REASON)) ||
+          abortReason === USER_CANCEL_ABORT_REASON ||
           abortReason === SESSION_DISPOSE_ABORT_REASON ||
           abortReason === INTERRUPTED_PROMPT_ABORT_REASON ||
           (abortReason === NEW_PROMPT_ABORT_REASON &&
