@@ -111,6 +111,7 @@ import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { agentsCommand } from '../commands/agents.js';
 import { batchCommand } from '../commands/batch.js';
 import { boardCommand } from '../commands/board.js';
 import { updateCommand } from '../commands/update.js';
@@ -635,6 +636,10 @@ export async function parseArguments(): Promise<CliArgs> {
         )
         .option('output-style', DEFAULT_COMMAND_OPTIONS['output-style'])
         .option('sandbox', DEFAULT_COMMAND_OPTIONS.sandbox)
+        .middleware((argv) => {
+          if (argv['sandbox'] === 'bwrap')
+            throw new FatalConfigError(BWRAP_MIGRATION_MESSAGE);
+        }, true)
         .option('sandbox-image', DEFAULT_COMMAND_OPTIONS['sandbox-image'])
         .option('yolo', DEFAULT_COMMAND_OPTIONS.yolo)
         .option('approval-mode', DEFAULT_COMMAND_OPTIONS['approval-mode'])
@@ -756,26 +761,12 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('auth-type', DEFAULT_COMMAND_OPTIONS['auth-type'])
         // Ensure validation flows through .fail() for clean UX
         .fail((msg: string, err: Error | undefined, yargs: Argv) => {
+          if (err instanceof FatalConfigError) throw err;
           writeStderrLine(msg || err?.message || 'Unknown error');
           yargs.showHelp();
           process.exit(1);
         })
         .check((argv: { [x: string]: unknown }) => {
-          const optionArgs = rawArgv.slice(
-            0,
-            rawArgv.includes('--') ? rawArgv.indexOf('--') : rawArgv.length,
-          );
-          if (
-            optionArgs.some(
-              (arg, index) =>
-                arg === '--sandbox=bwrap' ||
-                arg === '-s=bwrap' ||
-                ((arg === '--sandbox' || arg === '-s') &&
-                  optionArgs[index + 1] === 'bwrap'),
-            )
-          ) {
-            return BWRAP_MIGRATION_MESSAGE;
-          }
           // The 'query' positional can be a string (for one arg) or string[] (for multiple).
           // This guard safely checks if any positional argument was provided.
           const query = argv['query'] as string | string[] | undefined;
@@ -893,6 +884,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(serveCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
+    // Register `qwen agents` (join a coordinator; session_send MCP server)
+    .command(agentsCommand)
     .command(batchCommand)
     // Register update command
     .command(updateCommand)
@@ -918,7 +911,13 @@ export async function parseArguments(): Promise<CliArgs> {
     .help()
     .alias('h', 'help')
     .strict()
-    .demandCommand(0, 0); // Allow base command to run with no subcommands
+    .demandCommand(0, 0)
+    .fail((message, error, parser) => {
+      if (error instanceof FatalConfigError) throw error;
+      writeStderrLine(message || error?.message || 'Unknown argument error');
+      parser.showHelp();
+      process.exit(1);
+    }); // Allow base command to run with no subcommands
 
   yargsInstance.wrap(yargsInstance.terminalWidth());
   const result = await yargsInstance.parse();
@@ -936,6 +935,7 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
+      result._[0] === 'agents' ||
       result._[0] === 'board' ||
       result._[0] === 'batch' ||
       result._[0] === 'update' ||
@@ -1712,6 +1712,10 @@ export async function loadCliConfig(
     };
     /** Engine a paired host selected; the Config persists or verifies it. */
     executionEngine?: SessionExecutionEngine;
+    /** Where a Managed session's tools execute; see `ConfigParameters`. */
+    managedRuntimeEnvironment?: ConfigParameters['managedRuntimeEnvironment'];
+    /** How the host learns an unproven worker stop; see `ConfigParameters`. */
+    onManagedEngineQuarantine?: ConfigParameters['onManagedEngineQuarantine'];
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
 ): Promise<Config> {
@@ -2490,6 +2494,8 @@ export async function loadCliConfig(
     sessionRestoreProjection,
     sessionRestoreProjectionSource: boundSessionRestoreProjectionSource,
     sessionExecutionEngine: hostPolicy?.executionEngine,
+    managedRuntimeEnvironment: hostPolicy?.managedRuntimeEnvironment,
+    onManagedEngineQuarantine: hostPolicy?.onManagedEngineQuarantine,
     embeddingModel: DEFAULT_QWEN_EMBEDDING_MODEL,
     sandbox: sandboxConfig,
     targetDir: cwd,

@@ -373,15 +373,20 @@ coordinated rollout remains required before writing ABANDONED rows.
 ## 6b. W0e-2 implementation
 
 The [durable local adoption implementation](2026-09-27-local-runtime-adoption.md)
-adds an opt-in Linux identity store, a boot barrier with durable PID/start-tick
+adds a Linux identity store (enabled by default; opt out with
+`runtime-broker.durable-local-process=false` and
+`runtime-broker.trusted-local-reboot-recovery=false`), a boot
+barrier with durable PID/start-tick
 registration, permanent launch locks, and adoption after Broker restart. The
-default ephemeral mode retains the W0e-1 behavior. Neither mode proves stopped
+ephemeral mode retains the W0e-1 behavior and remains available behind that
+opt-out. Neither mode proves stopped
 writers after worker-only death; W0e-3 physical reclamation remains separate.
 
 ## 6c. W0e-3 implementation
 
 The [trusted local reboot implementation](2026-09-28-local-reboot-recovery.md)
-adds separately enabled same-host boot evidence, original-holder cleanup,
+adds same-host boot evidence (enabled by default alongside durable local
+provisioning), original-holder cleanup,
 late-acquisition fencing and an independent bounded maintenance scan. Cleanup
 uses saved physical ownership even after grants, product Session or Registry
 change. Loss receipts remain terminal uncertainty. Tests with real workers and

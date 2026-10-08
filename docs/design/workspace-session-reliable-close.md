@@ -2,6 +2,8 @@
 
 [English](workspace-session-reliable-close.md) | [简体中文](workspace-session-reliable-close.zh-CN.md)
 
+This document preserves the original L1/L2 and reliable-close protocol. Newly admitted ACTIVE files close/delete use [L3](workspace-session-active-delete-l3.md): close runs SessionEnd only, delete runs SessionEnd followed by SessionDelete, and durable Hook evidence precedes permanent draining. L2 CLOSED/ARCHIVED deletion remains independent of Harness; operations admitted before upgrade resume under their saved protocol.
+
 ## Status and scope
 
 Implemented and locally verified. This slice enables idle public `hosted-workspace-files/1` Sessions to close through existing public and WebShell lifecycle operations. Running, cancelling, accepted, or approval-waiting Turns remain a `409 turn_active`. Shell, MCP, archive/delete, and a new UI button are excluded. Close preserves transcripts, Artifacts, and shared Workspace files.
@@ -26,7 +28,7 @@ Persist a permanent tenant/Harness-Session drain fence under the existing tenant
 
 Fence probes use a nonlocking read after the placement guard, avoiding InnoDB gap locks that would block another tenant's fence insertion when no row exists. Execution admission discovers the immutable binding tenant outside the admission transaction; its first consistent read occurs after acquiring the guard, so REPEATABLE READ cannot hide a fence committed while admission was waiting.
 
-Enumerate saved binding generations by tenant, Session isolation class, and isolation key, in bounded pages with byte-exact identities regardless of database collation. Mark them draining without authorizing current Workspace execution. Enumerate Runtime Sessions by exact binding/generation and release using saved records: provider release, activation=false acknowledgement, conditional original-holder release, then durable RELEASED. No acquire, installation, execution replay, or model call is part of close. Unknown execution or startup identity blocks completion. An unusable original worker blocks with an identity failure instead of entering generic lease recovery. A newer holder on shared storage is preserved.
+Enumerate saved binding generations by tenant, Session isolation class, and isolation key, in bounded pages with byte-exact identities regardless of database collation. Mark them draining without authorizing current Workspace execution. Enumerate Runtime Sessions by exact binding/generation and release using saved records: provider release, activation=false acknowledgement, conditional original-holder release, then durable RELEASED. No acquire, installation, execution replay, or model call is part of close. Unknown execution or startup identity blocks completion. A LOST binding with no active Runtime Sessions or executions may retire through the same holder check and durable stop receipt; it remains LOST until the receipt commits RELEASED. A LOST binding with unsettled resources still requires recovery. An unusable original worker with an unreleased Session blocks with an identity failure instead of entering generic lease recovery. A newer holder on shared storage is preserved.
 
 ## Worker stop and completion
 

@@ -53,7 +53,7 @@ Harness 在持久化参数资源中保留精确 payload 字节。Broker 只在�
 
 ## 失败与取消
 
-占用存储前明确返回 HTTP 409 `workspace_busy` 或 `workspace_unavailable` 的 acquire 拒绝以普通错误结束回合，Session 可重试或 reload。占用存储后的 acquire 失败统一使用 `runtime_session_acquire_failed`，包括后续权限复检失败，仍要求恢复。acquire 响应丢失也保持阻塞。
+回合工具执行中遇到明确返回 HTTP 409 `workspace_busy` 的 acquire 拒绝不再直接结束回合：这表示另一 Session 的工具回合持有挂卷，本回合等待持有者释放——以短轮询重试 acquire，仅受回合取消与截止时限约束——然后取得所有权并继续，因此同一 Workspace 上的第二个 Session 排队而不是丢失回合。`workspace_unavailable` 拒绝，以及恢复路径上的明确拒绝，仍以普通错误结束回合，Session 可重试或 reload。占用存储后的 acquire 失败统一使用 `runtime_session_acquire_failed`，包括后续权限复检失败，仍要求恢复。acquire 响应丢失也保持阻塞。
 
 派发前的准入或参数资源失败不会产生工具副作用。start 响应丢失后只查询原始执行。无法观察的结果、lease 丢失、结果提交失败或未验证取消会把 Session 阻塞在持久等待点。调用方可观察 recovery-required 状态。Harness 不发出正常 completed/cancelled 安全边界，也不允许新 prompt 忘记这些工作。
 

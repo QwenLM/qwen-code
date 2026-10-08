@@ -80,7 +80,11 @@ import type {
   ExecutionEnvironment,
   ExecutionEnvironmentFactory,
 } from '../services/execution-environment.js';
-import { ExecutionCleanupError } from '../services/execution-environment.js';
+import {
+  ExecutionCleanupError,
+  MANAGED_RUNTIME_TOOL_NAMES,
+  ManagedRuntimeOutcomeUnknownError,
+} from '../services/execution-environment.js';
 import { isTieredEffortWireModel } from '../core/modalityDefaults.js';
 import {
   DashScopeOpenAICompatibleProvider,
@@ -250,6 +254,7 @@ import type { ToolInvocationGuard } from '../core/tool-invocation-guard.js';
 import {
   createAgentHostToolInvocationGuard,
   createAgentToolInvocationGuard,
+  createSessionAgentToolInvocationGuard,
 } from '../agents/workspace-agents/capability.js';
 import type {
   ExecutionSandboxPolicy,
@@ -341,6 +346,10 @@ import {
 } from '../managed-runtime/managed-session-authority.js';
 import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { LocalManagedSessionResourceStore } from '../managed-runtime/managed-session-resources.js';
+import {
+  LocalManagedRuntimeOutcomes,
+  unresolvedRuntimeWorkReason,
+} from '../managed-runtime/managed-runtime-outcomes.js';
 import { readManagedSessionRecords } from '../managed-runtime/managed-session-message-projection.js';
 import {
   MANAGED_SESSION_FORMAT_VERSION,
@@ -557,6 +566,14 @@ export class TrustGateError extends Error {
     this.name = 'TrustGateError';
   }
 }
+
+/**
+ * Why `Config.setApprovalMode` refuses a privileged mode in a session-agents
+ * session: every write or command an agent runs there asks the person in the
+ * chat session (see `Config.markSessionAgentSession`).
+ */
+const SESSION_AGENT_APPROVAL_MODE_ERROR =
+  'A session agent always asks before writing or running commands; its approval mode stays "default".';
 
 /**
  * Information about an approval mode including display name and description.
@@ -1032,10 +1049,17 @@ export interface AgentsCollabSettings {
    */
   maxParallelAgents?: number;
   /**
-   * Per-model maximum number of background sub-agents running concurrently,
-   * keyed by concrete model ID. Overrides the global `maxParallelAgents` for
-   * the matched model; models not listed here fall back to the global limit.
-   * Useful when a model has a lower concurrency capacity than the rest.
+   * Per-model maximum number of top-level sub-agents running concurrently,
+   * keyed by concrete model ID. Bounds both background and foreground
+   * launches. For background launches the tighter of this cap and the global
+   * `maxParallelAgents` binds; foreground launches are bounded by this cap
+   * alone. Applies to top-level launches only — nested sub-agents, teammate
+   * fan-out, foreground interactive forks, external-executor subagents, and
+   * agents dispatched by a workflow script are not capped. Models not listed
+   * here fall back to the global limit for background launches and are
+   * uncapped for foreground launches — list a model here to bound its
+   * foreground fan-out. Useful when a model has a lower concurrency capacity
+   * than the rest.
    */
   maxParallelAgentsByModel?: Record<string, number>;
   /** Display mode for multi-agent sessions ('in-process' | 'tmux' | 'iterm2') */
@@ -1094,6 +1118,20 @@ export interface ConfigParameters {
    * prove it, before hooks, MCP or tools start.
    */
   sessionExecutionEngine?: SessionExecutionEngine;
+  /**
+   * Builds the environment of a Managed session's Runtime-backed tools: each
+   * call is prepared and permission-checked in this process and executed in
+   * the session's Runtime worker. Ignored for any other engine. Without it a
+   * Managed session has no tools.
+   */
+  managedRuntimeEnvironment?: (config: Config) => ExecutionEnvironment;
+  /**
+   * Called by a Managed session's Runtime machinery when a worker's stop
+   * could not be proven (`quarantined: true`) and when the reaper proves it
+   * (`false`, with the same reason). The host quarantines the engine on the
+   * first and lifts it on the second. Ignored for any other engine.
+   */
+  onManagedEngineQuarantine?: (quarantined: boolean, reason: Error) => void;
   embeddingModel?: string;
   sandbox?: SandboxConfig;
   targetDir: string;
@@ -2618,12 +2656,16 @@ export function deriveAgentConfig(
   };
 }
 
+/**
+ * A subagent of an untrusted folder, or of a session-agents session (which
+ * always asks, see `Config.markSessionAgentSession`), gets no privileged mode.
+ */
 function getTrustedDerivedApprovalMode(
   base: Config,
   requestedMode: ApprovalMode,
 ): ApprovalMode {
   if (
-    !base.isTrustedFolder() &&
+    (!base.isTrustedFolder() || base.isSessionAgentSession?.() === true) &&
     requestedMode !== ApprovalMode.DEFAULT &&
     requestedMode !== ApprovalMode.PLAN
   ) {
@@ -2722,6 +2764,16 @@ export class Config {
     SessionRestoreProjection | undefined
   >;
   private readonly sessionExecutionEngine?: SessionExecutionEngine;
+  private readonly managedRuntimeEnvironmentFactory?: (
+    config: Config,
+  ) => ExecutionEnvironment;
+  private managedRuntimeEnvironment?: ExecutionEnvironment;
+  private readonly onManagedEngineQuarantine?: (
+    quarantined: boolean,
+    reason: Error,
+  ) => void;
+  private managedRuntimeClosing?: Promise<void>;
+  private managedSessionBlock?: Error;
   private restoredFileHistory = false;
   private goalRestoreActivation?: () => Promise<void>;
   private rejectGoalRestoreActivation?: (reason?: unknown) => void;
@@ -2733,6 +2785,7 @@ export class Config {
   private pendingSessionWriterLease?: SessionWriterLease;
   /** The Managed Session log a Managed session records through. */
   private managedSession?: ManagedSession;
+  private managedRuntimeOutcomes?: LocalManagedRuntimeOutcomes;
   private pendingSessionWriterRelease:
     | { lease: SessionWriterLease; promise: Promise<void> }
     | undefined;
@@ -2825,6 +2878,14 @@ export class Config {
   private systemPrompt: string | undefined;
   private workspaceAgentName: string | undefined;
   private workspaceAgentExecutionAllowedTools: ReadonlySet<string> | undefined;
+  /** The persona's `disallowedTools`; enforced for session-agents sessions. */
+  private workspaceAgentDisallowedTools: readonly string[] | undefined;
+  /**
+   * Set when this `agent` session was started by the session-agents
+   * orchestrator rather than the thread dispatcher. See
+   * {@link markSessionAgentSession}.
+   */
+  private sessionAgentSession = false;
   private readonly appendSystemPrompt: string | undefined;
   private liveAppendSystemPrompt: string | undefined;
   private outputStyle: OutputStyleDefinition | undefined;
@@ -2922,6 +2983,7 @@ export class Config {
    * built. See {@link getPromptToolSnapshot}.
    */
   private promptToolSnapshot: ReadonlySet<string> | undefined;
+  private promptAgentReachable = false;
 
   /**
    * Volatile system-prompt layer: the managed auto-memory section
@@ -3280,6 +3342,14 @@ export class Config {
     this.sessionData = params.sessionData;
     this.sessionRestoreProjectionSource = params.sessionRestoreProjectionSource;
     this.sessionExecutionEngine = params.sessionExecutionEngine;
+    this.managedRuntimeEnvironmentFactory =
+      params.sessionExecutionEngine === 'managed'
+        ? params.managedRuntimeEnvironment
+        : undefined;
+    this.onManagedEngineQuarantine =
+      params.sessionExecutionEngine === 'managed'
+        ? params.onManagedEngineQuarantine
+        : undefined;
     this.setSessionRestoreProjection(params.sessionRestoreProjection);
     // Daemon Configs use sessionIdContext and must not replace the
     // single-session CLI fallback with whichever session was created last.
@@ -3408,7 +3478,11 @@ export class Config {
       email: 'qwen-coder@alibabacloud.com',
     };
     this.usageStatisticsEnabled = params.usageStatisticsEnabled ?? true;
-    this.fileReadCacheDisabled = params.fileReadCacheDisabled ?? false;
+    // A Managed session reads in its Runtime worker, so this process could
+    // neither elide a repeated read nor prove the read an edit requires.
+    this.fileReadCacheDisabled =
+      params.sessionExecutionEngine === 'managed' ||
+      (params.fileReadCacheDisabled ?? false);
     this.outputLanguageFilePath = params.outputLanguageFilePath;
 
     this.fileFiltering = {
@@ -5035,6 +5109,36 @@ export class Config {
         if (this.sessionWriterShutdownRequested) {
           throw new SessionWriterShutdownError();
         }
+        // A committed receipt outlives its crash: settle what it proves
+        // before the gate reads, so a settled-but-unsettled crash window does
+        // not block on a call whose outcome the log already carries.
+        const sequenceBeforeRepair =
+          this.managedSession.authority.committedSequence;
+        await this.getManagedRuntimeOutcomes()?.recoverCommittedReceipts();
+        // The repair writes records the projection read above lacks: give
+        // this open the history the log now holds.
+        if (
+          this.sessionRestoreProjectionSource &&
+          this.managedSession.authority.committedSequence !==
+            sequenceBeforeRepair
+        ) {
+          projection = await this.sessionRestoreProjectionSource();
+          this.setSessionRestoreProjection(projection);
+        }
+        // A reopened log answers for itself: Runtime dispatches that never
+        // settled block the session again, as the in-memory block already
+        // does for the live process. The outcome cannot be learned from a
+        // past worker generation, and nothing replays it.
+        const unresolved = await unresolvedRuntimeWorkReason(
+          this.managedSession.authority,
+        );
+        if (unresolved !== undefined) {
+          this.blockManagedSession(
+            new ManagedRuntimeOutcomeUnknownError(
+              `The Managed session's log shows Runtime work with an unknown outcome: ${unresolved}.`,
+            ),
+          );
+        }
         recorder.bindManagedSink(
           managedRecordWriter(this.managedSession, {
             transcriptPath: this.getTranscriptPath(),
@@ -5868,6 +5972,100 @@ export class Config {
     return this.sessionExecutionEngine;
   }
 
+  /**
+   * The environment this Managed session's Runtime-backed tools execute in,
+   * built on first use. A derived Config has none: its tools would need an
+   * execution scope of their own.
+   */
+  getManagedRuntimeEnvironment(): ExecutionEnvironment | undefined {
+    if (isDerivedConfig(this)) return undefined;
+    if (
+      !this.managedRuntimeEnvironment &&
+      !this.shutdownRequested &&
+      !this.managedRuntimeClosing
+    ) {
+      this.managedRuntimeEnvironment =
+        this.managedRuntimeEnvironmentFactory?.(this);
+    }
+    return this.managedRuntimeEnvironment;
+  }
+
+  /**
+   * Stops this Managed session's Runtime worker, once. It runs before the
+   * session's log is finished, so no call the worker runs outlives the log.
+   * Afterwards the session has no environment: none is handed out or built,
+   * so a registry made later has no Runtime-backed tools.
+   */
+  closeManagedRuntime(): Promise<void> {
+    if (isDerivedConfig(this)) {
+      return (Object.getPrototypeOf(this) as Config).closeManagedRuntime();
+    }
+    if (!this.managedRuntimeClosing) {
+      const environment = this.managedRuntimeEnvironment;
+      this.managedRuntimeEnvironment = undefined;
+      this.managedRuntimeClosing = Promise.resolve(environment?.dispose());
+    }
+    return this.managedRuntimeClosing;
+  }
+
+  /**
+   * Blocks this Managed session after a Runtime tool call ended without a
+   * known outcome. The model is not asked again: it could repeat a call that
+   * already took effect. The first reason is kept.
+   */
+  blockManagedSession(reason: Error): void {
+    if (isDerivedConfig(this)) {
+      (Object.getPrototypeOf(this) as Config).blockManagedSession(reason);
+      return;
+    }
+    this.managedSessionBlock ??= reason;
+  }
+
+  /** Why this Managed session is blocked, or undefined while it is not. */
+  getManagedSessionBlock(): Error | undefined {
+    return this.managedSessionBlock;
+  }
+
+  /**
+   * Quarantines the engine that hosts this Managed session: a Runtime
+   * worker's stop could not be proven, so no new Managed session may run
+   * beside work nobody can account for. Cleared with the same reason once
+   * the reaper proves the stop.
+   */
+  reportManagedEngineQuarantine(reason: Error): void {
+    if (isDerivedConfig(this)) {
+      (Object.getPrototypeOf(this) as Config).reportManagedEngineQuarantine(
+        reason,
+      );
+      return;
+    }
+    this.onManagedEngineQuarantine?.(true, reason);
+  }
+
+  /** Lifts a quarantine reported with this very reason. */
+  clearManagedEngineQuarantine(reason: Error): void {
+    if (isDerivedConfig(this)) {
+      (Object.getPrototypeOf(this) as Config).clearManagedEngineQuarantine(
+        reason,
+      );
+      return;
+    }
+    this.onManagedEngineQuarantine?.(false, reason);
+  }
+
+  /**
+   * The durable outcome writer for this session's Runtime-backed tools, built
+   * once the log is open. A Managed session that records no log has none; a
+   * derived Config has none either, as its tools would need an execution
+   * scope of their own.
+   */
+  getManagedRuntimeOutcomes(): LocalManagedRuntimeOutcomes | undefined {
+    if (isDerivedConfig(this) || !this.managedSession) return undefined;
+    return (this.managedRuntimeOutcomes ??= new LocalManagedRuntimeOutcomes(
+      this.managedSession,
+    ));
+  }
+
   getSessionRestoreRuntime(): SessionRuntimeResumeState | undefined {
     return this.sessionRestoreRuntime;
   }
@@ -5955,6 +6153,7 @@ export class Config {
     systemPrompt: string,
     agentName: string,
     executionAllowedTools?: readonly string[],
+    disallowedTools?: readonly string[],
   ): void {
     if (this.sessionSourceType !== 'agent') {
       throw new Error(
@@ -5971,6 +6170,9 @@ export class Config {
     this.workspaceAgentExecutionAllowedTools = executionAllowedTools
       ? new Set(executionAllowedTools)
       : undefined;
+    this.workspaceAgentDisallowedTools = disallowedTools
+      ? [...disallowedTools]
+      : undefined;
   }
 
   /**
@@ -5982,6 +6184,41 @@ export class Config {
    */
   getWorkspaceAgentName(): string | undefined {
     return this.workspaceAgentName;
+  }
+
+  /**
+   * Marks this agent session as one the session-agents orchestrator drives
+   * (an agent answering @-mentions in a chat session), not a thread run.
+   *
+   * Must be called before `initialize()`: it decides whether the thread tools
+   * are registered at all. The caller sets it only after finding a persisted
+   * session-agents binding that names this session for this agent, so it is
+   * a server-side decision, never a client claim.
+   *
+   * Effects (product decision 2026-10-05, session-multi-agent design §8-1): no thread tools, and no
+   * read-only ceiling — every tool is available and writes / command
+   * execution go through the session's ordinary approval flow, which the
+   * orchestrator relays to the chat session. That flow is the only gate, so
+   * the session is pinned to `default` approval whatever the settings say,
+   * and {@link setApprovalMode} refuses a privileged mode for it later.
+   */
+  markSessionAgentSession(): void {
+    if (this.sessionSourceType !== 'agent') {
+      throw new Error(
+        'Only an agent session can be marked as a session-agents session.',
+      );
+    }
+    this.sessionAgentSession = true;
+    // Assigned rather than set: before `initialize()` there is no permission
+    // manager to adjust, and a fresh hidden session has no mode history.
+    this.approvalMode = ApprovalMode.DEFAULT;
+    this.prePlanMode = undefined;
+    this.planExecutionMode = undefined;
+  }
+
+  /** Whether {@link markSessionAgentSession} was applied to this session. */
+  isSessionAgentSession(): boolean {
+    return this.sessionAgentSession && this.sessionSourceType === 'agent';
   }
 
   setSessionSource(sourceType: string, sourceId?: string): void {
@@ -7541,6 +7778,10 @@ export class Config {
     if (isDerivedConfig(this)) {
       throw new Error('Derived Configs cannot relocate working directories');
     }
+    if (this.sessionExecutionEngine === 'managed') {
+      // Its Runtime worker is bound to the directory it was admitted in.
+      throw new Error('A Managed session cannot change its directory.');
+    }
     if (
       !opts?.skipArtifactMigration &&
       this.chatRecordingService?.hasWriteOwnership()
@@ -7699,6 +7940,20 @@ export class Config {
     this.shutdownRequested = true;
     void this.shutdownExecutionEnvironments().catch(() => undefined);
     this.settingsWatcher?.stopWatching();
+    // Only a Config with a Runtime waits for it, so others close their
+    // writer as soon as they did.
+    if (this.managedRuntimeEnvironment || this.managedRuntimeClosing) {
+      try {
+        await this.closeManagedRuntime();
+      } catch (error) {
+        // A stop the registry cannot prove is reported, not fatal: M5c
+        // keeps the engine quarantined on it.
+        this.debugLogger.error(
+          'Failed to stop the Managed Runtime worker:',
+          error,
+        );
+      }
+    }
     const closeWriter = () =>
       this.closeSessionWriter().catch((error) => {
         this.debugLogger.error(
@@ -8774,6 +9029,14 @@ export class Config {
     this.promptToolSnapshot = names;
   }
 
+  getPromptAgentReachable(): boolean {
+    return this.promptAgentReachable;
+  }
+
+  setPromptAgentReachable(reachable: boolean): void {
+    this.promptAgentReachable = reachable;
+  }
+
   /**
    * The managed auto-memory section of the system prompt (volatile layer).
    * Empty when managed memory is unavailable. Callers assembling a system
@@ -9094,6 +9357,12 @@ export class Config {
     if (executionMode === ApprovalMode.PLAN) {
       throw new Error('Plan is not an execution approval mode');
     }
+    if (
+      this.isSessionAgentSession?.() === true &&
+      executionMode !== ApprovalMode.DEFAULT
+    ) {
+      throw new Error(SESSION_AGENT_APPROVAL_MODE_ERROR);
+    }
     if (!this.isTrustedFolder() && executionMode !== ApprovalMode.DEFAULT) {
       throw new TrustGateError(
         'Cannot enable privileged approval modes in an untrusted folder.',
@@ -9174,6 +9443,15 @@ export class Config {
       !Object.prototype.hasOwnProperty.call(this, 'setApprovalMode')
     ) {
       throw new Error('Derived Configs cannot change approval mode');
+    }
+    if (
+      // Optional call: per-agent configs built over a partial parent (e.g.
+      // InProcessBackend's) may not carry the method.
+      this.isSessionAgentSession?.() === true &&
+      mode !== ApprovalMode.DEFAULT &&
+      mode !== ApprovalMode.PLAN
+    ) {
+      throw new Error(SESSION_AGENT_APPROVAL_MODE_ERROR);
     }
     if (
       !this.isTrustedFolder() &&
@@ -11978,6 +12256,14 @@ export class Config {
           this.getWorkspaceContext().isPathWithinWorkspace(candidate),
       );
     }
+    if (this.isWorkspaceAgentSession() && this.isSessionAgentSession()) {
+      // Session-agents sessions skip the read-only ceiling (session-multi-agent design §8-1).
+      return createSessionAgentToolInvocationGuard(
+        this.toolInvocationGuard,
+        this.workspaceAgentExecutionAllowedTools,
+        this.workspaceAgentDisallowedTools,
+      );
+    }
     return this.isWorkspaceAgentSession()
       ? createAgentToolInvocationGuard(
           this.toolInvocationGuard,
@@ -12044,6 +12330,49 @@ export class Config {
       registry.registerPermissionDeferredFactory(toolName, factory);
     } else if (status === 'registered') {
       registry.registerFactory(toolName, factory);
+    }
+  }
+
+  /**
+   * Registers a Managed session's tools: the first-phase tools, prepared and
+   * permission-checked here and executed in the session's Runtime worker. The
+   * permission manager decides their registration as it does for Legacy.
+   */
+  private async registerManagedRuntimeTools(
+    registry: ToolRegistry,
+  ): Promise<void> {
+    const environment = this.getManagedRuntimeEnvironment();
+    if (!environment) return;
+    const [{ createExecutionTools }, { wrapExecutionTool }] = await Promise.all(
+      [
+        import('../services/local-execution-environment.js'),
+        import('../tools/execution-tool.js'),
+      ],
+    );
+    const tools = createExecutionTools(this);
+    for (const name of MANAGED_RUNTIME_TOOL_NAMES) {
+      const tool = tools.get(name);
+      if (!tool) continue;
+      let status: ToolRegistrationStatus;
+      try {
+        status =
+          (await this.getPermissionManager()?.getToolRegistrationStatus(
+            name as ToolName,
+          )) ?? 'registered';
+      } catch (error) {
+        this.debugLogger.warn(
+          `Failed to check permissions for tool "${name}", skipping registration:`,
+          error,
+        );
+        continue;
+      }
+      if (status === 'disabled') continue;
+      registry.registerRuntimeBackedFactory(
+        name,
+        async () => wrapExecutionTool(tool, environment, this),
+        environment,
+        status === 'deferred',
+      );
     }
   }
 
@@ -12165,10 +12494,11 @@ export class Config {
       this.eventEmitter,
       sendSdkMcpMessage,
     );
-    // The registry refuses every tool of a Managed session, but its manager
-    // still connects a runtime-added server.
+    // The registry refuses every other tool of a Managed session, but its
+    // manager still connects a runtime-added server.
     if (this.sessionExecutionEngine === 'managed') {
       this.applyPendingMcpBudgetCallback(registry);
+      await this.registerManagedRuntimeTools(registry);
       return registry;
     }
 
@@ -12625,7 +12955,9 @@ export class Config {
     // run context" on first use. Observed both ways with the six-combination
     // probe: dropping the clause takes the plain-subagent row from six tools
     // to zero and leaves the agent-subagent row at six.
-    if (this.isWorkspaceAgentSession()) {
+    // A session-agents session has no thread behind it; its thread tools
+    // would only ever throw "requires an active agent run context".
+    if (this.isWorkspaceAgentSession() && !this.isSessionAgentSession()) {
       await registerLazy(ToolNames.THREAD_POST, async () => {
         const { ThreadPostTool } = await import('../tools/thread-tools.js');
         return new ThreadPostTool(this);
