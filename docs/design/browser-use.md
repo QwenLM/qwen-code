@@ -98,7 +98,8 @@ local Host setup. Initialization idempotently installs or reuses the launcher
 and manifests for existing browser roots, then the transport discovers a live
 Host and validates its extension, protocol and profile handshake. A configured
 `QWEN_BROWSER_USE_SOCKET_PATH` or `QWEN_BROWSER_USE_DISCOVERY_DIR` keeps using its
-externally managed setup.
+externally managed setup. Where neither applies, initialization attempts no
+registration.
 
 Initialization does not read `Secure Preferences` or `Preferences` to detect
 an installed extension. Those private configuration files may be unreadable,
@@ -367,7 +368,11 @@ it does not run a one-second retry loop or rewrite empty session state on
 failed discovery. Initial backend discovery can wait up to 35 seconds, with
 the normal request execution timeout starting after connection. Browser
 listing and selection both allow this discovery window; explicit short
-transport request timeouts still cap discovery.
+transport request timeouts still cap discovery. Where no Native Messaging Host
+can be registered and no `QWEN_BROWSER_USE_SOCKET_PATH` or
+`QWEN_BROWSER_USE_DISCOVERY_DIR` endpoint is configured, there is provably
+nothing to wait for, so listing and selection settle on a single discovery
+snapshot instead of waiting out the window.
 The active `runtime.connectNative()` port keeps the worker alive on Chrome 105
 and later, and an active `chrome.debugger` session provides an additional
 keepalive on Chrome 118 and later. This differs from the separate `/cdp`

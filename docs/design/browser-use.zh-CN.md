@@ -49,7 +49,7 @@ Browser Use 以内置 skill 及其运行时资源随 Qwen Code 一起发布，�
 
 Browser Use 默认对模型可用，由模型根据用户任务选择。用户可通过 `/skills` 或 `skills.disabled` 禁用，使用与 Computer Use 相同的控制方式。禁用的 skill 不参与模型发现和 skill 调用。这是 Computer Use 也使用的通用 skill 机制，不是浏览器权限边界：禁用 skill 不会移除已有对话中的指令，也不会断开现有 SDK 会话。
 
-Native Host 注册属于本机产品初始化，不由 Chrome 扩展执行。在 macOS 和 Linux 上，发起 Browser Use 任务即同意自动完成本机 Host 配置。初始化为已存在的浏览器根目录幂等安装或复用 launcher 和 manifest，然后由 transport 发现存活的 Host，并验证扩展、协议和 profile 握手。配置了 `QWEN_BROWSER_USE_SOCKET_PATH` 或 `QWEN_BROWSER_USE_DISCOVERY_DIR` 时继续使用外部管理的安装。
+Native Host 注册属于本机产品初始化，不由 Chrome 扩展执行。在 macOS 和 Linux 上，发起 Browser Use 任务即同意自动完成本机 Host 配置。初始化为已存在的浏览器根目录幂等安装或复用 launcher 和 manifest，然后由 transport 发现存活的 Host，并验证扩展、协议和 profile 握手。配置了 `QWEN_BROWSER_USE_SOCKET_PATH` 或 `QWEN_BROWSER_USE_DISCOVERY_DIR` 时继续使用外部管理的安装。两者都不满足时，初始化不尝试注册。
 
 初始化不通过读取 `Secure Preferences` 或 `Preferences` 检测扩展安装。这些私有配置文件可能无法读取，安装记录也无法证明扩展已启用或连接。Host 注册可以在扩展可用之前完成。若始终没有连接，应提示用户打开 Chrome，在目标 profile 中安装或启用扩展后重试；仅凭超时无法断定扩展未安装。协议不匹配仍提供更新指引。Profile 名称属于可选补充信息，不作为连接前提。
 
@@ -149,7 +149,7 @@ Node Kernel 直接拥有本地 Chrome 扩展 transport：
 
 在 Unix 上，两端优先使用已存在、私有且由当前用户拥有的 `/run/user/<uid>/bridge.sock`；否则使用 `/tmp/qwen-browser-use-<uid>/bridge.sock`（macOS 为 `/private/tmp`）。后端创建当前用户拥有、权限为 `0700` 的目录，以及权限为 `0600` 的 socket。两端都会拒绝不安全的 ownership、权限及可被替换的祖先目录；Native Host 还会在转发流量前拒绝 socket 符号链接。显式 socket 路径覆盖也必须遵守相同的私有目录边界。同一用户的进程仍处于信任边界内。
 
-没有后端监听时，Native Host 退出。扩展使用 30 秒 Chrome alarm 安排一次重试，可跨 worker 挂起保留；发现失败不会启动每秒重试循环或重写空会话状态。后端首次发现最多等待 35 秒，连接建立后才开始常规请求执行超时。浏览器列表和选择都允许这个发现窗口；显式指定的短 transport 请求超时仍会限制发现等待。Chrome 105 及以上的活跃 `runtime.connectNative()` port 会保持 worker 存活，Chrome 118 及以上的活跃 `chrome.debugger` 会话还提供额外保活。这与独立的 `/cdp` WebSocket bridge 不同，遵循 Chrome 文档规定的扩展 service-worker 生命周期。真实 Chrome 会话必须在超过 60 秒无 Browser Use 流量后仍可使用。
+没有后端监听时，Native Host 退出。扩展使用 30 秒 Chrome alarm 安排一次重试，可跨 worker 挂起保留；发现失败不会启动每秒重试循环或重写空会话状态。后端首次发现最多等待 35 秒，连接建立后才开始常规请求执行超时。浏览器列表和选择都允许这个发现窗口；显式指定的短 transport 请求超时仍会限制发现等待。若平台无法注册 Native Messaging Host，且未配置 `QWEN_BROWSER_USE_SOCKET_PATH` 或 `QWEN_BROWSER_USE_DISCOVERY_DIR` 端点，则不存在可等待的对象，列表和选择只取一次发现快照，不再等待该窗口。Chrome 105 及以上的活跃 `runtime.connectNative()` port 会保持 worker 存活，Chrome 118 及以上的活跃 `chrome.debugger` 会话还提供额外保活。这与独立的 `/cdp` WebSocket bridge 不同，遵循 Chrome 文档规定的扩展 service-worker 生命周期。真实 Chrome 会话必须在超过 60 秒无 Browser Use 流量后仍可使用。
 
 连接建立后若后端 socket 消失，Native Host 退出，Chrome 关闭其 Native Messaging port。扩展处理 port 断开时，会 detach 会话控制的标签页、移除 Browser Use overlays、清除 ownership 和派生标签页状态、取消托管标签页分组而不关闭页面，并安排 Native Host 发现以连接未来的后端。Debugger attach 和 detach 按标签页串行执行。成功释放会等待 Chrome 完成 detach；断线清理超时不会丢弃未完成的单标签页操作。新标签页初始化失败时，扩展会删除该新标签页。用户显式取消调试时，扩展释放 ownership 和派生关系，持久化状态，并尽力取消分组。
 

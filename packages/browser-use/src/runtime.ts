@@ -12,6 +12,7 @@ import { DEFAULT_CHROME_DOCUMENTATION } from './core/chrome-runtime-documentatio
 import {
   describeChromeProfiles,
   ensureChromeNativeHost,
+  NATIVE_HOST_SUPPORTED_PLATFORMS,
   nativeHostInstallHome,
 } from './native-host-installer.js';
 import { PlaywrightRuntime } from './playwright/playwright-runtime.js';
@@ -34,9 +35,8 @@ function hasManagedEndpointOverride(): boolean {
   );
 }
 
-/** Only these platforms have a Chrome profile root the manifest can live in. */
 function supportsNativeHostRegistration(): boolean {
-  return process.platform === 'darwin' || process.platform === 'linux';
+  return NATIVE_HOST_SUPPORTED_PLATFORMS.includes(process.platform);
 }
 
 export async function createBrowserBackend(): Promise<BrowserBackend> {
