@@ -7,6 +7,7 @@
 import type { Part } from '@google/genai';
 import type { GoalRecord, GoalTurnPermit } from './goal-protocol.js';
 import { escapeJsonTagCharacters } from '../utils/formatters.js';
+import { toolSearchBridgeSentence } from '../skills/bundled-reference.js';
 
 export type GoalContinuationUsage = Pick<
   GoalRecord,
@@ -69,6 +70,8 @@ const DATA_CLOSE_TAG = '</goal_runtime_data>';
 const SHARED_LINES = [
   'Continue working on the active Goal.',
   'Use get_goal for the authoritative objective, the budget figures, and any verifier feedback.',
+  `In Direct mode: ${toolSearchBridgeSentence('get_goal or update_goal')}`,
+  'In Code Mode, discover missing Goal tools with tool_search and invoke them through exec using the returned JavaScript name.',
   "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
   'If completion depends on content delivered in this turn, deliver only that content in this turn, before update_goal.',
 ];
@@ -153,7 +156,7 @@ function renderActiveMinutes(ms: number): string {
  * judgement itself, before it spends the turn.
  */
 const EVIDENCE_LINE =
-  "Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported. The verifier judges a proposal from the most recent records of this Goal's transcript, newest first, and older records drop out when the request is full, so run the decisive checks immediately before calling update_goal.";
+  "Treat the workspace and this turn's tool results as authoritative. Re-inspect state rather than relying on what earlier turns in this conversation reported. The verifier judges a proposal from the most recent records of this Goal's transcript, newest first, and older records drop out when the request is full, so run the decisive checks immediately before calling update_goal. A script's or an aggregate wrapper's summary (agent, advisor, workflow, thread_read) supports computation but attests no external fact, so run the decisive check as a direct tool call in this turn.";
 
 const FIDELITY_LINE =
   'Work toward the end state the objective asks for. Do not substitute a narrower or more easily reached result, and do not redefine success around what already exists.';

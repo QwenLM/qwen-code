@@ -105,6 +105,12 @@ export interface PermissionCheckContext {
   /** Historical names that may still appear in persisted rules. */
   toolAliases?: readonly string[];
   /**
+   * The producer-carried MCP identity of the tool being checked, when the
+   * registry can supply it. Lets the matcher read the server boundary from
+   * the producer instead of re-deriving it from a flattened spelling.
+   */
+  mcpIdentity?: { serverName: string; serverToolName: string };
+  /**
    * The shell command being executed (only for Bash / run_shell_command).
    */
   command?: string;

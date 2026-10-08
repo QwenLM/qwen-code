@@ -533,10 +533,7 @@ function isLockRecord(value: unknown): value is SessionWriterLockRecord {
       typeof record['sealed_at'] === 'string' &&
       Number.isFinite(Date.parse(record['sealed_at'])) &&
       isSealedTranscriptProof(record['transcript']) &&
-      Number.isSafeInteger(record['last_commit_sequence']) &&
-      (record['last_commit_sequence'] as number) >= 0 &&
-      typeof record['committed_prefix_hash'] === 'string' &&
-      /^[0-9a-f]{64}$/.test(record['committed_prefix_hash'])
+      isValidCommitProof(record)
     );
   }
   return false;

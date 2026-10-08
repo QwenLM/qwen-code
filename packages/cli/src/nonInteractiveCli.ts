@@ -59,6 +59,7 @@ import {
   recordHandledToolCall,
   isToolCallConcurrencySafe,
   canonicalToolName,
+  Kind,
   parsePositiveIntegerEnv,
   partitionByConcurrencySafety,
   PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
@@ -500,13 +501,28 @@ function partitionHeadlessToolCalls(
   requests: ToolCallRequestInfo[],
   config: Config,
 ): Array<ConcurrencyBatch<ToolCallRequestInfo>> {
+  // A PreToolUse or PermissionRequest hook can replace a read-only command
+  // after this check, so such a shell call runs alone. A skill earlier in
+  // the batch may register those hooks before the call runs.
+  let skillBefore = false;
   return partitionByConcurrencySafety(requests, (request) => {
     const executionRequest = getHeadlessExecutionRequest(request, config);
-    return isToolCallConcurrencySafe(
-      executionRequest.name,
-      config.getToolRegistry().getTool(canonicalToolName(executionRequest.name))
-        ?.kind,
-      executionRequest.args,
+    const canonicalName = canonicalToolName(executionRequest.name);
+    const kind = config.getToolRegistry().getTool(canonicalName)?.kind;
+    const inputMayChange =
+      kind === Kind.Execute &&
+      (skillBefore ||
+        (!config.getDisableAllHooks() &&
+          (config.hasHooksForEvent('PreToolUse') ||
+            config.hasHooksForEvent('PermissionRequest'))));
+    skillBefore ||= canonicalName === ToolNames.SKILL;
+    return (
+      !inputMayChange &&
+      isToolCallConcurrencySafe(
+        executionRequest.name,
+        kind,
+        executionRequest.args,
+      )
     );
   });
 }
@@ -520,7 +536,14 @@ function getHeadlessExecutionRequest(
   }
 
   const targetName = request.args['name'];
-  const targetArgs = request.args['arguments'];
+  let targetArgs = request.args['arguments'];
+  if (typeof targetArgs === 'string') {
+    try {
+      targetArgs = JSON.parse(targetArgs) as unknown;
+    } catch {
+      return request;
+    }
+  }
   if (
     typeof targetName !== 'string' ||
     typeof targetArgs !== 'object' ||
@@ -2429,7 +2452,10 @@ export async function runNonInteractive(
             resolvedResponses[index];
           const finalizedParts = finalized[index].responseParts;
           toolResponseParts.push(...finalizedParts);
-          const goalProvenance = goalToolResultProvenance(executionRequest);
+          const goalProvenance = goalToolResultProvenance(
+            executionRequest,
+            finalizedParts,
+          );
           chatRecordingService?.recordToolResult?.(
             finalizedParts,
             {
