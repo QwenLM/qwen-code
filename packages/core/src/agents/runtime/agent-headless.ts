@@ -60,6 +60,17 @@ const MAX_MODEL_VISIBLE_ERROR_LENGTH = 500;
 // above stays as the backstop for a long cause.
 const MAX_MODEL_VISIBLE_MESSAGE_LENGTH = MAX_MODEL_VISIBLE_ERROR_LENGTH - 100;
 
+/**
+ * Whitespace runs collapse to a single space rather than being deleted, so a
+ * multi-line provider body keeps its token boundaries — `stripAnsiAndControl`
+ * removes `\n`/`\r`/`\t` outright, which would weld adjacent tokens into ones
+ * that never existed. The result is still single-line, so it cannot forge the
+ * blank-line separator this string is later spliced into.
+ */
+function collapseModelErrorText(text: string): string {
+  return stripAnsiAndControl(text.replace(/\s+/g, ' ')).trim();
+}
+
 // ─── Utilities (unchanged, re-exported for consumers) ────────
 
 /**
@@ -454,25 +465,22 @@ export class AgentHeadless implements SubagentExecutor {
         // Bound the message before `getErrorMessage` composes the cause onto
         // it, not after — see MAX_MODEL_VISIBLE_MESSAGE_LENGTH. Non-Error
         // rejections are passed through untouched and rely on the outer bound.
+        //
+        // Sanitize before bounding, not after: the budget has to be spent on the
+        // text the parent actually reads. Bounding the raw message let an
+        // ANSI-coloured failure fill it with escape bytes that
+        // `stripAnsiAndControl` then deleted, leaving a stub of the reason.
+        const cleanedMessage =
+          error instanceof Error ? collapseModelErrorText(error.message) : '';
         const bounded =
           error instanceof Error &&
-          error.message.length > MAX_MODEL_VISIBLE_MESSAGE_LENGTH
+          cleanedMessage.length > MAX_MODEL_VISIBLE_MESSAGE_LENGTH
             ? {
-                message: `${error.message.slice(0, MAX_MODEL_VISIBLE_MESSAGE_LENGTH)}…`,
+                message: `${cleanedMessage.slice(0, MAX_MODEL_VISIBLE_MESSAGE_LENGTH)}…`,
                 cause: error.cause,
               }
             : error;
-        // Whitespace runs collapse to a single space rather than being deleted,
-        // so a multi-line provider body keeps its token boundaries —
-        // `stripAnsiAndControl` removes `\n`/`\r`/`\t` outright, which would
-        // weld adjacent tokens into ones that never existed. Same shape as
-        // `sanitizeForStderr` in packages/cli/src/utils/errors.ts. The result is
-        // still single-line, so it cannot forge the blank-line separator this
-        // string is later spliced into, and `stripAnsiAndControl` stays outer
-        // because the collapse only covers whitespace.
-        const clean = stripAnsiAndControl(
-          getErrorMessage(bounded).replace(/\s+/g, ' '),
-        ).trim();
+        const clean = collapseModelErrorText(getErrorMessage(bounded));
         this.lastError =
           clean.length > MAX_MODEL_VISIBLE_ERROR_LENGTH
             ? `${clean.slice(0, MAX_MODEL_VISIBLE_ERROR_LENGTH)}…`

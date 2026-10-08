@@ -5696,6 +5696,36 @@ describe('AgentTool', () => {
       },
     );
 
+    it('foreground TIMEOUT reserves room for a non-empty suffix in the budget', async () => {
+      // The case above runs without an executor and without worktree isolation,
+      // so `wtSuffix` is '' and the `- suffix.length` reservation is unpinned:
+      // dropping it composes past maxOutputChars and the tail-first truncator
+      // deletes exactly the reason line the composition exists to keep
+      // (#13597). An external executor is the reachable non-empty suffix.
+      loadAs({
+        name: 'file-search',
+        background: undefined,
+        executor: { kind: 'codex', command: 'codex' },
+      });
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        'x'.repeat(60_000) + 'TAIL-MARKER',
+      );
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.TIMEOUT,
+      );
+      vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
+      const text = textOf(await invoke(fg()).execute());
+      expect(text.length).toBeLessThanOrEqual(agentTool.maxOutputChars);
+      expect(
+        text.startsWith('Subagent did not complete (terminate mode: TIMEOUT).'),
+      ).toBe(true);
+      expect(
+        text.endsWith(
+          '[External executor token usage and cost are unavailable.]',
+        ),
+      ).toBe(true);
+    });
+
     it('foreground TIMEOUT with nothing captured announces no partial result', async () => {
       // A run that stops during its first turn has getFinalText() === '', so the
       // GOAL-only placeholder would be announced as the subagent's partial

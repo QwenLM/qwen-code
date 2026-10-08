@@ -2058,6 +2058,20 @@ describe('subagent.ts', () => {
         expect(retained).not.toContain('\u001b[31m');
       });
 
+      it('spends the message budget on real text, not escape bytes (#13597)', async () => {
+        // Bounding the raw message charged the budget to escape sequences that
+        // `stripAnsiAndControl` then deleted: a 2 000-char colourised failure
+        // reached the parent as a 40-char stub, which is the unactionable-reason
+        // shape #13597 is about.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          new Error('\u001b[31mx\u001b[0m'.repeat(200)),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'x');
+        expect(scope.getLastError()).toContain('x'.repeat(100));
+      });
+
       it('folds `cause` into the retained message (#13597)', async () => {
         // Raw `error.message` drops it, and the cause is the half that tells the
         // parent what to change — without it the reason line names only the
