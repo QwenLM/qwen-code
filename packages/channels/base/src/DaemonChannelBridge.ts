@@ -607,6 +607,16 @@ export class DaemonChannelBridge
     let rollbackUploadedAttachments = false;
     const uploadAttachment = session.uploadAttachment?.bind(session);
     const removeAttachment = session.removeAttachment?.bind(session);
+    // The signal reason is a provenance string for the daemon; the session
+    // client rejects with it verbatim, but callers above still classify and
+    // render the AbortError a bare abort() produced. Shared by the upload and
+    // prompt legs so the two cannot drift.
+    const asAbortError = (error: unknown): unknown =>
+      controller.signal.aborted &&
+      typeof error === 'string' &&
+      error === controller.signal.reason
+        ? new DOMException('This operation was aborted', 'AbortError')
+        : error;
 
     try {
       const prompt: Array<Record<string, unknown>> = [];
@@ -668,7 +678,7 @@ export class DaemonChannelBridge
           }
         } catch (error) {
           rollbackUploadedAttachments = true;
-          throw error;
+          throw asAbortError(error);
         }
       } else {
         // Daemons without `session_attachments` take images inline.
@@ -751,17 +761,7 @@ export class DaemonChannelBridge
         if (isDefinitePromptAdmissionRejection(error)) {
           rollbackUploadedAttachments = true;
         }
-        // The signal reason is a provenance string for the daemon; the
-        // session client rejects with it verbatim, but callers above still
-        // classify and render the AbortError a bare abort() produced.
-        if (
-          controller.signal.aborted &&
-          typeof error === 'string' &&
-          error === controller.signal.reason
-        ) {
-          throw new DOMException('This operation was aborted', 'AbortError');
-        }
-        throw error;
+        throw asAbortError(error);
       }
       // Prefer turn_complete for deterministic chunk collection (SSE path).
       // Fall back to one event-loop tick for non-SSE prompt paths (blocking

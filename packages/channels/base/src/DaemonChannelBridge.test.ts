@@ -4599,6 +4599,59 @@ describe('DaemonChannelBridge', () => {
     },
   );
 
+  it.each([
+    ['cancelSession', 'qwen:user-cancel'],
+    ['interrupted cancel', 'qwen:prompt-interrupted'],
+  ] as const)(
+    'rejects an in-flight attachment upload with an AbortError on %s',
+    async (label, reason) => {
+      const events = new EventQueue();
+      const session = createFakeSession(events);
+      // Mirrors DaemonClient.uploadSessionAttachment, which rejects with
+      // signal.reason verbatim.
+      session.uploadAttachment.mockImplementation(
+        (_blob: Blob, _name: string, _mimeType: string, signal?: AbortSignal) =>
+          new Promise((_resolve, reject) => {
+            signal?.addEventListener('abort', () => reject(signal.reason), {
+              once: true,
+            });
+          }),
+      );
+      const bridge = new DaemonChannelBridge({
+        cwd: '/repo',
+        sessionFactory: vi.fn().mockResolvedValue(session),
+        sessionAttachments: true,
+      });
+
+      await bridge.start();
+      await bridge.newSession('/repo');
+      const promptPromise = bridge.prompt('session-1', 'describe', {
+        imageBase64: 'AQID',
+        imageMimeType: 'image/png',
+      });
+      void promptPromise.catch(() => {});
+      await waitFor(() =>
+        expect(session.uploadAttachment).toHaveBeenCalledOnce(),
+      );
+
+      await bridge.cancelSession(
+        'session-1',
+        label === 'cancelSession' ? undefined : { cancelReason: 'interrupted' },
+      );
+
+      const error = await promptPromise.then(
+        () => undefined,
+        (err: unknown) => err,
+      );
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).name).toBe('AbortError');
+      expect(session.uploadAttachment.mock.calls[0]?.[3]?.reason).toBe(reason);
+
+      events.close();
+      bridge.stop();
+    },
+  );
+
   it('clears permission ownership when daemon permission responses fail', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
