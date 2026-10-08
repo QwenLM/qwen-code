@@ -31,7 +31,7 @@ Two gaps, different in kind:
   slice, per merged capability. For the 56 public and WebShell routes the API
   contract test already fails a mapped route that the OpenAPI contract lacks,
   and fires a cross-tenant probe at every contract operation. Nothing gates
-  the 22 internal routes, nothing probes a caller below read or with read but
+  the original slice-A baseline's 22 internal routes, nothing probes a caller below read or with read but
   without the family's power, and nothing ties a route to the admission rule
   it should follow — so a route can land with the wrong check and every test
   stays green, which is the failure mode that matters most while this surface
@@ -72,7 +72,8 @@ tenant may mutate them today; internal store/publication routes admit a writer
 HMAC credential, not an actor. The public surface is `/v1/agents/**` plus
 `/api/agent/web-shell/v1/**` (`PublicSurface`), realised by ten Spring
 controllers — the section-10 matrix enumerates the current 32 public + 24
-WebShell + 22 internal routes (78 in total, counted by the slice-A gate).
+WebShell + 24 internal routes (80 in total, including the two L3 authorization
+routes, counted by the gate).
 
 There is no production provisioning of workspace registry/access rows —
 today only tests and fixture entry points write them, and a deployment writes
@@ -220,7 +221,7 @@ the published shape of the 56 public and WebShell routes and which the API
 contract test keeps in bijection with the mounted handlers. The rule class is
 deliberately not an `x-qwen-*` extension on the spec: the spec is the
 published, machine-consumed contract (the WebShell client types are generated
-from it), it does not describe the 22 internal routes, and an admission rule
+from it), it does not describe the 24 internal routes, and an admission rule
 class is a server-internal classification. A new public or WebShell route is
 therefore named three times — controller, spec, registry — and each pairing
 is gated: the contract test fails a route the spec lacks, and the
@@ -365,8 +366,9 @@ Same as the issue's, plus the explicit deferrals named there:
 
 ## 10. Surface route matrix (the slice-A registry, bilingual summary)
 
-`api/SurfaceRegistry.java` at slice-A head carries 78 route constants: 32
-public + 24 WebShell + 22 internal handler methods of the ten controllers.
+`api/SurfaceRegistry.java` integrated with L3 carries 80 route constants: 32
+public + 24 WebShell + 24 internal handler methods of the ten controllers,
+including the two L3 authorization routes.
 The gate derives everything from scanning, so the count is information, not
 an asserted constant.
 
@@ -374,7 +376,7 @@ Rule classes name today's admission: `WORKSPACE_CREATE` (2), `READER` (24),
 `READER_ACTOR` (6), `READER_ACTOR_POLICY` (1), `OPERATOR` as today's
 submitter family (4), `OWNER` as today's creator families — lifecycle and
 cwd plus Action respond — (12), `WORKSPACE_DISCOVERY` (4), `TENANT_SCOPED`
-(3), `INTERNAL_WRITER` (22). The design's `legacy_create` and
+(3), `INTERNAL_WRITER` (24). The design's `legacy_create` and
 `legacy_tenant` names are kept in the class documentation as the names of
 the legacy arms: a route carries exactly one rule class and, per the
 separation rule, it is the bound-Session one. Slice C flips cwd and Action
@@ -448,6 +450,8 @@ store route and a publication route.
 | `POST /api/agent/web-shell/v1/artifacts/query`                                                                                   | WEBSHELL | ARTIFACT_LIST             | READER_ACTOR        |
 | `POST /api/agent/web-shell/v1/workspaces/query`                                                                                  | WEBSHELL | WORKSPACE_LIST            | WORKSPACE_DISCOVERY |
 | `POST /api/agent/web-shell/v1/workspaces/get`                                                                                    | WEBSHELL | WORKSPACE_GET             | WORKSPACE_DISCOVERY |
+| `POST /internal/managed-session-store/v1/sessions/{sessionId}/execution:authorize`                                               | INTERNAL | STORE_EXECUTION_AUTHORIZE | INTERNAL_WRITER     |
+| `POST /internal/managed-session-store/v1/sessions/{sessionId}/lifecycle:authorize`                                               | INTERNAL | STORE_LIFECYCLE_AUTHORIZE | INTERNAL_WRITER     |
 | `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:acquire`                                                   | INTERNAL | STORE_WRITER_ACQUIRE      | INTERNAL_WRITER     |
 | `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:renew`                                                     | INTERNAL | STORE_WRITER_RENEW        | INTERNAL_WRITER     |
 | `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:seal`                                                      | INTERNAL | STORE_WRITER_SEAL         | INTERNAL_WRITER     |

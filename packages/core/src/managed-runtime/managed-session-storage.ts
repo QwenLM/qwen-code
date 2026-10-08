@@ -23,6 +23,15 @@ import {
   type ManagedSessionKey,
 } from './managed-session-records.js';
 
+/** A durable store refused the transaction without appending any records. */
+export class ManagedSessionCommitRejectedError extends ManagedSessionRecordError {
+  constructor(cause: Error) {
+    super(cause.message);
+    this.cause = cause;
+    this.name = 'ManagedSessionCommitRejectedError';
+  }
+}
+
 export interface ManagedSessionCommitReceipt {
   readonly transactionId: string;
   readonly commandId: string;
