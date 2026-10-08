@@ -729,8 +729,8 @@ Publication and CSI ACK references keep the original execution and its parents,
 including already collected publications; unreferenced siblings may be removed.
 Nonterminal children, live operation/dispatch leases and managed bindings without
 stop evidence remain retained. Binding slots and generation counters, placement
-guards, harness drains and storage fences remain durable. Every tick logs scanned,
-skipped and deleted counts and its duration; failures retry on the next tick.
+guards, harness drains and storage fences remain durable. Successful ticks log
+scanned, skipped and deleted counts and duration; failures retry on the next tick.
 
 Enabling retention makes historical receipts and idempotency guarantees finite.
 After cleanup, existing missing-record responses apply. Callers must not reuse

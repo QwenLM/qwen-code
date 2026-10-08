@@ -337,6 +337,44 @@ class JdbcRuntimeRetentionTest {
         assertEquals(100, fixture.count("qwen_runtime_binding"));
     }
 
+    @Test
+    void protectedSubsecondBindingsAdvanceAcrossSingleRowBatches() throws Exception {
+        verifySubsecondBindingProgress(new Fixture());
+    }
+
+    private static void verifySubsecondBindingProgress(Fixture fixture) throws Exception {
+        List<String> ids = List.of("subsecond-01", "subsecond-02", "subsecond-03");
+        for (String id : ids) {
+            fixture.binding(id, "legacy", false, "RELEASED");
+            // SQL literals preserve migrated microseconds even when the driver truncates Timestamp parameters.
+            fixture.execute("UPDATE qwen_runtime_binding SET last_active_at = '2000-01-01 00:00:00.250001' "
+                    + "WHERE binding_id = ?", id);
+        }
+        fixture.execute("UPDATE qwen_runtime_binding SET last_active_at = '2000-01-01 00:00:00.750003' "
+                + "WHERE binding_id = ?", ids.getLast());
+        JdbcRuntimeRetention retention = fixture.retention(guard(Set.of(ids.getFirst()), Set.of()));
+        JdbcRuntimeRetention.Cursor cursor = null;
+        for (int index = 0; index < ids.size(); index++) {
+            var result = retention.sweep(MAX_AGE, 1, cursor);
+            assertEquals(1, result.bindingsScanned());
+            assertEquals(0, result.childrenScanned());
+            assertEquals(0, result.executionsDeleted());
+            assertEquals(0, result.sessionsDeleted());
+            assertEquals(index == 0 ? 1 : 0, result.skipped());
+            assertEquals(index == 0 ? 0 : 1, result.bindingsDeleted());
+            cursor = result.cursor();
+            assertNotNull(cursor);
+            assertEquals(ids.get(index), cursor.bindingId());
+        }
+        var end = retention.sweep(MAX_AGE, 1, cursor);
+        assertNull(end.cursor());
+        assertEquals(0, end.bindingsScanned());
+        assertNotNull(fixture.bindings.findById(ids.getFirst()));
+        assertNull(fixture.bindings.findById(ids.get(1)));
+        assertNull(fixture.bindings.findById(ids.getLast()));
+        assertEquals(List.of(0, 0, 1), fixture.complete(1, NO_REFERENCES));
+    }
+
     private static void verifyProtectedProgress(Fixture fixture) throws Exception {
         RuntimeBindingRecord binding = fixture.binding("large", "legacy", false, "RELEASED");
         fixture.session(binding, "session", "RELEASED", OLD);
@@ -437,6 +475,7 @@ class JdbcRuntimeRetentionTest {
 
     static void verifyOnDatabase(DataSource source) throws Exception {
         Fixture fixture = new Fixture(source);
+        verifySubsecondBindingProgress(fixture);
         verifyProtectedProgress(fixture);
         assertEquals(List.of(100, 1, 1), fixture.complete(1, NO_REFERENCES));
         verifyRollback(fixture, false);

@@ -6,12 +6,17 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import javax.sql.DataSource;
 
 /** Bounded cleanup of unreferenced retired Runtime generations. */
 public final class JdbcRuntimeRetention {
+    private static final DateTimeFormatter CURSOR_TIMESTAMP = DateTimeFormatter
+            .ofPattern("uuuu-MM-dd HH:mm:ss.SSSSSS").withZone(ZoneOffset.UTC);
+
     public interface ReferenceGuard {
         boolean bindingReferenced(Connection connection, RuntimeBindingRecord binding) throws SQLException;
 
@@ -199,11 +204,13 @@ public final class JdbcRuntimeRetention {
             } else {
                 JdbcRepositorySupport.setInstant(statement, 1, cutoff);
                 if (cursor != null) {
+                    // Connector/J can drop Timestamp fractions with MariaDB's MySQL 5.5 compatibility handshake.
+                    String lastActiveAt = CURSOR_TIMESTAMP.format(cursor.lastActiveAt());
                     statement.setString(2, cursor.bindingState());
                     statement.setString(3, cursor.bindingState());
-                    JdbcRepositorySupport.setInstant(statement, 4, cursor.lastActiveAt());
+                    statement.setString(4, lastActiveAt);
                     statement.setString(5, cursor.bindingState());
-                    JdbcRepositorySupport.setInstant(statement, 6, cursor.lastActiveAt());
+                    statement.setString(6, lastActiveAt);
                     statement.setString(7, cursor.bindingId());
                 }
             }
