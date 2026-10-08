@@ -66,6 +66,17 @@ export function createMonitorWakeRunTurn(params: {
    * exception as an ordinary failure, settling its unconsumed input.
    */
   readonly needsRecovery: (cause: unknown) => boolean;
+  /**
+   * H5/F5: a source's own terminal settlement for a wake turn it already
+   * ran (a channel input cannot mint a second user record, and a text
+   * turn has no checkpoint to continue). Returning true means the input
+   * is settled and the pump continues without freezing the Session;
+   * absent or false keeps the recovery-blocked freeze.
+   */
+  readonly settleInterrupted?: (
+    turn: HostedMonitorWakeTurn,
+    attempted: ChatRecord[],
+  ) => Promise<boolean>;
   readonly writeStderr: (line: string) => void;
 }): (turn: HostedMonitorWakeTurn) => Promise<'settled' | 'busy'> {
   const { session } = params;
@@ -73,6 +84,14 @@ export function createMonitorWakeRunTurn(params: {
     if (params.busy() || session.blocked) return 'busy';
     const attempted = await session.managed.sink.project();
     if (wakeHasPriorAttempt(attempted, turn.turnId)) {
+      if (await params.settleInterrupted?.(turn, attempted)) {
+        params.writeStderr(
+          'qwen serve: Interrupted channel wake turn ' +
+            turn.turnId +
+            ' was settled without a reply; the Session stays usable.',
+        );
+        return 'settled';
+      }
       // The notification ran and died inside the turn it started.
       // Re-driving it text-only would mint a second user record and an
       // unanswered first call in the model's history, so it is for the

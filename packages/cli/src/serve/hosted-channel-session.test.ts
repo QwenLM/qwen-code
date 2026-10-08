@@ -112,7 +112,22 @@ async function withSession<T>(
       {
         authority,
         resources: harness.store,
-        sink: { project: async () => [...harness.records] },
+        sink: {
+          project: async () => [...harness.records],
+          write: async (record: ChatRecord) => {
+            harness.records.push(record);
+            const payload = record.systemPayload as
+              | { promptId?: string; state?: string }
+              | undefined;
+            if (payload?.promptId && typeof payload.state === 'string') {
+              await settleInJournal(
+                authority,
+                payload.promptId,
+                payload.state as 'completed' | 'error' | 'cancelled',
+              );
+            }
+          },
+        },
       },
       sessionKey,
     );
@@ -589,6 +604,58 @@ describe('HostedChannelSession outbound', () => {
       await expect(
         channels.receipt(planned.deliveryId, 0, RECEIPT),
       ).resolves.toMatchObject({ run: { delivery: { state: 'delivered' } } });
+    });
+  });
+
+  it('settles an interrupted channel wake turn instead of freezing the Session', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (channels, authority) => {
+      const first = (await channels.submitInput(inbound())).inputId;
+      // The wake turn began — its user record is minted — and the Harness
+      // died before the model ever answered.
+      harness.records.push({
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        cwd: '/workspace',
+        version: 'hosted-harness/1',
+        uuid: `${first}:user`,
+        type: 'user',
+        daemonPromptId: first,
+        message: { role: 'user', parts: [{ text: 'channel' }] },
+      } as ChatRecord);
+      // The recovery fleet's channel settlement: terminal, always, without
+      // a reply — and exactly once, whatever races it.
+      expect(await channels.settleInterruptedWake(first)).toBe(true);
+      expect(await channels.settleInterruptedWake(first)).toBe(true);
+      const settles = authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .filter(
+          (event) =>
+            event.kind === 'turn.settled' && event.payload['turnId'] === first,
+        );
+      expect(settles).toHaveLength(1);
+      expect(settles[0]!.payload).toMatchObject({
+        turnId: first,
+        outcome: 'cancelled',
+      });
+      // The interrupted input never plans, and the pump owes nothing for it.
+      expect(await channels.planReply(first)).toBeUndefined();
+      expect(
+        pendingSessionInputs(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+        ),
+      ).toEqual([]);
+      // The thread resumes: the next input of the same route admits, its
+      // turn settles, its reply plans.
+      const second = (
+        await channels.submitInput(inbound({ platformEventId: '1700:50' }))
+      ).inputId;
+      settleTurn(harness, second, 'Recovered.');
+      await settleInJournal(authority, second);
+      const planned = await channels.planReply(second);
+      expect(planned).toMatchObject({ deliveryId: `${second}:reply` });
+      expect(await channels.reconcileReplies()).toEqual([]);
     });
   });
 

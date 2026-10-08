@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type {
   ChannelDelivery,
@@ -104,6 +104,7 @@ export interface HostedChannelStore {
   };
   readonly sink: {
     project(): Promise<ChatRecord[]>;
+    write(record: ChatRecord): Promise<unknown>;
   };
 }
 
@@ -351,6 +352,47 @@ export class HostedChannelSession {
   async turnText(inputId: string): Promise<string | undefined> {
     const envelope = await this.envelopeOf(inputId);
     return envelope === undefined ? undefined : channelInputText(envelope);
+  }
+
+  /**
+   * F5/direction (a): settle an interrupted channel wake turn with its
+   * terminal settlement. A text turn has no checkpoint to continue and
+   * minting its user record a second time is forbidden, so the one honest
+   * terminal for a channel turn that died mid-flight is a cancelled
+   * result — it never plans a reply, and its thread resumes immediately.
+   * True always means the turn is settled — by this call or a racing one.
+   */
+  settleInterruptedWake(turnId: string): Promise<boolean> {
+    return this.serial(async () => {
+      const authority = this.store.authority;
+      const alreadySettled = authority
+        .eventsInSequenceRange(1, authority.committedSequence)
+        .some(
+          (event) =>
+            event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
+        );
+      // An already-settled turn is the answer itself: the input consumes,
+      // and the pump continues — never a second tombstone or a freeze for
+      // a reply the racing path already answered terminally.
+      if (alreadySettled) return true;
+      await this.store.sink.write({
+        uuid: randomUUID(),
+        parentUuid: null,
+        sessionId: this.key.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        cwd: '/workspace',
+        version: 'hosted-harness/1',
+        subtype: 'turn_result',
+        systemPayload: {
+          promptId: turnId,
+          state: 'cancelled',
+          stopReason: 'harness_interruption',
+          endedAt: Date.now(),
+        },
+      } as unknown as ChatRecord);
+      return true;
+    });
   }
 
   /**

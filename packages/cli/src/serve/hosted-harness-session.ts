@@ -2559,6 +2559,13 @@ export function registerHostedHarnessSessionRoutes(
                 ),
               busy: wakeBusy,
               needsRecovery: monitorWakeNeedsRecovery,
+              // F5/direction (a): channel turns interrupted mid-flight get
+              // terminal settlement from their own funnel; monitor turns
+              // keep the recovery-blocked freeze their fleet owns.
+              settleInterrupted: (turn) =>
+                turn.source === CHANNEL_INPUT_SOURCE && session.channels
+                  ? session.channels.settleInterruptedWake(turn.turnId)
+                  : Promise.resolve(false),
               writeStderr: writeStderrLineSafe,
             });
             // H5c: the channel turn settled; its reply plans from the
