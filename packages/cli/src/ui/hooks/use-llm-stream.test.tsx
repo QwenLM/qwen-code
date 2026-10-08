@@ -52,6 +52,8 @@ import type { HistoryItem, SlashCommandProcessorResult } from '../types.js';
 import { MessageType, StreamingState, ToolCallStatus } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
+import * as markdownUtilities from '../utils/markdownUtilities.js';
+import { CODE_FENCE_RE } from '../utils/pending-rendered-height.js';
 import {
   MAX_INLINE_IMAGE_ENCODED_LENGTH,
   MAX_INLINE_IMAGES_PER_ITEM,
@@ -12401,6 +12403,247 @@ describe('useLlmStream', () => {
         expect(result.current.pendingHistoryItems[0]?.text).toBe('Done.');
       } finally {
         await stream.stop();
+      }
+    });
+
+    const boundaryModes = [
+      { name: 'raw', start: 'raw', end: 'raw' },
+      { name: 'visual', start: 'render', end: 'render' },
+      { name: 'visual to raw', start: 'render', end: 'raw' },
+      { name: 'raw to visual', start: 'raw', end: 'render' },
+    ] as const;
+    const makeBoundaryTable = (rows: number) =>
+      [
+        '| A | B |',
+        '| --- | --- |',
+        ...Array.from({ length: rows }, (_, i) => `| r${i} | c${i} |`),
+      ].join('\n');
+
+    it.each(
+      boundaryModes.flatMap((mode) =>
+        ['\n', '\r\n'].map((newline) => ({ ...mode, newline })),
+      ),
+    )(
+      'preserves complete display math before stream end in $name ($newline)',
+      async ({ start, end, newline }) => {
+        const mode = { current: start as 'raw' | 'render' };
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          mode,
+        );
+        const block =
+          `${makeBoundaryTable(40)}\n$$\na+b\n\nc+d\n$$\n   \n`.replaceAll(
+            '\n',
+            newline,
+          );
+        const content = `${block}Done.`;
+        const stream = await streamStages(result, [
+          'intro\n\n',
+          content,
+          '\nMore prose.',
+        ]);
+        try {
+          mode.current = end;
+          await stream.advance();
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          if (end === 'raw') {
+            expect(llmContentItems().map((item) => item.text)).toEqual([
+              'intro\n\n',
+              block,
+            ]);
+            expect(result.current.pendingHistoryItems[0]?.text).toBe('Done.');
+          } else {
+            expect(llmContentItems().map((item) => item.text)).toEqual([
+              'intro\n\n',
+            ]);
+            expect(result.current.pendingHistoryItems[0]?.text).toBe(content);
+          }
+          expect(
+            llmContentItems()
+              .map((item) => item.text)
+              .join('') + result.current.pendingHistoryItems[0]?.text,
+          ).toBe(`intro\n\n${content}`);
+          await stream.advance();
+          expect(result.current.pendingHistoryItems[0]?.text).toContain(
+            'Done.\nMore prose.',
+          );
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
+    it.each(
+      boundaryModes.flatMap((mode) =>
+        ['\n', '\n   '].map((tail) => ({ ...mode, tail })),
+      ),
+    )(
+      'continues a code fence with an unterminated last line in $name ($tail)',
+      async ({ start, end, tail }) => {
+        const mode = { current: start as 'raw' | 'render' };
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          mode,
+        );
+        const table = makeBoundaryTable(1);
+        const code = Array.from({ length: 50 }, (_, i) => `line${i}`);
+        const content = `${table}\n\`\`\`ts\n${code.join('\n')}${tail}`;
+        const stream = await streamStages(result, ['intro\n\n', content]);
+        try {
+          mode.current = end;
+          await stream.advance();
+          const committed = llmContentItems().map((item) => item.text);
+          const pending = result.current.pendingHistoryItems[0]?.text ?? '';
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          expect(committed.length).toBeGreaterThan(1);
+          expect(committed[1]).toBe(`${table}\n`);
+          expect(pending).toMatch(/^```ts qwen-code:start-line=[2-9]\d*\n/);
+          expect(pending).toContain('line49');
+          expect(pending.endsWith(tail)).toBe(true);
+          const lines = (committed.join('') + pending).split('\n');
+          for (const line of code) {
+            expect(
+              lines.filter((candidate) => candidate === line),
+            ).toHaveLength(1);
+          }
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
+    it.each(['raw', 'render'] as const)(
+      'keeps literal code fences inside unclosed display math in %s',
+      async (renderMode) => {
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { current: renderMode },
+        );
+        const content = [
+          '$$',
+          '```ts',
+          ...Array.from({ length: 40 }, (_, i) => `x_${i}`),
+        ].join('\n');
+        const stream = await streamStages(result, [content]);
+        try {
+          expect(llmContentItems()).toHaveLength(0);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(content);
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
+    it.each(['raw', 'render'] as const)(
+      'keeps inline fence text inside a whole table in %s',
+      async (renderMode) => {
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { current: renderMode },
+        );
+        const table = makeBoundaryTable(40).replace(
+          '| r0 | c0 |',
+          '| r0 ``` | c0 |',
+        );
+        const stream = await streamStages(result, [`${table}\n\nDone.`]);
+        try {
+          expect(llmContentItems().map((item) => item.text)).toEqual([
+            `${table}\n\n`,
+          ]);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe('Done.');
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
+    it('respects long mixed fence delimiters and math text inside code', async () => {
+      const { result } = renderTestHook(
+        [],
+        undefined,
+        { current: 24 },
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { current: 'raw' },
+      );
+      const content = `${makeBoundaryTable(40)}\n~~~~mermaid\n~~~\n\`\`\`\n$$\n\nA-->B`;
+      const stream = await streamStages(result, [
+        content,
+        '\n~~~~\n   \nDone.',
+      ]);
+      try {
+        expect(llmContentItems()).toHaveLength(0);
+        expect(result.current.pendingHistoryItems[0]?.text).toBe(content);
+        await stream.advance();
+        expect(llmContentItems().map((item) => item.text)).toEqual([
+          `${content}\n~~~~\n   \n`,
+        ]);
+        expect(result.current.pendingHistoryItems[0]?.text).toBe('Done.');
+      } finally {
+        await stream.stop();
+      }
+    });
+
+    it('bounds repeated fence-prefix work while scanning a long raw table tail', async () => {
+      const { result } = renderTestHook(
+        [],
+        undefined,
+        { current: 24 },
+        undefined,
+        undefined,
+        undefined,
+        false,
+        { current: 'raw' },
+      );
+      const blanks = 1024;
+      const content = `${makeBoundaryTable(40)}\n\`\`\`mermaid\ngraph TD\n${'A-->B\n\n'.repeat(blanks)}tail`;
+      const fenceSpy = vi.spyOn(markdownUtilities, 'getEnclosingFenceInfo');
+      const regexSpy = vi.spyOn(CODE_FENCE_RE, 'exec');
+      let stream: Awaited<ReturnType<typeof streamStages>> | undefined;
+      try {
+        stream = await streamStages(result, [content, '\n```\n\nDone.']);
+        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        expect(llmContentItems()).toHaveLength(0);
+        expect(result.current.pendingHistoryItems[0]?.text).toBe(content);
+        expect(fenceSpy.mock.calls.length).toBeLessThanOrEqual(2);
+        expect(regexSpy.mock.calls.length).toBeGreaterThan(blanks);
+        expect(regexSpy.mock.calls.length).toBeLessThan(4 * blanks);
+        await stream.advance();
+        expect(llmContentItems().map((item) => item.text)).toEqual([
+          `${content}\n\`\`\`\n\n`,
+        ]);
+        expect(result.current.pendingHistoryItems[0]?.text).toBe('Done.');
+      } finally {
+        await stream?.stop();
+        regexSpy.mockRestore();
+        fenceSpy.mockRestore();
       }
     });
 

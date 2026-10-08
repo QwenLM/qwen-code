@@ -110,8 +110,10 @@ import {
   findLastSafeSplitPoint,
   splitFencedMarkdown,
   getEnclosingFenceInfo,
+  parseCodeFenceInfo,
 } from '../utils/markdownUtilities.js';
 import {
+  CODE_FENCE_RE,
   fitPendingSlice,
   isTableStart,
 } from '../utils/pending-rendered-height.js';
@@ -2002,35 +2004,58 @@ export const useLlmStream = (
         // so nothing ever commits until the stream finalizes and dumps it all at
         // once. Committing an over-tall completed block to <Static> is fine; only
         // the live pending frame must stay within the viewport.
-        let boundaryLine = -1;
-        for (let k = Math.min(keptLines, bufferLines.length - 1); k >= 0; k--) {
-          if (bufferLines[k]!.trim() === '') {
-            boundaryLine = k;
-            break;
-          }
-        }
-        // Raw accounting can stop inside a table; commit it whole once its
-        // closing blank arrives, without mistaking a fenced blank for its end.
-        if (
-          boundaryLine < 0 &&
-          renderModeRef?.current === 'raw' &&
-          isTableStart(bufferLines, 0)
-        ) {
-          for (let k = keptLines + 1; k < bufferLines.length; k++) {
+        // Scan once: raw accounting may stop inside a table, whose safe exit
+        // can be past the budget. Mirror renderer blocks to keep math whole.
+        const allowTableExit =
+          renderModeRef?.current === 'raw' && isTableStart(bufferLines, 0);
+        let boundaryIndex = -1;
+        let offset = 0;
+        let activeCodeFence: string | null = null;
+        let activeCodeLanguage: string | null = null;
+        let inMathBlock = false;
+        let capAllowsCodeSplit = false;
+        // The last split entry has no terminating newline, even when empty.
+        for (let k = 0; k < bufferLines.length - 1; k++) {
+          const sourceLine = bufferLines[k]!;
+          const line = sourceLine.replace(/\r$/, '');
+          offset += sourceLine.length + 1;
+          if (activeCodeFence) {
+            const fence = CODE_FENCE_RE.exec(line);
             if (
-              bufferLines[k]!.trim() === '' &&
-              !getEnclosingFenceInfo(
-                newLlmMessageBuffer,
-                charIndexAfterLine(newLlmMessageBuffer, k + 1),
-              )
+              fence &&
+              fence[1]!.startsWith(activeCodeFence[0]!) &&
+              fence[1]!.length >= activeCodeFence.length
             ) {
-              boundaryLine = k;
+              activeCodeFence = null;
+            }
+          } else if (inMathBlock) {
+            if (/^ *\$\$ *$/.test(line)) inMathBlock = false;
+          } else {
+            const fence = CODE_FENCE_RE.exec(line);
+            if (fence) {
+              activeCodeFence = fence[1]!;
+              activeCodeLanguage = parseCodeFenceInfo(fence[2]).lang;
+            } else if (/^ *\$\$ *$/.test(line)) {
+              inMathBlock = true;
+            }
+          }
+          if (k + 1 === keptLines) {
+            capAllowsCodeSplit =
+              activeCodeFence !== null &&
+              activeCodeLanguage?.toLowerCase() !== 'mermaid';
+          }
+          if (!activeCodeFence && !inMathBlock && line.trim() === '') {
+            if (k <= keptLines) {
+              boundaryIndex = offset;
+            } else if (boundaryIndex < 0 && allowTableExit) {
+              boundaryIndex = offset;
               break;
             }
           }
+          if (k >= keptLines && (boundaryIndex > 0 || !allowTableExit)) break;
         }
         let target: number;
-        if (boundaryLine < 0) {
+        if (boundaryIndex < 0) {
           // No blank-line boundary at/before the kept prefix. A fenced code
           // block taller than the viewport never provides one mid-block, so the
           // whole block would stay pending — frozen on its head — and only land
@@ -2042,7 +2067,7 @@ export const useLlmStream = (
           // and are still kept pending.
           const capIndex = charIndexAfterLine(newLlmMessageBuffer, keptLines);
           const fenceInfo =
-            capIndex > 0
+            capAllowsCodeSplit && capIndex > 0
               ? getEnclosingFenceInfo(newLlmMessageBuffer, capIndex)
               : null;
           // Only hard-split a real code block. Other tall blocks (tables/lists)
@@ -2054,19 +2079,24 @@ export const useLlmStream = (
           }
           target = capIndex;
         } else {
-          target = charIndexAfterLine(newLlmMessageBuffer, boundaryLine + 1);
-          if (target <= 0) break;
+          target = boundaryIndex;
         }
-        const splitPoint = findLastSafeSplitPoint(newLlmMessageBuffer, target);
+        const splitPoint =
+          boundaryIndex < 0
+            ? findLastSafeSplitPoint(newLlmMessageBuffer, target)
+            : target;
         if (splitPoint <= 0 || splitPoint >= newLlmMessageBuffer.length) {
           break;
         }
         // Repair fences when the split lands inside a code block so the tail
         // does not render as prose (see splitFencedMarkdown).
-        const { before: beforeText, after: afterText } = splitFencedMarkdown(
-          newLlmMessageBuffer,
-          splitPoint,
-        );
+        const { before: beforeText, after: afterText } =
+          boundaryIndex < 0
+            ? splitFencedMarkdown(newLlmMessageBuffer, splitPoint)
+            : {
+                before: newLlmMessageBuffer.slice(0, splitPoint),
+                after: newLlmMessageBuffer.slice(splitPoint),
+              };
         commitItemInOrder(
           {
             type: nextPendingType,
