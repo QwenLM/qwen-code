@@ -7,6 +7,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   type Dirent,
+  chmodSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -18,6 +19,7 @@ import { readdir } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import type { UnprovenSweepReport } from '../runtime/managed-quarantine-report.js';
 
 const debugLogger = createDebugLogger('MANAGED_RUNTIME_LEDGER');
 
@@ -468,6 +470,23 @@ function writeLedgerDocument(
 }
 
 /**
+ * The ledger directory, owner-only: it guards the same secrets as the files
+ * inside it. A recursive mkdirSync's mode would land on every ancestor it
+ * creates — the shared tmp tree above the ledger dir is not ours to tighten
+ * — and on none it finds existing, so the leaf alone is chmod'd, which also
+ * heals a loose directory an earlier build left behind.
+ */
+export function ensureLedgerDirectory(ledgerDir: string): void {
+  mkdirSync(ledgerDir, { recursive: true });
+  if (process.platform === 'win32') return;
+  try {
+    chmodSync(ledgerDir, 0o700);
+  } catch {
+    // Best-effort: a truly unwritable dir fails the ledger write itself.
+  }
+}
+
+/**
  * The groups a session Runtime worker started: which Shell ran in which
  * process group, durable across a crash of the process that holds the truth.
  * Every write is synchronous and atomic, so no settled step of a tool call
@@ -491,11 +510,7 @@ export class ManagedRuntimeLedger {
     readonly worker: ManagedRuntimeLedgerWorkerRecord;
   }): ManagedRuntimeLedger {
     const ledger = new ManagedRuntimeLedger(options.workFile, options.worker);
-    mkdirSync(path.dirname(options.workFile), {
-      recursive: true,
-      // The directory guards the same secrets as the files inside it.
-      mode: 0o700,
-    });
+    ensureLedgerDirectory(path.dirname(options.workFile));
     ledger.rewrite();
     return ledger;
   }
@@ -746,7 +761,10 @@ export type LedgerSweepVerdict =
   | 'held';
 
 /** A stop a sweep could not prove; the ledger stays on disk. */
-export class LedgerSweepUnprovenError extends Error {
+export class LedgerSweepUnprovenError
+  extends Error
+  implements UnprovenSweepReport
+{
   constructor(
     readonly workFile: string,
     readonly remaining: readonly number[],

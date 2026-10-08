@@ -13,7 +13,7 @@
  */
 export interface UnprovenSweepReport {
   readonly workFile: string;
-  readonly remaining: unknown[];
+  readonly remaining: readonly unknown[];
 }
 
 /** Whether an arbitrary failure carries the structural sweep-report shape. */

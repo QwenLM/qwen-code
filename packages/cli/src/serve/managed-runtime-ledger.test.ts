@@ -5,7 +5,13 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, statSync, utimesSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  readFileSync,
+  statSync,
+  utimesSync,
+} from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os, { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -25,6 +31,7 @@ import {
   sweepWorkerLedger,
   testInternals,
 } from './managed-runtime-ledger.js';
+import { isUnprovenSweepReport } from '../runtime/managed-quarantine-report.js';
 
 /**
  * A controllable rmSync for the unlink-failure paths: enrolled paths throw
@@ -222,6 +229,52 @@ describe('Managed Runtime ledger', () => {
         ledger.addGroup({ pgid: 4242, callId: 'c1', startedAt: 123 });
         expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
         expect(statSync(workFile).mode & 0o777).toBe(0o600);
+      },
+    );
+
+    it.skipIf(!POSIX)(
+      'tightens a ledger directory an earlier build left loose',
+      async () => {
+        // mkdirSync's mode applies only at creation, so a directory left
+        // loose by a pre-hardening build must be chmod'd back to owner-only
+        // or the pids inside stay listable by another local user.
+        const ledgerDir = path.join(root, 'loose');
+        await mkdir(ledgerDir, { recursive: true });
+        chmodSync(ledgerDir, 0o755);
+        ManagedRuntimeLedger.create({
+          workFile: path.join(ledgerDir, 'ledger.json'),
+          worker: {
+            pid: process.pid,
+            pgid: process.pid,
+            incarnation: 'inc',
+            startedAt: Date.now(),
+          },
+        });
+        expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
+      },
+    );
+
+    it.skipIf(!POSIX)(
+      'tightens only the ledger directory, never the shared ancestors above it',
+      async () => {
+        // The tmp tree above the ledger dir holds checkpoints, history and
+        // logs owned by other features and shared across sessions: only the
+        // leaf is ours to make owner-only.
+        const control = path.join(root, 'ambient');
+        await mkdir(control, { recursive: true });
+        const ambient = statSync(control).mode & 0o777;
+        const ledgerDir = path.join(root, 'shared', 'managed-runtime');
+        ManagedRuntimeLedger.create({
+          workFile: path.join(ledgerDir, 'ledger.json'),
+          worker: {
+            pid: process.pid,
+            pgid: process.pid,
+            incarnation: 'inc',
+            startedAt: Date.now(),
+          },
+        });
+        expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
+        expect(statSync(path.dirname(ledgerDir)).mode & 0o777).toBe(ambient);
       },
     );
 
@@ -753,6 +806,19 @@ describe('Managed Runtime ledger', () => {
   });
 
   describe('sweepWorkerLedger', () => {
+    it('the sweep report predicate pairs with the class that produces it', () => {
+      // The acp-integration boundary reads the shape, never the class: a
+      // rename on the producer must redden here, not degrade a message there.
+      expect(
+        isUnprovenSweepReport(
+          new LedgerSweepUnprovenError('/x/a.json', [4123], 'unproven'),
+        ),
+      ).toBe(true);
+      expect(isUnprovenSweepReport(null)).toBe(false);
+      expect(isUnprovenSweepReport({ workFile: 1, remaining: [] })).toBe(false);
+      expect(isUnprovenSweepReport({ workFile: 'a' })).toBe(false);
+    });
+
     it('answers absent for a missing file, having proven nothing', async () => {
       await expect(
         sweepWorkerLedger(path.join(root, 'absent.json')),

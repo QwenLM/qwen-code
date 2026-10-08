@@ -6,7 +6,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -43,6 +43,7 @@ import {
   LedgerSweepRetiredError,
   LedgerSweepUnprovenError,
   MANAGED_RUNTIME_LEDGER_ENV,
+  ensureLedgerDirectory,
   processGroupLiveness,
   startLedgerReaper,
   sweepStaleLedgers,
@@ -748,12 +749,7 @@ export class ManagedSessionRuntimeWorker {
       : undefined;
     if (ledgerPath !== undefined) {
       // Fail before spawn: a worker without its ledger cannot be swept.
-      mkdirSync(path.dirname(ledgerPath), {
-        recursive: true,
-        // Same read-side hygiene as the staging write: the ledger dir is
-        // owner-only, so a traversal of $HOME/.qwen stops before the pids.
-        mode: 0o700,
-      });
+      ensureLedgerDirectory(path.dirname(ledgerPath));
       this.ledgerPaths.add(ledgerPath);
       launchedLedgerPaths.add(ledgerPath);
     }

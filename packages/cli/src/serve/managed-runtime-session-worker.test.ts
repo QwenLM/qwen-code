@@ -5,7 +5,7 @@
  */
 
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { existsSync, statSync, utimesSync } from 'node:fs';
+import { chmodSync, existsSync, statSync, utimesSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
@@ -253,9 +253,13 @@ describe.skipIf(process.platform === 'win32')(
 
     afterEach(async () => {
       await Promise.all(
-        workers
-          .splice(0)
-          .map((worker) => worker.close().catch(() => undefined)),
+        workers.splice(0).map((worker) =>
+          // close() rejects only with its AggregateError contract — anything
+          // else is a defect this teardown must not swallow.
+          worker.close().catch((error) => {
+            if (!(error instanceof AggregateError)) throw error;
+          }),
+        ),
       );
       await rm(root, { recursive: true, force: true });
     });
@@ -807,6 +811,18 @@ describe.skipIf(process.platform === 'win32')(
         expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
       });
 
+      it('tightens a ledger directory an earlier build left loose', async () => {
+        // mkdirSync's mode applies only at creation: a ledger dir left at
+        // 0o755 by a pre-hardening build must be healed at the next launch,
+        // or its pids stay listable by another local user forever.
+        const ledgerDir = path.join(root, 'ledgers');
+        await mkdir(ledgerDir, { recursive: true });
+        chmodSync(ledgerDir, 0o755);
+        const created = ledgerWorker('ok', { ledgerDir });
+        await created.execute('read_file', { file_path: 'a.txt' }, signal);
+        expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
+      });
+
       it('sweeps the ledger of a worker that exits between calls', async () => {
         // The dominant crash path: the exit observer fires without any call
         // in flight, long before close(). Its groups die with it.
@@ -915,6 +931,16 @@ describe.skipIf(process.platform === 'win32')(
         expect(quarantine.lift).toHaveBeenCalledWith(reason);
         expect(processGroupLiveness(survivorPid)).toBe('gone');
         expect(existsSync(workFile)).toBe(false);
+
+        // Proven is settled: the arming entry cleared with the lift, so a
+        // later close() resolves instead of rejecting with the stale reason.
+        await expect(created.close()).resolves.toBeUndefined();
+
+        // And the path can arm afresh: a NEW unproven stop on it reports
+        // again rather than hiding behind the settled one's entry.
+        await writeFile(workFile, 'not a ledger at all', 'utf8');
+        await created.close().catch(() => undefined);
+        expect(quarantine.report).toHaveBeenCalledTimes(2);
         sleeperChildren.length = 0;
       });
 
@@ -943,13 +969,12 @@ describe.skipIf(process.platform === 'win32')(
 
         const repeated = await created.close().catch((error: unknown) => error);
         expect(repeated).toBeInstanceOf(AggregateError);
-        const armedMessage = (quarantine.report.mock.calls[0]![0] as Error)
-          .message;
-        expect(
-          (repeated as AggregateError).errors.some(
-            (reason) => reason.message === armedMessage,
-          ),
-        ).toBe(true);
+        // The host lifts by reason identity, so the rejection must carry the
+        // very instance that armed the reaper — a same-message twin (every
+        // sweep of this file builds its message from workFile alone) is not
+        // the pairing the quarantine keeps.
+        const armedReason = quarantine.report.mock.calls[0]![0] as Error;
+        expect((repeated as AggregateError).errors).toContain(armedReason);
         expect(quarantine.report).toHaveBeenCalledTimes(1);
       });
 
@@ -1002,47 +1027,52 @@ describe.skipIf(process.platform === 'win32')(
         expect(quarantine.lift).not.toHaveBeenCalled();
       });
 
-      it('the reaper retries without the exit witness the first sweep spent', async () => {
-        // The witness is fresh only at the exit the host saw: a retry that
-        // carried it forever would SIGKILL whatever process group later
-        // answers on a recycled id, on the strength of a witness about a
-        // different moment. The arming sweep carries it; no retry may.
-        const ledgerDir = path.join(root, 'ledgers');
-        const quarantine = { report: vi.fn(), lift: vi.fn() };
-        const created = ledgerWorker('ok', { ledgerDir, quarantine });
-        await created.execute('read_file', { file_path: 'a.txt' }, signal);
-        const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
-        // Unreadable and too young to retire: every sweep throws the same
-        // way, so the reaper keeps retrying it for the child's lifetime.
-        await writeFile(workFile, 'not a ledger at all', 'utf8');
+      it(
+        'the reaper retries without the exit witness the first sweep spent',
+        // The inner 15 s wait must be reachable under the per-test ceiling.
+        { timeout: 30_000 },
+        async () => {
+          // The witness is fresh only at the exit the host saw: a retry that
+          // carried it forever would SIGKILL whatever process group later
+          // answers on a recycled id, on the strength of a witness about a
+          // different moment. The arming sweep carries it; no retry may.
+          const ledgerDir = path.join(root, 'ledgers');
+          const quarantine = { report: vi.fn(), lift: vi.fn() };
+          const created = ledgerWorker('ok', { ledgerDir, quarantine });
+          await created.execute('read_file', { file_path: 'a.txt' }, signal);
+          const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
+          // Unreadable and too young to retire: every sweep throws the same
+          // way, so the reaper keeps retrying it for the child's lifetime.
+          await writeFile(workFile, 'not a ledger at all', 'utf8');
 
-        sweepWitnesses.records.length = 0;
-        await created.close().catch(() => undefined);
-        expect(quarantine.report).toHaveBeenCalledTimes(1);
-        const own = () =>
-          sweepWitnesses.records.filter(
-            (record) => record.workFile === workFile,
-          );
-        // The arming sweep — close to the witnessed exit — carries it.
-        expect(own().length).toBeGreaterThan(0);
-        expect(own()[0]!.exitWitnessed).toBe(true);
-        // The reaper's first retry lands no earlier than its 1 s interval;
-        // anything this much later than the arming sweep is a retry.
-        const armedAt = own()[0]!.at;
-        await vi.waitFor(
-          () => {
-            expect(own().some((record) => record.at - armedAt > 900)).toBe(
-              true,
+          sweepWitnesses.records.length = 0;
+          await created.close().catch(() => undefined);
+          expect(quarantine.report).toHaveBeenCalledTimes(1);
+          const own = () =>
+            sweepWitnesses.records.filter(
+              (record) => record.workFile === workFile,
             );
-          },
-          { timeout: 15_000 },
-        );
-        for (const retry of own()) {
-          if (retry.at - armedAt > 900) {
-            expect(retry.exitWitnessed).not.toBe(true);
+          // The arming sweep — close to the witnessed exit — carries it.
+          expect(own().length).toBeGreaterThan(0);
+          expect(own()[0]!.exitWitnessed).toBe(true);
+          // The reaper's first retry lands no earlier than its 1 s interval;
+          // anything this much later than the arming sweep is a retry.
+          const armedAt = own()[0]!.at;
+          await vi.waitFor(
+            () => {
+              expect(own().some((record) => record.at - armedAt > 900)).toBe(
+                true,
+              );
+            },
+            { timeout: 15_000 },
+          );
+          for (const retry of own()) {
+            if (retry.at - armedAt > 900) {
+              expect(retry.exitWitnessed).not.toBe(true);
+            }
           }
-        }
-      });
+        },
+      );
 
       it('close joins the sweep the exit hook is already running over the same ledger', async () => {
         // Two triggers in one window — the exit hook and an explicit
@@ -1115,60 +1145,79 @@ describe.skipIf(process.platform === 'win32')(
         const second = await created.close().catch((error: unknown) => error);
         expect(second).toBeInstanceOf(AggregateError);
         const reasons = (second as AggregateError).errors as Error[];
-        expect(
-          reasons.some((reason) => reason.message === armedReason.message),
-        ).toBe(true);
+        expect(reasons).toContain(armedReason);
         // The second close paid no new sweep: the armed reaper owns it.
         expect(sweepWitnesses.records.length).toBe(sweepsAfterFirst);
       });
 
-      it('an unproven sweep from the exit hook arms the reaper from inside its own failure', async () => {
-        // The exit hook's catch swallows the sweep's throw because the
-        // arming already happened inside: the quarantine report is the
-        // observable consequence, and the armed reaper — not a late caller —
-        // owns the stop from there.
-        const ledgerDir = path.join(root, 'ledgers');
-        const quarantine = { report: vi.fn(), lift: vi.fn() };
-        const created = ledgerWorker('exit-after-call', {
-          ledgerDir,
-          quarantine,
-        });
-        sweepWitnesses.records.length = 0;
-        let release: (() => void) | undefined;
-        sweepWitnesses.hold = new Promise<void>((resolve) => {
-          release = resolve;
-        });
-        try {
-          await created.execute('read_file', { file_path: 'a.txt' }, signal);
-          const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
-          // The hook's sweep is parked pre-read; the unreadable content
-          // lands before it learns the file.
-          await vi.waitFor(
-            () => {
-              expect(
-                sweepWitnesses.records.some(
-                  (record) => record.workFile === workFile,
-                ),
-              ).toBe(true);
-            },
-            { timeout: 10_000 },
-          );
-          await writeFile(workFile, 'not a ledger at all', 'utf8');
-          release?.();
-          await vi.waitFor(
-            () => {
-              expect(quarantine.report).toHaveBeenCalledTimes(1);
-            },
-            { timeout: 10_000 },
-          );
-          // The lift never comes from garbage: the quarantine stands.
-          expect(quarantine.lift).not.toHaveBeenCalled();
-        } finally {
-          release?.();
-          sweepWitnesses.hold = undefined;
+      it(
+        'an unproven sweep from the exit hook arms the reaper from inside its own failure',
+        // Two 10 s waits plus the retry witness need a ceiling above 15 s.
+        { timeout: 30_000 },
+        async () => {
+          // The exit hook's catch swallows the sweep's throw because the
+          // arming already happened inside: the quarantine report is the
+          // observable consequence, and the armed reaper — not a late caller —
+          // owns the stop from there.
+          const ledgerDir = path.join(root, 'ledgers');
+          const quarantine = { report: vi.fn(), lift: vi.fn() };
+          const created = ledgerWorker('exit-after-call', {
+            ledgerDir,
+            quarantine,
+          });
           sweepWitnesses.records.length = 0;
-        }
-      });
+          let release: (() => void) | undefined;
+          sweepWitnesses.hold = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          try {
+            await created.execute('read_file', { file_path: 'a.txt' }, signal);
+            const workFile = path.join(
+              ledgerDir,
+              `${await incarnation()}.json`,
+            );
+            // The hook's sweep is parked pre-read; the unreadable content
+            // lands before it learns the file.
+            await vi.waitFor(
+              () => {
+                expect(
+                  sweepWitnesses.records.some(
+                    (record) => record.workFile === workFile,
+                  ),
+                ).toBe(true);
+              },
+              { timeout: 10_000 },
+            );
+            await writeFile(workFile, 'not a ledger at all', 'utf8');
+            release?.();
+            await vi.waitFor(
+              () => {
+                expect(quarantine.report).toHaveBeenCalledTimes(1);
+              },
+              { timeout: 10_000 },
+            );
+            // The lift never comes from garbage: the quarantine stands. The
+            // earliest lift is one reaper tick (1 s) out, so judging right
+            // after the report would be green under any implementation — wait
+            // for the armed reaper's own retry sweep first.
+            await vi.waitFor(
+              () => {
+                expect(
+                  sweepWitnesses.records.filter(
+                    (record) => record.workFile === workFile,
+                  ).length,
+                ).toBeGreaterThan(1);
+              },
+              { timeout: 3_000 },
+            );
+            expect(quarantine.lift).not.toHaveBeenCalled();
+          } finally {
+            release?.();
+            sweepWitnesses.hold = undefined;
+            sweepWitnesses.records.length = 0;
+          }
+        },
+      );
 
       it('sweeps the ledger of a worker that never finished launching', async () => {
         // A launch that fails attestation leaves no live session to own the
