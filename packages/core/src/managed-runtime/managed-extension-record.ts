@@ -425,7 +425,13 @@ function count(value: unknown, label: string, min = 0, max?: number): number {
     label,
   );
   if (number < min || (max !== undefined && number > max)) {
-    fail(`${label} is out of range.`);
+    // Pair to the Java store's identical refusal, so a cross-language
+    // failure reads alike wherever the boundary caught it.
+    fail(
+      max !== undefined
+        ? `${label} must be an integer from ${min} to ${max}.`
+        : `${label} must be an integer from ${min} or more.`,
+    );
   }
   return number;
 }

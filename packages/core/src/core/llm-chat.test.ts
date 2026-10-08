@@ -63,6 +63,7 @@ import {
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
 import { SYSTEM_REMINDER_OPEN } from './environmentContext.js';
+import { formatAgentMessageModelText } from '../agents/session-agents/envelope.js';
 import { SessionStartSource } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import {
@@ -9793,6 +9794,14 @@ describe('LlmChat', async () => {
 
     const reminder = (body: string) =>
       userText(`${SYSTEM_REMINDER_OPEN}\n${body}\n</system-reminder>`);
+    const AGENT_PAYLOAD = {
+      displayText: 'done',
+      author: { agentId: 'agent-1', name: 'claude-B' },
+      runId: 'run-1',
+      status: 'completed' as const,
+    };
+    const agentEnvelope = () =>
+      userText(formatAgentMessageModelText(AGENT_PAYLOAD));
 
     it.each<[string, Content[], Content[]]>([
       [
@@ -9821,6 +9830,25 @@ describe('LlmChat', async () => {
             {
               text: `${SYSTEM_REMINDER_OPEN}\nPlan mode is active.\n</system-reminder>`,
             },
+            { text: 'the actual user prompt' },
+          ),
+        ],
+        earlier(),
+      ],
+      // A resumed agent_message record is its own user entry; a later
+      // failed prompt must not take it along.
+      [
+        'preserves a trailing session agent envelope entry',
+        [...earlier(), agentEnvelope(), userText('failed prompt')],
+        [...earlier(), agentEnvelope()],
+      ],
+      [
+        'pops a failed prompt that carried a spliced agent envelope',
+        [
+          ...earlier(),
+          content(
+            'user',
+            { text: formatAgentMessageModelText(AGENT_PAYLOAD) },
             { text: 'the actual user prompt' },
           ),
         ],
@@ -12381,6 +12409,8 @@ describe('LlmChat', async () => {
   describe('XML tool call fallback integration', () => {
     const XML =
       '<invoke name="read_file"><parameter name="file_path">a.ts</parameter></invoke>';
+    const TAUGHT_XML =
+      '<tool_call><function=read_file><parameter=file_path>a.ts</parameter></function></tool_call>';
 
     /**
      * Stream one STOP chunk of `parts` (or `chunks`) for `message` on
@@ -12494,6 +12524,35 @@ describe('LlmChat', async () => {
       // History holds the recovered functionCall parts, not raw XML.
       expect(parts.some((p) => p.functionCall)).toBe(true);
       expect(hasRawXml(parts)).toBe(false);
+    });
+
+    it('recovers a split taught-dialect call once and stores the call instead of XML (#10692)', async () => {
+      const { chunks, parts } = await runXml('taught-xml', [], {
+        chunks: [
+          textChunk(TAUGHT_XML.slice(0, 30)),
+          textChunk(TAUGHT_XML.slice(30), 'STOP'),
+        ],
+      });
+      const calls = chunks.flatMap((chunk) => chunk.functionCalls ?? []);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        name: 'read_file',
+        args: { file_path: 'a.ts' },
+      });
+      expect(parts).toEqual([{ functionCall: calls[0] }]);
+    });
+
+    it('keeps a native call authoritative when taught-dialect text is also present (#10692)', async () => {
+      const native = fnCall('read_file', { file_path: 'b.ts' }, 'native-call');
+      const { chunks, parts } = await runXml('native-with-taught-xml', [
+        { text: TAUGHT_XML },
+        native,
+      ]);
+      expect(chunks.flatMap((chunk) => chunk.functionCalls ?? [])).toEqual([
+        native.functionCall,
+      ]);
+      expect(recoveredChunk(chunks)).toBeUndefined();
+      expect(parts.some((part) => part.text === TAUGHT_XML)).toBe(true);
     });
 
     it('preserves a preceding reasoning episode (text + signature) when XML tool call recovery fires on the same turn', async () => {
@@ -12707,33 +12766,36 @@ describe('LlmChat', async () => {
       expect(parts.some((p) => p.inlineData)).toBe(true);
     });
 
-    it('does not recover XML tool calls when the stream lacks a finish reason', async () => {
-      vi.useFakeTimers();
-      mockStream(streamOf(textChunk(XML))); // no finishReason
-      const stream = await chat.sendMessageStream(
-        'gemini-pro',
-        { message: 'read the file' },
-        'prompt-xml-fallback-no-finish',
-      );
+    it.each([XML, TAUGHT_XML])(
+      'does not recover XML without a finish reason: %s',
+      async (xml) => {
+        vi.useFakeTimers();
+        mockStream(streamOf(textChunk(xml))); // no finishReason
+        const stream = await chat.sendMessageStream(
+          'gemini-pro',
+          { message: 'read the file' },
+          'prompt-xml-fallback-no-finish',
+        );
 
-      // The recovery gate must not fire; stream validation throws
-      // NO_FINISH_REASON so the retry path handles the truncated stream.
-      const chunks: GenerateContentResponse[] = [];
-      const collecting = (async () => {
-        for await (const event of stream) {
-          if (event.type === StreamEventType.CHUNK) chunks.push(event.value);
-        }
-      })();
-      const resultPromise = (async () => {
-        await expect(collecting).rejects.toThrow('finish reason');
-      })();
-      await vi.advanceTimersByTimeAsync(0);
-      await vi.advanceTimersByTimeAsync(35_000);
-      await resultPromise;
+        // The recovery gate must not fire; stream validation throws
+        // NO_FINISH_REASON so the retry path handles the truncated stream.
+        const chunks: GenerateContentResponse[] = [];
+        const collecting = (async () => {
+          for await (const event of stream) {
+            if (event.type === StreamEventType.CHUNK) chunks.push(event.value);
+          }
+        })();
+        const resultPromise = (async () => {
+          await expect(collecting).rejects.toThrow('finish reason');
+        })();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(35_000);
+        await resultPromise;
 
-      // No synthetic tool-call chunk may be dispatched.
-      expect(recoveredChunk(chunks)).toBeUndefined();
-    });
+        // No synthetic tool-call chunk may be dispatched.
+        expect(recoveredChunk(chunks)).toBeUndefined();
+      },
+    );
     describe('issue #10380: HTTP 413 request-body overflow recovery', () => {
       // A reverse proxy can reject the serialized body (HTTP 413) below the
       // auto-compaction threshold; the send must recover via the same one-shot

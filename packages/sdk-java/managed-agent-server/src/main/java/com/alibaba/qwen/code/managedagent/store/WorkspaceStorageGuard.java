@@ -2,15 +2,20 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.AccessMode;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
@@ -141,12 +146,14 @@ public class WorkspaceStorageGuard {
         if (!enabled) {
             return;
         }
+        WorkspaceMigrationAdmission.requireOpen(jdbc, binding.getTenantId(), binding.getStorageId());
         verify(binding.getTenantId(), binding.getStorageId(), binding.getCwdRelative(), false);
     }
 
     void verifyLocked(ContextBinding binding) {
         WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
         if (enabled) {
+            WorkspaceMigrationAdmission.requireOpen(jdbc, binding.getTenantId(), binding.getStorageId());
             verify(binding.getTenantId(), binding.getStorageId(), binding.getCwdRelative(), true);
         }
     }
@@ -248,6 +255,15 @@ public class WorkspaceStorageGuard {
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
+            String migration = WorkspaceMigrationAdmission.owner(jdbc, tenantId, storageId);
+            if (migration != null) {
+                var requests = jdbc.queryForList("SELECT request_json FROM managed_workspace_migration WHERE operation_id = ?",
+                        String.class, migration);
+                if (requests.size() != 1 || !operationId.equals(WorkspaceRecoveryStore.parse(requests.getFirst())
+                        .path("fenceOperationId").asText())) {
+                    throw WorkspaceExecutionStore.unavailable();
+                }
+            }
             Registration current = row(key(tenantId, storageId), true);
             if (current != null && "FENCED".equals(current.state())
                     && tenantId.equals(current.tenantId()) && storageId.equals(current.storageId())
@@ -278,6 +294,7 @@ public class WorkspaceStorageGuard {
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenantId);
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, storageId);
+            WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, storageId);
             Registration row = row(key(tenantId, storageId), true);
             if (row != null && "READY".equals(row.state())
                     && row.revision() == revision + 1 && row.operationId() == null
@@ -319,6 +336,7 @@ public class WorkspaceStorageGuard {
             throw WorkspaceExecutionStore.unavailable();
         }
         requireMatching(row, actual, tenantId, storageId);
+        verifyHistory(tenantId, storageId, false);
         if (!marker(row).equals(readMarker(root))) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -331,6 +349,121 @@ public class WorkspaceStorageGuard {
             }
         } catch (IOException | IllegalArgumentException error) {
             throw WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    private void verifyHistory(String tenantId, String storageId, boolean probe) {
+        var migrations = jdbc.queryForList("SELECT history_identity_json FROM managed_workspace_migration"
+                + " WHERE tenant_id = ? AND storage_id = ? AND state = 'COMPLETED' ORDER BY updated_at DESC LIMIT 1",
+                tenantId, storageId);
+        if (!migrations.isEmpty()) {
+            Identity expected;
+            try {
+                expected = json.readValue((String) migrations.getFirst().get("history_identity_json"), Identity.class);
+            } catch (IOException error) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            String home = System.getenv("QWEN_HOME");
+            if (home == null || !Path.of(home).isAbsolute()
+                    || !Path.of(home).resolve("file-history").toString().equals(expected.root())) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            try {
+                if (!Path.of(home).toRealPath().equals(Path.of(home))
+                        || !expected.equals(identities.read(Path.of(expected.root())))) {
+                    throw WorkspaceExecutionStore.unavailable();
+                }
+            } catch (NoSuchFileException | AccessDeniedException error) {
+                throw WorkspaceExecutionStore.unavailable();
+            } catch (IOException error) {
+                if (probe) {
+                    throw WorkspaceExecutionStore.unavailableTransient(error);
+                }
+                throw WorkspaceExecutionStore.unavailable();
+            } catch (RuntimeException error) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+        }
+    }
+
+    // Probe-only verification: identical structural checks to verify(), but
+    // the cwd settlement probe classifies by the verdict — a momentary I/O
+    // failure on an identity or marker read, or on the directory liveness
+    // calls, is retryable-with-cause so the delivery machine re-arms the
+    // operation and the refusal log keeps the cause. Everything structural
+    // keeps the terminal unavailable(), and the shared acquire path above
+    // is deliberately untouched: re-classifying inside verify() would flip
+    // tool-turn verdicts.
+    public void verifyProbe(ContextBinding binding) {
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, binding.getTenantId(), binding.getStorageId());
+        if (!enabled) {
+            return;
+        }
+        WorkspaceMigrationAdmission.requireOpen(jdbc, binding.getTenantId(), binding.getStorageId());
+        verifyProbe(binding.getTenantId(), binding.getStorageId(),
+                binding.getCwdRelative());
+    }
+
+    private void verifyProbe(String tenantId, String storageId, String cwd) {
+        Path root = root(tenantId, storageId);
+        Identity actual;
+        try {
+            actual = identities.read(root);
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailableTransient(error);
+        } catch (RuntimeException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        Registration row = row(key(tenantId, storageId), false);
+        if (row == null || !"READY".equals(row.state()) || row.operationId() != null
+                || row.revision() <= 0) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        requireMatching(row, actual, tenantId, storageId);
+        verifyHistory(tenantId, storageId, true);
+        if (!marker(row).equals(readMarkerProbe(root))) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        Path directory = root.resolve(cwd).normalize();
+        try {
+            if (!directory.startsWith(root)
+                    || !Files.readAttributes(directory,
+                            BasicFileAttributes.class,
+                            LinkOption.NOFOLLOW_LINKS).isDirectory()
+                    || !directory.toRealPath().equals(directory)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            directory.getFileSystem().provider().checkAccess(directory,
+                    AccessMode.READ, AccessMode.EXECUTE);
+        } catch (NoSuchFileException | AccessDeniedException
+                | SecurityException | IllegalArgumentException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailableTransient(error);
+        }
+    }
+
+    private Marker readMarkerProbe(Path root) {
+        Path file = root.resolve(MARKER);
+        if (!Files.isRegularFile(file, LinkOption.NOFOLLOW_LINKS)) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        try (FileChannel channel = FileChannel.open(file,
+                StandardOpenOption.READ, LinkOption.NOFOLLOW_LINKS)) {
+            if (channel.size() > 4096) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            ByteBuffer bytes = ByteBuffer.allocate((int) channel.size());
+            while (bytes.hasRemaining()) {
+                if (channel.read(bytes) <= 0) {
+                    throw WorkspaceExecutionStore.unavailable();
+                }
+            }
+            return json.readValue(bytes.array(), Marker.class);
+        } catch (JsonProcessingException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailableTransient(error);
         }
     }
 
@@ -353,6 +486,143 @@ public class WorkspaceStorageGuard {
                         result.getString("mount_registration_id"),
                         result.getString("mount_completed_operation_id")), key);
         return rows.size() == 1 ? rows.getFirst() : null;
+    }
+
+    RecoveryRegistration migrationSource(String tenant, String storage, long revision, String fence) {
+        WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenant, storage);
+        Registration saved = row(key(tenant, storage), false);
+        if (saved == null || saved.revision() != revision || !List.of("READY", "FENCED").contains(saved.state())
+                || "FENCED".equals(saved.state()) && !fence.equals(saved.operationId())) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        requireMatching(saved, identity(root(tenant, storage)), tenant, storage);
+        if (!marker(saved).equals(readMarker(root(tenant, storage)))) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        return new RecoveryRegistration(tenant, storage, saved.registrationId(), revision, fence,
+                saved.root(), saved.hostId(), saved.device(), saved.inode(), saved.birthTime());
+    }
+
+    Identity migrationIdentity(Path path) {
+        return identity(path);
+    }
+
+    byte[] migrationMarker(String tenant, String storage, Identity target, String registration) {
+        try {
+            return json.writeValueAsBytes(new Marker(2, tenant, storage, target.root(), target.hostId(),
+                    target.device(), target.inode(), target.birthTime(), registration));
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    static Path migrationTemporary(Path root, String operation) {
+        return root.resolve(MARKER + "." + operation + ".tmp");
+    }
+
+    void discardMigrationTemporary(Path root, byte[] expected, String operation) {
+        Path temporary = migrationTemporary(root, operation);
+        if (!Files.exists(temporary, LinkOption.NOFOLLOW_LINKS)) {
+            return;
+        }
+        try {
+            if (!Files.isRegularFile(temporary, LinkOption.NOFOLLOW_LINKS)
+                    || ((Number) Files.getAttribute(temporary, "unix:nlink", LinkOption.NOFOLLOW_LINKS)).longValue() != 1
+                    || Files.size(temporary) > expected.length) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            byte[] partial = Files.readAllBytes(temporary);
+            if (!java.util.Arrays.equals(partial, java.util.Arrays.copyOf(expected, partial.length))) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            Files.delete(temporary);
+            try (FileChannel directory = FileChannel.open(root, StandardOpenOption.READ)) {
+                directory.force(true);
+            }
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    void publishMigrationMarker(Path root, byte[] expectedBytes, RecoveryRegistration original, String operation) {
+        Marker expected;
+        try {
+            expected = json.readValue(expectedBytes, Marker.class);
+            Marker old = new Marker(2, original.tenantId(), original.storageId(), original.root(), original.hostId(),
+                    original.device(), original.inode(), original.birthTime(), original.registrationId());
+            Marker current = readMarker(root);
+            if (expected.equals(current)) {
+                return;
+            }
+            if (!old.equals(current)) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+            Path temporary = migrationTemporary(root, operation);
+            if (Files.exists(temporary, LinkOption.NOFOLLOW_LINKS)) {
+                if (!Files.isRegularFile(temporary, LinkOption.NOFOLLOW_LINKS)
+                        || ((Number) Files.getAttribute(temporary, "unix:nlink", LinkOption.NOFOLLOW_LINKS)).longValue() != 1
+                        || Files.size(temporary) != expectedBytes.length
+                        || !java.util.Arrays.equals(Files.readAllBytes(temporary), expectedBytes)) {
+                    throw WorkspaceExecutionStore.unavailable();
+                }
+            } else {
+                try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.CREATE_NEW,
+                        StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
+                    ByteBuffer buffer = ByteBuffer.wrap(expectedBytes);
+                    while (buffer.hasRemaining()) {
+                        channel.write(buffer);
+                    }
+                    channel.force(true);
+                }
+                Files.setPosixFilePermissions(temporary, Files.getPosixFilePermissions(root.resolve(MARKER),
+                        LinkOption.NOFOLLOW_LINKS));
+            }
+            try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE, LinkOption.NOFOLLOW_LINKS)) {
+                channel.force(true);
+            }
+            Files.move(temporary, root.resolve(MARKER), java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            try (FileChannel directory = FileChannel.open(root, StandardOpenOption.READ)) {
+                directory.force(true);
+            }
+            try (FileChannel directory = FileChannel.open(root.getParent(), StandardOpenOption.READ)) {
+                directory.force(true);
+            }
+            if (!expected.equals(readMarker(root))) {
+                throw WorkspaceExecutionStore.unavailable();
+            }
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    void promoteMigration(RecoveryRegistration source, Identity target, String registration, String operation) {
+        recoveryRegistration(source.tenantId(), source.storageId(), source.mountRevision(), source.fenceOperationId());
+        if (!source.hostId().equals(target.hostId()) || !target.equals(identity(Path.of(target.root())))
+                || !new String(migrationMarker(source.tenantId(), source.storageId(), target, registration), StandardCharsets.UTF_8)
+                    .equals(markerJson(Path.of(target.root())))) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        int changed = jdbc.update("UPDATE managed_workspace_execution_lease SET mount_root = ?, mount_host_id = ?,"
+                + " mount_device = ?, mount_inode = ?, mount_birth_time = ?, mount_registration_id = ?,"
+                + " mount_revision = mount_revision + 1, mount_state = 'READY', mount_operation_id = NULL,"
+                + " mount_completed_operation_id = ? WHERE storage_key = ? AND tenant_id = ? AND storage_id = ?"
+                + " AND storage_kind = 'LOCAL' AND mount_state = 'FENCED' AND mount_revision = ? AND mount_operation_id = ?"
+                + " AND holder_key IS NULL AND binding_id IS NULL AND runtime_generation IS NULL AND runtime_session_id IS NULL",
+                target.root(), target.hostId(), target.device(), target.inode(), target.birthTime(), registration, operation,
+                key(source.tenantId(), source.storageId()), source.tenantId(), source.storageId(), source.mountRevision(),
+                source.fenceOperationId());
+        if (changed != 1) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+    }
+
+    private String markerJson(Path root) {
+        try {
+            return json.writeValueAsString(readMarker(root));
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
     }
 
     private Path root(String tenantId, String storageId) {

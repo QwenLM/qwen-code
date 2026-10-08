@@ -32,6 +32,10 @@ const INJECTED_USER_SOURCES: ReadonlySet<string> = new Set([
   'mid_turn_message_injected',
   'goal_runtime',
   'goal_control',
+  // An @-mention of a workspace agent (or an agent's post) is recorded inline
+  // and never opens a turn. The agent's reply (`agent_message`) arrives as an
+  // assistant block, which never opens one either.
+  'agent_mention',
 ]);
 
 /**

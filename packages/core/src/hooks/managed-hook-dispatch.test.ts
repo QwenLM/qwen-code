@@ -6,6 +6,8 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import { firePreToolUseHook } from '../core/toolHookTriggers.js';
 import { HookSystem } from './hookSystem.js';
 import { HookRegistry } from './hookRegistry.js';
 import { HookRunner } from './hookRunner.js';
@@ -180,6 +182,51 @@ describe('Managed native Hook dispatch', () => {
     expect(system.hasHooksForEvent(HookEventName.Stop)).toBe(false);
     await system.fireStopEvent();
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      'replaces the tool input with a managed updatedInput',
+      { file_path: 'b' },
+      { shouldProceed: true, updatedInput: { file_path: 'b' } },
+    ],
+    [
+      'denies a managed updatedInput that is not an object',
+      ['b'],
+      expect.objectContaining({ shouldProceed: false, blockType: 'denied' }),
+    ],
+  ])('%s like a local hook', async (_label, updatedInput, expected) => {
+    const { system, execute } = fixture();
+    execute.mockResolvedValue({
+      success: true,
+      allOutputs: [],
+      errors: [],
+      totalDuration: 1,
+      finalOutput: {
+        hookSpecificOutput: { hookEventName: 'PreToolUse', updatedInput },
+      },
+    });
+    const bus = {
+      request: vi.fn(async () => ({
+        success: true,
+        output: await system.firePreToolUseEvent(
+          'read_file',
+          { file_path: 'a' },
+          'call-1',
+          PermissionMode.Default,
+        ),
+      })),
+    } as unknown as MessageBus;
+
+    expect(
+      await firePreToolUseHook(
+        bus,
+        'read_file',
+        { file_path: 'a' },
+        'call-1',
+        'default',
+      ),
+    ).toEqual(expected);
   });
 
   it('propagates authoritative recovery failures instead of converting them into success', async () => {
