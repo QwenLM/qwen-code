@@ -10,6 +10,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.function.Supplier;
@@ -302,6 +303,10 @@ public final class JdbcRuntimeBindingRepository
                 RuntimeAdmission.requireSession(JdbcRuntimeSessionRepository.selectSession(
                         connection, binding.getRequest().getScope(),
                         candidate.getRuntimeSessionId(), true), candidate);
+                if (csiOriginal != null) {
+                    throw new RuntimeBrokerException(501, "csi_native_resources_required",
+                            "CSI allocation requires original assistant and resource bytes.", false);
+                }
                 ToolExecutionRecord receipt = JdbcToolExecutionRepository.selectByIdempotencyKey(
                         connection, candidate.getIdempotencyKey(), csiOriginal != null);
                 if (receipt != null) {
@@ -322,6 +327,48 @@ public final class JdbcRuntimeBindingRepository
                 }
             }
             throw failure;
+        }
+    }
+
+    ToolExecutionRecord prepareCsiExecution(RuntimeSessionRepository sessions, ToolExecutionRepository executions,
+            RuntimeBindingRecord hint, ToolExecutionRecord candidate, byte[] input, byte[] definition) {
+        requireCsiRepositories(sessions, executions);
+        JdbcToolExecutionRepository.requireCandidate(candidate);
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            var admission = JdbcCsiActivationAdmission.lockForReservation(connection, hint);
+            var original = admission.original();
+            var resources = CsiNativeToolReservation.inventory(connection, original);
+            JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
+            RuntimeAdmission.requireReady(selectById(connection, original.bindingId(), true), original.generation());
+            RuntimeAdmission.requireSession(JdbcRuntimeSessionRepository.selectSession(connection,
+                    original.request().getScope(), original.request().getIsolationKey(), true), candidate);
+            return CsiNativeToolReservation.prepare(connection, original, admission.prefix(), resources, candidate, input, definition);
+        });
+    }
+
+    Map<String, Object> readCsiBatch(RuntimeSessionRepository sessions, ToolExecutionRepository executions,
+            RuntimeBindingRecord hint, String promptId, String batchId) {
+        requireCsiRepositories(sessions, executions);
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            var admission = JdbcCsiActivationAdmission.lockForReservation(connection, hint);
+            var original = admission.original();
+            var resources = CsiNativeToolReservation.inventory(connection, original);
+            JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
+            RuntimeAdmission.requireReady(selectById(connection, original.bindingId(), true), original.generation());
+            RuntimeSessionRecord runtime = JdbcRuntimeSessionRepository.selectSession(connection,
+                    original.request().getScope(), original.request().getIsolationKey(), true);
+            original.requireSession(runtime);
+            if (runtime.getState() != RuntimeSessionRecord.State.READY) {
+                throw new RuntimeBrokerException(409, "runtime_admission_closed", "Original CSI Runtime Session is not ready", false);
+            }
+            return CsiNativeToolReservation.read(connection, original, admission.prefix(), resources, promptId, batchId);
+        });
+    }
+
+    private void requireCsiRepositories(RuntimeSessionRepository sessions, ToolExecutionRepository executions) {
+        if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions) || !jdbcSessions.usesDataSource(dataSource)
+                || !(executions instanceof JdbcToolExecutionRepository jdbcExecutions) || !jdbcExecutions.usesDataSource(dataSource)) {
+            throw new IllegalArgumentException("CSI allocation requires the same DataSource");
         }
     }
 

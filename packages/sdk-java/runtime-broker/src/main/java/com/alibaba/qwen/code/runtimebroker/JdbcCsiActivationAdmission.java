@@ -19,6 +19,17 @@ public final class JdbcCsiActivationAdmission {
     private JdbcCsiActivationAdmission() {
     }
 
+    record ReservationScope(JdbcCsiFilesRetirementGuard.Original original, CsiNativeActivationProof.Prefix prefix) {
+    }
+
+    static ReservationScope lockForReservation(Connection connection, RuntimeBindingRecord hint) throws SQLException {
+        require(hint != null && JdbcCsiFilesRetirementGuard.isProfile(hint.getRequest().getScope()));
+        var original = lockOriginal(connection, hint.getBindingId());
+        require(original != null && original.request().equals(hint.getRequest()) && original.generation() == hint.getGeneration());
+        original.requireAdmission();
+        return new ReservationScope(original, requireLive(connection, original));
+    }
+
     static JdbcCsiFilesRetirementGuard.Original lockForExecution(Connection connection, RuntimeBindingRecord hint)
             throws SQLException {
         if (hint == null) {
@@ -166,7 +177,7 @@ public final class JdbcCsiActivationAdmission {
         history(connection, original, revision, sequence, digest, writerId);
     }
 
-    static void requireLive(Connection connection, JdbcCsiFilesRetirementGuard.Original original)
+    static CsiNativeActivationProof.Prefix requireLive(Connection connection, JdbcCsiFilesRetirementGuard.Original original)
             throws SQLException {
         try (PreparedStatement statement = statement(connection,
                 "SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
@@ -185,6 +196,7 @@ public final class JdbcCsiActivationAdmission {
                         head.getLong("committed_sequence"), head.getString("last_commit_digest"), head.getString("writer_id"));
                 require(history.activation() != null && history.activation().expiresAt() > now
                         && head.getLong("activation_epoch") == 1);
+                return history.prefix();
             }
         }
     }

@@ -37,12 +37,26 @@ export interface HostedTurnSession {
   workspaceContext?: string;
 }
 
-type HostedTurnCommit = (
+export type HostedTurnCommit = (
   type: 'assistant' | 'tool_result',
   parts: Part[],
   model: string,
   identity?: { uuid: string; timestamp: string },
 ) => Promise<string>;
+
+export type HostedToolTurn = Pick<
+  HostedWorkspaceToolTurn,
+  'declarations' | 'execute' | 'consumeResults' | 'finish' | 'close'
+> &
+  Partial<
+    Pick<
+      HostedWorkspaceToolTurn,
+      | 'setPromptHookRunner'
+      | 'resumeHookResults'
+      | 'hookStopReason'
+      | 'resumeCommittedResults'
+    >
+  >;
 
 interface HostedTurnOptions {
   session: HostedTurnSession;
@@ -61,7 +75,7 @@ interface HostedTurnOptions {
       model: string,
     ) => boolean,
     workspaceContext: HostedWorkspaceContextSlot,
-  ) => HostedWorkspaceToolTurn;
+  ) => HostedToolTurn;
   resumeFromToolResults?: Part[];
   onTurnResult?: (result: ChatRecord) => void;
   onResumeReady?: () => void;
@@ -125,7 +139,7 @@ export async function runHostedHarnessTurn({
   const authority = session.managed.authority;
   const harness = createManagedHarnessHandle(session.managed);
   let turnResult: ChatRecord | undefined;
-  let toolTurn: HostedWorkspaceToolTurn | undefined;
+  let toolTurn: HostedToolTurn | undefined;
   const running = new ManagedHookActivationController(session.managed).runTurn(
     promptId,
     async (modelScope) =>
@@ -210,7 +224,7 @@ export async function runHostedHarnessTurn({
           workspaceContext,
         );
         if (resumeFromToolResults) {
-          if (!toolTurn)
+          if (!toolTurn?.resumeCommittedResults)
             throw new HostedToolRecoveryRequiredError(
               'Tool turn is unavailable.',
             );

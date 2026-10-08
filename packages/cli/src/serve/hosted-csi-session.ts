@@ -30,6 +30,7 @@ import {
   runHostedHarnessTurn,
   type HostedTurnSession,
 } from './hosted-harness-turn.js';
+import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -445,6 +446,14 @@ export function registerHostedCsiSessionRoutes(
             text,
             abort,
             historyMode: 'settled',
+            createToolTurn: (_harness, commit) =>
+              new HostedCsiToolTurn(
+                managed,
+                broker,
+                owner.admission!,
+                promptId,
+                commit,
+              ),
           });
         } catch (cause) {
           owner.blocked = true;

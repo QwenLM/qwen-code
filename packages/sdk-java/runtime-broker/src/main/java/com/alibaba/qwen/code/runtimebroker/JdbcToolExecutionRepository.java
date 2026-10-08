@@ -838,7 +838,7 @@ public final class JdbcToolExecutionRepository
         statement.setObject(27, record.getAuthorizedBindingVersion(), java.sql.Types.BIGINT);
     }
 
-    private static ToolExecutionRecord mapExecution(ResultSet result)
+    static ToolExecutionRecord mapExecution(ResultSet result)
             throws SQLException {
         String executionCallId = result.getString("execution_call_id");
         if (!JdbcRepositorySupport.valueKey(executionCallId).equals(

@@ -583,6 +583,61 @@ public final class RuntimeBrokerService implements AutoCloseable {
                 idempotencyKey, reference, null);
     }
 
+    public CompletionStage<ToolExecutionRecord> prepareCsiExecution(String harnessSessionId, String runtimeSessionId,
+            String idempotencyKey, Map<String, Object> reference, byte[] inputBytes, byte[] definitionBytes) {
+        requireOpen();
+        String key = BrokerValues.requireId(idempotencyKey, "idempotencyKey");
+        Map<String, Object> deferred = new LinkedHashMap<>(immutableMap(reference, "reference"));
+        if (deferred.containsKey("dispatchMode") || inputBytes == null || definitionBytes == null) {
+            throw invalid("runtime_reference_invalid", "Private CSI allocation fields are invalid");
+        }
+        deferred.put("dispatchMode", "deferred");
+        Map<String, Object> immutable = immutableMap(deferred, "reference");
+        byte[] input = inputBytes.clone();
+        byte[] definition = definitionBytes.clone();
+        return requireReadySession(harnessSessionId, runtimeSessionId).thenApply(context -> {
+            context.lock();
+            try {
+                JdbcRuntimeBindingRepository jdbc = privateCsiRepository(context);
+                ToolExecutionRecord candidate = ToolExecutionRecord.prepared(nextExecutionId(), key,
+                        context.binding().getBindingId(), context.binding().getGeneration(), harnessSessionId, runtimeSessionId,
+                        referenceString(immutable, "promptId"), referenceString(immutable, "callId"),
+                        referenceString(immutable, "argsDigest"), immutable);
+                return jdbc.prepareCsiExecution(sessionRepository, executionRepository, context.binding(), candidate, input, definition);
+            } finally {
+                context.unlock();
+            }
+        });
+    }
+
+    public CompletionStage<Map<String, Object>> readCsiBatch(String harnessSessionId, String runtimeSessionId,
+            String promptId, String batchId) {
+        requireOpen();
+        BrokerValues.requireId(promptId, "promptId");
+        BrokerValues.requireId(batchId, "batchId");
+        return requireReadySession(harnessSessionId, runtimeSessionId).thenApply(context -> {
+            context.lock();
+            try {
+                return privateCsiRepository(context).readCsiBatch(sessionRepository, executionRepository,
+                        context.binding(), promptId, batchId);
+            } finally {
+                context.unlock();
+            }
+        });
+    }
+
+    private JdbcRuntimeBindingRepository privateCsiRepository(SessionContext context) {
+        requireReadySessionRecord(context);
+        if (!JdbcCsiFilesRetirementGuard.isProfile(context.binding().getRequest().getScope())
+                || !context.session().getHarnessSessionId().equals(context.session().getRuntimeSessionId())
+                || !context.session().getRuntimeSessionId().equals(context.binding().getRequest().getIsolationKey())
+                || !context.session().getScope().equals(context.binding().getRequest().getScope())
+                || !(bindingRepository instanceof JdbcRuntimeBindingRepository jdbc)) {
+            throw invalid("csi_native_reservation_unavailable", "Original private CSI repositories are required");
+        }
+        return jdbc;
+    }
+
     /** A v3 reservation keeps the raw payload digest distinct from canonical input. */
     public CompletionStage<ToolExecutionRecord> prepareExecution(
             String harnessSessionId, String runtimeSessionId,
@@ -779,6 +834,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
             if (receipt != null && receipt.isTerminal()) {
                 requireOwnedExecution(harnessSessionId, runtimeSessionId,
                         receipt.getExecutionCallId());
+                RuntimeBindingRecord parent = bindingRepository.findById(receipt.getBindingId());
+                if (parent != null && JdbcCsiFilesRetirementGuard.isProfile(parent.getRequest().getScope())) {
+                    throw invalid("csi_native_resources_required", "Private CSI retry requires original resource bytes");
+                }
                 if (!BrokerValues.sameJsonMap(receipt.getReference(),
                         immutableMap(reference, "reference"))) {
                     throw conflict("runtime_idempotency_conflict",

@@ -29,6 +29,80 @@ import org.junit.jupiter.api.Test;
 
 class RuntimeBrokerHttpServerTest {
     @Test
+    void privateInlineResourceBoundsAreIndependentOfIdLength() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            Map<String, Object> body = new HashMap<>(Map.of("protocolVersion", 1, "requestId", "inline",
+                    "harnessSessionId", "harness", "runtimeSessionId", "runtime", "idempotencyKey", "inline-key",
+                    "turnId", "turn", "toolCallId", "call", "requestDigest", "digest",
+                    "reference", Map.of("sessionId", "runtime", "promptId", "turn", "callId", "call", "argsDigest", "digest")));
+            body.put("inputBytesBase64", "e30=");
+            body.put("toolDefinitionBytesBase64", "e30=");
+            for (String field : List.of("inputBytesBase64", "toolDefinitionBytesBase64")) {
+                for (int length : List.of(457, 65536)) {
+                    body.put(field, java.util.Base64.getEncoder().encodeToString(new byte[length]));
+                    HttpResponse<String> response = fixture.post("/executions:prepare", body);
+                    assertEquals(400, response.statusCode(), response.body());
+                    assertTrue(response.body().contains("csi_native_reservation_unavailable"), response.body());
+                }
+                for (Object invalid : List.of(7, "", "e30", "!!!!",
+                        java.util.Base64.getEncoder().encodeToString(new byte[65537]))) {
+                    body.put(field, invalid);
+                    HttpResponse<String> response = fixture.post("/executions:prepare", body);
+                    assertEquals(400, response.statusCode(), response.body());
+                    assertTrue(response.body().contains("runtime_broker_invalid_request"), response.body());
+                }
+                body.put(field, java.util.Base64.getEncoder().encodeToString(new byte[65538]));
+                assertEquals(400, fixture.post("/executions:prepare", body).statusCode());
+                body.put(field, java.util.Base64.getEncoder().encodeToString(new byte[65539]));
+                assertEquals(413, fixture.post("/executions:prepare", body).statusCode());
+                body.put(field, "e30=");
+            }
+            assertFalse(fixture.executions.hasActiveByRuntimeSession("runtime"));
+            assertEquals(0, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
+    void strictPrepareAndPrivateBatchReadRefuseAmbiguousJsonBeforeAdmission() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            for (String route : List.of("/executions:prepare", "/executions:read-batch")) {
+                for (byte[] bytes : List.of(
+                        "{\"protocolVersion\":1,\"protocolVersion\":1}".getBytes(StandardCharsets.UTF_8),
+                        "{} {}".getBytes(StandardCharsets.UTF_8),
+                        new byte[] {'{', '"', 'x', '"', ':', '"', (byte) 0xff, '"', '}'})) {
+                    HttpRequest request = HttpRequest.newBuilder(fixture.uri(route))
+                            .header("Authorization", "Bearer secret").header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofByteArray(bytes)).build();
+                    HttpResponse<String> response = fixture.client.send(request, HttpResponse.BodyHandlers.ofString());
+                    assertEquals(400, response.statusCode(), response.body());
+                    assertTrue(response.body().contains("runtime_broker_invalid_request"), response.body());
+                }
+            }
+            assertEquals(0, fixture.transport.executions.get());
+            assertFalse(fixture.executions.hasActiveByRuntimeSession("runtime"));
+        }
+    }
+
+    @Test
+    void privateBatchReadRejectsCallerMembershipAndOrdinaryRuntimeOwnership() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            Map<String, Object> body = new HashMap<>(Map.of("protocolVersion", 1, "requestId", "read",
+                    "harnessSessionId", "harness", "runtimeSessionId", "runtime", "promptId", "prompt", "batchId", "batch"));
+            for (String field : List.of("members", "executionCallIds", "inputRef", "file_path")) {
+                body.put(field, List.of("caller-selected"));
+                assertEquals(400, fixture.post("/executions:read-batch", body).statusCode());
+                body.remove(field);
+            }
+            HttpResponse<String> ordinary = fixture.post("/executions:read-batch", body);
+            assertEquals(400, ordinary.statusCode(), ordinary.body());
+            assertTrue(ordinary.body().contains("csi_native_reservation_unavailable"), ordinary.body());
+            assertEquals(0, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
     void unsupportedOperationsNeverDispatchOrClaimResolution() throws Exception {
         try (Fixture fixture = new Fixture()) {
             HttpResponse<String> acquired = fixture.post("/tool-sessions:acquire", Map.of(

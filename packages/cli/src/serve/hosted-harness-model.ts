@@ -14,7 +14,7 @@ import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
-import type { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
+import type { HostedToolTurn } from './hosted-harness-turn.js';
 import {
   HostedHookRecoveryRequiredError,
   type HostedHookSession,
@@ -71,11 +71,14 @@ export async function runHostedHarnessTextTurn(input: {
   hooks?: HostedHookSession;
   modelScope?: ManagedHookModelScope;
   toolTurn?: Pick<
-    HostedWorkspaceToolTurn,
-    'execute' | 'consumeResults' | 'declarations' | 'setPromptHookRunner'
+    HostedToolTurn,
+    'execute' | 'consumeResults' | 'declarations'
   > &
     Partial<
-      Pick<HostedWorkspaceToolTurn, 'resumeHookResults' | 'hookStopReason'>
+      Pick<
+        HostedToolTurn,
+        'setPromptHookRunner' | 'resumeHookResults' | 'hookStopReason'
+      >
     >;
   workspaceContext?: { read(): string | undefined };
   textDeltas?: HostedHarnessTextDeltas;

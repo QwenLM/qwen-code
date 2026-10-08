@@ -30,7 +30,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 
-/** Original private CSI activation and bounded text conversation proof. */
+/** Original private CSI activation and bounded conversation proof. */
 public final class CsiNativeActivationProof {
     private static final long MAX_SAFE = 9_007_199_254_740_990L;
     private static final Set<String> ENVELOPE = Set.of("uuid", "parentUuid", "sessionId", "timestamp",
@@ -70,10 +70,16 @@ public final class CsiNativeActivationProof {
     public record Stream(String messageId, long firstSequence, long nextOrdinal, String text) {
     }
 
+    public record FunctionCall(String id, String name, JsonNode args, int partIndex, int ordinal) {
+    }
+
+    public record PendingBatch(String messageId, JsonNode contentRef, List<FunctionCall> calls) {
+    }
+
     public record Prefix(Input input, Checkpoint checkpoint, String lastMessageId, Attempt attempt,
-            boolean assistantCommitted, Stream stream, Set<String> usedIds) {
+            boolean assistantCommitted, Stream stream, Set<String> usedIds, PendingBatch pendingBatch) {
         public static Prefix empty() {
-            return new Prefix(null, null, null, null, false, null, Set.of());
+            return new Prefix(null, null, null, null, false, null, Set.of(), null);
         }
 
         public String checkpointResourceId() {
@@ -188,16 +194,17 @@ public final class CsiNativeActivationProof {
                 && number(metadata.get("writerGeneration")) == 1 && number(metadata.get("activationEpoch")) == 1);
         return switch (text(metadata, "operation")) {
             case "submitInput" -> {
-                require(previous.input() == null);
+                require(previous.input() == null && previous.pendingBatch() == null);
                 Input input = input(transaction, metadata, original, activation, previousSequence, resources);
                 yield new Prefix(input, previous.checkpoint(), previous.lastMessageId(), null, false,
-                        null, useId(previous, input.inputId()));
+                        null, useId(previous, input.inputId()), null);
             }
             case "commitCheckpoint" -> {
                 require(previous.checkpoint() == null);
                 yield new Prefix(previous.input(), validatedInitialCheckpoint(transaction, metadata, original,
                         writerId, genesis, activation, previousSequence, resources), previous.lastMessageId(),
-                        previous.attempt(), previous.assistantCommitted(), previous.stream(), previous.usedIds());
+                        previous.attempt(), previous.assistantCommitted(), previous.stream(), previous.usedIds(),
+                        previous.pendingBatch());
             }
             case "commitMessage" -> message(transaction, metadata, original, genesis, activation,
                     previousSequence, previous, resources);
@@ -227,6 +234,7 @@ public final class CsiNativeActivationProof {
         conversation(previous);
         require(previous.input().userMessageId() != null && previous.attempt() != null
                 && "started".equals(previous.attempt().stage()) && !previous.assistantCommitted()
+                && previous.pendingBatch() == null
                 && transaction.events().size() == 1 && metadata.path("latestCheckpointResourceId").isNull());
         return harnessEvent(transaction.events().getFirst(), kind, original, activation, previousSequence + 1);
     }
@@ -253,7 +261,7 @@ public final class CsiNativeActivationProof {
         Stream stream = new Stream(messageId, prior == null ? previousSequence + 1 : prior.firstSequence(),
                 ordinal + 1, (prior == null ? "" : prior.text()) + fragment);
         return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(), previous.attempt(),
-                false, stream, prior == null ? useId(previous, messageId) : previous.usedIds());
+                false, stream, prior == null ? useId(previous, messageId) : previous.usedIds(), null);
     }
 
     private static Prefix retract(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
@@ -271,10 +279,10 @@ public final class CsiNativeActivationProof {
                 && sha256(utf8(stream.messageId() + ":" + stream.firstSequence()))
                         .equals(text(metadata, "contentDigest")));
         return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(), previous.attempt(),
-                false, null, previous.usedIds());
+                false, null, previous.usedIds(), null);
     }
 
-    private static byte[] utf8(String text) {
+    static byte[] utf8(String text) {
         try {
             ByteBuffer encoded = StandardCharsets.UTF_8.newEncoder().onMalformedInput(CodingErrorAction.REPORT)
                     .onUnmappableCharacter(CodingErrorAction.REPORT).encode(CharBuffer.wrap(text));
@@ -304,7 +312,8 @@ public final class CsiNativeActivationProof {
             Genesis genesis, Activation activation, long previousSequence, Prefix previous,
             Function<JsonNode, byte[]> resources) {
         conversation(previous);
-        require(transaction.events().size() == 1 && metadata.path("latestCheckpointResourceId").isNull()
+        require(previous.pendingBatch() == null && transaction.events().size() == 1
+                && metadata.path("latestCheckpointResourceId").isNull()
                 && genesis.definitionDigest().equals(text(metadata, "contentDigest")));
         JsonNode event = transaction.events().getFirst();
         JsonNode payload = harnessEvent(event, "message.committed", original, activation, previousSequence + 1);
@@ -332,6 +341,7 @@ public final class CsiNativeActivationProof {
         closed(body, Set.of("role", "parts"));
         require((user ? "user" : "model").equals(text(body, "role"))
                 && body.path("parts").isArray() && !body.path("parts").isEmpty());
+        List<FunctionCall> calls = new ArrayList<>();
         if (user) {
             require(previous.input().userMessageId() == null && previous.attempt() == null
                     && body.path("parts").size() == 1);
@@ -342,14 +352,28 @@ public final class CsiNativeActivationProof {
             require(previous.attempt() != null && "output_committed".equals(previous.attempt().stage())
                     && !previous.assistantCommitted()
                     && text(previous.attempt().route(), "model").equals(text(record, "model")));
-            for (JsonNode part : body.path("parts")) {
-                closed(part, part.has("thought") ? Set.of("text", "thought") : Set.of("text"));
-                require(part.path("text").isTextual() && (!part.has("thought") || part.path("thought").isBoolean()));
+            Set<String> functions = new HashSet<>();
+            for (int index = 0; index < body.path("parts").size(); index++) {
+                JsonNode part = body.path("parts").get(index);
+                if (part.has("functionCall")) {
+                    closed(part, Set.of("functionCall"));
+                    JsonNode call = part.path("functionCall");
+                    closed(call, Set.of("id", "name", "args"));
+                    String functionId = id(call, "id");
+                    String name = text(call, "name");
+                    require(functions.add(functionId) && Set.of("read_file", "write_file", "edit").contains(name)
+                            && call.path("args").isObject() && calls.size() < 256);
+                    calls.add(new FunctionCall(functionId, name, call.path("args").deepCopy(), index, calls.size()));
+                } else {
+                    closed(part, part.has("thought") ? Set.of("text", "thought") : Set.of("text"));
+                    require(part.path("text").isTextual()
+                            && (!part.has("thought") || part.path("thought").isBoolean()));
+                }
             }
             if (previous.stream() != null) {
                 StringBuilder visible = new StringBuilder();
                 for (JsonNode part : body.path("parts")) {
-                    if (!part.path("thought").asBoolean()) {
+                    if (part.has("text") && !part.path("thought").asBoolean()) {
                         visible.append(part.path("text").textValue());
                     }
                 }
@@ -359,8 +383,9 @@ public final class CsiNativeActivationProof {
         }
         Input input = user ? new Input(previous.input().inputId(), previous.input().text(), messageId, true)
                 : previous.input();
-        return new Prefix(input, previous.checkpoint(), messageId, previous.attempt(), !user,
-                null, !user && previous.stream() != null ? previous.usedIds() : useId(previous, messageId));
+        return new Prefix(input, previous.checkpoint(), messageId, previous.attempt(), !user && calls.isEmpty(),
+                null, !user && previous.stream() != null ? previous.usedIds() : useId(previous, messageId),
+                calls.isEmpty() ? null : new PendingBatch(messageId, payload.path("contentRef").deepCopy(), List.copyOf(calls)));
     }
 
     private static JsonNode messageBody(JsonNode ref, Function<JsonNode, byte[]> resources) {
@@ -410,7 +435,7 @@ public final class CsiNativeActivationProof {
     private static Prefix attempt(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
             Activation activation, long previousSequence, Prefix previous, Function<JsonNode, byte[]> resources) {
         conversation(previous);
-        require(previous.input().userMessageId() != null && !previous.assistantCommitted()
+        require(previous.input().userMessageId() != null && !previous.assistantCommitted() && previous.pendingBatch() == null
                 && transaction.events().size() == 1 && metadata.path("latestCheckpointResourceId").isNull());
         JsonNode event = transaction.events().getFirst();
         JsonNode payload = harnessEvent(event, "model.attempt", original, activation, previousSequence + 1);
@@ -452,7 +477,7 @@ public final class CsiNativeActivationProof {
         }
         return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(),
                 new Attempt(attemptId, routeRef.deepCopy(), checkpointRef.deepCopy(), route.deepCopy(), stage), false,
-                previous.stream(), ids);
+                previous.stream(), ids, null);
     }
 
     private static void usage(JsonNode usage, JsonNode route, String stage) {
@@ -496,7 +521,7 @@ public final class CsiNativeActivationProof {
     private static Prefix settle(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
             Activation activation, long previousSequence, Prefix previous, Function<JsonNode, byte[]> resources) {
         conversation(previous);
-        require(previous.attempt() != null && transaction.events().size() == 2);
+        require(previous.pendingBatch() == null && previous.attempt() != null && transaction.events().size() == 2);
         JsonNode event = transaction.events().getFirst();
         JsonNode payload = harnessEvent(event, "turn.settled", original, activation, previousSequence + 1);
         closed(payload, Set.of("turnId", "outcome", "stopReason", "resultRef", "usageRef", "pendingOwnersRef"));
@@ -546,7 +571,7 @@ public final class CsiNativeActivationProof {
                 && number(state.path("resume").get("initialTurn")) == 0
                 && canonical(expected).equals(canonical(state)));
         return new Prefix(null, new Checkpoint(stateRef.deepCopy(), state.deepCopy()), previous.lastMessageId(),
-                null, false, null, useId(previous, id(result, "uuid")));
+                null, false, null, useId(previous, id(result, "uuid")), null);
     }
 
     private static Input input(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
@@ -765,7 +790,7 @@ public final class CsiNativeActivationProof {
         return object(readJson(bytes));
     }
 
-    private static JsonNode readJson(byte[] bytes) {
+    static JsonNode readJson(byte[] bytes) {
         require(bytes != null && bytes.length > 0 && bytes.length <= 8 * 1024 * 1024);
         try {
             String text = StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
@@ -776,7 +801,7 @@ public final class CsiNativeActivationProof {
         }
     }
 
-    private static byte[] reference(JsonNode ref, String kind, Function<JsonNode, byte[]> resources) {
+    static byte[] reference(JsonNode ref, String kind, Function<JsonNode, byte[]> resources) {
         closed(ref, Set.of("resourceId", "kind", "schemaVersion", "byteLength", "digest"));
         id(ref, "resourceId");
         require(kind.equals(text(ref, "kind")) && number(ref.get("schemaVersion")) == 1);
@@ -813,7 +838,7 @@ public final class CsiNativeActivationProof {
         return node;
     }
 
-    private static void uuid(String value) {
+    static void uuid(String value) {
         try {
             require(UUID.fromString(value).toString().equals(value));
         } catch (IllegalArgumentException error) {
@@ -821,26 +846,26 @@ public final class CsiNativeActivationProof {
         }
     }
 
-    private static void closed(JsonNode node, Set<String> fields) {
+    static void closed(JsonNode node, Set<String> fields) {
         object(node);
         require(node.size() == fields.size());
         node.fieldNames().forEachRemaining(field -> require(fields.contains(field)));
     }
 
-    private static String text(JsonNode node, String field) {
+    static String text(JsonNode node, String field) {
         JsonNode value = node.get(field);
         require(value != null && value.isTextual() && !value.textValue().isEmpty()
                 && value.textValue().length() <= 4096);
         return value.textValue();
     }
 
-    private static long number(JsonNode value) {
+    static long number(JsonNode value) {
         require(value != null && value.isIntegralNumber() && value.canConvertToLong()
                 && value.longValue() >= 0 && value.longValue() <= MAX_SAFE);
         return value.longValue();
     }
 
-    private static String id(JsonNode node, String field) {
+    static String id(JsonNode node, String field) {
         String value = text(node, field);
         byte[] utf8 = value.getBytes(StandardCharsets.UTF_8);
         require(utf8.length <= 512 && new String(utf8, StandardCharsets.UTF_8).equals(value)
@@ -855,7 +880,7 @@ public final class CsiNativeActivationProof {
         return value;
     }
 
-    private static String canonical(JsonNode node) {
+    static String canonical(JsonNode node) {
         require(node != null);
         if (node.isObject()) {
             List<String> fields = new ArrayList<>();

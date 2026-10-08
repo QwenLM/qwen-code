@@ -267,6 +267,24 @@ export const HOSTED_WORKSPACE_FILE_TOOLS: FunctionDeclaration[] = [
   },
 ];
 
+export function hostedWorkspaceDeclarations(
+  tools: readonly FunctionDeclaration[],
+  mcp: boolean,
+): FunctionDeclaration[] {
+  return tools.map((tool) =>
+    ['write_file', 'edit'].includes(tool.name ?? '')
+      ? {
+          ...tool,
+          description:
+            tool.description +
+            (mcp
+              ? ' This MCP profile provides no file backups or undo for Write/Edit.'
+              : ' Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.'),
+        }
+      : tool,
+  );
+}
+
 export const HOSTED_WORKSPACE_SHELL_TOOLS: FunctionDeclaration[] = [
   ...HOSTED_WORKSPACE_FILE_TOOLS,
   {
@@ -463,24 +481,15 @@ export class HostedWorkspaceToolTurn {
     if (this.mcp) await waitForTurn(this.mcp.refresh(signal), signal);
     const search = isHostedWorkspaceSearchProfile(this.profile);
     this.advertised = [
-      ...(this.publication || this.shell
-        ? search
-          ? HOSTED_WORKSPACE_SHELL_TOOLS_V2
-          : HOSTED_WORKSPACE_SHELL_TOOLS
-        : search
-          ? HOSTED_WORKSPACE_FILE_TOOLS_V2
-          : HOSTED_WORKSPACE_FILE_TOOLS
-      ).map((tool) =>
-        ['write_file', 'edit'].includes(tool.name ?? '')
-          ? {
-              ...tool,
-              description:
-                tool.description +
-                (this.mcp
-                  ? ' This MCP profile provides no file backups or undo for Write/Edit.'
-                  : ' Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.'),
-            }
-          : tool,
+      ...hostedWorkspaceDeclarations(
+        this.publication || this.shell
+          ? search
+            ? HOSTED_WORKSPACE_SHELL_TOOLS_V2
+            : HOSTED_WORKSPACE_SHELL_TOOLS
+          : search
+            ? HOSTED_WORKSPACE_FILE_TOOLS_V2
+            : HOSTED_WORKSPACE_FILE_TOOLS,
+        Boolean(this.mcp),
       ),
       ...(this.mcp?.tools() ?? []),
     ];

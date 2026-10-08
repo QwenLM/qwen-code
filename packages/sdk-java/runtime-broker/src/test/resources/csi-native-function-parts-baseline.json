@@ -1,0 +1,32 @@
+[
+  { "text": "original owned thought 😀", "thought": true },
+  { "text": "original owned visible preface" },
+  {
+    "functionCall": {
+      "id": "owned-provider-nonuuid-0",
+      "name": "read_file",
+      "args": { "file_path": "owned-marker.txt" }
+    }
+  },
+  {
+    "functionCall": {
+      "id": "owned-provider-nonuuid-1",
+      "name": "write_file",
+      "args": {
+        "file_path": "owned-output.txt",
+        "content": "owned planned write"
+      }
+    }
+  },
+  {
+    "functionCall": {
+      "id": "owned-provider-nonuuid-2",
+      "name": "edit",
+      "args": {
+        "file_path": "owned-marker.txt",
+        "old_string": "owned marker",
+        "new_string": "owned planned edit"
+      }
+    }
+  }
+]

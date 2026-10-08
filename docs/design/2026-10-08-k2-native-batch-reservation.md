@@ -3,9 +3,13 @@
 [English](2026-10-08-k2-native-batch-reservation.md) |
 [简体中文](2026-10-08-k2-native-batch-reservation.zh-CN.md)
 
-Status: batch reservation remains proposed, not implemented or verified. Source
-baseline: `b23b4c22a8b1fbc2e790f8c424ae9466186a6b66`. The bounded input/wake
-prerequisite described below is implemented and independently verified locally.
+Status: private original reservations, resources and complete current batch reads
+are implemented with bounded independent local evidence from 2026-10-08. The
+remaining native chain and target qualification are pending. Pre-change source
+baseline: `d50fae9da9ffa2ecbf81e4a61b98f6ec56da0843`. Original input/wake,
+text/thought conversation, streamed model records and the private authenticated
+Hosted attachment/Java text entry are implemented with bounded local evidence.
+The earlier input/wake increment remains historical evidence for its own scope.
 This is the next dependency of
 the [native file chain](2026-10-07-k2-native-file-execution.md), within the
 full K2 objective and Draft PR #13526. It does not replace native history,
@@ -14,10 +18,13 @@ success. Proposal #12380 and tracker #13395 remain open.
 
 ## 1. Problem and current state
 
-The current private proof admits genesis, activation install/renew, original
-input/wake and the once-only initial checkpoint. Generic numeric transaction hashes now verify,
-but a committed assistant, file-history intent and tool outcome still have no
-private semantic admission. The worker constructs no file history or executor.
+At that baseline the private proof admits genesis, activation install/renew, original
+input/wake, the once-only initial checkpoint, complete bounded text/thought
+messages, original model attempts/streamed records and atomic turn settlement.
+The private Hosted owner invokes the shared runner with the fixed original
+Session and settled history, but supplies no tool-turn callback. Original
+function-call Parts, file-history intent and tool outcomes remain closed.
+The private worker still has no admitted native file executor.
 
 Hosted commits the assistant before tool reservation, but prepares raw file
 history before reservations. It publishes each input into an in-memory staging
@@ -35,10 +42,11 @@ omitted. Filtering to PREPARED first can conceal accepted conflicting/terminal
 rows. Before the preceding bounded fix, private retries compared the newly
 minted server candidate ID with the original ID and could refuse exact replay.
 
-The preceding bounded bugfix changed that existing retry comparison to the
-immutable request identity, after all current live admission checks. It returns
-the original receipt in its current state without another allocation or grant.
-This does not implement the proposed batch/reference/resource contract below.
+The preceding bounded bugfix compared immutable request identity after current
+live admission checks. This implementation closes that resource-free generic
+private admission, including historical terminal retries. Exact replay now uses
+the separate byte-qualified private entry; old resource-free rows are test-only
+historical fixtures for the existing continuation fences.
 
 Preserve one native journal and the original resource and execution tables.
 Add the missing durable allocation identity and original bytes before intent.
@@ -54,6 +62,10 @@ The private request adds only `inputBytesBase64` and
 inside the reference; files do not use `runtimeProtocol: 3`, `inputDigest` or
 publication credentials. Select the branch from the persisted original
 `csi-files-retirement/1` request, not an optional caller profile flag.
+
+Base64 fields are resource bodies, not structural IDs. Decode canonical,
+nonempty Base64 with its own 87384-character encoded and 65536-byte decoded
+bounds; the 512-character ID validator must not reject real declarations.
 
 | Reference field     | Original producer and meaning                                                |
 | ------------------- | ---------------------------------------------------------------------------- |
@@ -185,6 +197,18 @@ identities. If no allocation exists, the qualified committed assistant may
 begin allocation once. If any exists, all known original identities must be
 recovered before filling any proven never-accepted member.
 
+Use the existing authenticated Broker origin with a private
+`POST /executions:read-batch` entry. Its exact request is protocolVersion,
+requestId, harnessSessionId, runtimeSessionId, promptId and batchId; it supplies
+no member IDs or paths. Return protocolVersion, those owner/Session/prompt/batch
+identities, the original runtime binding/generation, and all members. Each
+member returns its original executionCallId, current state, complete stored
+reference, inputBytesBase64 and toolDefinitionBytesBase64. The same-Connection
+original-allocation reader qualifies those bytes before returning them. This
+avoids widening the public Session Store PUBLISHED whitelist or adding a
+generic resource publish/read authority. The actual private turn consumes this
+read on ambiguous reservation before making any decision about absence.
+
 A deterministic no-row reservation refusal retains its ordinal gap. Timeout,
 lost response or unknown status is not a refusal: exact retry/current full-batch
 read must establish the original row, otherwise remain pending and block
@@ -211,37 +235,63 @@ two batch IDs or ordinal roles.
 
 ## 5. Real consumers and implementation order
 
-No TypeScript private Harness production caller exists today. Add one internal
-checked-in runner that consumes a reviewed connection descriptor and the
-original private CREATE/Session. The descriptor supplies connection details,
-not profile or grant authority. Reuse the original warmed binding,
-`createHttpManagedSessionStores`, `openManagedSession`,
-`createManagedHarnessHandle` and the sink-backed message commit. It actually
-constructs the required private turn branch and passes it to
-`runHostedHarnessTextTurn`; do not add an unused optional private flag. Keep
-the public Hosted profile union/create/load, Spring CREATE, ServeOptions and
-environment selectors unchanged.
+The private production caller now exists in `hosted-csi-session.ts`, entered
+through the authenticated private attachment and Java text command described in
+[private Hosted attachment](2026-10-08-k2-private-hosted-attachment.md).
+It uses the deployment-pinned Store origin, original warmed Broker binding,
+`LocalManagedSessionAuthority.open`, original input admission and sink-backed
+messages. Extend that actual caller with a finite private tool turn passed to
+`runHostedHarnessTurn`; do not introduce another runner, optional profile flag,
+public selector or ordinary create/load path.
 
-Use the existing `ManagedHookActivationController.runTurn` Session model-slot
-guard and its real modelScope. Its turn operation is null and does not create a
-Hook worker or replacement activation. This preserves actual main model-attempt
-events and ownership; separate Harness handles alone do not serialize a Session.
-The private native grammar must qualify those real events before this runner
-can progress. No optional text-delta or Hook producer is implicitly required.
+Keep the original Session model-slot guard, null Hook operation and actual
+modelScope/streamed records. A new private tool implementation must satisfy the
+public methods consumed by the shared model and turn runner; ordinary Hosted
+continues using its existing implementation. The current concrete callback type
+must not force the private implementation to construct ordinary prompt-scoped
+Runtime ownership, raw preparation or turn-finish release.
 
-Explicitly use original `submitInput` to commit input.accepted/wake.requested
-together from original prompt blocks and admission bytes. A sink-written user
-message and an empty initial checkpoint do not admit input. The existing model
-caller returns the final assistant instead of committing it; the runner must
-commit that returned message and the original turn_result through the sink.
-The model caller preserves actual full Parts in both branches through the
-[native Parts prerequisite](2026-10-08-hosted-native-parts.md), but its tool path
-still warms an ordinary Runtime Session keyed by promptId. The private caller
-must use the fixed original Runtime Session; a private string or an empty tool
-callback does not connect these consumers.
-Preserve the exact message parent chain. Model function partIndex
-indexes full parts, ordinal indexes function requests, and tool definitions
-contain real name/description/parametersJsonSchema rather than `{name}` alone.
+The real model caller preserves complete Parts and replaces each original
+function Part ID with the corresponding collected request ID before the tool
+callback. Commit that original assistant once through the existing callback;
+its returned UUID identifies this batch. `partIndex` indexes complete Parts,
+while `ordinal` indexes function requests and retains definitive refusal gaps.
+The base file declaration array already contains exactly Read/Write/Edit.
+Persist the actual final advertised declaration, including full
+`name`, `description`, and `parametersJsonSchema`; the ordinary implementation
+appends backup semantics to mutation descriptions. A name-only object or a
+reconstructed narrower declaration is not the original advertised bytes.
+Collect actual producer bytes in the independent baseline before selecting the
+closed function-Part grammar.
+
+The private producer advertises the same finite base declarations and the
+existing non-MCP backup description for Write/Edit. Share that finite
+declaration transformation with its ordinary caller; do not instantiate the
+ordinary turn to obtain it. Java pins the complete observed declaration
+contract, rather than accepting any schema with one of the three names.
+
+The independent d50fae9 producer baseline captured five original Parts (thought,
+visible text and three function calls), three non-UUID request IDs, and the
+complete 1850-byte declaration array. Those supplied FunctionDeclarations are
+distinct from the OpenAI SDK wire: the existing SDK removes
+`additionalProperties: false` from Read/Edit parameters in that capture.
+Retain both observations. The durable definition pins the complete supplied
+declaration, not a claim that its bytes equal the transformed SDK request.
+
+The original function ID need not be a UUID. It is the collected request ID
+remapped into the preserved full Parts, distinct from the Runtime call UUID and
+optional provider ID. Provider decorations are neither discarded nor admitted
+by inference. Validate the observed private producer grammar and keep the full
+message resource, parent, admitted input and original model attempt as proof.
+
+The shared fold must distinguish a final text assistant from an assistant with
+pending function requests. Retain the latter's original UUID, ordered functions,
+part positions and local ordinals in the derived conversation prefix. Pending
+work prevents ordinary turn settlement, replacement input, a new model attempt
+or another assistant from clearing that obligation. Fresh acceptance and full
+historical replay enforce the same rule; a TypeScript suspension alone is not
+the SQL fence. Later qualified result consumption, rather than allocation,
+permits the original conversation to continue.
 
 That caller verifies the persisted reserved profile and exact genesis
 definition `{engine,sessionId,toolProfile}` and root `{cwd}`. It uses the
@@ -271,7 +321,7 @@ Concrete source consumers include `hosted-workspace-tool-turn.ts`,
 `JdbcCsiActivationAdmission`, `ManagedSessionStore`,
 `WorkspaceRecoveryReader` and `WorkspaceCsiCheckpointSnapshotStore`.
 
-The implemented first bounded conversation increment accepts only the actual
+The historical first bounded conversation increment accepted only the actual
 original `submitInput` transaction. Its two events are `input.accepted` followed
 by `wake.requested`, with the same occurrence time and no top-level subject.
 Their closed payloads bind the same original prompt/input UUID, `hosted-harness`
@@ -297,11 +347,10 @@ from the full original journal and stays read-only, including during DRAINING;
 it does not impose current READY or current expiry on historical events. New
 input during DRAINING still refuses.
 
-This increment does not admit user/assistant messages, model attempts, turn
-settlement or later checkpoint phases. Those actual producers and their
-transitions still need independent qualification and the chosen real private
-runner. Until original settlement is qualified, the unsettled-input fence cannot
-be cleared or replaced. Input/wake and an empty checkpoint alone identify no
+That historical increment did not admit messages, model attempts or settlement.
+The later private text/streamed turn now qualifies those actual producers,
+including original settlement. This implementation adds original function Parts
+and a pending-batch fence; later tool checkpoint phases remain closed. Input/wake and an empty checkpoint alone still identify no
 assistant batch, allocate no file call and grant no worker I/O.
 
 First connect original conversation admission and atomic durable reservations,
@@ -310,6 +359,39 @@ intent/prepared and the trusted worker readback protocol. Finally connect the
 same composer/history to actual execution, complete outcomes/results/messages,
 checkpoint and Hosted `consumed=true`, preserving original retained evidence.
 Do not claim the first step completes A2 or use its receipt as the later grant.
+
+### Current integrated increment
+
+The implementation connects original function-call assistant qualification in
+the shared fresh/history fold, the actual private Hosted callback, atomic
+allocation/resources and a complete current batch read. It fixes every accepted
+member's resource IDs and exact byte arrays before any reservation, retaining
+them across a lost reply. It clones the finite declarations and pins their
+complete supplied bytes before returning them to the SDK. The persisted SQL
+reference also undergoes strict UTF-8, duplicate-key and trailing-JSON checks.
+Both generic repository admission and HTTP/service entry enforce the persisted
+private contract; the old resource-free private shape is closed. The independent
+local observations and their limits are recorded in section 6.
+
+Return the derived original conversation/batch proof on the same JDBC Connection
+before the fixed Runtime Session lock. Inventory/lock resource rows first, then
+lock the Runtime Session and every potentially relevant execution row; compare
+complete membership including terminal and conflicting identities. Keep the
+original tables and journal as the authority.
+
+A successful allocation alone does not settle the native turn. Until intent,
+prepared, tool intent/checkpoint and worker grant consume this exact proof, the
+new stored reference remains unclaimable and private preparation/dispatch/file
+I/O remains closed. Use the shared recovery-required exception path to preserve
+the original unresolved input/assistant and accepted resources; a generic error
+must not turn that allocation into ordinary settlement. The full goal still
+requires original intent promotion, actual file execution/results/consumption
+and physical retirement/handoff; this increment is their dependency.
+
+The complete-batch read recovers allocation bytes and identities for the
+persisted original owner. It does not grant a new process boot or make the
+current create-only private attachment a cold-owner adoption path. Qualifying
+that owner recovery remains part of the subsequent continuation implementation.
 
 ## 6. Validation and acceptance
 
@@ -328,18 +410,20 @@ semantic mutations and damaged original revision/bytes. Historical renewal
 replay and a genuinely fresh renewal were checked separately. This used the
 actual native HTTP adapter/collector and production Spring transaction/JDBC
 methods on owned H2 fixtures, with synthetic Pod metadata and zero worker I/O.
-It qualifies this bounded prerequisite only; the batch matrix below is still
-required and unverified.
+It qualifies this bounded prerequisite only. The matrix below remains the
+acceptance requirement; the current allocation subset has the bounded evidence
+recorded below, while intent/grant, concurrency and target qualification remain
+open.
 
-| Group           | Required observation                                                                                                                                                                     |
-| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Identity/replay | Same request returns the original execution ID and resources; changed tuple/bytes conflicts; no second row or replacement resource                                                       |
-| Atomicity       | Failure at either resource or row insertion rolls back the entire new allocation; accepted rows survive lost replies with exact original bytes                                           |
-| Membership      | Accepted Read omission, extra/duplicate/foreign/terminal row, changed function/part and later insertion refuse; deterministic refusal gaps and two batches in one prompt remain distinct |
-| Resources       | In-memory staged ref alone is insufficient; unassociated PUBLISHED input is refused; intent promotion/association is atomic and original hashes are rechecked                            |
-| Recovery        | Crash before intent recovers original complete allocation/ref/bytes; ambiguous membership blocks without reminting IDs; schema1 cleanup cannot discard schema2 preparation               |
-| Concurrency     | Real parent/head competitions, current RC and warmed RR reads observe complete membership; no SQL lock spans worker I/O                                                                  |
-| Compatibility   | Ordinary Tool-v2/v3/provider references and result publication stay compatible; public/legacy private gates remain closed                                                                |
+| Group           | Required observation                                                                                                                                                                                                    |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Identity/replay | Same request returns the original execution ID and resources; changed tuple/bytes conflicts; no second row or replacement resource                                                                                      |
+| Atomicity       | Failure at either resource or row insertion rolls back the entire new allocation; accepted rows survive lost replies with exact original bytes                                                                          |
+| Membership      | Current reads include every state and reject conflicting identities; later intent/grant validation must reject omitted Read, extra/duplicate/foreign or invalid-state members, changed function/part and late insertion |
+| Resources       | In-memory staged ref alone is insufficient; public unassociated PUBLISHED input stays refused; private allocation reading qualifies exact stored refs/bytes; later intent promotion/association is atomic               |
+| Recovery        | Crash before intent recovers original complete allocation/ref/bytes; ambiguous membership blocks without reminting IDs; schema1 cleanup cannot discard schema2 preparation                                              |
+| Concurrency     | Real parent/head competitions, current RC and warmed RR reads observe complete membership; no SQL lock spans worker I/O                                                                                                 |
+| Compatibility   | Ordinary Tool-v2/v3/provider references and result publication stay compatible; public/legacy private gates remain closed                                                                                               |
 
 Run relevant focused tests, build, typecheck, applicable bundle and Java static
 checks. Independent test-engineer verification, two complete self-audits and
@@ -347,15 +431,78 @@ the repository's actual review workflow follow. H2, local fixtures and a green
 allocation test do not establish MySQL races, Linux CSI, real worker grant,
 complete K2 or maintainer approval.
 
+### Current bounded post-change evidence
+
+The independent local run completed eight distinct groups: ordinary bundled
+Read; a complete three-member private allocation/read; response loss after the
+first and second accepted members; rollback at the second resource insert and
+execution insert; retirement before the first reservation; and a 101-member
+batch crossing the 100-row page. Its 250 private labelled predicates are checks
+within those groups, not 250 separate scenarios. The actual private attachment,
+Java text producer, Node owner/model SDK/shared runner, native HTTP transactions
+and Broker HTTP/JDBC paths produced the original assistant and allocations.
+Owned deterministic model responses, a compiled provisioning fixture, synthetic
+Kubernetes metadata, Spring MockMvc and H2 remain explicit test seams. This did
+not execute Linux CSI, MySQL or a cloud worker.
+
+Original complete Parts, non-UUID function IDs, assistant/function/part mapping,
+457/663/726-byte supplied definitions and raw input bytes survived reservation
+and full reads. Only original resource/execution tables changed for successful
+allocation: resources stayed PUBLISHED/MYSQL_INLINE, with no revision
+association, file grant or worker file call. Exact replay retained the original
+ID and all 53 tables. Lost replies retained one or two original allocations;
+both injected insert faults rolled back the full allocation. Complete reads
+rejected the tested corrupt references/bytes and related foreign identities.
+The seven execution-state read cases used explicitly restored SQL state fixtures,
+not production state transitions.
+
+The retirement group first demonstrated the real unclaimed-operation refusal,
+then claimed the owned original operation and successfully sealed the original
+binding/reservation to DRAINING. Only then did fresh prepare refuse with
+`runtime_admission_closed`, without allocation or further table changes. This
+qualifies a serialized software admission fence, not a concurrent MySQL race,
+physical termination, DRAINED, NodeUnpublish or RELEASED. Three fresh derived
+input/attempt/assistant requests passed Node structural parsing and were refused
+by native admission, but have additional semantic differences; the input retains
+the old wake subject/source-event association. Without paired valid nonpending
+controls these do not isolate the pending-only fence. The start probe's
+`runtime_payload_invalid` is a parser refusal, not grant qualification. A valid
+final settlement suffix was unavailable and was not fabricated.
+
+The first real verification exposed the 512-character structural-ID validation
+of Base64 resource bodies. The resource-specific decoder repair passed the
+subsequent groups. Preserve that failure and all test-utility startup/envelope/
+retirement setup failures beside the final report; none is silently relabelled
+as a pass. Loaded Java origins qualified 207 production classes, four compiled
+test fixtures and 22 nested SDK classes separately. Of 529 unique observed Node
+origins, 112 lack a prelaunch anchor in at least one window and have only
+load-time/final byte assurance. This is not retroactive prelaunch proof.
+
+The retained final report SHA-256 is
+`7b5a3c848914f70544ee8fe95a1138ccd751ed11a95978980967fc67e619332e`,
+and its 965-artifact manifest SHA-256 is
+`a6882e64581fa57d1c0b69fe144db1fa6f7352c7530b7207cbb01b38db301f6e`.
+The separate platform-prose erratum corrects the retained environment to Darwin
+25.6.0/arm64, Node 22/Java 21 without changing either original artifact. Owned
+processes, ports, temporary roots and H2 resources were cleaned; the input and
+artifact freeze was released at `2026-10-08T16:33:17.551568Z`. Evidence stays in
+the git-ignored `.qwen/e2e-tests/` working artifacts and the PR report. It does
+not qualify the remaining original intent/prepared, worker grant/execution,
+consumption, RC/RR races, Linux CSI or complete K2 acceptance.
+
 ## 7. Remaining decisions and qualification
 
 The durable allocation choice and exact wire above are decided for this
 implementation; no alternate batch ledger or generic resource-publish endpoint
-is planned. The internal private caller above is chosen but not implemented.
-The exact native conversation grammar still needs actual producer fixtures
-before enabling allocation: message envelope/content, user/prompt parent chain,
-assistant/function/part mapping and any model-attempt/stream events the chosen
-caller emits. Fresh admission and historical folding must use the same grammar
+is planned. The internal private caller now has a reservation-only native tool
+callback; original function-call qualification, atomic resources/allocation and
+complete current reads have the bounded local observations above. The actual
+private caller demonstrated original full Parts, non-UUID function IDs,
+complete supplied declarations and assistant/function/part mapping. Precise
+pending-only negative isolation and subsequent continuation qualification remain
+open. Native
+intent, preparation, execution and result consumption remain closed.
+Fresh admission and historical folding must use the same grammar
 and preserve their context across activation renewal; a kind allowlist or
 latest-assistant-only lookup cannot substitute for this validation. Each new
 field must have a real producer and consumer.
