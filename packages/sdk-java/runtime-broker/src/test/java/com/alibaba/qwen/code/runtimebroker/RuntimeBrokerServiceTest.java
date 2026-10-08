@@ -48,6 +48,35 @@ class RuntimeBrokerServiceTest {
             "capability", "session");
 
     @Test
+    void coldReleaseRejectsHistoricalAmbiguityWithAStableConflict() {
+        var target = new RuntimeScope("tenant", "workspace", "generation", "/target",
+                "capability", "workspace");
+        try (Fixture fixture = new Fixture(target)) {
+            var old = fixture.sessionRepository.findOrCreate(new RuntimeSessionRecord(
+                    new RuntimeSession("harness", "runtime", "bootstrap", WORKSPACE_SCOPE),
+                    "binding-old", 1, RuntimeSessionRecord.State.ACQUIRING, 0, START));
+            old = fixture.sessionRepository.compareAndSet(old,
+                    old.withState(RuntimeSessionRecord.State.RELEASED, START));
+            var current = fixture.sessionRepository.findOrCreate(new RuntimeSessionRecord(
+                    new RuntimeSession("harness", "runtime", "bootstrap", target),
+                    "binding-new", 1, RuntimeSessionRecord.State.ACQUIRING, 0, START));
+            current = fixture.sessionRepository.compareAndSet(current,
+                    current.withState(RuntimeSessionRecord.State.READY, START));
+
+            for (int attempt = 0; attempt < 2; attempt++) {
+                var ambiguity = failure(fixture.service.release("harness", "runtime"));
+                assertEquals(409, ambiguity.getStatusCode());
+                assertEquals("runtime_session_ambiguous", ambiguity.getCode());
+                assertFalse(ambiguity.isRetryable());
+            }
+            assertEquals(old, fixture.sessionRepository.findById(WORKSPACE_SCOPE, "runtime"));
+            assertEquals(current, fixture.sessionRepository.findById(target, "runtime"));
+            assertEquals(0, fixture.transport.releaseCalls.get());
+            assertEquals(0, fixture.provisioner.calls.get());
+        }
+    }
+
+    @Test
     void workspaceSessionsShareOneProvisionedBinding() {
         try (Fixture fixture = new Fixture(WORKSPACE_SCOPE)) {
             RuntimeSessionRecord first = join(fixture.service.acquire(
@@ -75,6 +104,80 @@ class RuntimeBrokerServiceTest {
 
             assertNotEquals(first.getBindingId(), second.getBindingId());
             assertEquals(2, fixture.provisioner.calls.get());
+        }
+    }
+
+    @Test
+    void hookRecoveryUsesTheOriginalBindingAndNeverAcquiresAReplacement() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord original = join(fixture.service.acquire("harness-a", "runtime-a", "bootstrap"));
+            int acquires = fixture.transport.acquireCalls.get();
+            int provisions = fixture.provisioner.calls.get();
+            assertSame(original, join(fixture.service.acquireRecovery("harness-a", "runtime-a",
+                    original.getBindingId(), original.getRuntimeGeneration())));
+            for (CompletionStage<RuntimeSessionRecord> request : List.of(
+                    fixture.service.acquireRecovery("harness-b", "runtime-a", original.getBindingId(), original.getRuntimeGeneration()),
+                    fixture.service.acquireRecovery("harness-a", "runtime-a", original.getBindingId(), original.getRuntimeGeneration() + 1),
+                    fixture.service.acquireRecovery("harness-a", "missing", original.getBindingId(), original.getRuntimeGeneration()))) {
+                assertEquals("workspace_close_identity_unverified", failure(request).getCode());
+            }
+            join(fixture.service.release("harness-a", "runtime-a"));
+            assertEquals("workspace_close_identity_unverified", failure(fixture.service.acquireRecovery("harness-a", "runtime-a",
+                    original.getBindingId(), original.getRuntimeGeneration())).getCode());
+            assertEquals(acquires, fixture.transport.acquireCalls.get());
+            assertEquals(provisions, fixture.provisioner.calls.get());
+        }
+    }
+
+    @Test
+    void hookRecoveryDoesNotWaitForAnOrdinaryAcquireOfTheSameRuntimeId() throws Exception {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord original = join(fixture.service.acquire("harness-a", "runtime-a", "bootstrap"));
+            var field = RuntimeBrokerService.class.getDeclaredField("sessions");
+            field.setAccessible(true);
+            ((Map<?, ?>) field.get(fixture.service)).remove("runtime-a");
+            fixture.resolver.result = CompletableFuture.completedFuture(new RuntimeScope(
+                    "tenant", "other-workspace", "generation", "/other", "other-capability", "session"));
+            var pending = new CompletableFuture<Void>();
+            fixture.transport.acquireResult = pending;
+            var ordinary = fixture.service.acquire("harness-b", "runtime-a", "bootstrap");
+            int provisions = fixture.provisioner.calls.get();
+            int acquires = fixture.transport.acquireCalls.get();
+            try {
+                assertTimeoutPreemptively(Duration.ofSeconds(1), () -> assertEquals("workspace_close_identity_unverified",
+                        failure(fixture.service.acquireRecovery("harness-a", "runtime-a",
+                                original.getBindingId(), original.getRuntimeGeneration())).getCode()));
+                assertFalse(ordinary.toCompletableFuture().isDone());
+                assertSame(original, fixture.sessionRepository.findById(SESSION_SCOPE, "runtime-a"));
+                assertEquals(provisions, fixture.provisioner.calls.get());
+                assertEquals(acquires, fixture.transport.acquireCalls.get());
+            } finally {
+                pending.completeExceptionally(new RuntimeBrokerException(503, "ordinary_failure", "failed", true));
+            }
+        }
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void hookRecoveryRejectsFailedAndCancelledLocalRoutes() throws Exception {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord original = join(fixture.service.acquire("harness-a", "runtime-a", "bootstrap"));
+            var field = RuntimeBrokerService.class.getDeclaredField("sessions");
+            field.setAccessible(true);
+            var routes = (Map<String, CompletableFuture<?>>) field.get(fixture.service);
+            var cancelled = new CompletableFuture<>();
+            cancelled.cancel(false);
+            int provisions = fixture.provisioner.calls.get();
+            int acquires = fixture.transport.acquireCalls.get();
+            for (var route : List.of(CompletableFuture.failedFuture(
+                    new RuntimeBrokerException(503, "ordinary_failure", "failed", true)), cancelled)) {
+                routes.put("runtime-a", route);
+                assertEquals("workspace_close_identity_unverified", failure(fixture.service.acquireRecovery(
+                        "harness-a", "runtime-a", original.getBindingId(), original.getRuntimeGeneration())).getCode());
+            }
+            assertSame(original, fixture.sessionRepository.findById(SESSION_SCOPE, "runtime-a"));
+            assertEquals(provisions, fixture.provisioner.calls.get());
+            assertEquals(acquires, fixture.transport.acquireCalls.get());
         }
     }
 
@@ -2019,6 +2122,24 @@ class RuntimeBrokerServiceTest {
     }
 
     @Test
+    void legacyDrainAllowsOnlyOriginalHookControlAndNoNewOrdinaryAdmission() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            fixture.bindingRepository.requestHarnessDrain("tenant", "harness");
+            Map<String, Object> hook = Map.of("kind", "hook-execute", "operationId", "legacy-end",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"));
+            assertEquals("ok", join(fixture.service.control("harness", "runtime", hook)));
+            assertEquals(session.getSession(), fixture.transport.lastSession);
+            Map<String, Object> ordinary = Map.of("kind", "mcp-configure", "operationId", "ordinary",
+                    "sessionKey", Map.of("tenantId", "tenant", "workspaceId", "workspace", "sessionId", "harness"));
+            assertEquals("runtime_admission_closed", failure(fixture.service.control("harness", "runtime", ordinary)).getCode());
+            assertEquals("runtime_admission_closed", failure(fixture.service.acquire("harness", "new-runtime", "bootstrap")).getCode());
+            assertEquals(1, fixture.provisioner.calls.get());
+            assertEquals(1, fixture.transport.acquireCalls.get());
+        }
+    }
+
+    @Test
     void observesTheOriginalOwnerAfterNewAdmissionIsRevoked() {
         try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
             RuntimeSessionRecord original = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
@@ -2037,6 +2158,27 @@ class RuntimeBrokerServiceTest {
             assertEquals("runtime_admission_closed", failure(fixture.service.acquire("harness", "runtime", "bootstrap")).getCode());
             assertEquals(1, fixture.provisioner.calls.get());
             assertEquals(1, fixture.transport.acquireCalls.get());
+        }
+    }
+
+    @Test
+    void legacyDrainSettlesCancelledDispatchWithoutInvokingTheWorker() {
+        try (Fixture fixture = new Fixture(SESSION_SCOPE)) {
+            RuntimeSessionRecord session = join(fixture.service.acquire("harness", "runtime", "bootstrap"));
+            fixture.executionRepository.findOrCreate(ToolExecutionRecord.prepared("parked", "parked-key",
+                    session.getBindingId(), session.getRuntimeGeneration(), "harness", "runtime", "prompt", "call", "digest",
+                    reference("runtime", "digest")));
+            fixture.executionRepository.claimDispatch("parked", "broker", Duration.ofMinutes(1));
+            fixture.bindingRepository.requestHarnessDrain("tenant", "harness");
+            ToolExecutionRecord settled = join(fixture.service.cancelExecution("harness", "runtime", "parked"));
+            assertEquals(ToolExecutionRecord.State.SETTLED, settled.getState());
+            assertEquals("cancelled", settled.getExecutionStatus());
+            assertTrue(settled.isCancelRequested());
+            assertSame(settled, join(fixture.service.cancelExecution("harness", "runtime", "parked")));
+            assertEquals("runtime_admission_closed", failure(fixture.service.createExecution("harness", "runtime",
+                    "new-key", reference("runtime", "other"))).getCode());
+            assertEquals(0, fixture.transport.executeCalls.get());
+            assertEquals(0, fixture.transport.cancelCalls.get());
         }
     }
 

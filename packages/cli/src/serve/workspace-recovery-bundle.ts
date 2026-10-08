@@ -546,6 +546,37 @@ export class LocalRecoveryBundle {
     else if (saved !== null) throw new Error('source_drift');
   }
 
+  async verifyMigrationTree(
+    root: string,
+    candidate: string,
+    marker?: { digest: string; byteLength: number },
+  ): Promise<void> {
+    const mismatch = marker ? 'migration_tree_mismatch' : 'source_drift';
+    try {
+      if ((await realpath(root)) !== root || !(await lstat(root)).isDirectory())
+        throw new Error('invalid_source_root');
+      let count = 0;
+      for await (const actual of tree(dirname(root), basename(root), root)) {
+        const name = `${candidate}${actual.path.slice(basename(root).length)}`;
+        const saved = await this.lookup('entry', name);
+        let expected = saved;
+        if (marker && name === 'workspace/.qwen-managed-storage.json') {
+          const original =
+            recoveryJson({ ...actual, path: name }) === recoveryJson(saved);
+          if (!original) expected = { ...saved, ...marker };
+        }
+        if (recoveryJson(expected) !== recoveryJson({ ...actual, path: name }))
+          throw new Error(mismatch);
+        count++;
+      }
+      const expected = await this.lookup('tree', candidate);
+      if (expected['count'] !== count) throw new Error(mismatch);
+    } catch (error) {
+      if (sourceReadDrift(error)) throw new Error(mismatch);
+      throw error;
+    }
+  }
+
   async backup(ownerSessionId: string, backupFileName: string): Promise<void> {
     safeRelative(ownerSessionId);
     safeRelative(backupFileName);

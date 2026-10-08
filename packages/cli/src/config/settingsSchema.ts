@@ -4390,8 +4390,30 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Enable persistent workspace Agents collaborating on shared task threads (experimental). Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
+          'Enable persistent workspace Agents that you can @-mention in a chat session (experimental). Each mentioned Agent answers in the same session from its own native session. Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.',
         showInDialog: true,
+      },
+      agentChainLimit: {
+        type: 'number',
+        label: 'Agent Chain Limit',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: 0,
+        minimum: 0,
+        description:
+          'Maximum number of agent-to-agent hops when Agents @-mention each other in a chat session (experimental). A message from you resets the count. 0 means unlimited; every hop is a separate paid Agent run, and "Stop all agents" is always available.',
+        showInDialog: false,
+      },
+      agentTokenBudget: {
+        type: 'number',
+        label: 'Agent Token Budget',
+        category: 'Experimental',
+        requiresRestart: false,
+        default: 1_000_000,
+        minimum: 0,
+        description:
+          'Tokens Agents may spend in one chat session between two of your messages before they stop waking each other (experimental). Agents still answer what they were asked; your next message resets the budget. 0 means unlimited.',
+        showInDialog: false,
       },
       artifact: {
         type: 'boolean',
