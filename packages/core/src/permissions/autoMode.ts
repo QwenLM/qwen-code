@@ -611,7 +611,10 @@ export function applyAutoModeDecision(
       config.setAutoModeDenialState(blockedState);
       return {
         kind: 'blocked',
-        errorMessage: `${decision.reason}\n${AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE}`,
+        // Same guard reason as the banner above: it becomes the tool error the
+        // main model reads next, so only the interpolated reason is sanitized
+        // — the guidance below is ours and must survive intact.
+        errorMessage: `${sanitizeClassifierReason(decision.reason)}\n${AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE}`,
         reason: 'classifier_blocked',
       };
     }
