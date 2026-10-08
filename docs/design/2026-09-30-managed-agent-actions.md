@@ -275,15 +275,21 @@ still verifies the writer boot, tenant, Workspace, Store address, frozen tool
 profile and approval mode. Mutable grant or registry refusal remains retryable;
 structural binding or storage mismatch remains terminal. This does not enable
 broader cold Workspace recovery or change the default recovery configuration.
+If passive loading creates a runtime snapshot, its pending recovery marker
+remains fenced by the writer boot. The worker renews its claimed operation
+while attachment recovery or approval delivery is in flight, so a slow load
+does not let another replica take over an otherwise healthy delivery.
 
 A replica whose Harness connector is unavailable accepts and persists valid
-responses through the same public routes, but does not scan or dispatch their
-delivery. It leaves the claim and retry schedule untouched so an enabled
-dispatcher sharing the database can deliver them. The public and WebShell
+responses through the same public routes, but does not scan or dispatch
+requested Actions for delivery. It leaves their claim and retry schedule
+untouched so an enabled dispatcher sharing the database can deliver them.
+It can still settle responses whose journal projection already proves a
+final Action, without claiming or calling the Harness. The public and WebShell
 approval integration flow clears the connector cache before each answer and
 requires the original operation to complete with one decision and the expected
-file effect; a coordinator regression checks that a disabled connector never
-scans or schedules an answer.
+file effect; coordinator regressions check that a disabled connector never
+claims or schedules an answer and can settle a journal-proven final response.
 
 ### 6.3 Checks
 

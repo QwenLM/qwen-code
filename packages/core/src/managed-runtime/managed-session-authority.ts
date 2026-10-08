@@ -283,6 +283,15 @@ export class ManagedSessionConflictError extends ManagedSessionRecordError {
   }
 }
 
+export class ManagedSessionTitleSupersededError extends ManagedSessionRecordError {
+  override readonly code = 'managed_session_title_superseded';
+
+  constructor() {
+    super('A later Session title attempt has already committed.');
+    this.name = 'ManagedSessionTitleSupersededError';
+  }
+}
+
 /** The refusal for an activation ID the log already holds. */
 export function activationAlreadyInstalledError(
   activationId: string,
@@ -1365,6 +1374,47 @@ export class LocalManagedSessionAuthority {
       this.assertCommandWritable(command);
       this.assertExpectedSequence(command);
       const previous = this.domainRecords.get(request.domain);
+      let content = request.content;
+      const incomingTitleRevision = content['managedRenameRevision'];
+      if (
+        request.domain === 'session_metadata' &&
+        incomingTitleRevision !== undefined &&
+        (typeof incomingTitleRevision !== 'string' ||
+          !/^[1-9][0-9]{0,18}$/u.test(incomingTitleRevision) ||
+          BigInt(incomingTitleRevision) > 9223372036854775807n)
+      ) {
+        throw new ManagedSessionRecordError('Invalid Session title revision.');
+      }
+      if (request.domain === 'session_metadata' && previous !== undefined) {
+        const saved = JSON.parse(
+          (await store.read(previous.recordRef)).toString('utf8'),
+        ) as Record<string, unknown>;
+        const savedRevision = saved['managedRenameRevision'];
+        const requestedRevision = content['managedRenameRevision'];
+        if (savedRevision !== undefined) {
+          if (
+            typeof savedRevision !== 'string' ||
+            !/^[1-9][0-9]*$/u.test(savedRevision)
+          ) {
+            throw new ManagedSessionRecordError(
+              'Invalid persisted Session title revision.',
+            );
+          }
+          if (
+            requestedRevision !== undefined &&
+            (typeof requestedRevision !== 'string' ||
+              !/^[1-9][0-9]*$/u.test(requestedRevision) ||
+              BigInt(requestedRevision) <= BigInt(savedRevision))
+          ) {
+            throw new ManagedSessionTitleSupersededError();
+          }
+          // Local/manual title writers retain the hosted ordering watermark.
+          content = {
+            ...content,
+            managedRenameRevision: requestedRevision ?? savedRevision,
+          };
+        }
+      }
       const revision = (previous?.revision ?? 0) + 1;
       const recordRef = await store.publish(
         `managed-${request.domain}`,
@@ -1373,7 +1423,7 @@ export class LocalManagedSessionAuthority {
             operationId: command.commandId,
             revision,
             previousRecordRef: previous?.recordRef ?? null,
-            ...request.content,
+            ...content,
           }),
           'utf8',
         ),

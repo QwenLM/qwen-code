@@ -85,6 +85,10 @@ public interface HarnessConnector extends AutoCloseable {
 
     void rename(String tenantId, String sessionId, String title);
 
+    default void rename(String tenantId, String sessionId, String title, long revision) {
+        throw new UnsupportedOperationException("Fenced Session titles are unavailable");
+    }
+
     /**
      * Closes the Session and returns the boot ID of the Harness that
      * answered. A Harness that does not hold the Session answers too.

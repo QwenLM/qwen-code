@@ -317,25 +317,23 @@ public class ManagedAgentService {
             }
         }
         requireSubmitter(tenantId, actorId, sessionId);
-        SessionMutationCommand command = store.beginSessionMutation(tenantId,
-                RENAME, idempotencyKey, requestDigest, sessionId,
-                SessionMutationKind.RENAME);
+        SessionMutationCommand command = store.beginSessionRename(tenantId,
+                idempotencyKey, requestDigest, sessionId, effectiveTitle);
         if (!"COMPLETED".equals(command.status())) {
             try {
                 requireHarness();
                 SessionRecord session = store.requireSession(tenantId, sessionId);
                 HarnessConnector.Attachment attachment = harness.createOrLoad(tenantId, sessionId,
-                        session.harnessBootId() != null);
-                harness.rename(tenantId, sessionId, effectiveTitle);
-                session = store.completeSessionMutation(tenantId, RENAME,
-                        idempotencyKey, sessionId, SessionMutationKind.RENAME,
-                        effectiveTitle, attachment.bootId());
+                        session.harnessBootId() != null, true);
+                harness.rename(tenantId, sessionId, effectiveTitle, command.renameRevision());
+                session = store.completeSessionRename(tenantId, idempotencyKey, sessionId,
+                        effectiveTitle, attachment.bootId(), command.renameRevision());
                 return new SessionMutationResult<>(publicSession(session),
                         command.replayed());
             } catch (RuntimeException error) {
                 try {
-                    store.abandonSessionMutation(tenantId, RENAME,
-                            idempotencyKey, sessionId);
+                    store.abandonSessionRename(tenantId, idempotencyKey, sessionId,
+                            command.renameRevision());
                 } catch (RuntimeException cleanupError) {
                     LOG.warn("Failed to retire rename tenant={} session={}",
                             tenantId, sessionId, cleanupError);

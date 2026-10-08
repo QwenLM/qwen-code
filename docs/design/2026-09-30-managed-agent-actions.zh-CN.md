@@ -131,9 +131,9 @@ Session Store 已经会读取每一行已提交的 journal 来投影 Stage H 记
 
 #### 审批投递恢复
 
-调度器可能丢失附着缓存，而 Harness 仍持有 Workspace Session 的待处理审批。审批 worker 使用已有的被动附着协议恢复该引用，即使 `verified-workspace-recovery-enabled` 为 `false`。投递前仍检查当前的审批答复执行授权与挂载。Harness 仍验证 writer boot、租户、Workspace、Store 地址、已固定的工具配置与审批模式。可变授权或注册表状态造成的拒绝仍可重试；结构性的绑定或存储不匹配仍进入终态。这不会开启更广泛的 Workspace 冷恢复，也不改变恢复配置的默认值。
+调度器可能丢失附着缓存，而 Harness 仍持有 Workspace Session 的待处理审批。审批 worker 使用已有的被动附着协议恢复该引用，即使 `verified-workspace-recovery-enabled` 为 `false`。投递前仍检查当前的审批答复执行授权与挂载。Harness 仍验证 writer boot、租户、Workspace、Store 地址、已固定的工具配置与审批模式。可变授权或注册表状态造成的拒绝仍可重试；结构性的绑定或存储不匹配仍进入终态。这不会开启更广泛的 Workspace 冷恢复，也不改变恢复配置的默认值。若被动加载创建 runtime snapshot，其待恢复标记仍由 writer boot 围栏约束。附着恢复或审批投递尚未结束时，worker 会续租已认领的 operation，避免缓慢加载使其他副本接管仍在正常进行的投递。
 
-Harness connector 不可用的副本仍通过相同的公共路由受理并持久化有效答复，但不扫描或分派投递。它保持任务认领与重试时间不变，让共用数据库且启用了 Harness 的调度器完成投递。公共 API 与 WebShell 的审批集成流程在每次回答前清空 connector 缓存，要求原 operation 以一次决定和预期文件效果完成；协调器回归测试检查禁用的 connector 从不扫描或调度答复。
+Harness connector 不可用的副本仍通过相同的公共路由受理并持久化有效答复，但不扫描或分派仍为 requested 的 Action 进行投递。它保持这些任务的认领与重试时间不变，让共用数据库且启用了 Harness 的调度器完成投递。对于 journal 投影已经证明 Action 终态的答复，它仍可直接结算，无需认领任务或调用 Harness。公共 API 与 WebShell 的审批集成流程在每次回答前清空 connector 缓存，要求原 operation 以一次决定和预期文件效果完成；协调器回归测试检查禁用的 connector 从不认领或调度答复，并且能结算已由 journal 证明终态的答复。
 
 ### 6.3 检查
 

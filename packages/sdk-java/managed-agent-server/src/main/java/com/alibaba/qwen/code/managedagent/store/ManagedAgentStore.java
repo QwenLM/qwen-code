@@ -25,6 +25,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutation;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.RenameDelivery;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.TurnRecord;
@@ -551,6 +552,124 @@ public class ManagedAgentStore implements AgentStateStore {
         return new Admission(sessionId, turnId, false, commandEffect);
     }
 
+    @Override
+    @Transactional
+    public SessionMutationCommand beginSessionRename(String tenantId, String key,
+            String digest, String sessionId, String title) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        requireSessionForUpdate(tenantId, sessionId);
+        Optional<CommandRecord> previous = findCommand(tenantId, "RENAME_SESSION", key, true);
+        SessionMutationCommand command = beginSessionMutation(tenantId, "RENAME_SESSION",
+                key, digest, sessionId, SessionMutationKind.RENAME);
+        if ("COMPLETED".equals(command.status())) {
+            return command;
+        }
+        List<RenameDelivery> rows = jdbc.query("SELECT * FROM managed_session_rename_delivery"
+                        + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
+                this::renameDelivery, tenantId, sessionId);
+        boolean retryPending = previous.isPresent() && "PENDING".equals(previous.get().status());
+        if (!rows.isEmpty() && retryPending && rows.getFirst().idempotencyKey().equals(key)) {
+            return new SessionMutationCommand(sessionId, "PENDING", command.replayed(), rows.getFirst().revision());
+        }
+        long revision = rows.isEmpty() ? 1 : Math.addExact(rows.getFirst().revision(), 1);
+        if (rows.isEmpty()) {
+            jdbc.update("INSERT INTO managed_session_rename_delivery"
+                            + " (tenant_id, session_id, revision, idempotency_key, title, delivery_state, available_at)"
+                            + " VALUES (?, ?, ?, ?, ?, 'PENDING', ?)",
+                    tenantId, sessionId, revision, key, title, clock.millis());
+        } else {
+            jdbc.update("UPDATE managed_session_rename_delivery SET revision = ?,"
+                            + " idempotency_key = ?, title = ?, delivery_state = 'PENDING',"
+                            + " available_at = ?, lease_owner = NULL, lease_until = NULL, attempt_count = 0"
+                            + " WHERE tenant_id = ? AND session_id = ?",
+                    revision, key, title, clock.millis(), tenantId, sessionId);
+        }
+        return new SessionMutationCommand(sessionId, "PENDING", command.replayed(), revision);
+    }
+
+    @Override
+    @Transactional
+    public SessionRecord completeSessionRename(String tenantId, String key,
+            String sessionId, String title, String bootId, long revision) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        requireSessionForUpdate(tenantId, sessionId);
+        List<RenameDelivery> rows = jdbc.query("SELECT * FROM managed_session_rename_delivery"
+                        + " WHERE tenant_id = ? AND session_id = ? FOR UPDATE",
+                this::renameDelivery, tenantId, sessionId);
+        if (rows.isEmpty() || rows.getFirst().revision() != revision
+                || !rows.getFirst().idempotencyKey().equals(key) || !rows.getFirst().title().equals(title)) {
+            throw new ApiException(HttpStatus.CONFLICT, "session_mutation_superseded",
+                    "A later Session title attempt has been admitted.");
+        }
+        // This is the latest delivery, even if a sibling retired its public receipt.
+        jdbc.update("UPDATE managed_agent_command SET command_status = 'PENDING'"
+                        + " WHERE tenant_id = ? AND operation = 'RENAME_SESSION'"
+                        + " AND idempotency_key = ? AND session_id = ? AND command_status = 'FAILED'",
+                tenantId, key, sessionId);
+        SessionRecord session = completeSessionMutation(tenantId, "RENAME_SESSION", key,
+                sessionId, SessionMutationKind.RENAME, title, bootId);
+        jdbc.update("UPDATE managed_session_rename_delivery SET delivery_state = 'COMPLETED',"
+                        + " lease_owner = NULL, lease_until = NULL WHERE tenant_id = ? AND session_id = ?",
+                tenantId, sessionId);
+        return session;
+    }
+
+    @Override
+    @Transactional
+    public void abandonSessionRename(String tenantId, String key, String sessionId, long revision) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
+        requireSessionForUpdate(tenantId, sessionId);
+        if (jdbc.queryForObject("SELECT COUNT(*) FROM managed_session_rename_delivery"
+                        + " WHERE tenant_id = ? AND session_id = ? AND revision = ? AND idempotency_key = ?",
+                Integer.class, tenantId, sessionId, revision, key) == 1) {
+            abandonSessionMutation(tenantId, "RENAME_SESSION", key, sessionId);
+        }
+    }
+
+    @Override
+    public List<RenameDelivery> deliverableRenames(long now) {
+        return jdbc.query("SELECT * FROM managed_session_rename_delivery WHERE"
+                        + " (delivery_state = 'PENDING' AND available_at <= ?)"
+                        + " OR (delivery_state = 'RUNNING' AND lease_until <= ?) LIMIT 100",
+                this::renameDelivery, now, now);
+    }
+
+    @Override
+    @Transactional
+    public Optional<RenameDelivery> claimRename(RenameDelivery delivery, String owner, Duration lease) {
+        long now = clock.millis();
+        int claimed = jdbc.update("UPDATE managed_session_rename_delivery SET delivery_state = 'RUNNING',"
+                        + " lease_owner = ?, lease_until = ?, attempt_count = attempt_count + 1"
+                        + " WHERE tenant_id = ? AND session_id = ? AND revision = ? AND"
+                        + " ((delivery_state = 'PENDING' AND available_at <= ?)"
+                        + " OR (delivery_state = 'RUNNING' AND lease_until <= ?))",
+                owner, Math.addExact(now, lease.toMillis()), delivery.tenantId(), delivery.sessionId(),
+                delivery.revision(), now, now);
+        return claimed == 0 ? Optional.empty() : jdbc.query("SELECT * FROM managed_session_rename_delivery"
+                        + " WHERE tenant_id = ? AND session_id = ? AND revision = ?",
+                this::renameDelivery, delivery.tenantId(), delivery.sessionId(), delivery.revision()).stream().findFirst();
+    }
+
+    @Override
+    public void retryRename(RenameDelivery delivery, String owner, long availableAt) {
+        jdbc.update("UPDATE managed_session_rename_delivery SET delivery_state = 'PENDING',"
+                        + " available_at = ?, lease_owner = NULL, lease_until = NULL"
+                        + " WHERE tenant_id = ? AND session_id = ? AND revision = ? AND lease_owner = ?",
+                availableAt, delivery.tenantId(), delivery.sessionId(), delivery.revision(), owner);
+    }
+
+    private RenameDelivery renameDelivery(java.sql.ResultSet row, int index) throws java.sql.SQLException {
+        return new RenameDelivery(row.getString("tenant_id"), row.getString("session_id"),
+                row.getString("idempotency_key"), row.getString("title"), row.getLong("revision"),
+                row.getInt("attempt_count"));
+    }
+
+    private boolean hasPendingRenameDelivery(String tenantId, String sessionId) {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM managed_session_rename_delivery"
+                        + " WHERE tenant_id = ? AND session_id = ? AND delivery_state <> 'COMPLETED'",
+                Integer.class, tenantId, sessionId) > 0;
+    }
+
     @Transactional
     public SessionMutationCommand beginSessionMutation(String tenantId,
             String operation, String idempotencyKey, String requestDigest,
@@ -837,6 +956,10 @@ public class ManagedAgentStore implements AgentStateStore {
             }
             return new OperationAdmission(existing.get(), true);
         }
+        if (hasPendingRenameDelivery(tenantId, sessionId)) {
+            throw new ApiException(HttpStatus.CONFLICT, "session_operation_active",
+                    "The Session has a title delivery awaiting completion.");
+        }
         if (session.workspace() != null) {
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         }
@@ -972,6 +1095,7 @@ public class ManagedAgentStore implements AgentStateStore {
         // lifecycle admission refuses in exactly this state (409
         // turn_active), so the directory change must hold as well.
         if (hasOpenOperation(tenantId, sessionId)
+                || hasPendingRenameDelivery(tenantId, sessionId)
                 || hasActiveTurn(tenantId, sessionId)
                 || hasDecidableAction(session)
                 || hasRetainedRuntimeSession(tenantId, sessionId)) {

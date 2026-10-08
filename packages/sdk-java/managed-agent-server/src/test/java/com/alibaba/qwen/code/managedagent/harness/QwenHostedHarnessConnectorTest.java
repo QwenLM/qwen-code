@@ -183,6 +183,15 @@ class QwenHostedHarnessConnectorTest {
         verify(client, times(4)).loadSession(load.capture());
         assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load.getValue(), "toJson"))
                 .containsEntry("toolProfile", profile);
+        QwenHostedHarnessConnector renameRetry = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
+        ReflectionTestUtils.setField(renameRetry, "client", client);
+        renameRetry.createOrLoad("tenant-a", SESSION_ID, false, true);
+        verify(client, times(2)).createSession(any());
+        verify(client, times(5)).loadSession(load.capture());
+        assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(load.getValue(), "toJson"))
+                .containsEntry("toolProfile", profile)
+                .containsEntry("passiveManagedRuntimeRecovery", true)
+                .doesNotContainKey("driveRuntimeRecovery");
         clearInvocations(execution);
         RuntimeBrokerException refusal = WorkspaceExecutionStore.unavailable();
         doThrow(refusal).when(execution).authorize(session);
@@ -516,10 +525,17 @@ class QwenHostedHarnessConnectorTest {
         verify(execution, times(2)).verifyMountForProbe(session.workspace());
         verify(client, never()).createSession(any());
 
+        connector.resolveAction("tenant-a", SESSION_ID, actionId, response);
+        verify(client, times(2)).resolveAction(attached, actionId, "allow", 7L,
+                "hosted-tool-approval/1");
+        verify(client, times(2)).loadSession(any(LoadHarnessSession.class));
+        verify(execution, times(6)).authorizeActionResponse(session);
+        verify(execution, times(3)).verifyMountForProbe(session.workspace());
+
         doThrow(WorkspaceExecutionStore.unavailable()).when(execution).authorizeActionResponse(session);
         assertThatThrownBy(() -> connector.resolveAction("tenant-a", SESSION_ID, actionId, response))
                 .hasMessageContaining("Workspace execution authority is unavailable");
-        verify(client, times(1)).resolveAction(any(), any(), any(), anyLong(), any());
+        verify(client, times(2)).resolveAction(any(), any(), any(), anyLong(), any());
         verify(client, times(2)).loadSession(any(LoadHarnessSession.class));
     }
 
@@ -1406,8 +1422,9 @@ class QwenHostedHarnessConnectorTest {
                 .isInstanceOf(IllegalStateException.class);
     }
 
-    @Test
-    void unknownCreateOutcomeFallsBackToLoadAndPropagatesTheFullAttachment() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void unknownCreateOutcomeFallsBackToLoadAndPropagatesTheFullAttachment(boolean passive) {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities =
                 mock(HostedHarnessCapabilities.class);
@@ -1432,7 +1449,7 @@ class QwenHostedHarnessConnectorTest {
         QwenHostedHarnessConnector connector = connector(client);
 
         HarnessConnector.Attachment admission =
-                connector.createOrLoad("tenant-a", SESSION_ID, false);
+                connector.createOrLoad("tenant-a", SESSION_ID, false, passive);
 
         // The unknown-outcome create must recover by loading, and every
         // Attachment component the coordinator resumes on must travel.
@@ -1443,10 +1460,9 @@ class QwenHostedHarnessConnectorTest {
         ArgumentCaptor<LoadHarnessSession> load =
                 ArgumentCaptor.forClass(LoadHarnessSession.class);
         verify(client).loadSession(load.capture());
-        // Passive recovery belongs to the observe-only attachment; the
-        // create fallback keeps the session on the active path.
+        // Recovery preserves the attachment mode requested by the caller.
         assertThat(ReflectionTestUtils.getField(load.getValue(),
-                "passiveManagedRuntimeRecovery")).isEqualTo(false);
+                "passiveManagedRuntimeRecovery")).isEqualTo(passive);
     }
 
     @Test

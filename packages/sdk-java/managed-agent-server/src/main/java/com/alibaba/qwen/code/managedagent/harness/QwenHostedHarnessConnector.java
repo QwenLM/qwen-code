@@ -233,14 +233,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 if (!passiveManagedRuntimeRecovery) {
                     workspaceExecution.verifyMountForProbe(session.workspace());
                 }
-            } else if (passiveManagedRuntimeRecovery) {
+            } else if (passiveManagedRuntimeRecovery && loadExisting) {
                 workspaceExecution.authorizePassiveAttachment(session);
             } else {
                 workspaceExecution.authorize(session);
             }
         }
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
-        HarnessSessionRef attached = passiveManagedRuntimeRecovery
+        HarnessSessionRef attached = passiveManagedRuntimeRecovery && loadExisting
                 ? load(session, true) : attachments.get(key);
         if (attached == null) {
             AttachmentLock slot = attachmentLocks.compute(key,
@@ -254,8 +254,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             try {
                 attached = attachments.get(key);
                 if (attached == null) {
-                    attached = loadExisting ? load(session, false)
-                            : create(session);
+                    attached = loadExisting ? load(session, passiveManagedRuntimeRecovery)
+                            : create(session, passiveManagedRuntimeRecovery);
                     attachments.put(key, attached);
                 }
             } finally {
@@ -474,6 +474,17 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
     }
 
+    @Override
+    public void rename(String tenantId, String sessionId, String title, long revision) {
+        try {
+            HarnessSessionRef ref = attachment(tenantId, sessionId, false);
+            client().updateSessionTitle(ref, title, revision);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
     private void doRename(String tenantId, String sessionId, String title) {
         HarnessSessionRef ref = attachment(tenantId, sessionId, false);
         client().updateSessionTitle(ref, title);
@@ -545,7 +556,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         return session;
     }
 
-    private HarnessSessionRef create(SessionRecord session) {
+    private HarnessSessionRef create(SessionRecord session, boolean passiveManagedRuntimeRecovery) {
         try {
             CreateHarnessSession.Builder builder =
                     CreateHarnessSession.builder()
@@ -569,9 +580,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             if (error.getStatusCode() != 409) {
                 throw error;
             }
-            return load(session, false);
+            return load(session, passiveManagedRuntimeRecovery);
         } catch (SessionCreationOutcomeUnknownException error) {
-            return load(session, false);
+            return load(session, passiveManagedRuntimeRecovery);
         }
     }
 

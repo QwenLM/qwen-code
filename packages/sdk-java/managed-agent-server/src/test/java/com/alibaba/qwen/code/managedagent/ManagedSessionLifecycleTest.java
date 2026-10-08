@@ -11,6 +11,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -498,6 +499,43 @@ class ManagedSessionLifecycleTest {
                 Integer.class, tenant, sessionId)).isEqualTo(1);
     }
 
+    @Test
+    void renameDeliveriesFenceOldSiblingsAndKeepLatestLostReplyRecoverable() throws Exception {
+        String tenant = tenant();
+        String sessionId = attachedSession(tenant);
+        String boot = store.requireSession(tenant, sessionId).harnessBootId();
+        harness.setAvailable(false);
+        try {
+            var first = store.beginSessionRename(tenant, "k1", "digest-a", sessionId, "A");
+            assertThat(store.beginSessionRename(tenant, "k1", "digest-a", sessionId, "A").renameRevision())
+                    .isEqualTo(first.renameRevision());
+            store.abandonSessionRename(tenant, "k1", sessionId, first.renameRevision());
+            var second = store.beginSessionRename(tenant, "k2", "digest-b", sessionId, "B");
+            store.completeSessionRename(tenant, "k2", sessionId, "B", boot, second.renameRevision());
+            assertThatThrownBy(() -> store.completeSessionRename(tenant, "k1", sessionId, "A", boot, first.renameRevision()))
+                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("session_mutation_superseded"));
+            var latest = store.beginSessionRename(tenant, "k1", "digest-a", sessionId, "A");
+            assertThat(latest.renameRevision()).isGreaterThan(second.renameRevision());
+            store.abandonSessionRename(tenant, "k1", sessionId, first.renameRevision());
+            assertThat(store.findCommand(tenant, "RENAME_SESSION", "k1").orElseThrow().status()).isEqualTo("PENDING");
+            store.abandonSessionRename(tenant, "k1", sessionId, latest.renameRevision());
+            assertThatThrownBy(() -> store.beginOperation(tenant, sessionId, OperationKind.CLOSE,
+                    "", "close", "close-digest"))
+                    .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("session_operation_active"));
+            var candidate = store.deliverableRenames(Long.MAX_VALUE).stream()
+                    .filter(delivery -> delivery.sessionId().equals(sessionId)).findFirst().orElseThrow();
+            var claimed = store.claimRename(candidate, "replica-b", Duration.ofMinutes(1)).orElseThrow();
+            assertThat(store.claimRename(candidate, "replica-c", Duration.ofMinutes(1))).isEmpty();
+            // The last remote write can already have succeeded when its reply was lost.
+            store.completeSessionRename(tenant, "k1", sessionId, "A", boot, claimed.revision());
+            assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("A");
+            assertThat(store.deliverableRenames(Long.MAX_VALUE)).noneMatch(delivery -> delivery.sessionId().equals(sessionId));
+            assertThat(store.beginOperation(tenant, sessionId, OperationKind.CLOSE, "", "close", "close-digest").replayed()).isFalse();
+        } finally {
+            harness.setAvailable(true);
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void retiredRenameCannotCompleteOverALaterCompletedRename(boolean legacyReceipt)
@@ -662,12 +700,12 @@ class ManagedSessionLifecycleTest {
             }).when(faulted).requireSession(tenant, sessionId);
         } else if ("completion".equals(phase)) {
             doThrow(new IllegalStateException("completion unavailable"))
-                    .when(faulted).completeSessionMutation(anyString(), anyString(),
-                            anyString(), anyString(), any(), anyString(), anyString());
+                    .when(faulted).completeSessionRename(anyString(), anyString(),
+                            anyString(), anyString(), anyString(), anyLong());
         } else {
             doThrow(new IllegalStateException("cleanup unavailable"))
-                    .when(faulted).abandonSessionMutation(tenant, "RENAME_SESSION",
-                            "key", sessionId);
+                    .when(faulted).abandonSessionRename(org.mockito.ArgumentMatchers.eq(tenant),
+                            org.mockito.ArgumentMatchers.eq("key"), org.mockito.ArgumentMatchers.eq(sessionId), anyLong());
         }
         ManagedAgentService subject = new ManagedAgentService(faulted,
                 new RequestDigests(), null, harness, null);

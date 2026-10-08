@@ -27,6 +27,8 @@ import { MANAGED_MCP_MAX_CONNECTIONS } from '@qwen-code/qwen-code-core/managed-r
 import {
   ManagedSessionAlreadyExistsError,
   ManagedSessionNotFoundError,
+  ManagedSessionTitleSupersededError,
+  ManagedSessionConflictError,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
   createHttpManagedSessionStores,
@@ -4737,17 +4739,63 @@ export function registerHostedHarnessSessionRoutes(
     const title = object(req.body)?.['title'];
     if (typeof title !== 'string' || !title.trim() || title.length > 256)
       return error(res, 400, 'invalid_session_title');
-    void session.managed.sink
-      .write(
-        record(session, req.params['id'], 'system', null, {
-          subtype: 'custom_title',
-          systemPayload: { customTitle: title, titleSource: 'manual' },
+    const revision = object(req.body)?.['managedRenameRevision'];
+    if (
+      revision !== undefined &&
+      (typeof revision !== 'string' ||
+        !/^[1-9][0-9]{0,18}$/u.test(revision) ||
+        BigInt(revision) > 9223372036854775807n)
+    ) {
+      error(res, 400, 'invalid_session_title_revision');
+      return;
+    }
+    const write =
+      revision === undefined
+        ? session.managed.sink.write(
+            record(session, req.params['id']!, 'system', null, {
+              subtype: 'custom_title',
+              systemPayload: { customTitle: title, titleSource: 'manual' },
+            }),
+          )
+        : session.managed.authority.commitDomainRecord(
+            {
+              operation: 'renameSession',
+              commandId: `hosted-title:${revision}`,
+              sessionKey: session.managed.authority.sessionHeader.sessionKey,
+              contentDigest: createHash('sha256').update(title).digest('hex'),
+            },
+            {
+              domain: 'session_metadata',
+              content: {
+                title,
+                titleSource: 'manual',
+                managedRenameRevision: revision,
+              },
+            },
+            { class: 'trusted_entry' },
+          );
+    void write.then(
+      () =>
+        res.json({
+          sessionId: req.params['id'],
+          persisted: true,
+          ...(revision === undefined
+            ? {}
+            : { managedRenameRevision: revision }),
         }),
-      )
-      .then(
-        () => res.json({ sessionId: req.params['id'], persisted: true }),
-        () => error(res, 503, 'managed_session_title_failed'),
-      );
+      (failure: unknown) =>
+        error(
+          res,
+          failure instanceof ManagedSessionTitleSupersededError ||
+            failure instanceof ManagedSessionConflictError
+            ? 409
+            : 503,
+          failure instanceof ManagedSessionTitleSupersededError ||
+            failure instanceof ManagedSessionConflictError
+            ? 'session_mutation_superseded'
+            : 'managed_session_title_failed',
+        ),
+    );
   });
   const close = async (
     req: Request,
