@@ -85,8 +85,9 @@ public final class ApiModels {
     }
 
     public record WebShellSessionCapabilities(boolean tasks, boolean artifacts, boolean actions,
-            boolean workspaceTurns, boolean sessionClose, boolean sessionArchive, boolean sessionUnarchive,
-            boolean sessionDelete, @JsonInclude(JsonInclude.Include.NON_NULL) Boolean foregroundShell) {
+            boolean workspaceTurns, boolean sessionClose, boolean sessionArchive,
+            boolean sessionUnarchive, boolean sessionDelete,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean foregroundShell) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

@@ -893,31 +893,41 @@ describe('createJavaManagedAgentProvider', () => {
     ).toEqual({ canSend: false, canCancel: false });
   });
 
-  it('lets the allowed caller cancel a running Turn of a bound Session', async () => {
-    const provider = createJavaManagedAgentProvider({
-      baseUrl: 'https://product.example',
-      fetch: vi.fn<typeof fetch>().mockResolvedValue(
-        jsonResponse({
-          sessionId: 'bound-1',
-          status: 'ACTIVE',
-          createdAt: 1,
-          updatedAt: 2,
-          lastSequence: 5,
-          workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
-          activeTurn: {
-            turnId: 'turn-2',
+  it.each([true, false])(
+    'offers cancel for a running bound Turn when workspaceTurns is %s',
+    async (workspaceTurns) => {
+      const provider = createJavaManagedAgentProvider({
+        baseUrl: 'https://product.example',
+        fetch: vi.fn<typeof fetch>().mockResolvedValue(
+          jsonResponse({
             sessionId: 'bound-1',
-            status: 'RUNNING',
-            submittedAt: 2,
-          },
-          capabilities: { tasks: true, workspaceTurns: true },
-        }),
-      ),
-    });
-    expect(
-      (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
-    ).toEqual({ canSend: false, canCancel: true, workspaceTurns: true });
-  });
+            status: 'ACTIVE',
+            createdAt: 1,
+            updatedAt: 2,
+            lastSequence: 5,
+            workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+            activeTurn: {
+              turnId: 'turn-2',
+              sessionId: 'bound-1',
+              status: 'RUNNING',
+              submittedAt: 2,
+            },
+            capabilities: { tasks: true, workspaceTurns },
+          }),
+        ),
+      });
+      // The creator may still cancel after the Workspace stops admitting
+      // new work, so cancel does not follow workspaceTurns; the server
+      // refuses anyone else.
+      expect(
+        (await provider.getSession('bound-1', { clientId: 'c' })).capabilities,
+      ).toEqual({
+        canSend: false,
+        canCancel: true,
+        ...(workspaceTurns ? { workspaceTurns: true } : {}),
+      });
+    },
+  );
 
   it.each([true, false])(
     'gates fresh Shell sending with foregroundShell=%s while retaining cancellation',

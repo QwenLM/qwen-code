@@ -242,6 +242,9 @@ class QwenHostedHarnessConnectorTest {
                 .hasMessageContaining("requires persisted default or auto-edit");
         assertThatThrownBy(() -> connector.cancel("tenant-a", SESSION_ID))
                 .hasMessageContaining("requires persisted default or auto-edit");
+        assertThatThrownBy(() -> connector.cancelManagedRuntime("tenant-a", SESSION_ID,
+                "prompt", "checkpoint", "activation"))
+                .hasMessageContaining("requires persisted default or auto-edit");
         verifyNoInteractions(client);
     }
 
@@ -448,15 +451,16 @@ class QwenHostedHarnessConnectorTest {
         verify(client).createSession(any(CreateHarnessSession.class));
     }
 
-    @Test
-    void rechecksWorkspaceAuthorityOnCachedAttachmentAndKeepsPassiveRecoveryAuthorized() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rechecksWorkspaceAuthorityOnCachedAttachmentAndKeepsPassiveRecoveryAuthorized(boolean verifiedRecovery) {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
         HarnessSessionRef attached = mock(HarnessSessionRef.class);
         SessionRecord session = mock(SessionRecord.class);
         AgentStateStore sessions = mock(AgentStateStore.class);
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
-        when(execution.verifiedRecoveryEnabled()).thenReturn(true);
+        when(execution.verifiedRecoveryEnabled()).thenReturn(verifiedRecovery);
         when(client.capabilities()).thenReturn(capabilities);
         when(capabilities.getBootId()).thenReturn(BOOT_ID);
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
@@ -532,7 +536,8 @@ class QwenHostedHarnessConnectorTest {
         var response = new ObjectMapper().createObjectNode().put("optionId", "allow")
                 .put("inputRevision", 7L).put("policyRevision", "hosted-tool-approval/1");
 
-        doThrow(WorkspaceExecutionStore.unavailable()).doNothing().when(execution).authorize(session);
+        doThrow(WorkspaceExecutionStore.unavailable()).doNothing()
+                .when(execution).authorizeActionResponse(session);
         assertThatThrownBy(() -> connector.resolveAction("tenant-a", SESSION_ID, actionId, response))
                 .hasMessageContaining("Workspace execution authority is unavailable");
         verify(client, never()).loadSession(any());
@@ -549,15 +554,16 @@ class QwenHostedHarnessConnectorTest {
         for (LoadHarnessSession load : loads.getAllValues()) {
             Map<String, Object> wire = ReflectionTestUtils.invokeMethod(load, "toJson");
             assertThat(wire).containsEntry("toolProfile", "hosted-workspace-files/1")
-                    .doesNotContainKey("passiveManagedRuntimeRecovery");
+                    .containsEntry("passiveManagedRuntimeRecovery", true);
             assertThat(wire.get("managedSessionStore").toString())
                     .contains("tenantId=tenant-a", "workspaceId=selected-workspace")
                     .doesNotContain("workspaceId=workspace-a");
         }
-        verify(execution, never()).authorizePassiveAttachment(any());
+        verify(execution, never()).authorize(any());
+        verify(execution, times(2)).verifyMountForProbe(session.workspace());
         verify(client, never()).createSession(any());
 
-        doThrow(WorkspaceExecutionStore.unavailable()).when(execution).authorize(session);
+        doThrow(WorkspaceExecutionStore.unavailable()).when(execution).authorizeActionResponse(session);
         assertThatThrownBy(() -> connector.resolveAction("tenant-a", SESSION_ID, actionId, response))
                 .hasMessageContaining("Workspace execution authority is unavailable");
         verify(client, times(1)).resolveAction(any(), any(), any(), anyLong(), any());

@@ -356,11 +356,10 @@ function toSessionSummary(
         !active &&
         (!session.workspace ||
           (workspaceTurns && session.capabilities?.foregroundShell !== false)),
-      canCancel:
-        sessionActive &&
-        active &&
-        turnStatus !== 'cancelling' &&
-        (!session.workspace || workspaceTurns),
+      // The creator may cancel a running bound Turn after the Workspace stops
+      // admitting new work, so cancel is not tied to workspaceTurns; the
+      // server refuses anyone else.
+      canCancel: sessionActive && active && turnStatus !== 'cancelling',
       ...(workspaceTurns ? { workspaceTurns: true } : {}),
       ...(session.capabilities?.actions === true ? { actions: true } : {}),
     },

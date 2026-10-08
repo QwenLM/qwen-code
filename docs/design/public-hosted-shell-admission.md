@@ -4,7 +4,7 @@
 
 ## Status and problem
 
-Implementation design for #13271, based on main d735e20f. The Harness already
+Implementation design for #13271, based on main bb66a52c. The Harness already
 supports persisted `hosted-workspace-shell/1` and mandatory Shell approval.
 Public REST and WebShell creation still pin `hosted-workspace-files/1`; callers
 cannot opt into the foreground Shell path. This change exposes that existing
@@ -69,7 +69,9 @@ return false. This explicit false is necessary to distinguish an existing Shell
 Session from a files Session without exposing a caller-selectable profile.
 `workspaceTurns` continues to express the existing creator/grant permission,
 so WebShell can disable fresh sending while retaining cancellation of accepted
-work. Older clients remain protected by the transactional admission gate.
+work. Upstream creator-only cancellation remains independent of fresh-creation
+grants, and its dedicated cached attachment path performs the same persisted
+Shell approval validation. Older clients remain protected by the transactional admission gate.
 
 Shell close, archive, unarchive and delete capabilities are false. Fresh backend
 lifecycle requests are rejected before an operation or command is created,
@@ -108,8 +110,9 @@ package tests, Java packaging and Checkstyle, two clean self-audits and an
 independent review precede completion. Results live in
 `.qwen/e2e-tests/public-hosted-shell-admission.md`.
 
-Local validation passes 114 focused Java tests, 29 WebShell adapter tests and
-six real MySQL/Broker/Harness public integration cases. The receipt failure and
+Validation after merging main bb66a52c passed 181 focused Java tests, 30
+WebShell adapter tests, 341 CLI Harness/recovery tests and six real
+MySQL/Broker/Harness public integration cases. The receipt failure and
 committed-receipt/lost-reply cases each retain one dispatch and one side effect,
 with byte-identical receipt retries and verified capture resources. An independent
 flag-off/cold probe verifies Store/Service admission and the live Connector,

@@ -4,7 +4,7 @@
 
 ## 状态与问题
 
-本设计实现 #13271，基于 main d735e20f。Harness 已支持持久化
+本设计实现 #13271，基于 main bb66a52c。Harness 已支持持久化
 `hosted-workspace-shell/1` 与 Shell 强制审批，但公开 REST 和 WebShell
 创建仍固定使用 `hosted-workspace-files/1`，无法进入前台 Shell 路径。
 本次通过部署准入开放已有能力，不完成 G3 Step 3 或 Shell L4。
@@ -55,7 +55,8 @@ owner takeover。
 files 和非绑定响应省略该字段。持久化 Shell Session 仅在强制审批及部署准入有效时
 返回 true，禁用时返回 false。显式 false 让客户端区分既有 Shell 与 files Session，
 无需开放 profile 选择。`workspaceTurns` 继续表达已有 creator/grant 权限，使
-WebShell 禁止新发送时仍可取消已接受回合。旧客户端由事务内门禁保护。
+WebShell 禁止新发送时仍可取消已接受回合。保留上游与新创建授权分开的 creator-only
+取消规则，其独立缓存 attachment 路径执行同一持久化 Shell 审批校验。旧客户端由事务内门禁保护。
 
 Shell 的 close、archive、unarchive、delete 能力均为 false。新的后端生命周期请求
 在创建 operation 或 command 前拒绝，包含人工构造的 CLOSED/ARCHIVED Shell
@@ -89,8 +90,8 @@ Linux 物理静默。完成前执行 build、bundle、typecheck、定向包测�
 Checkstyle、两轮干净自审及独立审查。结果记录于
 `.qwen/e2e-tests/public-hosted-shell-admission.md`。
 
-本地验证通过 114 项定向 Java 测试、29 项 WebShell adapter 测试与六项真实
-MySQL/Broker/Harness 公开集成测试。receipt 事务失败和已提交 receipt 丢失响应
+合入 main bb66a52c 后验证通过 181 项定向 Java 测试、30 项 WebShell adapter 测试、
+341 项 CLI Harness/恢复测试与六项真实 MySQL/Broker/Harness 公开集成测试。receipt 事务失败和已提交 receipt 丢失响应
 两种场景均保留一次 dispatch、一次副作用，receipt 重试字节一致，capture 资源
 完整验证。独立关开关/冷恢复探针验证 Store/Service 准入与实际 Connector，包含
 已接受审批/取消及等待 writer 租约自然过期后的新 Harness。该探针不重启完整 Java

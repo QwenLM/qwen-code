@@ -49,10 +49,6 @@ public class ManagedWorkspaceRegistry {
                 Integer.class, tenantId, sessionId, tenantId, key).isEmpty();
     }
 
-    public boolean isSessionCreator(String tenantId, String sessionId, String actorId) {
-        return createdSession(tenantId, actorId, sessionId);
-    }
-
     /** The batch twin of createdSession for a page of Session ids. */
     public java.util.Set<String> createdSessions(String tenantId,
             String actorId, List<String> sessionIds) {
@@ -154,8 +150,13 @@ public class ManagedWorkspaceRegistry {
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
-    /** The batch twin of findReadable for a page of Workspace ids. */
-    public java.util.Map<String, WorkspaceSummary> findReadable(
+    /**
+     * The batch twin of findReadable for a page of Workspace ids. It carries
+     * the registry's current binding stamp as well, so a page answers the
+     * creator-submit gate from this one read instead of a per-row
+     * bindingCurrent.
+     */
+    public java.util.Map<String, ReadableGrant> findReadable(
             String tenantId, String actorId,
             java.util.Collection<String> workspaceIds) {
         if (workspaceIds.isEmpty()) {
@@ -173,9 +174,10 @@ public class ManagedWorkspaceRegistry {
         arguments.addAll(workspaceIds);
         arguments.add(tenantId);
         arguments.add(key);
-        List<WorkspaceSummary> rows = jdbc.query(
-                "SELECT r.workspace_id, r.display_name, r.state,"
-                        + " a.can_create FROM managed_workspace_registry r"
+        List<ReadableGrant> rows = jdbc.query(
+                "SELECT r.workspace_id, r.workspace_generation,"
+                        + " r.storage_id, r.state, a.can_create"
+                        + " FROM managed_workspace_registry r"
                         + " JOIN managed_workspace_access a ON"
                         + " a.tenant_id = r.tenant_id"
                         + " AND a.workspace_id = r.workspace_id"
@@ -190,10 +192,10 @@ public class ManagedWorkspaceRegistry {
                         + " AND CAST(CONCAT(r.tenant_id, '!') AS BINARY(513))"
                         + " = CAST(CONCAT(?, '!') AS BINARY(513))"
                         + " AND a.actor_id = ? AND a.can_read = TRUE",
-                (result, row) -> summary(result), arguments.toArray());
-        java.util.Map<String, WorkspaceSummary> result =
+                (result, row) -> readableGrant(result), arguments.toArray());
+        java.util.Map<String, ReadableGrant> result =
                 new java.util.HashMap<>(rows.size() * 2);
-        for (WorkspaceSummary row : rows) {
+        for (ReadableGrant row : rows) {
             result.put(row.workspaceId(), row);
         }
         return result;
@@ -224,8 +226,40 @@ public class ManagedWorkspaceRegistry {
                         && "ACTIVE".equals(state));
     }
 
+    private static ReadableGrant readableGrant(ResultSet result)
+            throws SQLException {
+        String state = result.getString("state");
+        return new ReadableGrant(result.getString("workspace_id"),
+                result.getLong("workspace_generation"),
+                result.getString("storage_id"),
+                result.getBoolean("can_create")
+                        && "ACTIVE".equals(state));
+    }
+
+    /**
+     * Whether the registry still holds the Workspace generation and storage a
+     * Session was bound to; a re-registration changes them.
+     */
+    public boolean bindingCurrent(String tenantId, String workspaceId,
+            long generation, String storageId) {
+        return !jdbc.queryForList("SELECT 1 FROM managed_workspace_registry"
+                + " WHERE tenant_id = ? AND workspace_id = ?"
+                + " AND workspace_generation = ? AND storage_id = ?",
+                Integer.class, tenantId, workspaceId, generation, storageId)
+                .isEmpty();
+    }
+
     public record WorkspaceSummary(String workspaceId, String displayName,
             String state, boolean canCreateSession) {
+    }
+
+    /**
+     * A readable Workspace with the generation and storage the registry holds
+     * now, so a batch caller can tell whether a Session's recorded binding is
+     * still the current one.
+     */
+    public record ReadableGrant(String workspaceId, long workspaceGeneration,
+            String storageId, boolean canCreateSession) {
     }
 
     public ResolvedBinding resolveForCreation(String tenantId,
