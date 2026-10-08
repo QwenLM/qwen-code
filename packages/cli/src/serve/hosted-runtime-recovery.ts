@@ -36,7 +36,7 @@ import {
 } from './hosted-workspace-broker.js';
 
 /** The parked turn is not one this recovery can drive; the caller 409s. */
-class RecoveryDeclined extends Error {}
+export class RecoveryDeclined extends Error {}
 
 export interface HostedRuntimeRecoveryExecution {
   functionCallId: string;
@@ -377,6 +377,65 @@ export type HostedInterruptedTurnRuntime =
   | { readonly kind: 'held' };
 
 /**
+ * Answers every functionCall the dead Turn still owes with a cancelled
+ * functionResponse: its assistant message is durable, and a resumed
+ * thread carrying a dangling call is a malformed request the provider
+ * rejects. Retry-safe — the answered set is re-derived from the journal
+ * on every attempt, exactly like the parked-Runtime counterpart above.
+ */
+async function answerAbandonedTurnCalls(input: {
+  session: ManagedSession;
+  sessionId: string;
+  cwd: string;
+  promptId: string;
+  message: string;
+}): Promise<void> {
+  const records = (await input.session.sink.project()).filter(
+    (entry) => entry.daemonPromptId === input.promptId,
+  );
+  const answered = new Set(
+    records
+      .filter((entry) => entry.type === 'tool_result')
+      .flatMap((entry) => entry.message?.parts ?? [])
+      .map((part) => part.functionResponse?.id)
+      .filter((id): id is string => typeof id === 'string'),
+  );
+  const owed = new Map<string, { name: string; messageId: string }>();
+  for (const record of records.filter((entry) => entry.type === 'assistant'))
+    for (const part of record.message?.parts ?? []) {
+      const call = part.functionCall;
+      if (call?.id && call.name && !answered.has(call.id) && !owed.has(call.id))
+        owed.set(call.id, { name: call.name, messageId: record.uuid });
+    }
+  for (const [functionCallId, call] of owed) {
+    const parts = convertToFunctionErrorResponse(
+      call.name,
+      functionCallId,
+      [],
+      `The tool call never ran: ${input.message}.`,
+    );
+    const response = parts[0]?.functionResponse;
+    if (!response || parts.length !== 1)
+      throw new Error('Runtime result cannot be represented durably.');
+    response.response = {
+      ...response.response,
+      executionStatus: 'cancelled',
+    };
+    await input.session.sink.write({
+      uuid: randomUUID(),
+      parentUuid: call.messageId,
+      sessionId: input.sessionId,
+      timestamp: new Date().toISOString(),
+      type: 'tool_result',
+      cwd: input.cwd,
+      version: 'hosted-harness/1',
+      daemonPromptId: input.promptId,
+      message: { role: 'user', parts },
+    });
+  }
+}
+
+/**
  * H5/F5 follow-up: the Runtime-facing settlement of an interrupted Turn
  * ahead of its terminal record. A Turn that died inside a tool call parked
  * its checkpoint in `await_runtime`, and a terminal record advances the
@@ -387,12 +446,16 @@ export type HostedInterruptedTurnRuntime =
  * round), and drop the dead Turn's pending file-history obligation on
  * every reachable checkpoint — a retry whose first attempt already left
  * the wait included — or the terminal record strands the marker at
- * `before_model`, where no load can ever clear it. The returned Broker
- * releases after the caller's terminal record is durable, never before.
- * Throws with nothing settled when the stop cannot be proven, leaving the
- * Turn to the recovery fleet; a checkpoint the authorization could not
- * verify (a faulting Store read erases into `missing_state`) refuses the
- * same way rather than being mistaken for "no Runtime wait to settle".
+ * `before_model`, where no load can ever clear it. A Turn parked in
+ * `await_action` is held while its approval stays `requested`, so the
+ * resolve route stays usable; once the durable Action decides, the wait
+ * is advanced and the abandoned calls answered before the terminal
+ * record lands. The returned Broker releases after the caller's terminal
+ * record is durable, never before. Throws with nothing settled when the
+ * stop cannot be proven, leaving the Turn to the recovery fleet; a
+ * checkpoint the authorization could not verify (a faulting Store read
+ * erases into `missing_state`) refuses the same way rather than being
+ * mistaken for "no Runtime wait to settle".
  */
 export async function settleInterruptedTurnRuntime(input: {
   session: ManagedSession;
@@ -404,16 +467,45 @@ export async function settleInterruptedTurnRuntime(input: {
 }): Promise<HostedInterruptedTurnRuntime> {
   const authorization = await input.session.authority.harnessRunAuthorization();
   // Only a committed, readable checkpoint — or the durable absence of any
-  // — can prove what the interrupted Turn left parked. Every blocked
-  // verdict is an unverifiable checkpoint, never evidence of no wait.
-  if (authorization.status === 'blocked') throw new RecoveryDeclined();
+  // — can prove what the interrupted Turn left parked. A durably blocked
+  // verdict names permanent damage and stays with the recovery fleet;
+  // a transient one (a faulting Store read erased into missing_state)
+  // refuses this attempt the same, but as an ordinary fault so the caller
+  // can retry — it is never evidence of no wait either way (R4/R6 P1).
+  if (authorization.status === 'blocked') {
+    if (!isDurableBlockedVerdict(authorization))
+      throw new Error(
+        `interrupted turn checkpoint could not be verified (blocked/${authorization.reason})`,
+      );
+    throw new RecoveryDeclined();
+  }
   let broker: HostedWorkspaceBroker | undefined;
   if (
     authorization.status === 'runnable' &&
     authorization.checkpoint.identity.turnId === input.promptId
   ) {
     const phase = authorization.checkpoint.continuation.phase;
-    if (phase === 'await_action') return { kind: 'held' };
+    if (phase === 'await_action') {
+      const requestId = authorization.checkpoint.approval?.requestId;
+      const action =
+        requestId === undefined
+          ? undefined
+          : input.session.authority.action(requestId);
+      if (action === undefined || action.state === 'requested')
+        return { kind: 'held' };
+      // The final Action outlives the owner that died asking: advance the
+      // wait the way the close path does, then answer every call the
+      // model is still owed — a dangling functionCall makes the resumed
+      // thread a malformed request the provider rejects.
+      await createManagedHarnessHandle(input.session).resolveDurableWait();
+      await answerAbandonedTurnCalls({
+        session: input.session,
+        sessionId: input.sessionId,
+        cwd: input.cwd,
+        promptId: input.promptId,
+        message: `the approval ended ${action.state} after the Harness that asked was interrupted`,
+      });
+    }
     if (phase === 'await_runtime') {
       // Symmetric with the continue/cancel routes: without the tool
       // profile or the Broker there is no way to prove the parked

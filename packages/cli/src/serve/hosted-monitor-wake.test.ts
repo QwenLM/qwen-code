@@ -174,12 +174,14 @@ describe('HostedMonitorWakeScheduler', () => {
     );
     scheduler.kick();
     await new Promise((resolve) => setTimeout(resolve, 50));
-    // A durable owner holds the wait: no 10 ms retry re-reads behind it,
-    // and an unconsumed input is not a programming error here.
+    // A held turn takes no busy retry and no settle-verify: one read, no
+    // second inside the slow window (retryMs × 30 = 300 ms here).
     expect(reads).toBe(1);
     expect(queue).toHaveLength(1);
+    // …but the pump observes the wait on its own: the slow retry
+    // re-derives without any outside kick, so a decided Action is seen.
+    await poll(() => reads >= 2);
     verdict = 'settled';
-    scheduler.kick();
     await poll(() => queue.length === 0);
     scheduler.close();
   });
@@ -621,6 +623,49 @@ describe('createMonitorWakeRunTurn', () => {
       expect(
         lines.some((line) => line.includes('keeps its durable wait')),
       ).toBe(true);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
+  it('passes a transiently faulted recovery through as busy without blocking', async () => {
+    // The R6 P1 arm: a one-shot fault ends the attempt but the recovery
+    // proof still stands — busy, never a first-attempt terminal block.
+    const { session, lease } = await openWakeSession();
+    try {
+      const access: MonitorWakeTurnSession['session'] = {
+        active: undefined,
+        blocked: false,
+        managed: { sink: session.sink },
+      };
+      await session.sink.write({
+        uuid: 'chin-3:user',
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'user',
+        cwd: '/workspace',
+        version: 'test',
+        daemonPromptId: 'chin-3',
+        message: { role: 'user', parts: [{ text: 'channel' }] },
+      } as ChatRecord);
+      const runTurn = createMonitorWakeRunTurn({
+        session: access,
+        sessionId,
+        cwd: '/workspace',
+        executeHostedTurn: async () => {
+          throw new Error('a busy recovery must not re-drive');
+        },
+        busy: () => access.active !== undefined,
+        needsRecovery,
+        settleInterrupted: async () => 'busy',
+        writeStderr: () => undefined,
+      });
+      expect(
+        await runTurn({ turnId: 'chin-3', text: 'channel', source: 'channel' }),
+      ).toBe('busy');
+      expect(access.blocked).toBe(false);
+      expect(access.active).toBeUndefined();
     } finally {
       await lease.release().catch(() => undefined);
     }

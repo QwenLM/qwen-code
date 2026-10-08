@@ -59,12 +59,12 @@ export interface HostedMonitorWakeDeps {
    * marks the owner blocked when the turn cannot settle. Returns 'busy'
    * when the owner took a turn synchronously between the pump's state
    * check and this call — the pump retries; 'held' when a durable owner
-   * (a pending approval) holds the wait — the pump stops without
-   * blocking, leaving its resolve route usable until the next kick
-   * re-derives; anything else must consume the input (the pump verifies
-   * the settle before taking the next one). The busy claim must be
-   * checked and taken synchronously at the top of the call so a prompt
-   * route admission cannot interleave.
+   * (a pending approval) holds the wait — the pump re-derives on its slow
+   * cadence without blocking, leaving the resolve route usable and
+   * observing the final Action itself; anything else must consume the
+   * input (the pump verifies the settle before taking the next one). The
+   * busy claim must be checked and taken synchronously at the top of the
+   * call so a prompt route admission cannot interleave.
    */
   runTurn(turn: HostedMonitorWakeTurn): Promise<'settled' | 'busy' | 'held'>;
   /** A failure the pump itself cannot recover: the owner decides. */
@@ -80,6 +80,10 @@ export class HostedMonitorWakeScheduler {
   constructor(
     private readonly deps: HostedMonitorWakeDeps,
     private readonly retryMs = 500,
+    // A held wait's owner decides on a human timescale: re-derive on a slow
+    // cadence rather than the busy retry's, so the pump observes the final
+    // Action without hammering the Store behind an approval.
+    private readonly holdRetryMs = retryMs * 30,
   ) {}
 
   /**
@@ -139,10 +143,14 @@ export class HostedMonitorWakeScheduler {
         this.armRetry();
         return;
       }
-      // A held wait belongs to its durable owner (a pending approval):
-      // neither a retry nor a settle-verify applies — the next kick
-      // re-derives after the owner decides.
-      if (outcome === 'held') return;
+      // A held wait belongs to its durable owner (a pending approval): no
+      // busy retry and no settle-verify — but the durable Action decides
+      // in this process, so the pump re-derives on the slow cadence and
+      // settles the ended wait itself instead of waiting for a new input.
+      if (outcome === 'held') {
+        this.armRetry(this.holdRetryMs);
+        return;
+      }
       // runTurn must have consumed the input: re-reading the journal is
       // the only honest check, and consuming is what lets the next
       // notification's turn begin. When the owner's own settle path went
@@ -160,12 +168,12 @@ export class HostedMonitorWakeScheduler {
     }
   }
 
-  private armRetry(): void {
+  private armRetry(delayMs = this.retryMs): void {
     if (this.retry !== undefined) return;
     this.retry = setTimeout(() => {
       this.retry = undefined;
       this.kick();
-    }, this.retryMs);
+    }, delayMs);
     this.retry.unref();
   }
 }

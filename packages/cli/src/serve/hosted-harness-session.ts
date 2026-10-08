@@ -114,6 +114,7 @@ import { HostedTextDeltaStream } from './hosted-text-deltas.js';
 import {
   isDurableBlockedVerdict,
   recoverHostedRuntimeTurn,
+  RecoveryDeclined,
   settleInterruptedTurnRuntime,
   settleParkedTurnCancelled,
   stopParkedRuntimeExecutions,
@@ -2560,6 +2561,10 @@ export function registerHostedHarnessSessionRoutes(
           state: () =>
             wakeBlocked() ? 'blocked' : wakeBusy() ? 'busy' : 'idle',
           runTurn: (() => {
+            // One deferral log per turn, ever: a transiently faulting
+            // recovery retries on the busy cadence, and seven hundred
+            // identical lines an hour hide the one that matters.
+            const deferredWakeRecovery = new Set<string>();
             const runWakeTurn = createMonitorWakeRunTurn({
               session,
               sessionId,
@@ -2602,6 +2607,33 @@ export function registerHostedHarnessSessionRoutes(
                     toolProfile: session.toolProfile !== undefined,
                   });
                 } catch (cause) {
+                  // R6 P1: a durable decline freezes for the fleet, but a
+                  // transient fault — a faulting Store read, a Broker
+                  // hiccup behind an otherwise verifiable checkpoint —
+                  // must stay retryable on the busy cadence instead of
+                  // latching the Session blocked on the first attempt.
+                  if (!(cause instanceof RecoveryDeclined)) {
+                    const retryable = await session.managed.authority
+                      .harnessRunAuthorization()
+                      .then(
+                        (verdict) =>
+                          verdict.status !== 'blocked' ||
+                          !isDurableBlockedVerdict(verdict),
+                      )
+                      .catch(() => true);
+                    if (retryable) {
+                      if (!deferredWakeRecovery.has(turn.turnId)) {
+                        deferredWakeRecovery.add(turn.turnId);
+                        writeStderrLineSafe(
+                          'qwen serve: Interrupted channel wake turn ' +
+                            turn.turnId +
+                            ' defers its recovery to the next wake attempt: ' +
+                            String(cause),
+                        );
+                      }
+                      return 'busy';
+                    }
+                  }
                   writeStderrLineSafe(
                     'qwen serve: Interrupted channel wake turn ' +
                       turn.turnId +

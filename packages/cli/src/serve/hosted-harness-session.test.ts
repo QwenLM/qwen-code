@@ -1679,12 +1679,12 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(404);
   });
 
-  it('recovers a channel turn interrupted inside a Write at attachment instead of refusing the load', async () => {
-    // The R4 P1 witness: a channel turn died inside write_file, leaving an
-    // await_runtime checkpoint and file_history.pendingTurn. The load gate
-    // refused every attachment shape (the input is pump-owned, so no
-    // takeover can match the marker) and the pump that would settle the
-    // turn never started. The gate now lets the pump's own recovery load.
+  /**
+   * A channel turn died inside write_file, leaving an await_runtime
+   * checkpoint and file_history.pendingTurn. Shared by the attachment
+   * and the transient-retry witnesses.
+   */
+  async function prewriteChannelWriteInterruption(): Promise<string> {
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -1867,6 +1867,15 @@ describe('Hosted Harness no-tool session', () => {
     } finally {
       await managed.close();
     }
+    return channelTurn;
+  }
+
+  it('recovers a channel turn interrupted inside a Write at attachment instead of refusing the load', async () => {
+    // The R4 P1 witness: the load gate refused every attachment shape (the
+    // input is pump-owned, so no takeover can match the marker) and the
+    // pump that would settle the turn never started. The gate now lets the
+    // pump's own recovery load.
+    const channelTurn = await prewriteChannelWriteInterruption();
     mockBrokerBroker();
     vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
       state: 'settled',
@@ -1887,7 +1896,11 @@ describe('Hosted Harness no-tool session', () => {
       async () => {
         const journal = await LocalJsonlManagedSessionJournalStore.read(
           path.join(state.root, `${SESSION_ID}.jsonl`),
-          key,
+          {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
         );
         const settled = journal.events.filter(
           (event) =>
@@ -1919,6 +1932,68 @@ describe('Hosted Harness no-tool session', () => {
     expect(
       vi.mocked(HostedWorkspaceBroker.prototype.release),
     ).toHaveBeenCalled();
+    expect(
+      (
+        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+          'X-Qwen-Client-Id',
+          clientId,
+        )
+      ).status,
+    ).toBe(204);
+  });
+
+  it('retries an interrupted channel Write recovery after a transient fault instead of latching blocked', async () => {
+    // The R6 P1 witness: one Broker-status fault, healthy afterwards. The
+    // pump must not latch session.blocked on the first attempt — it
+    // retries and the settlement still lands.
+    const channelTurn = await prewriteChannelWriteInterruption();
+    mockBrokerBroker();
+    const status = vi.spyOn(HostedWorkspaceBroker.prototype, 'status');
+    status.mockRejectedValueOnce(new Error('broker hiccup'));
+    status.mockResolvedValue({ state: 'settled' });
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-files/1',
+    });
+    expect(loaded.status).toBe(200);
+    const clientId = loaded.body.clientId as string;
+    await vi.waitFor(
+      async () => {
+        const journal = await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
+        );
+        const settled = journal.events.filter(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === channelTurn,
+        );
+        expect(settled).toHaveLength(1);
+        expect(settled[0]!.payload).toMatchObject({ outcome: 'cancelled' });
+      },
+      { timeout: 10_000 },
+    );
+    // The first attempt died at the fault; the busy retry proved the stop
+    // on the second pass — never a terminal block.
+    expect(status.mock.calls.length).toBeGreaterThanOrEqual(2);
+    await vi.waitFor(
+      async () => {
+        const history = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/files/history`),
+        )
+          .set('X-Qwen-Client-Id', clientId)
+          .expect(200);
+        expect(history.body.history?.pendingTurn ?? null).toBeNull();
+      },
+      { timeout: 10_000 },
+    );
     expect(
       (
         await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(

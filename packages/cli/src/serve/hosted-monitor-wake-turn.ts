@@ -73,12 +73,14 @@ export function createMonitorWakeRunTurn(params: {
    * settled and the pump continues without freezing the Session; 'held'
    * means a durable approval owns the wait and the Session must stay
    * usable — blocking it would refuse the approval's own resolve route;
-   * absent or false keeps the recovery-blocked freeze.
+   * 'busy' means the recovery proof stands but a transient fault ended
+   * this attempt, so the pump retries it like any synchronous
+   * contention; absent or false keeps the recovery-blocked freeze.
    */
   readonly settleInterrupted?: (
     turn: HostedMonitorWakeTurn,
     attempted: ChatRecord[],
-  ) => Promise<'settled' | 'held' | false>;
+  ) => Promise<'settled' | 'held' | 'busy' | false>;
   readonly writeStderr: (line: string) => void;
 }): (turn: HostedMonitorWakeTurn) => Promise<'settled' | 'busy' | 'held'> {
   const { session } = params;
@@ -102,6 +104,12 @@ export function createMonitorWakeRunTurn(params: {
             ' keeps its durable wait for its approval; the Session stays usable.',
         );
         return 'held';
+      }
+      if (interrupted === 'busy') {
+        // A transiently faulted recovery attempt: the proof discipline
+        // still stands (nothing settled), and the pump's busy retry is
+        // the only re-drive that does not mint a second user record.
+        return 'busy';
       }
       // The notification ran and died inside the turn it started.
       // Re-driving it text-only would mint a second user record and an
