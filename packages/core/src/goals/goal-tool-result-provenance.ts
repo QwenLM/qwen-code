@@ -126,7 +126,9 @@ export function ambientGoalToolResultProvenance(
  * The subtype stamp that marks a nested Code Mode tool result as an original
  * record: the outer `exec` script can discard or rewrite nested output, so
  * these separately recorded results -- not the aggregate `exec` response --
- * are the ones the evidence catalog and transcript replays read.
+ * are the ones the Goal evidence catalog reads. The replay projections
+ * deliberately skip them (`isInternalCodeModeToolResult`): internal calls
+ * have no model-emitted function-call partner.
  *
  * Both writer sites own a different carrier for the stamp (the scheduler
  * merges it into `goalToolResultProvenance`'s options, the ACP session spreads
