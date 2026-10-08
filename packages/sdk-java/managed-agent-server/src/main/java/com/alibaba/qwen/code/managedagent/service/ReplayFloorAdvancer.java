@@ -3,6 +3,9 @@ package com.alibaba.qwen.code.managedagent.service;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -37,16 +40,34 @@ public class ReplayFloorAdvancer {
         if (!properties.getEvents().isReplayFloorEnabled()) {
             return;
         }
-        for (ReplayFloorTarget target :
-                store.findReplayFloorTargets(TARGET_LIMIT)) {
-            try {
-                // MAX_VALUE asks for as far as the Snapshot proves safe; the
-                // store clamps the floor to the Snapshot's covered sequence.
-                store.advanceReplayFloor(target.tenantId(), target.sessionId(),
-                        Long.MAX_VALUE);
-            } catch (RuntimeException error) {
-                LOG.warn("Failed to advance the replay floor of Managed Agent"
-                        + " session {}", target.sessionId(), error);
+        // A pass drains the backlog, not just the first batch: the candidate
+        // query orders by updated_at, which the advance never moves, so a
+        // Session that keeps appending would sort last of every full batch
+        // and starve while more than TARGET_LIMIT candidates remain. A target
+        // whose advance keeps failing stays a candidate, so the attempted set
+        // keeps it from wedging the pass.
+        Set<ReplayFloorTarget> attempted = new HashSet<>();
+        while (true) {
+            List<ReplayFloorTarget> batch =
+                    store.findReplayFloorTargets(TARGET_LIMIT);
+            boolean fresh = false;
+            for (ReplayFloorTarget target : batch) {
+                if (!attempted.add(target)) {
+                    continue;
+                }
+                fresh = true;
+                try {
+                    // MAX_VALUE asks for as far as the Snapshot proves safe;
+                    // the store clamps the floor to the covered sequence.
+                    store.advanceReplayFloor(target.tenantId(),
+                            target.sessionId(), Long.MAX_VALUE);
+                } catch (RuntimeException error) {
+                    LOG.warn("Failed to advance the replay floor of Managed"
+                            + " Agent session {}", target.sessionId(), error);
+                }
+            }
+            if (!fresh || batch.size() < TARGET_LIMIT) {
+                return;
             }
         }
     }

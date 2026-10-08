@@ -3,8 +3,11 @@ package com.alibaba.qwen.code.managedagent.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -14,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -25,7 +29,8 @@ import org.springframework.boot.test.context.SpringBootTest;
  * The retention pass raises a Session's replay floor as far as its Snapshot
  * proves safe, and only when it is enabled: the store is never touched while
  * {@code replay-floor-enabled} is false, a converged Session is never
- * selected again, and one failing Session does not stop the rest.
+ * selected again, one failing Session does not stop the rest, and a backlog
+ * beyond one batch is drained within the pass without retrying the failure.
  */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:managed-replay-floor;MODE=MySQL;"
@@ -93,6 +98,52 @@ class ReplayFloorAdvancerTest {
                 Long.MAX_VALUE);
         verify(mockStore).advanceReplayFloor("tenant-b", "session-b",
                 Long.MAX_VALUE);
+    }
+
+    @Test
+    void aFullBacklogIsDrainedUntilAShortBatch() {
+        AgentStateStore mockStore = mock(AgentStateStore.class);
+        List<ReplayFloorTarget> first = new ArrayList<>();
+        for (int index = 0; index < 64; index++) {
+            first.add(new ReplayFloorTarget("tenant-a", "session-" + index));
+        }
+        List<ReplayFloorTarget> rest = List.of(
+                new ReplayFloorTarget("tenant-a", "session-64"),
+                new ReplayFloorTarget("tenant-a", "session-65"));
+        when(mockStore.findReplayFloorTargets(anyInt()))
+                .thenReturn(first, rest);
+
+        enabledAdvancer(mockStore).advance();
+
+        verify(mockStore, times(2)).findReplayFloorTargets(64);
+        verify(mockStore, times(66)).advanceReplayFloor(anyString(),
+                anyString(), eq(Long.MAX_VALUE));
+        verify(mockStore).advanceReplayFloor("tenant-a", "session-64",
+                Long.MAX_VALUE);
+        verify(mockStore).advanceReplayFloor("tenant-a", "session-65",
+                Long.MAX_VALUE);
+    }
+
+    @Test
+    void aFailingTargetIsNotRetriedWithinAPass() {
+        AgentStateStore mockStore = mock(AgentStateStore.class);
+        List<ReplayFloorTarget> batch = new ArrayList<>();
+        for (int index = 0; index < 64; index++) {
+            batch.add(new ReplayFloorTarget("tenant-a", "session-" + index));
+        }
+        // The failed advance leaves session-0 a candidate, so the next fetch
+        // returns the same full batch; the pass must skip what it tried.
+        when(mockStore.findReplayFloorTargets(anyInt())).thenReturn(batch);
+        doThrow(new IllegalStateException("locked")).when(mockStore)
+                .advanceReplayFloor("tenant-a", "session-0", Long.MAX_VALUE);
+
+        enabledAdvancer(mockStore).advance();
+
+        verify(mockStore, times(2)).findReplayFloorTargets(64);
+        verify(mockStore, times(64)).advanceReplayFloor(anyString(),
+                anyString(), eq(Long.MAX_VALUE));
+        verify(mockStore, times(1)).advanceReplayFloor("tenant-a",
+                "session-0", Long.MAX_VALUE);
     }
 
     @Test
