@@ -136,7 +136,9 @@ class WorkspaceRuntimeTest {
             case "unknown-execution" -> {
                 var execution = ToolExecutionRecord.prepared(UUID.randomUUID().toString(), UUID.randomUUID().toString(),
                         stopped.getBindingId(), stopped.getGeneration(), fixture.session().getSession().getHarnessSessionId(),
-                        fixture.session().getRuntimeSessionId(), "prompt", "call", "digest", Map.of()).withUnknown();
+                        fixture.session().getRuntimeSessionId(), "prompt", "call", "digest",
+                        Map.of("sessionId", fixture.session().getRuntimeSessionId(), "promptId", "prompt",
+                                "callId", "call", "argsDigest", "digest")).withUnknown();
                 fixture.executions().findOrCreate(execution);
             }
             default -> throw new AssertionError(fault);
