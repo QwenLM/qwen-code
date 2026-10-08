@@ -36,7 +36,10 @@ describe('getExtractNoopSkipTurns', () => {
       process.env[EXTRACT_NOOP_SKIP_TURNS_ENV] = raw;
       // Number() accepts '1.5', '-1' and '0x2'; the digit check is what
       // rejects them, so a skip window can never be armed by a typo.
-      expect(getExtractNoopSkipTurns(), raw).toBe(0);
+      expect({ raw, turns: getExtractNoopSkipTurns() }).toEqual({
+        raw,
+        turns: 0,
+      });
     }
   });
 
@@ -50,7 +53,10 @@ describe('getExtractNoopSkipTurns', () => {
     expect(getExtractNoopSkipTurns()).toBe(0);
     for (const raw of ['3', '4', '999']) {
       process.env[EXTRACT_NOOP_SKIP_TURNS_ENV] = raw;
-      expect(getExtractNoopSkipTurns(), raw).toBe(MAX_EXTRACT_NOOP_SKIP_TURNS);
+      expect({ raw, turns: getExtractNoopSkipTurns() }).toEqual({
+        raw,
+        turns: MAX_EXTRACT_NOOP_SKIP_TURNS,
+      });
     }
   });
 });
