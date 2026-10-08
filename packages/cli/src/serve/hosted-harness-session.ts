@@ -1827,6 +1827,11 @@ export function registerHostedHarnessSessionRoutes(
       error(res, 409, 'hosted_session_closing');
       return;
     }
+    if (resident.active !== undefined) {
+      noteOwedAdoption(resident, sessionId);
+      error(res, 409, 'hosted_turn_active');
+      return;
+    }
     refusedAdoptions.delete(sessionId);
     resident.blocked = false;
     sendAttachment(res, sessionId, resident);

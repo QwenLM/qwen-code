@@ -9831,6 +9831,146 @@ describe('Hosted Harness Runtime turn takeover', () => {
     },
   );
 
+  it('refuses a resident inapplicable redrive while a rewind owns the prompt slot', async () => {
+    const realAuthorization =
+      LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
+    await parkToolTurn();
+    vi.mocked(HostedWorkspaceBroker.prototype.execute).mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'written' }],
+    } as never);
+    const { server, loaded } = await loadReplacement();
+    const recovery = loaded.body._meta['qwen.daemon.managedRuntimeRecovery'];
+    const originalWrite = ManagedSessionRecordSink.prototype.write;
+    const write = vi
+      .spyOn(ManagedSessionRecordSink.prototype, 'write')
+      .mockImplementation(function (this: ManagedSessionRecordSink, item) {
+        if (item.subtype === 'turn_result')
+          return Promise.reject(new Error('terminal write unavailable'));
+        return originalWrite.call(this, item);
+      });
+    await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      })
+      .expect(200);
+    await vi.waitFor(async () => {
+      const status = await replacementHeaders(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', loaded.body.clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+      expect(status.body.recoveryBlocked).toBe(true);
+    });
+    write.mockRestore();
+    // An approval-pending redrive answers the inapplicable resident without
+    // a projection, clearing the resident latch.
+    mockAuthorizationWithPhase('await_approval', { state: 'requested' });
+    const armed = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+      driveRuntimeRecovery: true,
+    });
+    expect(armed.status).toBe(200);
+    // The next redrive turns payable: hold it inside
+    // settleProjectablePromptId, admit a rewind inside the window, and
+    // only then release the held read.
+    let resumeSettle!: () => void;
+    const settleHeld = new Promise<void>((resolve) => {
+      resumeSettle = resolve;
+    });
+    let settleParked = false;
+    let helperAnswered = false;
+    vi.mocked(
+      LocalManagedSessionAuthority.prototype.harnessRunAuthorization,
+    ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
+      if (helperAnswered && !settleParked) {
+        settleParked = true;
+        await settleHeld;
+      }
+      const authorization = await realAuthorization.call(this);
+      helperAnswered = true;
+      if (authorization.status !== 'runnable') return authorization;
+      return {
+        ...authorization,
+        checkpoint: {
+          ...authorization.checkpoint,
+          continuation: {
+            ...authorization.checkpoint.continuation,
+            phase: 'turn_settled',
+          },
+          approval: null,
+        },
+      } as never;
+    });
+    const redriven = replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({
+        managedSessionStore: storeFor(BOOT_ID_2),
+        toolProfile: FILE_PROFILE,
+        driveRuntimeRecovery: true,
+      })
+      .then((response) => response);
+    await vi.waitFor(() => {
+      expect(settleParked).toBe(true);
+    });
+    // The rewind's own history read is the only resource read in flight
+    // now, so gating it parks the rewind after it took the prompt slot.
+    let resumeRewindRead!: () => void;
+    const rewindReadHeld = new Promise<void>((resolve) => {
+      resumeRewindRead = resolve;
+    });
+    let rewindParked = false;
+    const realRead = LocalManagedSessionResourceStore.prototype.read;
+    const readSpy = vi
+      .spyOn(LocalManagedSessionResourceStore.prototype, 'read')
+      .mockImplementation(async function (
+        this: LocalManagedSessionResourceStore,
+        ...args: Parameters<LocalManagedSessionResourceStore['read']>
+      ) {
+        if (!rewindParked) {
+          rewindParked = true;
+          await rewindReadHeld;
+        }
+        return realRead.apply(this, args);
+      } as never);
+    const rewind = replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/files/rewind`),
+    )
+      .set('X-Qwen-Client-Id', armed.body.clientId)
+      .send({ requestId: randomUUID(), promptId: PROMPT_ID })
+      .then((response) => response);
+    await vi.waitFor(() => {
+      expect(rewindParked).toBe(true);
+    });
+    resumeSettle();
+    const refused = await redriven;
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_active');
+    // The rewind must keep its prompt slot: /status may never report the
+    // Session idle while a workspace mutation is in flight.
+    const during = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/status`),
+    ).set('X-Qwen-Client-Id', armed.body.clientId);
+    expect(during.body.hasActivePrompt).toBe(true);
+    resumeRewindRead();
+    readSpy.mockRestore();
+    await rewind;
+    await vi.waitFor(async () => {
+      const status = await replacementHeaders(
+        supertest(server).get(`/session/${SESSION_ID}/status`),
+      ).set('X-Qwen-Client-Id', armed.body.clientId);
+      expect(status.body.hasActivePrompt).toBe(false);
+    });
+  });
+
   it('refuses a cancellation takeover attachment deleted during settlement', async () => {
     const { server } = await parkToolTurn(true);
     const authorize =
