@@ -286,6 +286,12 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     );
     if (commandExists) return null;
 
+    // #13683: a bare authored name that uniquely matches one enabled
+    // extension skill resolves to it (exact registry identity and
+    // model-invocable commands take precedence above).
+    const authoredResolution = this.resolveAuthoredName(params.skill);
+    if (authoredResolution && 'name' in authoredResolution) return null;
+
     // Disabled-by-user branch — placed AFTER commandExists so a same-named
     // MCP prompt or file command can still pass validation. With the
     // `fileBasedSkillNames` exclusion in `refreshSkills`, a disabled skill
@@ -316,10 +322,39 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
         ...this.getModelInvocableCommands().map((c) => c.name),
       ]),
     ];
+    if (authoredResolution && 'candidates' in authoredResolution) {
+      return `Skill "${params.skill}" not found. The bare name matches multiple extension skills: ${authoredResolution.candidates.join(', ')}. Call one by its qualified name.`;
+    }
     if (availableNames.length === 0) {
       return `Skill "${params.skill}" not found. No skills are currently available.`;
     }
     return `Skill "${params.skill}" not found. Available skills: ${availableNames.join(', ')}`;
+  }
+
+  /**
+   * #13683: extension-contributed skills register under the qualified
+   * `<extension>:<authoredName>` identity, but extension docs (QWEN.md)
+   * often still teach the bare authored name. A bare request that
+   * uniquely matches one *enabled* skill's authoredName resolves to that
+   * skill's registry identity; multiple matches return the candidates so
+   * the caller can surface them instead of guessing. Security semantics
+   * are unchanged: capability grants (skills.enabled) keep matching the
+   * registry identity only.
+   */
+  private resolveAuthoredName(
+    requested: string,
+  ): { name: string } | { candidates: string[] } | null {
+    const cached = this.skillManager.getCachedSkills() ?? [];
+    const matches = cached.filter(
+      (skill) =>
+        skill.name !== requested &&
+        (skill.authoredName ?? '').trim() === requested &&
+        this.config.isSkillEnabled(skill),
+    );
+    if (matches.length === 1) return { name: matches[0]!.name };
+    if (matches.length > 1)
+      return { candidates: matches.map((skill) => skill.name) };
+    return null;
   }
 
   /**
@@ -707,6 +742,26 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     }
   }
 
+  // #13683 (invocation-side twin of SkillTool.resolveAuthoredName): a
+  // bare authored name that uniquely matches one enabled skill resolves
+  // to its registry identity for the runtime load; ambiguous matches
+  // return the candidates so callers surface them.
+  private resolveAuthoredName(
+    requested: string,
+  ): { name: string } | { candidates: string[] } | null {
+    const cached = this.skillManager.getCachedSkills() ?? [];
+    const matches = cached.filter(
+      (skill) =>
+        skill.name !== requested &&
+        (skill.authoredName ?? '').trim() === requested &&
+        this.config.isSkillEnabled(skill),
+    );
+    if (matches.length === 1) return { name: matches[0]!.name };
+    if (matches.length > 1)
+      return { candidates: matches.map((skill) => skill.name) };
+    return null;
+  }
+
   private async executeDisabledSkill(): Promise<ToolResult> {
     let disabledCommandFallbackAttempted = false;
     if (this.commandExecutor) {
@@ -804,6 +859,15 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       return { llmContent: msg, returnDisplay: msg };
     }
 
+    // #13683: resolve a bare authored name to its registry identity so
+    // the disabled guard and the runtime load below see the qualified
+    // name. Exact registry identities pass through unchanged.
+    const authoredResolution = this.resolveAuthoredName(this.params.skill);
+    const effectiveSkill =
+      authoredResolution && 'name' in authoredResolution
+        ? authoredResolution.name
+        : this.params.skill;
+
     // Disabled-skill guard. Mirrors validateToolParams's commandExists →
     // disabled ordering at the execution layer: when a skill is disabled
     // but a same-named non-skill command (MCP prompt, file command)
@@ -814,7 +878,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     // command.
     const disabled = this.config
       .getDisabledSkillNames()
-      .has(this.params.skill.toLowerCase());
+      .has(effectiveSkill.toLowerCase());
     if (disabled) {
       return this.executeDisabledSkill();
     }
@@ -824,7 +888,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     try {
       // Load the skill with runtime config (includes additional files)
       const skill = await this.skillManager.loadSkillForRuntime(
-        this.params.skill,
+        effectiveSkill,
       );
       if (skill && !this.config.isSkillEnabled(skill)) {
         return this.executeDisabledSkill();
