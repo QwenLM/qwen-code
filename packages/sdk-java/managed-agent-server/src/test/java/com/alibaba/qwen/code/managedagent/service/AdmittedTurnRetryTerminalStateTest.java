@@ -43,11 +43,16 @@ import org.mockito.InOrder;
  */
 class AdmittedTurnRetryTerminalStateTest {
     // 10 is exactly the spent budget; 42 is far past it.
-    @ParameterizedTest(name = "retryCount = {0}")
-    @ValueSource(ints = {10, 42})
+    @ParameterizedTest(name = "retryCount = {0}, refusalCode = {1}")
+    @CsvSource({"10,", "42,", "5, hosted_turn_recovery_required",
+            "5, hosted_prompt_recovery_required"})
     void admittedTurnFailsAfterThePostAdmissionRetryBudgetIsSpent(
-            int retryCount) {
-        Dispatched dispatched = dispatchTransientFailure(retryCount);
+            int retryCount, String refusalCode) {
+        DaemonHttpException refusal = mock(DaemonHttpException.class);
+        when(refusal.getStatusCode()).thenReturn(refusalCode == null ? 503 : 409);
+        when(refusal.getErrorCode()).thenReturn(refusalCode);
+        Dispatched dispatched = dispatchTransientFailure(retryCount,
+                new ManagedAgentProperties(), refusal);
         AgentStateStore store = dispatched.store();
 
         // A distinct code from pre-admission exhaustion: the Turn may have
@@ -59,7 +64,9 @@ class AdmittedTurnRetryTerminalStateTest {
         InOrder order = inOrder(store, dispatched.harness());
         order.verify(dispatched.harness()).cancel("tenant", "session");
         order.verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
-                anyString(), eq("hosted_harness_unavailable_after_admission"),
+                anyString(), eq(refusalCode == null
+                        ? "hosted_harness_unavailable_after_admission"
+                        : refusalCode),
                 anyString());
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
                 anyString(), anyString(), anyLong());

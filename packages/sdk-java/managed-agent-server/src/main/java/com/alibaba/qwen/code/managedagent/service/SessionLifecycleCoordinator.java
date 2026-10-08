@@ -219,6 +219,9 @@ public class SessionLifecycleCoordinator {
                     && operationIsLifecycle(claimed)) {
                 blocked = "workspace_lifecycle_hooks_unsettled";
             }
+            if (blocked != null) {
+                failureCode = blocked;
+            }
             // Two settle outcomes wait on a condition the retry itself or
             // an operator can still change, so the budget must not
             // terminate them and their attempts must not consume it: a live
@@ -330,7 +333,8 @@ public class SessionLifecycleCoordinator {
             }
             if (valid.get() && blocked != null) {
                 store.blockLifecycleOperation(tenantId, sessionId, operationId, owner,
-                        claimed.claimGeneration(), blocked, Math.addExact(clock.millis(), delay));
+                        claimed.claimGeneration(), blocked, Math.addExact(clock.millis(), delay),
+                        writerLive || staleBoot);
             } else if (valid.get() && writerLive
                     && claimed.attemptCount() >= maxOperationRetries) {
                 // Past the budget the writer wait is published: the row reads
@@ -380,6 +384,10 @@ public class SessionLifecycleCoordinator {
     // protocol error recur on every attempt until an operator realigns the
     // versions, and both are thrown before the Harness is asked to stop.
     private static boolean retryable(Throwable cause) {
+        if (cause instanceof com.alibaba.qwen.code.managedagent.api.ApiException apiError
+                && apiError.getStatus().is4xxClientError()) {
+            return "workspace_lifecycle_writer_active".equals(apiError.getCode());
+        }
         if (cause instanceof HostedHarnessCapabilityMismatchException
                 || cause instanceof DaemonProtocolException) {
             return false;

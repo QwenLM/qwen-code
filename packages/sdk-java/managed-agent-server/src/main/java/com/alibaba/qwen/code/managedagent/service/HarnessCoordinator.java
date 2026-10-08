@@ -1080,7 +1080,7 @@ public class HarnessCoordinator {
                 // refusal above. Without that mark the same code arrives
                 // from the open-LOAD path, whose reviewed exhaustion
                 // answer is the generic unavailable.
-                return fail(turn, false, http.getErrorCode().length() > 128
+                return fail(turn, turn.submissionAttempted(), http.getErrorCode().length() > 128
                         ? http.getErrorCode().substring(0, 128)
                         : http.getErrorCode(),
                         "Hosted Harness refused the Turn before Turn"

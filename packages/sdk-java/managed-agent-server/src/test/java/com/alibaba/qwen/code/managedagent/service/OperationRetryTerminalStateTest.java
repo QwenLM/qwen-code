@@ -64,20 +64,26 @@ class OperationRetryTerminalStateTest {
     // with its code instead of a healthy pending retry — and the attempt is
     // recorded budget-exempt so the wait never consumes the budget the close
     // itself still has.
-    @ParameterizedTest(name = "attemptCount = {0}")
-    @ValueSource(ints = {10, 40})
+    @ParameterizedTest(name = "attemptCount = {0}, lifecycleProtocol = {1}")
+    @CsvSource({"10, 0", "40, 0", "10, 1", "40, 1"})
     void lifecycleOperationKeepsWaitingPastTheBudgetWhileAWriterIsLive(
-            int attemptCount) {
+            int attemptCount, int lifecycleProtocol) {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
-        OperationRecord claimed = lifecycleOperation(attemptCount);
+        OperationRecord claimed = new OperationRecord("tenant", "session",
+                "op-close", OperationKind.CLOSE, "digest", "RUNNING",
+                "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner", 1,
+                attemptCount, null, null, null, null, 0, lifecycleProtocol);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
         when(store.claimOperation(eq("tenant"), eq("session"),
                 eq("op-close"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
         when(store.requireSession("tenant", "session")).thenReturn(
                 new SessionRecord("tenant", "session", "qwen-code", null,
-                        "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, lifecycleProtocol == 1 ? BOUND_WORKSPACE : null,
+                        "yolo", TOOL_PROFILE));
         when(harness.isAvailable()).thenReturn(true);
         when(harness.closeSession("tenant", "session")).thenReturn("boot-1");
         // Another live Harness keeps the Session's journal writer, so the
@@ -87,15 +93,22 @@ class OperationRetryTerminalStateTest {
 
         SessionLifecycleCoordinator coordinator =
                 new SessionLifecycleCoordinator(store, sessionStore, harness,
-                        mock(RuntimeWarmer.class),
+                        runtimeWarmer,
                         CoordinatorTestSupport.directExecutor(),
                         Clock.systemUTC(), new ManagedAgentProperties());
+        if (lifecycleProtocol == 1) {
+            when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+            when(harness.supportsLifecycle()).thenReturn(true);
+            coordinator.setWorkspaceLifecycleStore(mock(
+                    com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class));
+        }
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
             verify(store).blockLifecycleOperation(eq("tenant"), eq("session"),
                     eq("op-close"), anyString(), eq(1L),
-                    eq("session_close_writer_live"), anyLong(), eq(true));
+                    eq(lifecycleProtocol == 1 ? "workspace_lifecycle_writer_active"
+                            : "session_close_writer_live"), anyLong(), eq(true));
             verify(store, never()).retryOperation(anyString(), anyString(),
                     anyString(), anyString(), anyLong(), anyLong());
             verify(store, never()).failOperation(anyString(), anyString(),
@@ -339,13 +352,18 @@ class OperationRetryTerminalStateTest {
 
     // A blocked close keeps its failure code through the terminal record
     // rather than being erased by a completion write.
-    @Test
-    void blockedLifecycleOperationTerminatesWithItsCodePreserved() {
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1})
+    void blockedLifecycleOperationTerminatesWithItsCodePreserved(
+            int lifecycleProtocol) {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
-        OperationRecord claimed = lifecycleOperation(10);
+        OperationRecord claimed = new OperationRecord("tenant", "session",
+                "op-close", OperationKind.CLOSE, "digest", "RUNNING",
+                "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner", 1,
+                10, null, null, null, null, 0, lifecycleProtocol);
         when(store.claimOperation(eq("tenant"), eq("session"),
                 eq("op-close"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
@@ -921,13 +939,18 @@ class OperationRetryTerminalStateTest {
     // code can only come from settle()'s workspace-close path, which the
     // closed-Session delete never enters — so CLOSE is the shape that
     // exercises the fallback.
-    @Test
-    void blockedCloseFallsBackToBlockedWhenTheTerminalRecordFails() {
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1})
+    void blockedCloseFallsBackToBlockedWhenTheTerminalRecordFails(
+            int lifecycleProtocol) {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
         RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
-        OperationRecord claimed = lifecycleOperation(10);
+        OperationRecord claimed = new OperationRecord("tenant", "session",
+                "op-close", OperationKind.CLOSE, "digest", "RUNNING",
+                "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner", 1,
+                10, null, null, null, null, 0, lifecycleProtocol);
         when(store.claimOperation(eq("tenant"), eq("session"),
                 eq("op-close"), anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));
@@ -948,6 +971,9 @@ class OperationRetryTerminalStateTest {
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
+            verify(store).failOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L),
+                    eq("workspace_close_identity_unverified"));
             verify(store).blockLifecycleOperation(eq("tenant"), eq("session"),
                     eq("op-close"), anyString(), eq(1L),
                     eq("workspace_close_identity_unverified"), anyLong());
