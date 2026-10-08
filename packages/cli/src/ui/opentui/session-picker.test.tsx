@@ -80,6 +80,7 @@ vi.mock('@opentui/react', async () => {
       width: mocks.state.width,
       height: mocks.state.height,
     }),
+    useRenderer: () => null,
   };
 });
 vi.mock('@opentui/core', () => ({

@@ -16,8 +16,11 @@
  * silent no-op, which the composition-root contract forbids.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useRenderer } from '@opentui/react';
+import type { Renderable, ScrollBoxRenderable } from '@opentui/core';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { C, SYNTAX, SYNTAX_DIM, type Palette } from './theme.js';
 import {
   AnsiRows,
@@ -52,7 +55,15 @@ import {
   type LiveArenaSessionItem,
 } from './live-session-model.js';
 import { renderDiffBody } from './diff-render.js';
+import {
+  ESTIMATED_FIRST_ITEM_ROWS,
+  ESTIMATED_ITEM_ROWS,
+  computeTranscriptWindow,
+  itemOffsets,
+  type TranscriptWindow,
+} from './transcript-window.js';
 import { assistantMarkdownForRender } from './markdown-heal.js';
+import { OpenTuiErrorBoundary } from './opentui-error-boundary.js';
 import { formatInlineToolArgsJson } from '../components/messages/ToolMessage.js';
 import {
   getCachedStringWidth,
@@ -110,6 +121,13 @@ export interface TranscriptViewProps {
    * *behind* another waiting call, while its card goes back to pending in place,
    * so transcript order and queue order disagree. */
   awaitingCallId?: string;
+  /**
+   * Which end of the transcript is on screen before the first frame reports a
+   * real scroll position. The app shell pins its scroll region to the bottom,
+   * so it wants the tail; the session preview is a clipped, non-scrolling pane
+   * that reads from the first turn down.
+   */
+  initialAnchor?: 'top' | 'bottom';
 }
 
 /** ink HistoryItemDisplay getHistoryItemMarginTop: conversation turns and the
@@ -131,6 +149,190 @@ function itemMarginTop(kind: LiveHistoryItem['kind']): number {
   }
 }
 
+/** Stands in for "pinned to the last row" before the first frame reports a
+ *  real offset; `computeTranscriptWindow` clamps it to the bottom. */
+const ANCHOR_BOTTOM = Number.MAX_SAFE_INTEGER;
+
+const transcriptLogger = createDebugLogger('OPEN_TUI_TRANSCRIPT');
+
+/**
+ * The whole point of a per-item boundary: @opentui/react's own root boundary
+ * answers a render error with a red `text` fallback that calls `jsxDEV`, which
+ * the bundled CLI does not provide, so the fallback throws too and React
+ * unmounts the entire root, leaving a blank screen with no message. An item
+ * that renders nothing costs one row of transcript and keeps the banner, the
+ * composer and the exit path alive.
+ */
+function renderNothing(): null {
+  return null;
+}
+
+function logItemFailure(error: Error, item: LiveHistoryItem): void {
+  transcriptLogger.error(
+    `[TRANSCRIPT_ITEM_ERROR] kind=${item.kind} id=${item.id} ${error.message}`,
+  );
+}
+
+function findScrollHost(node: Renderable | null): ScrollBoxRenderable | null {
+  for (
+    let cur: Renderable | null = node;
+    cur;
+    cur = cur.parent as Renderable | null
+  ) {
+    const host = cur as unknown as Partial<ScrollBoxRenderable>;
+    if (typeof host.scrollTop === 'number' && host.content && host.viewport) {
+      return cur as unknown as ScrollBoxRenderable;
+    }
+  }
+  return null;
+}
+
+function sameWindow(a: TranscriptWindow, b: TranscriptWindow): boolean {
+  return (
+    a.start === b.start &&
+    a.end === b.end &&
+    a.topPad === b.topPad &&
+    a.bottomPad === b.bottomPad
+  );
+}
+
+/**
+ * Row-budgeted windowing: only the items near the viewport are mounted, and
+ * spacers stand in for the rest so the scroll geometry still spans the whole
+ * transcript. See ./transcript-window.ts for why mounting everything blanks the
+ * screen on a long session.
+ *
+ * The scroll region owns no scroll event, so the position is sampled on the
+ * renderer's `frame` event: frames only happen when something drew, and every
+ * wheel tick, drag or key scroll draws. Idle therefore costs nothing.
+ */
+function useTranscriptWindow(
+  items: readonly LiveHistoryItem[],
+  availableWidth: number,
+  availableTerminalHeight: number,
+  initialAnchor: 'top' | 'bottom',
+) {
+  const renderer = useRenderer();
+  const rootRef = useRef<Renderable | null>(null);
+  /** Measured rows per item id, kept after the item scrolls out of the window
+   *  so an estimate is never re-applied to something already measured. */
+  const heightsRef = useRef(new Map<string, number>());
+  const offsetsRef = useRef<number[]>([0]);
+  const itemsRef = useRef(items);
+  const mountedRef = useRef<TranscriptWindow>({
+    start: 0,
+    end: 0,
+    topPad: 0,
+    bottomPad: 0,
+  });
+  const scrollRef = useRef({
+    top: initialAnchor === 'bottom' ? ANCHOR_BOTTOM : 0,
+    rows: Math.max(1, availableTerminalHeight),
+  });
+  const [revision, setRevision] = useState(0);
+
+  const widthRef = useRef(availableWidth);
+  if (widthRef.current !== availableWidth) {
+    // Wrapping depends on the width, so every measurement taken at the old one
+    // is wrong.
+    widthRef.current = availableWidth;
+    heightsRef.current.clear();
+  }
+
+  const offsets = useMemo(() => {
+    const measured = heightsRef.current;
+    return itemOffsets(
+      items.map(
+        (item, index) =>
+          measured.get(item.id) ??
+          (index === 0 ? ESTIMATED_FIRST_ITEM_ROWS : ESTIMATED_ITEM_ROWS),
+      ),
+    );
+    // Measured heights live in a ref that the frame handler mutates, so
+    // `revision` is what tells this memo one of them changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, revision, availableWidth]);
+
+  itemsRef.current = items;
+  offsetsRef.current = offsets;
+  const win = computeTranscriptWindow({
+    itemCount: items.length,
+    offsets,
+    scrollTop: scrollRef.current.top,
+    viewportRows: scrollRef.current.rows,
+  });
+  mountedRef.current = win;
+
+  useEffect(() => {
+    if (!renderer?.on) return;
+    const onFrame = () => {
+      const root = rootRef.current;
+      if (!root) return;
+      const host = findScrollHost(root);
+      if (!host) return;
+
+      const mounted = mountedRef.current;
+      const previousTop = scrollRef.current.top;
+      // While the position is still the "pinned to the tail" placeholder,
+      // stickyScroll owns it; correcting from here would fight the pin.
+      const pinned = previousTop === ANCHOR_BOTTOM;
+      const measured = heightsRef.current;
+      // Children are [top spacer, ...mounted items, bottom spacer].
+      const children = root.getChildren();
+      let anchorDelta = 0;
+      let revised = false;
+      for (let slot = 1; slot + 1 < children.length; slot++) {
+        const index = mounted.start + slot - 1;
+        const item = itemsRef.current[index];
+        const node = children[slot];
+        if (!item || !node || !(node.height > 0)) continue;
+        const rows = Math.round(node.height) + itemMarginTop(item.kind);
+        const before = measured.get(item.id);
+        if (before === rows) continue;
+        measured.set(item.id, rows);
+        revised = true;
+        // A height correction above the viewport shifts everything the user is
+        // looking at, so the scroll position has to move with it.
+        if (!pinned && (offsetsRef.current[index] ?? 0) < previousTop) {
+          anchorDelta +=
+            rows -
+            (before ??
+              (index === 0 ? ESTIMATED_FIRST_ITEM_ROWS : ESTIMATED_ITEM_ROWS));
+        }
+      }
+
+      // `y` is absolute, so the difference is the offset inside the scroll
+      // content and cancels the translation the scroll position applies.
+      const top =
+        Math.round(host.scrollTop) - Math.round(root.y - host.content.y);
+      const rows = Math.max(1, Math.round(host.viewport.height));
+      const moved =
+        top !== scrollRef.current.top || rows !== scrollRef.current.rows;
+      scrollRef.current = { top, rows };
+      if (anchorDelta !== 0) host.scrollTop += anchorDelta;
+      if (revised) {
+        setRevision((value) => value + 1);
+        return;
+      }
+      if (!moved) return;
+      const next = computeTranscriptWindow({
+        itemCount: itemsRef.current.length,
+        offsets: offsetsRef.current,
+        scrollTop: top,
+        viewportRows: rows,
+      });
+      if (sameWindow(next, mountedRef.current)) return;
+      setRevision((value) => value + 1);
+    };
+    renderer.on('frame', onFrame);
+    return () => {
+      renderer.off('frame', onFrame);
+    };
+  }, [renderer]);
+
+  return { rootRef, win };
+}
+
 export function OpenTuiTranscriptView({
   items,
   availableWidth = 80,
@@ -141,6 +343,7 @@ export function OpenTuiTranscriptView({
   showToolCallDetails = true,
   mouseTracking = true,
   awaitingCallId,
+  initialAnchor = 'bottom',
 }: TranscriptViewProps) {
   const maxRows = maxHistoryItemRows(availableTerminalHeight);
   const awaitingId = items.find(
@@ -150,28 +353,48 @@ export function OpenTuiTranscriptView({
       !item.done &&
       item.id === awaitingCallId,
   )?.id;
+  const { rootRef, win } = useTranscriptWindow(
+    items,
+    availableWidth,
+    availableTerminalHeight,
+    initialAnchor,
+  );
   return (
-    <box flexDirection="column" marginLeft={2} marginRight={2}>
-      {items.map((item) => (
+    <box
+      flexDirection="column"
+      marginLeft={2}
+      marginRight={2}
+      ref={(el) => {
+        rootRef.current = el as Renderable | null;
+      }}
+    >
+      <box height={win.topPad} flexShrink={0} />
+      {items.slice(win.start, win.end).map((item) => (
         <box
           key={item.id}
           flexDirection="column"
           marginTop={itemMarginTop(item.kind)}
         >
-          <TranscriptItem
-            item={item}
-            maxRows={maxRows}
-            terminalHeight={availableTerminalHeight}
-            width={availableWidth}
-            thoughtsExpanded={thoughtsExpanded}
-            showToolCallArgs={showToolCallArgs}
-            showTimestamps={showTimestamps}
-            showToolCallDetails={showToolCallDetails}
-            mouseTracking={mouseTracking}
-            awaitingApproval={item.id === awaitingId}
-          />
+          <OpenTuiErrorBoundary
+            fallback={renderNothing}
+            onError={(error) => logItemFailure(error, item)}
+          >
+            <TranscriptItem
+              item={item}
+              maxRows={maxRows}
+              terminalHeight={availableTerminalHeight}
+              width={availableWidth}
+              thoughtsExpanded={thoughtsExpanded}
+              showToolCallArgs={showToolCallArgs}
+              showTimestamps={showTimestamps}
+              showToolCallDetails={showToolCallDetails}
+              mouseTracking={mouseTracking}
+              awaitingApproval={item.id === awaitingId}
+            />
+          </OpenTuiErrorBoundary>
         </box>
       ))}
+      <box height={win.bottomPad} flexShrink={0} />
     </box>
   );
 }

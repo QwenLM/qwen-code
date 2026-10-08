@@ -70,6 +70,9 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
+// No renderer in jsdom: the transcript falls back to a bottom-anchored window
+// sized from `availableTerminalHeight`, which is what these tests assert on.
+vi.mock('@opentui/react', () => ({ useRenderer: () => null }));
 
 import { OpenTuiTranscriptView } from './transcript-view.js';
 import { C } from './theme.js';
@@ -759,5 +762,44 @@ describe('OpenTuiTranscriptView', () => {
     );
     expect(container.textContent).toContain('SECRET_PAYLOAD');
     expect(container.textContent).not.toContain('click to expand');
+  });
+});
+
+/**
+ * Windowing regression guard for the blank-screen bug: a session long enough to
+ * exhaust the process's native TextBuffer allocations must not mount every item.
+ * Without a scroll host (jsdom has none) the window is bottom-anchored and sized
+ * from `availableTerminalHeight`, so the tail is what shows.
+ */
+describe('OpenTuiTranscriptView windowing', () => {
+  const longSession = Array.from({ length: 2000 }, (_, index) => ({
+    kind: 'user' as const,
+    id: `u${index}`,
+    text: `TURN_${String(index).padStart(4, '0')}`,
+  }));
+
+  it('mounts only the tail of a long session', () => {
+    const { container } = render(
+      <OpenTuiTranscriptView
+        items={longSession}
+        availableTerminalHeight={24}
+      />,
+    );
+    expect(container.textContent).toContain('TURN_1999');
+    expect(container.textContent).not.toContain('TURN_0000');
+    expect(container.querySelectorAll('div').length).toBeLessThan(400);
+  });
+
+  it('mounts the head of a top-anchored pane', () => {
+    const { container } = render(
+      <OpenTuiTranscriptView
+        items={longSession}
+        availableTerminalHeight={24}
+        initialAnchor="top"
+      />,
+    );
+    expect(container.textContent).toContain('TURN_0000');
+    expect(container.textContent).not.toContain('TURN_1999');
+    expect(container.querySelectorAll('div').length).toBeLessThan(400);
   });
 });
