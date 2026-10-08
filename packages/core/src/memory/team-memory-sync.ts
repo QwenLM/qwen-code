@@ -228,7 +228,14 @@ export async function syncTeamMemory(
         const filePath = path.join(gitRoot, entries[i + 1]!);
         if (!isMemoryDocumentFilename(path.basename(filePath))) continue;
         if (mode === '000000') {
-          record(filePath, null);
+          const leaf = await fs
+            .lstat(filePath)
+            .catch((error: unknown) =>
+              (error as NodeJS.ErrnoException).code === 'ENOENT'
+                ? null
+                : undefined,
+            );
+          record(filePath, leaf === null ? null : undefined);
         } else if ((mode === '100644' || mode === '100755') && blob) {
           const leaf = await fs.lstat(filePath).catch(() => undefined);
           if (!leaf?.isFile()) {

@@ -20227,6 +20227,135 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([
+    'workspace',
+    'owner',
+    'unknown',
+    'uninitialized',
+    'override',
+    'unchanged',
+    'write-failure',
+    'pending-hook',
+    'other-key',
+    'empty-session',
+    'number-session',
+  ])('qwen/settings setCoreValue memory toggle: %s', async (scenario) => {
+    const memoryFileChange = await import(
+      '@qwen-code/qwen-code-core/memory/memory-file-change.js'
+    );
+    const notify = vi
+      .spyOn(memoryFileChange, 'notifyMemoryEnabledChange')
+      .mockImplementation(() =>
+        scenario === 'pending-hook' ? new Promise(() => {}) : Promise.resolve(),
+      );
+    const settings = makeCoreSettings();
+    const memory = { enableManagedAutoMemory: scenario !== 'override' };
+    settings.merged.memory = memory;
+    const diskMemory = {
+      enableManagedAutoMemory: memory.enableManagedAutoMemory,
+    };
+    settings.user.settings.memory = diskMemory;
+    vi.mocked(settings.setValue).mockImplementation(
+      (_scope, key, value, _assert, opts) => {
+        if (scenario === 'write-failure') {
+          if (opts?.throwOnWriteFailure)
+            throw new Error('EACCES: settings write failed');
+          memory.enableManagedAutoMemory = value as boolean;
+          return;
+        }
+        if (key === 'memory.enableManagedAutoMemory') {
+          diskMemory.enableManagedAutoMemory = value as boolean;
+          if (scenario !== 'override')
+            memory.enableManagedAutoMemory = value as boolean;
+        }
+      },
+    );
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+    const workspace = '/tmp/qwen-memory-core-settings';
+    const ownerId = Symbol('requesting-memory-session');
+    const sessions = (
+      agent as unknown as {
+        sessions: Map<string, { getConfig: () => Record<string, unknown> }>;
+      }
+    ).sessions;
+    sessions.set('owner', {
+      getConfig: () => ({
+        storage: { getProjectRoot: () => workspace },
+        getMemoryHookDeliveryId: () => ownerId,
+      }),
+    });
+    sessions.set('uninitialized', {
+      getConfig: () => ({ storage: { getProjectRoot: () => workspace } }),
+    });
+    try {
+      const request = agent.extMethod('qwen/settings/setCoreValue', {
+        cwd: workspace,
+        ...(['owner', 'unknown', 'uninitialized'].includes(scenario)
+          ? { sessionId: scenario }
+          : {}),
+        ...(scenario === 'empty-session' ? { sessionId: '' } : {}),
+        ...(scenario === 'number-session' ? { sessionId: 42 } : {}),
+        scope: 'user',
+        key:
+          scenario === 'other-key'
+            ? 'memory.enableManagedAutoDream'
+            : 'memory.enableManagedAutoMemory',
+        value: scenario === 'override' || scenario === 'unchanged',
+      });
+      if (scenario.endsWith('-session')) {
+        await expect(request).rejects.toThrow('Invalid sessionId');
+        expect(settings.setValue).not.toHaveBeenCalled();
+      } else if (scenario === 'write-failure') {
+        await expect(request).rejects.toThrow('EACCES: settings write failed');
+        expect(diskMemory.enableManagedAutoMemory).toBe(true);
+        expect(memory.enableManagedAutoMemory).toBe(true);
+      } else {
+        await expect(request).resolves.toMatchObject({
+          merged: {
+            values: {
+              'memory.enableManagedAutoMemory':
+                scenario === 'unchanged' || scenario === 'other-key',
+            },
+          },
+        });
+        if (scenario === 'override' || scenario === 'unchanged') {
+          expect(diskMemory.enableManagedAutoMemory).toBe(true);
+        }
+      }
+      if (
+        [
+          'override',
+          'unchanged',
+          'write-failure',
+          'other-key',
+          'empty-session',
+          'number-session',
+        ].includes(scenario)
+      ) {
+        expect(notify).not.toHaveBeenCalled();
+      } else if (scenario === 'owner') {
+        expect(notify).toHaveBeenCalledExactlyOnceWith(
+          workspace,
+          false,
+          ownerId,
+        );
+      } else if (scenario === 'unknown' || scenario === 'uninitialized') {
+        expect(notify).toHaveBeenCalledExactlyOnceWith(
+          workspace,
+          false,
+          expect.any(Symbol),
+        );
+        expect(notify.mock.calls[0]![2]).not.toBe(ownerId);
+      } else {
+        expect(notify).toHaveBeenCalledExactlyOnceWith(workspace, false);
+      }
+    } finally {
+      notify.mockRestore();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('qwen/settings setCoreValue syncs output language rule file', async () => {
     const settings = makeCoreSettings();
     vi.mocked(loadSettings).mockReturnValue(settings);

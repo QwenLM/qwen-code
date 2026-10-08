@@ -256,6 +256,90 @@ describe('auto-memory extraction', () => {
       expect(cursorAfter).toEqual(cursorBefore);
     });
 
+    it('waits for the user index notification before propagating a project rebuild failure', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_BASE_DIR', path.join(tempDir, 'memories'));
+      const userRoot = getUserAutoMemoryRoot();
+      await fs.mkdir(path.join(userRoot, 'user'), { recursive: true });
+      await fs.writeFile(
+        path.join(userRoot, 'user', 'fact.md'),
+        '---\nname: User fact\ndescription: Durable fact\ntype: user\n---\nKeep this fact.\n',
+      );
+      const cursorBefore = await readCursor();
+      const realIndexer =
+        await vi.importActual<typeof import('./indexer.js')>('./indexer.js');
+      const gate = deferred<void>();
+      const entered = deferred<void>();
+      const userFinished = deferred<void>();
+      const projectError = new Error(
+        'EACCES: project memory index write failed',
+      );
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+        touchedTopics: ['project', 'user'],
+        touchedProjectScope: true,
+        touchedUserScope: true,
+        hasToolActivity: true,
+      });
+      vi.mocked(rebuildManagedAutoMemoryIndex).mockRejectedValueOnce(
+        projectError,
+      );
+      vi.mocked(rebuildUserAutoMemoryIndex).mockImplementationOnce(
+        async (...args) => {
+          entered.resolve();
+          await gate.promise;
+          try {
+            return await realIndexer.rebuildUserAutoMemoryIndex(...args);
+          } finally {
+            userFinished.resolve();
+          }
+        },
+      );
+      const seen: MemoryChangedNotice[] = [];
+      const unregister = registerMemoryChangedListener(
+        projectRoot,
+        (notice) => {
+          seen.push(notice);
+        },
+      );
+      mockConfig.getMemoryHookDeliveryId = () => unregister.id;
+      let settled = false;
+      const outcome = runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: [...newHistory],
+      })
+        .catch((error: unknown) => error)
+        .finally(() => {
+          settled = true;
+        });
+      try {
+        await entered.promise;
+        // Keep the user write pending while a fail-fast window would close.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        expect.soft(settled).toBe(false);
+        gate.resolve();
+        expect(await outcome).toBe(projectError);
+        await userFinished.promise;
+        await vi.waitFor(async () => {
+          expect(
+            await fs.readFile(getUserAutoMemoryIndexPath(), 'utf8'),
+          ).toContain('fact.md');
+        });
+        expect(seen).toContainEqual(
+          expect.objectContaining({
+            scope: 'user',
+            relativePaths: ['MEMORY.md'],
+          }),
+        );
+        expect(await readCursor()).toEqual(cursorBefore);
+        expect(refreshMemoryInstruction).not.toHaveBeenCalled();
+      } finally {
+        gate.resolve();
+        await outcome;
+        unregister();
+      }
+    });
+
     it('user-scope rebuild failure is logged and swallowed; project rebuild + cursor advance still happen', async () => {
       // User-level memory is best-effort: a read-only `~/.qwen/memories/`
       // must not prevent the project layer from making progress.

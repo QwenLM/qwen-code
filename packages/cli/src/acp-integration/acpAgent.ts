@@ -14393,6 +14393,18 @@ class QwenAgent implements Agent {
             'Unsupported Qwen setting key',
           );
         }
+        const sessionId = params['sessionId'];
+        if (
+          key === 'memory.enableManagedAutoMemory' &&
+          sessionId !== undefined &&
+          sessionId !== null &&
+          (typeof sessionId !== 'string' || sessionId.length === 0)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid sessionId: expected a non-empty string',
+          );
+        }
         const settingsCwd = this.settingsCwdFor(requestedCwd, params);
         const settings = this.loadRequestSettings(settingsCwd);
         const settingKey = key as QwenCoreSettingKey;
@@ -14401,7 +14413,15 @@ class QwenAgent implements Agent {
           params['value'],
         );
         const scope = toSettingsScope(params['scope']);
-        settings.setValue(scope, key, normalizedValue);
+        const previousEnabled =
+          settings.merged.memory?.enableManagedAutoMemory ?? true;
+        if (settingKey === 'memory.enableManagedAutoMemory') {
+          settings.setValue(scope, key, normalizedValue, undefined, {
+            throwOnWriteFailure: true,
+          });
+        } else {
+          settings.setValue(scope, key, normalizedValue);
+        }
         if (settingKey === 'model.name') {
           // Selecting a model by id here can't disambiguate providers that
           // share that id, so clear the paired baseUrl disambiguator left by a
@@ -14424,6 +14444,30 @@ class QwenAgent implements Agent {
         // `setValue` already persisted to disk and recomputed the in-memory
         // merged view, so reloading from disk here is redundant I/O.
         this.adoptRequestSettings(settings, settingsCwd);
+        const effectiveEnabled =
+          settings.merged.memory?.enableManagedAutoMemory ?? true;
+        if (
+          settingKey === 'memory.enableManagedAutoMemory' &&
+          effectiveEnabled !== previousEnabled
+        ) {
+          const deliveryId =
+            typeof sessionId === 'string' && sessionId.length > 0
+              ? (this.sessions
+                  .get(sessionId)
+                  ?.getConfig()
+                  .getMemoryHookDeliveryId?.() ??
+                Symbol('unavailable-memory-session'))
+              : undefined;
+          if (deliveryId === undefined) {
+            void notifyMemoryEnabledChange(settingsCwd, effectiveEnabled);
+          } else {
+            void notifyMemoryEnabledChange(
+              settingsCwd,
+              effectiveEnabled,
+              deliveryId,
+            );
+          }
+        }
         return this.buildCoreSettings(settings, settingsCwd);
       }
       case 'qwen/settings/setMcpServer': {

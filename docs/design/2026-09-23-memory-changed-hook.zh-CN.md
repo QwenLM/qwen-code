@@ -60,7 +60,7 @@
 }
 ```
 
-只有这次开关才带 `enabled`。省略 `operation` 和 `memory_scope`。记忆对话框先将工作区设置提交到磁盘，再更新显示状态并以该项目根目录作为 `workspace` 发出通知。设置写入失败时显示错误，不发送开关事件。`qwen/settings/setMemory` 写的是用户设置；`enableManagedAutoMemory` 真的变化时，用这次请求的工作区发事件。多键请求可能部分提交：后续写入失败时仍报告错误，但已经保存且生效的开关变化仍发出通知。开关没有相对路径，所以每个 `MemoryChanged` hook 都会收到。只关心文档的 hook 应忽略带 `enabled` 的事件。直接改 settings 文件不会发这个事件。只有记忆对话框和 `qwen/settings/setMemory` 会发。
+只有这次开关才带 `enabled`。省略 `operation` 和 `memory_scope`。记忆对话框先将工作区设置提交到磁盘，再更新显示状态并以该项目根目录作为 `workspace` 发出通知。设置写入失败时显示错误，不发送开关事件。`qwen/settings/setMemory` 写的是用户设置；`enableManagedAutoMemory` 真的变化时，用这次请求的工作区发事件。多键请求可能部分提交：后续写入失败时仍报告错误，但已经保存且生效的开关变化仍发出通知。开关没有相对路径，所以每个 `MemoryChanged` hook 都会收到。只关心文档的 hook 应忽略带 `enabled` 的事件。直接改 settings 文件不会发这个事件。记忆对话框、`qwen/settings/setMemory` 和 `qwen/settings/setCoreValue` 都会在成功持久化的修改改变生效设置时发事件。两个 ACP 路由有请求会话时使用该会话的注册，否则使用设置工作区的注册。
 
 基础 hook 输入仍有 `session_id` 和 `cwd`。`cwd` 是工作目录，不是工作区。
 

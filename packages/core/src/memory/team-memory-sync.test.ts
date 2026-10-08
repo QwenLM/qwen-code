@@ -238,6 +238,59 @@ describe('syncTeamMemory', () => {
     30_000,
   );
 
+  it
+    .skipIf(process.platform === 'win32' || process.getuid?.() === 0)
+    .each([false, true])(
+    'does not report a Git deletion when unlink is denied (%s)',
+    async (denyUnlink) => {
+      const { bare, repo } = freshRemoteAndClone('alice');
+      vi.stubEnv(
+        'QWEN_CODE_MEMORY_BASE_DIR',
+        path.join(path.dirname(repo), 'private-memory'),
+      );
+      writeTeamMemory(
+        repo,
+        'reference/remote.md',
+        'original collaborator fact',
+      );
+      git(repo, 'add', '--', '.qwen/team-memory');
+      git(repo, 'commit', '-m', 'seed reference');
+      git(repo, 'push');
+      const bob = makeWorkingClone(bare, 'bob');
+      cleanup.push(path.dirname(bob));
+      git(bob, 'rm', '--', '.qwen/team-memory/reference/remote.md');
+      git(bob, 'commit', '-m', 'delete reference');
+      git(bob, 'push');
+      const file = path.join(
+        getTeamAutoMemoryRoot(repo),
+        'reference/remote.md',
+      );
+      const original = fs.readFileSync(file, 'utf8');
+      const seen: MemoryChangedNotice[] = [];
+      const registration = registerMemoryChangedListener(repo, (notice) => {
+        seen.push(notice);
+      });
+      if (denyUnlink) fs.chmodSync(path.dirname(file), 0o555);
+      try {
+        await withCoalescedMemoryChanges(repo, registration.id, async () => {
+          expect(
+            (await syncTeamMemory(repo, { message: 'refresh' })).pulled,
+          ).toBe(true);
+        });
+        if (denyUnlink) {
+          expect(fs.readFileSync(file, 'utf8')).toBe(original);
+        } else {
+          expect(fs.existsSync(file)).toBe(false);
+        }
+        expect(seen).toEqual([]);
+      } finally {
+        registration();
+        if (denyUnlink) fs.chmodSync(path.dirname(file), 0o755);
+      }
+    },
+    30_000,
+  );
+
   it('does not report a pulled document excluded by sparse checkout as deleted', async () => {
     const { bare, repo } = freshRemoteAndClone('alice');
     vi.stubEnv(

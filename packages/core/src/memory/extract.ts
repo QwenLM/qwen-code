@@ -220,7 +220,7 @@ export async function runAutoMemoryExtract(params: {
         //     silently swallowed would leave the memory file written, the index
         //     stale, AND the cursor advanced — the memory becomes un-recallable
         //     until some later session happens to trigger another rebuild. The
-        //     pre-existing `Promise.all` contract (throw → cursor stays → retry
+        //     project rebuild failure contract (throw → cursor stays → retry
         //     on next session) is the durability guarantee we must preserve.
         //   * user-level rebuild is best-effort. A read-only `~/.qwen/memories/`
         //     (EACCES) must not poison the project-level rebuild or block the
@@ -245,7 +245,13 @@ export async function runAutoMemoryExtract(params: {
               );
             })
           : Promise.resolve();
-        await Promise.all([projectRebuild, userRebuild]);
+        const [projectOutcome] = await Promise.allSettled([
+          projectRebuild,
+          userRebuild,
+        ]);
+        if (projectOutcome.status === 'rejected') {
+          throw projectOutcome.reason;
+        }
       }
       return result;
     },
