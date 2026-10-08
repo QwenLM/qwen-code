@@ -124,6 +124,7 @@ import { HostedTextDeltaStream } from './hosted-text-deltas.js';
 import {
   isDurableBlockedVerdict,
   originalRuntimeBroker,
+  RecoveryDeclined,
   recoverHostedRuntimeTurn,
   settleParkedTurnCancelled,
   stopParkedRuntimeExecutions,
@@ -537,11 +538,24 @@ export async function settleCrashedWakeTurnAftermath(params: {
         );
         let broker: HostedWorkspaceBroker | undefined;
         if (runtimeItems.some((item) => item.state === 'in_progress')) {
-          broker = await stopParkedRuntimeExecutions({
-            session: session.managed,
-            promptId: turnId,
-            brokerOptions,
-          });
+          try {
+            broker = await stopParkedRuntimeExecutions({
+              session: session.managed,
+              promptId: turnId,
+              brokerOptions,
+            });
+          } catch (cause) {
+            // A decline is deterministic evidence read from the journal
+            // (a shell under a hooks/MCP definition, a mismatched own
+            // runtime route): retrying never changes it. Settle the
+            // cancelled tool results and proceed to the consume anyway —
+            // otherwise this Session wedges in an endless retry where a
+            // user Turn's same park would get a typed terminal verdict.
+            if (!(cause instanceof RecoveryDeclined)) throw cause;
+            writeStderrLineSafe(
+              `qwen serve: Hosted wake turn ${turnId} park is deterministically unrecoverable by the Broker; its cancelled tool results and run are settled anyway, and the wake session's lease stays the system's re-admitted kind: ${String(cause)}`,
+            );
+          }
           await settleParkedTurnCancelled({
             session: session.managed,
             sessionId,
@@ -552,13 +566,20 @@ export async function settleCrashedWakeTurnAftermath(params: {
         // Release on every pass: the journal cannot say whether an
         // earlier pass's release landed after the checkpoint moved on.
         if (runtimeItems.length > 0) {
-          broker ??= await originalRuntimeBroker(
-            session.managed,
-            turnId,
-            items,
-            brokerOptions,
-          );
-          await broker.release();
+          try {
+            broker ??= await originalRuntimeBroker(
+              session.managed,
+              turnId,
+              items,
+              brokerOptions,
+            );
+            await broker.release();
+          } catch (cause) {
+            if (!(cause instanceof RecoveryDeclined)) throw cause;
+            writeStderrLineSafe(
+              `qwen serve: Hosted wake turn ${turnId} could not derive its wake session's Broker identity; its lease stays the system's re-admitted kind: ${String(cause)}`,
+            );
+          }
         }
       }
     }

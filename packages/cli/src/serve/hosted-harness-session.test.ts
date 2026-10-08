@@ -1967,8 +1967,13 @@ describe('Hosted Harness no-tool session', () => {
   // A prewrite whose automation wake turn crashed inside its Runtime call:
   // exactly what a Harness kill mid-execution leaves durable — the
   // committed input, the turn's user record, the dispatch's tool.intent,
-  // and an await_runtime checkpoint pinning this turn.
-  async function prewriteAutomationParkedWakeSession(): Promise<string> {
+  // and an await_runtime checkpoint pinning this turn. 'run_shell_command'
+  // parks a Shell call instead: the hooks/MCP-defined Session of this
+  // fixture deterministically declines its Broker identity.
+  async function prewriteAutomationParkedWakeSession(
+    tooling: 'read_file' | 'run_shell_command' = 'read_file',
+  ): Promise<string> {
+    const shellArg = tooling === 'run_shell_command';
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -2053,12 +2058,14 @@ describe('Hosted Harness no-tool session', () => {
         message: { role: 'user', parts: [{ text: 'queued' }] },
       } as never);
       const argsRef = await resources.publish(
-        'managed-tool-input',
+        shellArg ? 'managed-tool-args' : 'managed-tool-input',
         Buffer.from(
-          JSON.stringify({
-            harnessSessionId: SESSION_ID,
-            runtimeSessionId: 'rt-wake-1',
-          }),
+          shellArg
+            ? JSON.stringify({ command: 'cat a.txt' })
+            : JSON.stringify({
+                harnessSessionId: SESSION_ID,
+                runtimeSessionId: 'rt-wake-1',
+              }),
         ),
       );
       const toolDefinitionRef = await resources.publish(
@@ -2099,7 +2106,7 @@ describe('Hosted Harness no-tool session', () => {
         [
           {
             functionCallId: 'fc-wake-1',
-            toolName: 'read_file',
+            toolName: shellArg ? 'run_shell_command' : 'read_file',
             executionCallId: 'ex-wake-1',
             invocationBindingId: 'bind-wake-1',
             capabilityVersion: 'cap-1',
@@ -2305,6 +2312,102 @@ describe('Hosted Harness no-tool session', () => {
         .find((each) => each.occurrenceKey === AUTOMATION_SLOT);
       expect(run?.run.state).toBe('failed');
       expect(run?.run.execution).toBe('outcome_unknown');
+      const journal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        key,
+      );
+      expect(
+        journal.events.some(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === inputId,
+        ),
+      ).toBe(true);
+    } finally {
+      await managed.close().catch(() => undefined);
+    }
+  });
+
+  it('settles the journal side of a deterministically declined wake park and still unblocks', async () => {
+    // A shell tool on a hooks-defined Session: the recovery machinery
+    // reads the decline deterministically, so the session must not wedge
+    // in a permanent retry loop — the journal side settles anyway (lane
+    // B audit round 1).
+    const inputId =
+      await prewriteAutomationParkedWakeSession('run_shell_command');
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const managed = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      }),
+    });
+    try {
+      const session = {
+        managed,
+        automations: new HostedAutomationSession(
+          {
+            authority: managed.authority,
+            resources: managed.resources,
+            sink: managed.sink,
+          },
+          key,
+        ),
+      } as never;
+      const aftermath = await settleCrashedWakeTurnAftermath({
+        session,
+        sessionId: SESSION_ID,
+        cwd: state.root,
+        brokerOptions: { token: '', baseUrl: 'http://broker' } as never,
+        turnId: inputId,
+      });
+      expect(aftermath).toBe('settled');
+      const automations = new HostedAutomationSession(
+        {
+          authority: managed.authority,
+          resources: managed.resources,
+          sink: managed.sink,
+        },
+        key,
+      );
+      const run = automations
+        .runs()
+        .find((each) => each.occurrenceKey === AUTOMATION_SLOT);
+      expect(run?.run.state).toBe('failed');
+      expect(run?.run.execution).toBe('outcome_unknown');
+      const checkpoint =
+        await createManagedHarnessHandle(managed).ensureRunnable();
+      expect(checkpoint.continuation.phase).not.toBe('await_runtime');
+      const projected = await managed.sink.project();
+      expect(
+        projected.filter(
+          (entry) =>
+            entry.type === 'tool_result' &&
+            entry.daemonPromptId === inputId &&
+            (entry.message?.parts ?? []).some(
+              (part) =>
+                part.functionResponse?.response?.['executionStatus'] ===
+                'cancelled',
+            ),
+        ),
+      ).toHaveLength(1);
       const journal = await LocalJsonlManagedSessionJournalStore.read(
         path.join(state.root, `${SESSION_ID}.jsonl`),
         key,

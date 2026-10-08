@@ -35,7 +35,7 @@ import {
 } from './hosted-workspace-broker.js';
 
 /** The parked turn is not one this recovery can drive; the caller 409s. */
-class RecoveryDeclined extends Error {}
+export class RecoveryDeclined extends Error {}
 
 export interface HostedRuntimeRecoveryExecution {
   functionCallId: string;
