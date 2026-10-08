@@ -60,6 +60,7 @@ import { isImagePart } from '../services/visionBridge/image-part-utils.js';
 import { buildMcpClassifierInput } from './mcp-classifier-input.js';
 import {
   boundedAppLimit,
+  effectiveAppResourceTimeoutMs,
   MCP_APP_RESOURCE_MAX_BYTES_CEILING,
   MCP_APP_RESOURCE_MAX_BYTES_DEFAULT,
   MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS,
@@ -539,7 +540,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           this.params,
           this.cliConfig,
           newTool['mcpClient'],
-          this.mcpTimeout,
+          newTool['mcpTimeout'],
           this.mcpToolIdleTimeoutMs,
           newTool.annotations,
           newTool['allowInvocationContext'] === true,
@@ -839,12 +840,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     fallback: number,
     min: number,
     max: number,
-    key: 'appResourceMaxBytes' | 'appResourceTimeoutMs',
+    key: 'appResourceMaxBytes' | 'appResourceTimeoutMs' | 'timeout',
   ): number {
-    if (
-      value !== undefined &&
-      (typeof value !== 'number' || !Number.isFinite(value))
-    ) {
+    if (value !== undefined && effectiveAppResourceTimeoutMs(value) === null) {
       debugLogger.warn(
         `Ignoring non-finite MCP App resource limit ${this.appLimitSettingRef(key)} (${typeof value === 'string' ? JSON.stringify(value) : String(value)}); falling back to ${fallback}`,
       );
@@ -901,6 +899,20 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       MCP_APP_RESOURCE_TIMEOUT_MAX_MS,
       'appResourceTimeoutMs',
     );
+    // Warn on a written-but-non-finite server `timeout` here, beside the two
+    // sibling keys, rather than on the failure path: the operator must learn
+    // the value was ignored on every load, not only when a read times out.
+    // The returned number is deliberately unused -- `defaultTimeoutMs` above
+    // owns the deadline and must stay on the already-defaulted `mcpTimeout`.
+    if (this.appResourceLimits?.timeout !== undefined) {
+      this.appResourceLimit(
+        this.appResourceLimits.timeout,
+        MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS,
+        1,
+        MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS,
+        'timeout',
+      );
+    }
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     try {
       const resource = await this.mcpClient.readResource(
@@ -973,13 +985,11 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       // validated at runtime) is ignored by `boundedAppLimit` too, so the
       // App resource default owns the deadline and is the key to name.
       const hasExplicitAppTimeout =
-        typeof configuredTimeoutMs === 'number' &&
-        Number.isFinite(configuredTimeoutMs);
+        effectiveAppResourceTimeoutMs(configuredTimeoutMs) !== null;
       const writtenServerTimeout = this.appResourceLimits?.timeout;
       const derivedFromServerTimeout =
         !hasExplicitAppTimeout &&
-        typeof writtenServerTimeout === 'number' &&
-        Number.isFinite(writtenServerTimeout);
+        effectiveAppResourceTimeoutMs(writtenServerTimeout) !== null;
       const capIsBinding =
         derivedFromServerTimeout &&
         defaultTimeoutMs === MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS;

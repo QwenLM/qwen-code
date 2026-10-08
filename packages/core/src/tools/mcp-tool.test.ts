@@ -1312,7 +1312,7 @@ describe('DiscoveredMCPTool', () => {
     });
 
     const expectDiscardedLimitWarn = (
-      key: 'appResourceMaxBytes' | 'appResourceTimeoutMs',
+      key: 'appResourceMaxBytes' | 'appResourceTimeoutMs' | 'timeout',
       warned: string | undefined,
     ) => {
       // The display warning legitimately names the key too, so match on the
@@ -1702,6 +1702,21 @@ describe('DiscoveredMCPTool', () => {
       } finally {
         timeoutSpy.mockRestore();
       }
+    });
+
+    it('warns when a written server timeout is not a finite number', async () => {
+      const mcpClient = appClient(
+        vi.fn(async () => {
+          throw new Error('boom');
+        }),
+      );
+      const handEdited = '60000' as unknown as number;
+      await createAppTool(mcpClient, undefined, handEdited, {
+        timeout: handEdited,
+      })
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+      expectDiscardedLimitWarn('timeout', '"60000"');
     });
 
     it.each(['text', 'blob'] as const)(
