@@ -1692,12 +1692,19 @@ export class HostedHookSession {
     for (const id of [...this.recoveredBrokers.keys()])
       await this.releaseOwner(id);
     this.recoveredBrokers.clear();
+    // The clear above empties the state a DELETE retry would release from,
+    // so the recorded fences are retried before they are named: without this
+    // pass the next close finds no recovered broker and throws off the
+    // still-fenced owner again without attempting any release. The retry
+    // absorbs every per-id refusal, so a fence it cannot clear is still
+    // named by the check below.
+    await this.retryFencedOwners();
     // An earlier owner still fenced keeps its Runtime owner attached, so a
     // DELETE that answered 204 here would drop the only state that could ever
-    // retry that release. The check sits below the loop: a fence recorded by
-    // it must still be named. Report recovery required before releasing the
-    // Session's own owner: the Session stays attached with it, so a later
-    // turn can still run and retry the fenced release.
+    // retry that release. The check sits below the loop and the retry: a
+    // fence recorded by either must still be named. Report recovery required
+    // before releasing the Session's own owner: the Session stays attached
+    // with it, so a later turn can still run and retry the fenced release.
     if (this.fencedOwners.size > 0) throw new HostedHookRecoveryRequiredError();
     if (this.ownsBroker && this.broker.runtime) {
       try {

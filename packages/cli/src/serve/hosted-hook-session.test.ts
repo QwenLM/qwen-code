@@ -2345,9 +2345,10 @@ it('names a hold-fenced recovered owner on close in the shared-broker shape', as
     HostedHookRecoveryRequiredError,
   );
   // The fence was absorbed and named — not leaked as a raw Broker refusal —
-  // the owner behind it in the map was still released, and the shared MCP
-  // broker was not touched.
-  expect(released()).toEqual([ownerA, ownerB]);
+  // the owner behind it in the map was still released, the recorded fence
+  // was retried once before close named it, and the shared MCP broker was
+  // not touched.
+  expect(released()).toEqual([ownerA, ownerB, ownerA]);
   // Settle confirmation for the abandoned child's detached poll loop: its
   // writer is gone, so completion shows as the poll count freezing.
   const statusPolls = () =>
@@ -2356,6 +2357,13 @@ it('names a hold-fenced recovered owner on close in the shared-broker shape', as
   const stopped = statusPolls();
   await delay(250);
   expect(statusPolls()).toBe(stopped);
+  // The 503 invited a DELETE retry: once the Runtime hold clears, that retry
+  // must re-attempt the recorded fence. The first close cleared the
+  // recovered-broker map, so without the fence retry the second close throws
+  // again off an empty map without attempting any release.
+  release.mockResolvedValue();
+  await linked.close();
+  expect(released()).toEqual([ownerA]);
 });
 
 it('requires increasing revisions within each catalog namespace', async () => {
