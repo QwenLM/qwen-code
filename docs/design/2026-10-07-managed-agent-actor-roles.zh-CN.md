@@ -13,7 +13,7 @@
 两个性质不同的缺口：
 
 - **R1 —— 没有角色词表。** 到目前为止合入的每个绑定 Session 操作都只准入其创建者，对其他任何人返回 `404` 或 `403`。`AuthenticatedTenantActor` 只带 `tenantId()` 与 `actorId()`，此外什么都没有。两个产品行为今天被阻塞：同一 Workspace 上的第二个操作者无法回答一个正阻塞 Turn 的审批；绑定 Workspace 的 Session 无法移交，因为没有任何东西能表达「与创建者不同的所有者」。
-- **R2 —— 没有系统性验收。** 准入覆盖是逐切片随各合入能力累积的。对 56 条公开与 WebShell 路由，API 契约测试已经会让契约里缺失的已挂载路由失败，并对每个契约 operation 发跨租户探针。但 22 条内部路由没有任何门禁，没有探针覆盖低于读权限或有读但无该族权限的调用方，也没有任何东西把一条路由与它应遵循的准入规则绑在一起 —— 于是一条路由可能带着错误的校验落地而所有测试保持全绿，而这个面还在快速增长，这恰恰是最要紧的失效模式。
+- **R2 —— 没有系统性验收。** 准入覆盖是逐切片随各合入能力累积的。对 56 条公开与 WebShell 路由，API 契约测试已经会让契约里缺失的已挂载路由失败，并对每个契约 operation 发跨租户探针。但原切片 A 基线的 22 条内部路由没有任何门禁，没有探针覆盖低于读权限或有读但无该族权限的调用方，也没有任何东西把一条路由与它应遵循的准入规则绑在一起 —— 于是一条路由可能带着错误的校验落地而所有测试保持全绿，而这个面还在快速增长，这恰恰是最要紧的失效模式。
 
 ## 2. 现状
 
@@ -32,7 +32,7 @@
 | 生命周期（close、archive、unarchive、delete）+ cwd 变更 | `POST …/close` / `…/archive` / `…/unarchive`、`DELETE`、`POST …/cwd`，及 WebShell 孪生                                | `requireWorkspaceCreator`（先 can_read 再创建命令行）                           | 403 `session_operation_forbidden` |
 | Action（审批）回答                                      | `POST …/actions/{id}/responses`、WebShell `actions/respond`                                                           | `requireOwner`（creator_actor_key，回退创建命令）                               | 403 `action_forbidden`            |
 
-其余已实现的规则形态：绑定读取与全部 list/stream/catalog 路由要求 `can_read`（否则 404）；绑定创建要求 actor + `can_create` + `ACTIVE` Workspace（按失败点返回 401/404/403/409）；artifact 字节读取叠加部署策略门（`403 artifact_content_forbidden`）；Workspace 发现只列出 `can_read` 行（无 actor 返回 401）；legacy（未绑定）Session 与 agent 定义是**租户级**的 —— 租户内任何 actor 今天都可以改它们；内部 store/publication 路由准入 writer HMAC 凭据而非 actor。公开面是 `/v1/agents/**` 加 `/api/agent/web-shell/v1/**`（`PublicSurface`），由十个 Spring controller 实现 —— 第 10 节的矩阵枚举当前的 32 条公开 + 24 条 WebShell + 22 条内部路由（切片 A 门禁实计共 78 条）。
+其余已实现的规则形态：绑定读取与全部 list/stream/catalog 路由要求 `can_read`（否则 404）；绑定创建要求 actor + `can_create` + `ACTIVE` Workspace（按失败点返回 401/404/403/409）；artifact 字节读取叠加部署策略门（`403 artifact_content_forbidden`）；Workspace 发现只列出 `can_read` 行（无 actor 返回 401）；legacy（未绑定）Session 与 agent 定义是**租户级**的 —— 租户内任何 actor 今天都可以改它们；内部 store/publication 路由准入 writer HMAC 凭据而非 actor。公开面是 `/v1/agents/**` 加 `/api/agent/web-shell/v1/**`（`PublicSurface`），由十个 Spring controller 实现 —— 第 10 节的矩阵枚举当前的 32 条公开 + 24 条 WebShell + 24 条内部路由（含 L3 两条授权入口，门禁实计共 80 条）。
 
 workspace registry/access 行没有任何生产置备路径 —— 今天只有测试与 fixture 入口写它们，部署环境靠带外方式写入；全仓没有 role 列、owner 列，也没有按租户存放 actor 的表。
 
@@ -112,7 +112,7 @@ owner 的更新路径（移交命令）是建在此列之上的后续切片；�
 
 注册表放在 `src/test/java`，因为生产代码里没有任何地方读它：下文的门禁与验收探针是它仅有的消费者，本切片如此，切片 C 也如此 —— C 的强制执行读的是存储的角色。只有出现运行时消费者时它才移到 `src/main`。
 
-它不取代 OpenAPI 契约（`managed-agent-public-api.openapi.json`）：契约仍是 56 条公开与 WebShell 路由对外发布形态的唯一来源，API 契约测试让它与已挂载的 handler 保持双射。规则类刻意不作为 `x-qwen-*` 扩展写进契约：契约是对外发布、被机器消费的（WebShell 客户端类型由它生成），它不描述 22 条内部路由，而准入规则类是服务端内部的分类。因此一条新的公开或 WebShell 路由要被点名三次 —— controller、契约、注册表 —— 且每一对都有门禁：契约测试让契约缺失的路由失败，对账门禁让注册表缺失的路由失败。
+它不取代 OpenAPI 契约（`managed-agent-public-api.openapi.json`）：契约仍是 56 条公开与 WebShell 路由对外发布形态的唯一来源，API 契约测试让它与已挂载的 handler 保持双射。规则类刻意不作为 `x-qwen-*` 扩展写进契约：契约是对外发布、被机器消费的（WebShell 客户端类型由它生成），它不描述 24 条内部路由，而准入规则类是服务端内部的分类。因此一条新的公开或 WebShell 路由要被点名三次 —— controller、契约、注册表 —— 且每一对都有门禁：契约测试让契约缺失的路由失败，对账门禁让注册表缺失的路由失败。
 
 ### D6 —— 构建门禁
 
@@ -179,14 +179,14 @@ A ∥ B 是安全的：文件不相交（A 纯新增；B 改 store 侧）。C �
 
 ## 10. Surface 路由矩阵（切片 A 注册表，双语摘要）
 
-切片 A 头的 `api/SurfaceRegistry.java` 携带 78 条路由常量：十个
-controller 的 32 公开 + 24 WebShell + 22 internal handler 方法。门禁从扫描推导一切，计数只是信息，不是被断言的常量。
+与 L3 整合后的 `api/SurfaceRegistry.java` 携带 80 条路由常量：十个
+controller 的 32 公开 + 24 WebShell + 24 internal handler 方法（含 L3 两条授权入口）。门禁从扫描推导一切，计数只是信息，不是被断言的常量。
 
 规则类按今天的准入命名：`WORKSPACE_CREATE`（2）、`READER`（24）、
 `READER_ACTOR`（6）、`READER_ACTOR_POLICY`（1）、`OPERATOR` 作为今天的
 submitter 族（4）、`OWNER` 作为今天的 creator 各族 —— lifecycle、cwd
 与 Action respond（12）、`WORKSPACE_DISCOVERY`（4）、`TENANT_SCOPED`
-（3）、`INTERNAL_WRITER`（22）。设计列出的 `legacy_create` 与
+（3）、`INTERNAL_WRITER`（24）。设计列出的 `legacy_create` 与
 `legacy_tenant` 两个名字保留在类的文档里，作为 legacy 分支的名字：
 每条路由恰有一个规则类，按分离规则取的是绑定 Session 的类。切片 C
 会把 cwd 与 Action respond 从 `OWNER` 翻到 `OPERATOR`，归一
@@ -253,6 +253,8 @@ submitter 族的拒绝码，并且只有在探针需要不同期望时才拆开 
 | `POST /api/agent/web-shell/v1/artifacts/query`                                                                                   | WEBSHELL | ARTIFACT_LIST             | READER_ACTOR        |
 | `POST /api/agent/web-shell/v1/workspaces/query`                                                                                  | WEBSHELL | WORKSPACE_LIST            | WORKSPACE_DISCOVERY |
 | `POST /api/agent/web-shell/v1/workspaces/get`                                                                                    | WEBSHELL | WORKSPACE_GET             | WORKSPACE_DISCOVERY |
+| `POST /internal/managed-session-store/v1/sessions/{sessionId}/execution:authorize`                                               | INTERNAL | STORE_EXECUTION_AUTHORIZE | INTERNAL_WRITER     |
+| `POST /internal/managed-session-store/v1/sessions/{sessionId}/lifecycle:authorize`                                               | INTERNAL | STORE_LIFECYCLE_AUTHORIZE | INTERNAL_WRITER     |
 | `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:acquire`                                                   | INTERNAL | STORE_WRITER_ACQUIRE      | INTERNAL_WRITER     |
 | `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:renew`                                                     | INTERNAL | STORE_WRITER_RENEW        | INTERNAL_WRITER     |
 | `POST /internal/managed-session-store/v1/sessions/{sessionId}/writers:seal`                                                      | INTERNAL | STORE_WRITER_SEAL         | INTERNAL_WRITER     |

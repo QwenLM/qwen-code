@@ -6,6 +6,10 @@
 
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
+  findSessionAgentBinding,
+  type SessionAgentNativeBinding,
+} from '@qwen-code/qwen-code-core/agents/session-agents/binding-store.js';
+import {
   buildHooksListing,
   type ContentGeneratorConfig,
   APPROVAL_MODE_INFO,
@@ -171,6 +175,7 @@ import {
   qualifySkillName,
   sessionIdContext,
   resolveAgentPersona,
+  buildRemoteSessionAgentSystemPrompt,
   findAgentSessionBinding,
   resolveModelId,
   buildModelIdContext,
@@ -367,6 +372,7 @@ import {
   writeOutputLanguageAndRegisterPath,
 } from '../i18n/languageUtils.js';
 import { runWithAcpRuntimeOutputDir } from './runtimeOutputDirContext.js';
+import { parseSessionExternalRecordParams } from './session-external-record-params.js';
 import { ACP_ERROR_CODES } from './errorCodes.js';
 import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { QWEN_CODE_SERVE_ENV } from '../config/acp-channel-fallback.js';
@@ -5008,6 +5014,9 @@ class QwenAgent implements Agent {
               error,
             );
           }
+          // Session multi-agent records deferred behind the turn that just
+          // settled land now, while the recorder still accepts writes.
+          await session.flushDeferredExternalRecords?.();
           recorder?.finalize();
           let flushError: unknown;
           try {
@@ -9649,7 +9658,8 @@ class QwenAgent implements Agent {
             }
           : params;
       if (
-        method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification &&
+        (method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification ||
+          method === SERVE_CONTROL_EXT_METHODS.sessionExternalRecord) &&
         this.privateParentState !== 'trusted'
       ) {
         throw RequestError.invalidParams(
@@ -12035,6 +12045,44 @@ class QwenAgent implements Agent {
           ...(typeof label === 'string' ? { label } : {}),
         });
         return { sessionId, accepted: result.accepted };
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionExternalRecord: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const request = parseSessionExternalRecordParams(params);
+        if (typeof request === 'string') {
+          throw RequestError.invalidParams(undefined, request);
+        }
+        const session = this.sessionOrThrow(sessionId);
+        try {
+          const result = await session.appendExternalRecord(request);
+          return {
+            sessionId,
+            recordId: result.recordId,
+            created: result.created,
+            ...(result.deferred ? { deferred: true } : {}),
+          };
+        } catch (error) {
+          // A Managed session's log has no mapping for these records
+          // (`ManagedSessionRecordSink.canCarry`); say so in a form the
+          // daemon can branch on instead of an opaque internal error.
+          if (
+            error instanceof Error &&
+            (error as { code?: unknown }).code ===
+              'managed_session_record_refused'
+          ) {
+            throw RequestError.invalidParams(
+              { errorKind: 'managed_session_unsupported' },
+              'Session agents are not supported in managed sessions.',
+            );
+          }
+          throw error;
+        }
       }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {
         const sessionId = params['sessionId'];
@@ -14961,9 +15009,13 @@ class QwenAgent implements Agent {
             // them on DEFAULT too — pushing the file value (or the AUTO fold
             // of a missing key) into a safe-mode session would silently
             // strip its approval restriction.
-            const reloadedSessionMode = isRestrictedApprovalModeConfig(config)
-              ? ApprovalMode.DEFAULT
-              : reloadedApprovalMode;
+            // Session-agent sessions are pinned to DEFAULT too: every write
+            // they make asks in the chat session (Config refuses other modes).
+            const reloadedSessionMode =
+              isRestrictedApprovalModeConfig(config) ||
+              config.isSessionAgentSession?.() === true
+                ? ApprovalMode.DEFAULT
+                : reloadedApprovalMode;
             const previousMode = config.getApprovalMode();
             const convergedMode = this.sessionApprovalModeConverged.get(id);
             if (
@@ -15611,7 +15663,28 @@ class QwenAgent implements Agent {
     if (!provisionalWorkspace && chatRecording !== false) {
       this.bindSessionSourceService(config);
     }
+    // A hidden agent session the session-agents orchestrator planned. Looked
+    // up before `initialize()` because it decides whether the thread tools
+    // are registered (see Config.markSessionAgentSession). A plain read of
+    // daemon-written state; the claim itself is still only `sourceType`.
+    let sessionAgentBinding: SessionAgentNativeBinding | undefined;
     try {
+      if (
+        sessionSource?.sourceType === AGENT_SESSION_SOURCE_TYPE &&
+        sessionSource.sourceId
+      ) {
+        sessionAgentBinding = await findSessionAgentBinding(
+          cwd,
+          wiredSessionId,
+          sessionSource.sourceId,
+        );
+        if (
+          sessionAgentBinding &&
+          typeof config.markSessionAgentSession === 'function'
+        ) {
+          config.markSessionAgentSession();
+        }
+      }
       await config.initialize({
         ...effectiveInitializeOptions,
         // Reverse tool channel (issue #5626, Phase 2): bind the session
@@ -15640,9 +15713,14 @@ class QwenAgent implements Agent {
         // means not enabled, which refuses — the safe direction here, since the
         // alternative is granting an agent persona on a Config that cannot say
         // whether the operator opted in.
+        // A remote Host runs a coordinator's turn under a binding its daemon
+        // wrote for that turn (`remotePersona`); being a runtime does not
+        // require this workspace to run collaboration itself (session-multi-agent design §8-5).
+        const remotePersona = sessionAgentBinding?.remotePersona;
         const collaborationEnabled =
-          typeof config.isAgentCollaborationEnabled === 'function' &&
-          config.isAgentCollaborationEnabled();
+          remotePersona !== undefined ||
+          (typeof config.isAgentCollaborationEnabled === 'function' &&
+            config.isAgentCollaborationEnabled());
         if (!collaborationEnabled) {
           throw RequestError.invalidParams(
             undefined,
@@ -15656,31 +15734,53 @@ class QwenAgent implements Agent {
         // workspace's store holds a live run for that agent naming this very
         // session. Deliberately not gated on the opt-in: with collaboration on
         // is exactly when the check has to hold.
-        const binding = await findAgentSessionBinding(
-          cwd,
-          wiredSessionId,
-          sessionSource.sourceId,
-        );
+        // Either collaboration surface may own the session while both exist:
+        // a live thread run (legacy dispatcher) or a live session-agents run
+        // whose binding planned this session id (looked up above).
+        // TODO(multi-agent): drop the thread lookup with the thread subsystem.
+        const binding =
+          sessionAgentBinding ??
+          (await findAgentSessionBinding(
+            cwd,
+            wiredSessionId,
+            sessionSource.sourceId,
+          ));
         if (!binding) {
           throw RequestError.invalidParams(
             undefined,
             'No dispatched run claims this session for that agent',
           );
         }
-        const persona = await resolveAgentPersona(
-          config,
-          sessionSource.sourceId,
-        );
-        if (persona.status !== 'resolved') {
-          throw RequestError.invalidParams(undefined, persona.error);
+        let personaModel: string | undefined;
+        if (remotePersona) {
+          // Not in this Host's roster: the coordinator sent the persona. No
+          // tool allowlist — every tool stays behind approval, which round-
+          // trips to the coordinator's session.
+          config.applyWorkspaceAgentPersona(
+            buildRemoteSessionAgentSystemPrompt(remotePersona),
+            remotePersona.name,
+            undefined,
+          );
+          personaModel = remotePersona.model;
+        } else {
+          const persona = await resolveAgentPersona(
+            config,
+            sessionSource.sourceId,
+            sessionAgentBinding ? { surface: 'session' } : {},
+          );
+          if (persona.status !== 'resolved') {
+            throw RequestError.invalidParams(undefined, persona.error);
+          }
+          config.applyWorkspaceAgentPersona(
+            persona.systemPrompt,
+            persona.agent.name,
+            persona.toolConfig.executionAllowedTools,
+            persona.toolConfig.disallowedTools,
+          );
+          personaModel = persona.model;
         }
-        config.applyWorkspaceAgentPersona(
-          persona.systemPrompt,
-          persona.agent.name,
-          persona.toolConfig.executionAllowedTools,
-        );
         const currentAuthType = config.getModelsConfig().getCurrentAuthType();
-        const model = resolveModelId(persona.model, {
+        const model = resolveModelId(personaModel, {
           ...buildModelIdContext(config),
           currentModel: undefined,
           currentAuthType,
