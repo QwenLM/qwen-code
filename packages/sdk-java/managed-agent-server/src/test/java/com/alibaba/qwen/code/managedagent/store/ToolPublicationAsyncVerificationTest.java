@@ -549,9 +549,19 @@ public class ToolPublicationAsyncVerificationTest {
         publish("predecessor", 0, "bytes");
         data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", terminal(10), true);
         bucket.objects.values().iterator().next()[0] = 'x';
+        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET verification_next_at = deadline"
+                + " WHERE operation_id = ?", "predecessor");
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
+            assertThat(status("predecessor").path("state").asText()).isEqualTo("PENDING");
+            assertThat(status("finish").path("state").asText()).isEqualTo("PENDING");
+            assertThatThrownBy(() -> data.finished(key, "pub-1", WRITER_TOKEN)).hasMessageContaining("no finished");
+            fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET verification_next_at = deadline"
+                    + " WHERE operation_id = ?", "finish");
+            due("predecessor");
+            assertThat(verifier.runOnce()).isTrue();
             assertThat(status("predecessor").path("state").asText()).isEqualTo("FAILED");
+            due("finish");
             assertThat(verifier.runOnce()).isTrue();
         }
         assertThat(status("finish").path("state").asText()).isEqualTo("FAILED");
