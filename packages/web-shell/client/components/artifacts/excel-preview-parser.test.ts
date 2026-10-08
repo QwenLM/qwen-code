@@ -1,4 +1,5 @@
 import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
 import { describe, expect, it, vi } from 'vitest';
 import {
   getExcelWorkbookInfo,
@@ -9,6 +10,111 @@ import {
 async function preview(workbook: ExcelJS.Workbook) {
   return loadExcelWorkbook(await workbook.xlsx.writeBuffer());
 }
+
+async function mergedWorkbook(rangesBySheet: string[][]) {
+  const workbook = new ExcelJS.Workbook();
+  rangesBySheet.forEach((_ranges, index) => {
+    workbook.addWorksheet(`Sheet ${index}`).getCell('A1').value = 'Master';
+  });
+  const zip = await JSZip.loadAsync(await workbook.xlsx.writeBuffer());
+  for (const [index, ranges] of rangesBySheet.entries()) {
+    const path = `xl/worksheets/sheet${index + 1}.xml`;
+    const xml = await zip.file(path)!.async('string');
+    zip.file(
+      path,
+      xml.replace(
+        '</worksheet>',
+        `<mergeCells>${ranges.map((ref) => `<mergeCell ref="${ref}"/>`).join('')}</mergeCells></worksheet>`,
+      ),
+    );
+  }
+  return zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
+}
+
+describe('Excel preview merge loading limits', () => {
+  it.each<[string, string[][], string]>([
+    ['one huge range', [['A1:XFD1048576']], 'Merged ranges are too large'],
+    [
+      'area just over the budget',
+      [['A1:A100001']],
+      'Merged ranges are too large',
+    ],
+    [
+      'total area across worksheets',
+      [['A1:J6000'], ['A1:J6000']],
+      'Merged ranges are too large',
+    ],
+    [
+      'too many ranges',
+      [Array.from({ length: 10001 }, (_, i) => `A${i + 1}:B${i + 1}`)],
+      'Too many merged ranges',
+    ],
+    [
+      'total count across worksheets',
+      [
+        Array.from({ length: 6000 }, (_, i) => `A${i + 1}:B${i + 1}`),
+        Array.from({ length: 6000 }, (_, i) => `A${i + 1}:B${i + 1}`),
+      ],
+      'Too many merged ranges',
+    ],
+    ['invalid address', [['A0:B2']], 'Invalid merged cell address'],
+  ])('rejects %s before expansion', async (_name, ranges, message) => {
+    const bytes = await mergedWorkbook(ranges);
+    const prototype = Object.getPrototypeOf(
+      new ExcelJS.Workbook().addWorksheet('Probe'),
+    ) as ExcelJS.Worksheet;
+    // Never allow an intentionally malicious fixture to allocate cells, even if
+    // the guard regresses. The expected limit error must precede expansion.
+    const expand = vi
+      .spyOn(prototype, 'mergeCellsWithoutStyle')
+      .mockImplementation(() => {});
+    try {
+      const error = await loadExcelWorkbook(bytes).then(
+        () => '',
+        (reason: Error) => reason.message,
+      );
+      expect(error).toContain(message);
+      expect(expand).toHaveBeenCalledTimes(
+        ranges.length > 1 ? ranges[0]!.length : 0,
+      );
+    } finally {
+      expand.mockRestore();
+    }
+  });
+
+  it('accepts the exact area budget and isolates concurrent workbook budgets', async () => {
+    const bytes = await mergedWorkbook([['$A$1:$J$10000']]);
+    const books = await Promise.all([
+      loadExcelWorkbook(bytes),
+      loadExcelWorkbook(bytes),
+    ]);
+    for (const book of books) {
+      expect(book.worksheets[0]!.getCell('J10000').master.address).toBe('A1');
+      expect(projectExcelSheet(book, 0)).toMatchObject({
+        columns: 10,
+        truncated: false,
+      });
+    }
+  });
+
+  it('accepts the exact range count without doing quadratic merge work in the test', async () => {
+    const bytes = await mergedWorkbook([
+      Array.from({ length: 10000 }, (_, i) => `A${i + 1}:B${i + 1}`),
+    ]);
+    const prototype = Object.getPrototypeOf(
+      new ExcelJS.Workbook().addWorksheet('Probe'),
+    ) as ExcelJS.Worksheet;
+    const expand = vi
+      .spyOn(prototype, 'mergeCellsWithoutStyle')
+      .mockImplementation(() => {});
+    try {
+      await loadExcelWorkbook(bytes);
+      expect(expand).toHaveBeenCalledTimes(10000);
+    } finally {
+      expand.mockRestore();
+    }
+  });
+});
 
 describe('Excel preview projection', () => {
   it.each([false, true])(
@@ -93,6 +199,43 @@ describe('Excel preview projection', () => {
       columns: 0,
       truncated: false,
     });
+  });
+
+  it('ignores peripheral empty formatting while preserving coordinates and merges', async () => {
+    const book = new ExcelJS.Workbook();
+    const sheet = book.addWorksheet('Data');
+    for (let row = 1; row <= 2000; row++)
+      sheet.addRow([`Row ${row}`, row, row * 2]);
+    sheet.getCell('XFD1').font = { bold: true };
+    sheet.getRow(5000).font = { bold: true };
+    const empty = book.addWorksheet('Only formatting');
+    empty.getCell('XFD1').fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFFF0000' },
+    };
+    const merged = book.addWorksheet('Merged extent');
+    merged.mergeCells('B2:E4');
+    merged.getCell('B2').value = 'Master';
+    const loaded = await preview(book);
+    expect(loaded.worksheets[0]!.columnCount).toBe(16384);
+    const projected = projectExcelSheet(loaded, 0);
+    expect(projected).toMatchObject({ columns: 3, truncated: false });
+    expect(projected.rows).toHaveLength(2000);
+    expect(projected.rows.at(-1)?.[0]?.text).toBe('Row 2000');
+    expect(projectExcelSheet(loaded, 1)).toMatchObject({
+      columns: 0,
+      rows: [],
+      truncated: false,
+    });
+    const mergedProjection = projectExcelSheet(loaded, 2);
+    expect(mergedProjection.columns).toBe(5);
+    expect(mergedProjection.rows).toHaveLength(4);
+    expect(mergedProjection.rows[0]).toEqual([null, null, null, null, null]);
+    expect(mergedProjection.rows[1]?.[1]?.text).toBe('Master');
+    expect(mergedProjection.merges).toEqual([
+      { top: 1, left: 1, bottom: 3, right: 4 },
+    ]);
   });
 
   it('budgets all grid cells without independent sheet or column limits', async () => {

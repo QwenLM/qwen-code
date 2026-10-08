@@ -22,7 +22,8 @@ virtual scrolling and download. An inline Vite worker loads ExcelJS only when th
 component is opened; its code must stay outside initial app/library entry chunks.
 The inline worker avoids a separate worker asset contract for embedded hosts.
 Terminate it on close, input changes, or a 30-second parsing timeout. Hosts must
-permit blob workers; failure shows a download fallback.
+permit blob workers; failure shows a download fallback. The first-party VS Code
+webview explicitly grants `worker-src blob:` without widening `script-src`.
 
 The worker initially returns only worksheet names. Selecting a sheet requests its preview projection; the page retains only
 the selected sheet and ignores outdated responses. Keep the parsed workbook in
@@ -46,7 +47,9 @@ Show basic explicit RGB colors, bold/italic text, alignment, and merges; complex
 styles/themes and embedded objects are outside this preview's fidelity guarantee.
 
 Limit preview input to 10 MiB and each selected sheet to 100,000 grid cells,
-including empty positions. Replace independent worksheet-count, row-count and
+including empty positions inside the content/merge extent. Ignore peripheral
+formatting-only cells when finding this extent; keep original coordinates and
+merged placeholders. Replace independent worksheet-count, row-count and
 column-count caps with this budget: retain all columns and as many complete rows
 as fit within floor(100,000 / column count). Empty sheets have no preview rows.
 Show the truncation notice only when the selected sheet exceeds that budget.
@@ -62,7 +65,16 @@ retaining the original master value and row/column coordinates. Remount the tabl
 on sheet changes to reset scroll position and row measurements. Remove pagination
 controls. The cell budget bounds projection size, while row virtualization reduces
 mounted rows; neither limits ZIP expansion; the worker is cancellable but is not
-a hard memory sandbox. Download retains the existing separate file-size policy.
+a hard memory sandbox. Before ExcelJS expands merges, reject workbooks with more
+than 100,000 merged cells in total or 10,000 merged ranges across all worksheets.
+These separate load-time budgets include off-screen sheets and prevent compact
+merge declarations from allocating unbounded cells or doing unbounded pairwise
+intersection checks. A worker-local hook wraps ExcelJS 4.4.0's private
+`_parseMergeCells`, applies only to registered preview workbooks, and retains
+separate budgets for concurrent loads. Keep the exact ExcelJS version pinned and
+revalidate this hook on upgrades. Invalid merge addresses fail closed. Rejection
+keeps the original downloadable. These guards do not bound general ZIP expansion
+or non-merge workbook memory. Download retains the existing separate file-size policy.
 
 ## Affected areas
 
@@ -84,6 +96,10 @@ truncation including empty cells. Compare large-sheet
 rendering with the paginated and full-render baselines. Inspect actual screenshots.
 Check built app and library chunks to ensure
 ExcelJS is absent from initial entries and its lazy worker is published correctly.
+Check huge merged ranges, exact/over-limit area and count, accumulation across
+sheets, concurrent load isolation, and peripheral empty formatting. Verify the
+first-party webview CSP permits blob workers while restrictive third-party hosts
+still receive the download fallback.
 
 ## Open questions
 

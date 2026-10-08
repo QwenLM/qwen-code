@@ -732,7 +732,7 @@ const EN: Messages = {
   'excel.tooLarge':
     'Excel preview supports files up to 10 MiB. Download the original to open it.',
   'excel.invalid':
-    'Unable to preview this workbook. It may be damaged, password protected, or unsupported by this browser. You can download the original.',
+    'Unable to preview this workbook. It may be damaged, password protected, too complex, or unsupported by this browser. You can download the original.',
   'excel.timeout':
     'This workbook took too long to preview. Download the original to open it.',
   'artifact.openLink': 'Open link',
@@ -5028,7 +5028,7 @@ const ZH: Messages = {
   'excel.notCalculated': '未计算',
   'excel.tooLarge': 'Excel 预览支持最大 10 MiB 的文件，请下载原文件打开。',
   'excel.invalid':
-    '无法预览此工作簿，文件可能已损坏、受密码保护，或当前浏览器不支持。你可以下载原文件。',
+    '无法预览此工作簿，文件可能已损坏、受密码保护、复杂度过高，或当前浏览器不支持。你可以下载原文件。',
   'excel.timeout': '工作簿预览超时，请下载原文件打开。',
   'artifact.openLink': '打开链接',
   'artifact.longDocument': '文件过大，默认展示源码。',

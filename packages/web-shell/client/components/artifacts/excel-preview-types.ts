@@ -2,6 +2,8 @@ import type { CSSProperties } from 'react';
 
 export const MAX_EXCEL_PREVIEW_BYTES = 10 * 1024 * 1024;
 export const MAX_EXCEL_PREVIEW_CELLS = 100_000;
+export const MAX_EXCEL_PREVIEW_MERGED_CELLS = 100_000;
+export const MAX_EXCEL_PREVIEW_MERGES = 10_000;
 
 export interface ExcelPreviewCell {
   text: string;

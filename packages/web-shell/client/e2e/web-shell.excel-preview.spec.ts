@@ -1,5 +1,6 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import ExcelJS from 'exceljs';
+import JSZip from 'jszip';
 import { readFile } from 'node:fs/promises';
 import type { DaemonEvent, DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
@@ -580,10 +581,23 @@ test('opens persisted attachment from message and Sources, then restores it afte
   expect(mock.textReads).toEqual([]);
 });
 
-test('keeps the original downloadable when the host blocks workers', async ({
+test('rejects excessive merged area without losing the original download or crashing on reopen', async ({
   page,
 }, info) => {
-  const bytes = await workbookBytes();
+  const zip = await JSZip.loadAsync(await workbookBytes());
+  const path = 'xl/worksheets/sheet1.xml';
+  const xml = await zip.file(path)!.async('string');
+  zip.file(
+    path,
+    xml.replace(
+      /<mergeCells[^>]*>[\s\S]*?<\/mergeCells>/,
+      '<mergeCells><mergeCell ref="A1:J10001"/></mergeCells>',
+    ),
+  );
+  const bytes = await zip.generateAsync({
+    type: 'nodebuffer',
+    compression: 'DEFLATE',
+  });
   const scenario = createWebShellDaemonScenario({
     events: [
       toolCallEvent(
@@ -598,19 +612,6 @@ test('keeps the original downloadable when the host blocks workers', async ({
   });
   scenario.capabilities.features.push('session_artifacts');
   const mock = await install(page, info, scenario, bytes);
-  await page.route(
-    (url) => url.pathname === `/session/${scenario.sessionId}`,
-    async (route) => {
-      const response = await route.fetch();
-      await route.fulfill({
-        response,
-        headers: {
-          ...response.headers(),
-          'content-security-policy': "worker-src 'none'",
-        },
-      });
-    },
-  );
   await mock.open();
   await page
     .locator(
@@ -618,13 +619,123 @@ test('keeps the original downloadable when the host blocks workers', async ({
     )
     .click();
   const preview = page.locator(previewSelector);
-  await expect(preview.getByRole('alert')).toBeVisible();
+  await expect(preview.getByRole('alert')).toContainText('too complex');
   await expect(preview.getByRole('table')).toHaveCount(0);
   const downloadPromise = page.waitForEvent('download');
   await preview.getByRole('link', { name: /Download/i }).click();
-  const download = await downloadPromise;
-  expect(await readFile((await download.path())!)).toEqual(bytes);
+  expect(await readFile((await (await downloadPromise).path())!)).toEqual(
+    bytes,
+  );
+  await page.reload();
+  await expect(preview.getByRole('alert')).toContainText('too complex');
+  await page.screenshot({
+    path: info.outputPath('excel-merge-limit-mock-daemon.png'),
+  });
 });
+
+test('retains all content when peripheral empty cells carry formatting', async ({
+  page,
+}, info) => {
+  const book = new ExcelJS.Workbook();
+  const sheet = book.addWorksheet('Orders');
+  for (let row = 1; row <= 2000; row++)
+    sheet.addRow([`Order ${row}`, row, row * 2]);
+  sheet.getCell('XFD1').font = { bold: true };
+  sheet.getRow(5000).font = { bold: true };
+  const bytes = Buffer.from(await book.xlsx.writeBuffer());
+  const scenario = createWebShellDaemonScenario({
+    events: [
+      toolCallEvent(
+        'make-workbook',
+        'Artifact',
+        { file_path: workbookPath },
+        { id: 1 },
+      ),
+      turnCompleteEvent('report', { id: 2 }),
+    ],
+    artifacts: [artifact()],
+  });
+  scenario.capabilities.features.push('session_artifacts');
+  const mock = await install(page, info, scenario, bytes);
+  await mock.open();
+  await page
+    .locator(
+      '[data-web-shell-message-list] [title="Quarterly workbook"] > button',
+    )
+    .click();
+  const preview = page.locator(previewSelector);
+  await expect(preview.getByRole('table')).toHaveAttribute(
+    'aria-rowcount',
+    '2001',
+  );
+  await expect(preview.getByRole('columnheader')).toHaveCount(4);
+  await expect(preview.getByRole('status')).toHaveCount(0);
+  await preview.locator('[data-web-shell-excel-scroll]').evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(
+    preview.getByRole('cell', { name: 'Order 2000', exact: true }),
+  ).toBeVisible();
+  await page.screenshot({
+    path: info.outputPath('excel-formatted-extent-mock-daemon.png'),
+  });
+});
+
+for (const allowWorker of [false, true]) {
+  test(`host worker policy ${allowWorker ? 'permits preview' : 'keeps download fallback'}`, async ({
+    page,
+  }, info) => {
+    const bytes = await workbookBytes();
+    const scenario = createWebShellDaemonScenario({
+      events: [
+        toolCallEvent(
+          'make-workbook',
+          'Artifact',
+          { file_path: workbookPath },
+          { id: 1 },
+        ),
+        turnCompleteEvent('report', { id: 2 }),
+      ],
+      artifacts: [artifact()],
+    });
+    scenario.capabilities.features.push('session_artifacts');
+    const mock = await install(page, info, scenario, bytes);
+    await page.route(
+      (url) => url.pathname === `/session/${scenario.sessionId}`,
+      async (route) => {
+        const response = await route.fetch();
+        await route.fulfill({
+          response,
+          headers: {
+            ...response.headers(),
+            // Vite dev serves a worker URL; production inlines the worker as a blob.
+            'content-security-policy': allowWorker
+              ? "worker-src 'self' blob:"
+              : "worker-src 'none'",
+          },
+        });
+      },
+    );
+    await mock.open();
+    await page
+      .locator(
+        '[data-web-shell-message-list] [title="Quarterly workbook"] > button',
+      )
+      .click();
+    const preview = page.locator(previewSelector);
+    if (allowWorker) {
+      await expect(preview.getByRole('table')).toBeVisible();
+      await expect(preview.getByRole('alert')).toHaveCount(0);
+    } else {
+      await expect(preview.getByRole('alert')).toBeVisible();
+      await expect(preview.getByRole('table')).toHaveCount(0);
+    }
+    const downloadPromise = page.waitForEvent('download');
+    await preview.getByRole('link', { name: /Download/i }).click();
+    const download = await downloadPromise;
+    expect(await readFile((await download.path())!)).toEqual(bytes);
+  });
+}
 
 test('keeps artifact and incoming Blob downloadable when the lazy preview module fails', async ({
   page,

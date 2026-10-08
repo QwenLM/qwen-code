@@ -1,7 +1,11 @@
 import ExcelJS from 'exceljs';
 import { format } from 'ssf';
-import type { Cell, CellValue } from 'exceljs';
-import { MAX_EXCEL_PREVIEW_CELLS } from './excel-preview-types';
+import type { Cell, CellValue, Worksheet } from 'exceljs';
+import {
+  MAX_EXCEL_PREVIEW_CELLS,
+  MAX_EXCEL_PREVIEW_MERGED_CELLS,
+  MAX_EXCEL_PREVIEW_MERGES,
+} from './excel-preview-types';
 import type {
   ExcelPreviewCell,
   ExcelPreviewSheet,
@@ -75,17 +79,67 @@ function previewCell(cell: Cell, date1904: boolean): ExcelPreviewCell {
 }
 
 function address(value: string): { row: number; column: number } {
-  const match = /^([A-Z]+)(\d+)$/.exec(value)!;
+  const match = /^\$?([A-Z]+)\$?([1-9]\d*)$/i.exec(value);
+  if (!match) throw new Error('Invalid merged cell address.');
   let column = 0;
-  for (const character of match[1]!)
+  for (const character of match[1]!.toUpperCase())
     column = column * 26 + character.charCodeAt(0) - 64;
-  return { row: Number(match[2]) - 1, column: column - 1 };
+  const row = Number(match[2]);
+  if (row > 1_048_576 || column > 16_384)
+    throw new Error('Merged cell address is outside the worksheet.');
+  return { row: row - 1, column: column - 1 };
+}
+
+const mergeBudgets = new WeakMap<
+  ExcelJS.Workbook,
+  { cells: number; count: number }
+>();
+let mergeGuardInstalled = false;
+
+function installMergeGuard() {
+  if (mergeGuardInstalled) return;
+  // ExcelJS 4.4.0 expands merges before load resolves; this private hook must
+  // stay covered by load tests when upgrading. Guard only preview workbooks.
+  const prototype = Object.getPrototypeOf(
+    new ExcelJS.Workbook().addWorksheet('guard'),
+  ) as {
+    _parseMergeCells(this: Worksheet, model: { mergeCells?: string[] }): void;
+  };
+  const parseMergeCells = prototype._parseMergeCells;
+  prototype._parseMergeCells = function (model) {
+    const budget = mergeBudgets.get(this.workbook);
+    if (budget) {
+      const ranges = model.mergeCells ?? [];
+      budget.count += ranges.length;
+      if (budget.count > MAX_EXCEL_PREVIEW_MERGES)
+        throw new RangeError('Too many merged ranges to preview.');
+      for (const range of ranges) {
+        const parts = range.split(':');
+        if (parts.length > 2) throw new Error('Invalid merged range.');
+        const a = address(parts[0]!);
+        const b = address(parts[1] ?? parts[0]!);
+        budget.cells +=
+          (Math.abs(b.row - a.row) + 1) * (Math.abs(b.column - a.column) + 1);
+        if (budget.cells > MAX_EXCEL_PREVIEW_MERGED_CELLS)
+          throw new RangeError('Merged ranges are too large to preview.');
+      }
+    }
+    parseMergeCells.call(this, model);
+  };
+  mergeGuardInstalled = true;
 }
 
 export async function loadExcelWorkbook(
   data: ArrayBuffer,
 ): Promise<ExcelJS.Workbook> {
-  return new ExcelJS.Workbook().xlsx.load(data);
+  installMergeGuard();
+  const workbook = new ExcelJS.Workbook();
+  mergeBudgets.set(workbook, { cells: 0, count: 0 });
+  try {
+    return await workbook.xlsx.load(data);
+  } finally {
+    mergeBudgets.delete(workbook);
+  }
 }
 
 export function getExcelWorkbookInfo(
@@ -108,15 +162,24 @@ export function projectExcelSheet(
     throw new RangeError('Worksheet index is outside the preview range.');
   }
   const sheet = workbook.worksheets[index]!;
-  const columns = sheet.columnCount;
+  // Peripheral formatting-only cells must not consume the rectangular budget.
+  // eachCell includes merged placeholders, preserving the full merged extent.
+  let columns = 0;
+  let lastRow = 0;
+  sheet.eachRow((row, rowNumber) => {
+    lastRow = rowNumber;
+    row.eachCell((_cell, column) => {
+      columns = Math.max(columns, column);
+    });
+  });
   const rowCount =
     columns === 0
       ? 0
-      : Math.min(sheet.rowCount, Math.floor(MAX_EXCEL_PREVIEW_CELLS / columns));
+      : Math.min(lastRow, Math.floor(MAX_EXCEL_PREVIEW_CELLS / columns));
   return {
     name: sheet.name,
     columns,
-    truncated: columns > 0 && sheet.rowCount > rowCount,
+    truncated: columns > 0 && lastRow > rowCount,
     rows: Array.from({ length: rowCount }, (_, r) =>
       Array.from({ length: columns }, (_, c) => {
         const cell = sheet.findRow(r + 1)?.findCell(c + 1);

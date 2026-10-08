@@ -102,6 +102,7 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.2.0",
     "jsdom": "^26.1.0",
+    "jszip": "3.10.2",
     "openapi-typescript": "^7.13.0",
     "postcss": "^8.5.17",
     "postcss-selector-parser": "^7.1.4",
