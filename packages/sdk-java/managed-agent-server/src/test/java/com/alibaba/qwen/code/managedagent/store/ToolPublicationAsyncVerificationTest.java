@@ -187,14 +187,20 @@ public class ToolPublicationAsyncVerificationTest {
     @ParameterizedTest
     @ValueSource(strings = {"null", "{"})
     void malformedCandidateInputsFailWithoutEscapingTheScan(String encoded) {
-        publish("bad-inputs", 0, "bytes");
-        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET verification_request_json = ?",
-                encoded.equals("null") ? null : encoded);
+        publish("healthy", 0, "bytes");
+        data.finish(key, "pub-1", PUBLICATION_TOKEN, "bad-inputs", terminal(10), true);
+        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET verification_request_json = ?,"
+                        + " verification_next_at = ? WHERE operation_id = 'bad-inputs'",
+                encoded.equals("null") ? null : encoded, Timestamp.valueOf("2000-01-01 00:00:00"));
+        fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET verification_next_at = ?"
+                        + " WHERE operation_id = 'healthy'",
+                Timestamp.valueOf("2000-01-02 00:00:00"));
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("bad-inputs").path("state").asText()).isEqualTo("FAILED");
         assertThat(status("bad-inputs").path("error").path("code").asText()).isEqualTo("invalid_request");
+        assertThat(status("healthy").path("state").asText()).isEqualTo("SUCCEEDED");
         assertThat(data.verifyNextOperation()).isFalse();
-        assertThat(bucket.opens).hasValue(0);
+        assertThat(bucket.opens).hasValue(1);
     }
 
     @ParameterizedTest
@@ -246,6 +252,7 @@ public class ToolPublicationAsyncVerificationTest {
     @ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
     void springSchedulingDrainsAcceptedWorkEvenWithAdmissionDisabled(boolean asyncEnabled) {
+        data = replacement(Duration.ofMinutes(5), Duration.ofSeconds(2));
         publish("restart", 0, "bytes");
         new org.springframework.boot.test.context.runner.ApplicationContextRunner()
                 .withUserConfiguration(SchedulingHarness.class,
@@ -258,6 +265,7 @@ public class ToolPublicationAsyncVerificationTest {
                         "qwen.managed-agent.tool-publication.tenant-bytes=104857600",
                         "qwen.managed-agent.tool-publication.active-captures=10",
                         "qwen.managed-agent.tool-publication.entry-concurrency=2",
+                        "qwen.managed-agent.tool-publication.verification-concurrency=3",
                         "qwen.managed-agent.tool-publication.operation-timeout=10s",
                         "qwen.managed-agent.tool-publication.claim-timeout=2s",
                         "qwen.managed-agent.tool-publication.max-verification-timeout=25m",
@@ -284,7 +292,7 @@ public class ToolPublicationAsyncVerificationTest {
                             .getToolPublication();
                     assertThat(settings.isAsyncVerificationEnabled()).isEqualTo(asyncEnabled);
                     assertThat(settings.isJournalHeadAuthorization()).isTrue();
-                    assertThat(settings.getVerificationConcurrency()).isEqualTo(2);
+                    assertThat(settings.getVerificationConcurrency()).isEqualTo(3);
                     await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                             assertThat(status("restart").path("state").asText()).isEqualTo("SUCCEEDED"));
                 });
@@ -412,11 +420,17 @@ public class ToolPublicationAsyncVerificationTest {
         assertThat(status("denied").path("state").asText()).isEqualTo("FAILED");
     }
 
-    @Test
-    void expiredAttemptDefersInsteadOfImmediatelyReclaiming() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"temporary", "denied"})
+    void expiredAttemptDefersInsteadOfImmediatelyReclaiming(String failure) throws Exception {
         publish("retry", 0, "bytes");
         bucket.blockOpen = 1;
-        bucket.failRead = true;
+        if (failure.equals("denied")) {
+            bucket.readFailure = new com.aliyun.oss.OSSException("denied", "AccessDenied",
+                    "request", "host", "bucket", "key", "resource");
+        } else {
+            bucket.failRead = true;
+        }
         try (var verifier = manualVerifier(data); var worker = Executors.newSingleThreadExecutor()) {
             var attempt = worker.submit(verifier::runOnce);
             assertThat(bucket.readStarted.await(5, TimeUnit.SECONDS)).isTrue();
@@ -554,6 +568,58 @@ public class ToolPublicationAsyncVerificationTest {
             assertThat(successor.get(5, TimeUnit.SECONDS)).isTrue();
         }
         assertThat(status("takeover").path("state").asText()).isEqualTo("SUCCEEDED");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"seal", "prefix"})
+    void staleCorruptScanCannotQuarantineTheSuccessorsPublication(String scan) throws Exception {
+        data = replacement(Duration.ofMinutes(2), Duration.ofMinutes(1));
+        byte[] bytes = new byte[] {1, 2};
+        data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "seed", "stdout", 0, bytes, null);
+        bucket.opens.set(0);
+        if (scan.equals("seal")) {
+            data.seal(key, "pub-1", PUBLICATION_TOKEN, "takeover", "stdout", 1, bytes.length,
+                    ToolPublicationContract.sha256(bytes), true);
+        } else {
+            data.prefix(key, "pub-1", PUBLICATION_TOKEN, "takeover", "stdout", true);
+        }
+        bucket.blockOpen = 1;
+        bucket.corruptBlockedRead = true;
+        bucket.blockSuccessor = true;
+        try (var first = manualVerifier(data); var second = manualVerifier(replacement(Duration.ofMinutes(2), Duration.ofMinutes(1)));
+                var workers = Executors.newFixedThreadPool(2)) {
+            var old = workers.submit(first::runOnce);
+            try {
+                assertThat(bucket.readStarted.await(5, TimeUnit.SECONDS)).isTrue();
+                long oldEpoch = fixture.jdbc.queryForObject("SELECT claim_epoch FROM qwen_tool_publication_operation"
+                        + " WHERE operation_id = 'takeover'", Long.class);
+                fixture.jdbc.update("UPDATE qwen_tool_publication_operation SET claim_until = ?, verification_next_at = ?"
+                                + " WHERE operation_id = 'takeover'",
+                        Timestamp.valueOf("2000-01-01 00:00:00"), Timestamp.valueOf("2000-01-01 00:00:00"));
+                var successor = workers.submit(second::runOnce);
+                try {
+                    assertThat(bucket.successorStarted.await(5, TimeUnit.SECONDS)).isTrue();
+                    assertThat(fixture.jdbc.queryForObject("SELECT claim_epoch FROM qwen_tool_publication_operation"
+                            + " WHERE operation_id = 'takeover'", Long.class)).isEqualTo(oldEpoch + 1);
+                    bucket.readRelease.countDown();
+                    assertThat(old.get(5, TimeUnit.SECONDS)).isTrue();
+                    assertThat(status("takeover").path("state").asText()).isEqualTo("PENDING");
+                    assertThat(fixture.jdbc.queryForObject("SELECT quarantined FROM qwen_tool_publication", Boolean.class)).isFalse();
+                    assertThat(fixture.jdbc.queryForObject("SELECT state FROM qwen_tool_publication_object", String.class))
+                            .isEqualTo("VERIFIED");
+                } finally {
+                    bucket.successorRelease.countDown();
+                }
+                assertThat(successor.get(5, TimeUnit.SECONDS)).isTrue();
+            } finally {
+                bucket.readRelease.countDown();
+                bucket.successorRelease.countDown();
+            }
+        }
+        assertThat(status("takeover").path("state").asText()).isEqualTo("SUCCEEDED");
+        assertThat(status("takeover").path("receipt").path("segmentCount").asInt()).isEqualTo(1);
+        assertThat(status("takeover").path("receipt").path("digest").asText())
+                .isEqualTo(ToolPublicationContract.sha256(bytes));
     }
 
     @Test

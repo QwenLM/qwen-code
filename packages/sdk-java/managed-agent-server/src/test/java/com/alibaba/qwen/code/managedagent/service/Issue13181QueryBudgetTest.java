@@ -84,7 +84,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  *       window, not per delivered event.</li>
  *   <li>listPublicSessions / listWebShellSessions assemble a page from a
  *       fixed number of grouped batch queries.</li>
- *   <li>Tool-publication authorization, async heartbeats, and status polling
+ *   <li>Tool-publication authorization and async heartbeats
  *       read the activation state from the journal head when journal-head-authorization is enabled (the flag
  *       ships false), rescanning the journal only for pre-migration heads
  *       (and backfilling them).</li>
@@ -1041,13 +1041,16 @@ class Issue13181QueryBudgetTest {
         try (var verifier = new ToolPublicationVerifier(data, 1)) {
             assertThat(verifier.runOnce()).isTrue();
         }
+        assertThat(fixture.ledger.count("update qwen_tool_publication_operation set claim_until")).isGreaterThanOrEqualTo(2);
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx")).isZero();
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_head", "for update")).isPositive();
+        fixture.ledger.reset();
         for (int i = 0; i < 12; i++) {
             assertThat(data.operationStatus(binding.path("sessionKey"), "pub-1", PUBLICATION_TOKEN, "async-heartbeat")
                     .path("state").asText()).isEqualTo("SUCCEEDED");
         }
-        assertThat(fixture.ledger.count("update qwen_tool_publication_operation set claim_until")).isGreaterThanOrEqualTo(2);
         assertThat(fixture.ledger.count("from qwen_managed_session_journal_tx")).isZero();
-        assertThat(fixture.ledger.count("from qwen_managed_session_journal_head", "for update")).isPositive();
+        assertThat(fixture.ledger.count("from qwen_managed_session_journal_head")).isZero();
     }
 
     @Test
