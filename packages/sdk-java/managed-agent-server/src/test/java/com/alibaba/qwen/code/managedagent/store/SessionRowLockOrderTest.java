@@ -4,9 +4,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -14,6 +16,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.Test;
 
@@ -28,13 +31,18 @@ import org.junit.jupiter.api.Test;
 // transitively through the same-file methods a writer calls, because a
 // one-hop turn side audited beginOperation's three-hop path as no access
 // and never compared its ordering at all. The locker set is asserted
-// exactly, so a new locker fails here instead of escaping the audit.
+// exactly, so a new locker fails here instead of escaping the audit. A
+// pure delegator whose lock and turn sides resolve to the same call site
+// is inconclusive in its own body, so the comparison descends into the
+// callee that site names; and member selection fails closed against the
+// compiled class, so a declaration shape the source matcher cannot see
+// fails the canary instead of passing unaudited.
 class SessionRowLockOrderTest {
     private static final Path SOURCE = Path.of("src", "main", "java",
             "com", "alibaba", "qwen", "code", "managedagent", "store",
             "ManagedAgentStore.java");
     private static final Pattern DECLARATION = Pattern.compile(
-            "\n    (?:public|private) [^\n]+? (\\w+)\\(");
+            "\n    (?:public|protected|private) [^\n]+? (\\w+)\\(");
     private static final List<String> TURN_ROW_ACCESS = List.of(
             "requireTurn(", "requireTurnForUpdate(", "managed_agent_turn");
     private static final String LOCK_HELPER = "requireSessionForUpdate";
@@ -65,6 +73,19 @@ class SessionRowLockOrderTest {
                 "retractHarnessTurnOutput", "recordHarnessEvents",
                 "cancelBeforeAdmission", "failTurn",
                 "appendPublicEventIfAbsent", "appendLiveSessionEventIfAbsent");
+        // Member selection is fail-closed against the compiled class: a
+        // member whose declaration shape the matcher does not see — a
+        // visibility it does not name, a nested type — never enters the
+        // audited set, so the matcher's harvest is asserted against the
+        // bytecode's own enumeration instead of trusting the regex.
+        Set<String> compiled = Arrays.stream(
+                ManagedAgentStore.class.getDeclaredMethods())
+                .filter(method -> !method.isSynthetic())
+                .map(Method::getName)
+                .collect(Collectors.toSet());
+        assertThat(new HashSet<>(declarationsOf(stripComments(source))))
+                .as("the source matcher must see every compiled member")
+                .containsAll(compiled);
     }
 
     // The derivation must report a writer that reaches the turn row through
@@ -255,6 +276,70 @@ class SessionRowLockOrderTest {
                 .containsExactly("deepWriter");
     }
 
+    // A pure delegator's lock and turn sides resolve to the same call
+    // site, so a strict comparison of its own body can never fire: the
+    // helper it delegates to reads the session row, writes the turn row
+    // and only then locks, and the descent must report the delegator for
+    // the inversion its helper commits.
+    @Test
+    void theAuditDescendsIntoASameSiteDelegate() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void lateLockWriter(String tenantId,
+                            String sessionId) {
+                        beginLifecycle(tenantId, sessionId);
+                    }
+
+                    private void beginLifecycle(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session WHERE session_id"
+                                + " = ?");
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'");
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThat(auditLockOrder(synthetic, new ArrayList<>()))
+                .containsExactly("lateLockWriter");
+    }
+
+    // A protected writer is an entry point the declaration matcher used to
+    // skip entirely: it never entered the audited set, so the same
+    // inversion passed unaudited.
+    @Test
+    void theAuditAuditsAProtectedWriter() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    protected void protectedWriter(String tenantId,
+                            String sessionId) {
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'");
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThat(auditLockOrder(synthetic, new ArrayList<>()))
+                .containsExactly("protectedWriter");
+    }
+
     // The parity guard is the fail-closed half of the strip: a comment
     // shaped like a member declaration matches in the raw source but not
     // after the strip, and that drift must fail the canary instead of
@@ -310,7 +395,9 @@ class SessionRowLockOrderTest {
         List<String> violations = new ArrayList<>();
         Matcher declarations = DECLARATION.matcher(code);
         while (declarations.find()) {
-            if (!declarations.group(0).startsWith("\n    public")) {
+            // A private member enters the audit as a callee of the entry
+            // points; the descent compares it in its own body.
+            if (declarations.group(0).startsWith("\n    private")) {
                 continue;
             }
             String name = declarations.group(1);
@@ -326,9 +413,8 @@ class SessionRowLockOrderTest {
             assertThat(body).as(name + " is transactional, so the"
                     + " session-row lock outlives the statement")
                     .contains("@Transactional");
-            int turnRowAccess = firstTurnRowAccess(body, name, members,
-                    turnRowReaching);
-            if (turnRowAccess >= 0 && sessionLock > turnRowAccess) {
+            if (lockAfterTurnRowAccess(body, name, members, turnRowReaching,
+                    new HashSet<>())) {
                 violations.add(name);
             }
         }
@@ -453,6 +539,54 @@ class SessionRowLockOrderTest {
         return first;
     }
 
+    // The ordering comparison for one declaration: the lock must precede
+    // the first turn-row access. Both sides resolve through same-file
+    // callees, so a pure delegator's two indices land on the same call
+    // site and its own body is inconclusive — the inversion it would hide
+    // lives in the callee, so the comparison descends into the callee the
+    // site names. The visited set ends the cycle when overloads share a
+    // name and the delegate is the caller's own sibling.
+    private static boolean lockAfterTurnRowAccess(String body, String self,
+            Map<String, List<String>> members, Set<String> turnRowReaching,
+            Set<String> visiting) {
+        int sessionLock = sessionLockIndex(body, self, members);
+        if (sessionLock < 0) {
+            return false;
+        }
+        int turnRowAccess = firstTurnRowAccess(body, self, members,
+                turnRowReaching);
+        if (turnRowAccess < 0) {
+            return false;
+        }
+        if (sessionLock != turnRowAccess) {
+            return sessionLock > turnRowAccess;
+        }
+        String callee = calleeAt(body, sessionLock, members);
+        if (callee == null || callee.equals(self) || !visiting.add(body)) {
+            return false;
+        }
+        for (String slice : members.get(callee)) {
+            if (lockAfterTurnRowAccess(slice, callee, members,
+                    turnRowReaching, visiting)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The member a resolved index names: both resolutions find their index
+    // as a name( occurrence, so the member whose call starts there is the
+    // delegate both sides resolved to.
+    private static String calleeAt(String body, int callSite,
+            Map<String, List<String>> members) {
+        for (String name : members.keySet()) {
+            if (body.startsWith(name + "(", callSite)) {
+                return name;
+            }
+        }
+        return null;
+    }
+
     // Every same-file member that reaches the turn row, as a fixpoint: a
     // member qualifies when its own body bears a needle or calls a member
     // already in the set. One-hop resolution audited beginOperation,
@@ -502,12 +636,17 @@ class SessionRowLockOrderTest {
         int nextPublic = source.indexOf("\n    public ", declarationStart + 1);
         int nextPrivate = source.indexOf("\n    private ",
                 declarationStart + 1);
+        int nextProtected = source.indexOf("\n    protected ",
+                declarationStart + 1);
         int end = source.length();
         if (nextPublic >= 0) {
             end = nextPublic;
         }
         if (nextPrivate >= 0 && nextPrivate < end) {
             end = nextPrivate;
+        }
+        if (nextProtected >= 0 && nextProtected < end) {
+            end = nextProtected;
         }
         String body = source.substring(start, end);
         // The next member's annotations sit between this method's closing

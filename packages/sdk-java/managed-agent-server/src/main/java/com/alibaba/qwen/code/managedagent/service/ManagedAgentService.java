@@ -259,6 +259,11 @@ public class ManagedAgentService {
             dispatch(tenantId, replay, session.workspace() != null);
             return response(replay);
         }
+        // A fresh key against a tombstone answers 404, as every other
+        // Session read does; only the recorded outcome above survives the
+        // delete. beginLifecycle orders its DELETED 404 the same way,
+        // below its replay return.
+        requireVisibleSession(session);
         if (!admissible) {
             refuseBoundSession(session);
         }
@@ -340,7 +345,11 @@ public class ManagedAgentService {
             return new SessionMutationResult<>(publicSession(
                     asLastVisible(session)), true);
         }
-        requireSubmitter(tenantId, actorId, sessionId);
+        // The fresh-key half answers a tombstone 404, as every other
+        // Session read does; the recorded rename above is the only outcome
+        // that survives the delete.
+        requireSubmitter(requireVisibleSession(tenantId, sessionId),
+                actorId);
         String effectiveTitle = validRenameTitle(title);
         SessionMutationCommand command = store.beginSessionMutation(tenantId,
                 RENAME, idempotencyKey, renameDigest(sessionId, title),
@@ -932,9 +941,7 @@ public class ManagedAgentService {
     // creator may submit them or rename the Session, and only with Workspace
     // files enabled. Everyone else keeps the existing refusal. Cancelling
     // has its own, narrower rule (mayCancelWorkspaceTurn).
-    private void requireSubmitter(String tenantId, String actorId,
-            String sessionId) {
-        SessionRecord session = store.requireSession(tenantId, sessionId);
+    private void requireSubmitter(SessionRecord session, String actorId) {
         if (!maySubmitWorkspaceTurn(session, actorId)) {
             requireLegacyWorkspace(session, actorId);
         }
@@ -1101,7 +1108,11 @@ public class ManagedAgentService {
 
     private SessionRecord requireVisibleSession(String tenantId,
             String sessionId) {
-        SessionRecord session = store.requireSession(tenantId, sessionId);
+        return requireVisibleSession(store.requireSession(tenantId,
+                sessionId));
+    }
+
+    private SessionRecord requireVisibleSession(SessionRecord session) {
         if ("DELETED".equals(session.status())) {
             throw new ApiException(HttpStatus.NOT_FOUND,
                     "session_not_found", "The Session was not found.");

@@ -26,9 +26,11 @@ import java.time.Clock;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.assertj.core.api.ThrowableAssert;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -284,6 +286,51 @@ class ManagedAgentWorkspaceReplayTest {
                     .isFalse();
             assertThat(replay.body().capabilities().sessionDelete()).isFalse();
         });
+    }
+
+    // The fresh-key half of the split gate: only a recorded outcome
+    // survives the delete. A fresh Idempotency-Key against a tombstone
+    // answers 404 on both routes — as every other Session read does — for
+    // the unbound and the bound-creator shapes; the 409s the state and
+    // availability gates below would answer are reserved for live
+    // Sessions.
+    @Test
+    void aFreshKeyAgainstADeletedSessionAnswers404() {
+        freshDatabase();
+        String tenant = "tenant-" + UUID.randomUUID();
+        ManagedAgentService service = service(new AtomicBoolean(true));
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+        String bound = boundSession(tenant);
+        String legacy = transaction.execute(status -> store
+                .insertSessionCommand(tenant, "CREATE_SESSION",
+                        "create-legacy", "create-legacy-digest", "qwen-code",
+                        null, null, List.of(), null)
+                .sessionId());
+        for (String sessionId : new String[] {bound, legacy}) {
+            jdbc.update("UPDATE managed_agent_session SET status ="
+                            + " 'DELETED', deleted_at = 1, updated_at = 1,"
+                            + " version = version + 1 WHERE tenant_id = ?"
+                            + " AND session_id = ?",
+                    tenant, sessionId);
+        }
+
+        assertNotFound(() -> service.submitTurn(tenant, "actor-a",
+                "fresh-submit-bound", bound, input));
+        assertNotFound(() -> service.renameSession(tenant, "actor-a",
+                "fresh-rename-bound", bound, "after delete"));
+        assertNotFound(() -> service.submitTurn(tenant, "actor-a",
+                "fresh-submit-legacy", legacy, input));
+        assertNotFound(() -> service.renameSession(tenant, "actor-a",
+                "fresh-rename-legacy", legacy, "after delete"));
+    }
+
+    private void assertNotFound(ThrowableAssert.ThrowingCallable call) {
+        transaction.executeWithoutResult(status -> assertThatThrownBy(call)
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus())
+                            .isEqualTo(HttpStatus.NOT_FOUND);
+                    assertThat(error.getCode()).isEqualTo("session_not_found");
+                }));
     }
 
     // The other legal bound-delete footprint: an archived-then-deleted
