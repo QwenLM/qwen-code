@@ -5354,6 +5354,7 @@ describe('createServeApp', () => {
         'agent_collaboration_v1',
       );
       expect(app.locals['stopWorkspaceAgentRecovery']).toBeUndefined();
+      expect(app.locals['stopSessionAgentOrchestrators']).toBeUndefined();
 
       const primary = capabilities.body.workspaces.find(
         (workspace: { primary?: boolean }) => workspace.primary,
@@ -5430,6 +5431,11 @@ describe('createServeApp', () => {
       } finally {
         (
           app?.locals['stopWorkspaceAgentRecovery'] as (() => void) | undefined
+        )?.();
+        (
+          app?.locals['stopSessionAgentOrchestrators'] as
+            | (() => void)
+            | undefined
         )?.();
         restoreEnv('QWEN_HOME', previousQwenHome);
         resetHomeEnvBootstrapForTesting();

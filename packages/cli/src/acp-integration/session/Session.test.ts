@@ -559,6 +559,8 @@ describe('Session', () => {
     recordSlashCommand: ReturnType<typeof vi.fn>;
     recordNotification: ReturnType<typeof vi.fn>;
     recordNotificationStrict: ReturnType<typeof vi.fn>;
+    recordExternalAgentRecordStrict: ReturnType<typeof vi.fn>;
+    findExternalAgentRecord: ReturnType<typeof vi.fn>;
     recordRealtimeConversation: ReturnType<typeof vi.fn>;
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
@@ -946,6 +948,12 @@ describe('Session', () => {
       recordSlashCommand: vi.fn(),
       recordNotification: vi.fn(),
       recordNotificationStrict: vi.fn().mockResolvedValue(undefined),
+      recordExternalAgentRecordStrict: vi.fn().mockResolvedValue({
+        uuid: 'record-1',
+        timestamp: '2026-10-06T01:02:03.000Z',
+        created: true,
+      }),
+      findExternalAgentRecord: vi.fn().mockResolvedValue(undefined),
       recordRealtimeConversation: vi.fn().mockResolvedValue(undefined),
       recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
@@ -1184,6 +1192,202 @@ describe('Session', () => {
       mockClient,
       mockSettings,
     );
+  });
+
+  describe('session agent records', () => {
+    const request = {
+      kind: 'agent_message' as const,
+      recordKey: 'run-1:result',
+      modelText: '<agent_message from="claude-B">done</agent_message>',
+      payload: {
+        displayText: 'done',
+        author: { agentId: 'agent-1', name: 'claude-B' },
+        runId: 'run-1',
+        status: 'completed' as const,
+      },
+    };
+
+    it('writes once per recordKey, shows it live, and starts no turn', async () => {
+      type Written = { uuid: string; timestamp: string; created: boolean };
+      let finishWrite!: (written: Written) => void;
+      mockChatRecordingService.recordExternalAgentRecordStrict.mockImplementationOnce(
+        () =>
+          new Promise<Written>((resolve) => {
+            finishWrite = resolve;
+          }),
+      );
+
+      const first = session.appendExternalRecord(request);
+      // A retry while the first write is still in flight must not write.
+      const retry = session.appendExternalRecord(request);
+      await vi.waitFor(() =>
+        expect(
+          mockChatRecordingService.recordExternalAgentRecordStrict,
+        ).toHaveBeenCalled(),
+      );
+      finishWrite({
+        uuid: 'record-1',
+        timestamp: '2026-10-06T01:02:03.000Z',
+        created: true,
+      });
+      await expect(first).resolves.toEqual({
+        recordId: 'record-1',
+        created: true,
+      });
+      await expect(retry).resolves.toEqual({
+        recordId: 'record-1',
+        created: false,
+      });
+      await expect(session.appendExternalRecord(request)).resolves.toEqual({
+        recordId: 'record-1',
+        created: false,
+      });
+
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).toHaveBeenCalledOnce();
+      const agentUpdates = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([notification]) => notification.update)
+        .filter((update) => update._meta?.['qwenAgentMessage'] !== undefined);
+      expect(agentUpdates).toHaveLength(1);
+      expect(agentUpdates[0]).toMatchObject({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'done' },
+        _meta: {
+          qwenDiscreteMessage: true,
+          qwenAgentMessage: { kind: 'agent_message', runId: 'run-1' },
+          qwenTranscript: {
+            segmentId: 'agent:run-1',
+            sourceRecordIds: ['record-1'],
+          },
+          // The record's own timestamp, as replay projects it.
+          timestamp: Date.parse('2026-10-06T01:02:03.000Z'),
+        },
+      });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(session.pendingExternalAgentContext).toEqual([request.modelText]);
+    });
+
+    it('returns a record already in the transcript, even mid-turn', async () => {
+      // A restarted child: nothing in memory, the record is on disk.
+      mockChatRecordingService.findExternalAgentRecord.mockResolvedValueOnce({
+        uuid: 'record-0',
+        timestamp: '2026-10-06T00:00:00.000Z',
+      });
+      vi.spyOn(session, 'isTurnIdle').mockReturnValue(false);
+
+      await expect(session.appendExternalRecord(request)).resolves.toEqual({
+        recordId: 'record-0',
+        created: false,
+      });
+      // Remembered: the next repeat does not consult the transcript again.
+      await expect(session.appendExternalRecord(request)).resolves.toEqual({
+        recordId: 'record-0',
+        created: false,
+      });
+      expect(
+        mockChatRecordingService.findExternalAgentRecord,
+      ).toHaveBeenCalledOnce();
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).not.toHaveBeenCalled();
+      expect(session.pendingExternalAgentContext).toEqual([]);
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.some(
+            ([notification]) =>
+              notification.update._meta?.['qwenAgentMessage'] !== undefined,
+          ),
+      ).toBe(false);
+    });
+
+    it('defers once per key mid-turn and writes the queue on close', async () => {
+      const idle = vi.spyOn(session, 'isTurnIdle').mockReturnValue(false);
+      const deferred = { recordId: '', created: true, deferred: true };
+      await expect(session.appendExternalRecord(request)).resolves.toEqual(
+        deferred,
+      );
+      await expect(session.appendExternalRecord(request)).resolves.toEqual(
+        deferred,
+      );
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).not.toHaveBeenCalled();
+
+      // The close path: turns settled, the recorder still open.
+      session.beginClose();
+      idle.mockRestore();
+      await session.flushDeferredExternalRecords();
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).toHaveBeenCalledOnce();
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).toHaveBeenCalledWith(request);
+      // Nothing is shown or queued for a session that is going away.
+      expect(session.pendingExternalAgentContext).toEqual([]);
+
+      // Written: a re-send now gets the record id back without a write.
+      await expect(session.appendExternalRecord(request)).resolves.toEqual({
+        recordId: 'record-1',
+        created: false,
+      });
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).toHaveBeenCalledOnce();
+    });
+
+    it('keeps send order when a record arrives behind a deferred one', async () => {
+      const idle = vi.spyOn(session, 'isTurnIdle').mockReturnValue(false);
+      await session.appendExternalRecord(request);
+      // The turn settles before the queue drains; a later record must queue
+      // behind the earlier one instead of being written first.
+      idle.mockReturnValue(true);
+      const later = { ...request, recordKey: 'run-2:result' };
+      await expect(session.appendExternalRecord(later)).resolves.toEqual({
+        recordId: '',
+        created: true,
+        deferred: true,
+      });
+      await vi.waitFor(() =>
+        expect(
+          mockChatRecordingService.recordExternalAgentRecordStrict,
+        ).toHaveBeenCalledTimes(2),
+      );
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict.mock.calls.map(
+          (call) => (call[0] as { recordKey: string }).recordKey,
+        ),
+      ).toEqual(['run-1:result', 'run-2:result']);
+    });
+
+    it('drops deferred records it cannot write on close', async () => {
+      vi.spyOn(session, 'isTurnIdle').mockReturnValue(false);
+      await session.appendExternalRecord(request);
+      mockChatRecordingService.recordExternalAgentRecordStrict.mockRejectedValueOnce(
+        new Error('writer closed'),
+      );
+      await expect(
+        session.flushDeferredExternalRecords(),
+      ).resolves.toBeUndefined();
+      // The queue is empty afterwards: a second flush writes nothing.
+      await session.flushDeferredExternalRecords();
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).toHaveBeenCalledOnce();
+    });
+
+    it('refuses to write once the session is closing', async () => {
+      session.dispose();
+      await expect(session.appendExternalRecord(request)).rejects.toThrow(
+        /closing/,
+      );
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).not.toHaveBeenCalled();
+    });
   });
 
   describe('MCP App tools', () => {
@@ -12390,6 +12594,64 @@ describe('Session', () => {
       },
     );
 
+    it.each(['image', 'text', 'binary'] as const)(
+      'keeps %s attachment paths in model context without changing user display text',
+      async (kind) => {
+        const context = 'Attachment absolutePath: /tmp/attached-file';
+        const reference = {
+          type: kind === 'image' ? 'image' : 'resource',
+          attachmentId: kind === 'image' ? 'image.png' : 'file.txt',
+          mimeType: kind === 'image' ? 'image/png' : 'text/plain',
+          size: 3,
+        };
+        const attachment: PromptRequest['prompt'][number] =
+          kind === 'image'
+            ? { type: 'image', data: 'AQID', mimeType: 'image/png' }
+            : {
+                type: 'resource',
+                resource: {
+                  uri: 'attachment:///file.txt',
+                  mimeType: 'text/plain',
+                  ...(kind === 'text'
+                    ? { text: 'contents' }
+                    : { blob: 'AP8B' }),
+                },
+              };
+        attachment._meta = { 'qwen.daemon.attachmentContext': context };
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        // The image case has no user text or resource block to avoid either
+        // image-only early return hiding the model context.
+        const userText = kind === 'image' ? '' : 'inspect this';
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            ...(userText ? [{ type: 'text' as const, text: userText }] : []),
+            attachment,
+          ],
+          _meta: { 'qwen.daemon.attachmentReferences': [reference] },
+        });
+
+        expect(firstSentMessage()).toContainEqual({ text: context });
+        if (kind === 'image') {
+          expect(firstSentMessage()).toContainEqual({
+            inlineData: { data: 'AQID', mimeType: 'image/png' },
+          });
+        }
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          userText,
+          undefined,
+          expect.objectContaining({
+            displayText: userText,
+            attachmentReferences: [reference],
+          }),
+          expect.any(String),
+          undefined,
+        );
+      },
+    );
+
     it('records daemon attachment references for transcript replay', async () => {
       const imageReference = {
         type: 'image' as const,
@@ -17785,6 +18047,65 @@ describe('Session', () => {
       expect(sent.some((part) => 'inlineData' in part)).toBe(false);
     });
 
+    it.each(['normal', 'custom command', 'image-only'] as const)(
+      'keeps attachment paths outside the vision bridge focus for %s prompts',
+      async (kind) => {
+        const question = kind === 'image-only' ? '' : 'Read the serial number.';
+        const context = `Attachment absolutePath: /tmp/${'a'.repeat(2100)}`;
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'qwen3.7-plus',
+        });
+        runVisionBridgeSpy.mockResolvedValue({
+          applied: false,
+          status: 'skipped',
+          convertedCount: 0,
+          omittedCount: 0,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+        if (kind === 'custom command') {
+          vi.mocked(
+            nonInteractiveCliCommands.handleSlashCommand,
+          ).mockResolvedValueOnce({
+            type: 'submit_prompt',
+            content: [{ text: question }],
+            resolvedCommand: { name: 'inspect', kind: CommandKind.FILE },
+          });
+        }
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            {
+              type: 'text',
+              text: kind === 'custom command' ? '/inspect' : question,
+            },
+            {
+              type: 'image',
+              mimeType: 'image/png',
+              data: 'iVBORw0KGgo=',
+              _meta: { 'qwen.daemon.attachmentContext': context },
+            },
+          ],
+        });
+
+        expect(runVisionBridgeSpy).toHaveBeenCalledOnce();
+        expect(runVisionBridgeSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            intentText: question,
+            parts: expect.arrayContaining([
+              { text: context },
+              { inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' } },
+            ]),
+          }),
+        );
+        expect(textParts(firstSentMessage())).toContain(context);
+        if (question) expect(textParts(firstSentMessage())).toContain(question);
+      },
+    );
+
     it('routes an agent-capable image prompt for that ACP prompt only', async () => {
       const runtimeView = {
         contentGenerator: {},
@@ -23092,6 +23413,10 @@ describe('Session', () => {
                   type: 'image',
                   mimeType: 'image/png',
                   data: 'cHVyZS1pbWFnZQ==',
+                  _meta: {
+                    'qwen.daemon.attachmentContext':
+                      'Attachment absolutePath: /tmp/image-2.png',
+                  },
                 },
               ],
               displayText: '',
@@ -23195,6 +23520,9 @@ describe('Session', () => {
         expect(secondCall?.[1].message).toEqual(
           expect.arrayContaining(midTurnParts),
         );
+        expect(secondCall?.[1].message).toContainEqual({
+          text: 'Attachment absolutePath: /tmp/image-2.png',
+        });
         expect(runVisionBridgeSpy).not.toHaveBeenCalled();
         expect(secondCall?.[1].message).not.toEqual(
           expect.arrayContaining([
@@ -23302,7 +23630,10 @@ describe('Session', () => {
         expect(
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(
-          [{ text: '\n[User message received during tool execution]: ' }],
+          [
+            { text: '\n[User message received during tool execution]: ' },
+            { text: 'Attachment absolutePath: /tmp/image-2.png' },
+          ],
           '',
           undefined,
           [

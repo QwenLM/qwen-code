@@ -197,7 +197,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         if (!managed(session)) {
             throw WorkspaceExecutionStore.unavailable();
         }
-        Context context = context(lease, session, false, true);
+        Context context = context(lease, session, false, false, true);
         var runtime = context.runtime();
         if (!"kubernetes-workspace".equals(runtime.getRequest().getProvisionerKind())
                 || runtime.getState() != RuntimeBindingRecord.State.DRAINING || !runtime.isDrainRequested()
@@ -332,7 +332,7 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
             }
             boolean recovery = ManagedMcpProtocol.isRecovery(operation) || ManagedHookProtocol.isRecovery(operation)
                     || ManagedShellProtocol.isRecovery(operation);
-            Context context = context(lease, session, !recovery);
+            Context context = context(lease, session, !recovery, ManagedHookProtocol.isOperation(operation));
             if (context.runtime().getState() != RuntimeBindingRecord.State.READY
                     && !(recovery && context.runtime().getState() == RuntimeBindingRecord.State.DRAINING)) {
                 throw WorkspaceExecutionStore.unavailable();
@@ -380,10 +380,16 @@ final class WorkspaceRuntimeTransport implements RuntimeTransport {
         return context(lease, session, authorize, false);
     }
 
-    private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize, boolean originalCsi) {
+    private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize, boolean hook) {
+        return context(lease, session, authorize, hook, false);
+    }
+
+    private Context context(RuntimeLease lease, RuntimeSession session, boolean authorize,
+            boolean hook, boolean originalCsi) {
         ContextBinding binding;
         if (authorize) {
-            var resolved = resolver.resolve(session.getHarnessSessionId());
+            var resolved = hook ? resolver.resolveHook(session.getHarnessSessionId(), session.getScope().getLifecycleAuthority())
+                    : resolver.resolve(session.getHarnessSessionId(), session.getScope().getLifecycleAuthority());
             if (!resolved.scope().equals(session.getScope())) {
                 throw WorkspaceExecutionStore.unavailable();
             }

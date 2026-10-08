@@ -19,11 +19,14 @@ import type {
   SessionSourceRemoveResult,
   TurnResultCode,
   TurnResultErrorPayload,
+  SessionExternalRecordRequest,
+  SessionExternalRecordResponse,
 } from '@qwen-code/qwen-code-core';
 import type {
   CancelNotification,
   ContentBlock,
   LoadSessionResponse,
+  McpServer,
   PromptRequest,
   PromptResponse,
   RequestPermissionResponse,
@@ -331,6 +334,14 @@ export interface BridgeSpawnRequest {
   sessionId?: string;
   /** Trusted Hosted Harness route only; forwarded through private ACP metadata. */
   managedSessionStore?: BridgeManagedSessionStore;
+  /**
+   * Daemon-internal: session-level MCP servers for ACP `session/new`, used
+   * only when this call creates the session (an attach keeps the live
+   * session's servers). No HTTP route forwards a client value here; the
+   * session-agents orchestrator uses it to give a hidden agent session its
+   * `session_send` tool. Absent means none (the historical `[]`).
+   */
+  mcpServers?: McpServer[];
 }
 
 /** Internal daemon-only creation surface for a managed standalone session. */
@@ -492,12 +503,18 @@ export interface BridgeRestoreSessionRequest {
   suppressWorktreeContextRestore?: boolean;
   /** Delay ask_user_question recovery until daemon route validation finishes. */
   deferRestoreAskUserQuestionPrompt?: boolean;
+  /**
+   * Daemon-internal: session-level MCP servers for ACP `session/load` /
+   * `session/resume` (see `BridgeSpawnRequest.mcpServers`). Absent means
+   * none.
+   */
+  mcpServers?: McpServer[];
 }
 
 /** Internal daemon-only restore surface for a managed standalone session. */
 export type BridgeStandaloneRestoreSessionRequest = Omit<
   BridgeRestoreSessionRequest,
-  'sourceType' | 'sourceId'
+  'sourceType' | 'sourceId' | 'mcpServers'
 >;
 
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
@@ -1401,6 +1418,8 @@ export const DAEMON_PASSIVE_MANAGED_RUNTIME_RECOVERY_META_KEY =
   'qwen.daemon.passiveManagedRuntimeRecovery';
 export const DAEMON_ATTACHMENT_REFERENCES_META_KEY =
   'qwen.daemon.attachmentReferences';
+export const DAEMON_ATTACHMENT_CONTEXT_META_KEY =
+  'qwen.daemon.attachmentContext';
 export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;
 
 export function isValidTrustedModelPrompt(value: unknown): value is string {
@@ -1809,6 +1828,18 @@ export type BridgeWorkspaceGenerationNotificationEvent = Exclude<
 >;
 
 /** A daemon-owned worker completion injected into its parent session. */
+/**
+ * `SessionExternalRecordRequest` without `sessionId` (the bridge method takes
+ * it separately). Distributive, so `kind` still discriminates `payload`; a
+ * plain `Omit` over the union would collapse it.
+ */
+export type BridgeSessionExternalRecordRequest =
+  SessionExternalRecordRequest extends infer T
+    ? T extends unknown
+      ? Omit<T, 'sessionId'>
+      : never
+    : never;
+
 export interface BridgeBackgroundNotification {
   displayText: string;
   modelText: string;
@@ -2870,6 +2901,18 @@ export interface AcpSessionBridge extends WorkspaceEventBridge {
     sessionId: string,
     notification: BridgeBackgroundNotification,
   ): Promise<{ sessionId: string; accepted: boolean }>;
+
+  /**
+   * Session multi-agent: ask the session's ACP child to write an
+   * `agent_mention` / `agent_message` record (durable + main-model history)
+   * without starting a turn. Idempotent per `recordKey` within the child's
+   * lifetime. Rejects with `SessionNotFoundError` for unknown/dying sessions,
+   * and with the child's error otherwise (a Managed session refuses).
+   */
+  appendExternalRecord(
+    sessionId: string,
+    request: BridgeSessionExternalRecordRequest,
+  ): Promise<SessionExternalRecordResponse>;
 
   /**
    * Return the mid-turn reconciliation snapshot for a session: messages still
