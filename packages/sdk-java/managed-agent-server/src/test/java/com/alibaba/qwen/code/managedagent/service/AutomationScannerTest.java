@@ -1364,6 +1364,38 @@ class AutomationScannerTest {
     }
 
     @Test
+    void aRetiredDefinitionRefreshRetiresOnTheReconcileRefusalNotSkippedForever() {
+        PublicAutomation automation = define("* * * * *", "skip", "none", null,
+                true);
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        // The chain ended at the journal while the mirror still arms: each
+        // later reconcile meets its not-found — refresh-retire the mirror
+        // and record the accurate reason instead of skipped-overlap for
+        // every slot after it.
+        fake.failNextReconcile = AutomationHarnessFake.refusal(404,
+                "automation_not_found");
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+                tenant, automation.id(), "schedule:2026-06-01T10:02:00Z")
+                .orElseThrow();
+        assertThat(skipped.outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+        assertThat(skipped.reason())
+                .isEqualTo(AutomationScanner.REASON_DEFINITION_RETIRED);
+        AutomationLedgerStore.ScheduleRow mirror = ledger.findSchedule(tenant,
+                automation.id()).orElseThrow();
+        assertThat(mirror.state())
+                .isEqualTo(AutomationLedgerStore.STATE_RETIRED);
+        clock.set(T0 + 3 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        assertThat(fake.operations.stream()
+                .filter(operation -> "reconcile_run"
+                        .equals(operation.get("kind")))).hasSize(1);
+    }
+
+    @Test
     void anOpenTurnBlocksFiresWithoutAskingForAReconcile() {
         PublicAutomation automation = define("* * * * *", "skip", "none", null,
                 true);

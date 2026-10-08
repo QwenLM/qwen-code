@@ -47,8 +47,6 @@ public class AutomationScanner {
     private static final int MIRROR_LIMIT = 200;
     /** Re-drives of one claim before its answer is recorded unknown. */
     static final int MAX_FIRE_ATTEMPTS = 64;
-    /** Blocking runs one decision asks the Harness to reconcile at most. */
-    static final int MAX_RECONCILE_RUNS = 5;
     public static final String TRIGGER_SCHEDULED = "scheduled";
     public static final String TRIGGER_MANUAL = "manual";
     public static final String TRIGGER_CATCH_UP = "catch_up";
@@ -319,9 +317,16 @@ public class AutomationScanner {
             // nothing ever will. Ask the Harness to reconcile the blocking
             // runs first: a live one answers unchanged and the refusal
             // stands; a crashed one settles and frees the slot chain and
-            // the lease.
-            Set<String> resolved = reconcileBlockingRuns(row);
-            if (!resolved.isEmpty()) {
+            // the lease; a definition the Harness reports retired refresh-
+            // retires here instead of standing forever.
+            ReconcileOutcome outcome = reconcileBlockingRuns(row);
+            if (outcome.definitionEnded()) {
+                record(row, fence, key, slot, trigger,
+                        AutomationLedgerStore.OUTCOME_SKIPPED,
+                        REASON_DEFINITION_RETIRED, now);
+                return false;
+            }
+            if (!outcome.resolved().isEmpty()) {
                 // The mirror's correction rides the event stream the
                 // commit that answered just applied (the host store's
                 // commit applies the record synchronously); a mirror that
@@ -329,16 +334,16 @@ public class AutomationScanner {
                 // active, subtracting only what STILL appears blocking:
                 // resolving what the answer proved terminal while the
                 // mirror already drops it must not subtract twice.
+                int fanOut = Math.max(2, settings.getConcurrency() + 1);
                 int after = store.countActive(row.tenantId(),
                         row.scheduleId());
                 int lagging = 0;
                 Set<String> still = new HashSet<>();
                 for (OccurrenceView blocking : store.findBlockingRuns(
-                        row.tenantId(), row.scheduleId(),
-                        MAX_RECONCILE_RUNS)) {
+                        row.tenantId(), row.scheduleId(), fanOut)) {
                     still.add(blocking.occurrence().occurrenceKey());
                 }
-                for (String asked : resolved) {
+                for (String asked : outcome.resolved()) {
                     if (still.contains(asked)) {
                         lagging++;
                     }
@@ -366,18 +371,29 @@ public class AutomationScanner {
     }
 
     /**
+     * What one decision learned by reconciling: the occurrence keys whose
+     * runs the pass provably unblocked, and whether the Harness told the
+     * definition — or its Session — is gone for good.
+     */
+    private record ReconcileOutcome(Set<String> resolved,
+            boolean definitionEnded) {
+    }
+
+    /**
      * The blocking occurrences of a count-based refusal, reconciled with
      * the Harness: for each it loads its Session — the wake pump's crash
      * classification and aftermath run there — and answers whether the
      * crashed wake turn's run settled, its park cleared and its lease
      * came back. A live run reports untouched; an unanswered reconcile
-     * keeps the refusal and the next due slot retries. The occurrence
-     * keys whose runs this pass provably unblocked.
+     * keeps the refusal and the next due slot retries; a retired
+     * definition or Session ends here, the way a fired answer's refusal
+     * refresh-terminates its mirror.
      */
-    private Set<String> reconcileBlockingRuns(ScheduleRow row) {
+    private ReconcileOutcome reconcileBlockingRuns(ScheduleRow row) {
         Set<String> resolved = new HashSet<>();
         for (OccurrenceView blocking : store.findBlockingRuns(row.tenantId(),
-                row.scheduleId(), MAX_RECONCILE_RUNS)) {
+                row.scheduleId(),
+                Math.max(2, settings.getConcurrency() + 1))) {
             Map<String, Object> body = new LinkedHashMap<>();
             body.put("operationId", UUID.randomUUID().toString());
             body.put("kind", "reconcile_run");
@@ -399,7 +415,18 @@ public class AutomationScanner {
                         || "failed".equals(state) || "cancelled".equals(state)) {
                     resolved.add(blocking.occurrence().occurrenceKey());
                 }
-            } catch (RuntimeException error) {
+            } catch (DaemonHttpException error) {
+                String code = errorCode(error);
+                if ("automation_retired".equals(code)
+                        || "automation_not_found".equals(code)
+                        || "hosted_session_not_found".equals(code)) {
+                    // The chain — or its Session — is gone for good:
+                    // refresh the mirror like a fired answer does instead
+                    // of recording skipped-overlap for every future slot.
+                    store.retire(row.tenantId(), row.scheduleId(),
+                            clock.get());
+                    return new ReconcileOutcome(resolved, true);
+                }
                 // An unanswered reconcile tries nothing further this
                 // decision: the refusal it stood behind is the accurate
                 // record, and the next due slot re-drives the repair.
@@ -407,9 +434,14 @@ public class AutomationScanner {
                         + " occurrence={} failure={}", row.tenantId(),
                         row.scheduleId(), blocking.occurrence()
                                 .occurrenceKey(), error.getMessage());
+            } catch (RuntimeException error) {
+                LOG.warn("automation reconcile failed tenant={} schedule={}"
+                        + " occurrence={} failure={}", row.tenantId(),
+                        row.scheduleId(), blocking.occurrence()
+                                .occurrenceKey(), error.getMessage());
             }
         }
-        return resolved;
+        return new ReconcileOutcome(resolved, false);
     }
 
     /** Why a due occurrence may not fire now, or null when it may. */
