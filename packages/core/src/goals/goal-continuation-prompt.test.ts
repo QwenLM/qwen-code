@@ -82,12 +82,13 @@ describe('renderGoalContinuationPrompt', () => {
     );
     expect(codeModeRegistry).not.toContain('In Direct mode:');
     // The registry's own mode wins over the exec proxy, and the Code Mode
-    // route needs tool_search as well as exec.
+    // route needs tool_search as well as exec: without exec it is withheld.
     const modeOnly = renderGoalContinuationPrompt(input, {
       getAllToolNames: () => [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
       isCodeModeOnly: () => true,
     } as unknown as ToolRegistry);
     expect(modeOnly).not.toContain('In Direct mode:');
+    expect(modeOnly).not.toContain('In Code Mode');
     expect(
       renderGoalContinuationPrompt(input, registryWith(ToolNames.EXEC)),
     ).not.toContain('tool_search');

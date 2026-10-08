@@ -219,7 +219,12 @@ export function renderGoalContinuationPrompt(
       `In Direct mode: ${toolSearchBridgeSentence('get_goal or update_goal')}`,
     );
   }
-  if (codeModeOnly && toolNames.includes(ToolNames.TOOL_SEARCH)) {
+  // The sentence routes through exec, which a deny rule can unregister.
+  if (
+    codeModeOnly &&
+    toolNames.includes(ToolNames.TOOL_SEARCH) &&
+    toolNames.includes(ToolNames.EXEC)
+  ) {
     discoveryLines.push(
       'In Code Mode, discover missing Goal tools with tool_search and invoke them through exec using the returned JavaScript name.',
     );

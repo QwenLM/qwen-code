@@ -1472,15 +1472,15 @@ export class ToolRegistry {
     );
   }
 
-  /**
-   * Returns an array of all registered and discovered tool names,
-   * including tools that are registered via factory but not yet loaded.
-   */
   /** True under `ToolMode.CodeModeOnly`, where `tool_call` is hidden and refused. */
   isCodeModeOnly(): boolean {
     return this.config.getToolMode?.() === ToolMode.CodeModeOnly;
   }
 
+  /**
+   * Returns an array of all registered and discovered tool names,
+   * including tools that are registered via factory but not yet loaded.
+   */
   getAllToolNames(): string[] {
     const names = new Set([...this.tools.keys(), ...this.factories.keys()]);
     return Array.from(names).filter((name) => this.isToolAvailable(name));
