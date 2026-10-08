@@ -3,6 +3,7 @@ import './styles/globals.css';
 import React from 'react';
 import { scheduleServiceWorkerRegistration } from './pwa-registration.js';
 import { StandaloneContext } from './config/standalone';
+import { WorkspaceHostsEnabled } from './config/workspace-hosts';
 import { isKnownDaemonTarget } from './config/daemon';
 import { isRemoteConnectionKnown } from './config/remote-connections';
 import { exchangePairingCode } from './config/pairing';
@@ -332,75 +333,77 @@ export function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
         options={{ defaultEnabled: true }}
       >
         <StandaloneContext.Provider value={true}>
-          <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
-            <WorkspaceSessionProvider
-              urlNavigation={{ basePath: navigationBasePath }}
-              chromeTheme={documentTheme}
-              chromeLanguage={documentLanguage}
-              webShellProps={{
-                theme,
-                onThemeChange: handleThemeChange,
-                onThemeResolved: handleThemeResolved,
-                language,
-                onLanguageChange: handleLanguageChange,
-                onLanguageResolved: handleLanguageResolved,
-                onBrandResolved: handleBrandResolved,
-                managedAgentProvider,
-                sidebar: {
-                  enabled: true,
-                  showLive: true,
-                  // Built from the sidebar's own defaults so a new entry
-                  // (e.g. Agents) cannot silently drop out of the standalone
-                  // shell.
-                  primaryNav: {
-                    items: DEFAULT_PRIMARY_NAV_ITEMS,
+          <WorkspaceHostsEnabled.Provider value={true}>
+            <DaemonWorkspaceProvider baseUrl={baseUrl} token={daemonToken}>
+              <WorkspaceSessionProvider
+                urlNavigation={{ basePath: navigationBasePath }}
+                chromeTheme={documentTheme}
+                chromeLanguage={documentLanguage}
+                webShellProps={{
+                  theme,
+                  onThemeChange: handleThemeChange,
+                  onThemeResolved: handleThemeResolved,
+                  language,
+                  onLanguageChange: handleLanguageChange,
+                  onLanguageResolved: handleLanguageResolved,
+                  onBrandResolved: handleBrandResolved,
+                  managedAgentProvider,
+                  sidebar: {
+                    enabled: true,
+                    showLive: true,
+                    // Built from the sidebar's own defaults so a new entry
+                    // (e.g. Agents) cannot silently drop out of the standalone
+                    // shell.
+                    primaryNav: {
+                      items: DEFAULT_PRIMARY_NAV_ITEMS,
+                    },
+                    footer: {
+                      items: isDesktopShell()
+                        ? DESKTOP_DEFAULT_FOOTER_ITEMS
+                        : DEFAULT_FOOTER_ITEMS,
+                    },
                   },
-                  footer: {
-                    items: isDesktopShell()
-                      ? DESKTOP_DEFAULT_FOOTER_ITEMS
-                      : DEFAULT_FOOTER_ITEMS,
+                  showToolCalls: true,
+                  className: macosOverlayTitlebar
+                    ? MACOS_TITLEBAR_CLASS
+                    : undefined,
+                  header: {
+                    showMobileAccess: true,
+                    items: [
+                      'title',
+                      'environment',
+                      'rightPanel',
+                      'tokenUsage',
+                      'contextUsage',
+                    ],
                   },
-                },
-                showToolCalls: true,
-                className: macosOverlayTitlebar
-                  ? MACOS_TITLEBAR_CLASS
-                  : undefined,
-                header: {
-                  showMobileAccess: true,
-                  items: [
-                    'title',
-                    'environment',
-                    'rightPanel',
-                    'tokenUsage',
-                    'contextUsage',
-                  ],
-                },
-                rightPanel: {
-                  items: [
-                    'review',
-                    'sideTask',
-                    'terminal',
-                    'webPreview',
-                    'trajectory',
-                  ],
-                },
-                environmentPanel: {
-                  items: [
-                    'environment',
-                    'sources',
-                    'subagents',
-                    'backgroundTasks',
-                    'attachments',
-                    'artifacts',
-                  ],
-                },
-                compactThinking: true,
-                markdownTableMode: 'advanced',
-                composerToolbarAdditionalActions:
-                  STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
-              }}
-            />
-          </DaemonWorkspaceProvider>
+                  rightPanel: {
+                    items: [
+                      'review',
+                      'sideTask',
+                      'terminal',
+                      'webPreview',
+                      'trajectory',
+                    ],
+                  },
+                  environmentPanel: {
+                    items: [
+                      'environment',
+                      'sources',
+                      'subagents',
+                      'backgroundTasks',
+                      'attachments',
+                      'artifacts',
+                    ],
+                  },
+                  compactThinking: true,
+                  markdownTableMode: 'advanced',
+                  composerToolbarAdditionalActions:
+                    STANDALONE_COMPOSER_TOOLBAR_ADDITIONS,
+                }}
+              />
+            </DaemonWorkspaceProvider>
+          </WorkspaceHostsEnabled.Provider>
         </StandaloneContext.Provider>
       </BrowserTurnNotifications>
     </ErrorBoundary>
