@@ -11965,6 +11965,8 @@ describe('LlmChat', async () => {
         ),
         'second',
       );
+      // MIN_PRESSURE_TOOL_OUTPUT_CHARS x 8 results: the floor is per result, so
+      // the whole batch fits and every spill pointer survives.
       expect(resultChars(1)).toBe(32_000);
       expect(
         resultOutputs(1).every((output) => output.includes(SPILL_PATH_PREFIX)),
@@ -11975,12 +11977,15 @@ describe('LlmChat', async () => {
       await reportUsage(NEAR_AUTO);
       await sendDrain(
         [
-          fnResponse('search_memory', { output: 'm'.repeat(12_000) }, 'mem'),
+          fnResponse('search_memory', { output: 'm'.repeat(48_000) }, 'mem'),
           result(),
         ],
         'second',
       );
-      expect(resultChars(1)).toBe(32_000);
+      // The exempt text alone exceeds the headroom by far more than the
+      // conservative factor, so nothing is shrunk and the memory result travels
+      // whole on top of the budget.
+      expect(resultChars(1)).toBe(68_000);
     });
 
     it('keeps the tighter of the aggregate budget and the headroom', async () => {
