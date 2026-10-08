@@ -256,6 +256,7 @@ describe('Hosted real-process gates', () => {
     // their own allowance, which is exactly what the job comment claims.
     expect(summed).toBe(135);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 10);
+    expect(job['timeout-minutes']).toBe(148);
   });
 
   it.each([
@@ -296,7 +297,6 @@ describe('Hosted real-process gates', () => {
     ],
   ])('pins the %s arm into the Hosted MySQL job', (stepName, script, flags) => {
     const job = java.jobs['hosted-harness-mysql'];
-    expect(job['timeout-minutes']).toBe(148);
     const install = job.steps.find(
       (step) => step.name === 'Install MySQL binaries for the failover E2E',
     );
@@ -346,6 +346,9 @@ describe('Hosted real-process gates', () => {
       const run = java.jobs['hosted-harness-mysql'].steps.find(
         (step) => step.name === stepName,
       );
+      // Tie the asserted ceiling to the profile the step actually runs: a
+      // re-pointed -P flag must not leave the row reading the old profile.
+      expect(run.run).toContain(`-P${profile}`);
       const forkSeconds = Number(
         read('packages/sdk-java/managed-agent-server/pom.xml')
           .split(`<id>${profile}</id>`)[1]
@@ -355,9 +358,10 @@ describe('Hosted real-process gates', () => {
       // the main-CI failure analyzer can only file an undiagnosable
       // per-commit issue (#13503 for the Hosted verify step, #13684 for the
       // O4 gates). The ceiling must cover the fork plus the wrapped
-      // compile/surefire/spotbugs/checkstyle work.
+      // compile/surefire/spotbugs/checkstyle work — 600 s is the wrap both
+      // steps actually carry, so a step trim or fork bump reddens this row.
       expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-        forkSeconds + 300,
+        forkSeconds + 600,
       );
     },
   );
