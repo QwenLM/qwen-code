@@ -332,7 +332,7 @@ export function useVoiceInput({
           }
           if (recorder.supportsStreaming?.() === false) {
             throw new Error(
-              'Streaming voice transcription requires native audio capture. Install/rebuild @qwen-code/audio-capture or switch voiceModel to qwen3-asr-flash for batch transcription.',
+              `Streaming voice transcription requires native audio capture for voice model '${voiceModel}'. Install/rebuild @qwen-code/audio-capture or switch to a batch-capable *-asr-flash id in the same family (for example qwen3-asr-flash or qwen-audio-<version>-asr-flash).`,
             );
           }
           const streamPromise = openStream!({
@@ -425,6 +425,7 @@ export function useVoiceInput({
       setVoiceStatus,
       stopRecorderQuietly,
       updateAudioLevel,
+      voiceModel,
     ],
   );
 
