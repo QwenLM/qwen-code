@@ -57,7 +57,13 @@ export function measureToolOutput(
           partChars += value.length;
           continue;
         }
-        const nested = JSON.stringify(value)?.length ?? 0;
+        let nested = 0;
+        try {
+          nested = JSON.stringify(value)?.length ?? 0;
+        } catch {
+          // Unserializable payloads (circular, BigInt) contribute nothing here;
+          // the wrapper floor still applies via estimatePartChars.
+        }
         partChars += nested;
         structuredChars += nested;
       }

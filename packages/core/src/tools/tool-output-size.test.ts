@@ -48,6 +48,23 @@ describe('result-size provenance', () => {
     expect(size.estimatedTokens).toBe(Math.ceil((64 + size.chars) / 4));
   });
 
+  it('survives responses JSON.stringify cannot serialize', () => {
+    const circular: Record<string, unknown> = { output: 'abcd' };
+    circular['self'] = circular;
+    const circularSize = measureToolOutput([
+      { functionResponse: { name: 'mcp', response: circular } },
+    ]);
+    // Unserializable values must not fail the measurement: the string value is
+    // still billed and the wrapper floor still applies.
+    expect(circularSize.chars).toBe(4);
+    expect(circularSize.estimatedTokens).toBe(Math.ceil((64 + 4) / 4));
+    const bigintSize = measureToolOutput([
+      { functionResponse: { name: 'mcp', response: { n: BigInt(1) } } },
+    ]);
+    expect(bigintSize.chars).toBe(0);
+    expect(bigintSize.estimatedTokens).toBe(Math.ceil(64 / 4));
+  });
+
   it('survives live shallow copies, stays off the wire, and never invents restored raw size', () => {
     const provenance = {
       callId: 'anonymous',
