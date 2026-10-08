@@ -179,8 +179,6 @@ function isValidAgent(value: unknown): value is WorkspaceAgent {
     // persona and read as an instruction that was meant to say something.
     (value['instructions'] === undefined ||
       isNonEmptyString(value['instructions'])) &&
-    (value['queueLimit'] === undefined ||
-      isPositiveInteger(value['queueLimit'])) &&
     (value['enabled'] === undefined || typeof value['enabled'] === 'boolean') &&
     (value['retiredAt'] === undefined ||
       isFiniteTimestamp(value['retiredAt'])) &&

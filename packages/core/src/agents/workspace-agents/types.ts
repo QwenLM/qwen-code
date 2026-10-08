@@ -197,13 +197,6 @@ export interface WorkspaceAgent {
    */
   instructions?: string;
   /**
-   * Thread-era cap on runs waiting for this agent. Still accepted on read so
-   * existing roster files validate; nothing reads it now.
-   * TODO(multi-agent): drop once rosters written before the session-agents
-   * redesign no longer need to load.
-   */
-  queueLimit?: number;
-  /**
    * Absent or `true` = can be addressed. `false` keeps the identity and its
    * history but stops it taking new work, matching how a disabled scheduled
    * task stays on disk.

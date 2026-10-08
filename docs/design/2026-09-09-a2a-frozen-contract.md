@@ -45,7 +45,7 @@ Optional, with **none included in the first version**: `sendMessageStream` / `re
 | `failed`, `offline` | `TASK_STATE_FAILED`         |             |
 | `cancelled`         | `TASK_STATE_CANCELED`       |             |
 
-`toA2ATaskState` is exhaustive: adding a run status without deciding its external representation makes the mapper throw rather than use a default. A run that finished but whose reply is not yet in the transcript (the record is deferred while a main-model turn runs in the session) stays `WORKING`, so `COMPLETED` always carries the answer; one whose reply could not be recorded is `FAILED`.
+`toA2ATaskState` is exhaustive: adding a run status without deciding its external representation makes the mapper throw rather than use a default. A run that finished but whose reply is not yet in the transcript (the record is deferred while a main-model turn runs in the session) stays `WORKING`, so `COMPLETED` is never published before the reply is recorded. A reply with no text (a blank turn, such as a squad leader's `no_action`) completes with no `answer`, which is optional. A run whose reply could not be recorded is `FAILED`.
 
 **Approvals.** An A2A caller cannot answer a tool approval. A run waiting on one is reported as `INPUT_REQUIRED` with `localStatus: 'awaiting_approval'` in the extension metadata and a status message saying so; sending more input does not answer it. The workspace owner answers it in the chat session in WebShell.
 
@@ -56,7 +56,7 @@ Optional, with **none included in the first version**: `sendMessageStream` / `re
   **The key must be persisted before the work is started.** The key is reserved in one locked write to the caller's mapping file (`<agentsDir>/a2a/<callerId>.json`, mode 0600), the session is created and the message posted outside the lock (the orchestrator persists runs under the same lock), and the run is recorded afterwards; a retry resumes a reservation that has no run yet, and the post's id is derived from the key so the orchestrator's own idempotency catches a half-finished accept. Adding it afterward cannot establish whether a retry is the request currently being accepted, nor reliably reject the same key with different content.
 - **Two gaps in local state:** `TASK_STATE_REJECTED` (the agent declines work) and `TASK_STATE_AUTH_REQUIRED` have no local equivalents. Cancelling a queued run is immediate; an executing run is asked to stop and reaches `CANCELED` once its program has stopped (`runsStillLive` in the cancel response says which). Adding a message to an existing task is refused; continuing a context is supported.
 
-## 5. A Non-`_meta` Channel for Run Frames
+## 5. A Non-`_meta` Channel for Local Run Status
 
 Local ACP prompts carry run frames in `_meta`. That is the daemon's trust boundary and **is neither externally reachable nor intended to be**. External tasks use a separate channel: declare the extension URI `https://qwenlm.github.io/qwen-code/a2a/workspace-agents/v1` in `AgentCapabilities.extensions`, and put the local run status (`localStatus`), its error and token usage (`tokensUsed`) under that URI in `Task.metadata`.
 

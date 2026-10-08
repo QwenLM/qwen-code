@@ -182,7 +182,7 @@ Typed `qwenAgentMessage` metadata and the session-agent views.
 - **Second PR:** remove the thread backend and move A2A onto sessions.
   - One A2A task becomes one agent turn in a session, with `contextId` set to that session.
   - A2A reaches remote agents again, through Host v2 like any other mention, so the `unsupported` refusal goes away.
-  - Thread tools, thread routes, the dispatcher and Host v1 leases are removed. Records already written by the thread backend are still read; they are not migrated.
+  - Thread tools, thread routes, the dispatcher and Host v1 leases are removed. Records already written by the thread backend stay on disk; they are not migrated, shown or run.
 
 ## 7. Acceptance
 

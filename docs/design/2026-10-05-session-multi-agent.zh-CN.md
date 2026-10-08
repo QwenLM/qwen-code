@@ -193,7 +193,7 @@ Agent 发起的权限请求，会在会话里那条 Agent 消息上显示为审�
 - **第二个 PR**：删除 thread 后端，并把 A2A 改为基于会话。
   - 一个 A2A 任务对应会话里的一轮 Agent 回复，`contextId` 就是这个会话。
   - A2A 重新可以发给远端 Agent，和普通 @ 一样走 Host v2，`unsupported` 的拒绝随之去掉。
-  - 删除 thread 工具、thread 路由、调度器和 Host v1 租约。thread 后端已经写下的记录仍然可读，不做迁移。
+  - 删除 thread 工具、thread 路由、调度器和 Host v1 租约。thread 后端已经写下的记录留在磁盘上，不迁移、不显示，也不再运行。
 
 ## 7. 验收
 

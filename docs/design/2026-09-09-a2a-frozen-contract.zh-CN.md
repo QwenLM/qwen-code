@@ -45,7 +45,7 @@
 | `failed`、`offline` | `TASK_STATE_FAILED`         |      |
 | `cancelled`         | `TASK_STATE_CANCELED`       |      |
 
-`toA2ATaskState` 是穷尽映射：新增 run 状态而不决定它对外长什么样，会让映射器抛错而不是默认。已结束但回复尚未写入会话记录的 run（会话里主模型正在跑时记录会被延后）保持 `WORKING`，因此 `COMPLETED` 一定带着回答；回复写入失败的 run 报 `FAILED`。
+`toA2ATaskState` 是穷尽映射：新增 run 状态而不决定它对外长什么样，会让映射器抛错而不是默认。已结束但回复尚未写入会话记录的 run（会话里主模型正在跑时记录会被延后）保持 `WORKING`，因此回复写入之前不会发布 `COMPLETED`。没有文本的回复（空回合，例如小队 leader 的 `no_action`）以 `COMPLETED` 结束但不带 `answer`，`answer` 是可选字段。回复写入失败的 run 报 `FAILED`。
 
 **审批。** A2A 调用方无法回答工具审批。等待审批的 run 报 `INPUT_REQUIRED`，扩展元数据里带 `localStatus: 'awaiting_approval'`，状态消息也会说明；再发输入并不能回答它。由工作区所有者在 WebShell 的该聊天会话中处理。
 
@@ -56,7 +56,7 @@
   **该键必须在开始干活之前持久化。** 事后补写的键无法回答它存在的那个问题（重试是否与正在接受的请求是同一个），而“同键不同内容明确拒绝”也就无从判断。具体做法：先在一次加锁写入中把键预留到调用方映射文件（`<agentsDir>/a2a/<callerId>.json`，权限 0600），再在锁外建会话、发消息（编排器在同一把锁下持久化 run，锁不可重入），最后记录 run；重试会续上尚无 run 的预留，消息 id 由键派生，半途中断的接单会被编排器自身的幂等挡住。
 - **两处本地状态缺口：** `TASK_STATE_REJECTED`（agent 拒绝接活）与 `TASK_STATE_AUTH_REQUIRED` 在本地模型里没有对应物。取消排队中的 run 立即生效；执行中的 run 会被要求停止，程序真正停下后才进入 `CANCELED`（取消响应里的 `runsStillLive` 说明是哪种）。不能给已有任务追加消息，但可以在同一 context 中继续。
 
-## 5. run 帧的非 `_meta` 通道
+## 5. 本地 run 状态的非 `_meta` 通道
 
 本地用 ACP prompt 的 `_meta` 传 run 帧，那是 daemon 的信任边界，**外部不可达也不应可达**。外部任务另用一条：在 `AgentCapabilities.extensions` 里声明扩展 URI `https://qwenlm.github.io/qwen-code/a2a/workspace-agents/v1`，本地 run 状态（`localStatus`）、错误与用量（`tokensUsed`）都放在 `Task.metadata` 该 URI 下。
 
