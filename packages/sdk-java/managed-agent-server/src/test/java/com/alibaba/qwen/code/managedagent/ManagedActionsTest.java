@@ -887,6 +887,11 @@ class ManagedActionsTest {
                     return true;
                 }
                 if ("resolveAction".equals(call.getMethod().getName())) {
+                    // recover() scans every deliverable operation, so responses
+                    // left behind by sibling tests reach this mock as well.
+                    if (!journal.id.equals(call.getArgument(2))) {
+                        return null;
+                    }
                     calls.incrementAndGet();
                     entered.countDown();
                     if (!release.await(5, TimeUnit.SECONDS)) {
