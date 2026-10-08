@@ -409,6 +409,33 @@ export async function attachExternalSession(
   });
 }
 
+/**
+ * Undos {@link attachExternalSession}, after the post into the recorded
+ * session was refused for good and the session is being discarded. A retry
+ * then re-creates session and context instead of resuming a deleted one.
+ *
+ * The session's context is dropped only when no other entry continues
+ * through it: a second submission naming the same session keeps its
+ * authorization.
+ */
+export async function releaseExternalReservation(
+  projectRoot: string,
+  callerId: string,
+  key: string,
+): Promise<void> {
+  await updateExternalCallerFile(projectRoot, callerId, (file) => {
+    const entry = file.tasks.find((candidate) => candidate.key === key);
+    if (!entry?.sessionId) return;
+    const sessionId = entry.sessionId;
+    delete entry.sessionId;
+    if (!file.tasks.some((candidate) => candidate.sessionId === sessionId)) {
+      file.contexts = file.contexts.filter(
+        (context) => context.sessionId !== sessionId,
+      );
+    }
+  });
+}
+
 /** Step 3: records the run the post started. Returns the updated entry. */
 export async function completeExternalSubmission(
   projectRoot: string,

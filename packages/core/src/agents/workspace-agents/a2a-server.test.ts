@@ -317,6 +317,20 @@ describe('A2A send', () => {
     expect(task.contextId).toBe(port.sessions[0]!.id);
   });
 
+  it('discards a session whose first post is refused for good', async () => {
+    const caller = await grant();
+    port.mentionFailure = new A2ASessionError('refused', 'invalid_text');
+    await expect(send(caller)).resolves.toEqual({ ok: false, kind: 'refused' });
+    expect(port.discarded).toEqual([port.sessions[0]!.id]);
+
+    // A retry cannot reuse a discarded session: it starts over with a new
+    // one, because the refusal released the reservation's session.
+    delete port.mentionFailure;
+    const task = await sent(caller);
+    expect(port.sessions).toHaveLength(2);
+    expect(task.contextId).toBe(port.sessions[1]!.id);
+  });
+
   it('does not post twice when a send dies after posting', async () => {
     const caller = await grant();
     port.failAfterPost = new Error('daemon stopped');
@@ -764,6 +778,26 @@ describe('A2A task state', () => {
     await expect(
       a2aGetTask(PROJECT_ROOT, port, caller, task.id),
     ).resolves.toEqual(done);
+  });
+
+  it('stops following a run whose retry names itself', async () => {
+    const caller = await grant();
+    const task = await sent(caller);
+    port.live.delete(task.id);
+    // A store file edited into a cycle: the run's replacement is itself.
+    // The followed-set ends the walk instead of recursing without end.
+    await persistRun(task.contextId, {
+      id: task.id,
+      status: 'failed',
+      error: 'daemon restarted',
+      retryOf: task.id,
+    });
+    await expect(
+      a2aGetTask(PROJECT_ROOT, port, caller, task.id),
+    ).resolves.toMatchObject({
+      ok: true,
+      value: { status: { state: 'TASK_STATE_FAILED' } },
+    });
   });
 
   it('fails a run nothing tracks any more', async () => {
