@@ -1324,21 +1324,26 @@ describe('recoverHostedRuntimeTurn', () => {
     }
   });
 
-  it('owes no Broker for a turn whose wait already settled', async () => {
+  it('hands the runtime back even on a retry that already left the wait', async () => {
+    // A settlement split across attempts — the first pass stopped and
+    // settled the executions, the second's checkpoint says model-start —
+    // still owes the dead turn's runtime session, or the F9 lease leak
+    // returns on exactly that shape (R6/R8 P1).
     await parkAtAwaitRuntime('write_file', false, true);
     const status = vi.spyOn(HostedWorkspaceBroker.prototype, 'status');
     const replacement = await open('boot-2', false);
     try {
-      await expect(
-        settleInterruptedTurnRuntime({
-          session: replacement,
-          sessionId: SESSION_ID,
-          cwd: root,
-          promptId: PROMPT_ID,
-          brokerOptions,
-          toolProfile: true,
-        }),
-      ).resolves.toEqual({ kind: 'ready' });
+      const runtime = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: true,
+      });
+      expect(runtime.kind).toBe('ready');
+      if (runtime.kind !== 'ready') throw new Error('expected a ready verdict');
+      expect(runtime.broker?.runtimeSessionId).toBe(PROMPT_ID);
       expect(status).not.toHaveBeenCalled();
     } finally {
       await replacement.close();
@@ -1656,6 +1661,39 @@ describe('recoverHostedRuntimeTurn', () => {
         pendingUndo: null,
       });
       const status = vi.spyOn(HostedWorkspaceBroker.prototype, 'status');
+      const runtime = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: true,
+      });
+      expect(runtime.kind).toBe('ready');
+      if (runtime.kind !== 'ready') throw new Error('expected a ready verdict');
+      // The retry owes the handback too, or exactly this shape re-leaks
+      // the Workspace (R8 P1).
+      expect(runtime.broker?.runtimeSessionId).toBe(PROMPT_ID);
+      expect(status).not.toHaveBeenCalled();
+      expect(
+        (await readHostedFileHistory(replacement))?.pendingTurn,
+      ).toBeNull();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('hands the runtime back when the settlement itself split across attempts', async () => {
+    // The F9 retry shape, verbatim: the first call advanced the wait and
+    // died inside the answer writes; the second one's checkpoint is no
+    // longer await_action, so the handback must not be keyed on the phase
+    // (R8 P1). The cancelled response is written exactly once.
+    await parkAtAwaitAction();
+    const replacement = await open('boot-2', false);
+    try {
+      await endAction(replacement, 'decided');
+      const writes = vi.spyOn(replacement.sink, 'write');
+      writes.mockRejectedValueOnce(new Error('store flap'));
       await expect(
         settleInterruptedTurnRuntime({
           session: replacement,
@@ -1665,11 +1703,28 @@ describe('recoverHostedRuntimeTurn', () => {
           brokerOptions,
           toolProfile: true,
         }),
-      ).resolves.toEqual({ kind: 'ready' });
-      expect(status).not.toHaveBeenCalled();
+      ).rejects.toThrow('store flap');
+      const mid = await replacement.authority.harnessRunAuthorization();
       expect(
-        (await readHostedFileHistory(replacement))?.pendingTurn,
-      ).toBeNull();
+        mid.status === 'runnable' && mid.checkpoint.continuation.phase,
+      ).toBe('model_output_committed');
+      writes.mockRestore();
+      const runtime = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: true,
+      });
+      expect(runtime.kind).toBe('ready');
+      if (runtime.kind !== 'ready') throw new Error('expected a ready verdict');
+      expect(runtime.broker?.runtimeSessionId).toBe(PROMPT_ID);
+      const owed = (await replacement.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+      );
+      expect(owed).toHaveLength(1);
     } finally {
       await replacement.close();
     }

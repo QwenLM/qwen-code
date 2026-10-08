@@ -518,27 +518,10 @@ export async function settleInterruptedTurnRuntime(input: {
       }
       if (finalState === 'requested') return { kind: 'held' };
       // The final Action outlives the owner that died asking: advance the
-      // wait the way the close path does, then answer every call the
-      // model is still owed — a dangling functionCall makes the resumed
-      // thread a malformed request the provider rejects. And the turn
-      // acquired its Workspace (runtime session plus execution lease)
-      // before it asked: hand that acquisition back exactly like the
-      // await_runtime arm, or every later tool call in the Workspace
-      // waits behind a dead holder (R6/F9).
+      // wait the way the close path does, and let the common tail answer
+      // its abandoned calls — a dangling functionCall makes the resumed
+      // thread a malformed request the provider rejects.
       await createManagedHarnessHandle(input.session).resolveDurableWait();
-      await answerAbandonedTurnCalls({
-        session: input.session,
-        sessionId: input.sessionId,
-        cwd: input.cwd,
-        promptId: input.promptId,
-        message: `the approval ended ${finalState} after the Harness that asked was interrupted`,
-      });
-      if (input.brokerOptions !== undefined)
-        broker = new HostedWorkspaceBroker(
-          input.brokerOptions,
-          input.session.authority.sessionHeader.sessionKey,
-          input.promptId,
-        );
     }
     if (phase === 'await_runtime') {
       // Symmetric with the continue/cancel routes: without the tool
@@ -569,6 +552,51 @@ export async function settleInterruptedTurnRuntime(input: {
       pendingTurn: null,
       pendingUndo: null,
     });
+  }
+  if (
+    authorization.status === 'runnable' &&
+    authorization.checkpoint.identity.turnId === input.promptId
+  ) {
+    // Every call the dead Turn still owes is answered on every pass,
+    // identically idempotent: a settlement that split across attempts —
+    // its wait advanced, its answer write faulted — leaves the retry at a
+    // model-start phase with no wait left to detect, and a dangling
+    // functionCall would make the resumed thread malformed (R8 P1).
+    const approval = authorization.checkpoint.approval;
+    const action =
+      approval?.requestId === undefined
+        ? undefined
+        : input.session.authority.action(approval.requestId);
+    await answerAbandonedTurnCalls({
+      session: input.session,
+      sessionId: input.sessionId,
+      cwd: input.cwd,
+      promptId: input.promptId,
+      message:
+        action !== undefined && action.state !== 'requested'
+          ? `the approval ended ${action.state} after the Harness that asked was interrupted`
+          : 'the Harness that asked was interrupted',
+    });
+  }
+  // The handback owed for a taken Workspace survives a settlement split
+  // across attempts: a first attempt that advanced the checkpoint and
+  // died before answering, or a settle failure afterwards, leaves the
+  // retry at a model-start phase with no wait left to detect — yet the
+  // dead Turn's runtime session still holds the lease until something
+  // releases it. Every ready verdict whose checkpoint still names the
+  // interrupted Turn therefore hands that session back with it, not only
+  // the wait arm's first pass (F9's retry shape).
+  if (
+    broker === undefined &&
+    input.brokerOptions !== undefined &&
+    authorization.status === 'runnable' &&
+    authorization.checkpoint.identity.turnId === input.promptId
+  ) {
+    broker = new HostedWorkspaceBroker(
+      input.brokerOptions,
+      input.session.authority.sessionHeader.sessionKey,
+      input.promptId,
+    );
   }
   return broker === undefined ? { kind: 'ready' } : { kind: 'ready', broker };
 }

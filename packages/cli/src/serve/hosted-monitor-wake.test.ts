@@ -17,6 +17,7 @@ import { HostedMonitorSession } from './hosted-monitor-session.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 import {
   HostedMonitorWakeScheduler,
+  MonitorWakeTransientReadError,
   settlePendingMonitorInputs,
   wakeHasPriorAttempt,
   type HostedMonitorWakeTurn,
@@ -183,6 +184,41 @@ describe('HostedMonitorWakeScheduler', () => {
     await poll(() => reads >= 2);
     verdict = 'settled';
     await poll(() => queue.length === 0);
+    scheduler.close();
+  });
+
+  it('retries a transiently faulting envelope read instead of failing the Session', async () => {
+    // One Store flap must not park the resident Session on failed(): the
+    // next read heals, the turn runs, and nothing ever blocks (R8 P1).
+    const queue: HostedMonitorWakeTurn[] = [{ turnId: 'm:1', text: 'x' }];
+    let flapped = false;
+    let failures = 0;
+    const ran: string[] = [];
+    const scheduler = new HostedMonitorWakeScheduler(
+      {
+        next: async () => {
+          if (!flapped) {
+            flapped = true;
+            throw new MonitorWakeTransientReadError('store flap');
+          }
+          return queue[0];
+        },
+        state: () => 'idle',
+        runTurn: async (turn) => {
+          ran.push(turn.turnId);
+          queue.shift();
+          return 'settled';
+        },
+        failed: () => {
+          failures += 1;
+        },
+      },
+      10,
+    );
+    scheduler.kick();
+    await poll(() => ran.length === 1);
+    expect(ran).toEqual(['m:1']);
+    expect(failures).toBe(0);
     scheduler.close();
   });
 

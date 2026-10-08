@@ -149,6 +149,7 @@ let sent: ReturnType<typeof vi.fn>;
 let plane: FakeControlPlane;
 let adapters: ManagedEmailAdapter[];
 let lockCompromised: (() => void) | undefined;
+let lifecycle: string[] = [];
 
 function raw(
   id: string,
@@ -202,7 +203,9 @@ function make(extra: Record<string, unknown> = {}): ManagedEmailAdapter {
       parse: async () => simpleParser,
       lock: async (_dir: string, onCompromised: () => void) => {
         lockCompromised = onCompromised;
-        return async () => {};
+        return async () => {
+          lifecycle.push('lock');
+        };
       },
       now: () => 1_750_000_000_000,
       log: () => {},
@@ -224,6 +227,7 @@ beforeEach(() => {
   plane = new FakeControlPlane();
   adapters = [];
   lockCompromised = undefined;
+  lifecycle = [];
 });
 
 afterEach(async () => {
@@ -709,7 +713,9 @@ describe('managed email outbound', () => {
     plane.receipt = async () => {
       throw new Error('process died');
     };
-    await expect(adapter.tick()).rejects.toThrow('process died');
+    // The send-level isolation keeps the entry (and its batch) moving: the
+    // tick resolves, the persisted outcome stays behind.
+    await adapter.tick();
     await adapter.disconnect();
     expect(state(adapter).outbound).toEqual([
       {
@@ -738,7 +744,7 @@ describe('managed email outbound', () => {
     plane.receipt = async () => {
       throw new Error('control plane blip');
     };
-    await expect(adapter.tick()).rejects.toThrow('control plane blip');
+    await adapter.tick();
     expect(state(adapter).outbound).toHaveLength(1);
     // The next tick re-drives the persisted receipt; the ledger converges
     // without waiting for a restart.
@@ -775,7 +781,9 @@ describe('managed email outbound', () => {
       }
       await original(deliveryId, receipt);
     };
-    await expect(adapter.tick()).rejects.toThrow('HTTP 409');
+    // The failed report is swallowed into the persisted outbound: the
+    // entry stays with its receipt for the next tick's refusal verdict.
+    await adapter.tick();
     expect(state(adapter).outbound).toHaveLength(1);
     // Another thread's reply must not wait behind the refused receipt.
     plane.outbox = [delivery('d-next')];
@@ -783,6 +791,66 @@ describe('managed email outbound', () => {
     expect(state(adapter).outbound).toEqual([]);
     expect(sent).toHaveBeenCalledTimes(2);
     expect(plane.receipts.map((entry) => entry.deliveryId)).toEqual(['d-next']);
+  });
+
+  it('keeps the rest of a claimed batch sending when one receipt answer dies', async () => {
+    // The batch was already claimed server-side: an unreportable first
+    // receipt must not strand the still-unsent rest of it (R8 P1).
+    const adapter = make();
+    await adapter.connect();
+    plane.outbox = [
+      delivery('d-batch-1'),
+      delivery('d-batch-2'),
+      delivery('d-batch-3'),
+    ];
+    const original = plane.receipt.bind(plane);
+    plane.receipt = async (deliveryId: string, receipt: ManagedReceipt) => {
+      if (deliveryId === 'd-batch-1') throw new Error('control plane blip');
+      await original(deliveryId, receipt);
+    };
+    await adapter.tick();
+    // The other two still send and report this tick; the first one stays
+    // outbound with its accepted outcome persisted.
+    expect(sent).toHaveBeenCalledTimes(3);
+    expect(plane.receipts.map((entry) => entry.deliveryId)).toEqual([
+      'd-batch-2',
+      'd-batch-3',
+    ]);
+    expect(state(adapter).outbound).toEqual([
+      {
+        deliveryId: 'd-batch-1',
+        ordinal: 0,
+        messageId: expect.any(String),
+        receipt: {
+          outcome: 'accepted',
+          ordinal: 0,
+          providerMessageId: expect.any(String),
+          acceptedAt: 1_750_000_000_000,
+        },
+      },
+    ]);
+    // The next tick re-drives exactly that receipt, never an SMTP resend.
+    plane.receipt = original;
+    await adapter.tick();
+    expect(state(adapter).outbound).toEqual([]);
+    expect(plane.receipts.map((entry) => entry.deliveryId).slice(2)).toEqual([
+      'd-batch-1',
+    ]);
+    expect(sent).toHaveBeenCalledTimes(3);
+  });
+
+  it('completes the remote disconnect while the mailbox is still owned', async () => {
+    // Releasing the lock first would let a replacement register and have
+    // its fresh registration revoked by our unfenced disconnect (R8 P1).
+    const adapter = make();
+    await adapter.connect();
+    const original = FakeControlPlane.prototype.disconnect;
+    plane.disconnect = async () => {
+      lifecycle.push('remote');
+      return original.call(plane);
+    };
+    await adapter.disconnect();
+    expect(lifecycle).toEqual(['remote', 'lock']);
   });
 
   it('replays the persisted provider receipt on restart instead of settling unknown', async () => {
@@ -796,7 +864,7 @@ describe('managed email outbound', () => {
       await original(deliveryId, receipt);
       throw new Error('answer lost');
     };
-    await expect(adapter.tick()).rejects.toThrow('answer lost');
+    await adapter.tick();
     await adapter.disconnect();
     const persisted = state(adapter).outbound;
     expect(persisted).toHaveLength(1);

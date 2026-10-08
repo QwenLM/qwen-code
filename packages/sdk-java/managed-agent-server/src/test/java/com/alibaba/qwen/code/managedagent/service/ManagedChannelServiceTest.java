@@ -19,6 +19,7 @@ import com.alibaba.qwen.code.managedagent.api.ChannelAdapterModels.RegisterChann
 import com.alibaba.qwen.code.managedagent.api.ChannelAdapterModels.ResendResponse;
 import com.alibaba.qwen.code.managedagent.api.ChannelAdapterModels.RouteScope;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.store.ChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.store.ChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.store.JdbcChannelDeliveryRepository;
 import com.alibaba.qwen.code.managedagent.store.JdbcChannelRouteRepository;
@@ -312,24 +313,35 @@ class ManagedChannelServiceTest {
         service.claimDeliveries(TENANT, channel, 16);
         // The adapter died after the send: the lease expires, the
         // reconciler settles unknown, and nothing resends.
-        int before = harness.operations.size();
+        int before = (int) harness.operations.stream()
+                .filter(op -> deliveryId.equals(op.get("deliveryId")))
+                .count();
         service.reconcile();
-        assertThat(harness.operations).hasSize(before);
+        assertThat(harness.operations.stream()
+                        .filter(op -> deliveryId.equals(op.get("deliveryId")))
+                        .count())
+                .isEqualTo(before);
         clock.addAndGet(Duration.ofMinutes(11).toMillis());
         jdbc.update("UPDATE qwen_managed_channel_claim SET claimed_at = ?"
                         + " WHERE tenant_id = ? AND delivery_id = ?",
                 clock.get() - Duration.ofMinutes(11).toMillis(), TENANT,
                 deliveryId);
         service.reconcile();
-        assertThat(harness.operations.getLast().get("kind"))
-                .isEqualTo("settle_delivery");
-        assertThat(harness.operations.getLast().get("outcome"))
-                .isEqualTo("unknown");
+        assertThat(harness.operations.stream()
+                        .filter(op -> deliveryId.equals(op.get("deliveryId")))
+                        .reduce((first, second) -> second)).get()
+                .extracting(op -> op.get("kind"), op -> op.get("outcome"))
+                .containsExactly("settle_delivery", "unknown");
         assertThat(service.ledger(TENANT, channel, deliveryId)).get()
                 .extracting(row -> row.state()).isEqualTo("unknown");
+        Map<String, Object> last = harness.operations.stream()
+                .filter(op -> deliveryId.equals(op.get("deliveryId")))
+                .reduce((first, second) -> second).orElseThrow();
         service.reconcile();
-        assertThat(harness.operations.getLast().get("kind"))
-                .isEqualTo("settle_delivery");
+        assertThat(harness.operations.stream()
+                        .filter(op -> deliveryId.equals(op.get("deliveryId")))
+                        .reduce((first, second) -> second)).get()
+                .isSameAs(last);
         assertThat(service.claimDeliveries(TENANT, channel, 16).deliveries())
                 .isEmpty();
 
@@ -417,6 +429,151 @@ class ManagedChannelServiceTest {
         // Once the lease lapses the same event admits: nothing was lost.
         assertThat(service.submitInbound(TENANT, channel,
                 event(1, "1700:97", "hello")).replayed()).isFalse();
+    }
+
+    @Test
+    void refusesAnOwnershipMoveWhileBindingsRemain() {
+        // A moved Workspace/actor must not inherit what the old owner could
+        // see: every retained binding still points at a Session of the old
+        // Workspace, while the new connection's read authority would answer
+        // their routes and receipts (R8 P1). A binding-less re-registration
+        // keeps working.
+        service.submitInbound(TENANT, channel, event(1, "1700:90", "hi"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " qwen_managed_channel_binding WHERE tenant_id = ?"
+                        + " AND channel_id = ?", Integer.class, TENANT,
+                channel)).isEqualTo(1);
+        RegisterChannelRequest moved = new RegisterChannelRequest("email",
+                "agent@example.com", 2, "other-actor", "other-workspace",
+                ".", new ChannelPolicy("email", "allowlist",
+                        List.of("alice@example.com"), "followup"));
+        assertThatThrownBy(() -> service.register(TENANT, channel, moved))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus())
+                            .isEqualTo(org.springframework.http.HttpStatus
+                                    .CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("channel_ownership_conflict");
+                });
+        // The refusal changed nothing: the connection keeps its owner.
+        assertThat(instances.findInstance(TENANT, channel)).get()
+                .extracting(ChannelInstanceStore.ChannelInstance::workspaceId)
+                .isEqualTo(WORKSPACE);
+        assertThat(instances.findInstance(TENANT, channel)).get()
+                .extracting(ChannelInstanceStore.ChannelInstance::actorId)
+                .isEqualTo(ACTOR);
+        // With no binding yet, the same move class is ordinary
+        // re-registration.
+        String fresh = "mail-" + UUID.randomUUID();
+        service.register(TENANT, fresh, moved);
+        assertThat(instances.findInstance(TENANT, fresh)).get()
+                .extracting(ChannelInstanceStore.ChannelInstance::workspaceId)
+                .isEqualTo("other-workspace");
+    }
+
+    @Test
+    void keepsMonotonicGenerationInTheWriteItself() {
+        // The registration race: an earlier SELECT cannot promise against a
+        // row that moved forward — the monotonic check rides in the UPDATE
+        // (R8 P2). Simulate the stale read with a store whose findInstance
+        // answers the just-slipped snapshot.
+        ChannelInstanceStore.ChannelInstance snapshot = instances
+                .findInstance(TENANT, channel).orElseThrow();
+        assertThat(snapshot.accountGeneration()).isEqualTo(1);
+        jdbc.update("UPDATE qwen_managed_channel_instance"
+                        + " SET account_generation = 3"
+                        + " WHERE tenant_id = ? AND channel_id = ?",
+                TENANT, channel);
+        ChannelInstanceStore racing = new ChannelInstanceStore(jdbc) {
+            @Override
+            public java.util.Optional<ChannelInstanceStore.ChannelInstance>
+                    findInstance(String tenantId, String channelId) {
+                return java.util.Optional.of(
+                        new ChannelInstanceStore.ChannelInstance(
+                                snapshot.tenantId(), snapshot.channelId(),
+                                snapshot.platform(), snapshot.accountId(), 1L,
+                                snapshot.state(), snapshot.actorId(),
+                                snapshot.workspaceId(), snapshot.cwdRelative(),
+                                snapshot.policyJson(), snapshot.createdAt(),
+                                snapshot.updatedAt()));
+            }
+        };
+        assertThatThrownBy(() -> racing.register(
+                        new ChannelInstanceStore.ChannelInstance(TENANT,
+                                channel, "email", "agent@example.com", 2,
+                                "connected", ACTOR, WORKSPACE, ".",
+                                snapshot.policyJson(), 0, 0)))
+                .isInstanceOfSatisfying(IllegalStateException.class, error ->
+                        assertThat(error.getMessage()).isEqualTo(
+                                "channel_generation_stale"));
+        // The stored row never regressed.
+        assertThat(instances.findInstance(TENANT, channel)).get()
+                .extracting(
+                        ChannelInstanceStore.ChannelInstance::accountGeneration)
+                .isEqualTo(3L);
+    }
+
+    @Test
+    void sweepsPastUnprogressedClaimsInsteadOfStarvingNewerOnes() {
+        // Fifty claims that never committed their claimed delivery (the
+        // record stays planned) crowd the sweep page; a live claim on a
+        // sibling channel must not starve behind them (R8 P2).
+        List<String> stalled = new ArrayList<>();
+        ChannelDeliveryRepository repo = new JdbcChannelDeliveryRepository(
+                jdbc);
+        for (int i = 0; i < 50; i++) {
+            InboundAdmission admitted = service.submitInbound(TENANT, channel,
+                    event(1, "1800:" + (100 + i), "q" + i));
+            String deliveryId = admitted.inputId() + ":reply";
+            plannedDelivery(admitted.sessionId(), deliveryId,
+                    admitted.routeId(), "Done.");
+            repo.findOrCreate(new ChannelDeliveryRepository.ChannelDelivery(
+                    TENANT, channel, deliveryId, deliveryId + ":0", 0,
+                    "planned", null, 0, 0));
+            instances.claim(TENANT, channel, deliveryId, admitted.sessionId());
+            stalled.add(deliveryId);
+        }
+        for (int i = 0; i < stalled.size(); i++) {
+            // Strictly ordered past-marks, each older than the next: the
+            // sweep's first page is exactly this 50, ties impossible.
+            jdbc.update("UPDATE qwen_managed_channel_claim"
+                            + " SET claimed_at = ? WHERE tenant_id = ?"
+                            + " AND delivery_id = ?",
+                    clock.get() - Duration.ofDays(1).toMillis() - i * 1000L,
+                    TENANT, stalled.get(i));
+        }
+        String channel2 = "mail-" + UUID.randomUUID();
+        service.register(TENANT, channel2, register(1));
+        InboundAdmission late = service.submitInbound(TENANT, channel2,
+                event(1, "1801:1", "newer"));
+        String lateDelivery = late.inputId() + ":reply";
+        plannedDelivery(late.sessionId(), lateDelivery, late.routeId(),
+                "Done.");
+        assertThat(service.claimDeliveries(TENANT, channel2, 16).deliveries())
+                .hasSize(1);
+        assertThat(service.ledger(TENANT, channel2, lateDelivery)).get()
+                .extracting(row -> row.state()).isEqualTo("sending");
+        jdbc.update("UPDATE qwen_managed_channel_claim SET claimed_at = ?"
+                        + " WHERE tenant_id = ? AND delivery_id = ?",
+                clock.get() - Duration.ofMinutes(10).toMillis() - 30_000,
+                TENANT, lateDelivery);
+        // One sweep settles every unprogressed row unknown; the live claim
+        // takes its turn on the next one instead of never.
+        service.reconcile();
+        List<String> unknowns = jdbc.queryForList(
+                "SELECT delivery_id FROM qwen_managed_channel_delivery"
+                        + " WHERE tenant_id = ? AND channel_instance_id = ?"
+                        + " AND state = 'unknown'",
+                String.class, TENANT, channel);
+        // Every stalled row advanced; the sweep may also carry an expired
+        // planned claim an earlier test of this suite left behind — the
+        // page bound is proven by the live claim remaining next.
+        assertThat(unknowns).containsAll(stalled);
+        assertThat(service.ledger(TENANT, channel2, lateDelivery)).get()
+                .extracting(row -> row.state()).isEqualTo("sending");
+        service.reconcile();
+        assertThat(service.ledger(TENANT, channel2, lateDelivery)).get()
+                .extracting(row -> row.state()).isEqualTo("unknown");
     }
 
     private static com.alibaba.qwen.code.daemon.DaemonHttpException harnessError(

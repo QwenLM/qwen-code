@@ -236,8 +236,12 @@ export class ManagedEmailAdapter {
   async disconnect(): Promise<void> {
     this.stop();
     await this.loop;
-    await this.release();
+    // The remote close completes while this process still holds the
+    // mailbox lock: freeing the lock first would let a replacement
+    // register, and our delayed unfenced disconnect would then revoke
+    // the fresh registration (R8 P1).
     await this.controlPlane.disconnect().catch(() => undefined);
+    await this.release();
   }
 
   /** One inbound poll and one outbound pull, for callers that drive the adapter. */
@@ -898,7 +902,20 @@ export class ManagedEmailAdapter {
       );
       if (entry) entry.receipt = outcome;
       this.persist();
-      await this.controlPlane.receipt(delivery.deliveryId, outcome);
+      try {
+        await this.controlPlane.receipt(delivery.deliveryId, outcome);
+      } catch (error) {
+        // One delivery's unreportable receipt never aborts the claimed
+        // batch: the entry stays outbound with the outcome persisted, so
+        // every later tick re-drives exactly this receipt — never the
+        // SMTP send — and the remaining claimed deliveries still send
+        // (R8 P1). Its remaining segments wait behind the settled one,
+        // the same ordering the !accepted arm already owns.
+        this.log(
+          `Managed email receipt for ${delivery.deliveryId} could not be reported (${String(error)}); it re-drives on the next tick.`,
+        );
+        return;
+      }
       state.outbound = state.outbound.filter(
         (entry) =>
           !(

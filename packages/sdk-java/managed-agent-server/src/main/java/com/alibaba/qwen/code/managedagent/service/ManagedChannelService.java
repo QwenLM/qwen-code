@@ -382,10 +382,18 @@ public class ManagedChannelService {
                 });
         Optional<ChannelDelivery> ledger = deliveries.find(tenantId,
                 channelId, deliveryId);
+        if (ledger.isPresent() && "planned".equals(ledger.get().state())) {
+            // The claim row committed but the claimed-delivery commit never
+            // landed, and the lease already lapsed — the failed claim is
+            // durable enough to settle. Returning here would keep the row
+            // at the sweep's head forever and starve every later claim
+            // behind the oldest 50 (R8 P2).
+            stepLedger(tenantId, channelId, deliveryId, "unknown", null);
+            return;
+        }
         if (ledger.isEmpty() || !"sending".equals(ledger.get().state())) {
-            // Nothing provably in flight here: a delivery whose claim never
-            // committed sits in the pending view for a live adapter, and a
-            // terminal row needs no recovery.
+            // Nothing provably in flight here: a terminal row needs no
+            // recovery.
             return;
         }
         if (!"ACTIVE".equals(instances.sessionStatus(tenantId,

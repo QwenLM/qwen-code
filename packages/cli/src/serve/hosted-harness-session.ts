@@ -91,6 +91,7 @@ import {
 import type { ChannelDelivery } from '@qwen-code/qwen-code-core/managed-runtime/managed-channel-record.js';
 import {
   HostedMonitorWakeScheduler,
+  MonitorWakeTransientReadError,
   settlePendingMonitorInputs,
   wakeHasPriorAttempt,
 } from './hosted-monitor-wake.js';
@@ -2723,7 +2724,16 @@ export function registerHostedHarnessSessionRoutes(
             );
             if (first === undefined) return undefined;
             if (first.source === CHANNEL_INPUT_SOURCE) {
-              const text = await session.channels!.turnText(first.inputId);
+              let text: string | undefined;
+              try {
+                text = await session.channels!.turnText(first.inputId);
+              } catch (cause) {
+                // A Store fault reading the durable envelope is owed the
+                // pump's retry, never a terminal Session lock (R8 P1).
+                throw new MonitorWakeTransientReadError(String(cause), {
+                  cause,
+                });
+              }
               if (text === undefined)
                 throw new Error('Channel wake input has no envelope.');
               return { turnId: first.turnId, text, source: first.source };
@@ -2734,11 +2744,15 @@ export function registerHostedHarnessSessionRoutes(
             );
             if (ref.kind !== 'managed-input')
               throw new Error('Monitor wake input is not an input resource.');
-            const body = object(
-              JSON.parse(
-                (await session.managed.resources.read(ref)).toString('utf8'),
-              ),
-            );
+            let bytes: Buffer;
+            try {
+              bytes = await session.managed.resources.read(ref);
+            } catch (cause) {
+              throw new MonitorWakeTransientReadError(String(cause), {
+                cause,
+              });
+            }
+            const body = object(JSON.parse(bytes.toString('utf8')));
             if (typeof body?.['text'] !== 'string')
               throw new Error('Monitor wake input has no text.');
             return { turnId: first.turnId, text: body['text'] };
@@ -2853,7 +2867,30 @@ export function registerHostedHarnessSessionRoutes(
             });
             // H5c: the channel turn settled; its reply plans from the
             // committed result now, and again on the next open if this
-            // commit is lost — never twice, never from memory.
+            // commit is lost — never twice, never from memory. A
+            // planning failure only loses the prompt path: while the
+            // owner is still resident the retry keeps re-planning with
+            // backing-off delays, and a later detach falls back to the
+            // open-path reconcile instead of a silent missing reply
+            // (R8 P2).
+            const replyPlanRetries = new Map<string, NodeJS.Timeout>();
+            const scheduleReplyPlanRetry = (
+              turnId: string,
+              delayMs: number,
+            ) => {
+              if (replyPlanRetries.has(turnId)) return;
+              const timer = setTimeout(() => {
+                replyPlanRetries.delete(turnId);
+                void session.channels?.planReply(turnId).catch((cause) => {
+                  writeStderrLineSafe(
+                    `qwen serve: Hosted channel reply of turn ${turnId} could not be planned: ${String(cause)}`,
+                  );
+                  scheduleReplyPlanRetry(turnId, Math.min(delayMs * 2, 60_000));
+                });
+              }, delayMs);
+              timer.unref();
+              replyPlanRetries.set(turnId, timer);
+            };
             return async (turn) => {
               const outcome = await runWakeTurn(turn);
               if (
@@ -2863,10 +2900,16 @@ export function registerHostedHarnessSessionRoutes(
               ) {
                 try {
                   await session.channels.planReply(turn.turnId);
+                  const pending = replyPlanRetries.get(turn.turnId);
+                  if (pending !== undefined) {
+                    clearTimeout(pending);
+                    replyPlanRetries.delete(turn.turnId);
+                  }
                 } catch (cause) {
                   writeStderrLineSafe(
                     `qwen serve: Hosted channel reply of turn ${turn.turnId} could not be planned: ${String(cause)}`,
                   );
+                  scheduleReplyPlanRetry(turn.turnId, 1_000);
                 }
               }
               return outcome;

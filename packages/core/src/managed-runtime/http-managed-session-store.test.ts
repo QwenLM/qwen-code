@@ -19,6 +19,7 @@ import {
 import {
   ManagedSessionStoreHttpError,
   ManagedSessionStoreTransportError,
+  collectNestedResourceRefs,
   createHttpManagedSessionStores,
   readOnlyManagedSessionSnapshot,
 } from './http-managed-session-store.js';
@@ -3218,3 +3219,68 @@ function jsonResponse(body: unknown, status = 200): Response {
     },
   });
 }
+
+describe('collectNestedResourceRefs', () => {
+  function closureRef(kind: string, seed: string): ManagedSessionDurableRef {
+    const bytes = Buffer.from(seed, 'utf8');
+    return {
+      kind,
+      resourceId: crypto.randomUUID(),
+      schemaVersion: 1,
+      byteLength: bytes.byteLength,
+      digest: createHash('sha256').update(bytes).digest('hex'),
+    };
+  }
+
+  it('closes over attachment refs embedded in a managed-input envelope (R8 P1)', () => {
+    // The leak: the commit uploaded the envelope but never the attachment
+    // bytes it admits — a reopened reader found the envelope and 404'd on
+    // its attachments.
+    const envelopeRef = closureRef('managed-input', 'envelope');
+    const attachmentRef = closureRef('managed-channel-attachment', 'bytes-1');
+    const secondAttachmentRef = closureRef(
+      'managed-channel-attachment',
+      'bytes-2',
+    );
+    const envelope = Buffer.from(
+      JSON.stringify({
+        v: 1,
+        inputId: 'chin-a',
+        attachments: [
+          {
+            fileName: 'a.txt',
+            mimeType: 'text/plain',
+            byteLength: 7,
+            ref: attachmentRef,
+          },
+          {
+            fileName: 'b.png',
+            mimeType: 'image/png',
+            byteLength: 9,
+            digest: 'x'.repeat(64),
+            ref: secondAttachmentRef,
+          },
+          { fileName: 'huge.mov', omitted: 'too_large' },
+        ],
+      }),
+      'utf8',
+    );
+    const nested = collectNestedResourceRefs(envelopeRef, envelope);
+    expect(nested.map((ref) => ref.resourceId).sort()).toEqual(
+      [attachmentRef.resourceId, secondAttachmentRef.resourceId].sort(),
+    );
+    expect(
+      nested.every((ref) => ref.kind === 'managed-channel-attachment'),
+    ).toBe(true);
+  });
+
+  it('keeps a managed-input body it cannot represent out of the closure', () => {
+    const envelopeRef = closureRef('managed-input', 'plain-string-body');
+    expect(
+      collectNestedResourceRefs(
+        envelopeRef,
+        Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+      ),
+    ).toEqual([]);
+  });
+});

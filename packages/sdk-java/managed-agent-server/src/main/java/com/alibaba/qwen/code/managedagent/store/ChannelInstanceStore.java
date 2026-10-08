@@ -108,15 +108,40 @@ public class ChannelInstanceStore {
                     || !current.accountId().equals(candidate.accountId())) {
                 throw new IllegalStateException("channel_identity_conflict");
             }
-            jdbc.update("UPDATE qwen_managed_channel_instance SET"
-                            + " account_generation = ?, state = ?, actor_id = ?,"
-                            + " workspace_id = ?, cwd_relative = ?,"
-                            + " policy_json = ?, updated_at = ?"
+            // An ownership move must not inherit what was visible to the
+            // old owner: every retained binding still names a Session of
+            // the old Workspace, and its routes and receipts would answer
+            // under the new connection's read authority. Re-registering a
+            // fresh connection with no bindings keeps the history.
+            boolean ownershipMoves = !current.actorId()
+                    .equals(candidate.actorId())
+                    || !current.workspaceId().equals(candidate.workspaceId())
+                    || !current.cwdRelative().equals(candidate.cwdRelative());
+            if (ownershipMoves && jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM qwen_managed_channel_binding"
                             + " WHERE tenant_id = ? AND channel_id = ?",
+                    Long.class, candidate.tenantId(),
+                    candidate.channelId()) > 0) {
+                throw new IllegalStateException("channel_ownership_conflict");
+            }
+            // The monotonic-generation check rides in the write itself: an
+            // overlapping registration that moved the row forward can no
+            // longer slip between the earlier SELECT and this UPDATE.
+            int updated = jdbc.update("UPDATE qwen_managed_channel_instance"
+                            + " SET account_generation = ?, state = ?,"
+                            + " actor_id = ?, workspace_id = ?,"
+                            + " cwd_relative = ?, policy_json = ?,"
+                            + " updated_at = ?"
+                            + " WHERE tenant_id = ? AND channel_id = ?"
+                            + " AND account_generation <= ?",
                     candidate.accountGeneration(), candidate.state(),
                     candidate.actorId(), candidate.workspaceId(),
                     candidate.cwdRelative(), candidate.policyJson(), now,
-                    candidate.tenantId(), candidate.channelId());
+                    candidate.tenantId(), candidate.channelId(),
+                    candidate.accountGeneration());
+            if (updated == 0) {
+                throw new IllegalStateException("channel_generation_stale");
+            }
         }
         return findInstance(candidate.tenantId(), candidate.channelId())
                 .orElseThrow();

@@ -32,6 +32,13 @@ export interface HostedMonitorWakeTurn {
 export type HostedMonitorWakeState = 'idle' | 'busy' | 'blocked';
 
 /**
+ * A durable-resource read that faulted after the Store's own retry: the
+ * committed input is still owed, so the pump retries the read on its
+ * cadence instead of parking the resident Session as terminally broken.
+ */
+export class MonitorWakeTransientReadError extends Error {}
+
+/**
  * Whether the wake turn's id already carries durable history. A previous
  * attempt that reached the transcript and died there left work behind —
  * exactly what its recovery paths own — while a fresh text re-drive would
@@ -48,8 +55,10 @@ export function wakeHasPriorAttempt(
 export interface HostedMonitorWakeDeps {
   /**
    * The oldest pending monitor notification with its envelope text, or
-   * undefined when the Session owes none. Read failures must throw; the
-   * pump reports them through {@link failed}.
+   * undefined when the Session owes none. Read failures must throw; a
+   * durable resource fault throws as {@link MonitorWakeTransientReadError}
+   * and the pump retries it on its cadence, while anything else reports
+   * through {@link failed}.
    */
   next(): Promise<HostedMonitorWakeTurn | undefined>;
   /** Busy Sessions queue; blocked Sessions report their remainder. */
@@ -132,7 +141,19 @@ export class HostedMonitorWakeScheduler {
         this.armRetry();
         return;
       }
-      const next = await this.deps.next();
+      let next: HostedMonitorWakeTurn | undefined;
+      try {
+        next = await this.deps.next();
+      } catch (cause) {
+        // A faulting envelope read is owed the same retry cadence as a
+        // busy Session: the durable input stays pending, and everything
+        // the pump would have parked on heals without a detach.
+        if (cause instanceof MonitorWakeTransientReadError) {
+          this.armRetry();
+          return;
+        }
+        throw cause;
+      }
       if (next === undefined) return;
       if (state === 'busy' || this.deps.state() === 'busy') {
         this.armRetry();
