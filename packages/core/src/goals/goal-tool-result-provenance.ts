@@ -72,8 +72,7 @@ export function goalToolResultProvenance(
     lowerToolName === ToolNames.EXEC ||
     lowerToolName === ToolNames.AGENT ||
     lowerToolName === ToolNames.ADVISOR ||
-    lowerToolName === ToolNames.WORKFLOW ||
-    lowerToolName === ToolNames.THREAD_READ
+    lowerToolName === ToolNames.WORKFLOW
   ) {
     return { goalContext: { ...goalContext }, provenance: 'execution_output' };
   }
