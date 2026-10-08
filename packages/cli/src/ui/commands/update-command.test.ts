@@ -304,6 +304,26 @@ describe('updateCommand', () => {
     });
   });
 
+  it('does not update standalone installs in non-interactive mode when auto-update is disabled', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
+
+    const result = await updateCommand.action!(
+      context('non_interactive', false),
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Update available: 1.2.3\nManual update required. Please reinstall Qwen Code.',
+    });
+    expect(performStandaloneUpdate).not.toHaveBeenCalled();
+  });
+
   it('returns deferred message when standalone update is not yet active', async () => {
     getInstallationInfo.mockReturnValue({
       isStandalone: true,

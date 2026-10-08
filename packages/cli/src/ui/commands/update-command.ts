@@ -86,6 +86,9 @@ export const updateCommand: SlashCommand = {
       };
     };
 
+    const isAutoUpdateEnabled =
+      settings.merged.general?.enableAutoUpdate !== false;
+
     if (context.executionMode === 'interactive' && projectRoot) {
       const customSandboxImage = process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR];
       if (customSandboxImage) {
@@ -99,8 +102,6 @@ export const updateCommand: SlashCommand = {
         };
       }
       const hostUpdateRelaunch = process.env[HOST_UPDATE_RELAUNCH_ENV_VAR];
-      const isAutoUpdateEnabled =
-        settings.merged.general?.enableAutoUpdate !== false;
       if (hostUpdateRelaunch === 'true' && isAutoUpdateEnabled) {
         await relaunchForUpdate();
         return;
@@ -124,7 +125,11 @@ export const updateCommand: SlashCommand = {
       return manualInstructions();
     }
 
-    if (installInfo.isStandalone && installInfo.standaloneDir) {
+    if (
+      isAutoUpdateEnabled &&
+      installInfo.isStandalone &&
+      installInfo.standaloneDir
+    ) {
       try {
         const result = await performStandaloneUpdate(
           installInfo.standaloneDir,
