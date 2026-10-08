@@ -104,6 +104,14 @@ public interface AgentStateStore {
             OperationKind kind, String actorId, String actorDigest, String key,
             String digest, boolean closeSupported);
 
+    default OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId, OperationKind kind,
+            String actorId, String actorDigest, String key, String digest, boolean supported, int protocolVersion) {
+        if (protocolVersion != 0) {
+            throw new UnsupportedOperationException("Workspace lifecycle protocol is unavailable");
+        }
+        return beginWorkspaceLifecycle(tenantId, sessionId, kind, actorId, actorDigest, key, digest, supported);
+    }
+
     boolean hasCompletedWorkspaceClose(String tenantId, String sessionId);
 
     /** The given Sessions with a completed workspace close, in one read. */

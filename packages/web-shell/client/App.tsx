@@ -206,11 +206,20 @@ import {
   saveManagedSelection,
 } from './components/managed/managed-session-storage';
 import { AgentsManagerPage } from './components/agents/AgentsManagerPage';
-import { LazyThreadsRoute } from './components/workspace-agents/LazyThreadsRoute';
 import {
-  conversationContext,
+  recordedAgentMentionTexts,
   useAgentChatEntry,
 } from './components/workspace-agents/useAgentChatEntry';
+import { createSessionAgentsHttpApi } from './components/workspace-agents/session-agents-api';
+import {
+  settledAgentRunKey,
+  useSessionAgentRuns,
+} from './components/workspace-agents/use-session-agent-runs';
+import {
+  PendingAgentMentions,
+  SessionAgentLiveRuns,
+  StopAllAgentsButton,
+} from './components/workspace-agents/session-agent-live-runs';
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
@@ -2002,8 +2011,7 @@ type PersistedArtifactPanelTab =
   | Pick<
       Extract<ArtifactPanelTab, { kind: 'workflow' }>,
       'id' | 'kind' | 'title' | 'sessionId'
-    >
-  | Extract<ArtifactPanelTab, { kind: 'agent_activity' }>;
+    >;
 
 function parsePersistedArtifactPanelTab(
   value: unknown,
@@ -2206,18 +2214,6 @@ function parsePersistedArtifactPanelTab(
         sessionId: tab['sessionId'],
         closeWithPane: tab['closeWithPane'],
       } as PersistedArtifactPanelTab;
-    case 'agent_activity':
-      if (
-        typeof tab['threadId'] !== 'string' ||
-        typeof tab['workspaceCwd'] !== 'string'
-      )
-        return;
-      return {
-        ...common,
-        kind: 'agent_activity',
-        threadId: tab['threadId'],
-        workspaceCwd: tab['workspaceCwd'],
-      };
     case 'workflow':
       return {
         ...common,
@@ -2383,16 +2379,6 @@ function serializeArtifactPanelTabs(
               },
             ]
           : [];
-      case 'agent_activity':
-        return [
-          {
-            id,
-            kind: tab.kind,
-            title,
-            threadId: tab.threadId,
-            workspaceCwd: tab.workspaceCwd,
-          },
-        ];
       case 'workflow':
         return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
       case 'pending': {
@@ -5160,23 +5146,6 @@ export function App({
       setArtifactPanelOpen(false);
     }
   }, [activeArtifactPanelTabId, artifactPanelTabs, workspaceContextActive]);
-  useEffect(() => {
-    if (collaborationAvailable) return;
-    const activityIds = artifactPanelTabs
-      .filter((tab) => tab.kind === 'agent_activity')
-      .map((tab) => tab.id);
-    if (activityIds.length === 0) return;
-    setArtifactPanelTabs((tabs) =>
-      tabs.filter((tab) => tab.kind !== 'agent_activity'),
-    );
-    if (
-      activeArtifactPanelTabId &&
-      activityIds.includes(activeArtifactPanelTabId)
-    ) {
-      setActiveArtifactPanelTabId(null);
-      setArtifactPanelOpen(false);
-    }
-  }, [activeArtifactPanelTabId, artifactPanelTabs, collaborationAvailable]);
   const [sideTaskCatalog, setSideTaskCatalog] = useState<SideTaskCatalogState>({
     items: [],
     loaded: false,
@@ -6809,8 +6778,6 @@ export function App({
                   const { taskId: _taskId, ...rest } = tab;
                   return { ...rest, task, sessionActions } as ArtifactPanelTab;
                 }
-                case 'agent_activity':
-                  return collaborationAvailable ? tab : undefined;
                 case 'side_task':
                   return tab.sessionId ? tab : undefined;
                 case 'terminal':
@@ -6958,7 +6925,6 @@ export function App({
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
-    collaborationAvailable,
     getDefaultReviewPanelWidth,
     hydratePendingArtifactPanelTab,
     hydrateRestoredAttachmentTab,
@@ -9322,59 +9288,10 @@ export function App({
   const navigateToMessage = useMessageNavigation(messageListRef, chatActive);
 
   const activePanelRef = useRef(activePanel);
-  const [collaborationThread, setCollaborationThread] = useState<
-    { id: string; cwd: string; server: string } | undefined
-  >(() => {
-    try {
-      const saved = JSON.parse(
-        sessionStorage.getItem('qwen:team-conversation') ?? 'null',
-      );
-      return saved &&
-        typeof saved.id === 'string' &&
-        typeof saved.cwd === 'string' &&
-        typeof saved.server === 'string'
-        ? saved
-        : undefined;
-    } catch {
-      return undefined;
-    }
-  });
-  const collaborationThreadId =
-    isAgentCollaborationEnabledForWorkspace(
-      workspace.capabilities,
-      collaborationThread?.cwd,
-    ) &&
-    collaborationThread !== undefined &&
-    collaborationThread.server === workspace.baseUrl
-      ? collaborationThread.id
-      : undefined;
-  const [collaborationTitle, setCollaborationTitle] = useState<{
-    id: string;
-    title: string;
-  }>();
-  const [collaborationHeaderActions, setCollaborationHeaderActions] =
-    useState<HTMLDivElement | null>(null);
-  const updateCollaborationTitle = useCallback((id: string, title: string) => {
-    setCollaborationTitle((current) =>
-      current?.id === id && current.title === title ? current : { id, title },
-    );
-  }, []);
   const [agentsNav, setAgentsNav] = useState<{
-    view: 'agents' | 'tasks' | 'runtime' | 'new-agent';
+    view: 'agents' | 'squads' | 'runtime' | 'new-agent';
     request: number;
   }>({ view: 'agents', request: 0 });
-  useEffect(() => {
-    try {
-      if (collaborationThread)
-        sessionStorage.setItem(
-          'qwen:team-conversation',
-          JSON.stringify(collaborationThread),
-        );
-      else sessionStorage.removeItem('qwen:team-conversation');
-    } catch {
-      /* Storage may be unavailable in embedded hosts. */
-    }
-  }, [collaborationThread]);
   // Deep-link target for the Settings panel (e.g. 'Daemon' from the Local
   // Control QR popover). Cleared on any panel close/switch, not just
   // closePanel — several paths call setActivePanel directly (approval
@@ -10636,11 +10553,6 @@ export function App({
     connection.sessionContext?.kind === 'standalone'
       ? (sessionStatusDisplayName ?? connection.displayName)
       : (connection.displayName ?? sessionStatusDisplayName);
-  const chatHeaderTitle = collaborationThreadId
-    ? collaborationTitle?.id === collaborationThreadId
-      ? collaborationTitle.title
-      : t('collab.chat.title')
-    : sessionDisplayName;
   useEffect(() => {
     onSessionInfoChange?.({
       sessionId: connection.sessionId,
@@ -14088,7 +14000,6 @@ export function App({
         pushToast('warning', t('session.recoveryBlocksAction'));
         return false;
       }
-      setCollaborationThread(undefined);
       pendingManualTitleRef.current = opts?.carryManualTitle
         ? { displayName: opts.carryManualTitle }
         : undefined;
@@ -15099,7 +15010,6 @@ export function App({
       workspaceCwd?: string,
       sessionContext?: DaemonProductSessionContext,
     ) => {
-      setCollaborationThread(undefined);
       pendingManualTitleRef.current = undefined;
       splitClassificationGenerationRef.current += 1;
       const invocation = ++sessionOpenInvocationRef.current;
@@ -19199,34 +19109,138 @@ export function App({
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
-  const handleCollaborationThreadOpen = useCallback(
-    (id: string, cwd: string) => {
-      setCollaborationThread({ id, cwd, server: workspace.baseUrl });
-      setMainView('chat');
-      closePanel();
-    },
-    [closePanel, workspace.baseUrl],
-  );
-  const handleCollaborationThreadError = useCallback(
+  const handleAgentCollaborationError = useCallback(
     (message: string) => pushToast('error', message),
     [pushToast],
   );
-  const displayMessagesRef = useRef(displayMessages);
-  displayMessagesRef.current = displayMessages;
-  const getMentionContext = useCallback(
-    () => conversationContext(displayMessagesRef.current),
-    [],
+  // Agents @-mentioned in this chat answer inside it: the session routes of
+  // the session's workspace.
+  const sessionAgentsApi = useMemo(
+    () =>
+      collaborationAvailable && legacyWorkspaceContextCwd
+        ? createSessionAgentsHttpApi(
+            workspace.baseUrl,
+            workspace.token,
+            legacyWorkspaceContextCwd,
+          )
+        : undefined,
+    [
+      collaborationAvailable,
+      legacyWorkspaceContextCwd,
+      workspace.baseUrl,
+      workspace.token,
+    ],
+  );
+  // The session an @-mention goes to, with the workspace it lives in: a new
+  // chat's session is created in the composer's workspace, which can differ
+  // from the one this hook's routes were built for. Same resolution as an
+  // ordinary first prompt (`promptWorkspaceCwd` in the submit path).
+  const ensureAgentMentionSession = useCallback(async () => {
+    const existing = connectionRef.current.sessionId;
+    const allocated = existing ? undefined : await ensureSessionForPrompt();
+    const sessionId = existing ?? allocated ?? connectionRef.current.sessionId;
+    if (!sessionId) return undefined;
+    const allocatedOwner = allocatedSessionCatalogOwnerRef.current;
+    const workspaceCwd =
+      allocatedOwner?.sessionId === sessionId
+        ? allocatedOwner.workspaceCwd
+        : getComposerWorkspaceCwd();
+    return { sessionId, ...(workspaceCwd ? { workspaceCwd } : {}) };
+  }, [ensureSessionForPrompt, getComposerWorkspaceCwd]);
+  const settledAgentRunsKey = useMemo(
+    () => settledAgentRunKey(blocks),
+    [blocks],
+  );
+  const settledAgentRunIds = useMemo(
+    () => new Set(settledAgentRunsKey ? settledAgentRunsKey.split('\n') : []),
+    [settledAgentRunsKey],
+  );
+  const sessionAgentRuns = useSessionAgentRuns({
+    api: sessionAgentsApi,
+    sessionId: connection.sessionId,
+    settledRunIds: settledAgentRunIds,
+  });
+  const reportAgentError = useCallback(
+    (error: unknown) =>
+      pushToast(
+        'error',
+        error instanceof Error ? error.message : String(error),
+      ),
+    [pushToast],
+  );
+  const cancelSessionAgentRun = useCallback(
+    async (runId: string) => {
+      const sessionId = connectionRef.current.sessionId;
+      if (!sessionAgentsApi || !sessionId) return;
+      try {
+        await sessionAgentsApi.cancelRun(sessionId, runId);
+      } catch (error) {
+        reportAgentError(error);
+      }
+    },
+    [reportAgentError, sessionAgentsApi],
+  );
+  const stopAllSessionAgents = useCallback(async () => {
+    const sessionId = connectionRef.current.sessionId;
+    if (!sessionAgentsApi || !sessionId) return;
+    try {
+      await sessionAgentsApi.stopAll(sessionId);
+    } catch (error) {
+      reportAgentError(error);
+    }
+  }, [reportAgentError, sessionAgentsApi]);
+  const respondToSessionAgentPermission = useCallback(
+    async (runId: string, requestId: string, optionId: string) => {
+      const sessionId = connectionRef.current.sessionId;
+      if (!sessionAgentsApi || !sessionId) return;
+      try {
+        await sessionAgentsApi.respondToPermission(
+          sessionId,
+          runId,
+          requestId,
+          optionId,
+        );
+      } catch (error) {
+        reportAgentError(error);
+        // Rethrown so the card comes back for another vote.
+        throw error;
+      }
+    },
+    [reportAgentError, sessionAgentsApi],
+  );
+  const retrySessionAgentRunRequest = sessionAgentRuns.retry;
+  const retrySessionAgentRun = useCallback(
+    async (runId: string) => {
+      try {
+        await retrySessionAgentRunRequest(runId);
+      } catch (error) {
+        reportAgentError(error);
+      }
+    },
+    [reportAgentError, retrySessionAgentRunRequest],
+  );
+  // The @-mentions recorded in the shown session, keyed so the list keeps its
+  // identity across streamed deltas (it changes far less often than blocks).
+  const recordedMentionTextsKey = useMemo(
+    () => JSON.stringify(recordedAgentMentionTexts(blocks)),
+    [blocks],
+  );
+  const recordedMentionTexts = useMemo(
+    () => JSON.parse(recordedMentionTextsKey) as string[],
+    [recordedMentionTextsKey],
   );
   const agentChatEntry = useAgentChatEntry({
     enabled: collaborationAvailable,
-    getContext: getMentionContext,
     t,
     cwd: legacyWorkspaceContextCwd,
     baseUrl: workspace.baseUrl,
     token: workspace.token,
+    sessionApi: sessionAgentsApi,
+    ensureSession: ensureAgentMentionSession,
     onSubmit: handleEditorSubmit,
-    onOpen: handleCollaborationThreadOpen,
-    onError: handleCollaborationThreadError,
+    onError: handleAgentCollaborationError,
+    sessionId: connection.sessionId,
+    recordedMentionTexts,
     onCreateAgent: () => {
       setAgentsNav((current) => ({
         view: 'new-agent',
@@ -19236,6 +19250,28 @@ export function App({
       openPanel('agents');
     },
   });
+  const sessionAgentTail = useMemo(
+    () =>
+      sessionAgentRuns.runs.length > 0 ||
+      agentChatEntry.pendingMentions.length > 0 ? (
+        <>
+          <PendingAgentMentions mentions={agentChatEntry.pendingMentions} />
+          <SessionAgentLiveRuns
+            runs={sessionAgentRuns.runs}
+            onCancel={cancelSessionAgentRun}
+            onRespond={respondToSessionAgentPermission}
+            onRetry={retrySessionAgentRun}
+          />
+        </>
+      ) : undefined,
+    [
+      agentChatEntry.pendingMentions,
+      cancelSessionAgentRun,
+      respondToSessionAgentPermission,
+      retrySessionAgentRun,
+      sessionAgentRuns.runs,
+    ],
+  );
   const composerAtProviders = useMemo(
     () =>
       collaborationAvailable
@@ -19493,9 +19529,7 @@ export function App({
   const appClassName = [
     styles.app,
     styles.appChat,
-    isChatEmptyState && !collaborationThreadId
-      ? styles.appChatEmpty
-      : undefined,
+    isChatEmptyState ? styles.appChatEmpty : undefined,
     sidebarOptions.enabled ? styles.appWithSidebar : undefined,
     selectedTheme === WebShellThemeId.Light
       ? styles.themeLight
@@ -19795,8 +19829,6 @@ export function App({
   // Shared by the drawer and docked render sites below; only the genuine
   // per-variant props (variant / panelWidth) stay at each site.
   const artifactPanelSharedProps = {
-    onOpenCollaborationSession: (sessionId: string, workspaceCwd: string) =>
-      void loadSidebarSession(sessionId, workspaceCwd),
     onSelectTurnCallsPrompt: openTurnCalls,
     artifacts: artifactPanelArtifacts,
     tabs: artifactPanelTabs,
@@ -20401,13 +20433,6 @@ export function App({
                   aria-hidden="true"
                 />
                 <WebShellSidebar
-                  selectedCollaborationId={collaborationThreadId}
-                  onOpenCollaboration={(id, cwd) => {
-                    closeMobileDrawer();
-                    setCollaborationThread({ id, cwd, server: workspace.baseUrl });
-                    setMainView('chat');
-                    closePanel();
-                  }}
                   collapsed={sidebarCollapsedEffective}
                   layout={sidebarRailEnabled ? 'rail' : 'single'}
                   containerWidth={sidebarLayoutWidth}
@@ -20687,7 +20712,7 @@ export function App({
               aria-hidden={artifactPanelFullscreen || undefined}
             >
               {chatHeaderEnabled &&
-                (!isChatEmptyState || Boolean(collaborationThreadId)) &&
+                !isChatEmptyState &&
                 !activePanel &&
                 (mainView === 'chat' || mainView === 'cockpit') && (
                 <div className={styles.chatHeaderRow}>
@@ -20722,7 +20747,7 @@ export function App({
                     <div className={styles.customChatHeader}>
                       {renderChatHeader({
                         sessionId: connection.sessionId,
-                        sessionName: chatHeaderTitle,
+                        sessionName: sessionDisplayName,
                         workspaceCwd: workspaceContextActive
                           ? connection.workspaceCwd
                           : undefined,
@@ -20760,7 +20785,7 @@ export function App({
                     <ChatContextHeader
                       content={
                         titleHeaderItemVisible
-                          ? (chatHeaderTitle ?? t('session.new'))
+                          ? (sessionDisplayName ?? t('session.new'))
                           : null
                       }
                       workspaceName={headerWorkspaceName}
@@ -20808,7 +20833,6 @@ export function App({
                       }
                     />
                   )}
-                  {collaborationThreadId && <div ref={setCollaborationHeaderActions} className="flex shrink-0 items-center pr-3" />}
                   {sessionWorkflowEnabled &&
                     (sessionWorkflowTodos.length > 0 ||
                       mainView === 'cockpit') && (
@@ -20852,14 +20876,14 @@ export function App({
             >
               {sidebarOptions.enabled &&
                 sidebarOptions.showCompactToggle &&
-                (!chatHeaderEnabled || (isChatEmptyState && !collaborationThreadId)) &&
+                (!chatHeaderEnabled || isChatEmptyState) &&
                 !activePanel &&
                 mainView === 'chat' && (
                   <button
                     type="button"
                     className={[
                       styles.hamburgerButton,
-                      !chatHeaderEnabled || (isChatEmptyState && !collaborationThreadId)
+                      !chatHeaderEnabled || isChatEmptyState
                         ? styles.hamburgerButtonFloating
                         : undefined,
                     ]
@@ -21149,22 +21173,20 @@ export function App({
                         key={agentsNav.request}
                         workspaceCwd={legacyWorkspaceContextCwd}
                         initialAgentView={agentsNav.view}
-                        onOpenThreadChat={(threadId, cwd) => {
-                          setCollaborationThread({ id: threadId, cwd, server: workspace.baseUrl });
-                          setMainView('chat');
-                          closePanel();
-                        }}
                         onClose={() => {
                           setAgentsCreateScope(null);
                           closePanel();
                         }}
                         initialCreateScope={agentsCreateScope}
-                        onOpenAgentSession={(sessionId) => {
-                          // An agent is its own session, so a run opens the
-                          // ordinary session view. `loadSidebarSession`
-                          // already closes this panel on its way there.
+                        onMentionAgent={(name) => {
+                          // Agents answer inside the chat: "Mention in chat"
+                          // starts the @ there.
                           setAgentsCreateScope(null);
-                          void loadSidebarSession(sessionId);
+                          closePanel();
+                          window.setTimeout(() => {
+                            editorRef.current?.setText(`@${name} `);
+                            editorRef.current?.focus();
+                          }, 0);
                         }}
                       />
                     ) : activePanel === 'plugins' ? (
@@ -21656,22 +21678,7 @@ export function App({
                     : undefined
                 }
               >
-                {collaborationThreadId && (
-                  <LazyThreadsRoute key={`${collaborationThread?.cwd}:${collaborationThreadId}`} chat initialThreadId={collaborationThreadId}
-                    workspaceCwd={collaborationThread?.cwd}
-                    headerActionsContainer={collaborationHeaderActions}
-                    onTitleChange={updateCollaborationTitle}
-                    onOpenActivity={(threadId, workspaceCwd) => {
-                      const tab: ArtifactPanelTab = { id: `agent-activity:${workspaceCwd}:${threadId}`, kind: 'agent_activity', title: t('collab.team.title'), threadId, workspaceCwd };
-                      setArtifactPanelTabs((tabs) => tabs.some((item) => item.id === tab.id) ? tabs : [...tabs, tab]);
-                      setActiveArtifactPanelTabId(tab.id);
-                      setArtifactPanelWidth((width) => artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth());
-                      setArtifactPanelOpen(true);
-                    }}
-                    onOpenThreadChat={(id, cwd) => setCollaborationThread({ id, cwd, server: workspace.baseUrl })}
-                    onOpenAgentSession={(sessionId) => void loadSidebarSession(sessionId, collaborationThread?.cwd)} />
-                )}
-                {!collaborationThreadId && showMissingSessionState && (
+                {showMissingSessionState && (
                   <div className={styles.missingSessionState}>
                     <div className={styles.missingSessionMessage}>
                       {t('session.missing')}
@@ -21688,7 +21695,7 @@ export function App({
                 )}
                 <div
                   className={
-                    showMissingSessionState || collaborationThreadId
+                    showMissingSessionState
                       ? styles.chatSubtreeHidden
                       : styles.chatSubtree
                   }
@@ -21801,8 +21808,8 @@ export function App({
                                 centerWelcomeHeader={
                                   showMobileWelcomeFooterMiddle || undefined
                                 }
-                                tailContent={undefined}
-                                tailKey={undefined}
+                                tailContent={sessionAgentTail}
+                                tailKey="session-agent-runs"
                                 onCanScrollToBottomChange={
                                   handleCanScrollToBottomChange
                                 }
@@ -22345,6 +22352,11 @@ export function App({
                               sessionName={sessionDisplayName}
                             />
                           </div>
+                        )}
+                        {sessionAgentRuns.anyLive && (
+                          <StopAllAgentsButton
+                            onStopAll={stopAllSessionAgents}
+                          />
                         )}
                         <SessionRecoveryBanner
                           blocked={

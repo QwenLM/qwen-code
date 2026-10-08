@@ -102,6 +102,11 @@ function appendApiHistoryRecord(
   if (record.type === 'user' && !record.subtype) {
     markApiHistoryPrompt(message, record.promptId);
   }
+  // Session multi-agent records (`agent_mention` / `agent_message`) need no
+  // branch: their `message` is the enveloped model text, pushed below as its
+  // own user entry. This is the resume half of the contract; the live half is
+  // `Session.pendingExternalAgentContext`, which only exists in memory, so
+  // the two never double up.
   if (record.subtype === 'mid_turn_user_message') {
     const previous = history.at(-1);
     if (

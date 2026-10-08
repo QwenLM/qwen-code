@@ -363,7 +363,18 @@ final class LocalRuntimeStore {
         }
     }
 
+    static void validateDirectory(Path directory) throws IOException {
+        if (!directory.equals(directory.toRealPath())) {
+            throw new IOException("Recovery path is not canonical");
+        }
+        validate(directory, true, processOwner());
+    }
+
     private void validate(Path path, boolean isDirectory) throws IOException {
+        validate(path, isDirectory, owner);
+    }
+
+    private static void validate(Path path, boolean isDirectory, UserPrincipal owner) throws IOException {
         var attributes = Files.readAttributes(path, java.nio.file.attribute.PosixFileAttributes.class,
                 LinkOption.NOFOLLOW_LINKS);
         if (isDirectory ? !attributes.isDirectory() : !attributes.isRegularFile()) {

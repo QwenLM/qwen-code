@@ -198,8 +198,11 @@ public class SessionLifecycleService {
         String digest = sessions.lifecycleDigest(sessionId, DIGEST_NAMES.get(kind));
         OperationAdmission admission;
         if (session.workspace() != null) {
+            boolean activeLifecycle = "ACTIVE".equals(session.status()) && (kind == OperationKind.CLOSE || kind == OperationKind.DELETE);
             admission = store.beginWorkspaceLifecycle(tenantId, sessionId, kind, actorId, actorDigest(actorId),
-                    idempotencyKey, digest, kind == OperationKind.CLOSE && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose());
+                    idempotencyKey, digest, activeLifecycle ? coordinator.supportsWorkspaceLifecycle()
+                            : kind == OperationKind.CLOSE && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose(),
+                    activeLifecycle ? 1 : 0);
         } else {
             sessions.requireLegacyWorkspace(tenantId, actorId, sessionId);
             admission = store.beginOperation(tenantId, sessionId, kind, actorDigest(actorId), idempotencyKey, digest);
