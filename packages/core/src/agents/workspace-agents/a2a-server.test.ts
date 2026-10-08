@@ -287,6 +287,15 @@ describe('A2A send', () => {
     expect(task.contextId).toBe(port.sessions[0]!.id);
   });
 
+  it('refuses when the daemon refuses the session', async () => {
+    const caller = await grant();
+    port.createFailure = new A2ASessionError('refused', 'managed session');
+    await expect(send(caller)).resolves.toEqual({
+      ok: false,
+      kind: 'refused',
+    });
+  });
+
   it('removes a session it could not record', async () => {
     const caller = await grant();
     // The reservation is gone by the time the session would be recorded.
@@ -677,6 +686,11 @@ describe('A2A isolation and cancel', () => {
     const task = await sent(caller);
     port.reply(task.id, 'completed', 'Done.');
     await a2aGetTask(PROJECT_ROOT, port, caller, task.id);
+    // Records every request, so a cancel of the finished run would show.
+    port.cancel = async (_sessionId, runId) => {
+      port.cancelled.push(runId);
+      return false;
+    };
 
     await expect(
       a2aCancelTask(PROJECT_ROOT, port, caller, task.id),
