@@ -1,3 +1,30 @@
+CREATE TABLE IF NOT EXISTS managed_workspace_execution_lease (
+    storage_key CHAR(64) PRIMARY KEY,
+    holder_key CHAR(64),
+    binding_id VARCHAR(512),
+    runtime_generation BIGINT,
+    runtime_session_id VARCHAR(512),
+    tenant_id VARCHAR(256),
+    storage_id VARCHAR(256),
+    mount_revision BIGINT NOT NULL DEFAULT 0,
+    mount_state VARCHAR(16) NOT NULL DEFAULT 'UNVERIFIED',
+    mount_operation_id CHAR(36),
+    mount_completed_operation_id CHAR(36),
+    mount_root VARCHAR(2048),
+    mount_host_id VARCHAR(256),
+    mount_device VARCHAR(32),
+    mount_inode VARCHAR(32),
+    mount_birth_time VARCHAR(64),
+    mount_registration_id CHAR(36),
+    storage_kind VARCHAR(16) NOT NULL DEFAULT 'LOCAL',
+    csi_phase VARCHAR(16) NOT NULL DEFAULT 'RELEASED',
+    csi_revision BIGINT NOT NULL DEFAULT 0,
+    csi_reservation_id CHAR(36),
+    csi_registration_key CHAR(64),
+    csi_registration_revision BIGINT,
+    csi_provision_request_id VARCHAR(512)
+) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
 CREATE TABLE IF NOT EXISTS qwen_runtime_placement_guard (
     tenant_key CHAR(64) PRIMARY KEY,
     tenant_id VARCHAR(512) NOT NULL

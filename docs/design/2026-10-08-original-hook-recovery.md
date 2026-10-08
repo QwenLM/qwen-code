@@ -90,6 +90,12 @@ SessionLifecycleCoordinator, WorkspaceLifecycleStore, WorkspaceRuntimeProvisione
 WorkspaceExecutionStore, and the JDBC/in-memory binding repositories. Public READY
 admission and execution ownership remain unchanged.
 
+Standalone JDBC Broker initialization also creates the existing execution-holder
+table with the same columns, defaults, primary key, and indexes as the Server's
+current migrated schema. The stopped-Session transaction can therefore use the
+same storage-holder contract in either deployment. Existing Server migrations
+remain unchanged; retaining their CSI columns does not enable CSI retirement.
+
 ## Validation and acceptance
 
 Run build, typecheck, and targeted Broker tests. Pin exact original READY
@@ -99,6 +105,8 @@ Session, unknown execution, and READY-but-unusable refusal controls.
 Verify atomic holder/Session rollback for expired or replaced claims, foreign
 holder identity and unknown executions, and same-claim renewal and multiple
 original Sessions without clearing the wrong holder.
+Compare the standalone Broker and migrated Server holder-table shapes, and run
+the managed Server holder rollback and provisioner refusal controls.
 
 The independent test engineer freezes exact products and runs one new native
 case per fault: Spring restart, all original product processes crashing, and

@@ -78,6 +78,11 @@ WorkspaceRuntimeProvisioner、WorkspaceExecutionStore 及 JDBC/内存 binding
 repository。公开 READY
 准入及执行所有权不变。
 
+独立 JDBC Broker 初始化入口也创建既有执行 holder 表，其列、默认值、主键和
+索引与 Server 当前迁移后的表结构一致。因此两种部署下的已停机 Session
+事务都使用同一存储 holder 契约。既有 Server 迁移保持不变；保留其 CSI 列
+不启用 CSI 退役。
+
 ## 验证和验收
 
 执行 build、typecheck 和定向 Broker 测试。固定原 READY 的精确身份、drain
@@ -85,6 +90,8 @@ repository。公开 READY
 fencing。保留 LOST Session、未知执行和 READY 但不可用的拒绝控制。
 验证过期或被替换的 claim、外来 holder 身份和未知执行会原子回滚 holder 与
 Session；验证同一 claim 的合法续约，以及多个原 Session 不会清除错误 holder。
+比较独立 Broker 与迁移后 Server 的 holder 表结构，并运行 managed Server
+holder 回滚及 provisioner 拒绝控制。
 
 独立 test-engineer 冻结精确产物，每种故障运行一个新原生用例：Spring
 重启、全部原产品进程崩溃、实际操作系统重启，以及 Harness 保留 Hook
