@@ -145,7 +145,7 @@ public class HarnessCoordinator {
     public void cancel(String tenantId, String sessionId, String turnId) {
         dispatch(tenantId, sessionId, turnId);
         executor.execute(() -> cancelAdmittedTurn(tenantId, sessionId,
-                turnId));
+                turnId, false));
     }
 
     @Scheduled(fixedDelayString =
@@ -181,7 +181,7 @@ public class HarnessCoordinator {
                             leaseLost.set(true);
                         } else if (!leaseLost.get()) {
                             executor.execute(() -> cancelAdmittedTurn(
-                                    tenantId, sessionId, turnId));
+                                    tenantId, sessionId, turnId, true));
                         }
                     } catch (RuntimeException error) {
                         leaseLost.set(true);
@@ -866,7 +866,7 @@ public class HarnessCoordinator {
     }
 
     private void cancelAdmittedTurn(String tenantId, String sessionId,
-            String turnId) {
+            String turnId, boolean renewalDriven) {
         try {
             TurnRecord turn = store.findTurn(tenantId, sessionId, turnId)
                     .orElse(null);
@@ -884,17 +884,22 @@ public class HarnessCoordinator {
                     && !harness.isWorkspaceFilesAvailable()) {
                 return;
             }
-            // Reuse the admitted attachment: attaching would recheck grants
-            // needed for new work and could replace the running attachment.
+            // Reuse the admitted owner; a cold connector cache re-attaches
+            // only for the persisted cancellation, without requiring the
+            // authority that admits new work.
             if (session.harnessBootId() != null && store.bindHarness(tenantId,
                     sessionId, turnId, owner, session.harnessBootId())) {
                 // Renewal requeues this poller while the Turn is still
-                // settling, so only one concurrent poller may send the
-                // cancel; a failed send releases the claim so the next
-                // renewal retries it.
+                // settling, so only one renewal-driven poller may send the
+                // cancel once per event epoch; a failed send releases the
+                // claim so the next renewal retries it. A public cancel()
+                // call always pays its own send: a takeover load re-armed
+                // after a transient failure must be settled by the send it
+                // re-requests, and the plain cancel is idempotent at the
+                // daemon under the same identities.
                 String cancelKey = key(tenantId, sessionId, turnId) + "\n"
                         + turn.harnessEventEpoch();
-                if (cancellations.add(cancelKey)) {
+                if (!renewalDriven || cancellations.add(cancelKey)) {
                     try {
                         harness.cancel(session.tenantId(),
                                 session.sessionId());
@@ -907,7 +912,9 @@ public class HarnessCoordinator {
                         // The coded refusal is a failed plain send: release
                         // the claim here and let the paced takeover below,
                         // not the claim, gate re-sends of this path.
-                        cancellations.remove(cancelKey);
+                        if (renewalDriven) {
+                            cancellations.remove(cancelKey);
+                        }
                         // The plain cancel route aborts only a live, in-memory
                         // Turn: a parked Turn its dead generation owned answers
                         // the coded refusal, and re-issuing that same cancel
@@ -948,7 +955,9 @@ public class HarnessCoordinator {
                                     recovery.getActivationId());
                         }
                     } catch (RuntimeException error) {
-                        cancellations.remove(cancelKey);
+                        if (renewalDriven) {
+                            cancellations.remove(cancelKey);
+                        }
                         throw error;
                     }
                 }

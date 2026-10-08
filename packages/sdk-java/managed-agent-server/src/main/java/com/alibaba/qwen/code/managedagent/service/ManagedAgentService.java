@@ -283,11 +283,11 @@ public class ManagedAgentService {
         String requestDigest = digests.digest(Map.of(
                 "sessionId", sessionId, "turnId", turnId));
         SessionRecord session = store.requireSession(tenantId, sessionId);
-        // The same split as submitTurn: the actor gate stays above the
-        // replay, so a recorded cancel still answers after the Session
-        // leaves ACTIVE or Workspace files turn off, and only a fresh key
-        // meets the refusal below.
-        boolean admissible = maySubmitWorkspaceTurn(session, actorId);
+        // The same split as submitTurn, on cancel's narrower predicate:
+        // the actor gate stays above the replay, so a recorded cancel still
+        // answers after the Session leaves ACTIVE or Workspace files turn
+        // off, and only a fresh key meets the refusal below.
+        boolean admissible = mayCancelWorkspaceTurn(session, actorId);
         if (!admissible) {
             requireReplayActor(session, actorId);
         }
@@ -322,22 +322,21 @@ public class ManagedAgentService {
             String title) {
         validateIdempotencyKey(idempotencyKey);
         // A recorded rename answers before the shape and availability gates
-        // a deleted Session can no longer pass. The actor check stays ahead
+        // a deleted Session can no longer pass, but only when the recorded
+        // command IS this request — the key is tenant-global, so a key
+        // another Session consumed falls through to beginSessionMutation,
+        // which answers idempotency_conflict. The actor check stays ahead
         // of the outcome, and the read-only probe never writes the PENDING
         // row beginSessionMutation would create for a fresh key.
         StoreModels.CommandRecord recorded = store.findCommand(tenantId,
                 RENAME, idempotencyKey).orElse(null);
-        if (recorded != null && "COMPLETED".equals(recorded.status())) {
+        if (recorded != null && "COMPLETED".equals(recorded.status())
+                && recorded.sessionId().equals(sessionId)
+                && recorded.requestDigest().equals(renameDigest(sessionId,
+                        title))) {
             SessionRecord session = store.requireSession(tenantId,
-                    recorded.sessionId());
+                    sessionId);
             requireReplayActor(session, actorId);
-            if (!recorded.requestDigest().equals(renameDigest(sessionId,
-                    title)) || !recorded.sessionId().equals(sessionId)) {
-                throw new ApiException(HttpStatus.CONFLICT,
-                        "idempotency_conflict",
-                        "The idempotency key was reused with different"
-                                + " content.");
-            }
             return new SessionMutationResult<>(publicSession(
                     asLastVisible(session)), true);
         }
@@ -727,7 +726,7 @@ public class ManagedAgentService {
                                 session.sessionId()))
                         .map(session -> session.workspace().getWorkspaceId())
                         .collect(java.util.stream.Collectors.toSet());
-        Map<String, ManagedWorkspaceRegistry.WorkspaceSummary> grants =
+        Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants =
                 grantWorkspaces.isEmpty() ? Map.of()
                         : workspaces.findReadable(tenantId, actorId,
                                 grantWorkspaces);
@@ -930,8 +929,9 @@ public class ManagedAgentService {
 
     // Later Turns of a Workspace-bound Session run under the creator's
     // Workspace grants (WorkspaceExecutionStore.authorize), so only the
-    // creator may submit or cancel them or rename the Session, and only with
-    // Workspace files enabled. Everyone else keeps the existing refusal.
+    // creator may submit them or rename the Session, and only with Workspace
+    // files enabled. Everyone else keeps the existing refusal. Cancelling
+    // has its own, narrower rule (mayCancelWorkspaceTurn).
     private void requireSubmitter(String tenantId, String actorId,
             String sessionId) {
         SessionRecord session = store.requireSession(tenantId, sessionId);
@@ -965,6 +965,21 @@ public class ManagedAgentService {
         }
     }
 
+    // Cancelling aborts work that is already running, so it needs only what
+    // identifies the creator, not the grants that admit new work: the
+    // creator who can still read the Workspace may cancel while can_create
+    // is revoked, the Workspace is draining or it was re-registered. The
+    // shape term stays: a Session that can no longer execute keeps the
+    // refusal.
+    private boolean mayCancelWorkspaceTurn(SessionRecord session,
+            String actorId) {
+        return maySubmitShape(session)
+                && workspaces.canRead(session.tenantId(), actorId,
+                        session.workspace().getWorkspaceId())
+                && workspaces.createdSession(session.tenantId(), actorId,
+                        session.sessionId());
+    }
+
     private boolean maySubmitWorkspaceTurn(SessionRecord session,
             String actorId) {
         if (!maySubmitShape(session)) {
@@ -983,20 +998,34 @@ public class ManagedAgentService {
         ManagedWorkspaceRegistry.WorkspaceSummary summary =
                 workspaces.findReadable(session.tenantId(), actorId,
                         session.workspace().getWorkspaceId());
-        return summary != null && summary.canCreateSession();
+        // Execution also requires the Workspace generation and storage the
+        // Session was bound to; after a re-registration it refuses, so
+        // admission must refuse first instead of accepting a Turn that fails.
+        return summary != null && summary.canCreateSession()
+                && workspaces.bindingCurrent(session.tenantId(),
+                        session.workspace().getWorkspaceId(),
+                        session.workspace().getWorkspaceGeneration(),
+                        session.workspace().getStorageId());
     }
 
     // The page twin of the singular: the same rule answered from the batch
-    // reads the assembler already made.
+    // reads the assembler already made. The grant batch carries the registry's
+    // binding stamp, so a re-registration drops the capability here exactly as
+    // bindingCurrent drops it in the singular.
     private boolean maySubmitWorkspaceTurn(SessionRecord session,
             Set<String> creatorOwns,
-            Map<String, ManagedWorkspaceRegistry.WorkspaceSummary> grants) {
+            Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants) {
         if (!maySubmitShape(session)
                 || !creatorOwns.contains(session.sessionId())) {
             return false;
         }
-        var summary = grants.get(session.workspace().getWorkspaceId());
-        return summary != null && summary.canCreateSession();
+        var grant = grants.get(session.workspace().getWorkspaceId());
+        if (grant == null || !grant.canCreateSession()) {
+            return false;
+        }
+        var binding = session.workspace();
+        return grant.workspaceGeneration() == binding.getWorkspaceGeneration()
+                && grant.storageId().equals(binding.getStorageId());
     }
 
     private boolean maySubmitShape(SessionRecord session) {

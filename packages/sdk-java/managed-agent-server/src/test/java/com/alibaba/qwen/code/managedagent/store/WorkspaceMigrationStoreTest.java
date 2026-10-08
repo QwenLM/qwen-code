@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import static org.assertj.core.api.Assertions.*;
+import static org.awaitility.Awaitility.await;
 import static org.mockito.Mockito.mock;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
@@ -21,6 +22,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
@@ -188,6 +190,97 @@ class WorkspaceMigrationStoreTest {
         if (!"source_drift".equals(code)) {
             assertThatThrownBy(() -> operation.verify(false)).hasMessageContaining(code);
             assertThat(operation.inspect().path("verifyOperationId").asText()).isEqualTo(attempt);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,recovery_read_failed", "true,recovery_read_failed",
+            "false,migration_not_writable", "true,migration_not_writable"})
+    void clearsCompetingAttemptErrorsOnSuccessfulVerification(boolean promote, String code) throws Exception {
+        Process node = new ProcessBuilder("node", "-p", "process.execPath").start();
+        try {
+            assertThat(node.waitFor(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(node.exitValue()).isZero();
+            request.put("nodeExecutable", Path.of(new String(node.getInputStream().readAllBytes(), StandardCharsets.UTF_8)
+                    .trim()).toRealPath().toString());
+        } finally {
+            if (node.isAlive()) {
+                node.destroyForcibly();
+            }
+        }
+        Path ready = temp.resolve("worker-ready");
+        Path release = temp.resolve("worker-release");
+        Path worker = temp.resolve("successful-worker.cjs");
+        request.put("cliEntry", worker.toString());
+        var operation = store(true);
+        operation.retire(mock(RuntimeBrokerService.class));
+        guard.fence("tenant", "storage", 1, request.path("fenceOperationId").asText());
+        Files.copy(source.resolve(".qwen-managed-storage.json"), target.resolve(".qwen-managed-storage.json"));
+        var captureRequest = request.deepCopy();
+        captureRequest.remove(List.of("migrationOperationId", "targetRoot", "stateDirectory"));
+        captureRequest.put("operationId", request.path("captureOperationId").asText());
+        var capture = new WorkspaceRecoveryStore(jdbc, manager, guard, null, "capture",
+                captureRequest.toString().getBytes(StandardCharsets.UTF_8));
+        var context = capture.call("context", WorkspaceRecoveryStore.JSON.createObjectNode());
+        var manifest = WorkspaceRecoveryStore.JSON.createObjectNode().put("version", 1)
+                .put("provider", "local-workspace-bundle/1").put("tenantId", "tenant").put("storageId", "storage")
+                .put("captureOperationId", request.path("captureOperationId").asText()).put("activation", false);
+        for (String name : List.of("fenceOperationId", "mountRevision")) manifest.set(name, request.path(name));
+        for (String name : List.of("registration", "sourceDigest", "sessionCount")) manifest.set(name, context.path(name));
+        for (String name : List.of("sessions", "assets")) manifest.putObject(name)
+                .put("path", ".w1-recovery/" + name + ".ndjson").put("count", 0).put("byteLength", 0)
+                .put("digest", WorkspaceRecoveryStore.hash(new byte[0]));
+        Path metadata = Files.createDirectories(temp.resolve("bundle/.w1-recovery"));
+        byte[] bytes = manifest.toString().getBytes(StandardCharsets.UTF_8);
+        Files.write(metadata.resolve("manifest.json"), bytes);
+        var finish = WorkspaceRecoveryStore.JSON.createObjectNode().put("manifestDigest", WorkspaceRecoveryStore.hash(bytes));
+        finish.putObject("result").put("contentVerified", true).put("activation", false);
+        capture.call("finish", finish);
+        // Protocol fixture for the success boundary, not file-content verification.
+        Files.writeString(worker, "const fs = require('node:fs');\n"
+                + "const rl = require('node:readline').createInterface({input: process.stdin});\n"
+                + "rl.once('line', line => {\n"
+                + "  if (JSON.parse(line).error) process.exit(1);\n"
+                + "  fs.writeFileSync(" + WorkspaceRecoveryStore.JSON.valueToTree(ready.toString()) + ", 'ready');\n"
+                + "  const deadline = Date.now() + 10000;\n"
+                + "  setInterval(() => {\n"
+                + "    if (fs.existsSync(" + WorkspaceRecoveryStore.JSON.valueToTree(release.toString()) + ")) process.exit(0);\n"
+                + "    if (Date.now() > deadline) process.exit(2);\n"
+                + "  }, 10);\n"
+                + "});\n"
+                + "process.stdout.write(JSON.stringify({id: 1, method: 'finish', params: " + finish + "}) + '\\n');\n");
+        if (promote) {
+            Files.writeString(release, "release");
+            operation.verify(false);
+            Files.delete(release);
+            Files.delete(ready);
+        }
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var verified = executor.submit(() -> {
+                operation.verify(promote);
+                return operation.inspect();
+            });
+            try {
+                await().atMost(10, TimeUnit.SECONDS).until(() -> Files.exists(ready));
+                store(false).failed(code);
+                assertThat(operation.inspect().path("lastErrorCode").asText()).isEqualTo(code);
+                Files.writeString(release, "release");
+                var receipt = verified.get(15, TimeUnit.SECONDS);
+                assertThat(receipt.path("state").asText()).isEqualTo(promote ? "COMPLETED" : "PREPARED");
+                assertThat(receipt.path("lastErrorCode").isNull()).isTrue();
+                assertThat(receipt.path("result_json").path("contentVerified").asBoolean()).isTrue();
+                assertThat(receipt.path("result_json").path("activation").asBoolean()).isFalse();
+                assertThat(jdbc.queryForObject("SELECT mount_revision FROM managed_workspace_execution_lease", Long.class))
+                        .isEqualTo(promote ? 2 : 1);
+                operation.verify(promote);
+                assertThat(operation.inspect()).isEqualTo(receipt);
+                if (!promote) operation.abort();
+                var terminal = operation.inspect();
+                operation.failed("source_drift");
+                assertThat(operation.inspect()).isEqualTo(terminal);
+            } finally {
+                Files.writeString(release, "release");
+            }
         }
     }
 

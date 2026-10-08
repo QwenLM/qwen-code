@@ -8,8 +8,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -21,10 +23,12 @@ import org.junit.jupiter.api.Test;
 // both rows. The order lives only in that prose, so this source-level
 // canary pins it. Comments carry no weight — only code counts. Selection is
 // fail-closed on the lock itself — a requireSessionForUpdate call or a raw
-// managed_agent_session FOR UPDATE, taken directly or one helper hop deep —
-// turn-row access resolves one hop through the same-file methods a writer
-// calls, and the locker set is asserted exactly, so a new locker fails here
-// instead of escaping the audit.
+// managed_agent_session FOR UPDATE, taken directly or one helper hop deep,
+// so the asserted locker set stays stable — while turn-row access resolves
+// transitively through the same-file methods a writer calls, because a
+// one-hop turn side audited beginOperation's three-hop path as no access
+// and never compared its ordering at all. The locker set is asserted
+// exactly, so a new locker fails here instead of escaping the audit.
 class SessionRowLockOrderTest {
     private static final Path SOURCE = Path.of("src", "main", "java",
             "com", "alibaba", "qwen", "code", "managedagent", "store",
@@ -213,6 +217,44 @@ class SessionRowLockOrderTest {
                 .containsExactly("lateLockWriter");
     }
 
+    // The turn side resolves transitively: a writer that reaches the turn
+    // row through a two-hop chain before taking the lock is the inversion
+    // this canary exists to catch, and one-hop resolution audited it as no
+    // access — the ordering was never compared.
+    @Test
+    void theAuditFollowsTheTurnRowThroughTransitiveCalls() {
+        String synthetic = """
+                class SyntheticStore {
+
+                    @Transactional
+                    public void deepWriter(String tenantId,
+                            String sessionId) {
+                        writeTurnRow(tenantId, sessionId);
+                        requireSessionForUpdate(tenantId, sessionId);
+                    }
+
+                    private void writeTurnRow(String tenantId,
+                            String sessionId) {
+                        markTurn(tenantId, sessionId);
+                    }
+
+                    private void markTurn(String tenantId,
+                            String sessionId) {
+                        jdbc.update("UPDATE managed_agent_turn SET status"
+                                + " = 'FAILED'");
+                    }
+
+                    private void requireSessionForUpdate(String tenantId,
+                            String sessionId) {
+                        jdbc.queryForMap("SELECT session_id FROM"
+                                + " managed_agent_session FOR UPDATE");
+                    }
+                }
+                """;
+        assertThat(auditLockOrder(synthetic, new ArrayList<>()))
+                .containsExactly("deepWriter");
+    }
+
     // The parity guard is the fail-closed half of the strip: a comment
     // shaped like a member declaration matches in the raw source but not
     // after the strip, and that drift must fail the canary instead of
@@ -245,9 +287,10 @@ class SessionRowLockOrderTest {
                 .hasMessageContaining("ghost");
     }
 
-    // Returns the public writers that touch the turn row — directly or one
-    // hop through a same-file method — before taking the session-row lock,
-    // and collects every public lock-bearing member into locked.
+    // Returns the public writers that touch the turn row — directly or
+    // transitively through same-file methods — before taking the
+    // session-row lock, and collects every public lock-bearing member into
+    // locked.
     private static List<String> auditLockOrder(String source,
             List<String> locked) {
         String code = stripComments(source);
@@ -263,6 +306,7 @@ class SessionRowLockOrderTest {
                     + lost);
         }
         Map<String, List<String>> members = memberBodies(code);
+        Set<String> turnRowReaching = turnRowReaching(members);
         List<String> violations = new ArrayList<>();
         Matcher declarations = DECLARATION.matcher(code);
         while (declarations.find()) {
@@ -282,7 +326,8 @@ class SessionRowLockOrderTest {
             assertThat(body).as(name + " is transactional, so the"
                     + " session-row lock outlives the statement")
                     .contains("@Transactional");
-            int turnRowAccess = firstTurnRowAccess(body, name, members);
+            int turnRowAccess = firstTurnRowAccess(body, name, members,
+                    turnRowReaching);
             if (turnRowAccess >= 0 && sessionLock > turnRowAccess) {
                 violations.add(name);
             }
@@ -302,9 +347,10 @@ class SessionRowLockOrderTest {
     // The index the session-row lock is taken at: the helper call or raw
     // session-table FOR UPDATE in this body, or one hop through a same-file
     // member whose own body bears either spelling — a member reaching the
-    // lock neither way is not a locker and answers -1. One hop matches the
-    // turn-row side; two-hop lock paths like insertSessionCommand's would
-    // need transitive resolution this canary deliberately does not attempt.
+    // lock neither way is not a locker and answers -1. Selection stays one
+    // hop so the asserted locker set is exactly the writers that bear the
+    // lock spelling up close; the turn row side below is transitive, because
+    // an access the audit cannot see can never violate the order.
     private static int sessionLockIndex(String body, String self,
             Map<String, List<String>> members) {
         int first = directLockIndex(body);
@@ -387,28 +433,55 @@ class SessionRowLockOrderTest {
     }
 
     // The earliest turn-row access: a direct needle, or a call to a
-    // same-file member whose own body touches the turn row. Overloads share
-    // a name, so any matching body marks the callee — over-approximating a
-    // canary is safe, under-approximating it is what the finding measured.
+    // same-file member that reaches the turn row at any depth.
+    // Overloads share a name, so any matching body marks the callee —
+    // over-approximating a canary is safe, under-approximating it is what
+    // the finding measured.
     private static int firstTurnRowAccess(String body, String self,
-            Map<String, List<String>> members) {
+            Map<String, List<String>> members, Set<String> turnRowReaching) {
         int first = firstIndexOf(body, TURN_ROW_ACCESS);
         for (Map.Entry<String, List<String>> member : members.entrySet()) {
-            if (member.getKey().equals(self)) {
+            if (member.getKey().equals(self)
+                    || !turnRowReaching.contains(member.getKey())) {
                 continue;
             }
             int call = body.indexOf(member.getKey() + "(");
-            if (call < 0) {
-                continue;
-            }
-            boolean touchesTurnRow = member.getValue().stream()
-                    .anyMatch(slice -> firstIndexOf(slice,
-                            TURN_ROW_ACCESS) >= 0);
-            if (touchesTurnRow && (first < 0 || call < first)) {
+            if (call >= 0 && (first < 0 || call < first)) {
                 first = call;
             }
         }
         return first;
+    }
+
+    // Every same-file member that reaches the turn row, as a fixpoint: a
+    // member qualifies when its own body bears a needle or calls a member
+    // already in the set. One-hop resolution audited beginOperation,
+    // beginWorkspaceClose, both beginWorkspaceLifecycle overloads and
+    // materializeNextBatch as turnRowAccess == -1 — the ordering of four of
+    // the 24 lockers was never compared.
+    private static Set<String> turnRowReaching(
+            Map<String, List<String>> members) {
+        Set<String> reaching = new HashSet<>();
+        boolean grew = true;
+        while (grew) {
+            grew = false;
+            for (Map.Entry<String, List<String>> member : members
+                    .entrySet()) {
+                if (reaching.contains(member.getKey())) {
+                    continue;
+                }
+                boolean reaches = member.getValue().stream()
+                        .anyMatch(slice -> firstIndexOf(slice,
+                                TURN_ROW_ACCESS) >= 0
+                                || reaching.stream().anyMatch(callee ->
+                                        slice.contains(callee + "(")));
+                if (reaches) {
+                    reaching.add(member.getKey());
+                    grew = true;
+                }
+            }
+        }
+        return reaching;
     }
 
     private static Map<String, List<String>> memberBodies(String source) {
