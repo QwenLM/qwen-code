@@ -2055,14 +2055,13 @@ export function registerHostedHarnessSessionRoutes(
       | undefined;
     try {
       const rawLineage = body?.['lineage'];
-      if (
-        rawLineage !== undefined &&
-        rawLineage !== null &&
-        typeof rawLineage !== 'object'
-      )
+      const value =
+        rawLineage === undefined || rawLineage === null
+          ? null
+          : object(rawLineage);
+      if (rawLineage !== undefined && rawLineage !== null && value === null)
         throw new Error('Invalid child lineage.');
-      const value = object(rawLineage);
-      if (value !== undefined && value !== null) {
+      if (value) {
         const parentSessionId = value['parentSessionId'];
         const rootSessionId = value['rootSessionId'];
         const parentChildRunId = value['parentChildRunId'];
@@ -4157,32 +4156,35 @@ export function registerHostedHarnessSessionRoutes(
    */
   app.post('/session/:id/children/operations', async (req, res) => {
     const session = identity(req, sessions);
-    if (!session) return error(res, 404, 'hosted_session_not_found');
-    if (!session.childAgents)
-      return error(res, 409, 'hosted_children_unavailable');
-    if (session.blocked)
-      return error(res, 409, 'hosted_turn_recovery_required');
-    const body = object(req.body);
-    const operationId = body?.['operationId'];
-    const childRunId = body?.['childRunId'];
-    const kind = body?.['kind'];
-    if (
-      typeof operationId !== 'string' ||
-      !HOSTED_UUID.test(operationId) ||
-      typeof childRunId !== 'string' ||
-      childRunId.length < 1 ||
-      childRunId.length > 320
-    ) {
-      return error(res, 400, 'invalid_child_operation');
-    }
-    const children = session.childAgents;
-    // A claimed cleanup keeps its stamped authority on this route's
-    // durable writes and restores the prior stamp on every exit —
-    // `try/finally` because a `return` inside any case must close too.
     const claimedRestore = res.locals as {
       lifecycleRestoreAuthority?: ManagedSessionLifecycleAuthority;
     };
+    // The claimed stamp restores on EVERY exit, including the
+    // unavailable/blocked/validation returns that previously ran before
+    // any try and leaked the stamp onto the shared client for good.
     try {
+      if (!session) return error(res, 404, 'hosted_session_not_found');
+      if (!session.childAgents)
+        return error(res, 409, 'hosted_children_unavailable');
+      if (session.blocked)
+        return error(res, 409, 'hosted_turn_recovery_required');
+      const body = object(req.body);
+      const operationId = body?.['operationId'];
+      const childRunId = body?.['childRunId'];
+      const kind = body?.['kind'];
+      if (
+        typeof operationId !== 'string' ||
+        !HOSTED_UUID.test(operationId) ||
+        typeof childRunId !== 'string' ||
+        childRunId.length < 1 ||
+        childRunId.length > 320
+      ) {
+        return error(res, 400, 'invalid_child_operation');
+      }
+      const children = session.childAgents;
+      // A claimed cleanup keeps its stamped authority on this route's
+      // durable writes and restores the prior stamp on every exit —
+      // `try/finally` because a `return` inside any case must close too.
       try {
         switch (kind) {
           case 'dispatch_started': {
@@ -4343,7 +4345,7 @@ export function registerHostedHarnessSessionRoutes(
       }
       res.status(202).json({ operationId, state: 'settled' });
     } finally {
-      if ('lifecycleRestoreAuthority' in claimedRestore) {
+      if (session && 'lifecycleRestoreAuthority' in claimedRestore) {
         session.stores!.setLifecycleAuthority(
           claimedRestore.lifecycleRestoreAuthority,
         );

@@ -107,7 +107,7 @@ function createTurn(
         type,
         cwd: root,
         version: 'test',
-        daemonPromptId: 'prompt',
+        daemonPromptId: promptName,
         message: {
           role: type === 'assistant' ? 'model' : 'user',
           parts: messageParts,
@@ -820,6 +820,32 @@ it('fires PostToolUse on resumed results through the durable launch record', asy
   expect(firstEvents).toContain('PostToolUse');
   const recoveredEvents: string[] = [];
   const recovered = createTurn(0, recoveredEvents);
+  await recovered.resumeHookResults(
+    saved,
+    'model',
+    new AbortController().signal,
+  );
+  expect(recoveredEvents).toContain('PostToolUse');
+});
+
+// The same arm on a wake turn: the launcher's collapsed key is the only
+// name the record carries, so a resumed wake turn reading the verbatim
+// prompt id would find nothing — a shared derivation points both at the
+// same name. Without it, PostToolUse vanishes silently for wake turns.
+it('fires PostToolUse on resumed results of a wake-turn launch', async () => {
+  const firstEvents: string[] = [];
+  const first = createTurn(0, firstEvents, 'root-run:accept:notify');
+  const saved = await executeAgent(
+    first,
+    call({
+      description: 'audit the diff',
+      prompt: 'review the change',
+      run_in_background: true,
+    }),
+  );
+  expect(firstEvents).toContain('PostToolUse');
+  const recoveredEvents: string[] = [];
+  const recovered = createTurn(0, recoveredEvents, 'root-run:accept:notify');
   await recovered.resumeHookResults(
     saved,
     'model',

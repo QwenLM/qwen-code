@@ -886,8 +886,10 @@ export class HostedWorkspaceToolTurn {
         // A resumed committed result never re-drives the launch, so the
         // durable child_run record is the dispatch evidence that
         // survives restart: it exists exactly because the admission
-        // committed (R1-62's recovery arm).
-        this.childAgents?.record(`${this.promptId}:${call.callId}`) !==
+        // committed (R1-62's recovery arm). The run id derives from the
+        // same collapsed key the launcher wrote — a wake turn's id would
+        // otherwise read as a hybrid between the two before the third hop.
+        this.childAgents?.record(this.childRunIdFor(call.callId)) !==
           undefined ||
         intents.some((entry) => entry.payload['ordinal'] === ordinal);
       const response = responses.find(
@@ -2601,6 +2603,25 @@ export class HostedWorkspaceToolTurn {
   }
 
   /**
+   * One derivation of the child run id shared by the launcher and the
+   * recovery probe: a wake turn's turn id already embeds its
+   * commissioning child run (`<childRunId>:accept:notify`), so using it
+   * verbatim as the launch base grows the next run id one suffix per hop
+   * and walks a chained helper into the 128-char lineage bound by the
+   * third hop. The replay-stable key needs determinism, not readability:
+   * collapse the wake turn's identity to a bounded digest of its own
+   * stable name — never grow across hops, always 17 chars plus the call
+   * id. Calls keyed verbatim for every other turn — re-driven batches
+   * and resumed Hook results both name the same run again and again.
+   */
+  private childRunIdFor(callId: string): string {
+    const promptKey = this.promptId.endsWith(':accept:notify')
+      ? createHash('sha256').update(this.promptId).digest('hex').slice(0, 16)
+      : this.promptId;
+    return `${promptKey}:${callId}`;
+  }
+
+  /**
    * H4b: launch one child Session and complete the call through its own
    * arm. The intent commits before any physical effect; the control
    * plane's relay owns creation and delivery from there. The launch is
@@ -2634,17 +2655,7 @@ export class HostedWorkspaceToolTurn {
     const key = authority.sessionHeader.sessionKey;
     const description = (request.call.args['description'] as string).trim();
     const prompt = request.call.args['prompt'] as string;
-    // A wake turn's turn id already embeds its commissioning child run
-    // (`<childRunId>:accept:notify`), so using it verbatim as the launch
-    // base grows the next run id one suffix per hop and walks a chained
-    // helper into the 128-char lineage bound by the third hop. The
-    // replay-stable key needs determinism, not readability: collapse the
-    // wake turn's identity to a bounded digest of its own stable name
-    // instead — never grow across hops, always 17 chars plus the call id.
-    const promptKey = this.promptId.endsWith(':accept:notify')
-      ? createHash('sha256').update(this.promptId).digest('hex').slice(0, 16)
-      : this.promptId;
-    const childRunId = `${promptKey}:${request.call.callId}`;
+    const childRunId = this.childRunIdFor(request.call.callId);
     // The v1 pin: the parent's own definition, documented by its
     // definition resource's digest (the control plane reads the pin from
     // the committed body when it stamps the child's lineage).

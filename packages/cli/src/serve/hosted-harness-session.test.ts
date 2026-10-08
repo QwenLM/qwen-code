@@ -1963,6 +1963,42 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(204);
   });
 
+  // An array-valued `lineage` must not be silently accepted as a root
+  // Session — every non-plain-object lineage is a 400 with the same code
+  // the malformed object shapes already get, and only absent or `null`
+  // lineage means "root".
+  it('refuses an array-valued lineage on session create', async () => {
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      captureBytes: 1024 * 1024,
+      lineage: [],
+    });
+    expect(created.status).toBe(400);
+    expect(created.body.code).toBe('invalid_hosted_lineage');
+    const scrambled = await headers(supertest(server).post('/session')).send({
+      sessionId: randomUUID(),
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      captureBytes: 1024 * 1024,
+      lineage: 'x',
+    });
+    expect(scrambled.status).toBe(400);
+    expect(scrambled.body.code).toBe('invalid_hosted_lineage');
+    const absent = await headers(supertest(server).post('/session')).send({
+      sessionId: randomUUID(),
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/1',
+      captureBytes: 1024 * 1024,
+    });
+    expect(absent.status).toBe(200);
+  });
+
   // R1-4: a rejected consume commit is isolated behind the turn's durable
   // settlement — the turn still completes, the Session never blocks, and
   // the refusal only logs; the owed id survives for a later flush.
@@ -2096,6 +2132,88 @@ describe('Hosted Harness no-tool session', () => {
       .set('X-Qwen-Client-Id', clientId)
       .expect(204);
   }, 60_000);
+
+  // Any early refusal of a claimed request — validation, profile, blocked —
+  // still restores the stamped authority. A pre-try return leaking it
+  // would attach the claim's lifecycle headers onto this shared client's
+  // every later write, and a refusal like that restores nothing at all.
+  it('never leaks the claimed stamp through an early refusal', async () => {
+    domainEnablement.childRun = true;
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        captureBytes: 1024 * 1024,
+      })
+      .expect(200);
+    const clientId = created.body.clientId as string;
+    state.authorizeOrdinary.mockRejectedValue(
+      new ManagedSessionStoreHttpError(
+        409,
+        'managed_session_lifecycle_active',
+        'DRAINING',
+      ),
+    );
+    // The validation arm: the childRunId the route rejects with 400
+    // invalid_child_operation *after* the claim was stamped.
+    state.setLifecycleAuthority.mockClear();
+    const refused = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/children/operations`),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        operationId: 'not-a-uuid',
+        childRunId: 'prompt:call-1',
+        kind: 'cancel',
+        authority: {
+          operationId: 'close-1',
+          claimGeneration: 7,
+          kind: 'close',
+        },
+      });
+    expect(refused.status).toBe(400);
+    expect(refused.body.code).toBe('invalid_child_operation');
+    expect(state.setLifecycleAuthority).toHaveBeenLastCalledWith(undefined);
+
+    // The profile arm: a Session with no child Agents at all answers
+    // hosted_children_unavailable on the same seam — same restore.
+    state.authorizeOrdinary.mockRejectedValue(
+      new ManagedSessionStoreHttpError(
+        409,
+        'managed_session_lifecycle_active',
+        'DRAINING',
+      ),
+    );
+    const files = await headers(supertest(server).post('/session')).send({
+      sessionId: randomUUID(),
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(files.status).toBe(200);
+    state.setLifecycleAuthority.mockClear();
+    const filesRefused = await headers(
+      supertest(server).post(
+        `/session/${files.body.sessionId}/children/operations`,
+      ),
+    )
+      .set('X-Qwen-Client-Id', files.body.clientId as string)
+      .send({
+        operationId: randomUUID(),
+        childRunId: 'prompt:call-1',
+        kind: 'cancel',
+        authority: {
+          operationId: 'close-1',
+          claimGeneration: 7,
+          kind: 'close',
+        },
+      });
+    expect(filesRefused.status).toBe(409);
+    expect(filesRefused.body.code).toBe('hosted_children_unavailable');
+    expect(state.setLifecycleAuthority).toHaveBeenLastCalledWith(undefined);
+  });
 
   // P1 (lifecycle fence): with ordinary authorization closed by the
   // closing parent's fence, its own child cleanup must present the
