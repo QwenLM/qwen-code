@@ -512,8 +512,14 @@ export function registerWorkspaceAgentRoutes(
           res.status(404).json({ error: 'host_not_found' });
           return;
         }
-        // TODO(multi-agent): a run this Host holds is not ended here; it fails
-        // when its lease expires in the session-agents orchestrator.
+        // Its runs, and queued runs nothing can start any more, end now
+        // rather than wait for a lease that a revoked Host cannot renew.
+        await getSessionAgentOrchestrator(
+          runtime.workspaceCwd,
+        )?.endRunsForRemovedHost(
+          String(req.params['hostId']),
+          result.agentsMadeLocal,
+        );
         res.json({ agentsMadeLocal: result.agentsMadeLocal });
       } catch (error) {
         fail(res, error);

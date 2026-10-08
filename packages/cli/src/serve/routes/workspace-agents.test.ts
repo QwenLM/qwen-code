@@ -29,13 +29,17 @@ import { registerWorkspaceAgentRoutes } from './workspace-agents.js';
 
 const liveRuns = vi.hoisted(() => ({
   value: undefined as SessionAgentLiveRunSummary[] | undefined,
+  endRunsForRemovedHost: vi.fn(async () => 0),
 }));
 
 vi.mock('../session-agents/orchestrator.js', () => ({
   getSessionAgentOrchestrator: () =>
     liveRuns.value === undefined
       ? undefined
-      : { liveRuns: async () => liveRuns.value },
+      : {
+          liveRuns: async () => liveRuns.value,
+          endRunsForRemovedHost: liveRuns.endRunsForRemovedHost,
+        },
 }));
 
 // The real probe runs `claude --version` and friends; the route only needs
@@ -209,6 +213,33 @@ it('refuses to move an agent while it has a live session-agent run', async () =>
   expect(
     (await readWorkspaceAgents(workspaceCwd))[0]?.execution,
   ).toBeUndefined();
+});
+
+it('ends the runs a removed Host leaves stranded', async () => {
+  const workspaceCwd = path.join(runtimeDir, 'remove-host');
+  const { token } = await issueAgentHostEnrollment(workspaceCwd);
+  const { host } = await enrollAgentHost(workspaceCwd, {
+    token,
+    name: 'gone',
+    workspaceCwd: '/remote/gone',
+    providers: ['Qwen Code ACP'],
+  });
+  await updateWorkspaceAgents(workspaceCwd, () => [
+    {
+      id: 'ag_alice',
+      name: 'alice',
+      createdAt: 1,
+      execution: { mode: 'managed-host', hostIds: [host.id] },
+    },
+  ]);
+  liveRuns.value = [];
+
+  await request(appFor(runtimeAt(workspaceCwd)))
+    .delete(`/workspaces/workspace/agent/hosts/${host.id}`)
+    .expect(200, { agentsMadeLocal: ['ag_alice'] });
+  expect(liveRuns.endRunsForRemovedHost).toHaveBeenCalledWith(host.id, [
+    'ag_alice',
+  ]);
 });
 
 it("closes only the retired agent's hidden sessions", async () => {

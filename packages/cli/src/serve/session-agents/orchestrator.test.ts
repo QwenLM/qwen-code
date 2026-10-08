@@ -35,6 +35,7 @@ import { SessionAgentEventHub } from './events.js';
 import {
   RECORD_RECOVERY_WATCH_MAX_MS,
   RECORD_WATCH_MAX_MS,
+  SESSION_AGENT_HOST_REMOVED_ERROR,
   SESSION_AGENT_OFFLINE_ERROR,
   SESSION_AGENT_REPLY_NOT_RECORDED_ERROR,
   SESSION_AGENT_RESTARTED_ERROR,
@@ -708,6 +709,38 @@ describe('SessionAgentOrchestrator', () => {
     });
     const second = await orchestrator.pickupForHost('h1', ['claude']);
     expect(second).toMatchObject({ runId, attempt: 2 });
+  });
+
+  it('ends the runs a removed Host held or alone could start', async () => {
+    const { orchestrator, lastFrame } = harness({
+      roster: [{ ...carol, agentType: undefined }],
+    });
+    const first = await orchestrator.mention(SESSION, {
+      text: '@carol one',
+      clientMessageId: 'm1',
+    });
+    await orchestrator.pickupForHost('h1', ['claude']);
+    const second = await orchestrator.mention(SESSION, {
+      text: '@carol two',
+      clientMessageId: 'm2',
+    });
+    const runIds = [first.runs[0]!.runId, second.runs[0]!.runId];
+    expect(new Set(runIds).size).toBe(2);
+
+    await expect(
+      orchestrator.endRunsForRemovedHost('h1', ['ag_carol']),
+    ).resolves.toBe(2);
+    for (const runId of runIds) {
+      expect(lastFrame(runId)).toMatchObject({
+        status: 'offline',
+        error: SESSION_AGENT_HOST_REMOVED_ERROR,
+        retryable: true,
+      });
+    }
+    expect(await orchestrator.snapshot(SESSION)).toMatchObject([
+      { status: 'offline', retryable: true },
+      { status: 'offline', retryable: true },
+    ]);
   });
 
   it('marks a remote run offline when its lease lapses, and offers it for retry', async () => {

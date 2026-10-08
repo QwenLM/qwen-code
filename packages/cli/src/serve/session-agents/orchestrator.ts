@@ -178,6 +178,7 @@ export const SESSION_AGENT_STOPPED_ERRORS: Readonly<
   collaboration_disabled: 'stopped: agent collaboration was turned off',
 };
 export const SESSION_AGENT_OFFLINE_ERROR = 'runtime went offline';
+export const SESSION_AGENT_HOST_REMOVED_ERROR = 'its Agent Host was removed';
 /** A run finished before a restart, its reply never in the transcript. */
 export const SESSION_AGENT_REPLY_NOT_RECORDED_ERROR =
   'the reply was not recorded before the daemon stopped';
@@ -1693,6 +1694,34 @@ export class SessionAgentOrchestrator {
       decisions.push(...live.remote.decisions);
     }
     return decisions;
+  }
+
+  /**
+   * Ends the runs a removed Agent Host leaves stranded: the ones it was
+   * running, and queued runs of agents it was the only Host for (now
+   * local, so no Host picks them up and no local slot starts them). Each
+   * ends `offline`, offered to the owner for a retry. Returns how many.
+   */
+  async endRunsForRemovedHost(
+    hostId: string,
+    agentsMadeLocal: readonly string[],
+  ): Promise<number> {
+    await this.recovered;
+    const madeLocal = new Set(agentsMadeLocal);
+    const stranded = [...this.live.values()].filter(
+      (live) =>
+        live.remote?.hostId === hostId ||
+        (live.run.status === 'queued' && madeLocal.has(live.run.agentId)),
+    );
+    for (const live of stranded) {
+      const state = await this.session(live.sessionId);
+      await this.finishRun(state, live, {
+        status: 'offline',
+        outputText: live.frame.outputText ?? '',
+        error: SESSION_AGENT_HOST_REMOVED_ERROR,
+      });
+    }
+    return stranded.length;
   }
 
   /**
