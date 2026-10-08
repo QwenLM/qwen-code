@@ -194,10 +194,13 @@ export function createA2ASessionPort(
     },
 
     async discardSession(sessionId) {
-      await bridge.killSession(sessionId, { requireZeroAttaches: true });
-      await sessionService(workspaceCwd, options.runtimeBaseDir).removeSession(
-        sessionId,
-      );
+      // Only a session nobody attached to; its transcript goes with it.
+      if (await bridge.killSession(sessionId, { requireZeroAttaches: true })) {
+        await sessionService(
+          workspaceCwd,
+          options.runtimeBaseDir,
+        ).removeSession(sessionId);
+      }
     },
 
     async mention(sessionId, input) {
