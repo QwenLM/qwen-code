@@ -206,6 +206,10 @@ public final class JdbcRuntimeBindingRepository
             RuntimeBindingRecord binding = selectById(connection,
                     candidate.getBindingId(), true);
             if (binding != null) {
+                if (binding.getRequest().getStorageId() != null && storageFence(connection,
+                        binding.getRequest().getScope().getTenantId(), binding.getRequest().getStorageId()) != null) {
+                    throw new RuntimeBrokerException(409, "workspace_migrating", "Storage is under maintenance.", false);
+                }
                 requireHarnessAdmission(connection, candidate.getSession().getScope(), candidate.getSession().getHarnessSessionId(),
                         candidate.getSession().getScope().getLifecycleAuthority());
             }
