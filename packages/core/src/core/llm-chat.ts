@@ -18,7 +18,10 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent, FinishReason } from './genai-compat.js';
-import { enforceFunctionResponseBudget } from '../tools/tool-response-finalizer.js';
+import {
+  enforceFunctionResponseBudget,
+  isBudgetShrinkablePart,
+} from '../tools/tool-response-finalizer.js';
 import {
   retryWithBackoff,
   isUnattendedMode,
@@ -2186,10 +2189,12 @@ function stripTrailingSessionStartContextBlock(
 }
 
 /**
- * Floor for the pressure-aware tool result budget (#2566). Right below the
- * auto-compaction trigger the computed headroom can be a few tokens, and a
- * budget that small would replace every result with a bare stub; compaction is
- * about to run anyway, so overshooting by this much is the better trade.
+ * Floor for the pressure-aware tool result budget (#2566), per result. Right
+ * below the auto-compaction trigger the computed headroom can be a few tokens,
+ * and a budget that small would replace every result with a bare stub;
+ * compaction is about to run anyway, so overshooting by this much is the
+ * better trade. The shared budget is split across the results it can shorten,
+ * so this floor is scaled by their count.
  */
 const MIN_PRESSURE_TOOL_OUTPUT_CHARS = 4_000;
 
@@ -2209,8 +2214,11 @@ export class LlmChat {
   /**
    * This chat's last successful usage report, kept only to size the next
    * send's tool results (#2566): the route it came from, its prompt+output
-   * tokens and the exact history it covered. Cleared whenever the counts or
-   * the history are replaced, and consumed by every dispatch.
+   * tokens and the exact history it covered, and consumed by every dispatch.
+   * A stale anchor is rejected by the route key and by the history
+   * length/identity-prefix predicate, so the clear sites below are an
+   * optimisation rather than the safety net — a history rewrite that keeps
+   * element identity has to stay rejected by that predicate.
    */
   private toolBudgetUsageAnchor?: {
     routeKey: string;
@@ -3120,15 +3128,24 @@ export class LlmChat {
       // see only the stale prior-turn count (0).
       let userContent = createUserContent(params.message);
       // One pass over the batch: the tighter of the aggregate guard and the
-      // pressure budget (#2566), so a result is never cut twice.
-      const toolOutputBudget = Math.min(
-        this.config.getToolOutputBatchBudget?.() ?? Number.POSITIVE_INFINITY,
-        this.pressureToolOutputBudget(
-          userContent,
-          requestRouteKey,
-          cgConfigForThresholds?.contextWindowSize,
-        ) ?? Number.POSITIVE_INFINITY,
+      // pressure budget (#2566), so a result is never cut twice. A non-finite
+      // aggregate budget is the documented "disabled" sentinel, so it has to
+      // stay non-finite all the way to the `Number.isFinite` gate — taking
+      // `Math.min` with the pressure budget would run the pass the operator
+      // turned off.
+      const batchBudget = this.config.getToolOutputBatchBudget?.();
+      const pressureBudget = this.pressureToolOutputBudget(
+        userContent,
+        requestRouteKey,
+        cgConfigForThresholds?.contextWindowSize ?? DEFAULT_TOKEN_LIMIT,
       );
+      const toolOutputBudget =
+        batchBudget !== undefined && !Number.isFinite(batchBudget)
+          ? batchBudget
+          : Math.min(
+              batchBudget ?? Number.POSITIVE_INFINITY,
+              pressureBudget ?? Number.POSITIVE_INFINITY,
+            );
       if (Number.isFinite(toolOutputBudget) && userContent.parts) {
         const [guarded] = enforceFunctionResponseBudget(
           [
@@ -5604,33 +5621,45 @@ export class LlmChat {
       !anchor.history.every((content, index) => content === this.history[index])
     )
       return undefined;
-    const newNonToolContent: Content[] = [
+    // Only the results this budget can actually shorten are held out of the
+    // estimate: exempt tools keep their output and media is not text, so that
+    // text travels whole on top of the budget and has to be charged to the
+    // headroom.
+    const shrinkableParts = userContent.parts.filter(isBudgetShrinkablePart);
+    if (shrinkableParts.length === 0) return undefined;
+    const newUnshrinkableContent: Content[] = [
       ...this.history.slice(anchor.history.length),
       {
         ...userContent,
-        parts: userContent.parts.filter((part) => !part.functionResponse),
+        parts: userContent.parts.filter(
+          (part) => !isBudgetShrinkablePart(part),
+        ),
       },
     ];
     const { auto } = computeThresholds(
       contextWindow,
       this.config.getAutoCompactThreshold(),
     );
-    const newTokens = Math.ceil(
-      estimateContentTokens(
-        newNonToolContent,
-        resolveSlimmingConfig(this.config.getChatCompression())
-          .imageTokenEstimate,
-      ) * CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR,
+    const projectedTokens = estimatePromptTokens(
+      [],
+      newUnshrinkableContent,
+      anchor.tokens,
+      0,
+      resolveSlimmingConfig(this.config.getChatCompression())
+        .imageTokenEstimate,
+      true,
     );
     const remainingTokens =
-      (auto - anchor.tokens - newTokens) /
-      CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR;
+      (auto - projectedTokens) / CONSERVATIVE_NEW_CONTENT_SAFETY_FACTOR;
     if (remainingTokens <= 0) return undefined;
+    // `chars` covers the whole batch while `baseChars` caps one result, so both
+    // the floor and the comparison against the static budgets scale with the
+    // number of results the shared budget is split across.
     const chars = Math.max(
-      MIN_PRESSURE_TOOL_OUTPUT_CHARS,
+      MIN_PRESSURE_TOOL_OUTPUT_CHARS * shrinkableParts.length,
       Math.floor(remainingTokens * TOKEN_TO_CHAR_RATIO),
     );
-    return chars < baseChars ? chars : undefined;
+    return chars < baseChars * shrinkableParts.length ? chars : undefined;
   }
 
   /**

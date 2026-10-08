@@ -19,6 +19,7 @@ import {
   normalizeToolResultCallId,
   persistAndTruncateToolResult,
 } from './truncation.js';
+import { getFunctionResponseParts } from '../services/compactionInputSlimming.js';
 import { canonicalToolName, ToolNames } from './tool-names.js';
 
 const debugLogger = createDebugLogger('TOOL_RESPONSE_FINALIZER');
@@ -100,6 +101,29 @@ type TextSlot = {
   protectedPrefix?: string;
 };
 
+function isBudgetExemptOutputName(name: string | undefined): boolean {
+  const canonical = canonicalToolName(name ?? '');
+  return (
+    canonical === ToolNames.SEARCH_MEMORY || canonical === ToolNames.TOOL_SEARCH
+  );
+}
+
+/**
+ * Whether `enforceFunctionResponseBudget` can shorten this part. Exempt tools
+ * keep their output verbatim and media is not text, so a caller that charges a
+ * batch of results against a token headroom has to count those parts as input
+ * instead of assuming the budget covers them.
+ */
+export function isBudgetShrinkablePart(part: Part): boolean {
+  const response = part.functionResponse;
+  if (!response || isBudgetExemptOutputName(response.name)) return false;
+  if ((getFunctionResponseParts(part)?.length ?? 0) > 0) return false;
+  return (
+    typeof response.response?.['output'] === 'string' ||
+    typeof response.response?.['error'] === 'string'
+  );
+}
+
 function collectTextSlots(
   entries: ToolResponseBudgetEntry[],
   includeTopLevelText = true,
@@ -132,9 +156,7 @@ function collectTextSlots(
         part.functionResponse?.name ?? entry.toolName,
       );
       const budgetExemptOutput =
-        excludeBudgetExemptOutput &&
-        (responseName === ToolNames.SEARCH_MEMORY ||
-          responseName === ToolNames.TOOL_SEARCH);
+        excludeBudgetExemptOutput && isBudgetExemptOutputName(responseName);
       if (typeof output === 'string' && !budgetExemptOutput) {
         const protectedPrefix = excludeBudgetExemptOutput
           ? getPlanModeLifecyclePrefix(
