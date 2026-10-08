@@ -71,6 +71,15 @@ export interface OpenTuiArenaDialogProps {
 
 const MODEL_PROVIDERS_DOCUMENTATION_URL =
   'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/#modelproviders';
+const ARENA_NO_MODELS = 'No models available. Please configure models first.';
+const ARENA_OAUTH_NOTE = 'Note: qwen-oauth models are not supported in Arena.';
+const ARENA_NEED_MORE = 'Arena requires at least 2 models. To add more:';
+const ARENA_ADD_VIA_AUTH =
+  '  - Run /auth to set up a Coding Plan (includes multiple models)';
+const ARENA_ADD_VIA_SETTINGS =
+  '  - Or configure modelProviders in settings.json';
+const ARENA_MORE_MODELS_GUIDE =
+  'Configure more models with the modelProviders guide:';
 
 const STATUS_REFRESH_INTERVAL_MS = 2000;
 const IN_PROCESS_REFRESH_INTERVAL_MS = 1000;
@@ -198,17 +207,39 @@ function ArenaStart({
   // they address a row — while Enter stays live for the checks already made.
   const regionHeight = clampDialogHeight(propsRegionHeight);
   const { width } = useTerminalDimensions();
+  // Every charged run is measured at the frame's content width — the same
+  // width the ArenaFrame hint clips to: a run charged a flat row that wraps
+  // (the modelProviders URL is 88 columns) under-pays, and the unshrinkable
+  // frame grows past the region by the difference.
+  const frameContentWidth = Math.max(1, dialogAreaWidth(width) - 6);
   // Each model row is charged one physical row, so the label — model labels
   // come from the config — is clipped to what the row owns: the frame's
-  // content columns (region width minus border and padding) less the four
-  // columns of the `[x] ` checkbox.
-  const modelLabelWidth = Math.max(1, dialogAreaWidth(width) - 6 - 4);
+  // content columns less the four columns of the `[x] ` checkbox.
+  const modelLabelWidth = Math.max(1, frameContentWidth - 4);
+  const errorRows = error ? 1 + wrappedRows(error, frameContentWidth) : 0;
   const guidanceRows =
     hasDisabledQwenOauth || needsMoreModels
-      ? 1 + (hasDisabledQwenOauth ? 1 : 0) + (needsMoreModels ? 3 : 0)
+      ? 1 +
+        (hasDisabledQwenOauth
+          ? wrappedRows(ARENA_OAUTH_NOTE, frameContentWidth)
+          : 0) +
+        (needsMoreModels
+          ? wrappedRows(ARENA_NEED_MORE, frameContentWidth) +
+            wrappedRows(ARENA_ADD_VIA_AUTH, frameContentWidth) +
+            wrappedRows(ARENA_ADD_VIA_SETTINGS, frameContentWidth)
+          : 0)
       : 0;
+  const moreModelsRows = showMoreModelsHint
+    ? 1 +
+      wrappedRows(ARENA_MORE_MODELS_GUIDE, frameContentWidth) +
+      wrappedRows(MODEL_PROVIDERS_DOCUMENTATION_URL, frameContentWidth)
+    : 0;
   // The empty branch paints a text row where the list would paint its first
-  // model row, so it pays the same one row the list would.
+  // model row, so it pays the rows that text wraps into.
+  const emptyRows =
+    modelItems.length === 0
+      ? wrappedRows(ARENA_NO_MODELS, frameContentWidth)
+      : 0;
   const modelWindowRows =
     regionHeight === undefined
       ? modelItems.length
@@ -216,10 +247,10 @@ function ArenaStart({
           0,
           regionHeight -
             8 -
-            (modelItems.length === 0 ? 1 : 0) -
-            (error ? 2 : 0) -
+            emptyRows -
+            errorRows -
             guidanceRows -
-            (showMoreModelsHint ? 3 : 0),
+            moreModelsRows,
         );
   const modelOffset = getSelectionScrollOffset(
     cursor,
@@ -229,6 +260,11 @@ function ArenaStart({
 
   useKeyboard((key) => {
     const o = toOriginalKey(key);
+    // The error's rows can take the window to zero, where the refusal keeps
+    // Space off the only rows that could satisfy the message; the next key
+    // clears it, so the window comes back. (The zero-row refusal itself
+    // stays: this key's closure still saw no painted row.)
+    if (error) setError(null);
     if (o.name === 'escape') {
       onClose();
     } else if (o.name === 'up' || o.name === 'down') {
@@ -262,9 +298,7 @@ function ArenaStart({
     >
       {modelItems.length === 0 ? (
         <box marginTop={1}>
-          <text fg={C.yellow}>
-            {'No models available. Please configure models first.'}
-          </text>
+          <text fg={C.yellow}>{ARENA_NO_MODELS}</text>
         </box>
       ) : (
         <box flexDirection="column" marginTop={1}>
@@ -301,32 +335,20 @@ function ArenaStart({
       {(hasDisabledQwenOauth || needsMoreModels) && (
         <box marginTop={1} flexDirection="column">
           {hasDisabledQwenOauth && (
-            <text fg={C.yellow}>
-              {'Note: qwen-oauth models are not supported in Arena.'}
-            </text>
+            <text fg={C.yellow}>{ARENA_OAUTH_NOTE}</text>
           )}
           {needsMoreModels && (
             <>
-              <text fg={C.yellow}>
-                {'Arena requires at least 2 models. To add more:'}
-              </text>
-              <text fg={C.yellow}>
-                {
-                  '  - Run /auth to set up a Coding Plan (includes multiple models)'
-                }
-              </text>
-              <text fg={C.yellow}>
-                {'  - Or configure modelProviders in settings.json'}
-              </text>
+              <text fg={C.yellow}>{ARENA_NEED_MORE}</text>
+              <text fg={C.yellow}>{ARENA_ADD_VIA_AUTH}</text>
+              <text fg={C.yellow}>{ARENA_ADD_VIA_SETTINGS}</text>
             </>
           )}
         </box>
       )}
       {showMoreModelsHint && (
         <box marginTop={1} flexDirection="column">
-          <text fg={C.dim}>
-            {'Configure more models with the modelProviders guide:'}
-          </text>
+          <text fg={C.dim}>{ARENA_MORE_MODELS_GUIDE}</text>
           <text fg={C.dim}>{MODEL_PROVIDERS_DOCUMENTATION_URL}</text>
         </box>
       )}
@@ -671,16 +693,22 @@ function clipAgentPreview(
   frameContentWidth: number,
   rowBudget: number | undefined,
 ): ClippedAgentPreview | undefined {
-  const title = `Quick Preview · ${result.model.modelId}`;
+  // Sanitize before measuring: the summary is LLM-generated and the paths
+  // are git-derived, and a tab or newline measures zero columns for the clip
+  // while the terminal advances it — the charge and the paint must read the
+  // same bytes, like the sibling runs in this file.
+  const title = sanitizeTerminalLine(`Quick Preview · ${result.model.modelId}`);
   const naturalRuns: AgentPreviewRun[] = [
     {
       label: 'Approach: ',
-      value: result.approachSummary ?? 'No approach summary available.',
+      value: sanitizeTerminalLine(
+        result.approachSummary ?? 'No approach summary available.',
+      ),
     },
     {
       label: 'Major files: ',
-      value: formatFileList(
-        (result.diffSummary?.files ?? []).map((f) => f.path),
+      value: sanitizeTerminalLine(
+        formatFileList((result.diffSummary?.files ?? []).map((f) => f.path)),
       ),
     },
     {
@@ -756,7 +784,7 @@ function AgentDetailedDiff({
   return (
     <box marginTop={1} flexDirection="column">
       <text fg={C.text} attributes={1}>
-        {`Detailed Diff · ${result.model.modelId}`}
+        {sanitizeTerminalLine(`Detailed Diff · ${result.model.modelId}`)}
       </text>
       {lines.length === 0 ? (
         maxLines === 0 ? null : (
@@ -929,10 +957,23 @@ function ArenaSelect({
   // ceiling can never fit a region.
   const diffOpen = Boolean(showDetailedDiff && selectedResult);
   const diffLines = diffOpen ? visibleDiffLines(selectedResult?.diff) : [];
+  // The diff pane's margin and title, the title measured the way the
+  // preview pane measures its own: a model id long enough to wrap it would
+  // otherwise be paid one row for two.
+  const diffChromeRows =
+    diffOpen && selectedResult
+      ? 1 +
+        wrappedRows(
+          sanitizeTerminalLine(
+            `Detailed Diff · ${selectedResult.model.modelId}`,
+          ),
+          frameContentWidth,
+        )
+      : 0;
   const previewBudget =
     regionHeight === undefined
       ? undefined
-      : Math.max(0, regionHeight - 12 - (diffOpen ? 2 : 0));
+      : Math.max(0, regionHeight - 12 - diffChromeRows);
   const preview =
     showPreview && selectedResult
       ? clipAgentPreview(selectedResult, frameContentWidth, previewBudget)
@@ -948,7 +989,7 @@ function ArenaSelect({
       // The pane pays its margin and title rows, then as many diff lines as
       // fit (one row for the empty diff's notice — which a zero-line budget
       // does not paint); the list windows from the rest.
-      const lineBudget = Math.max(0, afterPanes - 2);
+      const lineBudget = Math.max(0, afterPanes - diffChromeRows);
       diffLineCap = lineBudget;
       const painted =
         diffLines.length === 0
@@ -956,7 +997,10 @@ function ArenaSelect({
             ? 0
             : 1
           : Math.min(diffLines.length, lineBudget);
-      agentWindowRows = Math.max(0, Math.floor((afterPanes - 2 - painted) / 2));
+      agentWindowRows = Math.max(
+        0,
+        Math.floor((afterPanes - diffChromeRows - painted) / 2),
+      );
     } else {
       agentWindowRows = Math.max(0, Math.floor(afterPanes / 2));
     }

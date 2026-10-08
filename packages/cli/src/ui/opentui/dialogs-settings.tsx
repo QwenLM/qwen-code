@@ -422,7 +422,12 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
     setScrollOffset((prev) =>
       followScrollOffset(
         activeSettingIndexRef.current,
-        prev,
+        // The follow rule leaves the offset alone while the highlight stays
+        // inside the window, so a grown window would inherit the smaller
+        // window's offset and paint fewer rows than the budget grants; clamp
+        // to the last full start first, the same bound selectionWindow
+        // derives at paint time.
+        Math.min(prev, Math.max(0, items.length - maxItemsToShow)),
         items.length,
         maxItemsToShow,
       ),

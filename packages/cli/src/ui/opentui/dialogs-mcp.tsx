@@ -490,7 +490,6 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
   // the cursor's position mapped to its row.
   type ServerRow =
     | { kind: 'gap'; key: string }
-    | { kind: 'hint'; key: string }
     | { kind: 'header'; key: string; displayName: string; configPath?: string }
     | {
         kind: 'server';
@@ -521,16 +520,6 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
         flatIndex += 1;
       }
     });
-    // The debug hint's margin and text rows window with the list.
-    if (
-      serverRows.length > 0 &&
-      servers.some(
-        (s) => s.status === 'disconnected' && !s.isDisabled && !s.approvalState,
-      )
-    ) {
-      serverRows.push({ kind: 'gap', key: 'debug-gap' });
-      serverRows.push({ kind: 'hint', key: 'debug-hint' });
-    }
   }
   const serverCursorRow = Math.max(
     0,
@@ -538,7 +527,22 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
       (row) => row.kind === 'server' && row.flatIndex === serverCursor,
     ),
   );
-  const serverWindowRows = bodyWindowRows ?? serverRows.length;
+  // The debug hint is pinned below the windowed list rather than windowed
+  // with it: the cursor can only sit on a server row, so a window that
+  // follows it never scrolls the tail rows into view — the one diagnostic
+  // the long-list case exists for would never paint. Its two rows come out
+  // of the step's region budget, so the frame still fits the region.
+  const debugHintRows =
+    servers.some(
+      (s) => s.status === 'disconnected' && !s.isDisabled && !s.approvalState,
+    ) &&
+    (bodyWindowRows === undefined || bodyWindowRows >= 2)
+      ? 2
+      : 0;
+  const serverWindowRows =
+    bodyWindowRows === undefined
+      ? serverRows.length
+      : Math.max(0, bodyWindowRows - debugHintRows);
   const serverListOffset = useFollowScrollOffset(
     serverCursorRow,
     serverRows.length,
@@ -886,18 +890,6 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
           if (row.kind === 'gap') {
             return <box key={row.key} height={1} />;
           }
-          if (row.kind === 'hint') {
-            return (
-              <box key={row.key} flexDirection="row">
-                <text fg={C.yellow}>
-                  {clipToWidth(
-                    `${ICON.REFERENCE} ${t('Run qwen --debug to see error logs')}`,
-                    contentWidth,
-                  )}
-                </text>
-              </box>
-            );
-          }
           if (row.kind === 'header') {
             // Every row the window paints is charged one physical row, so
             // the config path — a real filesystem path — clips to what the
@@ -975,6 +967,19 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
             </box>
           );
         })}
+        {debugHintRows > 0 && (
+          <>
+            <box height={1} />
+            <box flexDirection="row">
+              <text fg={C.yellow}>
+                {clipToWidth(
+                  `${ICON.REFERENCE} ${t('Run qwen --debug to see error logs')}`,
+                  contentWidth,
+                )}
+              </text>
+            </box>
+          </>
+        )}
       </box>
     );
   };

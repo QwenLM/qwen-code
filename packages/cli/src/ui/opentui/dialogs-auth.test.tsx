@@ -1368,12 +1368,36 @@ describe('the wizard frame keeps its natural height', () => {
     expect(screen.getByText('Third-party Providers · Provider')).toBeTruthy();
   });
 
-  it('refuses the main-menu keys when even the shed chrome pays zero rows', async () => {
-    // With the rule and terms block shed, the main chrome is the shell's six
-    // rows, so a seven-row region leaves a one-row budget — less than an
-    // item's three-row stride. No row paints, and the arrows and Enter must
-    // not address one: the view does not move.
-    renderDialog({ availableTerminalHeight: 7 });
+  it('sheds the main list margin row before the list loses its last row', async () => {
+    // With the rule and terms block shed, the shell's six chrome rows leave
+    // a seven-row region a one-row budget — less than an item's three-row
+    // stride — so the list's own margin row sheds too and one provider row
+    // paints: the frame is exactly the region's seven rows, and Enter opens
+    // the painted row.
+    const { onClose } = renderDialog({ availableTerminalHeight: 7 });
+    expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
+    expect(screen.queryByText('Third-party Providers')).toBeNull();
+
+    await press('return');
+    expect(
+      screen.getByText('Alibaba ModelStudio · Access Method'),
+    ).toBeTruthy();
+
+    await pressEsc(); // a sub-view's Esc is goBack, unchanged
+    expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('refuses the main-menu keys when even the shed chrome pays zero rows, and Esc closes the dead view', async () => {
+    // With the rule, the terms block and the list's margin row shed, the
+    // main chrome is five rows, so a six-row region leaves a one-row budget
+    // — less than an item's three-row stride. No row paints, and the arrows
+    // and Enter must not address one: the view does not move. Esc must still
+    // leave: arming the must-connect error over a list that cannot paint
+    // would wedge the dialog shut, since the armed error then swallows every
+    // later Esc.
+    const { onClose } = renderDialog({ availableTerminalHeight: 6 });
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
     expect(screen.queryByText('Alibaba ModelStudio')).toBeNull();
     expect(screen.queryByText('Third-party Providers')).toBeNull();
@@ -1383,6 +1407,10 @@ describe('the wizard frame keeps its natural height', () => {
 
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
     expect(screen.queryByText('Third-party Providers · Provider')).toBeNull();
+
+    const consumed = await pressEsc();
+    expect(consumed).toBe(true);
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
   it('refuses the sub-menu keys when the region pays zero provider rows', async () => {

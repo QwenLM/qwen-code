@@ -547,4 +547,32 @@ describe('OpenTuiMcpDialog list windows', () => {
       'authenticate',
     );
   });
+
+  it('pins the --debug hint below the windowed server list when a server is disconnected', async () => {
+    // Twelve servers, one disconnected: the hint rows used to ride the
+    // scroll window at the list's tail, where a cursor that can only sit on
+    // a server row never scrolls them into view — the one diagnostic the
+    // long-list case exists for never painted. The hint is pinned below the
+    // window now, paid two rows out of the region budget, so it survives the
+    // overflow.
+    const servers = [
+      serverWith({ name: 'srv_0', status: MCPServerStatus.DISCONNECTED }),
+      ...Array.from({ length: 11 }, (_, i) =>
+        serverWith({ name: `srv_${i + 1}` }),
+      ),
+    ];
+    render(
+      <OpenTuiMcpDialog
+        servers={servers}
+        availableTerminalHeight={12}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByText(/Run qwen --debug to see error logs/)).toBeTruthy();
+    for (let i = 0; i < 11; i++) await press('down');
+    // The window followed the cursor to the last server; the hint stayed.
+    expect(screen.getByText('srv_11')).toBeTruthy();
+    expect(screen.getByText(/Run qwen --debug to see error logs/)).toBeTruthy();
+  });
 });

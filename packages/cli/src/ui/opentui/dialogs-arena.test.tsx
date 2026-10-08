@@ -83,7 +83,9 @@ vi.mock('./theme.js', () => ({
 }));
 
 import { AgentStatus, type Config } from '@qwen-code/qwen-code-core';
+import { clipToRows } from './dialogs-core.js';
 import { OpenTuiArenaDialog } from './dialogs-arena.js';
+import { sanitizeTerminalLine } from '../utils/textUtils.js';
 
 function baseKeyEvent(overrides: Record<string, unknown> = {}) {
   return {
@@ -163,6 +165,20 @@ const fourAgentManager = {
 
 const fourConfig = {
   getArenaManager: () => fourAgentManager,
+} as unknown as Config;
+
+const twoModelStartConfig = {
+  getArenaManager: () => ({
+    getAgents: () => [],
+  }),
+  getContentGeneratorConfig: () => ({
+    model: 'test-model',
+    authType: 'openai',
+  }),
+  getAllConfiguredModels: () => [
+    { authType: 'openai', id: 'm1', label: 'model-1' },
+    { authType: 'openai', id: 'm2', label: 'model-2' },
+  ],
 } as unknown as Config;
 
 describe('OpenTuiArenaDialog select panes at a zero-row window', () => {
@@ -558,5 +574,193 @@ describe('OpenTuiArenaDialog select pane charging', () => {
     expect(screen.queryByText(/model-5/)).toBeNull();
     for (let i = 0; i < 5; i++) await press('down');
     expect(screen.getByText(/\[openai\] model-5/)).toBeTruthy();
+  });
+
+  it('clears the start error on the next key, so a premature Enter cannot wedge the list', async () => {
+    // Two models at a twelve-row region leave the model window one row.
+    // Enter with fewer than two checks arms the error, whose two rows then
+    // zero the window — and the zero-row refusal keeps Space off the only
+    // rows that could satisfy the message, while nothing cleared the flag:
+    // the dialog showed the error with no key able to resolve it. The next
+    // key clears the error, the window comes back, and the list reaches the
+    // two checks Enter asks for.
+    const onFillInput = vi.fn();
+    render(
+      <OpenTuiArenaDialog
+        mode="start"
+        config={twoModelStartConfig}
+        onClose={() => {}}
+        notify={() => {}}
+        onFillInput={onFillInput}
+        availableTerminalHeight={12}
+      />,
+    );
+
+    await press('return'); // arms the error; the window drops to zero rows
+    expect(screen.getByText(/Please select at least 2 models/)).toBeTruthy();
+    await press('down'); // clears the error; this stale closure refuses the move
+    await press('space'); // checks the painted first row
+    await press('down');
+    await press('space'); // checks the second row
+    await press('return');
+    expect(onFillInput).toHaveBeenCalledWith(
+      '/arena start --models openai:m1,openai:m2 ',
+    );
+  });
+
+  it('charges the start hint runs the rows they wrap into at the frame width', () => {
+    // At width 80 the frame's content is seventy columns, so the 88-column
+    // modelProviders URL wraps into two rows. Charged a flat row each, the
+    // hint block under-paid one row and the unshrinkable frame grew past a
+    // twelve-row region, pushing its bottom border out; measured at the
+    // paint width the block pays four rows and the model window drops to
+    // zero — no model row the region cannot pay for paints.
+    mocks.state.width = 80;
+    render(
+      <OpenTuiArenaDialog
+        mode="start"
+        config={twoModelStartConfig}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={12}
+      />,
+    );
+    expect(
+      screen.getByText(
+        'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/settings/#modelproviders',
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/model-1/)).toBeNull();
+  });
+
+  it('sanitizes the preview and detailed-diff runs before they are measured and painted', async () => {
+    // clipAgentPreview built, measured and painted its runs without
+    // sanitizeTerminalLine while the sibling external runs in this file all
+    // carry it: an approachSummary with a tab (measured zero columns, so the
+    // clip kept a prefix that paints past its row budget) and a git-derived
+    // path with a bidi override reached the terminal raw, and the diff
+    // pane's title — the same externally-derived shape — painted raw too.
+    const dirtyApproach = 'a\tb'.repeat(60);
+    const dirtyPath = 'src/\u202Etnp.ts';
+    const dirtyModel = 'model-\x07a1';
+    const dirtyManager = {
+      getAgentStates: () => [
+        {
+          agentId: 'a1',
+          model: { modelId: dirtyModel },
+          status: AgentStatus.COMPLETED,
+          stats: { durationMs: 1000, outputTokens: 42 },
+        },
+      ],
+      getResult: () => ({
+        task: 'task',
+        agents: [
+          {
+            agentId: 'a1',
+            model: { modelId: dirtyModel },
+            approachSummary: dirtyApproach,
+            stats: { outputTokens: 42, durationMs: 1000, toolCalls: 1 },
+            diffSummary: {
+              additions: 1,
+              deletions: 0,
+              files: [{ path: dirtyPath, additions: 1, deletions: 0 }],
+            },
+            diff: '+x',
+          },
+        ],
+      }),
+    };
+    const dirtyConfig = {
+      getArenaManager: () => dirtyManager,
+    } as unknown as Config;
+    const view = (availableTerminalHeight: number) => (
+      <OpenTuiArenaDialog
+        mode="select"
+        config={dirtyConfig}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={availableTerminalHeight}
+      />
+    );
+    const { rerender } = render(view(16));
+
+    await press('p');
+    // The title and the approach run are sanitized before they are measured:
+    // the clip pays at most the two rows the region left the run, and no
+    // control or bidi byte reaches the screen. (Read the frame text, not
+    // getByText: a string matcher is compared un-normalized, so a clip that
+    // ends on a space could never match.)
+    expect(screen.getByText('Quick Preview · model-a1')).toBeTruthy();
+    const sanitizedApproach = sanitizeTerminalLine(dirtyApproach);
+    const clippedApproach = clipToRows(sanitizedApproach, 78, 2);
+    const painted = () => document.body.textContent ?? '';
+    expect(painted()).toContain(clippedApproach);
+    expect(painted()).not.toContain(sanitizedApproach);
+    expect(painted()).not.toContain('\t');
+    expect(painted()).not.toContain('\x07');
+    expect(painted()).not.toContain('\u202E');
+
+    // A taller region leaves the files run a row: the git-derived path is
+    // stripped the same way.
+    rerender(view(24));
+    expect(screen.getByText('src/tnp.ts')).toBeTruthy();
+    expect(painted()).not.toContain('\t');
+    expect(painted()).not.toContain('\x07');
+    expect(painted()).not.toContain('\u202E');
+
+    // The detailed-diff pane's title is the same externally-derived shape.
+    await press('p'); // close the preview so the diff pane may open
+    await press('d');
+    expect(screen.getByText('Detailed Diff · model-a1')).toBeTruthy();
+    expect(painted()).not.toContain('\t');
+    expect(painted()).not.toContain('\x07');
+    expect(painted()).not.toContain('\u202E');
+  });
+
+  it('charges the detailed-diff title the rows it wraps into, like the preview title', async () => {
+    // The diff pane paid its margin and title a flat two rows while the
+    // sibling preview title measures its own wrap: at width 40 the pane's
+    // content is thirty columns, so a thirty-column model id wraps the title
+    // into two rows, and the flat charge grants one diff line the region
+    // cannot pay.
+    mocks.state.width = 40;
+    const longIdManager = {
+      getAgentStates: () => [
+        {
+          agentId: 'a1',
+          model: { modelId: 'm'.repeat(30) },
+          status: AgentStatus.COMPLETED,
+          stats: { durationMs: 1000, outputTokens: 42 },
+        },
+      ],
+      getResult: () => ({
+        task: 'task',
+        agents: [
+          {
+            agentId: 'a1',
+            model: { modelId: 'm'.repeat(30) },
+            approachSummary: 'did the thing',
+            stats: { outputTokens: 42, durationMs: 1000, toolCalls: 1 },
+            diffSummary: { additions: 40, deletions: 0, files: [] },
+            diff: Array.from({ length: 40 }, (_, l) => `+line ${l}`).join('\n'),
+          },
+        ],
+      }),
+    };
+    render(
+      <OpenTuiArenaDialog
+        mode="select"
+        config={{ getArenaManager: () => longIdManager } as unknown as Config}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={20}
+      />,
+    );
+
+    await press('d');
+    expect(screen.getByText('+line 3')).toBeTruthy();
+    expect(screen.queryByText('+line 4')).toBeNull();
+    // The marker is a diff line, clipped to the pane's 28 columns here.
+    expect(screen.getByText(/more rows than/)).toBeTruthy();
   });
 });

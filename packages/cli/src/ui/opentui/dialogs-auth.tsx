@@ -243,6 +243,7 @@ function RadioList({
   cursor,
   offset = 0,
   maxItems,
+  marginTop = 1,
 }: {
   items: RadioItem[];
   cursor: number;
@@ -250,13 +251,19 @@ function RadioList({
   offset?: number;
   /** The items the region budget pays for; undefined paints them all. */
   maxItems?: number;
+  /**
+   * The list's margin row, charged in the caller's chrome count; a region
+   * too short for even one item sheds it (and drops the charge to match)
+   * before it sheds the last item.
+   */
+  marginTop?: number;
 }) {
   const { width } = useTerminalDimensions();
   const runWidth = Math.max(1, dialogContentWidth(width) - 2);
   const windowed =
     maxItems === undefined ? items : items.slice(offset, offset + maxItems);
   return (
-    <box flexDirection="column" marginTop={1}>
+    <box flexDirection="column" marginTop={marginTop}>
       {windowed.map((item, windowIndex) => {
         const selected = offset + windowIndex === cursor;
         return (
@@ -1459,9 +1466,21 @@ function AuthDialogFlow({
   const shedMainFooter =
     wizardListWindow(regionHeight, fullMainChromeRows, MAIN_ITEMS.length, 2) <
     1;
-  const mainChromeRows = shedMainFooter
-    ? SHELL_BODY_CHROME_ROWS + errorRows
-    : fullMainChromeRows;
+  // Below even the shed chrome's first item the list's own margin row sheds
+  // too: the frame must fit the region, and the alternative is a dead dialog
+  // — a zero-row window refuses every list key while the must-connect gate
+  // and the error swallow keep Esc from leaving.
+  const shedMainMargin =
+    shedMainFooter &&
+    wizardListWindow(
+      regionHeight,
+      SHELL_BODY_CHROME_ROWS + errorRows,
+      MAIN_ITEMS.length,
+      2,
+    ) < 1;
+  const mainChromeRows =
+    (shedMainFooter ? SHELL_BODY_CHROME_ROWS + errorRows : fullMainChromeRows) -
+    (shedMainMargin ? 1 : 0);
   const listWindow: StepWindow = {
     regionHeight,
     chromeRows: listChromeRows,
@@ -1528,6 +1547,13 @@ function AuthDialogFlow({
         goBack();
         return true;
       }
+      // A main window that paints no row is a dead dialog: the list keys are
+      // refused, so the must-connect gate and the error swallow would wedge
+      // it shut — Esc closes it instead.
+      if (mainWindow < 1) {
+        onClose();
+        return true;
+      }
       // The swallow is for an error the dialog armed itself; a boot-seeded
       // initialError must fall through, or the auto-opened dialog could never
       // be dismissed with Esc.
@@ -1560,6 +1586,7 @@ function AuthDialogFlow({
     initialError,
     config,
     onClose,
+    mainWindow,
   ]);
 
   // -- View title -------------------------------------------------------------
@@ -1591,6 +1618,7 @@ function AuthDialogFlow({
             cursor={mainCursor}
             offset={mainOffset}
             maxItems={mainWindow}
+            marginTop={shedMainMargin ? 0 : 1}
           />
           {!shedMainFooter && (
             <>

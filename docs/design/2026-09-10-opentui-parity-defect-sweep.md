@@ -2472,7 +2472,13 @@ main menu, the provider sub-menus, and the protocol, wire-API and endpoint
 steps — charging two physical rows an item (label and description, each
 clipped to the columns the row owns) plus the margin between items, with the
 window following the cursor and the keys refusing a row nothing painted, the
-same refusal the other windowed dialogs make.
+same refusal the other windowed dialogs make. A later round pushed the same
+floor one row lower: when the region is too short for even the shed chrome's
+first item, the main list's own margin row sheds too — a seven-row region now
+paints one provider in a frame that exactly fits — and when even that pays
+nothing (a six-row region) the dead main view lets Esc close it rather than
+arming the must-connect error over a list that cannot paint, because the armed
+error swallows every later Esc.
 
 ## Coverage boundary
 

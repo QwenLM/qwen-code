@@ -2289,6 +2289,43 @@ describe('OpenTuiSettingsDialog region budget', () => {
 
     expect(setValue).not.toHaveBeenCalled();
   });
+
+  it('re-clamps the offset when the window grows, so the grown window paints in full', () => {
+    // Walking to the last row at a two-row window parks the offset at
+    // items − 2. A resize that grows the window to eight left the offset
+    // parked — the follow rule only moves it when the highlight leaves the
+    // window — and the slice painted two rows in the eight-row window until
+    // enough Ups refilled it. The effect now clamps the offset to the grown
+    // window's last full start.
+    const items = buildSettingsListItems();
+    const settings = {
+      isTrusted: true,
+      merged: {},
+      forScope: () => ({ settings: {} }),
+      setValue: vi.fn(),
+    } as unknown as LoadedSettings;
+    const view = (availableTerminalHeight: number) => (
+      <OpenTuiSettingsDialog
+        settings={settings}
+        onSelect={vi.fn()}
+        availableTerminalHeight={availableTerminalHeight}
+      />
+    );
+    const { rerender } = render(view(16));
+
+    // Region 16 pays the list two rows; walk the highlight to the last row.
+    for (let i = 0; i < items.length - 1; i++) press('down');
+    expect(screen.getByText(items[items.length - 1]!.label)).toBeTruthy();
+    expect(screen.queryByText(items[items.length - 3]!.label)).toBeNull();
+
+    rerender(view(30));
+
+    // Region 30 pays eight rows: the last eight paint, the ninth back does
+    // not.
+    expect(screen.getByText(items[items.length - 1]!.label)).toBeTruthy();
+    expect(screen.getByText(items[items.length - 8]!.label)).toBeTruthy();
+    expect(screen.queryByText(items[items.length - 9]!.label)).toBeNull();
+  });
 });
 
 describe('DialogFrame fill flag (Decision 66)', () => {
