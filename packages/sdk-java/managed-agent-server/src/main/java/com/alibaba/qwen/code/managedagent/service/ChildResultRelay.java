@@ -145,6 +145,28 @@ public class ChildResultRelay {
         // debt arm runs before the orphaned early-out could erase it.
         if (!"ACTIVE".equals(parentStatus)
                 && !"close_debt".equals(row.state())) {
+            // The settlement can be committed while its close_debt write
+            // was never reached — a crash or a lost reply between the two
+            // leaves the record terminal and the ledger still walking, and
+            // the parent's close cascade already excluded that settled
+            // task from the live scopes it would stop. Classifying such
+            // a row orphaned would erase the only durable holder of the
+            // owed close; fill it in here instead. A still-unsettled run
+            // was the cascade's to stop, so the old orphaned arm stays.
+            String child = row.childSessionId() != null
+                    ? row.childSessionId()
+                    : relayStore.findLineageChild(row.tenantId(),
+                            row.parentSessionId(), row.childRunId());
+            if (child != null && isSettledDelivery(pending.deliveryState())
+                    && childSessionNeedsClose(row.tenantId(), child)) {
+                relayStore.advance(row, owner, "close_debt", child,
+                        now + HEARTBEAT_MS,
+                        "close debt retained over a settled task at parent "
+                                + (parentStatus == null ? "gone"
+                                        : parentStatus),
+                        now + LEASE_MS, now);
+                return;
+            }
             relayStore.classify(row, owner, "orphaned",
                     parentStatus == null ? "parent session is gone"
                             : "parent session is " + parentStatus,
@@ -165,6 +187,24 @@ public class ChildResultRelay {
         } catch (RuntimeException error) {
             defer(row, error, now);
         }
+    }
+
+    /** The parent record's settlement already committed — a terminal
+     * delivery that the close cascade's live-scope walk can no longer
+     * see. Only such rows can hide an unadmitted close. */
+    private static boolean isSettledDelivery(String deliveryState) {
+        return "cancelled".equals(deliveryState)
+                || "accepted".equals(deliveryState)
+                || "consumed".equals(deliveryState);
+    }
+
+    /** The child Session still stands in an owning state: its row must
+     * exist and be short of CLOSED/DELETED (a close already in flight
+     * counts — the retained admission replays it idempotently). */
+    private boolean childSessionNeedsClose(String tenantId, String child) {
+        String status = relayStore.sessionStatus(tenantId, child);
+        return status != null && !"CLOSED".equals(status)
+                && !"DELETED".equals(status);
     }
 
     private void create(RelayRow row, PendingChild pending, long now) {

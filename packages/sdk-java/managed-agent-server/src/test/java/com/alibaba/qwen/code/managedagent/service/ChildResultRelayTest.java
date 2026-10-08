@@ -471,6 +471,91 @@ class ChildResultRelayTest {
         assertThat(harness.operations).isEmpty();
     }
 
+    // The settlement committed but the close_debt write never landed —
+    // a crash or a lost reply between them: the record is terminal, the
+    // ledger still walks, and the parent's cascade already skipped the
+    // settled task. A parent that closes in that window must not erase
+    // the owed close under `orphaned`: the reconciliation retains the
+    // debt (nothing re-settles), and the ordinary discharge closes it.
+    @Test
+    void aSettledRowRetainsItsCloseAcrossTheParentsClose() {
+        when(store.findPendingChildren(Mockito.anyString(), Mockito.anyInt()))
+                .thenAnswer(ignored -> List.of(new PendingChild(TENANT,
+                        PARENT, RUN, 1, "cancelled", "resource-body")));
+        when(store.sessionStatus(TENANT, PARENT)).thenReturn("CLOSED");
+        when(store.sessionStatus(TENANT, CHILD)).thenReturn("ACTIVE");
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("close_debt");
+        assertThat(row.get().childSessionId()).isEqualTo(CHILD);
+        assertThat(harness.operations).isEmpty();
+        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
+                anyString(), anyString());
+        RelayRow parked = row.get();
+        row.set(new RelayRow(parked.tenantId(), parked.parentSessionId(),
+                parked.childRunId(), parked.creationKey(),
+                parked.childSessionId(), parked.state(), parked.claimedBy(),
+                now + 30_000, parked.attempts(), 0, parked.lastError(),
+                parked.createdAt(), now));
+        relay.scan();
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(row.get().state()).isEqualTo("done");
+    }
+
+    // The lineage fallback of the same boundary: a creation-answer-lost
+    // row that learned its child only from the committed lineage keeps
+    // that id on the parked debt, so the discharge knows its Session.
+    @Test
+    void aSettledLineageRowRetainsItsCloseAcrossParentDelete() {
+        when(store.findPendingChildren(Mockito.anyString(), Mockito.anyInt()))
+                .thenAnswer(ignored -> List.of(new PendingChild(TENANT,
+                        PARENT, RUN, 1, "cancelled", "resource-body")));
+        when(store.sessionStatus(TENANT, PARENT)).thenReturn("DELETED");
+        when(store.sessionStatus(TENANT, CHILD)).thenReturn("ACTIVE");
+        when(store.findLineageChild(TENANT, PARENT, RUN)).thenReturn(CHILD);
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("close_debt");
+        assertThat(row.get().childSessionId()).isEqualTo(CHILD);
+        assertThat(harness.operations).isEmpty();
+        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
+    // The orphaned arm still owns every unsettled walk: a run whose fail
+    // commit never landed was the close cascade's to stop, and the relay
+    // classifies its parked ledger orphaned as it always has.
+    @Test
+    void anUnsettledRowStillOrphansAtParentClose() {
+        when(store.sessionStatus(TENANT, PARENT)).thenReturn("CLOSED");
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("orphaned");
+        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
+    // And nothing is owed a close that already happened: a settled row
+    // whose child is terminaled for any other reason classifies exactly
+    // as the old orphaned arm did.
+    @Test
+    void aSettledRowWithAnAlreadyClosedChildStillOrphans() {
+        when(store.findPendingChildren(Mockito.anyString(), Mockito.anyInt()))
+                .thenAnswer(ignored -> List.of(new PendingChild(TENANT,
+                        PARENT, RUN, 1, "cancelled", "resource-body")));
+        when(store.sessionStatus(TENANT, PARENT)).thenReturn("CLOSED");
+        when(store.sessionStatus(TENANT, CHILD)).thenReturn("CLOSED");
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 0, 0, null, now, now));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("orphaned");
+        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
     // R4-3: a faltered close admission parks the row BEFORE the fail
     // commit, so nothing moves delivery to `cancelled` while the child
     // Session is still owed its durable close; the recovered retry
