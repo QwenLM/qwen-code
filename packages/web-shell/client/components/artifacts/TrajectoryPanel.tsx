@@ -191,7 +191,7 @@ function metricsOf(
 function toolStatusTone(row: TrajectoryToolRow): string | undefined {
   const status = row.toolStatus ?? row.block.status;
   if (status === 'error' || status === 'failed') return styles.toneError;
-  if (status === 'cancelled') return styles.toneMuted;
+  if (status === 'cancelled' || status === 'canceled') return styles.toneMuted;
   return undefined;
 }
 
@@ -752,7 +752,8 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
       if (
         (event.key === 'ArrowLeft' || event.key === 'ArrowRight') &&
         activeVisualKey &&
-        layout?.groups.has(activeVisualKey)
+        layout?.groups.has(activeVisualKey) &&
+        (hiddenCounts.get(activeVisualKey) ?? 0) > 0
       ) {
         const wantsCollapsed = event.key === 'ArrowLeft';
         if (collapsed.has(activeVisualKey) !== wantsCollapsed) {
@@ -786,6 +787,7 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
       visualRows,
       activeVisualKey,
       layout,
+      hiddenCounts,
       collapsed,
       toggleGroup,
     ],

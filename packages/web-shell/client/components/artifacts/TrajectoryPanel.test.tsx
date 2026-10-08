@@ -19,6 +19,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonEvent } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../../i18n';
 import { TrajectoryPanel } from './TrajectoryPanel';
+import styles from './TrajectoryPanel.module.css';
 import type {
   TrajectoryPageLoader,
   TrajectoryPageResult,
@@ -472,6 +473,28 @@ describe('TrajectoryPanel', () => {
     expect(
       text(container.querySelector('[data-testid="trajectory-selected"]')),
     ).not.toContain('7.8s');
+  });
+
+  it.each(['cancelled', 'canceled'])('mutes a %s tool row', async (status) => {
+    const container = await render(async () =>
+      page([
+        {
+          v: 1,
+          type: 'session_update',
+          data: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'cancel-call',
+            title: 'Cancelled operation',
+            status,
+          },
+        } as unknown as DaemonEvent,
+      ]),
+    );
+    const badge = container.querySelector(
+      '[data-testid="trajectory-row-tool"] .' + styles.badge,
+    )!;
+    expect(badge).not.toBeNull();
+    expect(badge.classList.contains(styles.toneMuted)).toBe(true);
   });
 
   it('marks a failed request', async () => {
@@ -1660,6 +1683,34 @@ describe('trajectory diagnostic filters', () => {
     await act(async () => button(container, 'Clear filters').click());
     expect(fold(container).getAttribute('aria-expanded')).toBe('false');
   });
+
+  it.each(['ArrowLeft', 'ArrowRight'])(
+    'ignores %s on a matching request without visible descendants',
+    async (key) => {
+      const container = await render(async () => page(events()));
+      const initiallyCollapsed = key === 'ArrowRight';
+      if (initiallyCollapsed) await act(async () => fold(container).click());
+      await typeQuery(container, 'qwen-search');
+      const request = container.querySelector<HTMLElement>(
+        '[data-testid="trajectory-row-request"]',
+      )!;
+      expect(request.querySelector('button')).toBeNull();
+      await act(async () => request.click());
+      const event = new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      });
+      await act(async () =>
+        container.querySelector('[role="grid"]')!.dispatchEvent(event),
+      );
+      expect(event.defaultPrevented).toBe(false);
+      await act(async () => button(container, 'Clear filters').click());
+      expect(fold(container).getAttribute('aria-expanded')).toBe(
+        String(!initiallyCollapsed),
+      );
+    },
+  );
 
   it('drops temporary folds when the query changes directly', async () => {
     const container = await render(async () => page(events()));
