@@ -9,6 +9,7 @@ import java.lang.reflect.Proxy;
 import java.net.URI;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -74,6 +75,23 @@ class RuntimeBrokerServiceBindingReadTest {
         // Nothing READY? Meant nothing.
         rows.set(List.of(inert));
         assertNull(service.findLatestBindingByHarnessSession("tenant",
+                "session"));
+        // Two READY rows spanning the page boundary, lower id first:
+        // the new Javadoc's rule wins — "the newest READY id wins across
+        // pages", never the first page that holds any READY row.
+        RuntimeBindingRecord readyLow = row("0000a",
+                RuntimeBindingRecord.State.READY);
+        RuntimeBindingRecord readyHigh = row("zzzz0",
+                RuntimeBindingRecord.State.READY);
+        List<RuntimeBindingRecord> spanning = new ArrayList<>();
+        spanning.add(readyLow);
+        for (int index = 0; index < 120; index++) {
+            spanning.add(row(String.format("%04x-mid", index + 1),
+                    RuntimeBindingRecord.State.LOST));
+        }
+        spanning.add(readyHigh);
+        rows.set(spanning);
+        assertSame(readyHigh, service.findLatestBindingByHarnessSession("tenant",
                 "session"));
     }
 }

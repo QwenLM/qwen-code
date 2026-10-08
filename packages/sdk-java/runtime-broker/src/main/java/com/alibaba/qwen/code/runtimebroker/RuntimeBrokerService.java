@@ -113,21 +113,23 @@ public final class RuntimeBrokerService implements AutoCloseable {
     public RuntimeBindingRecord findLatestBindingByHarnessSession(
             String tenantId, String harnessSessionId) {
         String after = null;
+        RuntimeBindingRecord best = null;
         for (;;) {
             List<RuntimeBindingRecord> page = bindingRepository
                     .findByHarnessSession(tenantId, harnessSessionId, after,
                             100);
             if (page.isEmpty()) {
-                return null;
+                return best;
             }
-            for (int index = page.size() - 1; index >= 0; index--) {
-                RuntimeBindingRecord candidate = page.get(index);
-                if (candidate.getState() == RuntimeBindingRecord.State.READY) {
-                    return candidate;
+            for (RuntimeBindingRecord candidate : page) {
+                if (candidate.getState() == RuntimeBindingRecord.State.READY
+                        && (best == null || candidate.getBindingId()
+                                .compareTo(best.getBindingId()) > 0)) {
+                    best = candidate;
                 }
             }
             if (page.size() < 100) {
-                return null;
+                return best;
             }
             after = page.get(page.size() - 1).getBindingId();
         }
