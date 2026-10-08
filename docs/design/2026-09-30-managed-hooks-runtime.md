@@ -222,10 +222,14 @@ because the owner is already absent (404 `runtime_session_not_found`) is booked
 as released, reported on the debug logger, and never retried. An execution the
 Harness fenced as
 outcome_unknown is never drained or released past, so a hold-fenced refusal
-arrives only from a Runtime that certified an abandoned evaluation as
-cancelled before the fence existed. Both pending-work producers name that one
-condition with the dedicated code `managed_runtime_owner_hold_pending`: the
-Runtime Session still owns unfinished work of any kind. The generic conflict
+caused by a Hook execution arrives only from a Runtime that certified an
+abandoned evaluation as cancelled before the fence existed. The same code
+also answers for unfinished non-Hook work on that Runtime Session — an MCP,
+Monitor or background hold, provider-side pending work, or an in-flight tool
+invocation — which the record-based release gate does not inspect. Both
+pending-work producers name the condition with the dedicated code
+`managed_runtime_owner_hold_pending`: the Runtime Session still owns
+unfinished work of any kind. The generic conflict
 codes stay catch-alls an identity mismatch or an unexpected provider error
 also answers with, so only the dedicated code is read as a hold and every
 other refusal propagates as it did before. A refusal from a hold-fenced owner

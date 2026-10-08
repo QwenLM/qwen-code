@@ -435,6 +435,23 @@ async function isSettledHookFence(
   }
 }
 
+// An input that cannot be read or parsed proves nothing about its record:
+// skip it — one corrupt resource must not reject the whole pass, and a
+// skipped record never counts as a fence, so the fail-closed direction is
+// unchanged.
+async function readHookInput(
+  session: HostedSession,
+  ref: ManagedSessionDurableRef,
+): Promise<Record<string, unknown> | null> {
+  try {
+    return object(
+      JSON.parse((await session.managed.resources.read(ref)).toString()),
+    );
+  } catch {
+    return null;
+  }
+}
+
 async function recoverCancelledPreToolHook(
   session: HostedSession,
   promptId: string,
@@ -542,11 +559,7 @@ async function recoverCancelledPreToolHook(
       !(await isSettledHookFence(session, execution))
     )
       continue;
-    const input = object(
-      JSON.parse(
-        (await session.managed.resources.read(execution.inputRef)).toString(),
-      ),
-    );
+    const input = await readHookInput(session, execution.inputRef);
     if (
       input?.['prompt_id'] === promptId &&
       calls.some(
@@ -791,6 +804,27 @@ export async function settleCancelledHookTurn(
         `session-start:${authority.sessionHeader.sessionKey.sessionId}`,
       ),
     ]);
+    // A republished InstructionsLoaded evaluation fence can never carry
+    // cancelRequested — status() returns a terminal record before the flag
+    // could be set — and its occurrence id digests the turn's native fields,
+    // which cannot be recomputed here. What identifies it arithmetically is
+    // the event log: a record's creation commit carries the record id as its
+    // operationId (revisions commit as `${id}:${revision}`), and the fence
+    // that parked this turn was created after its input.accepted. Records
+    // from earlier turns are excluded before any durable read, so a
+    // long-lived Session's historical InstructionsLoaded receipts stay
+    // behind the same pre-filter the occurrence match provides.
+    const createdInTurn = new Set<string>();
+    for (const event of turnEvents) {
+      if (
+        event.kind !== 'domain.committed' ||
+        event.payload['domain'] !== 'hook_execution'
+      )
+        continue;
+      const operationId = event.payload['operationId'];
+      if (typeof operationId === 'string' && !operationId.includes(':'))
+        createdInTurn.add(operationId);
+    }
     let cancelled = false;
     if (preModel)
       for (const { record } of authority.extensionRecordsInDomain(
@@ -798,23 +832,16 @@ export async function settleCancelledHookTurn(
       )) {
         signal?.throwIfAborted();
         const execution = parseHookExecution(record);
-        const cancelledInstructions =
+        const instructionsFence =
           execution.eventName === HookEventName.InstructionsLoaded &&
           execution.hookId !== '__plan__' &&
-          execution.cancelRequested;
+          createdInTurn.has(execution.hookExecutionId);
         if (
-          (!occurrenceIds.has(execution.occurrenceId) &&
-            !cancelledInstructions) ||
+          (!occurrenceIds.has(execution.occurrenceId) && !instructionsFence) ||
           !(await isSettledHookFence(session, execution))
         )
           continue;
-        const input = object(
-          JSON.parse(
-            (
-              await session.managed.resources.read(execution.inputRef)
-            ).toString(),
-          ),
-        );
+        const input = await readHookInput(session, execution.inputRef);
         if (input?.['prompt_id'] !== promptId) continue;
         cancelled = true;
         break;
@@ -2963,15 +2990,22 @@ export function registerHostedHarnessSessionRoutes(
     // once — a non-cancelling poll, so no fenced occurrence re-dispatches —
     // and settle the turn the fence parked before the admission gate reads
     // either, or a Session whose cancel landed mid-evaluation stays blocked
-    // for life. A Session blocked with nothing pending keeps the existing
-    // contract: the prompt refuses and the Hook status poll settles. Only a
+    // for life. The gate re-arms while the Session stays blocked, not only
+    // while records are pending: a pass can drain the last record and still
+    // miss the settle — the budget or a client disconnect aborts the shared
+    // signal between the two, and a concurrent cancel's settle declines
+    // while hooksBusy is held — and blocked is written false only inside
+    // settleCancelledHookTurn, so the next prompt must retry it. Only a
     // request that passed body validation and missed the idempotent replay
     // pays for the pass, and the pass is bounded and dies with the client,
     // so a stalled Runtime cannot hold the route open. hooksBusy holds a
     // concurrent prompt at the gate for the duration and is released
     // straight into the settle, which re-takes it before its first await.
-    if (!reconciled && session.hooks?.hasPendingOperations) {
-      session.hooksBusy = true;
+    if (
+      !reconciled &&
+      session.hooks &&
+      (session.hooks.hasPendingOperations || session.blocked)
+    ) {
       const reconcileAbort = new AbortController();
       const budget = setTimeout(
         () =>
@@ -2988,10 +3022,15 @@ export function registerHostedHarnessSessionRoutes(
       res.once('close', disconnected);
       void (async () => {
         try {
-          try {
-            await session.hooks!.reconcileUnsettled(reconcileAbort.signal);
-          } finally {
-            session.hooksBusy = false;
+          // A blocked Session with nothing pending has nothing to
+          // reconcile — only a dropped settle to retry.
+          if (session.hooks!.hasPendingOperations) {
+            session.hooksBusy = true;
+            try {
+              await session.hooks!.reconcileUnsettled(reconcileAbort.signal);
+            } finally {
+              session.hooksBusy = false;
+            }
           }
           await settleCancelledHookTurn(session, reconcileAbort.signal);
         } catch (cause) {

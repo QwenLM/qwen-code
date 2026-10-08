@@ -671,6 +671,118 @@ describe('settleCancelledHookTurn', () => {
     expect(session.blocked).toBe(true);
   });
 
+  it('treats an unreadable settled PreToolUse input as no fence', async () => {
+    const { record, resultRef } = settledPreToolRecord(
+      hostedHookOccurrenceId(HookEventName.PreToolUse, 'prompt:call-0'),
+      'r-input',
+    );
+    const read = vi.fn(async (ref: unknown) => {
+      if ((ref as { resourceId?: string }).resourceId === resultRef.resourceId)
+        return Buffer.from('{"outcome":"timeout"}');
+      throw new ManagedSessionRecordError('resource gone');
+    });
+    const session = preToolParkedSession([{ record }], read);
+    // The result read proves the fence, then the input read that would
+    // attribute it to the parked turn fails: the record must be skipped,
+    // never rejecting the pass and never counting as a match.
+    await expect(settleCancelledHookTurn(session)).resolves.toBeUndefined();
+    expect(read).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceId: 'r-input-input' }),
+    );
+    expect(session.blocked).toBe(true);
+  });
+
+  it('treats an unreadable InstructionsLoaded input of the parked turn as no fence', async () => {
+    const hookExecutionId = 'hook-instructions';
+    const resultRef = {
+      resourceId: 'r-result',
+      kind: 'managed-hook-result',
+      schemaVersion: 1,
+      byteLength: 2,
+      digest: 'b'.repeat(64),
+    };
+    const record = {
+      hookExecutionId,
+      occurrenceId: hostedHookOccurrenceId(
+        HookEventName.InstructionsLoaded,
+        `prompt:native:${'c'.repeat(64)}:0`,
+      ),
+      runtimeSessionId: 'runtime-1',
+      registrationId: 'registration-1',
+      eventName: HookEventName.InstructionsLoaded,
+      ordinal: 1,
+      hookId: 'hook-1',
+      planRef: {
+        ...resultRef,
+        resourceId: 'r-plan',
+        kind: 'managed-hook-plan',
+      },
+      inputRef: {
+        ...resultRef,
+        resourceId: 'r-input',
+        kind: 'managed-hook-input',
+      },
+      resultRef,
+      onceKey: null,
+      cancelRequested: false,
+      run: {
+        state: 'settled',
+        reason: null,
+        definition: {
+          definitionId: 'catalog',
+          definitionRevision: 1,
+          definitionDigest: 'a'.repeat(64),
+        },
+        executionCallId: null,
+        effectId: hookExecutionId,
+        dispatchId: null,
+        deliveryId: null,
+        execution: 'settled',
+        runtime: null,
+        delivery: null,
+      },
+    };
+    const events = [
+      {
+        kind: 'input.accepted',
+        sequence: 5,
+        payload: { turnId: 'prompt', source: 'hosted-harness' },
+      } as unknown as ManagedSessionEvent,
+      // The record's creation commit inside the parked turn: what admits a
+      // republished InstructionsLoaded fence, which can never carry
+      // cancelRequested, ahead of any durable read.
+      {
+        kind: 'domain.committed',
+        sequence: 6,
+        payload: { domain: 'hook_execution', operationId: hookExecutionId },
+      } as unknown as ManagedSessionEvent,
+    ];
+    const read = vi.fn(async (ref: unknown) => {
+      if ((ref as { resourceId?: string }).resourceId === 'r-result')
+        return Buffer.from('{"outcome":"timeout"}');
+      throw new ManagedSessionRecordError('resource gone');
+    });
+    const session = {
+      blocked: true,
+      hooks: { hasPendingOperations: false },
+      managed: {
+        authority: {
+          committedSequence: 6,
+          sessionHeader: { sessionKey: { sessionId: 's' } },
+          eventsInSequenceRange: () => events,
+          extensionRecordsInDomain: () => [{ record }],
+        },
+        resources: { read },
+        sink: { project: async () => [] },
+      },
+    } as unknown as Parameters<typeof settleCancelledHookTurn>[0];
+    await expect(settleCancelledHookTurn(session)).resolves.toBeUndefined();
+    expect(read).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceId: 'r-input' }),
+    );
+    expect(session.blocked).toBe(true);
+  });
+
   it('aborts the pre-model scan when the reconcile signal fires', async () => {
     const reason = new Error('The Hook reconciliation deadline expired.');
     const aborted = new AbortController();
@@ -2149,19 +2261,29 @@ describe('Hosted Harness no-tool session', () => {
     {
       code: 'managed_hook_module_evaluation_abandoned',
       outcome: 'cancelled',
+      event: HookEventName.UserPromptSubmit,
     },
     {
       code: 'managed_hook_module_evaluation_timeout',
       outcome: 'timeout',
+      event: HookEventName.UserPromptSubmit,
+    },
+    {
+      code: 'managed_hook_module_evaluation_abandoned',
+      outcome: 'cancelled',
+      event: HookEventName.InstructionsLoaded,
+    },
+    {
+      code: 'managed_hook_module_evaluation_timeout',
+      outcome: 'timeout',
+      event: HookEventName.InstructionsLoaded,
     },
   ] as const)(
-    'settles a turn an evaluation fence parked once the Runtime republishes ($code)',
-    async ({ code, outcome }) => {
+    'settles a turn an evaluation fence parked once the Runtime republishes ($code, $event)',
+    async ({ code, outcome, event }) => {
       const { server, authorize, catalog, requests } = await hookApp();
       Object.assign(catalog, {
-        hooks: [
-          { ...catalog.hooks[0], eventName: HookEventName.UserPromptSubmit },
-        ],
+        hooks: [{ ...catalog.hooks[0], eventName: event }],
       });
       const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl');
       const original = control.getMockImplementation()!;
@@ -2188,13 +2310,17 @@ describe('Hosted Harness no-tool session', () => {
           return republished.get(operation.targetOperationId)!;
         return original.call(this, operation);
       });
-      // The mock stands in for the whole turn body, so fire the
-      // UserPromptSubmit Hook from it the way runHostedHarnessTextTurn would.
+      // The mock stands in for the whole turn body, so fire the Hook from
+      // it the way runHostedHarnessTextTurn would. A republished
+      // InstructionsLoaded receipt can never carry cancelRequested, so its
+      // fence is admitted by its creation inside the parked turn instead.
       state.model.mockImplementationOnce(
         async ({ hooks, promptId, signal }) => {
           await hooks!.fire(
-            HookEventName.UserPromptSubmit,
-            promptId!,
+            event,
+            event === HookEventName.InstructionsLoaded
+              ? `${promptId}:native:${'c'.repeat(64)}:0`
+              : promptId!,
             { prompt_id: promptId },
             signal,
           );
@@ -2571,9 +2697,18 @@ describe('Hosted Harness no-tool session', () => {
           supertest(server).get(`/session/${SESSION_ID}/status`),
         );
         expect(status.body.recoveryBlocked).toBe(true);
+        // The prompt gate re-arms while the Session stays blocked and
+        // retries the settle the failed cancel dropped: where the refusal
+        // writes already landed durably the retry completes the settlement
+        // and admits the prompt, and where the write failure is permanent
+        // it refuses again.
+        const heals =
+          mode === 'result-ack-failure' ||
+          mode === 'large-batch-partial' ||
+          mode === 'large-batch-reload';
         await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
           .send({ prompt, promptId: randomUUID(), payloadDigest })
-          .expect(409);
+          .expect(heals ? 202 : 409);
         if (large || mode === 'result-ack-failure') {
           const partial = await authorize(
             supertest(server).get(`/session/${SESSION_ID}/transcript`),
@@ -2584,24 +2719,38 @@ describe('Hosted Harness no-tool session', () => {
                 ? [event.data.record]
                 : [],
           );
-          expect(results).toHaveLength(1);
+          // No call is refused twice: the retry answers only the calls the
+          // dropped settle had not already covered durably.
+          expect(results).toHaveLength(large ? 2 : 1);
           expect(results[0].message!.parts!.length).toBeGreaterThan(0);
           if (large)
             expect(results[0].message!.parts!.length).toBeLessThan(
               calls.length,
             );
-          else
-            expect(
-              results[0].message!.parts!.map(
-                (part) => part.functionResponse?.id,
-              ),
-            ).toEqual(calls.map((call) => call.callId));
+          expect(
+            results.flatMap((result) =>
+              result.message!.parts!.map((part) => part.functionResponse?.id),
+            ),
+          ).toEqual(calls.map((call) => call.callId));
           expect(
             partial.body.events.filter(
-              (event: { type: string }) => event.type === 'turn_complete',
+              (event: { type: string; promptId?: string }) =>
+                event.type === 'turn_complete' && event.promptId === PROMPT_ID,
             ),
-          ).toHaveLength(0);
+          ).toHaveLength(1);
         }
+        if (heals)
+          // The admitted retry prompt runs its own turn; let it finish
+          // before the admissions below race its active Turn.
+          await vi.waitFor(
+            async () => {
+              const settled = await authorize(
+                supertest(server).get(`/session/${SESSION_ID}/status`),
+              );
+              expect(settled.body.hasActivePrompt).toBe(false);
+            },
+            { timeout: 10_000 },
+          );
         if (!fail) return;
       }
       write.mockRestore();
@@ -2686,7 +2835,8 @@ describe('Hosted Harness no-tool session', () => {
       );
       expect(
         transcript.body.events.filter(
-          (event: { type: string }) => event.type === 'turn_complete',
+          (event: { type: string; promptId?: string }) =>
+            event.type === 'turn_complete' && event.promptId === PROMPT_ID,
         ),
       ).toHaveLength(1);
       expect(execute).not.toHaveBeenCalled();
@@ -3513,6 +3663,152 @@ describe('Hosted Harness no-tool session', () => {
       supertest(server).delete(`/session/${SESSION_ID}`),
     );
     expect(deleted.body?.code).not.toBe('hosted_turn_active');
+  });
+
+  it('retries a settle the reconcile pass dropped once nothing is pending', async () => {
+    const { server, authorize, catalog, requests } = await hookApp();
+    Object.assign(catalog, {
+      hooks: [
+        { ...catalog.hooks[0], eventName: HookEventName.UserPromptSubmit },
+      ],
+    });
+    const control = vi.spyOn(HostedWorkspaceBroker.prototype, 'hookControl');
+    const original = control.getMockImplementation()!;
+    const republished = new Map<string, ManagedHookOperationView>();
+    let fence = true;
+    control.mockImplementation(async function (
+      this: HostedWorkspaceBroker,
+      operation,
+    ) {
+      if (operation.kind === 'hook-execute' && fence) {
+        fence = false;
+        requests.push(operation);
+        return {
+          operationId: operation.operationId,
+          state: 'settled',
+          error: { code: 'managed_hook_module_evaluation_abandoned' },
+        };
+      }
+      if (
+        (operation.kind === 'hook-status' ||
+          operation.kind === 'hook-cancel') &&
+        republished.has(operation.targetOperationId)
+      )
+        return republished.get(operation.targetOperationId)!;
+      return original.call(this, operation);
+    });
+    state.model.mockImplementationOnce(async ({ hooks, promptId, signal }) => {
+      await hooks!.fire(
+        HookEventName.UserPromptSubmit,
+        promptId!,
+        { prompt_id: promptId },
+        signal,
+      );
+      throw new Error('The fenced Hook must stop this turn.');
+    });
+    const prompt = [{ type: 'text', text: 'hello' }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .send({ prompt, promptId: PROMPT_ID, payloadDigest })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: true,
+        });
+      },
+      { timeout: 10_000 },
+    );
+    const child = requests.find((entry) => entry.kind === 'hook-execute')!;
+    republished.set(child.operationId, {
+      operationId: child.operationId,
+      state: 'settled',
+      result: { success: false, outcome: 'cancelled', duration: 0 },
+    });
+    // The client disconnects the moment the poll's first record commit
+    // lands: the reconcile drains the pending records, but the aborted
+    // signal drops the settle at its first checkpoint, leaving the Session
+    // blocked with nothing pending.
+    let cut = false;
+    let posted: supertest.Test | undefined;
+    const commit = LocalManagedSessionAuthority.prototype.commitExtensionRecord;
+    const commits = vi
+      .spyOn(LocalManagedSessionAuthority.prototype, 'commitExtensionRecord')
+      .mockImplementation(async function (
+        this: LocalManagedSessionAuthority,
+        ...args
+      ) {
+        const receipt = await commit.apply(this, args);
+        if (!cut && args[1].domain === 'hook_execution') {
+          cut = true;
+          posted?.abort();
+        }
+        return receipt;
+      });
+    try {
+      posted = authorize(
+        supertest(server).post(`/session/${SESSION_ID}/prompt`),
+      ).send({ prompt, promptId: randomUUID(), payloadDigest });
+      const answered = posted.then(
+        (response) => response,
+        (cause: unknown) => cause,
+      );
+      await answered;
+      // Both the parked record and its marker must finish committing before
+      // the next prompt, or the pending gate would re-arm on its own.
+      await vi.waitFor(
+        () => {
+          expect(
+            commits.mock.calls.filter(
+              ([, request]) => request.domain === 'hook_execution',
+            ),
+          ).toHaveLength(2);
+        },
+        { timeout: 10_000 },
+      );
+    } finally {
+      commits.mockRestore();
+    }
+    const blocked = await authorize(
+      supertest(server).get(`/session/${SESSION_ID}/status`),
+    );
+    expect(blocked.body.recoveryBlocked).toBe(true);
+    // The gate re-arms on the still-blocked Session, retries the dropped
+    // settle, and the prompt is admitted rather than refused for life.
+    await authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .send({ prompt, promptId: randomUUID(), payloadDigest })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body).toMatchObject({
+          hasActivePrompt: false,
+          recoveryBlocked: false,
+        });
+      },
+      { timeout: 10_000 },
+    );
+    const transcript = await authorize(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    );
+    expect(transcript.body.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'turn_complete',
+          promptId: PROMPT_ID,
+          data: expect.objectContaining({ stopReason: 'cancelled' }),
+        }),
+      ]),
+    );
+    await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/detach`),
+    ).expect(204);
   });
 
   it('answers an invalid prompt on a fenced Session without reconciling first', async () => {

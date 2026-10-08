@@ -162,8 +162,11 @@ Harness 记为 not_started_proven——无论是在任何顶层语句执行前�
 Harness 释放此前 owner 时 Broker 可能拒绝：因 owner 已不存在而拒绝
 （404 `runtime_session_not_found`）时记为已释放、写入 debug 日志且不再重试。被 Harness 以
 outcome_unknown 围闭的执行永远不会被 drain 越过、也不会进入释放集合，因此 hold
-围闭的拒绝只会来自在围闭存在之前就把被弃用求值认证为已取消的 Runtime。两处 pending-work
-生产者都用专用编码 `managed_runtime_owner_hold_pending` 命名这一种情况：该 Runtime
+围闭的拒绝只会来自在围闭存在之前就把被弃用求值认证为已取消的 Runtime——准确说，由 Hook
+执行引起的 hold 围闭拒绝满足这一排他性。同一编码也会为该 Runtime Session
+上未完成的非 Hook 工作作答——MCP、Monitor 或后台任务的 hold、provider
+侧的未决工作，或进行中的工具调用——基于记录的释放门并不检查这些。两处 pending-work
+生产者都用专用编码 `managed_runtime_owner_hold_pending` 命名该情况：该 Runtime
 Session 仍持有任何类型的未完成工作。通用的 conflict 编码仍是身份不匹配
 或任何未预期 provider 错误也会共用的兜底值，因此只有该专用编码被读作 hold，其余拒绝
 一律按原样向上传播。被 hold 围闭的
