@@ -11040,7 +11040,9 @@ describe('CoreToolScheduler telemetry spans', () => {
       title: 'Confirm MCP Tool Execution',
       serverName: 'external-context',
       toolName: 'context_remember',
-      toolDisplayName: 'context_remember',
+      // Distinct from `toolName`, as in production (#13687): the title
+      // assertion below must discriminate which field is read.
+      toolDisplayName: 'context_remember (external-context MCP Server)',
       onConfirm: async () => {},
     });
     const { waiting } = await askUntilApproval({
@@ -11068,8 +11070,12 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(details.title).toBe(
       'Hook requested confirmation to run context_remember',
     );
+    // The reason stays literal and first; the destination follows it, because
+    // the info dialog renders no title and carries no server field.
     expect(details.prompt).toBe(
-      'Save this exact content to the bound Mem0 repository memory?\n[visible](https://hidden.example/target)',
+      'Save this exact content to the bound Mem0 repository memory?\n' +
+        '[visible](https://hidden.example/target)\n\n' +
+        'MCP Server: external-context\nTool: context_remember',
     );
     expect(details.renderPromptAsPlainText).toBe(true);
     expect(details.hideAlwaysAllow).toBe(true);
@@ -11081,7 +11087,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       title: 'Confirm MCP Tool Execution',
       serverName: 'external-context',
       toolName: 'context_remember',
-      toolDisplayName: 'context_remember',
+      toolDisplayName: 'context_remember (external-context MCP Server)',
       onConfirm: async () => {},
     });
     const { onAllToolCallsComplete } = await scheduleWithAsk({
@@ -11106,6 +11112,35 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(JSON.stringify(completed.response.responseParts)).toContain(
       'Tool blocked by plan mode',
     );
+  });
+
+  it('does not let AUTO_EDIT auto-approve a hook-asked MCP call', async () => {
+    const mcpConfirmation = async (): Promise<ToolCallConfirmationDetails> => ({
+      type: 'mcp',
+      title: 'Confirm MCP Tool Execution',
+      serverName: 'external-context',
+      toolName: 'context_remember',
+      toolDisplayName: 'context_remember (external-context MCP Server)',
+      onConfirm: async () => {},
+    });
+    const execute = vi.fn().mockResolvedValue(textResult('ok'));
+    const { waiting } = await askUntilApproval({
+      approvalMode: ApprovalMode.AUTO_EDIT,
+      messageBus: askMessageBus('Save this exact content?'),
+      tools: [
+        new MockTool({
+          name: 'mcpTool',
+          execute,
+          getConfirmationDetails: mcpConfirmation,
+        }),
+      ],
+    });
+
+    // The ask rewrite makes the details an approvable `info` shape, so the
+    // `!preToolUseAsk` term is the only thing between AUTO_EDIT and a silently
+    // executed write the hook explicitly asked the user about.
+    expect(waiting.confirmationDetails.type).toBe('info');
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('executes the tool exactly once when the user approves an ask (no re-ask loop)', async () => {
