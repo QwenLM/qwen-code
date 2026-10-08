@@ -18,13 +18,32 @@ import { PlaywrightRuntime } from './playwright/playwright-runtime.js';
 
 export type BrowserBackend = Pick<PlaywrightRuntime, 'dispatch' | 'stop'>;
 
+/**
+ * The transport spends its own 35s connect budget polling for a Chrome that
+ * published an endpoint. Where no Native Messaging Host can be registered and
+ * nothing else publishes one, that wait can only end in the disconnect error,
+ * so it is cut short (#13692).
+ */
+const UNREGISTERABLE_HOST_CONNECT_TIMEOUT_MS = 0;
+
+/** A managed endpoint is published by something else, so no Host is needed. */
+function hasManagedEndpointOverride(): boolean {
+  return Boolean(
+    process.env['QWEN_BROWSER_USE_SOCKET_PATH']?.trim() ||
+      process.env['QWEN_BROWSER_USE_DISCOVERY_DIR']?.trim(),
+  );
+}
+
+/** Only these platforms have a Chrome profile root the manifest can live in. */
+function supportsNativeHostRegistration(): boolean {
+  return process.platform === 'darwin' || process.platform === 'linux';
+}
+
 export async function createBrowserBackend(): Promise<BrowserBackend> {
   let describeProfiles: ChromeProfileDescriber | undefined;
-  if (
-    !process.env['QWEN_BROWSER_USE_SOCKET_PATH']?.trim() &&
-    !process.env['QWEN_BROWSER_USE_DISCOVERY_DIR']?.trim() &&
-    (process.platform === 'darwin' || process.platform === 'linux')
-  ) {
+  const managed = hasManagedEndpointOverride();
+  const registrable = supportsNativeHostRegistration();
+  if (!managed && registrable) {
     const options = {
       homeDir: nativeHostInstallHome(),
       nativeHostPath: fileURLToPath(
@@ -60,8 +79,18 @@ export async function createBrowserBackend(): Promise<BrowserBackend> {
     describeProfiles = (ids) =>
       describeChromeProfiles({ homeDir: options.homeDir }, ids);
   }
+  // The bridge can only ever reach a Host this process registered, so where
+  // registration was impossible and nothing else publishes an endpoint there
+  // is provably nothing to wait for.
+  const connectTimeoutMs =
+    !managed && !registrable
+      ? UNREGISTERABLE_HOST_CONNECT_TIMEOUT_MS
+      : undefined;
   return new PlaywrightRuntime({
-    bridge: new ChromeExtensionTransport({ describeProfiles }),
+    bridge: new ChromeExtensionTransport({
+      describeProfiles,
+      connectTimeoutMs,
+    }),
     documentation: DEFAULT_CHROME_DOCUMENTATION,
   });
 }
