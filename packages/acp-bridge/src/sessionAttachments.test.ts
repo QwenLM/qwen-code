@@ -8,6 +8,7 @@ import { promises as fs, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import type { ContentBlock } from '@agentclientprotocol/sdk';
+import { DAEMON_ATTACHMENT_CONTEXT_META_KEY } from './bridgeTypes.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   SESSION_ATTACHMENT_UNAVAILABLE_TEXT,
@@ -28,7 +29,102 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
+const attachmentMeta = {
+  [DAEMON_ATTACHMENT_CONTEXT_META_KEY]:
+    expect.stringContaining('"absolutePath":'),
+};
+
 describe('SessionAttachmentStore', () => {
+  it.each([
+    ['notes 空格.txt', 'text/plain', Buffer.from('attachment text')],
+    ['table.xlsx', 'application/octet-stream', Buffer.from([0, 255, 1])],
+    ['image.png', 'image/png', Buffer.from([1, 2, 3])],
+  ])(
+    'supplies the actual stored path for %s after restore',
+    async (name, mimeType, data) => {
+      const root = await fs.mkdtemp(path.join(tmpdir(), 'qwen-path-context-'));
+      const sessionId = 'restored';
+      const store = new SessionAttachmentStore(root, sessionId);
+      const restored = new SessionAttachmentStore(root, sessionId);
+      try {
+        const first = await store.putAttachment(data, mimeType, name);
+        const duplicate = await store.putAttachment(data, mimeType, name);
+        expect(duplicate.attachmentId).not.toBe(first.attachmentId);
+        await store.close();
+        for (const reference of [first, duplicate]) {
+          const [content] = await restored.resolveContent([reference]);
+          const context = content?._meta?.[DAEMON_ATTACHMENT_CONTEXT_META_KEY];
+          if (typeof context !== 'string')
+            throw new Error('Missing attachment context');
+          const absolutePath = path.join(
+            root,
+            `session-${sessionId}`,
+            reference.attachmentId,
+          );
+          expect(JSON.parse(context.split('\n')[1]!)).toEqual({
+            name: reference.attachmentId,
+            uri: `attachment:///${encodeURIComponent(reference.attachmentId)}`,
+            mimeType,
+            absolutePath,
+          });
+          expect(path.isAbsolute(absolutePath)).toBe(true);
+          expect(await fs.readFile(absolutePath)).toEqual(data);
+          expect(content?.type).toBe(reference.type);
+        }
+        const otherSession = new SessionAttachmentStore(root, 'other');
+        await expect(otherSession.resolveContent([first])).rejects.toThrow(
+          'Unknown or unavailable',
+        );
+        await otherSession.close();
+      } finally {
+        await store.close();
+        await restored.close();
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(['missing', 'unreadable'] as const)(
+    'reports the fallback path when the primary is %s',
+    async (primaryState) => {
+      const root = await fs.mkdtemp(
+        path.join(tmpdir(), 'qwen-fallback-context-'),
+      );
+      const primary = path.join(root, 'primary');
+      const fallback = path.join(root, 'legacy');
+      const oldStore = new SessionAttachmentStore(fallback, 'test');
+      const store = new SessionAttachmentStore(primary, 'test', fallback);
+      const readFile = vi.spyOn(fs, 'readFile');
+      try {
+        const reference = await oldStore.putAttachment(
+          Buffer.from('legacy'),
+          'text/plain',
+          'notes.txt',
+        );
+        await oldStore.close();
+        if (primaryState === 'unreadable') {
+          readFile.mockRejectedValueOnce(
+            Object.assign(new Error('unreadable'), { code: 'EACCES' }),
+          );
+        }
+        const [content] = await store.resolveContent([reference]);
+        const context = content?._meta?.[DAEMON_ATTACHMENT_CONTEXT_META_KEY];
+        if (typeof context !== 'string')
+          throw new Error('Missing attachment context');
+        const { absolutePath } = JSON.parse(context.split('\n')[1]!);
+        expect(absolutePath).toBe(
+          path.join(fallback, 'session-test', reference.attachmentId),
+        );
+        expect(await fs.readFile(absolutePath, 'utf8')).toBe('legacy');
+      } finally {
+        readFile.mockRestore();
+        await oldStore.close();
+        await store.close();
+        await fs.rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.each(['close', 'delete'] as const)(
     'invalidates staged uploads on %s',
     async (operation) => {
@@ -405,7 +501,12 @@ describe('SessionAttachmentStore', () => {
         size: 3,
       });
       expect(await store.resolveContent([reference])).toEqual([
-        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        {
+          type: 'image',
+          data: 'AQID',
+          mimeType: 'image/png',
+          _meta: attachmentMeta,
+        },
       ]);
       expect(await store.read(reference.attachmentId)).toEqual({
         data: Buffer.from([1, 2, 3]),
@@ -436,6 +537,7 @@ describe('SessionAttachmentStore', () => {
       expect(await store.resolveContent([reference])).toEqual([
         {
           type: 'resource',
+          _meta: attachmentMeta,
           resource: {
             uri: 'attachment:///notes.txt',
             mimeType: 'text/plain',
@@ -467,6 +569,7 @@ describe('SessionAttachmentStore', () => {
       expect(await store.resolveContent([reference])).toEqual([
         {
           type: 'resource',
+          _meta: attachmentMeta,
           resource: {
             uri: 'attachment:///report.pdf',
             mimeType: 'application/pdf',
@@ -495,6 +598,7 @@ describe('SessionAttachmentStore', () => {
       expect(await store.resolveContent([reference])).toEqual([
         {
           type: 'resource',
+          _meta: attachmentMeta,
           resource: {
             uri: `attachment:///${name}`,
             mimeType,
@@ -519,6 +623,7 @@ describe('SessionAttachmentStore', () => {
       expect(await store.resolveContent([reference])).toEqual([
         {
           type: 'resource',
+          _meta: attachmentMeta,
           resource: {
             uri: 'attachment:///payload.unknown',
             mimeType: 'application/octet-stream',
@@ -548,6 +653,7 @@ describe('SessionAttachmentStore', () => {
       expect(await store.resolveContent([reference])).toEqual([
         {
           type: 'resource',
+          _meta: attachmentMeta,
           resource: {
             uri: 'attachment:///diagram.svg',
             mimeType: 'image/svg+xml',
@@ -580,9 +686,24 @@ describe('SessionAttachmentStore', () => {
       ]);
 
       expect(resolved).toEqual([
-        { type: 'image', data: 'AQID', mimeType: 'image/png' },
-        { type: 'image', data: 'AQID', mimeType: 'image/png' },
-        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        {
+          type: 'image',
+          data: 'AQID',
+          mimeType: 'image/png',
+          _meta: attachmentMeta,
+        },
+        {
+          type: 'image',
+          data: 'AQID',
+          mimeType: 'image/png',
+          _meta: attachmentMeta,
+        },
+        {
+          type: 'image',
+          data: 'AQID',
+          mimeType: 'image/png',
+          _meta: attachmentMeta,
+        },
       ]);
       expect(readFile).toHaveBeenCalledTimes(1);
     } finally {
@@ -603,6 +724,7 @@ describe('SessionAttachmentStore', () => {
 
       const memo = new Map<string, Promise<ContentBlock>>();
       const block = {
+        _meta: attachmentMeta,
         type: 'image',
         data: 'AQID',
         mimeType: 'image/png',
@@ -1515,6 +1637,7 @@ describe('SessionAttachmentStore', () => {
         await expect(restored.resolveContent([typescript])).resolves.toEqual([
           {
             type: 'resource',
+            _meta: attachmentMeta,
             resource: {
               uri: 'attachment:///example.ts',
               mimeType: 'text/plain',
@@ -1666,7 +1789,12 @@ describe('SessionAttachmentStore', () => {
       // The failed entry must not stay cached: the next resolution re-reads
       // from disk and succeeds.
       await expect(store.resolveContent([reference], memo)).resolves.toEqual([
-        { type: 'image', data: 'CQk=', mimeType: 'image/png' },
+        {
+          type: 'image',
+          data: 'CQk=',
+          mimeType: 'image/png',
+          _meta: attachmentMeta,
+        },
       ]);
       expect(readFile).toHaveBeenCalledTimes(2);
     } finally {
@@ -1689,7 +1817,12 @@ describe('SessionAttachmentStore', () => {
       expect(result.retainedBlocks).toEqual([text, live]);
       expect(result.resolvedBlocks).toEqual([
         text,
-        { type: 'image', data: 'AQI=', mimeType: 'image/png' },
+        {
+          type: 'image',
+          data: 'AQI=',
+          mimeType: 'image/png',
+          _meta: attachmentMeta,
+        },
       ]);
     } finally {
       await store.close();
