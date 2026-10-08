@@ -19,6 +19,7 @@ import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
+import { createHostedChatRecord } from './hosted-harness-turn.js';
 
 const state = vi.hoisted(() => ({
   config: undefined as unknown as {
@@ -191,6 +192,38 @@ describe('Hosted Harness model boundary', () => {
       { text: 'answer' },
       { inlineData: { mimeType: 'image/png', data: 'aGk=' } },
     ]);
+  });
+
+  it('omits a thought-only answer and its prompt while retaining a visible answered pair', async () => {
+    const model = config([{ type: LlmEventType.Finished }]);
+    const unanswered = [{ text: 'unanswered' }];
+    const thoughtOnly = [{ text: 'private thought', thought: true }];
+    const answered = [{ text: 'answered' }];
+    const visible = [
+      { text: 'retained thought', thought: true },
+      { text: 'visible answer', thought: false },
+    ];
+    const pairs: Array<['user' | 'assistant', Part[]]> = [
+      ['user', unanswered],
+      ['assistant', thoughtOnly],
+      ['user', answered],
+      ['assistant', visible],
+    ];
+    const history = pairs.map(([type, parts]) =>
+      createHostedChatRecord({ cwd: input.cwd }, input.sessionId, type, null, {
+        message: {
+          role: type === 'assistant' ? 'model' : 'user',
+          parts,
+        },
+      }),
+    );
+    await runHostedHarnessTextTurn({ ...input, history });
+    expect(model.setHistory).toHaveBeenCalledWith([
+      { role: 'user', parts: answered },
+      { role: 'model', parts: visible },
+    ]);
+    expect(history[1]!.message!.parts).toEqual(thoughtOnly);
+    expect(history[3]!.message!.parts).toEqual(visible);
   });
 
   it.each([

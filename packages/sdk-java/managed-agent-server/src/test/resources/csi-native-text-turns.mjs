@@ -4,8 +4,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { URL, pathToFileURL } from 'node:url';
 import { Buffer } from 'node:buffer';
 import process from 'node:process';
+import { setTimeout, clearTimeout } from 'node:timers';
 
-/** Diagnostic ChatRecord composition; does not invoke private executeHostedTurn. */
+/** Original shared runner for streamed diagnostics; legacy fixtures retain disclosed ChatRecord composition. */
 export async function generateNativeTextTurns(
   stores,
   input,
@@ -27,6 +28,16 @@ export async function generateNativeTextTurns(
     pathToFileURL(`${root}/packages/cli/dist/src/serve/hosted-harness-model.js`)
       .href
   );
+  const runHostedHarnessTurn = input.streamed
+    ? (
+        await import(
+          pathToFileURL(
+            `${root}/packages/cli/dist/src/serve/hosted-harness-turn.js`,
+          ).href
+        )
+      ).runHostedHarnessTurn
+    : undefined;
+  const longDelta = '汉'.repeat(1023) + '😀' + '🧪'.repeat(1000) + 'END';
   const promptFor = (turn) =>
     turn === 5 ? 'A'.repeat(65300) : `owned prompt ${turn} 汉字\nline`;
   const requests = [];
@@ -85,8 +96,14 @@ export async function generateNativeTextTurns(
           ],
         });
         add({}, 'tool_calls');
+      } else if (input.streamed && turn === 2) {
+        add({ content: `owned partial ${requests.length + 1} 😀` });
       } else {
-        add({ content: `owned answer ${turn} ✓` });
+        add({
+          content:
+            input.streamed && turn === 1 ? longDelta : `owned answer ${turn} ✓`,
+        });
+        if (input.streamed && turn === 1) add({ content: '尾😀🧪' });
         add({}, 'stop');
       }
       const usage =
@@ -104,15 +121,26 @@ export async function generateNativeTextTurns(
               total_tokens: 18 + 2 * turn,
               completion_tokens_details: { reasoning_tokens: 3 },
             };
-      chunks.push({ ...base, choices: [], usage });
+      if (!input.streamed || turn !== 2)
+        chunks.push({ ...base, choices: [], usage });
       const sse =
         chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join('') +
-        'data: [DONE]\n\n';
-      requests.push({ turn, wire, chunks, sse });
+        (input.streamed && turn === 2 ? '' : 'data: [DONE]\n\n');
+      const observed = { turn, wire, chunks, sse };
+      requests.push(observed);
+      if (body.tools?.length)
+        throw new Error('No-tool diagnostic declared tools');
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
-      res.end(sse);
+      if (input.streamed && turn === 2) {
+        if (requests.filter((request) => request.turn === 2).length > 3)
+          throw new Error('Owned provider retry budget exceeded');
+        res.write(sse);
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        res.destroy();
+        observed.physicalStreamCut = res.destroyed;
+      } else res.end(sse);
     } catch (error) {
-      res.writeHead(500);
+      if (!res.headersSent) res.writeHead(500);
       res.end(String(error));
     }
   });
@@ -201,6 +229,54 @@ export async function generateNativeTextTurns(
           wakeReason: 'input',
         },
       );
+      if (runHostedHarnessTurn) {
+        const abort = new globalThis.AbortController();
+        const timeout = setTimeout(() => abort.abort(), 20000);
+        let turnResult;
+        try {
+          turnResult = await runHostedHarnessTurn({
+            session: { managed, cwd: input.cwd, blocked: false },
+            sessionId: input.sessionKey.sessionId,
+            cwd: input.cwd,
+            promptId,
+            text,
+            abort,
+            historyMode: 'settled',
+          });
+        } finally {
+          clearTimeout(timeout);
+        }
+        const projected = await managed.sink.project();
+        const assistant = projected.findLast(
+          (record) =>
+            record.daemonPromptId === promptId && record.type === 'assistant',
+        );
+        const expectedState = turn === 2 || turn === 3 ? 'error' : 'completed';
+        if (
+          turnResult.systemPayload.state !== expectedState ||
+          (expectedState === 'completed') !== Boolean(assistant)
+        )
+          throw new Error(`Unexpected shared runner outcome ${turn}`);
+        const result = assistant && {
+          parts: assistant.message.parts,
+          model: assistant.model,
+          text: assistant.message.parts
+            .filter((part) => !part.thought)
+            .map((part) => part.text)
+            .join(''),
+        };
+        observations.push({
+          turn,
+          promptId,
+          result,
+          turnResult,
+          checkpoint: managed.authority.latestCheckpoint,
+          projected,
+          sharedHostedRunner: true,
+          privateHttpAttachment: false,
+        });
+        continue;
+      }
       const harness = createManagedHarnessHandle(managed);
       let result, refusal;
       await new ManagedHookActivationController(managed).runTurn(
@@ -262,8 +338,28 @@ export async function generateNativeTextTurns(
         projected: await managed.sink.project(),
       });
     }
-    if (requests.length !== 5)
+    if (requests.length !== (input.streamed ? 7 : 5))
       throw new Error('Owned provider request count differs');
+    if (input.streamed) {
+      const fourth = JSON.parse(
+        requests.find((request) => request.turn === 4).wire,
+      );
+      const history = fourth.messages.flatMap((message) =>
+        typeof message.content === 'string'
+          ? [message.content]
+          : (message.content ?? [])
+              .filter((part) => part.type === 'text')
+              .map((part) => part.text),
+      );
+      if (
+        !history.includes(promptFor(1)) ||
+        !history.some((text) => text.includes(longDelta)) ||
+        history.includes(promptFor(2)) ||
+        history.includes(promptFor(3)) ||
+        history.some((text) => text.includes('owned partial'))
+      )
+        throw new Error('Actual next provider history differs');
+    }
     return observations;
   } finally {
     try {

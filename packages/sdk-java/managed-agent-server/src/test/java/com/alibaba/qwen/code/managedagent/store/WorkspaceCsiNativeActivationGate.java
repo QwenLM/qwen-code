@@ -109,11 +109,140 @@ class WorkspaceCsiNativeActivationGate {
         binding = bindings.compareAndSet(binding, binding.withAttestation(lease,
                 new RuntimeResourceHandle("kubernetes-workspace", 3, Map.of("podUid", "fixture-original")),
                 Instant.now(), Instant.now()));
-        generate(info.getTestMethod().orElseThrow().getName().startsWith("textConversation"));
+        String method = info.getTestMethod().orElseThrow().getName();
+        generate(method.startsWith("textConversation") || method.startsWith("streamConversation"),
+                method.startsWith("streamConversation"));
         writerId = nativeFixture.path("writerId").textValue();
         token = nativeFixture.path("writerToken").textValue();
         transaction.execute(status -> journal.acquireWriter("tenant", sessionId, token,
                 new ManagedSessionStoreModels.AcquireWriterRequest("workspace", writerId, 300_000L)));
+    }
+
+    @Test
+    void streamConversationAcceptsOriginalSharedRunnerRetriesErrorsAndFullReplay() throws Exception {
+        ready();
+        assertThat(nativeFixture.path("provenance").path("sharedHostedTurn").booleanValue()).isTrue();
+        int end = nativeFixture.path("commits").size() - 1;
+        int retracts = 0;
+        for (int index = 2; index < end; index++) {
+            assertThat(commit(index).replayed()).isFalse();
+            if ("assistantRetract".equals(nativeFixture.path("commits").get(index).path("request")
+                    .path("operation").textValue())) {
+                retracts++;
+            }
+        }
+        assertThat(retracts).isEqualTo(2);
+        assertThat(nativeFixture.path("observations").get(1).path("turnResult")
+                .path("systemPayload").path("state").textValue()).isEqualTo("error");
+        assertThat(nativeFixture.path("observations").get(2).path("turnResult")
+                .path("systemPayload").path("state").textValue()).isEqualTo("error");
+        assertThat(nativeFixture.path("observations").get(3).path("result").path("parts").get(0)
+                .path("thought").booleanValue()).isTrue();
+        var before = allRows();
+        for (int index = 0; index < end; index++) {
+            assertThat(commit(index).replayed()).isTrue();
+        }
+        assertThat(allRows()).isEqualTo(before);
+        rejectedCommit((ObjectNode) nativeFixture.path("commits").get(end).path("request"));
+        assertThat(allRows()).isEqualTo(before);
+        assertThat(pin()).isEqualTo(2);
+    }
+
+    @Test
+    void streamConversationDigestValidDeltaAndRetractionRefusalsRollbackAllTables() throws Exception {
+        ready();
+        int delta = operationIndex("assistantDelta", 0);
+        for (int index = 2; index < delta; index++) {
+            commit(index);
+        }
+        var before = allRows();
+        for (var change : List.<java.util.function.Consumer<ObjectNode>>of(
+                event -> ((ObjectNode) event.path("payload")).put("role", "user"),
+                event -> ((ObjectNode) event.path("payload")).put("turnId", UUID.randomUUID().toString()),
+                event -> ((ObjectNode) event.path("payload")).put("text", ""),
+                event -> ((ObjectNode) event.path("payload")).put("text", "x".repeat(3073)),
+                event -> ((ObjectNode) event.path("payload")).put("text", "\ud800"),
+                event -> {
+                    String id = event.path("eventId").textValue();
+                    event.put("eventId", id.substring(0, id.lastIndexOf(':') + 1) + "1");
+                })) {
+            rejectedCommit(changedStreamEvent(delta, change));
+            assertThat(allRows()).isEqualTo(before);
+        }
+        int retract = operationIndex("assistantRetract", 0);
+        for (int index = delta; index < retract; index++) {
+            commit(index);
+        }
+        before = allRows();
+        rejectedCommit(changedStreamEvent(retract, event -> ((ObjectNode) event.path("payload"))
+                .put("fromSequence", 1)));
+        assertThat(allRows()).isEqualTo(before);
+        assertThat(commit(retract).replayed()).isFalse();
+    }
+
+    @Test
+    void streamConversationFinalAssistantMustConsumeOriginalVisibleStream() throws Exception {
+        ready();
+        int assistant = operationIndex("commitMessage", 1);
+        for (int index = 2; index < assistant; index++) {
+            commit(index);
+        }
+        var before = allRows();
+        rejectedCommit(changedConversationBody(assistant, "contentRef", body -> {
+            for (JsonNode part : body.path("message").path("parts")) {
+                if (!part.path("thought").asBoolean()) {
+                    ((ObjectNode) part).put("text", "different original visible text");
+                }
+            }
+        }));
+        assertThat(allRows()).isEqualTo(before);
+        rejectedCommit(changedConversationBody(assistant, "contentRef", body -> body.put("uuid", UUID.randomUUID().toString())));
+        assertThat(allRows()).isEqualTo(before);
+        assertThat(commit(assistant).replayed()).isFalse();
+    }
+
+    @Test
+    void streamConversationDrainingKeepsOldSettlementReadonlyAndRefusesNewInput() throws Exception {
+        ready();
+        int settlement = operationIndex("settleTurn", 0);
+        for (int index = 2; index <= settlement; index++) {
+            commit(index);
+        }
+        retire();
+        var before = allRows();
+        assertThat(commit(settlement).replayed()).isTrue();
+        assertThat(allRows()).isEqualTo(before);
+        var next = JSON.treeToValue(nativeFixture.path("commits").get(settlement + 1).path("request"),
+                ManagedSessionStoreModels.CommitTransactionRequest.class);
+        rejected(() -> transaction.execute(status -> journal.commit("tenant", sessionId, token, next)),
+                "runtime_admission_closed");
+        assertThat(allRows()).isEqualTo(before);
+    }
+
+    private int operationIndex(String operation, int ordinal) {
+        for (int index = 0; index < nativeFixture.path("commits").size(); index++) {
+            if (operation.equals(nativeFixture.path("commits").get(index).path("request").path("operation").textValue())
+                    && ordinal-- == 0) {
+                return index;
+            }
+        }
+        throw new AssertionError("Original operation is unavailable: " + operation);
+    }
+
+    private ObjectNode changedStreamEvent(int index, java.util.function.Consumer<ObjectNode> change) throws Exception {
+        ObjectNode request = nativeFixture.path("commits").get(index).path("request").deepCopy();
+        var records = CsiNativeActivationProof.records(Base64.getDecoder().decode(request.path("recordBytesBase64").textValue()));
+        ObjectNode event = (ObjectNode) records.getFirst().path("managedSession");
+        change.accept(event);
+        String content = "message.delta".equals(event.path("kind").textValue())
+                ? event.path("payload").path("text").textValue()
+                : event.path("payload").path("messageId").textValue() + ":" + event.path("payload").path("fromSequence").longValue();
+        // The lone-surrogate negative uses Node's UTF8 replacement digest; its JSON remains escaped.
+        String digestContent = "\ud800".equals(content) ? "\ufffd" : content;
+        request.put("contentDigest", CsiNativeActivationProof.sha256(digestContent.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                .put("commandId", event.path("eventId").textValue());
+        ((ObjectNode) records.getLast().path("managedSession")).put("commandId", request.path("commandId").textValue());
+        return resign(request, records);
     }
 
     @Test
@@ -921,14 +1050,15 @@ class WorkspaceCsiNativeActivationGate {
     private ObjectNode resign(ObjectNode request, List<JsonNode> records) throws Exception {
         var events = records.subList(0, records.size() - 1).stream()
                 .map(record -> sorted(record.path("managedSession"))).toList();
-        request.put("eventsDigest", CsiNativeActivationProof.sha256(JSON.writeValueAsBytes(events)));
+        request.put("eventsDigest", CsiNativeActivationProof.sha256(JSON.writeValueAsString(events)
+                .replace("\ud800", "\\ud800").getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         ObjectNode marker = (ObjectNode) records.getLast().path("managedSession");
         marker.put("contentDigest", request.path("contentDigest").textValue())
                 .put("eventsDigest", request.path("eventsDigest").textValue());
         request.put("commitDigest", CsiNativeActivationProof.sha256(JSON.writeValueAsBytes(sorted(marker))));
         StringBuilder text = new StringBuilder();
         for (JsonNode record : records) {
-            text.append(JSON.writeValueAsString(record)).append('\n');
+            text.append(JSON.writeValueAsString(record).replace("\ud800", "\\ud800")).append('\n');
         }
         byte[] bytes = text.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
         request.put("recordBytesBase64", Base64.getEncoder().encodeToString(bytes))
@@ -1029,13 +1159,16 @@ class WorkspaceCsiNativeActivationGate {
         return jdbc.queryForList("SELECT * FROM qwen_managed_session_journal_head");
     }
 
-    private void generate(boolean conversation) throws Exception {
+    private void generate(boolean conversation, boolean streamed) throws Exception {
         Path root = Path.of("../../..").toRealPath();
         Path input = directory.resolve("input.json");
         var value = JSON.createObjectNode().put("cwd", request.getScope().getCanonicalCwd())
                 .put("capabilityDigest", CsiFilesRetirementProfile.CAPABILITY_DIGEST);
         if (conversation) {
             value.put("conversation", true);
+        }
+        if (streamed) {
+            value.put("streamed", true);
         }
         value.putObject("sessionKey").put("tenantId", "tenant").put("workspaceId", "workspace").put("sessionId", sessionId);
         JSON.writeValue(input.toFile(), value);

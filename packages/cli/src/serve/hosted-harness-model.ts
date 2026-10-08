@@ -317,7 +317,8 @@ export async function runHostedHarnessTextTurn(input: {
     // history drops an empty assistant record while keeping its prompt. Omit
     // both kinds of unanswered prompt even when later completed turns follow.
     const answered = (entry: Content | undefined): boolean =>
-      entry?.role === 'model' && !!entry.parts?.some((part) => !!part.text);
+      entry?.role === 'model' &&
+      !!entry.parts?.some((part) => !part.thought && !!part.text);
     client
       .getChat()
       .setHistory(

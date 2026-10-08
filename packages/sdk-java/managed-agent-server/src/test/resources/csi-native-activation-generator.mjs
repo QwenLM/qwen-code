@@ -255,6 +255,8 @@ try {
               'owned HTTP collector; actual SQL admission is in the Java gate',
             manufacturedNativeEvents: false,
             privateExecuteHostedTurn: false,
+            sharedHostedTurn: input.streamed === true,
+            privateHttpAttachment: false,
           },
         },
         null,
