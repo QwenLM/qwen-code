@@ -400,6 +400,18 @@ describe('subagent.ts', () => {
         { name: 'Agent' },
         'Hello Agent. Do not write ${0} or ${1}.',
       ],
+      [
+        'should substitute a present key whose value is empty',
+        'Hook: ${hook_context}.',
+        { hook_context: '' },
+        'Hook: .',
+      ],
+      [
+        'should leave an inherited Object.prototype name literal',
+        '${toString}',
+        {},
+        '${toString}',
+      ],
     ])('%s', (_title, template, values, expected) => {
       expect(templateString(template, contextWith(values))).toBe(expected);
     });
