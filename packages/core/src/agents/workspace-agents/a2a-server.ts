@@ -551,9 +551,10 @@ export async function a2aSendMessage(
       if (reserved) {
         // A failure below leaves the reservation without a run; a retry of
         // the same request resumes it (in the same session, if one was made).
-        // The one exception is a permanent refusal below: a retry cannot
-        // change the answer, so `createdThisCall` is torn down instead.
-        let createdThisCall: string | undefined;
+        // Set only when this call made the session, so the refusal path in
+        // the catch never removes one an earlier message is still using.
+        // Declared outside the try because that catch is what reads it.
+        let createdHere: string | undefined;
         try {
           const roster = await readWorkspaceAgents(projectRoot);
           const squads = await readSquads(projectRoot);
@@ -583,6 +584,7 @@ export async function a2aSendMessage(
               agentId: agent.id,
               title: a2aSessionTitle(caller.callerId),
             });
+            createdHere = created;
             try {
               await attachExternalSession(
                 projectRoot,
@@ -597,7 +599,6 @@ export async function a2aSendMessage(
               throw error;
             }
             sessionId = created;
-            createdThisCall = created;
           }
           const posted = await port.mention(sessionId, {
             text,
@@ -617,17 +618,26 @@ export async function a2aSendMessage(
           );
         } catch (error) {
           if (error instanceof A2ASessionError) {
-            // A permanent refusal cannot be answered better by a retry, so a
-            // session made for it here is torn down and the reservation
-            // released for the retry to start over. An 'unavailable' is
-            // retryable: the reservation keeps the session for the retry.
-            if (error.kind === 'refused' && createdThisCall) {
-              await releaseExternalReservation(
+            // A permanent refusal is never going to be posted into the
+            // session this call made, and every retry would reuse it, so
+            // release the reservation and remove the session. A retryable
+            // `unavailable` keeps both: that retry continues where it
+            // stopped. Release first — removing the session while the
+            // reservation still names it would send the retry to a session
+            // that is gone.
+            if (createdHere && error.kind === 'refused') {
+              const released = await releaseExternalReservation(
                 projectRoot,
                 caller.callerId,
                 entry.key,
-              ).catch(() => {});
-              await port.discardSession(createdThisCall).catch(() => {});
+                createdHere,
+              ).then(
+                () => true,
+                () => false,
+              );
+              if (released) {
+                await port.discardSession(createdHere).catch(() => {});
+              }
             }
             return { ok: false, ...sessionFailure(error) };
           }

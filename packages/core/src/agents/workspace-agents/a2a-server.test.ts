@@ -317,20 +317,6 @@ describe('A2A send', () => {
     expect(task.contextId).toBe(port.sessions[0]!.id);
   });
 
-  it('discards a session whose first post is refused for good', async () => {
-    const caller = await grant();
-    port.mentionFailure = new A2ASessionError('refused', 'invalid_text');
-    await expect(send(caller)).resolves.toEqual({ ok: false, kind: 'refused' });
-    expect(port.discarded).toEqual([port.sessions[0]!.id]);
-
-    // A retry cannot reuse a discarded session: it starts over with a new
-    // one, because the refusal released the reservation's session.
-    delete port.mentionFailure;
-    const task = await sent(caller);
-    expect(port.sessions).toHaveLength(2);
-    expect(task.contextId).toBe(port.sessions[1]!.id);
-  });
-
   it('does not post twice when a send dies after posting', async () => {
     const caller = await grant();
     port.failAfterPost = new Error('daemon stopped');
@@ -440,6 +426,54 @@ describe('A2A send', () => {
 
     await expect(send(caller)).rejects.toThrow('disappeared');
     expect(port.discarded).toEqual([port.sessions[0]!.id]);
+  });
+
+  it('releases the reservation when the post is permanently refused', async () => {
+    const caller = await grant();
+    port.mentionFailure = new A2ASessionError('refused', 'text too long');
+
+    await expect(send(caller)).resolves.toEqual({
+      ok: false,
+      kind: 'refused',
+    });
+
+    const created = port.sessions[0]!.id;
+    expect(port.discarded).toEqual([created]);
+    // Nothing may keep naming a session that is gone, or the retry posts
+    // into it and a stale contextId stays continuable.
+    const file = JSON.parse(
+      await fs.readFile(
+        getExternalCallerFilePath(PROJECT_ROOT, caller.callerId),
+        'utf8',
+      ),
+    ) as { contexts: unknown[]; tasks: Array<{ sessionId?: string }> };
+    expect(file.contexts).toEqual([]);
+    expect(file.tasks[0]?.sessionId).toBeUndefined();
+
+    // The retry of the same request starts a fresh session.
+    port.mentionFailure = undefined;
+    await expect(send(caller)).resolves.toMatchObject({ ok: true });
+    expect(port.sessions).toHaveLength(2);
+    expect(port.posts[0]!.sessionId).toBe(port.sessions[1]!.id);
+  });
+
+  it('keeps the session and its reservation when the post may still land', async () => {
+    const caller = await grant();
+    port.mentionFailure = new A2ASessionError('unavailable', 'starting up');
+
+    await expect(send(caller)).resolves.toEqual({
+      ok: false,
+      kind: 'unavailable',
+    });
+
+    const created = port.sessions[0]!.id;
+    expect(port.discarded).toEqual([]);
+    // The retry continues in the session already made and recorded for it.
+    port.mentionFailure = undefined;
+    const task = await sent(caller);
+    expect(port.sessions).toHaveLength(1);
+    expect(port.posts[0]!.sessionId).toBe(created);
+    expect(task.contextId).toBe(created);
   });
 
   it('refuses work for a retired agent but keeps its tasks readable', async () => {
