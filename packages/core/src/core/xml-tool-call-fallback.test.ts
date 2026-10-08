@@ -1071,4 +1071,116 @@ describe('borrowed closers, lexer cost and rejected-block masking', () => {
     ]);
     expect(result.remainingText).toBe('');
   });
+
+  it('does not borrow a closer that following prose merely mentions', () => {
+    // Stepping out of a quoted value searches the rest of the text, so the
+    // advance lands on the closer this prose documents instead of the block's
+    // own. Unchecked, it swallowed that prose: the trailing file_path was never
+    // parsed, a write_file missing its required path was dispatched, and the
+    // block's own markup was reinserted into the visible turn. See #13492.
+    const quoted = invoke('read_file', param('file_path', 'x.txt'));
+    const text = invoke(
+      'write_file',
+      param('content', `Usage:\n${quoted}\n`) +
+        `\nEscape ${CLOSE} in docs.\n` +
+        param('file_path', 'doc.md'),
+    );
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('does not borrow a function-dialect closer that prose mentions', () => {
+    const fnOpen = (name: string) => '<' + 'function=' + name + '>';
+    const fnClose = '<' + '/function>';
+    const flat = (name: string, value: string) =>
+      PARAM_OPEN + '=' + name + '>' + value + PARAM_CLOSE;
+    const quoted = fnOpen('read_file') + flat('file_path', 'x.txt') + fnClose;
+    const text =
+      fnOpen('write_file') +
+      flat('content', `Run rm -rf /tmp/x\nWell-formed:\n${quoted}\n`) +
+      `\nEscape ${fnClose} in docs.\n` +
+      flat('file_path', 'doc.md') +
+      fnClose;
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('does not swallow prose between a quoted value and a borrowed closer', () => {
+    // Same advance with nothing but prose after it: the block must stay whole
+    // rather than end at a closer the prose mentions.
+    const quoted = invoke('read_file', param('file_path', 'x.txt'));
+    const text = invoke(
+      'write_file',
+      param('content', `Usage:\n${quoted}\n`) + `\nNote: escape ${CLOSE} here.`,
+    );
+    expect(extractXmlToolCalls(text)).toEqual([]);
+    expect(tryRecoverXmlToolCalls(text)).toEqual({
+      recovered: false,
+      functionCallParts: [],
+      remainingText: text,
+    });
+  });
+
+  it('still recovers a trailing parameter behind a quoted value', () => {
+    // Positive control for the advance check above: the legitimate shape is a
+    // quoted value followed by the block's own parameter element, so what the
+    // advance steps over is that element plus whitespace, not whitespace only.
+    const quoted = invoke('read_file', param('file_path', 'x.txt'));
+    const text = invoke(
+      'write_file',
+      param('content', `Usage:\n${quoted}\n`) + param('file_path', 'doc.md'),
+    );
+    expect(extractXmlToolCalls(text)).toEqual([
+      {
+        name: 'write_file',
+        args: { content: `Usage:\n${quoted}`, file_path: 'doc.md' },
+      },
+    ]);
+    expect(tryRecoverXmlToolCalls(text).remainingText).toBe('');
+  });
+
+  it('masks quoted values out of the lexer prose without changing its length', () => {
+    // Example tag positions are reported in prose offsets and looked up again
+    // in the raw text, so the mask has to be length-preserving. Appending the
+    // quoted-value spans after the flat parameter matches puts them out of text
+    // order, which is what the sort plus overlap-compaction undoes. Dropping
+    // that normalization flips no end-to-end outcome here: the only tags it
+    // mispositions are the ones after the last parameter element, and a region
+    // holding no parameter element holds no call for an example range to
+    // filter. So the mask length is the assertion that pins it — without the
+    // normalization the prose outgrows the text it is read back against, and
+    // the lexer cap, which is measured on text.length, stops bounding it.
+    const spy = vi.spyOn(Lexer, 'lexInline');
+    try {
+      const quoted = invoke('read_file', param('file_path', 'x.txt'));
+      const text =
+        invoke(
+          'write_file',
+          param('content', `Usage:\n${quoted}\n`) + param('file_path', 'd.md'),
+        ) +
+        '\n<example>model:\n' +
+        readBlock +
+        EXAMPLE_CLOSE;
+      expect(extractXmlToolCalls(text)).toEqual([
+        {
+          name: 'write_file',
+          args: { content: `Usage:\n${quoted}`, file_path: 'd.md' },
+        },
+      ]);
+      expect(spy).toHaveBeenCalled();
+      for (const call of spy.mock.calls) {
+        expect(String(call[0]).length).toBe(text.length);
+      }
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });

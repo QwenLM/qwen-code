@@ -337,6 +337,12 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     }
   }
   parameterRanges.push(...quotedValueRanges);
+  // Quoted-value spans are appended out of text order and overlap the flat
+  // matches they extend, so restore the ordered, disjoint sequence the mask
+  // below needs: it blanks these ranges with a single forward cursor, which is
+  // only length-preserving while no range starts behind that cursor. Example
+  // tag offsets are read back against the unmasked text, and the lexer cap is
+  // measured on text.length, so a mask that grows breaks both.
   parameterRanges.sort(([startA], [startB]) => startA - startB);
   let rangeCount = 0;
   for (let index = 0; index < parameterRanges.length; index++) {
@@ -369,6 +375,8 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       tagEnd === -1 ? match.index + match[0].length : match.index + tagEnd;
     const closeTag = match[1] !== undefined ? '</invoke>' : '</function>';
     let closeStart = match.index + match[0].length - closeTag.length;
+    // Where this match's own closer sat before the advance below moved it.
+    const lazyCloseStart = closeStart;
     let quotedValue: [number, number] | undefined;
     while (
       (quotedValue = quotedValueRanges.find(
@@ -393,6 +401,8 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
     >;
     let outsideParameters = '';
     let cursor = 0;
+    // Text-coordinate spans of the parameter elements this block consumed.
+    const parameterSpans: Array<[number, number]> = [];
     PARAMETER_PATTERN.lastIndex = 0;
     let paramMatch: RegExpExecArray | null;
     while ((paramMatch = PARAMETER_PATTERN.exec(paramsBlock)) !== null) {
@@ -412,6 +422,7 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       }
       outsideParameters += paramsBlock.slice(cursor, paramMatch.index);
       cursor = parameterEnd;
+      parameterSpans.push([parameterStart, paramsStart + parameterEnd]);
       const paramName = paramMatch[1] ?? paramMatch[2];
       args[paramName] = parseParameterValue(
         decodeXmlEntities(stripDelimitingNewlines(value)),
@@ -426,6 +437,34 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
       cursor = end;
     }
     unquotedParameters += text.slice(cursor, closeStart);
+    // An advance may only step over regions this block owns: the search for a
+    // later closer is unbounded, so without this it also binds the block to a
+    // closer merely mentioned in the prose that follows, which silently drops
+    // every parameter behind it and reinserts the block's own markup into the
+    // visible turn. What the advance swallowed must therefore be nothing but
+    // the block's own parameter elements and the quoted values inside them.
+    if (closeStart > lazyCloseStart) {
+      const covered: Array<[number, number]> = [];
+      for (const span of parameterSpans.concat(quotedValueRanges)) {
+        const coveredStart = Math.max(span[0], lazyCloseStart);
+        const coveredEnd = Math.min(span[1], closeStart);
+        if (coveredStart < coveredEnd) covered.push([coveredStart, coveredEnd]);
+      }
+      covered.sort(([startA], [startB]) => startA - startB);
+      let borrowed = '';
+      let borrowedCursor = lazyCloseStart;
+      for (const [start, end] of covered) {
+        if (start > borrowedCursor) {
+          borrowed += text.slice(borrowedCursor, start);
+        }
+        borrowedCursor = Math.max(borrowedCursor, end);
+      }
+      borrowed += text.slice(borrowedCursor, closeStart);
+      if (borrowed.trim() !== '') {
+        TOOL_CALL_PATTERN.lastIndex = resumeAt;
+        continue;
+      }
+    }
     // A missing close must not borrow a later block's parameters or recover
     // only the arguments preceding a prematurely matched function close, so
     // reject a call opener the parameters did not consume. A closer is only
