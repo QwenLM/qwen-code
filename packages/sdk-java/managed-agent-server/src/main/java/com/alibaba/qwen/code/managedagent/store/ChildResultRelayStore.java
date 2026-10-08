@@ -60,6 +60,9 @@ public class ChildResultRelayStore {
     // quota never waits on a host's close capability, and the ledger
     // row keeps the retained close admission discoverable until a
     // capable scan discharges it.
+    // Debts sort after every other due row: they accumulate one per
+    // finished child where close is unavailable, and ahead of the page
+    // they would keep a newer launch from ever being reached.
     private static final String PENDING_SQL =
             "SELECT r.tenant_id, r.session_id, r.record_id, r.revision,"
                     + " r.delivery_state, r.record_resource_id"
@@ -77,7 +80,8 @@ public class ChildResultRelayStore {
                     + " AND (l.next_retry_at IS NULL OR l.next_retry_at <= ?)"
                     + " AND (l.claimed_until IS NULL OR l.claimed_until <="
                     + " ? OR l.claimed_by = ?)"
-                    + " ORDER BY r.created_at, r.session_id, r.record_id"
+                    + " ORDER BY CASE WHEN l.state = 'close_debt' THEN 1"
+                    + " ELSE 0 END, r.created_at, r.session_id, r.record_id"
                     + " LIMIT ?";
 
     private final JdbcTemplate jdbc;

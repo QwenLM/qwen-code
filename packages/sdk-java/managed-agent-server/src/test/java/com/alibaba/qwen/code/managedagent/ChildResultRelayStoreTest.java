@@ -429,6 +429,32 @@ class ChildResultRelayStoreTest {
                 .isEmpty();
     }
 
+    // Debts sort after every other due row: one accumulates per finished
+    // child where close is unavailable, and ahead of the bounded page they
+    // would keep a newer launch from ever being reached.
+    @Test
+    void sortsCloseDebtsAfterNewerDueWork() {
+        long now = 600_000L;
+        String session = UUID.randomUUID().toString();
+        insertRecordRow("scope-f", session, "run-a-old-debt", "child_agent",
+                "consumed", "completed");
+        RelayRow row = relayStore.claim(TENANT, session, "run-a-old-debt",
+                "key-a-old-debt", "owner", now + 30_000, now);
+        relayStore.advance(row, "owner", "close_debt", "child-f",
+                now + 1_000, "close debt retained", now + 30_000, now);
+        insertRecordRow("scope-f", session, "run-z-new", "child_agent",
+                "planned", "pending");
+        assertThat(relayStore.findPendingChildren("owner", now + 1_000, 1))
+                .extracting(PendingChild::childRunId)
+                .containsExactly("run-z-new");
+        // Retire the fixture rows: the discovery page is fleet-wide.
+        relayStore.classify(relayStore.find(TENANT, session,
+                "run-a-old-debt"), "owner", "done", null, now + 2_000);
+        relayStore.classify(relayStore.claim(TENANT, session, "run-z-new",
+                "key-z-new", "owner", now + 30_000, now + 1_000), "owner",
+                "done", null, now + 2_000);
+    }
+
     @Test
     void readsInlineResourcesOnly() {
         jdbc.update("INSERT INTO qwen_managed_session_resource"

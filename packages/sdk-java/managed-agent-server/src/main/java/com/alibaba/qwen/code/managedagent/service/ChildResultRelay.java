@@ -49,6 +49,10 @@ public class ChildResultRelay {
     private static final long LEASE_MS = 30_000;
     /** The watch gap for a Turn that keeps running — a wait, not a failure. */
     private static final long HEARTBEAT_MS = 5_000;
+    // A close debt on a host without close capability cannot be
+    // discharged until the capability returns, which takes a restart:
+    // look again rarely instead of on every heartbeat.
+    private static final long CLOSE_DEBT_IDLE_MS = 300_000;
 
     private final ChildResultRelayStore relayStore;
     private final ManagedAgentService sessions;
@@ -485,7 +489,7 @@ public class ChildResultRelay {
             return;
         }
         if (!childCloses.closeSupported()) {
-            relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+            relayStore.scheduleRetry(row, owner, now + CLOSE_DEBT_IDLE_MS,
                     now + LEASE_MS, now);
             return;
         }

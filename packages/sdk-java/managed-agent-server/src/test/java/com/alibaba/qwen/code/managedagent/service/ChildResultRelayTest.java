@@ -449,6 +449,21 @@ class ChildResultRelayTest {
     // records and classifies `unknown` — both already done for this row.
     // It must never run again on it: the debt arm only ever retries its
     // own single verb, and a stopped falter discharges the same row.
+    // A host that cannot close parks a debt for the idle interval, not the
+    // heartbeat: nothing discharges it before a restart brings the
+    // capability back, and every visit costs a page slot and a write.
+    @Test
+    void aCloseDebtWithoutCloseSupportWaitsTheIdleInterval() {
+        when(childCloses.closeSupported()).thenReturn(false);
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "close_debt", "owner", now + 30_000, 0, 0, null, now, now));
+        relay.scan();
+        verify(store).scheduleRetry(any(RelayRow.class), anyString(),
+                Mockito.eq(now + 300_000L), anyLong(), anyLong());
+        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
     @Test
     void aCloseDebtRowNeverEntersTheGiveUpChain() {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
