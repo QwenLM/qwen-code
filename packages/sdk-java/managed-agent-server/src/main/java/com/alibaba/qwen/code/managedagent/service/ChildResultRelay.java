@@ -119,11 +119,14 @@ public class ChildResultRelay {
             // and a watching row whose accept committed but whose
             // advance to delivering was lost reconciles through the same
             // idempotent walk (replay the result, the acceptance, then the
-            // advance) instead of wedging the discovery window closed.
+            // advance) instead of wedging the discovery window closed. A
+            // close_debt row's only owed verb is outliving the acceptance,
+            // so it walks through too.
             RelayRow existing = relayStore.find(pending.tenantId(),
                     pending.parentSessionId(), pending.childRunId());
             if (existing == null || !"delivering".equals(existing.state())
-                    && !"watching".equals(existing.state())) {
+                    && !"watching".equals(existing.state())
+                    && !"close_debt".equals(existing.state())) {
                 return;
             }
         }
@@ -137,7 +140,11 @@ public class ChildResultRelay {
         }
         // A parent that is closing or gone gets no acceptance, no wake and
         // no revival: the original result stays, classified, on this side.
-        if (!"ACTIVE".equals(parentStatus)) {
+        // A retained close debt outlives that classification — the child
+        // Session owes its close whoever the parent's writer was, so the
+        // debt arm runs before the orphaned early-out could erase it.
+        if (!"ACTIVE".equals(parentStatus)
+                && !"close_debt".equals(row.state())) {
             relayStore.classify(row, owner, "orphaned",
                     parentStatus == null ? "parent session is gone"
                             : "parent session is " + parentStatus,
@@ -150,6 +157,7 @@ public class ChildResultRelay {
                 case "binding" -> bind(row, now);
                 case "watching" -> watch(row, pending, now);
                 case "delivering" -> deliver(row, now);
+                case "close_debt" -> dischargeCloseDebt(row, now);
                 default -> {
                     return;
                 }
@@ -230,8 +238,10 @@ public class ChildResultRelay {
                 // parks the row while delivery is still discoverable; the
                 // fail commit itself moves delivery to `cancelled`, which
                 // the discovery page keeps surfacing until the close has
-                // durably admitted and classify lands.
-                closeFinishedChild(row, now);
+                // durably admitted and classify lands. A host without the
+                // close capability at all settles on time and keeps the
+                // debt as close_debt instead.
+                boolean closed = closeFinishedChild(row, now);
                 Map<String, Object> fail = new LinkedHashMap<>();
                 fail.put("operationId", UUID.randomUUID().toString());
                 fail.put("kind", "fail");
@@ -240,7 +250,7 @@ public class ChildResultRelay {
                 fail.put("started", true);
                 harness.runChildOperation(row.tenantId(),
                         row.parentSessionId(), fail);
-                relayStore.classify(row, owner, "done",
+                finishOrRetainDebt(row, row.childSessionId(), closed, "done",
                         "child Turn " + turn.status(), now);
             }
             // A running child is not a failed watch: look again after the
@@ -265,7 +275,7 @@ public class ChildResultRelay {
             // before any classification — and before the fail commit that
             // moves delivery to `cancelled` — so a faltered admission can
             // never strand the child Session behind a terminal row.
-            closeFinishedChild(row, now);
+            boolean closed = closeFinishedChild(row, now);
             Map<String, Object> quota = new LinkedHashMap<>();
             quota.put("operationId", UUID.randomUUID().toString());
             quota.put("kind", "fail");
@@ -275,7 +285,7 @@ public class ChildResultRelay {
             quota.put("started", true);
             harness.runChildOperation(row.tenantId(), row.parentSessionId(),
                     quota);
-            relayStore.classify(row, owner, "done",
+            finishOrRetainDebt(row, row.childSessionId(), closed, "done",
                     "child result exceeds the copy bound", now);
             return;
         }
@@ -329,8 +339,9 @@ public class ChildResultRelay {
         accepted.put("childRunId", row.childRunId());
         harness.runChildOperation(row.tenantId(), row.parentSessionId(),
                 accepted);
-        closeFinishedChild(row, now);
-        relayStore.classify(row, owner, "done", null, now);
+        boolean closed = closeFinishedChild(row, now);
+        finishOrRetainDebt(row, row.childSessionId(), closed, "done", null,
+                now);
     }
 
     /** A run whose classification would be durable `done` owes its child
@@ -338,10 +349,19 @@ public class ChildResultRelay {
      * exists would park the child with nothing owed anywhere — no ledger
      * scan and no operation row could ever find it again. The admission
      * is idempotent, a faltherd is owed and retried via the ordinary
-     * relay defer, never settled on suspicion. */
-    private void closeFinishedChild(RelayRow row, long now) {
-        if (row.childSessionId() == null || !childCloses.closeSupported()) {
-            return;
+     * relay defer, never settled on suspicion. A host that cannot close
+     * Workspace Sessions at all differs from a faltered admission: no
+     * retry here can ever land the close, so the settlement must not wait
+     * on it — the caller retains the debt instead (false), parked as a
+     * discoverable `close_debt` row that a later capable scan discharges.
+     * Returns false only then; anything else either admitted or had no
+     * child to close. */
+    private boolean closeFinishedChild(RelayRow row, long now) {
+        if (row.childSessionId() == null) {
+            return true;
+        }
+        if (!childCloses.closeSupported()) {
+            return false;
         }
         try {
             childCloses.admitChildClose(row.tenantId(),
@@ -358,10 +378,67 @@ public class ChildResultRelay {
                     row.childSessionId(), error.getMessage());
             throw error;
         }
+        return true;
+    }
+
+    /** The terminal write of every settled arm: with its close admitted
+     * the row retires to its proven classification; without close
+     * capability the settled record already freed its quota and the
+     * parent's next Turn, so the row keeps only the close debt — parked
+     * due on the heartbeat, named by the child id, still claimed, and
+     * still discoverable, because a settled parent record is not the
+     * child Session's close and discarding this row would strand the
+     * ACTIVE child with no durable owner anywhere. */
+    private void finishOrRetainDebt(RelayRow row, String child,
+            boolean closed, String classification, String lastError,
+            long now) {
+        if (closed) {
+            relayStore.classify(row, owner, classification, lastError, now);
+            return;
+        }
+        relayStore.advance(row, owner, "close_debt", child,
+                now + HEARTBEAT_MS,
+                "close debt retained: host cannot close a Workspace Session",
+                now + LEASE_MS, now);
+    }
+
+    /** A retained close debt owes exactly one verb: admit the durable
+     * close. No capability yet is a wait, not a failure — look again on
+     * the heartbeat without eating the attempt budget; a faltered
+     * admission parks as ever; the admission lands → terminal, with the
+     * prior error line kept, because the record's own settled revision
+     * (never this ledger state) is the consumption truth either way. */
+    private void dischargeCloseDebt(RelayRow row, long now) {
+        if (row.childSessionId() == null) {
+            relayStore.classify(row, owner, "done", row.lastError(), now);
+            return;
+        }
+        if (!childCloses.closeSupported()) {
+            relayStore.scheduleRetry(row, owner, now + HEARTBEAT_MS,
+                    now + LEASE_MS, now);
+            return;
+        }
+        try {
+            childCloses.admitChildClose(row.tenantId(),
+                    row.parentSessionId(), row.childSessionId(),
+                    row.childRunId());
+        } catch (RuntimeException error) {
+            relayStore.advance(row, owner, "close_debt", row.childSessionId(),
+                    0, "child close admission faltered", now + LEASE_MS,
+                    now);
+            LOG.warn("child result relay's close-debt discharge faltered"
+                            + " tenant={} parent={} run={} child={} — owed,"
+                            + " retried on the ledger row; failure={}",
+                    row.tenantId(), row.parentSessionId(), row.childRunId(),
+                    row.childSessionId(), error.getMessage());
+            throw error;
+        }
+        relayStore.classify(row, owner, "done", row.lastError(), now);
     }
 
     private void defer(RelayRow row, RuntimeException error, long now) {
-        if (row.attempts() + 1 >= MAX_ATTEMPTS) {
+        if (row.attempts() + 1 >= MAX_ATTEMPTS
+                && !"close_debt".equals(row.state())) {
             // The close and the parent settlement outlive the bounded
             // retries, and this row is their only durable holder: the
             // give-up chain owes and retries on any refusal instead of
@@ -383,15 +460,22 @@ public class ChildResultRelay {
      * decides). Then the ordinary close admission, the settle with that
      * pairing, and only then the classification. Any refusal anywhere
      * owes through the ordinary defer; the row never retires with the
-     * debt airborne.
+     * debt airborne. A host without close capability at all settles the
+     * parent record on time (the give-up and its pairing are proven
+     * facts, not capability-held), then parks the row as `close_debt` —
+     * the settlement is nobody's close, so the ledger keeps the owed
+     * admission discoverable instead of classifying `unknown` over it.
      */
     private void settleThenClassifyGaveUp(RelayRow row,
             RuntimeException error, long now) {
+        String resolvedChild;
+        boolean closed;
         try {
             boolean started = reconcileAttach(row);
             String child = row.childSessionId() != null ? row.childSessionId()
                     : relayStore.findLineageChild(row.tenantId(),
                             row.parentSessionId(), row.childRunId());
+            closed = child == null || childCloses.closeSupported();
             if (child != null && childCloses.closeSupported()) {
                 childCloses.admitChildClose(row.tenantId(),
                         row.parentSessionId(), child, row.childRunId());
@@ -404,6 +488,7 @@ public class ChildResultRelay {
             fail.put("started", started);
             harness.runChildOperation(row.tenantId(), row.parentSessionId(),
                     fail);
+            resolvedChild = child;
         } catch (RuntimeException settlementError) {
             LOG.warn("child result relay's give-up chain owes and retries"
                             + " tenant={} parent={} run={} — the row keeps"
@@ -416,11 +501,12 @@ public class ChildResultRelay {
                     settlementError.getMessage(), now + LEASE_MS, now);
             return;
         }
-        relayStore.classify(row, owner, "unknown", error.getMessage(), now);
+        finishOrRetainDebt(row, resolvedChild, closed, "unknown",
+                error.getMessage(), now);
         LOG.warn("child result relay gives up tenant={} parent={}"
-                + " run={} after={} failure={}", row.tenantId(),
-                row.parentSessionId(), row.childRunId(), row.attempts(),
-                error.getMessage());
+                        + " run={} after={} failure={} closeDebt={}",
+                row.tenantId(), row.parentSessionId(), row.childRunId(),
+                row.attempts(), error.getMessage(), !closed);
     }
 
     /**

@@ -356,23 +356,119 @@ class ChildResultRelayTest {
         verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
     }
 
-    // A host that cannot close a Workspace Session never admits one, so
+    // A host that cannot close a Workspace Session never admits one, and
     // the close-first order must not hold the parent's settlement on it:
-    // the failed and over-bound runs still settle, and the row retires.
+    // the failed run still settles. But settling the record is not
+    // closing the child Session — the row parks as a discoverable
+    // `close_debt` instead of retiring, and a later capable scan
+    // discharges the owed admission before the row retires.
     @Test
-    void aHostWithoutCloseStillSettlesAFailedChild() {
+    void aHostWithoutCloseSettlesAndRetainsTheCloseDebt() {
         when(childCloses.closeSupported()).thenReturn(false);
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
                 new TurnLine("turn-1", "FAILED", now + 1L, "model"));
         relay.scan();
-        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(row.get().state()).isEqualTo("close_debt");
+        assertThat(row.get().childSessionId()).isEqualTo(CHILD);
         assertThat(harness.operations)
                 .extracting(operation -> operation.get("kind"))
                 .containsExactly("fail");
         verify(childCloses, never()).admitChildClose(anyString(), anyString(),
                 anyString(), anyString());
+        // Capability returns: the next due scan discharges exactly the
+        // owed close, nothing else re-commits, and the row retires.
+        when(childCloses.closeSupported()).thenReturn(true);
+        RelayRow parked = row.get();
+        row.set(new RelayRow(parked.tenantId(), parked.parentSessionId(),
+                parked.childRunId(), parked.creationKey(),
+                parked.childSessionId(), parked.state(), parked.claimedBy(),
+                now + 30_000, parked.attempts(), 0, parked.lastError(),
+                parked.createdAt(), now));
+        relay.scan();
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+    }
+
+    // The bounded give-up on a capability-less host settles the parent's
+    // record on time — the give-up and its started pairing are proven
+    // facts — but never classifies `unknown` over the owed close: the
+    // row parks as `close_debt`, still names the child, and discharges
+    // once a capable scan sees it.
+    @Test
+    void aGiveUpWithoutCloseSupportRetainsItsCloseDebt() {
+        when(childCloses.closeSupported()).thenReturn(false);
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "watching", "owner", now + 30_000, 63, 0, null, now, now));
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(null);
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("close_debt");
+        assertThat(row.get().childSessionId()).isEqualTo(CHILD);
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+        assertThat(harness.operations.get(0))
+                .containsEntry("stopReason", "child_failed")
+                .containsEntry("started", true);
+        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
+                anyString(), anyString());
+        when(childCloses.closeSupported()).thenReturn(true);
+        RelayRow parked = row.get();
+        row.set(new RelayRow(parked.tenantId(), parked.parentSessionId(),
+                parked.childRunId(), parked.creationKey(),
+                parked.childSessionId(), parked.state(), parked.claimedBy(),
+                now + 30_000, parked.attempts(), 0, parked.lastError(),
+                parked.createdAt(), now));
+        relay.scan();
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(row.get().state()).isEqualTo("done");
+    }
+
+    // A close-debt row may exhaust its attempt budget (the admission can
+    // falter past 64): the give-up chain behind that budget settles
+    // records and classifies `unknown` — both already done for this row.
+    // It must never run again on it: the debt arm only ever retries its
+    // own single verb, and a stopped falter discharges the same row.
+    @Test
+    void aCloseDebtRowNeverEntersTheGiveUpChain() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "close_debt", "owner", now + 30_000, 63, 0, null, now, now));
+        Mockito.doThrow(new IllegalStateException("admission refused"))
+                .when(childCloses).admitChildClose(TENANT, PARENT, CHILD,
+                        RUN);
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("close_debt");
+        assertThat(row.get().attempts()).isEqualTo(64);
+        assertThat(harness.operations).isEmpty();
+        Mockito.doReturn(null).when(childCloses)
+                .admitChildClose(TENANT, PARENT, CHILD, RUN);
+        RelayRow parked = row.get();
+        row.set(new RelayRow(parked.tenantId(), parked.parentSessionId(),
+                parked.childRunId(), parked.creationKey(),
+                parked.childSessionId(), parked.state(), parked.claimedBy(),
+                now + 30_000, parked.attempts(), 0, parked.lastError(),
+                parked.createdAt(), now));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(harness.operations).isEmpty();
+    }
+
+    // An answered acceptance short-circuits arms the relay owes nothing
+    // — never the retained close debt: a delivered run parked on a
+    // capability-less host discharges like every sibling.
+    @Test
+    void anAcceptedCloseDebtStillDischarges() {
+        when(store.hasAcceptance(TENANT, PARENT, RUN)).thenReturn(true);
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "close_debt", "owner", now + 30_000, 0, 0, null, now, now));
+        relay.scan();
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(harness.operations).isEmpty();
     }
 
     // R4-3: a faltered close admission parks the row BEFORE the fail

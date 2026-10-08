@@ -381,6 +381,30 @@ class ChildResultRelayStoreTest {
                 .isEmpty();
     }
 
+    // The capability-retained close debt rides the same cancelled arm:
+    // the record settled (delivery `cancelled`), so the parked ledger
+    // row is the only durable holder of the owed close admission, and
+    // the discovery page is the only thing that can ever drive it again.
+    @Test
+    void keepsACloseDebtDiscoverableOnTheCancelledArm() {
+        long now = 400_000L;
+        String session = UUID.randomUUID().toString();
+        insertRecordRow("scope-d", session, "run-debt", "child_agent",
+                "cancelled", "failed");
+        RelayRow row = relayStore.claim(TENANT, session, "run-debt",
+                "key-debt", "owner", now + 30_000, now);
+        relayStore.advance(row, "owner", "close_debt", "child-d",
+                now + 1_000, "close debt retained", now + 30_000, now);
+        assertThat(relayStore.findPendingChildren("owner", now + 1_000, 10))
+                .extracting(PendingChild::childRunId)
+                .containsExactly("run-debt");
+        // Terminal classifications drop it; the parked debt never is one.
+        relayStore.classify(relayStore.find(TENANT, session, "run-debt"),
+                "owner", "done", null, now + 2_000);
+        assertThat(relayStore.findPendingChildren("owner", now + 3_000, 10))
+                .isEmpty();
+    }
+
     @Test
     void readsInlineResourcesOnly() {
         jdbc.update("INSERT INTO qwen_managed_session_resource"
