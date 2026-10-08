@@ -4,14 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import vm from 'node:vm';
 import {
   buildWorkflowResultPreview,
   isWorkflowResultPreview,
   MAX_WORKFLOW_RESULT_PREVIEW_CHARS,
 } from './workflow-result-preview.js';
-import { MAX_FAILURE_LINE_CHARS } from './workflow-failure-lines.js';
+import {
+  MAX_FAILURE_LINE_CHARS,
+  REPORTED_FAILURE_KEYS,
+} from './workflow-failure-lines.js';
+import { sanitizeWorkflowText } from './workflow-result-format.js';
+
+vi.mock('./workflow-result-format.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./workflow-result-format.js')>();
+  return {
+    ...actual,
+    sanitizeWorkflowText: vi.fn(actual.sanitizeWorkflowText),
+  };
+});
 
 const MARKER = '… (truncated)';
 
@@ -122,6 +135,28 @@ describe('buildWorkflowResultPreview', () => {
     expect(preview.text).toBe(`${'a'.repeat(cut - 1)}${MARKER}`);
     expect(preview.text).not.toMatch(/[\uD800-\uDFFF]/);
   });
+
+  it('cleans only a bounded slice of a huge result', () => {
+    const sanitize = vi.mocked(sanitizeWorkflowText);
+    sanitize.mockClear();
+    const preview = buildWorkflowResultPreview('x'.repeat(5_000_000));
+    expect(preview.truncated).toBe(true);
+    expect(preview.text).toHaveLength(MAX_WORKFLOW_RESULT_PREVIEW_CHARS);
+    expect(preview.text.endsWith(MARKER)).toBe(true);
+    const cleaned = Math.max(...sanitize.mock.calls.map(([t]) => t.length));
+    expect(cleaned).toBeLessThanOrEqual(MAX_WORKFLOW_RESULT_PREVIEW_CHARS * 4);
+  });
+
+  it('still fills the preview when cleaning widens tabs', () => {
+    const preview = buildWorkflowResultPreview('a\t'.repeat(1_000_000));
+    expect(preview.truncated).toBe(true);
+    expect(preview.text).toHaveLength(MAX_WORKFLOW_RESULT_PREVIEW_CHARS);
+  });
+
+  it('reports a cut even when cleaning leaves the slice short', () => {
+    const preview = buildWorkflowResultPreview(`${'\x07'.repeat(200_000)}tail`);
+    expect(preview).toMatchObject({ text: MARKER, truncated: true });
+  });
 });
 
 describe('isWorkflowResultPreview', () => {
@@ -141,6 +176,14 @@ describe('isWorkflowResultPreview', () => {
     ).toBe(true);
   });
 
+  it('accepts a failure line for every reported key', () => {
+    const preview = buildWorkflowResultPreview(
+      Object.fromEntries(REPORTED_FAILURE_KEYS.map((key) => [key, 'x'])),
+    );
+    expect(preview.reportedFailures).toHaveLength(REPORTED_FAILURE_KEYS.length);
+    expect(isWorkflowResultPreview(preview)).toBe(true);
+  });
+
   it.each([
     ['not an object', 'text'],
     ['an array', []],
@@ -151,7 +194,13 @@ describe('isWorkflowResultPreview', () => {
     ],
     ['a truncated flag that is not boolean', { ...valid, truncated: 'no' }],
     ['missing failures', { text: 'x', truncated: false }],
-    ['too many failures', { ...valid, reportedFailures: ['a', 'b', 'c', 'd'] }],
+    [
+      'too many failures',
+      {
+        ...valid,
+        reportedFailures: [...REPORTED_FAILURE_KEYS, 'one more'],
+      },
+    ],
     ['a failure that is not a string', { ...valid, reportedFailures: [{}] }],
     [
       'a failure past the bound',

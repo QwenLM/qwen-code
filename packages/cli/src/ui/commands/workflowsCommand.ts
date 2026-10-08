@@ -20,7 +20,10 @@ import {
 import {
   buildFailureLines,
   MAX_FAILURE_LINE_CHARS,
+  REPORTED_FAILURE_KEYS,
+  reportedFailureLines,
 } from '@qwen-code/qwen-code-core/agents/workflow-failure-lines.js';
+import { isWorkflowRunId } from '@qwen-code/qwen-code-core/agents/runtime/workflow-saved.js';
 import {
   sanitizeWorkflowText,
   truncateWorkflowText,
@@ -133,10 +136,49 @@ interface SnapshotSource {
   file?: string;
 }
 
+/** Arrays and objects with nothing but more of the same, such as `[{}]`. */
+function isHollow(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  return Object.values(value).every(isHollow);
+}
+
+/**
+ * An older snapshot's result with the reported-failure fields plain JSON
+ * emptied left out: `{ errors: [new Error('x')] }` was stored as
+ * `{ errors: [{}] }`, which says nothing about what failed.
+ */
+function withoutHollowFailures(result: unknown): unknown {
+  if (typeof result !== 'object' || result === null || Array.isArray(result)) {
+    return result;
+  }
+  const kept: Record<string, unknown> = { ...result };
+  for (const key of REPORTED_FAILURE_KEYS) {
+    try {
+      if (isHollow(kept[key])) delete kept[key];
+    } catch {
+      // Nested too deep to check; show it as stored.
+    }
+  }
+  return kept;
+}
+
+/**
+ * Whether plain JSON may have emptied an older snapshot's result: an object
+ * can have held an Error, Map, or Set, and an unserializable result was
+ * replaced with a placeholder. Strings, numbers, and booleans are kept whole.
+ */
+function mayHaveLostDetail(result: unknown): boolean {
+  return (
+    (typeof result === 'object' && result !== null) ||
+    (typeof result === 'string' && result.startsWith('(non-JSON-serializable '))
+  );
+}
+
 /**
  * The preview a completed run is shown with. A live entry is rendered from
  * its value; a snapshot uses the preview it stored, or, when it predates
- * them, whatever its plain-JSON `result` kept.
+ * them, whatever its plain-JSON `result` kept. `legacy` marks an older
+ * snapshot whose result may be missing detail.
  */
 function resultPreviewFor(
   entry: WorkflowTask,
@@ -153,7 +195,14 @@ function resultPreviewFor(
   // Without a stored preview an absent `result` is not "returned nothing":
   // older snapshots dropped undefined and never-recorded alike.
   if (!Object.hasOwn(snapshot, 'result')) return { legacy: true };
-  return { preview: buildWorkflowResultPreview(snapshot.result), legacy: true };
+  const { result } = snapshot;
+  return {
+    preview: {
+      ...buildWorkflowResultPreview(result),
+      reportedFailures: reportedFailureLines(withoutHollowFailures(result)),
+    },
+    legacy: mayHaveLostDetail(result),
+  };
 }
 
 function indent(text: string, prefix: string): string {
@@ -168,7 +217,7 @@ async function confirmedSnapshotFile(
   config: Config,
   runId: string,
 ): Promise<string | undefined> {
-  if (!/^wf_[0-9a-f]+$/.test(runId) || !config.storage) return undefined;
+  if (!isWorkflowRunId(runId) || !config.storage) return undefined;
   return (await readWorkflowSnapshot(config, runId))
     ? config.storage.getWorkflowRunSnapshotPath(runId)
     : undefined;
@@ -271,6 +320,8 @@ function detailLines(
     if (!preview) {
       lines.push('    (this snapshot did not record a result)');
     } else {
+      // Cleaning can widen a stored preview (a tab becomes two spaces), so
+      // it is bounded again and the cut reported alongside a stored one.
       const sanitized = sanitizeWorkflowText(preview.text);
       const text = truncateWorkflowText(
         sanitized,

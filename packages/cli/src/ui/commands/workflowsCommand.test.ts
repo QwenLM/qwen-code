@@ -554,6 +554,16 @@ describe('workflowsCommand', () => {
       expect(error.length).toBeLessThan(4_200);
     });
 
+    it('strips bidi controls from failed agent labels', async () => {
+      live({
+        status: 'failed',
+        dispatches: [dispatch('build\u202ekcab\u2066', 'failed', 'HTTP 400')],
+      });
+      const result = await content(context, 'wf_live');
+      expect(result.content).toContain('    [buildkcab] HTTP 400');
+      expect(result.content).not.toMatch(/[\u202a-\u202e\u2066-\u2069]/);
+    });
+
     it('bounds a long result and says the preview was truncated', async () => {
       live({ status: 'completed', result: 'x'.repeat(30_000) });
       const result = await content(context, 'wf_live');
@@ -900,6 +910,47 @@ describe('workflowsCommand', () => {
       );
     });
 
+    it('leaves out reported failures plain JSON emptied in an older snapshot', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([
+        {
+          runId: 'wf_12',
+          // Stored from { errors: [Error], failed: [Map, Set] }; a literal
+          // '{}' string is data and stays.
+          result: { errors: [{}], failed: [{}, {}], error: '{}' },
+        },
+      ]);
+      const result = (await content(ctx, 'wf_12')).content;
+      expect(result).not.toContain('Reported errors');
+      expect(result).not.toContain('Reported failed');
+      expect(result).toContain('  Reported failures\n    Reported error: {}');
+      expect(result).toContain('older snapshot');
+    });
+
+    it.each([
+      ['a string', 'verbatim', '    verbatim'],
+      ['a number', 42, '    42'],
+    ])(
+      'does not call %s an older snapshot kept incomplete',
+      async (_kind, stored, shown) => {
+        getMock.mockReturnValue(undefined);
+        const ctx = await ctxWithSnapshots([
+          { runId: 'wf_13', result: stored },
+        ]);
+        const result = (await content(ctx, 'wf_13')).content;
+        expect(result).toContain(`  Result\n${shown}`);
+        expect(result).not.toContain('older snapshot');
+      },
+    );
+
+    it('still notes the placeholder an older snapshot stored for an unserializable result', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([
+        { runId: 'wf_14', result: '(non-JSON-serializable bigint)' },
+      ]);
+      expect((await content(ctx, 'wf_14')).content).toContain('older snapshot');
+    });
+
     it('cleans a hand-edited preview before showing it', async () => {
       getMock.mockReturnValue(undefined);
       const ctx = await ctxWithSnapshots([
@@ -936,6 +987,23 @@ describe('workflowsCommand', () => {
       expect((await content(ctx, 'wf_11')).content).toContain(
         '    (preview truncated to 25000 characters)',
       );
+    });
+
+    it('bounds a stored preview that cleaning widened, and says so', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([
+        {
+          runId: 'wf_15',
+          resultPreview: {
+            text: '\t'.repeat(25_000),
+            truncated: false,
+            reportedFailures: [],
+          },
+        },
+      ]);
+      const result = (await content(ctx, 'wf_15')).content;
+      expect(result).toContain(' … (truncated)');
+      expect(result).toContain('    (preview truncated to 25000 characters)');
     });
 
     it('prefers the live entry over a same-runId snapshot', async () => {

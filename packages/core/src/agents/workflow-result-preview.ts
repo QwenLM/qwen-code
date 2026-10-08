@@ -15,6 +15,7 @@
 
 import {
   MAX_FAILURE_LINE_CHARS,
+  REPORTED_FAILURE_KEYS,
   reportedFailureLines,
 } from './workflow-failure-lines.js';
 import {
@@ -26,6 +27,13 @@ import {
 /** UTF-16 code units of result text kept, truncation marker included. */
 export const MAX_WORKFLOW_RESULT_PREVIEW_CHARS = 25_000;
 
+/**
+ * Raw text cleaned before the final cut. Cleaning is per character, so a huge
+ * result is cut first; the slack covers tabs, which cleaning widens to two
+ * spaces, and controls, which it removes.
+ */
+const MAX_RAW_PREVIEW_CHARS = MAX_WORKFLOW_RESULT_PREVIEW_CHARS * 4;
+
 export interface WorkflowResultPreview {
   text: string;
   truncated: boolean;
@@ -36,10 +44,9 @@ export interface WorkflowResultPreview {
 export function buildWorkflowResultPreview(
   result: unknown,
 ): WorkflowResultPreview {
-  const text =
-    result === ''
-      ? '""'
-      : sanitizeWorkflowText(stringifyWorkflowResult(result, true));
+  const raw = result === '' ? '""' : stringifyWorkflowResult(result, true);
+  const cut = truncateWorkflowText(raw, MAX_RAW_PREVIEW_CHARS);
+  const text = sanitizeWorkflowText(cut);
   let reportedFailures: string[];
   try {
     reportedFailures = reportedFailureLines(result);
@@ -49,7 +56,11 @@ export function buildWorkflowResultPreview(
     reportedFailures = [];
   }
   const bounded = truncateWorkflowText(text, MAX_WORKFLOW_RESULT_PREVIEW_CHARS);
-  return { text: bounded, truncated: bounded !== text, reportedFailures };
+  return {
+    text: bounded,
+    truncated: cut !== raw || bounded !== text,
+    reportedFailures,
+  };
 }
 
 /** Shape and bounds a stored preview must keep; anything else is not one. */
@@ -68,8 +79,7 @@ export function isWorkflowResultPreview(
     text.length <= MAX_WORKFLOW_RESULT_PREVIEW_CHARS &&
     typeof truncated === 'boolean' &&
     Array.isArray(reportedFailures) &&
-    // One line each for `failed`, `errors`, and `error`.
-    reportedFailures.length <= 3 &&
+    reportedFailures.length <= REPORTED_FAILURE_KEYS.length &&
     reportedFailures.every(
       (line) =>
         typeof line === 'string' && line.length <= MAX_FAILURE_LINE_CHARS,
