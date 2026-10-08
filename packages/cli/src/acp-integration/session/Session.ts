@@ -14826,6 +14826,21 @@ export class Session implements SessionContext {
                           ToolErrorType.INVALID_TOOL_PARAMS,
                         );
                       }
+                      // The replacement is released when the call ends,
+                      // even if a later check rejects it; the original
+                      // will not run, so release it now.
+                      const original = builtInvocation;
+                      builtInvocation = replacement;
+                      if (original?.release && original !== replacement) {
+                        void Promise.resolve()
+                          .then(() => original.release?.())
+                          .catch((error: unknown) => {
+                            debugLogger.warn(
+                              'Tool invocation resource cleanup failed:',
+                              error,
+                            );
+                          });
+                      }
                       const replacementFlow = await evaluatePermissionFlow(
                         this.config,
                         replacement,
@@ -14920,7 +14935,6 @@ export class Session implements SessionContext {
                       }
                       cleanupSubAgentTracking();
                       invocation = replacement;
-                      builtInvocation = replacement;
                       args = replacementArgs;
                       confirmationDetails = replacementDetails;
                       trackAgentInvocation();

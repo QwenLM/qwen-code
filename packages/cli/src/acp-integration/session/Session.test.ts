@@ -37429,6 +37429,73 @@ describe('Session', () => {
               expect(executed).toEqual([]);
               recordedError('invalid replacement');
             });
+
+            describe('releases both invocations', () => {
+              function releasingWriteTool(
+                extra: (params: Record<string, unknown>) => object = () => ({}),
+              ) {
+                const released: unknown[] = [];
+                const spies = writeTool((params) => ({
+                  release: vi.fn(async () => {
+                    released.push(params['path']);
+                  }),
+                  ...extra(params),
+                }));
+                return { ...spies, released };
+              }
+
+              it('when the replacement runs', async () => {
+                const { executed, released } = releasingWriteTool();
+                await promptWith({ path: '/tmp/a.txt' });
+
+                expect(executed).toEqual(['/tmp/c.txt']);
+                await vi.waitFor(() =>
+                  expect(released.sort()).toEqual(['/tmp/a.txt', '/tmp/c.txt']),
+                );
+              });
+
+              it('when a permission rule denies the replacement', async () => {
+                mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+                  isToolEnabled: vi.fn().mockResolvedValue(true),
+                  hasRelevantRules: () => true,
+                  hasMatchingAskRule: () => false,
+                  evaluate: async (ctx: { filePath?: string }) =>
+                    ctx.filePath === '/tmp/c.txt' ? 'deny' : 'default',
+                  findMatchingDenyRule: () => 'Write(/tmp/c.txt)',
+                });
+                const { executed, released } = releasingWriteTool();
+                await promptWith({ path: '/tmp/a.txt' });
+
+                expect(executed).toEqual([]);
+                recordedError('Write(/tmp/c.txt)');
+                await vi.waitFor(() =>
+                  expect(released.sort()).toEqual(['/tmp/a.txt', '/tmp/c.txt']),
+                );
+              });
+
+              it('when the call is cancelled while checking the replacement', async () => {
+                const { executed, released } = releasingWriteTool((params) => ({
+                  getDefaultPermission: vi.fn(async () => {
+                    if (params['path'] === '/tmp/c.txt') {
+                      await session.cancelPendingPrompt();
+                    }
+                    return 'ask';
+                  }),
+                }));
+                await promptWith({ path: '/tmp/a.txt' });
+
+                expect(executed).toEqual([]);
+                expect(
+                  mockChatRecordingService.recordToolResult,
+                ).toHaveBeenCalledWith(
+                  expect.anything(),
+                  expect.objectContaining({ status: 'cancelled' }),
+                );
+                await vi.waitFor(() =>
+                  expect(released.sort()).toEqual(['/tmp/a.txt', '/tmp/c.txt']),
+                );
+              });
+            });
           });
         });
 
