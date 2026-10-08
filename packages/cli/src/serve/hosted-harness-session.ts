@@ -3747,7 +3747,15 @@ export function registerHostedHarnessSessionRoutes(
           break;
         }
         case 'accept': {
-          const notification = object(body?.['notification']);
+          const rawNotification = body?.['notification'];
+          if (
+            rawNotification !== undefined &&
+            rawNotification !== null &&
+            typeof rawNotification !== 'object'
+          ) {
+            return error(res, 400, 'invalid_child_operation');
+          }
+          const notification = object(rawNotification);
           if (
             notification !== null &&
             notification !== undefined &&
