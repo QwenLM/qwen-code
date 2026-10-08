@@ -1981,6 +1981,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           requestedExecutionAllowedTools,
           profilePromptHint,
           nestedExecutionAllowedTools,
+          agentConfig.getToolMode?.(),
         );
         if (forkedMessages.length > 0) {
           // Model had function calls: append tool responses + directive,
@@ -2015,6 +2016,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         requestedExecutionAllowedTools,
         profilePromptHint,
         nestedExecutionAllowedTools,
+        agentConfig.getToolMode?.(),
       );
     }
 

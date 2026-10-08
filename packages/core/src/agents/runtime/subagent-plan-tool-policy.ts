@@ -89,19 +89,40 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.MANAGE_MEMORY,
 ]);
 
+type AgentSkillContext = Pick<
+  Config,
+  'getToolMode' | 'getToolRegistry' | 'getVisibleTools'
+>;
+
+export function isAgentSkillEagerHidden(
+  context: AgentSkillContext,
+  registryWillBeRebuilt = false,
+): boolean {
+  const registry = context.getToolRegistry?.();
+  // Lazy factories may not have a Tool instance yet. Registry rebuilds copy
+  // discovery metadata, but deliberately leave transient reveals behind.
+  return (
+    context.getToolMode?.() === ToolMode.CodeMode &&
+    registry?.isPermissionDeferred?.(ToolNames.SKILL) === true &&
+    !context.getVisibleTools?.().has(ToolNames.SKILL) &&
+    (registryWillBeRebuilt ||
+      registry?.isDeferredToolRevealed?.(ToolNames.SKILL) !== true)
+  );
+}
+
 export function hasAgentSkillExecBinding(
-  context: Pick<Config, 'getToolMode' | 'getToolRegistry' | 'getVisibleTools'>,
+  context: AgentSkillContext,
+  registryWillBeRebuilt = false,
 ): boolean {
   const mode = context.getToolMode?.();
-  const registry = context.getToolRegistry?.();
   return (
     mode === ToolMode.CodeModeOnly ||
     (mode === ToolMode.CodeMode &&
-      !!registry?.getAllToolNames().includes(ToolNames.EXEC) &&
-      !(
-        registry?.isPermissionDeferred?.(ToolNames.SKILL) === true &&
-        !context.getVisibleTools?.().has(ToolNames.SKILL)
-      ))
+      !!context
+        .getToolRegistry?.()
+        ?.getAllToolNames()
+        .includes(ToolNames.EXEC) &&
+      !isAgentSkillEagerHidden(context, registryWillBeRebuilt))
   );
 }
 
@@ -122,7 +143,8 @@ export function hasAgentSkillExecBinding(
  * Callers supply whether exec bindings are reachable in the current mode and
  * registry. A finite list naming exec can therefore reach Skill without
  * naming it directly. CodeModeOnly retains eager-deferred nested targets;
- * Hybrid applies its final eager and permission scope in prepareTools().
+ * The eager-hidden input vetoes every route in Hybrid, including wildcards
+ * and explicit Skill entries. Other permission bounds stay in prepareTools().
  * Registry deny/exclude rules remain the bundled-reference resolver's concern;
  * this predicate supplies the per-agent policy that resolver cannot see.
  *
@@ -138,8 +160,9 @@ export function hasAgentSkillExecBinding(
 export function toolConfigAllowsSkill(
   toolConfig: ToolConfig | undefined,
   execBindingsAvailable = false,
+  skillEagerHidden = false,
 ): boolean {
-  if (EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL)) {
+  if (skillEagerHidden || EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL)) {
     return false;
   }
   // No per-agent config inherits the whole registry.

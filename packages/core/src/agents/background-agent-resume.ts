@@ -77,6 +77,7 @@ import {
 } from './runtime/agent-core.js';
 import {
   hasAgentSkillExecBinding,
+  isAgentSkillEagerHidden,
   toolConfigAllowsSkill,
 } from './runtime/subagent-plan-tool-policy.js';
 import { toolSearchBridgeSentence } from '../skills/bundled-reference.js';
@@ -141,6 +142,7 @@ const CONTAINER_EXECUTION_BLOCKED_REASON =
 function subagentWillHaveSkillTool(
   subagentConfig: SubagentConfig | undefined,
   execBindingsAvailable = false,
+  skillEagerHidden = false,
 ): boolean {
   // Launch reads `config.tools?.length ? resolveToolNames(config.tools) : ['*']`,
   // and `resolveToolNames`' `for...of` walks a bare string per character,
@@ -169,6 +171,7 @@ function subagentWillHaveSkillTool(
         : undefined,
     },
     execBindingsAvailable,
+    skillEagerHidden,
   );
 }
 
@@ -1019,6 +1022,7 @@ export class BackgroundAgentResumeService {
                 includeAvailableSkillsReminder: subagentWillHaveSkillTool(
                   target.subagentConfig,
                   hasAgentSkillExecBinding(activeAgentConfig),
+                  isAgentSkillEagerHidden(activeAgentConfig),
                 ),
               })
             )[0],

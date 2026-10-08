@@ -1433,18 +1433,16 @@ export class ToolRegistry {
     const candidates: string[] = [];
     let totalChars = 0;
     const execTool = this.tools.get(ToolNames.EXEC);
-    const codeModeBindings =
-      this.config.getToolMode?.() === ToolMode.CodeMode &&
-      execTool !== undefined &&
-      this.isToolAvailable(execTool.name) &&
-      this.isToolDeclared(execTool.name)
-        ? new Map(
-            this.getCodeModeBindingPlan().bindings.map((binding) => [
-              binding.name,
-              binding,
-            ]),
-          )
+    const declaredNames =
+      this.config.getToolMode?.() === ToolMode.CodeMode
+        ? new Set(this.getFunctionDeclarations().map((tool) => tool.name))
         : undefined;
+    const codeModePlan = declaredNames?.has(ToolNames.EXEC)
+      ? this.getCodeModeBindingPlan()
+      : undefined;
+    const codeModeBindings = codeModePlan
+      ? new Map(codeModePlan.bindings.map((binding) => [binding.name, binding]))
+      : undefined;
     for (const tool of this.tools.values()) {
       if (!this.isToolAvailable(tool.name)) continue;
       if (!this.isEffectivelyDeferred(tool) || tool.alwaysLoad) continue;
@@ -1463,6 +1461,46 @@ export class ToolRegistry {
           ? augmentDeclarationForCodeMode(tool.schema, binding)
           : tool.schema,
       ).length;
+    }
+    if (codeModePlan && execTool && declaredNames) {
+      const candidateNames = new Set(candidates);
+      // Compare complete exec declarations without changing registry state.
+      // Treat prior reveals as hidden in the baseline so repeated preloads
+      // keep charging their footprint instead of ratcheting past the budget.
+      const execChars = (revealed: boolean): number => {
+        const topLevelBindingNames = new Set(
+          [...declaredNames].filter(
+            (name): name is string =>
+              name !== undefined && !candidateNames.has(name),
+          ),
+        );
+        if (revealed) {
+          for (const name of candidates) topLevelBindingNames.add(name);
+        }
+        const hasToolCallBridge =
+          topLevelBindingNames.has(ToolNames.TOOL_SEARCH) &&
+          topLevelBindingNames.has(ToolNames.TOOL_CALL);
+        return JSON.stringify(
+          buildExecDeclaration(
+            execTool,
+            {
+              ...codeModePlan,
+              bindings: codeModePlan.bindings.map((binding) =>
+                candidateNames.has(binding.name)
+                  ? { ...binding, deferred: !revealed }
+                  : binding,
+              ),
+            },
+            {
+              codeModeOnly: false,
+              topLevelBindingNames,
+              canSearchDeferredSchemas: hasToolCallBridge,
+              hasToolCallBridge,
+            },
+          ),
+        ).length;
+      };
+      totalChars += Math.max(0, execChars(true) - execChars(false));
     }
     const estimatedTokens = Math.ceil(totalChars / CHARS_PER_TOKEN);
     if (candidates.length === 0) {

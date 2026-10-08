@@ -4,6 +4,7 @@ import type { Config } from '../../config/config.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import { ToolNames } from '../tool-names.js';
+import { ToolMode } from '../code-mode.js';
 import {
   getStartupContextLength,
   isSystemReminderContent,
@@ -310,6 +311,7 @@ export function buildForkedMessages(
   executionAllowedTools?: readonly string[],
   promptHint?: string,
   nestedExecutionAllowedTools?: readonly string[],
+  toolMode?: ToolMode,
 ): Content[] {
   const toolUseParts =
     assistantMessage.parts?.filter((part) => part.functionCall) || [];
@@ -362,6 +364,7 @@ export function buildForkedMessages(
           executionAllowedTools,
           promptHint,
           nestedExecutionAllowedTools,
+          toolMode,
         ),
       },
     ],
@@ -416,13 +419,18 @@ export function buildChildMessage(
   executionAllowedTools?: readonly string[],
   promptHint?: string,
   nestedExecutionAllowedTools?: readonly string[],
+  toolMode?: ToolMode,
 ): string {
   const executionRestriction =
     nestedExecutionAllowedTools !== undefined
       ? `\n\nTOOL EXECUTION RESTRICTION:
-You may call exec and tools matched by this direct-call allowlist: ${JSON.stringify(executionAllowedTools ?? [])}.
+${
+  toolMode === ToolMode.CodeModeOnly
+    ? `You may call exec and, when declared, tool_search. Ordinary tools are reachable only inside exec; other declared direct-only control tools must also match this allowlist: ${JSON.stringify(executionAllowedTools ?? [])}.`
+    : `You may call exec and declared tools matched by this direct-call allowlist: ${JSON.stringify(executionAllowedTools ?? [])}.`
+}
 Inside exec, only these exact nested tool names are permitted: ${JSON.stringify(nestedExecutionAllowedTools)}.
-Nested permission does not permit direct calls to those tools.`
+A nested allowance alone does not authorize a direct call; direct calls must satisfy the mode and direct-call allowlist above.`
       : executionAllowedTools === undefined
         ? ''
         : executionAllowedTools.length === 0

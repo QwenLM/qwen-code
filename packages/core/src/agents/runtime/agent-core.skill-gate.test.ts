@@ -311,6 +311,10 @@ describe('AgentCore skill-gate inputs', () => {
           );
         }
         expect(registry.getTool(ToolNames.EXEC)).toBeUndefined();
+        registry.registerFactory(
+          ToolNames.SKILL,
+          async () => new MockTool({ name: ToolNames.SKILL }),
+        );
         const core = new AgentCore(
           'lazy-exec-skill-listing',
           config,
@@ -369,7 +373,9 @@ describe('AgentCore skill-gate inputs', () => {
         } else if (visibility === 'revealed') {
           registry.revealDeferredTool(ToolNames.SKILL);
         }
-        const parentExecBinding = hasAgentSkillExecBinding(config);
+        expect(hasAgentSkillExecBinding(config)).toBe(
+          mode === ToolMode.CodeModeOnly || visibility !== 'hidden',
+        );
         const childRegistry = new ToolRegistry(config);
         childRegistry.registerTool(new ExecTool(config));
         childRegistry.registerPermissionDeferredFactory(
@@ -381,7 +387,9 @@ describe('AgentCore skill-gate inputs', () => {
         expect(childRegistry.isDeferredToolRevealed(ToolNames.SKILL)).toBe(
           false,
         );
-        expect(hasAgentSkillExecBinding(config)).toBe(parentExecBinding);
+        expect(hasAgentSkillExecBinding(config)).toBe(
+          mode === ToolMode.CodeModeOnly || visibility === 'visible',
+        );
         const core = new AgentCore(
           'skill-route',
           config,

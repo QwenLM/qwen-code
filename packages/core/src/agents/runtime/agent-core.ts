@@ -149,6 +149,7 @@ import {
   isPlanLifecycleToolUnavailableInSubagent,
   isToolExcludedForCurrentContext,
   hasAgentSkillExecBinding,
+  isAgentSkillEagerHidden,
   matchesAgentToolBlocklist,
   toolConfigAllowsSkill,
 } from './subagent-plan-tool-policy.js';
@@ -658,9 +659,19 @@ export class AgentCore {
    * disallowed `skill` was still shown every skill it could not load.
    */
   private willHaveSkillTool(): boolean {
+    if (
+      this.runtimeContext.getToolMode?.() === ToolMode.CodeMode &&
+      !this.runtimeContext
+        .getToolRegistry()
+        .getAllToolNames()
+        .includes(ToolNames.SKILL)
+    ) {
+      return false;
+    }
     return toolConfigAllowsSkill(
       this.toolConfig,
       hasAgentSkillExecBinding(this.runtimeContext),
+      isAgentSkillEagerHidden(this.runtimeContext),
     );
   }
 
