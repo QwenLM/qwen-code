@@ -19,6 +19,7 @@ import {
   listExternalTasksForCaller,
   readExternalCallerFile,
   recordExternalTaskResult,
+  releaseExternalReservation,
   reserveExternalSubmission,
   type ExternalSubmission,
 } from './external-intake.js';
@@ -98,6 +99,60 @@ describe('external intake', () => {
     expect(
       (await readExternalCallerFile(PROJECT_ROOT, 'share_1')).tasks,
     ).toHaveLength(1);
+  });
+
+  it('releases a reservation whose session nothing will be posted into', async () => {
+    const first = await reserveExternalSubmission(PROJECT_ROOT, submission);
+    await attachExternalSession(
+      PROJECT_ROOT,
+      'share_1',
+      first.entry.key,
+      SESSION,
+    );
+
+    await releaseExternalReservation(
+      PROJECT_ROOT,
+      'share_1',
+      first.entry.key,
+      SESSION,
+    );
+
+    const file = await readExternalCallerFile(PROJECT_ROOT, 'share_1');
+    // The reservation itself stays — its key is what makes a retry the same
+    // request — but it no longer names a session that is gone, and the
+    // context goes with it so the removed session is not continuable.
+    expect(file.tasks).toHaveLength(1);
+    expect(file.tasks[0]?.sessionId).toBeUndefined();
+    expect(file.contexts).toEqual([]);
+
+    const retry = await reserveExternalSubmission(PROJECT_ROOT, submission);
+    expect(retry).toMatchObject({ outcome: 'reserved' });
+    expect(retry.entry.sessionId).toBeUndefined();
+  });
+
+  it('keeps a context another reservation still names when releasing', async () => {
+    await accept(submission, 'sr_1');
+    const second = await reserveExternalSubmission(PROJECT_ROOT, {
+      ...submission,
+      messageId: 'msg-2',
+      contextId: SESSION,
+    });
+
+    await releaseExternalReservation(
+      PROJECT_ROOT,
+      'share_1',
+      second.entry.key,
+      SESSION,
+    );
+
+    const file = await readExternalCallerFile(PROJECT_ROOT, 'share_1');
+    expect(file.tasks.map((task) => task.sessionId)).toEqual([
+      SESSION,
+      undefined,
+    ]);
+    expect(file.contexts).toEqual([
+      expect.objectContaining({ sessionId: SESSION, agentId: 'ag_lead' }),
+    ]);
   });
 
   it('refuses a reused key with different content', async () => {

@@ -409,6 +409,38 @@ export async function attachExternalSession(
   });
 }
 
+/**
+ * Undoes {@link attachExternalSession} for a session nothing will ever be
+ * posted into, because the post was permanently refused. Without it the
+ * reservation keeps naming an empty chat session in the owner's list and
+ * points every retry at that session. Removing the session itself is the
+ * caller's, and must happen after this: the other order leaves a reservation
+ * naming a session that is already gone.
+ *
+ * Drops the context only when no other entry names that session. A context is
+ * what makes a `contextId` this caller may continue, so one another task
+ * still needs stays.
+ */
+export async function releaseExternalReservation(
+  projectRoot: string,
+  callerId: string,
+  key: string,
+  sessionId: string,
+): Promise<void> {
+  await updateExternalCallerFile(projectRoot, callerId, (file) => {
+    const entry = file.tasks.find((candidate) => candidate.key === key);
+    if (!entry || entry.sessionId !== sessionId) return;
+    delete entry.sessionId;
+    const stillNamed = file.tasks.some(
+      (candidate) => candidate.sessionId === sessionId,
+    );
+    if (stillNamed) return;
+    file.contexts = file.contexts.filter(
+      (context) => context.sessionId !== sessionId,
+    );
+  });
+}
+
 /** Step 3: records the run the post started. Returns the updated entry. */
 export async function completeExternalSubmission(
   projectRoot: string,
