@@ -1611,6 +1611,13 @@ export function createDaemonSessionActions({
           discardAttachments,
           options?.signal,
         );
+        // Only a cancelled upload has a payload that must not be submitted.
+        // Without uploads the prompt still goes through admission so the
+        // accepted id can be removed exactly by the aborted-signal path below.
+        if (options?.signal?.aborted && uploaded.references.length > 0) {
+          await removeUploadedAttachments(session, uploaded.references);
+          options.signal.throwIfAborted();
+        }
       } catch (error) {
         if (shouldAppendOptimisticMessage && !optimisticMessageAppended) {
           store.appendLocalUserMessage(

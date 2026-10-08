@@ -535,6 +535,8 @@ describe('Session', () => {
     recordSlashCommand: ReturnType<typeof vi.fn>;
     recordNotification: ReturnType<typeof vi.fn>;
     recordNotificationStrict: ReturnType<typeof vi.fn>;
+    recordExternalAgentRecordStrict: ReturnType<typeof vi.fn>;
+    findExternalAgentRecord: ReturnType<typeof vi.fn>;
     recordRealtimeConversation: ReturnType<typeof vi.fn>;
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
@@ -922,6 +924,12 @@ describe('Session', () => {
       recordSlashCommand: vi.fn(),
       recordNotification: vi.fn(),
       recordNotificationStrict: vi.fn().mockResolvedValue(undefined),
+      recordExternalAgentRecordStrict: vi.fn().mockResolvedValue({
+        uuid: 'record-1',
+        timestamp: '2026-10-06T01:02:03.000Z',
+        created: true,
+      }),
+      findExternalAgentRecord: vi.fn().mockResolvedValue(undefined),
       recordRealtimeConversation: vi.fn().mockResolvedValue(undefined),
       recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
@@ -1160,6 +1168,202 @@ describe('Session', () => {
       mockClient,
       mockSettings,
     );
+  });
+
+  describe('session agent records', () => {
+    const request = {
+      kind: 'agent_message' as const,
+      recordKey: 'run-1:result',
+      modelText: '<agent_message from="claude-B">done</agent_message>',
+      payload: {
+        displayText: 'done',
+        author: { agentId: 'agent-1', name: 'claude-B' },
+        runId: 'run-1',
+        status: 'completed' as const,
+      },
+    };
+
+    it('writes once per recordKey, shows it live, and starts no turn', async () => {
+      type Written = { uuid: string; timestamp: string; created: boolean };
+      let finishWrite!: (written: Written) => void;
+      mockChatRecordingService.recordExternalAgentRecordStrict.mockImplementationOnce(
+        () =>
+          new Promise<Written>((resolve) => {
+            finishWrite = resolve;
+          }),
+      );
+
+      const first = session.appendExternalRecord(request);
+      // A retry while the first write is still in flight must not write.
+      const retry = session.appendExternalRecord(request);
+      await vi.waitFor(() =>
+        expect(
+          mockChatRecordingService.recordExternalAgentRecordStrict,
+        ).toHaveBeenCalled(),
+      );
+      finishWrite({
+        uuid: 'record-1',
+        timestamp: '2026-10-06T01:02:03.000Z',
+        created: true,
+      });
+      await expect(first).resolves.toEqual({
+        recordId: 'record-1',
+        created: true,
+      });
+      await expect(retry).resolves.toEqual({
+        recordId: 'record-1',
+        created: false,
+      });
+      await expect(session.appendExternalRecord(request)).resolves.toEqual({
+        recordId: 'record-1',
+        created: false,
+      });
+
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).toHaveBeenCalledOnce();
+      const agentUpdates = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([notification]) => notification.update)
+        .filter((update) => update._meta?.['qwenAgentMessage'] !== undefined);
+      expect(agentUpdates).toHaveLength(1);
+      expect(agentUpdates[0]).toMatchObject({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'done' },
+        _meta: {
+          qwenDiscreteMessage: true,
+          qwenAgentMessage: { kind: 'agent_message', runId: 'run-1' },
+          qwenTranscript: {
+            segmentId: 'agent:run-1',
+            sourceRecordIds: ['record-1'],
+          },
+          // The record's own timestamp, as replay projects it.
+          timestamp: Date.parse('2026-10-06T01:02:03.000Z'),
+        },
+      });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(session.pendingExternalAgentContext).toEqual([request.modelText]);
+    });
+
+    it('returns a record already in the transcript, even mid-turn', async () => {
+      // A restarted child: nothing in memory, the record is on disk.
+      mockChatRecordingService.findExternalAgentRecord.mockResolvedValueOnce({
+        uuid: 'record-0',
+        timestamp: '2026-10-06T00:00:00.000Z',
+      });
+      vi.spyOn(session, 'isTurnIdle').mockReturnValue(false);
+
+      await expect(session.appendExternalRecord(request)).resolves.toEqual({
+        recordId: 'record-0',
+        created: false,
+      });
+      // Remembered: the next repeat does not consult the transcript again.
+      await expect(session.appendExternalRecord(request)).resolves.toEqual({
+        recordId: 'record-0',
+        created: false,
+      });
+      expect(
+        mockChatRecordingService.findExternalAgentRecord,
+      ).toHaveBeenCalledOnce();
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).not.toHaveBeenCalled();
+      expect(session.pendingExternalAgentContext).toEqual([]);
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.some(
+            ([notification]) =>
+              notification.update._meta?.['qwenAgentMessage'] !== undefined,
+          ),
+      ).toBe(false);
+    });
+
+    it('defers once per key mid-turn and writes the queue on close', async () => {
+      const idle = vi.spyOn(session, 'isTurnIdle').mockReturnValue(false);
+      const deferred = { recordId: '', created: true, deferred: true };
+      await expect(session.appendExternalRecord(request)).resolves.toEqual(
+        deferred,
+      );
+      await expect(session.appendExternalRecord(request)).resolves.toEqual(
+        deferred,
+      );
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).not.toHaveBeenCalled();
+
+      // The close path: turns settled, the recorder still open.
+      session.beginClose();
+      idle.mockRestore();
+      await session.flushDeferredExternalRecords();
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).toHaveBeenCalledOnce();
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).toHaveBeenCalledWith(request);
+      // Nothing is shown or queued for a session that is going away.
+      expect(session.pendingExternalAgentContext).toEqual([]);
+
+      // Written: a re-send now gets the record id back without a write.
+      await expect(session.appendExternalRecord(request)).resolves.toEqual({
+        recordId: 'record-1',
+        created: false,
+      });
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).toHaveBeenCalledOnce();
+    });
+
+    it('keeps send order when a record arrives behind a deferred one', async () => {
+      const idle = vi.spyOn(session, 'isTurnIdle').mockReturnValue(false);
+      await session.appendExternalRecord(request);
+      // The turn settles before the queue drains; a later record must queue
+      // behind the earlier one instead of being written first.
+      idle.mockReturnValue(true);
+      const later = { ...request, recordKey: 'run-2:result' };
+      await expect(session.appendExternalRecord(later)).resolves.toEqual({
+        recordId: '',
+        created: true,
+        deferred: true,
+      });
+      await vi.waitFor(() =>
+        expect(
+          mockChatRecordingService.recordExternalAgentRecordStrict,
+        ).toHaveBeenCalledTimes(2),
+      );
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict.mock.calls.map(
+          (call) => (call[0] as { recordKey: string }).recordKey,
+        ),
+      ).toEqual(['run-1:result', 'run-2:result']);
+    });
+
+    it('drops deferred records it cannot write on close', async () => {
+      vi.spyOn(session, 'isTurnIdle').mockReturnValue(false);
+      await session.appendExternalRecord(request);
+      mockChatRecordingService.recordExternalAgentRecordStrict.mockRejectedValueOnce(
+        new Error('writer closed'),
+      );
+      await expect(
+        session.flushDeferredExternalRecords(),
+      ).resolves.toBeUndefined();
+      // The queue is empty afterwards: a second flush writes nothing.
+      await session.flushDeferredExternalRecords();
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).toHaveBeenCalledOnce();
+    });
+
+    it('refuses to write once the session is closing', async () => {
+      session.dispose();
+      await expect(session.appendExternalRecord(request)).rejects.toThrow(
+        /closing/,
+      );
+      expect(
+        mockChatRecordingService.recordExternalAgentRecordStrict,
+      ).not.toHaveBeenCalled();
+    });
   });
 
   describe('MCP App tools', () => {
@@ -2973,6 +3177,143 @@ describe('Session', () => {
     await expect(session.assertCanStartTurn()).resolves.toBeUndefined();
     await session.releaseManagedConversationBinding(expectation);
     expect(onRelease).toHaveBeenCalledOnce();
+  });
+
+  it('retries a provisional activation refused by a liftable quarantine', async () => {
+    session.dispose();
+    vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+    vi.mocked(mockConfig.isProvisionalWorkspace).mockReturnValue(true);
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const expectation = {
+      canonicalSessionId: 'test-session-id',
+      root: { canonicalPath: '/managed', device: 1, inode: 2 },
+      child: {
+        name: 'child',
+        canonicalPath: '/managed/child',
+        device: 1,
+        inode: 3,
+      },
+    };
+    const assertIdentity = vi.fn().mockResolvedValue(undefined);
+    // The quarantine refusal lifts once the unproven stop is proven: the
+    // first commit meets it, the second must be free to retry.
+    const quarantined = new RequestError(
+      -32024,
+      'The Managed engine is quarantined.',
+      { errorKind: 'managed_engine_quarantined' },
+    );
+    const activate = vi
+      .fn()
+      .mockRejectedValueOnce(quarantined)
+      .mockResolvedValue(undefined);
+    session.installManagedConversationActivation(activate);
+    session.installPendingManagedConversationBinding(
+      expectation,
+      assertIdentity,
+    );
+
+    await expect(
+      session.commitManagedConversationBinding(expectation),
+    ).rejects.toBe(quarantined);
+    await expect(
+      session.commitManagedConversationBinding(expectation),
+    ).resolves.toBeUndefined();
+    expect(activate).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects with the peer's own error when its data is null", async () => {
+    session.dispose();
+    vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+    vi.mocked(mockConfig.isProvisionalWorkspace).mockReturnValue(true);
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const expectation = {
+      canonicalSessionId: 'test-session-id',
+      root: { canonicalPath: '/managed', device: 1, inode: 2 },
+      child: {
+        name: 'child',
+        canonicalPath: '/managed/child',
+        device: 2,
+        inode: 4,
+      },
+    };
+    const assertIdentity = vi.fn().mockResolvedValue(undefined);
+    // A peer that serializes an absent `data` as null: typeof null passes a
+    // bare typeof === 'object' probe, and a refusal guard that dereferences
+    // it throws a TypeError inside the catch — wedging the activation on a
+    // rejected promise that masks this error forever.
+    const peerError = { code: -32000, message: 'peer', data: null };
+    const activate = vi
+      .fn()
+      .mockRejectedValueOnce(peerError)
+      .mockResolvedValue(undefined);
+    session.installManagedConversationActivation(activate);
+    session.installPendingManagedConversationBinding(
+      expectation,
+      assertIdentity,
+    );
+
+    await expect(
+      session.commitManagedConversationBinding(expectation),
+    ).rejects.toBe(peerError);
+    // Not the liftable quarantine refusal: the activation poisons with the
+    // peer's own error, terminally, instead of wedging on a TypeError.
+    await expect(
+      session.commitManagedConversationBinding(expectation),
+    ).rejects.toBe(peerError);
+    expect(activate).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a terminal activation failure poisoned', async () => {
+    session.dispose();
+    vi.mocked(mockConfig.getSessionSourceType).mockReturnValue('standalone');
+    vi.mocked(mockConfig.isProvisionalWorkspace).mockReturnValue(true);
+    vi.mocked(mockConfig.getTargetDir).mockReturnValue('/managed/child');
+    session = new Session(
+      'test-session-id',
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const expectation = {
+      canonicalSessionId: 'test-session-id',
+      root: { canonicalPath: '/managed', device: 1, inode: 2 },
+      child: {
+        name: 'child',
+        canonicalPath: '/managed/child',
+        device: 1,
+        inode: 3,
+      },
+    };
+    const assertIdentity = vi.fn().mockResolvedValue(undefined);
+    // Any refusal that is not the liftable quarantine stays terminal: the
+    // activation never retries behind a commit's back.
+    const terminal = new Error('The Managed host is shutting down.');
+    const activate = vi.fn().mockRejectedValue(terminal);
+    session.installManagedConversationActivation(activate);
+    session.installPendingManagedConversationBinding(
+      expectation,
+      assertIdentity,
+    );
+
+    await expect(
+      session.commitManagedConversationBinding(expectation),
+    ).rejects.toBe(terminal);
+    await expect(
+      session.commitManagedConversationBinding(expectation),
+    ).rejects.toBe(terminal);
+    expect(activate).toHaveBeenCalledOnce();
   });
 
   it('drains automatic work that was queued before standalone release', async () => {
@@ -18906,6 +19247,9 @@ describe('Session', () => {
       it.each(['success', 'build error', 'execute error'] as const)(
         'routes tool_call through a hidden deferred tool in ACP: %s',
         async (outcome) => {
+          const { DEFERRED_TOOL_CALL_REFUSAL_PREFIX } = await import(
+            '@qwen-code/qwen-code-core/tools/tool-call.js'
+          );
           mockConfig.getApprovalMode = vi
             .fn()
             .mockReturnValue(ApprovalMode.YOLO);
@@ -19019,7 +19363,7 @@ describe('Session', () => {
                 : {
                     error:
                       outcome === 'build error'
-                        ? `[tool_call bridge refused] Deferred tool "${target.name}" (called through tool_call) rejected the arguments: params must have required property 'title'. Pass arguments matching the schema returned by tool_search for "${target.name}".`
+                        ? `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}Deferred tool "${target.name}" (called through tool_call) rejected the arguments: params must have required property 'title'. Pass arguments matching the schema returned by tool_search for "${target.name}".`
                         : 'Remote service unavailable',
                   },
           });
@@ -41548,6 +41892,9 @@ describe('Session', () => {
           }),
         ]),
         expect.anything(),
+        // Nested Code Mode originals are recorded with the branch's new
+        // options argument marking them 'code_mode_tool_result'.
+        expect.objectContaining({ subtype: 'code_mode_tool_result' }),
       );
 
       const direct = await (
@@ -41694,6 +42041,11 @@ describe('Session', () => {
           'exec-parent:code:1',
           'exec-parent',
         ]);
+        expect(recorded.map(([, , options]) => options)).toEqual([
+          { subtype: 'code_mode_tool_result' },
+          { subtype: 'code_mode_tool_result' },
+          undefined,
+        ]);
         for (const [parts, metadata] of recorded) {
           expect(parts).toHaveLength(1);
           expect(parts[0].functionResponse?.id).toBe(metadata.callId);
@@ -41704,6 +42056,32 @@ describe('Session', () => {
               value.responseParts[0].functionResponse.response.output,
           ),
         ).toEqual(['read_b', 'read_a']);
+      });
+
+      it('keeps the Goal turn stamp on nested Code Mode originals', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-code-mode',
+          revision: 1,
+          turnId: 'turn-code-mode',
+        };
+        const nested = nestedTool('read_nested', core.Kind.Read, async () =>
+          output('nested fact'),
+        );
+        const onResult = vi.fn();
+        await core.goalTurnContext.run(permit, () =>
+          runCode([nested], (runtime, signal) =>
+            runtime.dispatch(nested.name, {}, signal, onResult),
+          ),
+        );
+        const recorded = mockChatRecordingService.recordToolResult.mock.calls;
+        expect(recorded.map(([, metadata]) => metadata.callId)).toEqual([
+          'exec-parent:code:1',
+          'exec-parent',
+        ]);
+        expect(recorded.map(([, , options]) => options)).toEqual([
+          { goalContext: permit, subtype: 'code_mode_tool_result' },
+          { goalContext: permit, provenance: 'execution_output' },
+        ]);
       });
 
       it('overlaps independent Bash calls with commands that are not read-only', async () => {

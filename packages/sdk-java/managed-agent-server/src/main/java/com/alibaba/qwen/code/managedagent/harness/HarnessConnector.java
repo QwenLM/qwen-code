@@ -12,6 +12,16 @@ public interface HarnessConnector extends AutoCloseable {
         return false;
     }
 
+    default boolean supportsLifecycle() { return false; }
+
+    default JsonNode settleLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+        throw new UnsupportedOperationException("Hosted lifecycle is unavailable");
+    }
+
+    default void detachLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+        throw new UnsupportedOperationException("Hosted lifecycle is unavailable");
+    }
+
     Attachment createOrLoad(String tenantId, String sessionId,
             boolean loadExisting);
 
@@ -27,6 +37,19 @@ public interface HarnessConnector extends AutoCloseable {
      */
     default Attachment recoverManagedRuntime(String tenantId, String sessionId,
             boolean cancellation) {
+        throw new UnsupportedOperationException(
+                "Managed Runtime recovery is unavailable");
+    }
+
+    /**
+     * Sends the cancellation takeover load even when this Harness already
+     * serves the Session: a plain cancel the daemon refused with
+     * {@code hosted_turn_recovery_required} is payable only by that load,
+     * while the healthy-attachment shortcut would answer from cache and
+     * never tell the daemon (R9-P1-2).
+     */
+    default Attachment recoverManagedCancellation(String tenantId,
+            String sessionId) {
         throw new UnsupportedOperationException(
                 "Managed Runtime recovery is unavailable");
     }

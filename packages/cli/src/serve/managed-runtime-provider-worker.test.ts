@@ -53,6 +53,7 @@ import {
 import {
   MANAGED_RUNTIME_PROVIDER_PROTOCOL,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
+  MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
   managedRuntimeProviderLimit,
   type ManagedRuntimeProviderSession,
 } from './managed-runtime-provider-protocol.js';
@@ -887,6 +888,95 @@ describe('Managed Runtime provider worker', () => {
     expect(backgroundShell.status).toBe(409);
     expect(await backgroundShell.json()).toMatchObject({
       code: 'managed_runtime_provider_operation_failed',
+    });
+  });
+
+  it.each([false, true])(
+    'reads Workspace context without a provider Session, confined to the Workspace (linked root: %s)',
+    async (linkedRoot) => {
+      if (linkedRoot) {
+        await worker.close();
+        const linkedWorkspace = path.join(storage, 'workspace-link');
+        fs.symlinkSync(workspace, linkedWorkspace, 'dir');
+        worker = await startManagedRuntimeAttestationWorker({
+          ...BOOT,
+          workspaceCwd: linkedWorkspace,
+        });
+      }
+      fs.writeFileSync(path.join(workspace, 'QWEN.md'), 'project rules');
+      const outside = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-provider-outside-'),
+      );
+      try {
+        // A planted symlink must not promote a host file into the system
+        // instruction.
+        fs.writeFileSync(path.join(outside, 'secret.txt'), 'host-secret');
+        fs.symlinkSync(
+          path.join(outside, 'secret.txt'),
+          path.join(workspace, 'AGENTS.md'),
+        );
+        expect(await control({ kind: 'workspace-context' })).toEqual({
+          files: [{ name: 'QWEN.md', text: 'project rules' }],
+        });
+
+        fs.rmSync(path.join(workspace, 'AGENTS.md'));
+        fs.writeFileSync(
+          path.join(workspace, 'AGENTS.md'),
+          'x'.repeat(MANAGED_WORKSPACE_CONTEXT_FILE_CHARS + 10),
+        );
+        const { files } = await control<{
+          files: Array<{ name: string; text: string }>;
+        }>({ kind: 'workspace-context' });
+        expect(files.map((file) => file.name)).toEqual([
+          'QWEN.md',
+          'AGENTS.md',
+        ]);
+        expect(files[1].text).toHaveLength(
+          MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
+        );
+        expect(files[1].text).toContain('[Truncated');
+
+        // An astral character at the cut must not leave a lone surrogate:
+        // one of the two offsets splits a pair whatever the note's length.
+        for (const prefix of ['', 'x']) {
+          fs.writeFileSync(
+            path.join(workspace, 'AGENTS.md'),
+            prefix + '😀'.repeat(MANAGED_WORKSPACE_CONTEXT_FILE_CHARS),
+          );
+          const astral = await control<{
+            files: Array<{ name: string; text: string }>;
+          }>({ kind: 'workspace-context' });
+          expect(astral.files[1].text).not.toMatch(
+            /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+          );
+          expect(astral.files[1].text).toContain('[Truncated');
+        }
+
+        // One file under both names is injected once.
+        fs.rmSync(path.join(workspace, 'AGENTS.md'));
+        fs.symlinkSync('QWEN.md', path.join(workspace, 'AGENTS.md'));
+        expect(await control({ kind: 'workspace-context' })).toEqual({
+          files: [{ name: 'QWEN.md', text: 'project rules' }],
+        });
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+      // The read claimed no provider Session, so the legacy protocol is intact.
+      await acquire();
+    },
+  );
+
+  it('reads Workspace context for an already-claimed provider Session', async () => {
+    // The production ordering: the Harness reads from inside acquire(), after
+    // the acquire control claimed this Session. Refusing that state answered
+    // 409 managed_runtime_identity_conflict, which the best-effort catch
+    // swallowed — every Hosted turn ran without instructions and looked
+    // healthy.
+    fs.writeFileSync(path.join(workspace, 'QWEN.md'), 'project rules');
+    await acquire();
+
+    expect(await control({ kind: 'workspace-context' })).toEqual({
+      files: [{ name: 'QWEN.md', text: 'project rules' }],
     });
   });
 

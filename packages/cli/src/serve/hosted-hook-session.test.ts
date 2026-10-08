@@ -181,6 +181,198 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+it.each([HookEventName.SessionEnd, HookEventName.SessionDelete])(
+  'restores the original lifecycle Hook owner before dispatching %s after Broker restart',
+  async (eventName) => {
+    let lifecycle = false;
+    let ownerPresent = true;
+    hooks = new HostedHookSession(
+      {
+        ...options,
+        lifecycleAuthority: () =>
+          lifecycle
+            ? { operationId: 'close-original', claimGeneration: 2 }
+            : undefined,
+      },
+      session,
+      pin,
+    );
+    catalog = { ...catalog, hooks: [{ ...catalog.hooks[0], eventName }] };
+    const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+    const originalAcquire = acquire.getMockImplementation()!;
+    acquire.mockImplementation(async function (
+      this: HostedWorkspaceBroker,
+      expected,
+    ) {
+      if (lifecycle) {
+        expect(expected).toEqual({
+          runtimeBindingId: 'binding',
+          generation: '1',
+        });
+        expect(hooks.hasPendingOperations).toBe(true);
+      }
+      await originalAcquire.call(this, expected);
+      ownerPresent = true;
+    });
+    vi.spyOn(
+      HostedWorkspaceBroker.prototype,
+      'authorizeLifecycle',
+    ).mockResolvedValue();
+    const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+    const originalControl = control.getMockImplementation()!;
+    control.mockImplementation(async function (
+      this: HostedWorkspaceBroker,
+      operation,
+    ) {
+      if (operation.kind === 'hook-execute' && !ownerPresent)
+        throw new HostedWorkspaceBrokerRejection(
+          404,
+          'runtime_session_not_found',
+        );
+      return originalControl.call(this, operation);
+    });
+    await hooks.ensureReady();
+    const originalRuntimeSessionId = hooks.broker.runtimeSessionId;
+    ownerPresent = false;
+    lifecycle = true;
+    acquire.mockClear();
+    const output = await hooks.fire(
+      eventName,
+      'lifecycle-after-restart',
+      {},
+      signal(),
+    );
+    expect(output?.hookSpecificOutput?.['additionalContext']).toBe('checked');
+    expect(acquire).toHaveBeenCalledExactlyOnceWith({
+      runtimeBindingId: 'binding',
+      generation: '1',
+    });
+    expect(hooks.broker.runtimeSessionId).toBe(originalRuntimeSessionId);
+    expect(hooks.broker.runtime).toEqual({
+      bindingId: 'binding',
+      generation: '1',
+      workspaceGeneration: '1',
+    });
+    expect(
+      vi.mocked(HostedWorkspaceBroker.prototype.warm),
+    ).toHaveBeenCalledOnce();
+    expect(
+      await hooks.fire(eventName, 'lifecycle-after-restart', {}, signal()),
+    ).toEqual(output);
+    expect(
+      requests.filter((request) => request.kind === 'hook-execute'),
+    ).toHaveLength(1);
+    expect(hooks.hasPendingOperations).toBe(false);
+  },
+);
+
+it('keeps a lifecycle Hook intent retryable when its original owner cannot be restored', async () => {
+  let lifecycle = false;
+  hooks = new HostedHookSession(
+    {
+      ...options,
+      lifecycleAuthority: () =>
+        lifecycle
+          ? { operationId: 'close-original', claimGeneration: 2 }
+          : undefined,
+    },
+    session,
+    pin,
+  );
+  catalog = {
+    ...catalog,
+    hooks: [{ ...catalog.hooks[0], eventName: HookEventName.SessionEnd }],
+  };
+  vi.spyOn(
+    HostedWorkspaceBroker.prototype,
+    'authorizeLifecycle',
+  ).mockResolvedValue();
+  await hooks.ensureReady();
+  lifecycle = true;
+  const refusal = new HostedWorkspaceBrokerRejection(
+    409,
+    'workspace_close_identity_unverified',
+  );
+  const acquire = vi.mocked(HostedWorkspaceBroker.prototype.acquire);
+  const originalAcquire = acquire.getMockImplementation()!;
+  acquire.mockRejectedValue(refusal);
+  await expect(
+    hooks.fire(HookEventName.SessionEnd, 'owner-refused', {}, signal()),
+  ).rejects.toBe(refusal);
+  const children = session.authority
+    .extensionRecordsInDomain('hook_execution')
+    .map((entry) => parseHookExecution(entry.record))
+    .filter((record) => record.hookId !== '__plan__');
+  expect(children).toHaveLength(1);
+  expect(children[0].run.execution).toBe('intent');
+  expect(children[0].run.reason).toBeNull();
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(0);
+  acquire.mockImplementation(originalAcquire);
+  expect(
+    (await hooks.fire(HookEventName.SessionEnd, 'owner-refused', {}, signal()))
+      ?.hookSpecificOutput?.['additionalContext'],
+  ).toBe('checked');
+  expect(
+    requests.filter((request) => request.kind === 'hook-execute'),
+  ).toHaveLength(1);
+});
+
+it('preserves an uncertain lifecycle Hook outcome after original-owner restoration', async () => {
+  let lifecycle = false;
+  hooks = new HostedHookSession(
+    {
+      ...options,
+      lifecycleAuthority: () =>
+        lifecycle
+          ? { operationId: 'close-original', claimGeneration: 2 }
+          : undefined,
+    },
+    session,
+    pin,
+  );
+  catalog = {
+    ...catalog,
+    hooks: [{ ...catalog.hooks[0], eventName: HookEventName.SessionEnd }],
+  };
+  vi.spyOn(
+    HostedWorkspaceBroker.prototype,
+    'authorizeLifecycle',
+  ).mockResolvedValue();
+  await hooks.ensureReady();
+  lifecycle = true;
+  const control = vi.mocked(HostedWorkspaceBroker.prototype.hookControl);
+  const originalControl = control.getMockImplementation()!;
+  let dispatched = 0;
+  control.mockImplementation(async function (
+    this: HostedWorkspaceBroker,
+    operation,
+  ) {
+    if (operation.kind === 'hook-execute') {
+      dispatched++;
+      throw new TypeError('reply lost after possible worker effect');
+    }
+    return originalControl.call(this, operation);
+  });
+  await expect(
+    hooks.fire(HookEventName.SessionEnd, 'unknown-original', {}, signal()),
+  ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+  await expect(
+    hooks.fire(HookEventName.SessionEnd, 'unknown-original', {}, signal()),
+  ).rejects.toBeInstanceOf(HostedHookRecoveryRequiredError);
+  const child = session.authority
+    .extensionRecordsInDomain('hook_execution')
+    .map((entry) => parseHookExecution(entry.record))
+    .find((record) => record.hookId !== '__plan__')!;
+  expect(child.run).toMatchObject({
+    state: 'recovery_blocked',
+    execution: 'outcome_unknown',
+    reason: 'outcome_unknown',
+  });
+  expect(dispatched).toBe(1);
+});
+
 it('commits a pinned plan before dispatch and replays the original occurrence after reconstruction', async () => {
   const output = await hooks.fire(
     HookEventName.PreToolUse,
