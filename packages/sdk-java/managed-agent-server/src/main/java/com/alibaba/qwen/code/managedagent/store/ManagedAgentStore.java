@@ -1340,15 +1340,17 @@ public class ManagedAgentStore implements AgentStateStore {
     public boolean failOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             String failureCode) {
+        WorkspaceLifecycleStore.lockPlacement(jdbc, tenantId);
         long now = lifecycleDatabaseTime();
-        // The same fencing as completeOperation, and deliberately nothing
-        // more: the Session row keeps its pending status and no completion
-        // event is appended, because the settle never succeeded. The receipt
+        // The same fencing as completeOperation, and deliberately no
+        // Session effect beyond the claim-mirror release below: the Session
+        // row keeps its pending status and no completion event is appended,
+        // because the settle never succeeded. The receipt
         // the contract requires of every confirmed row certifies nothing —
         // status failed and the failure code carry the outcome.
         // delivery_state CONFIRMED keeps every recovery scan from re-driving
         // the row.
-        return jdbc.update("UPDATE managed_agent_operation SET"
+        int updated = jdbc.update("UPDATE managed_agent_operation SET"
                         + " state = 'FAILED', delivery_state = 'CONFIRMED',"
                         + " error_code = ?, receipt_id = ?,"
                         + " lease_owner = NULL, lease_until = NULL,"
@@ -1358,7 +1360,26 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " AND lease_owner = ? AND claim_generation = ?"
                         + " AND lease_until > ?",
                 failureCode, publicId("rcpt"), now, now, tenantId, sessionId,
-                operationId, owner, claimGeneration, now) == 1;
+                operationId, owner, claimGeneration, now);
+        if (updated == 1) {
+            // The terminal write also releases the lifecycle claim mirror a
+            // v1 admission raised, the way the completion path's
+            // phase='DRAINING' flip does: nothing will drive this operation
+            // again, so the fence row must not stay admission-closed under a
+            // dead operation's id. retryOperation and blockLifecycleOperation
+            // deliberately only NULL the lease — a rescheduled operation is
+            // still in flight and must stay admission-closed to everyone
+            // else — so the phase flip belongs here alone.
+            jdbc.update("UPDATE qwen_runtime_harness_drain SET"
+                            + " phase = 'DRAINING', claim_lease_until = NULL"
+                            + " WHERE tenant_key = ? AND harness_key = ? AND"
+                            + " tenant_id = ? AND harness_session_id = ? AND"
+                            + " operation_id = ? AND phase = 'LIFECYCLE_ONLY'",
+                    JdbcRuntimeBindingRepository.harnessDrainKey(tenantId),
+                    JdbcRuntimeBindingRepository.harnessDrainKey(sessionId),
+                    tenantId, sessionId, operationId);
+        }
+        return updated == 1;
     }
 
     private long lifecycleDatabaseTime() {

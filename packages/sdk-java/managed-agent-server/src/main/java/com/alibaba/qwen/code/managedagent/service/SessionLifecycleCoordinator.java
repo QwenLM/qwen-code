@@ -278,8 +278,15 @@ public class SessionLifecycleCoordinator {
                         // The completed CLOSE is the cleanup authority.
                     } else if (bound) {
                         if (runtimeWarmer.supportsWorkspaceClose()) {
-                            runtimeWarmer.requestWorkspaceClose(tenantId,
-                                    sessionId);
+                            if (claimed.lifecycleProtocolVersion() != 1) {
+                                runtimeWarmer.requestWorkspaceClose(tenantId,
+                                        sessionId);
+                            }
+                            // A v1 operation never takes the v0 drain route:
+                            // requestHarnessDrain would flip the fence row to
+                            // DRAINING without the lifecycle store's claim
+                            // checks, and failOperation's terminal write is
+                            // what releases that mirror below.
                             runtimeWarmer.closeWorkspace(tenantId, sessionId)
                                     .toCompletableFuture().join();
                         }
@@ -335,12 +342,17 @@ public class SessionLifecycleCoordinator {
                 store.blockLifecycleOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(), blocked, Math.addExact(clock.millis(), delay),
                         writerLive || staleBoot);
-            } else if (valid.get() && writerLive
+            } else if (valid.get() && writerLive && !staleBoot
                     && claimed.attemptCount() >= maxOperationRetries) {
                 // Past the budget the writer wait is published: the row reads
                 // recovery_blocked with its code rather than a healthy
                 // pending retry, and the recovery scan still re-drives it —
-                // the wait itself stays unbounded.
+                // the wait itself stays unbounded. A generation error wins
+                // the overlap: the live writer it surfaces beside is the old
+                // boot's unexpired lease, which the close does not wait on
+                // once this replica adopts the new generation, so the code
+                // names the wait that actually bounds the close (review
+                // R1-30).
                 store.blockLifecycleOperation(tenantId, sessionId,
                         operationId, owner, claimed.claimGeneration(),
                         "session_close_writer_live",
@@ -383,10 +395,17 @@ public class SessionLifecycleCoordinator {
     // daemon's own negotiation refusals — a capability digest mismatch and a
     // protocol error recur on every attempt until an operator realigns the
     // versions, and both are thrown before the Harness is asked to stop.
+    // The two whitelisted codes are the whole writer-wait family:
+    // workspace_lifecycle_writer_active is settle()'s own writer check, and
+    // managed_session_writer_active is the retention retirement a delete of
+    // a closed Session runs inside completeOperation; each is raised under
+    // exactly the predicate hasLiveWriter reads, and writerLive stays gated
+    // on a fresh writerStillLive(claimed) check regardless.
     private static boolean retryable(Throwable cause) {
         if (cause instanceof com.alibaba.qwen.code.managedagent.api.ApiException apiError
                 && apiError.getStatus().is4xxClientError()) {
-            return "workspace_lifecycle_writer_active".equals(apiError.getCode());
+            return "workspace_lifecycle_writer_active".equals(apiError.getCode())
+                    || "managed_session_writer_active".equals(apiError.getCode());
         }
         if (cause instanceof HostedHarnessCapabilityMismatchException
                 || cause instanceof DaemonProtocolException) {

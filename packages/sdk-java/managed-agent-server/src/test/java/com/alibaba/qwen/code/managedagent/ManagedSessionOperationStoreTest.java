@@ -4,13 +4,16 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -153,6 +156,52 @@ class ManagedSessionOperationStoreTest {
                 "worker", Duration.ofSeconds(30))).isEmpty();
     }
 
+    // A protocol-v1 admission raises a LIFECYCLE_ONLY claim mirror in
+    // qwen_runtime_harness_drain, and every rescheduling mutator keeps that
+    // mirror in step. The terminal write must release it too: nothing
+    // drives the failed operation again, so a mirror left LIFECYCLE_ONLY
+    // under the dead operation's id would hold the harness admission closed
+    // forever — drainHarnessSession admits only phase = 'DRAINING' (review
+    // round 5, R5-5).
+    @Test
+    void aFailedTerminationReleasesTheLifecycleClaimMirror() {
+        ManagedAgentStore store = workspaceStore();
+        String sessionId = store.insertWorkspaceSessionCommand(TENANT,
+                "owner", "create", "digest", "qwen-code", null, null,
+                List.of(), null, new WorkspaceSelection("workspace", "."))
+                .sessionId();
+        String operationId = store.beginWorkspaceLifecycle(TENANT, sessionId,
+                OperationKind.CLOSE, "owner", "a".repeat(64), "close",
+                "digest", true, 1).operation().operationId();
+        assertThat(jdbc.queryForObject("SELECT phase FROM"
+                        + " qwen_runtime_harness_drain", String.class))
+                .isEqualTo("LIFECYCLE_ONLY");
+
+        OperationRecord claimed = store.claimOperation(TENANT, sessionId,
+                operationId, "worker", Duration.ofSeconds(30)).orElseThrow();
+        // The claim mirrors the operation lease onto the fence row.
+        assertThat(jdbc.queryForObject("SELECT claim_lease_until FROM"
+                        + " qwen_runtime_harness_drain", Long.class))
+                .isNotNull();
+
+        assertThat(store.failOperation(TENANT, sessionId, operationId,
+                "worker", claimed.claimGeneration(),
+                "workspace_lifecycle_protocol_unavailable")).isTrue();
+        OperationRecord failed = operation(store, sessionId, operationId);
+        assertThat(failed.state()).isEqualTo("FAILED");
+        assertThat(failed.deliveryState()).isEqualTo("CONFIRMED");
+        assertThat(store.requireSession(TENANT, sessionId).status())
+                .isEqualTo("CLOSING");
+        // The mirror flips to the same shape the completion path leaves, so
+        // the drain admission the row exists to gate can proceed.
+        assertThat(jdbc.queryForObject("SELECT phase FROM"
+                        + " qwen_runtime_harness_drain", String.class))
+                .isEqualTo("DRAINING");
+        assertThat(jdbc.queryForObject("SELECT claim_lease_until FROM"
+                        + " qwen_runtime_harness_drain", Long.class))
+                .isNull();
+    }
+
     // The budget-exempt reschedule keeps the delay-growing attempt count
     // but records the wait so the terminal budget only counts attempts that
     // could have made progress; the plain retry and block paths leave the
@@ -281,6 +330,30 @@ class ManagedSessionOperationStoreTest {
     }
 
     private ManagedAgentStore store() {
+        return store(new ManagedAgentProperties());
+    }
+
+    // A store with the Workspace-files deployment flag on, plus the
+    // registry and access rows a bound Session's admission resolves.
+    private ManagedAgentStore workspaceStore() {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedAgentStore store = store(properties);
+        jdbc.update("INSERT INTO managed_workspace_registry (tenant_id,"
+                        + " workspace_id, workspace_generation, storage_id,"
+                        + " display_name, config_ref, policy_ref, state)"
+                        + " VALUES (?, 'workspace', 1, 'storage',"
+                        + " 'Workspace', ?, ?, 'ACTIVE')",
+                TENANT, WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+                        + " workspace_id, actor_id, can_read, can_create)"
+                        + " VALUES (?, 'workspace', ?, TRUE, TRUE)",
+                TENANT, "owner".getBytes(StandardCharsets.UTF_8));
+        return store;
+    }
+
+    private ManagedAgentStore store(ManagedAgentProperties properties) {
         JdbcDataSource dataSource = new JdbcDataSource();
         dataSource.setURL("jdbc:h2:mem:operation-store-" + UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
@@ -303,7 +376,7 @@ class ManagedSessionOperationStoreTest {
                 return Instant.ofEpochMilli(now.get());
             }
         }, ignored -> {
-        }, new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties());
+        }, new ManagedWorkspaceRegistry(jdbc), properties);
     }
 
     private List<String> targets(ManagedAgentStore store) {

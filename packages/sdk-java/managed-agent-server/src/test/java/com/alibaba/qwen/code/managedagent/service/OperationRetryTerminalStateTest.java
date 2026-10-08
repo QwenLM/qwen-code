@@ -19,6 +19,7 @@ import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.DaemonProtocolException;
 import com.alibaba.qwen.code.daemon.HostedHarnessCapabilityMismatchException;
 import com.alibaba.qwen.code.daemon.HostedHarnessGenerationException;
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
@@ -39,6 +40,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.http.HttpStatus;
 
 /**
  * Regression for issue #13182 finding 3: SessionLifecycleCoordinator and
@@ -197,6 +199,52 @@ class OperationRetryTerminalStateTest {
             // Past the budget the stale-view wait is published like the
             // writer wait: recovery_blocked with its own code, still
             // budget-exempt so the wait itself stays unbounded.
+            verify(store).blockLifecycleOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L),
+                    eq("hosted_harness_generation_mismatch"), anyLong(),
+                    eq(true));
+            verify(store, never()).failOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyString());
+            verify(store, never()).retryOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyLong(),
+                    anyBoolean());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // The overlap names the wait that actually bounds the close: a
+    // generation error beside a live writer is the old boot's unexpired
+    // lease, which the close does not wait on once this replica adopts the
+    // new generation — so the published code is the generation mismatch,
+    // not the writer wait (review R1-30).
+    @Test
+    void aStaleHarnessViewBesideALiveWriterPublishesTheGenerationMismatch() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        OperationRecord claimed = lifecycleOperation(10);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        "ACTIVE", "boot-1", null, 0, 0, 1, 1, null, 1));
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.closeSession("tenant", "session")).thenThrow(
+                mock(HostedHarnessGenerationException.class));
+        // The old boot's writer lease has not expired yet.
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(true);
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        mock(RuntimeWarmer.class),
+                        CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
             verify(store).blockLifecycleOperation(eq("tenant"), eq("session"),
                     eq("op-close"), anyString(), eq(1L),
                     eq("hosted_harness_generation_mismatch"), anyLong(),
@@ -648,6 +696,114 @@ class OperationRetryTerminalStateTest {
                     eq("runtime_close_claim_pending"));
             verify(store, never()).completeOperation(anyString(), anyString(),
                     anyString(), anyString(), anyLong(), anyBoolean());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // The terminal arm mirrors settle()'s protocol routing: a bound
+    // protocol-v1 operation never takes the v0 drain route, because
+    // requestHarnessDrain would flip the fence row to DRAINING without the
+    // lifecycle store's claim checks. Only the workspace close runs; the
+    // claim mirror is released by failOperation's terminal write (review
+    // round 5, R5-3).
+    @Test
+    void boundV1SessionExhaustionSkipsTheV0DrainRequest() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = new OperationRecord("tenant", "session",
+                "op-close", OperationKind.CLOSE, "digest", "RUNNING",
+                "JAVA_DURABLE", "LEASED", "ACTIVE", null, "owner", 1,
+                10, null, null, null, null, 0, 1);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(harness.isAvailable()).thenReturn(true);
+        // The v1 settle refuses permanently before any effects are saved:
+        // this Harness speaks no lifecycle protocol.
+        when(harness.supportsLifecycle()).thenReturn(false);
+        when(runtimeWarmer.closeWorkspace("tenant", "session"))
+                .thenReturn(CompletableFuture.completedFuture(null));
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        coordinator.setWorkspaceLifecycleStore(mock(
+                com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class));
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            verify(runtimeWarmer, never()).requestWorkspaceClose(
+                    anyString(), anyString());
+            verify(runtimeWarmer).closeWorkspace("tenant", "session");
+            verify(runtimeWarmer, never()).drain(anyString());
+            verify(store).failOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L),
+                    eq("workspace_lifecycle_protocol_unavailable"));
+            verify(store, never()).completeOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyBoolean());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // The retention retirement a delete of a closed Session runs inside
+    // completeOperation refuses with managed_session_writer_active while a
+    // journal writer is live — the same writer wait settle() reports as
+    // workspace_lifecycle_writer_active, under its own code. The wait stays
+    // budget-exempt and is published past the budget instead of being
+    // charged as an ordinary failure (review round 5, R5-2).
+    @Test
+    void aClosedSessionDeleteWaitsOnTheRetirementWriterCode() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = new OperationRecord("tenant", "session",
+                "op-delete", OperationKind.DELETE, "digest", "RUNNING",
+                "JAVA_DURABLE", "LEASED", "CLOSED", null, "owner", 1,
+                10, null, null, null, null, 0, 0);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-delete"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "DELETING", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
+        // The writer the retirement waits on is still live.
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(true);
+        doThrow(new ApiException(HttpStatus.CONFLICT,
+                        "managed_session_writer_active",
+                        "Session deletion is waiting for its writer to stop."))
+                .when(store).completeOperation(eq("tenant"), eq("session"),
+                        eq("op-delete"), anyString(), eq(1L), eq(false));
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-delete");
+
+            verify(store).blockLifecycleOperation(eq("tenant"), eq("session"),
+                    eq("op-delete"), anyString(), eq(1L),
+                    eq("session_close_writer_live"), anyLong(), eq(true));
+            verify(store, never()).retryOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyLong());
+            verify(store, never()).retryOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyLong(),
+                    anyBoolean());
+            verify(store, never()).failOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyString());
         } finally {
             coordinator.stopRenewals();
         }

@@ -43,16 +43,14 @@ import org.mockito.InOrder;
  */
 class AdmittedTurnRetryTerminalStateTest {
     // 10 is exactly the spent budget; 42 is far past it.
-    @ParameterizedTest(name = "retryCount = {0}, refusalCode = {1}")
-    @CsvSource({"10,", "42,", "5, hosted_turn_recovery_required",
-            "5, hosted_prompt_recovery_required"})
+    @ParameterizedTest(name = "retryCount = {0}")
+    @ValueSource(ints = {10, 42})
     void admittedTurnFailsAfterThePostAdmissionRetryBudgetIsSpent(
-            int retryCount, String refusalCode) {
-        DaemonHttpException refusal = mock(DaemonHttpException.class);
-        when(refusal.getStatusCode()).thenReturn(refusalCode == null ? 503 : 409);
-        when(refusal.getErrorCode()).thenReturn(refusalCode);
+            int retryCount) {
+        DaemonHttpException unavailable = mock(DaemonHttpException.class);
+        when(unavailable.getStatusCode()).thenReturn(503);
         Dispatched dispatched = dispatchTransientFailure(retryCount,
-                new ManagedAgentProperties(), refusal);
+                new ManagedAgentProperties(), unavailable);
         AgentStateStore store = dispatched.store();
 
         // A distinct code from pre-admission exhaustion: the Turn may have
@@ -64,10 +62,98 @@ class AdmittedTurnRetryTerminalStateTest {
         InOrder order = inOrder(store, dispatched.harness());
         order.verify(dispatched.harness()).cancel("tenant", "session");
         order.verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
-                anyString(), eq(refusalCode == null
-                        ? "hosted_harness_unavailable_after_admission"
-                        : refusalCode),
+                anyString(), eq("hosted_harness_unavailable_after_admission"),
                 anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
+    }
+
+    // The named recovery refusals never reach the post-admission budget this
+    // class is named for: dispatch strips the submission mark for
+    // hosted_prompt_recovery_required, and for hosted_turn_recovery_required
+    // when the claimed record carries no epoch — the shape
+    // dispatchTransientFailure builds — so retryCount = 5 exhausts the
+    // PRE-admission budget (default 5) and its named-code branch records the
+    // daemon's own verdict. The post-admission arm would record the generic
+    // hosted_harness_unavailable_after_admission instead (review round 5,
+    // R5-1).
+    @ParameterizedTest(name = "refusalCode = {0}")
+    @ValueSource(strings = {"hosted_turn_recovery_required",
+            "hosted_prompt_recovery_required"})
+    void namedRecoveryRefusalsTerminateAtThePreAdmissionBudgetWithTheirOwnCode(
+            String refusalCode) {
+        DaemonHttpException refusal = mock(DaemonHttpException.class);
+        when(refusal.getStatusCode()).thenReturn(409);
+        when(refusal.getErrorCode()).thenReturn(refusalCode);
+        Dispatched dispatched = dispatchTransientFailure(5,
+                new ManagedAgentProperties(), refusal);
+        AgentStateStore store = dispatched.store();
+
+        InOrder order = inOrder(store, dispatched.harness());
+        order.verify(dispatched.harness()).cancel("tenant", "session");
+        order.verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq(refusalCode), anyString());
+        verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong());
+    }
+
+    // The cancel gate on a terminal pre-admission fail reads the re-read
+    // record, not the claim-time one: a submission mark that landed after
+    // the claim is exactly the admission the terminal fail must reconcile
+    // first — failing on the claim-time record alone would leave that
+    // admitted Turn unreachable (review R4-1).
+    @Test
+    void aSubmissionMarkedAfterTheClaimIsCancelledBeforeTheTerminalFail() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        TurnRecord claimed = new TurnRecord("tenant", "session", "turn",
+                "11111111-1111-4111-8111-111111111111",
+                List.of(Map.of("type", "text", "text", "recover")),
+                "sha256:" + "a".repeat(64), "RUNNING", false, null, null,
+                "previous-owner", Long.MAX_VALUE, 5, null, null,
+                null, 1, 1, null, 1);
+        // The durable record advanced past the claim: the submission mark
+        // landed between the claim and the failure.
+        TurnRecord current = new TurnRecord("tenant", "session", "turn",
+                "11111111-1111-4111-8111-111111111111",
+                List.of(Map.of("type", "text", "text", "recover")),
+                "sha256:" + "a".repeat(64), "RUNNING", true, null, null,
+                "previous-owner", Long.MAX_VALUE, 5, null, null,
+                null, 1, 1, null, 1);
+        when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.findTurn("tenant", "session", "turn"))
+                .thenReturn(Optional.of(current));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, new ContextBinding("tenant", "ws-a", 1,
+                                "storage-a", ".", "config-a", 1), "yolo",
+                        "hosted-workspace-files/1"));
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        DaemonHttpException unavailable = mock(DaemonHttpException.class);
+        when(unavailable.getStatusCode()).thenReturn(503);
+        when(harness.recoverManagedRuntime("tenant", "session", false))
+                .thenThrow(unavailable);
+        when(store.bindHarness(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("boot-1"))).thenReturn(true);
+
+        HarnessCoordinator coordinator = new HarnessCoordinator(store,
+                harness, new HarnessEventProjector(),
+                mock(RuntimeWarmer.class),
+                CoordinatorTestSupport.directExecutor(),
+                Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "turn");
+        } finally {
+            coordinator.close();
+        }
+
+        InOrder order = inOrder(store, harness);
+        order.verify(harness).cancel("tenant", "session");
+        order.verify(store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("hosted_harness_unavailable"), anyString());
         verify(store, never()).scheduleTurnRetry(anyString(), anyString(),
                 anyString(), anyString(), anyLong());
     }

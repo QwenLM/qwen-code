@@ -1071,8 +1071,13 @@ public class HarnessCoordinator {
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
                     failureLabel(error), error);
+            // The cancel gate reads the re-read record, not the claim-time
+            // one this method already calls stale: a submission mark that
+            // landed after the claim is exactly the admission the terminal
+            // fail must reconcile first (review R4-1).
             if (error instanceof HarnessSessionRefusedException refusal) {
-                return fail(turn, false, refusal.getCode(),
+                return fail(turn, current.submissionAttempted(),
+                        refusal.getCode(),
                         "Hosted Harness refused to open the Session before"
                                 + " Turn admission.");
             }
@@ -1089,13 +1094,14 @@ public class HarnessCoordinator {
                 // refusal above. Without that mark the same code arrives
                 // from the open-LOAD path, whose reviewed exhaustion
                 // answer is the generic unavailable.
-                return fail(turn, turn.submissionAttempted(), http.getErrorCode().length() > 128
+                return fail(turn, current.submissionAttempted(), http.getErrorCode().length() > 128
                         ? http.getErrorCode().substring(0, 128)
                         : http.getErrorCode(),
                         "Hosted Harness refused the Turn before Turn"
                                 + " admission.");
             }
-            return fail(turn, false, "hosted_harness_unavailable",
+            return fail(turn, current.submissionAttempted(),
+                    "hosted_harness_unavailable",
                     "Hosted Harness remained unavailable before Turn"
                             + " admission.");
         }
