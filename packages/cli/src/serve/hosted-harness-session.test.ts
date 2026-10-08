@@ -2133,6 +2133,116 @@ describe('Hosted Harness no-tool session', () => {
       .expect(204);
   }, 60_000);
 
+  // The record truth forbids an unproven start: intent-only runs
+  // receive `409 child_operation_conflict` both for attach and for
+  // fail-started=true. The relay reconciles from the record instead of
+  // blaming the wire code, but the wire must refuse those calls anyway.
+  it('refuses an attach or start-fail over a run that never dispatched', async () => {
+    domainEnablement.childRun = true;
+    mockBrokerBroker();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-shell/1',
+        captureBytes: 1024 * 1024,
+      })
+      .expect(200);
+    const clientId = created.body.clientId as string;
+    const childRunId = `${PROMPT_ID}:call-1`;
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      const callRequest = {
+        name: 'agent',
+        callId: 'call-1',
+        args: {
+          description: 'audit the diff',
+          prompt: 'review the change',
+          run_in_background: false,
+        },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      await toolTurn!.execute(
+        [callRequest],
+        [
+          {
+            functionCall: {
+              id: callRequest.callId,
+              name: callRequest.name,
+              args: callRequest.args,
+            },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      return { text: 'done', model: 'test-model' };
+    });
+    const operation = (body: Record<string, unknown>) =>
+      headers(
+        supertest(server).post(`/session/${SESSION_ID}/children/operations`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ operationId: randomUUID(), childRunId, ...body });
+    const prompt = [{ type: 'text', text: 'run the audit' }];
+    const posted = (async () =>
+      headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        }))();
+    await vi.waitFor(
+      async () => {
+        const journal = await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          {
+            tenantId: 'tenant',
+            workspaceId: 'workspace',
+            sessionId: SESSION_ID,
+          },
+        );
+        expect(
+          journal.events.some(
+            (event) =>
+              event.kind === 'domain.committed' &&
+              event.payload['domain'] === 'child_run',
+          ),
+        ).toBe(true);
+      },
+      { timeout: 15_000, interval: 100 },
+    );
+    // The intent state has no legal successor for attach or for fail-truth.
+    const attachRefused = await operation({
+      kind: 'attach',
+      childSessionId: '550e8400-e29b-41d4-a716-446655440001',
+    });
+    expect(attachRefused.status).toBe(409);
+    expect(attachRefused.body.code).toBe('child_operation_record');
+    const failRefused = await operation({
+      kind: 'fail',
+      stopReason: 'child_failed',
+      started: true,
+    });
+    expect(failRefused.status).toBe(409);
+    expect(failRefused.body.code).toBe('child_operation_record');
+    // And the lawful path the honest chain takes: dispatch then attach.
+    await operation({
+      kind: 'dispatch_started',
+      dispatchId: 'dispatch-1',
+      runtimeBindingId: 'binding-1',
+      generation: '1',
+    }).expect(202);
+    await operation({
+      kind: 'attach',
+      childSessionId: '550e8400-e29b-41d4-a716-446655440001',
+    }).expect(202);
+    await posted;
+  }, 60_000);
+
   // Any early refusal of a claimed request — validation, profile, blocked —
   // still restores the stamped authority. A pre-try return leaking it
   // would attach the claim's lifecycle headers onto this shared client's

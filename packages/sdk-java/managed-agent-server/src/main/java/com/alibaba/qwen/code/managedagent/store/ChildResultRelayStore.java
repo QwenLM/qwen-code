@@ -123,6 +123,21 @@ public class ChildResultRelayStore {
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
+    /** The record's execution line as committed — the give-up's proof
+     * of start: the wire's own transition legality already says whether
+     * a dispatch ever attached (`intent → dispatch_started →
+     * running_attached` only), so the verdict reads the record. */
+    public String executionState(String tenantId, String parentSessionId,
+            String childRunId) {
+        List<String> rows = jdbc.query(
+                "SELECT runtime_state FROM qwen_managed_session_extension_record"
+                        + " WHERE tenant_id = ? AND session_id = ?"
+                        + " AND domain = 'child_run' AND record_id = ?",
+                (result, row) -> result.getString("runtime_state"),
+                tenantId, parentSessionId, childRunId);
+        return rows.isEmpty() ? null : rows.getFirst();
+    }
+
     /** One inline resource's bytes, or null when it is not inline-held. */
     public String readResource(String tenantId, String resourceId) {
         List<byte[]> rows = jdbc.query(

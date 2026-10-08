@@ -331,6 +331,49 @@ class SessionLifecycleCoordinatorTest {
         });
     }
 
+    // A host that cannot close Workspace Sessions answers the child
+    // close admission as an ordinary debt, which the delivery taxonomy
+    // cannot name: one unclassifiable keep-retrying forever. The relay's
+    // split applies at the gate too — no admission is owed there, so
+    // the parent close settles into the existing typed blocked code it
+    // already uses when there's nothing to cascade.
+    @Test
+    void aCloseIncapableHostBlocksTheParentCloseWithTheTypedCode() {
+        World world = closingWorld("incapable-");
+        liveScope(world, "{\"childSessionId\":\"" + world.child + "\"}");
+        var harness = new CascadingHarness(true, false);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(world.store,
+                    new ManagedSessionStore(world.jdbc), harness,
+                    warmer(false, false), world.relayStore,
+                    new ObjectMapper(), admissions(world.store,
+                            warmer(false, false)),
+                    brokerProvider(null), executor, Clock.systemUTC(),
+                    world.properties);
+            try {
+                coordinator.dispatch("tenant", world.session,
+                        world.operation);
+                // The blocked code is stable even though the state line
+                // keeps re-arming — a blocked parent's close is owed and
+                // re-delivered by design once `available_at` passes, so
+                // `failure_code` is what identifies the typed truth and
+                // confirms the gate exists at all.
+                await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
+                        assertThat(world.store.findOperation("tenant",
+                                world.session, world.operation)
+                                .orElseThrow().failureCode())
+                                .isEqualTo(
+                                        "workspace_close_identity_unverified"));
+                assertThat(harness.closed).doesNotContain(world.child);
+                assertThat(harness.operations)
+                        .extracting(op -> op.get("kind"))
+                        .doesNotContain("close_scope");
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
     @Test
     void aFalteringJournalStillClosesTheChildAndReArmsTheClose() {
         World world = closingWorld("debt-");
@@ -414,6 +457,37 @@ class SessionLifecycleCoordinatorTest {
                 assertThat(world.store.findOperation("tenant", world.session,
                         world.operation).orElseThrow().state())
                         .isNotEqualTo("COMPLETED");
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    // The same lineage-only shape with nothing LEFT to replay: no body
+    // facts, no ledger key, no physical binding. The only honest verdict
+    // of the window is that creation never attached — so the scope
+    // settles started: false once, and the parent close completes,
+    // never re-armed forever on behalf of empty proof.
+    @Test
+    void anUnprovableLineageChildSettlesStartedFalseAndLetsTheParentClose() {
+        World world = closingWorld("unstart-");
+        liveScope(world, "{\"inputRef\":{\"resourceId\":\"res-input\"}}");
+        var harness = new CascadingHarness(true, false);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(world.store,
+                    new ManagedSessionStore(world.jdbc), harness,
+                    warmer(true, false), world.relayStore, new ObjectMapper(),
+                    admissions(world.store, warmer(true, false)),
+                    brokerProvider(null), executor,
+                    Clock.systemUTC(), world.properties);
+            try {
+                redispatchUntil(coordinator, world, "COMPLETED");
+                var terminals = harness.operations.stream()
+                        .filter(op -> "close_scope".equals(op.get("kind")))
+                        .toList();
+                assertThat(terminals).hasSize(1);
+                assertThat(terminals.get(0)).containsEntry("started", false);
+                assertThat(harness.closed).contains(world.child);
             } finally {
                 coordinator.stopRenewals();
             }

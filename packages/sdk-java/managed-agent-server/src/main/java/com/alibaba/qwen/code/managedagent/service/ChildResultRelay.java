@@ -11,7 +11,6 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore.PendingChild;
@@ -609,46 +608,79 @@ public class ChildResultRelay {
     }
 
     /**
-     * Whether the parent's committed record says this run attached: a
-     * replayed `attach` op with the resolved child id (the ledger's own
-     * when known, the committed lineage's otherwise). Rows past the
-     * watch already proved it by their committed walk; a lost attach
-     * reply or died ledger advance is exactly what the replay recovers.
-     * The refusal's shape carries the record's own answer: a conflict
-     * (`child_operation_conflict`) means one already stands; a veto
-     * (`child_operation_record`) means no attach — but that is not yet
-     * proof of never-started, because the replay id itself may be the
-     * lost write. The child's own committed Turn is the second,
-     * independent evidence source consulted before `creation_failed`
-     * may be claimed.
+     * Whether the parent's committed record PROVES the run started, read
+     * from the record itself, never guessed from a wire answer. Rows
+     * past the watch already proved it by their committed walk. A run
+     * whose record still sits at `intent` never dispatched — `intent`'s
+     * own successors are `dispatch_started` and `not_started_proven`,
+     * and refusing code like `child_operation_...` carries no start
+     * evidence whether 409 too, or sketchier. The window that committed
+     * its child but lost the chain replays from the same evidence the
+     * coordinator uses: the lineage names the child, the binding tells
+     * the physical identity — anything unprovable simply defers, never
+     * inventedverdicts.
      */
     private boolean reconcileAttach(RelayRow row, String child) {
         if ("watching".equals(row.state()) || "delivering".equals(row.state())) {
             return true;
         }
-        if (child == null) {
+        String execution = relayStore.executionState(row.tenantId(),
+                row.parentSessionId(), row.childRunId());
+        if (execution == null) {
+            // Nothing written about the run at all: absence of commit
+            // evidence itself is the proof of never-started.
             return false;
         }
+        if ("intent".equals(execution)) {
+            if (child != null && relayStore.latestTurn(row.tenantId(), child)
+                    != null) {
+                // The child provably ran while the record never attached:
+                // the chain replays dispatch first (intent allows exactly
+                // that successor), then the attach — only from the
+                // physical binding the child warms with, or it owes the
+                // bounded wait, never on a bogus verdict.
+                RuntimeBindingRecord binding = broker
+                        .findLatestBindingByHarnessSession(row.tenantId(),
+                                child);
+                if (binding == null) {
+                    throw new RelayRetry("child physically ran, yet its"
+                            + " binding's own dispatch is not an honest chain");
+                }
+                Map<String, Object> dispatch = new LinkedHashMap<>();
+                dispatch.put("operationId", UUID.randomUUID().toString());
+                dispatch.put("kind", "dispatch_started");
+                dispatch.put("childRunId", row.childRunId());
+                dispatch.put("dispatchId", row.creationKey());
+                dispatch.put("runtimeBindingId", binding.getBindingId());
+                dispatch.put("generation",
+                        Long.toString(binding.getGeneration()));
+                harness.runChildOperation(row.tenantId(),
+                        row.parentSessionId(), dispatch);
+                attachReplay(row, child);
+                return true;
+            }
+            // Record truth: truly nothing ever dispatched — the
+            // `creation_failed` pairing is the lawful verdict here.
+            return false;
+        }
+        if ("dispatch_started".equals(execution)) {
+            // Just the ack was lost: a replay of attach is the same
+            // command, owning the same truth the record confirms now.
+            attachReplay(row, child);
+            return true;
+        }
+        // running_attached or past it: the record confirms alone.
+        return true;
+    }
+
+    private void attachReplay(RelayRow row, String child) {
         Map<String, Object> attach = new LinkedHashMap<>();
         attach.put("operationId", UUID.randomUUID().toString());
         attach.put("kind", "attach");
         attach.put("childRunId", row.childRunId());
         attach.put("childSessionId", child);
-        try {
-            harness.runChildOperation(row.tenantId(), row.parentSessionId(),
-                    attach);
-            return true;
-        } catch (DaemonHttpException refused) {
-            if (refused.getStatusCode() == 409) {
-                if ("child_operation_record".equals(refused.getErrorCode())) {
-                    return relayStore.latestTurn(row.tenantId(), child)
-                            != null;
-                }
-                return "child_operation_conflict"
-                        .equals(refused.getErrorCode());
-            }
-            throw refused;
-        }
+        harness.runChildOperation(row.tenantId(), row.parentSessionId(),
+                attach);
     }
 
     private JsonNode readJson(String content, String label) {

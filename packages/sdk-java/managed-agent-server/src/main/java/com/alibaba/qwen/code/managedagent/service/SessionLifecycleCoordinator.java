@@ -452,6 +452,7 @@ public class SessionLifecycleCoordinator {
                 }
             }
             boolean recordReady = body.childSessionId() != null;
+            boolean provablyUnstarted = false;
             if (childSessionId != null && !recordReady) {
                 // The close_scope settlement parses only with the child
                 // Session recorded through valid transitions: dispatch and
@@ -463,18 +464,30 @@ public class SessionLifecycleCoordinator {
                 // MutationOutcomeUnknownException): a journal-side failure
                 // owes its revision, but must never skip the child's own
                 // physical close behind it.
-                try {
-                    repairChildRecord(operation, scope.childRunId(), body,
-                            childSessionId, creationKey);
-                    recordReady = true;
-                } catch (RuntimeException unfixed) {
-                    journalDebt = true;
-                    LOG.warn("Managed Session close cascade cannot rebuild"
-                                    + " a child's record tenant={} session={}"
-                                    + " childRun={} child={} — debt owed;"
-                                    + " failure={}", tenantId, sessionId,
-                            scope.childRunId(), childSessionId,
-                            unfixed.getMessage());
+                if (body.runtimeBindingId() == null && creationKey == null
+                        && findBinding(tenantId, childSessionId) == null) {
+                    // Nothing to replay: no dispatch facts committed, no
+                    // physical binding the child could have warmed from —
+                    // the only honest read of the create→attach window is
+                    // that the creation never attached. The run settles
+                    // `started: false` on its evidence, not on a leaded
+                    // row re-armed forever on behalf of proof it lacks.
+                    provablyUnstarted = true;
+                } else {
+                    try {
+                        repairChildRecord(operation, scope.childRunId(),
+                                body, childSessionId, creationKey);
+                        recordReady = true;
+                    } catch (RuntimeException unfixed) {
+                        journalDebt = true;
+                        LOG.warn("Managed Session close cascade cannot"
+                                        + " rebuild a child's record"
+                                        + " tenant={} session={}"
+                                        + " childRun={} child={} — debt"
+                                        + " owed; failure={}",
+                                tenantId, sessionId, scope.childRunId(),
+                                childSessionId, unfixed.getMessage());
+                    }
                 }
             }
             Map<String, Object> cancel = new LinkedHashMap<>();
@@ -496,6 +509,25 @@ public class SessionLifecycleCoordinator {
                         childSessionId);
                 if (status == null
                         || !SETTLED_SESSION_STATES.contains(status)) {
+                    // A host that cannot close Workspace Sessions answers
+                    // nothing here — the relay's split: the admission
+                    // would refuse as `workspace_unavailable`, and one
+                    // unclassifiable throw in the delivery retry runs the
+                    // parent's operation forever outside the typed gate.
+                    // Settle below takes its existing
+                    // `workspace_close_identity_unverified` way instead,
+                    // and the re-arm walks this branch again only after
+                    // the capability returns.
+                    if (!childCloses.closeSupported()) {
+                        LOG.info("Managed Session close cascade skips the"
+                                        + " child close admission on a"
+                                        + " close-incapable host tenant={}"
+                                        + " session={} childRun={}"
+                                        + " child={}",
+                                tenantId, sessionId, scope.childRunId(),
+                                childSessionId);
+                        continue;
+                    }
                     // The child closes through its own Session lifecycle:
                     // an admission is idempotent under the run's key, and
                     // an active Turn or a missing Runtime lane refuses —
@@ -533,13 +565,14 @@ public class SessionLifecycleCoordinator {
             closeScope.put("operationId", UUID.randomUUID().toString());
             closeScope.put("kind", "close_scope");
             closeScope.put("childRunId", scope.childRunId());
-            if (childSessionId != null && !recordReady) {
+            if (childSessionId != null && !recordReady
+                    && !provablyUnstarted) {
                 // The settleCancelled parse accepts only a chain whose
                 // attach committed: the debt above keeps the close owed
                 // instead of committing a revision no parser reads.
                 continue;
             }
-            closeScope.put("started", childSessionId != null);
+            closeScope.put("started", childSessionId != null && recordReady);
             try {
                 runLifecycleChildOperation(operation, closeScope);
             } catch (RuntimeException error) {

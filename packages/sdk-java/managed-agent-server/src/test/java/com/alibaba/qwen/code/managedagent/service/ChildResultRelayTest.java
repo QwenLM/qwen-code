@@ -413,24 +413,33 @@ class ChildResultRelayTest {
 
     // A lost relay session id is not proof that execution never began:
     // ledger `creating/null`, lineage names the child, and its own
-    // committed Turn says the run started — the give-up settles
-    // child_failed over those proofs, never creation_failed over the
-    // missing id.
+    // committed Turn says the run started — the give-up replays the
+    // only chain it can honestly commit (dispatch then attach from the
+    // recorded binding) and settles child_failed over those proofs,
+    // never creation_failed over the missing id.
     @Test
     void aGiveUpReadsLineageAndTurnBeforeChoosingTheFailureProof() {
         when(store.findLineageChild(TENANT, PARENT, RUN)).thenReturn(CHILD);
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn(
+                "intent");
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
                 new TurnLine("turn-1", "RUNNING", null, null));
-        harness.refuseRecord = "attach";
+        RuntimeBindingRecord binding = mock(RuntimeBindingRecord.class);
+        when(binding.getBindingId()).thenReturn("binding-1");
+        when(binding.getGeneration()).thenReturn(7L);
+        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+                .thenReturn(binding);
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
                 "creating", "owner", now + 30_000, 63, 0, null, now, now));
-        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
-                .thenReturn(null);
         relay.scan();
         assertThat(harness.operations)
                 .extracting(operation -> operation.get("kind"))
-                .containsExactly("fail");
+                .containsExactly("dispatch_started", "attach", "fail");
         assertThat(harness.operations.get(0))
+                .containsEntry("dispatchId", "creation-key")
+                .containsEntry("runtimeBindingId", "binding-1")
+                .containsEntry("generation", "7");
+        assertThat(harness.operations.get(2))
                 .containsEntry("stopReason", "child_failed")
                 .containsEntry("started", true);
         verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
@@ -689,12 +698,17 @@ class ChildResultRelayTest {
     void aGiveUpDefersALateLifecycleChildRatherThanMisclassifyIt() {
         when(store.findLineageChild(TENANT, PARENT, RUN))
                 .thenReturn(null, CHILD, CHILD, CHILD);
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn(
+                "intent");
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
                 new TurnLine("turn-1", "RUNNING", null, null));
+        RuntimeBindingRecord binding = mock(RuntimeBindingRecord.class);
+        when(binding.getBindingId()).thenReturn("binding-1");
+        when(binding.getGeneration()).thenReturn(7L);
+        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+                .thenReturn(binding);
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
                 "creating", "owner", now + 30_000, 63, 0, null, now, now));
-        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
-                .thenReturn(null);
         relay.scan();
         assertThat(row.get().state()).isEqualTo("creating");
         assertThat(row.get().attempts()).isEqualTo(64);
@@ -707,14 +721,11 @@ class ChildResultRelayTest {
                 parked.childSessionId(), parked.state(), parked.claimedBy(),
                 now + 30_000, parked.attempts(), 0, parked.lastError(),
                 parked.createdAt(), now));
-        when(store.latestTurn(TENANT, CHILD)).thenReturn(
-                new TurnLine("turn-1", "COMPLETED", now + 1, null));
-        harness.refuseRecord = "attach";
         relay.scan();
         assertThat(harness.operations)
                 .extracting(operation -> operation.get("kind"))
-                .containsExactly("fail");
-        assertThat(harness.operations.get(0))
+                .containsExactly("dispatch_started", "attach", "fail");
+        assertThat(harness.operations.get(2))
                 .containsEntry("stopReason", "child_failed")
                 .containsEntry("started", true);
         verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
@@ -852,15 +863,17 @@ class ChildResultRelayTest {
                 .containsEntry("started", true);
     }
 
-    // R1-7/12: a binding-state give-up with an attached record — the
-    // replayed attach IS that evidence; the ledger's walk never decides.
-    // The reconciliation recovers a lost attach reply.
+    // R1-7/12: a binding-state give-up with the run's record standing at
+    // dispatch_started: the attach's ack was the thing that got lost —
+    // replaying the same `attach` op carries the full `child_failed`
+    // pairing the committed transition legality recognizes, the ledger's
+    // walk never decides on wire answers.
     @Test
     void aBindingGiveUpReconcilesItsLostAttachReply() {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "binding", "owner", now + 30_000, 63, 0, null, now, now));
-        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
-                .thenReturn(null);
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn(
+                "dispatch_started");
         relay.scan();
         assertThat(row.get().state()).isEqualTo("unknown");
         verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
@@ -872,15 +885,16 @@ class ChildResultRelayTest {
                 .containsEntry("started", true);
     }
 
-    // R1-7/12: when the record vetoes the attach replay
-    // (`child_operation_record`), it carries the unattached truth —
-    // the settle takes the unstarted pairing and classifies; the row
-    // only defers on a refusal the record never owes an answer for.
+    // R1-7/12: a binding-state give-up where the record proves never
+    // dispatched (`intent`) and no child Turn exists to suggest
+    // otherwise: the reconciliation takes its unstarted pairing —
+    // the veto the wire might use is never reached at all.
     @Test
-    void aRecordVetoReconcilesUnstartedAtGiveUp() {
+    void anIntentGiveUpTakesTheUnstartedPairing() {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "binding", "owner", now + 30_000, 63, 0, null, now, now));
-        harness.refuseRecord = "attach";
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn(
+                "intent");
         relay.scan();
         assertThat(row.get().state()).isEqualTo("unknown");
         verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
@@ -892,10 +906,35 @@ class ChildResultRelayTest {
                 .containsEntry("started", false);
     }
 
+    // Same window as the lineage-driven `R` case, but the settled
+    // shape: intent + a child Turn proves the child ran while the
+    // binding never existed physically imaginable dispatch chain — the
+    // win defers (owed), never writes a bogus creation_failed over the
+    // binding-less launched child.
+    @Test
+    void anIntentGiveUpWithNoPhysicalBindingDefersNotVerdicts() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 63, 0, null, now, now));
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn(
+                "intent");
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "RUNNING", null, null));
+        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+                .thenReturn(null);
+        relay.scan();
+        assertThat(row.get().attempts()).isEqualTo(64);
+        assertThat(row.get().state()).isEqualTo("binding");
+        assertThat(harness.operations).isEmpty();
+        verify(childCloses, never()).admitChildClose(anyString(),
+                anyString(), anyString(), anyString());
+    }
+
     @Test
     void aTransientAttachRefusalKeepsTheDebtAtGiveUp() {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "binding", "owner", now + 30_000, 63, 0, null, now, now));
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn(
+                "dispatch_started");
         harness.refuseKind = "attach";
         relay.scan();
         assertThat(row.get().state()).isEqualTo("binding");
@@ -935,6 +974,8 @@ class ChildResultRelayTest {
     void aRefusedGiveUpChainKeepsItsDebtRecoverable() {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "binding", "owner", now + 30_000, 63, 0, null, now, now));
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn(
+                "dispatch_started");
         harness.refuseKind = "fail";
         relay.scan();
         assertThat(row.get().state()).isEqualTo("binding");
@@ -964,6 +1005,8 @@ class ChildResultRelayTest {
     void aFalteredGiveUpCloseRetainsTheCleanupDebt() {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "binding", "owner", now + 30_000, 63, 0, null, now, now));
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn(
+                "dispatch_started");
         Mockito.doThrow(new IllegalStateException("admission refused"))
                 .when(childCloses).admitChildClose(TENANT, PARENT, CHILD,
                         RUN);
