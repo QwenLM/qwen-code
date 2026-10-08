@@ -99,7 +99,8 @@ class ManagedWorkspaceRolesMigrationTest {
                 "default-actor".getBytes(StandardCharsets.UTF_8)))
                 .isInstanceOf(DataIntegrityViolationException.class);
         // PAD SPACE comparisons accept a padded value into an IN-list
-        // CHECK; the REGEXP constraint stores only byte-exact enum names.
+        // CHECK; the length-guarded CHECK stores only byte-exact enum
+        // names.
         assertThatThrownBy(() -> jdbc.update("INSERT INTO"
                 + " managed_workspace_access (tenant_id, workspace_id,"
                 + " actor_id, role) VALUES ('tenant', 'workspace', ?,"

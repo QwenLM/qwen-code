@@ -7,9 +7,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
 import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
@@ -17,13 +18,18 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
  * Real-engine counterpart of the V53 role-constraint shape: utf8mb4
  * comparisons ignore trailing spaces (PAD SPACE), so an IN-list CHECK
  * would accept and preserve 'READER ' — a value the enum parser rejects
- * at read time. The REGEXP constraint must store only byte-exact enum
- * names on the engines CI actually runs.
+ * at read time. The CHECK pairs each name with its exact length; only
+ * byte-exact enum names are storable. The assertion talks
+ * DataAccessException plus the constraint name rather than
+ * DataIntegrityViolationException, because MySQL reports a CHECK
+ * violation as 3819/HY000, which Spring 6.2 cannot map, while MariaDB's
+ * 4025/23000 maps to DataIntegrityViolationException.
  */
 class ManagedWorkspaceRolesMySqlIT {
     private JdbcTemplate admin;
     private JdbcTemplate jdbc;
     private DriverManagerDataSource data;
+    private String schema;
 
     @BeforeEach
     void setup() {
@@ -34,11 +40,18 @@ class ManagedWorkspaceRolesMySqlIT {
         String user = System.getProperty("mysql.user");
         String password = System.getProperty("mysql.password", "");
         admin = new JdbcTemplate(new DriverManagerDataSource(url, user, password));
-        String schema = "workspace_roles_" + UUID.randomUUID().toString().replace("-", "");
+        schema = "workspace_roles_" + UUID.randomUUID().toString().replace("-", "");
         admin.execute("CREATE DATABASE " + schema);
         data = new DriverManagerDataSource(url.replaceFirst("/[^/?]+(?=\\?|$)", "/" + schema), user, password);
         jdbc = new JdbcTemplate(data);
         Flyway.configure().dataSource(data).locations("classpath:db/migration").load().migrate();
+    }
+
+    @AfterEach
+    void cleanup() {
+        if (admin != null && schema != null) {
+            admin.execute("DROP DATABASE IF EXISTS " + schema);
+        }
     }
 
     @Test
@@ -66,7 +79,8 @@ class ManagedWorkspaceRolesMySqlIT {
                     + " ?)", "padded".getBytes(StandardCharsets.UTF_8),
                     rejected))
                     .as("role %s must be rejected", rejected)
-                    .isInstanceOf(DataIntegrityViolationException.class);
+                    .isInstanceOf(DataAccessException.class)
+                    .hasMessageContaining("managed_workspace_access_role");
         }
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM"
                 + " managed_workspace_access WHERE actor_id = ?",
