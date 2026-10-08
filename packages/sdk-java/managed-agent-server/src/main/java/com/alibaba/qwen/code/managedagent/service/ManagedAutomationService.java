@@ -34,6 +34,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -417,15 +418,28 @@ public class ManagedAutomationService {
     }
 
     /**
-     * The relay of a claimed mutation. A definitive 4xx whose code only
-     * ever answers before any commit — not found, mode gate, conflict,
-     * stale revision, retired, quota — committed nothing on the Harness,
-     * so the claim goes back instead of burning the key on a request the
-     * caller may fix and re-send. `invalid_automation_operation` proves
-     * no such thing: it also answers a read of committed data that failed
-     * integrity (the original operation may well have committed), and
-     * releasing there would orphan exactly the definition the claim
-     * protects.
+     * Refusals that can only ever answer before any commit: the funnel's
+     * own business refusals, each audited against its single answering
+     * path. Anything else a 4xx may mean — a malformed request, a broken
+     * read of committed data, a Session the takeover found busy or
+     * missing — proves nothing about whether the operation landed, and
+     * never releases the claim.
+     */
+    private static final Set<String> PRE_COMMIT_REFUSALS = Set.of(
+            "automation_not_found",
+            "automation_mode_disabled",
+            "automation_operation_conflict",
+            "automation_revision_stale",
+            "automation_retired",
+            "automation_count_limit");
+
+    /**
+     * The relay of a claimed mutation. Only a refusal in
+     * {@link #PRE_COMMIT_REFUSALS} — the funnel's business answers that
+     * validate before they could commit — lets the claim go back instead
+     * of burning the key on the caller's request. Every other answer
+     * keeps the binding: releasing on an unproven one would orphan
+     * exactly the definition the claim protects.
      */
     private Map<String, Object> relayClaimed(String tenantId,
             String idempotencyKey, String requestDigest, String actorId,
@@ -433,9 +447,7 @@ public class ManagedAutomationService {
         try {
             return relay(session.tenantId(), session.sessionId(), body);
         } catch (ApiException refusal) {
-            if (refusal.getStatus().is4xxClientError()
-                    && !"invalid_automation_operation".equals(
-                            refusal.getCode())) {
+            if (PRE_COMMIT_REFUSALS.contains(refusal.getCode())) {
                 ledger.releaseCommand(tenantId, idempotencyKey, requestDigest,
                         actorId);
             }
