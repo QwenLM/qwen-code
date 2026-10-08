@@ -18,6 +18,7 @@ import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
+import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 
 const state = vi.hoisted(() => ({
@@ -1267,5 +1268,92 @@ describe('Hosted Harness resume and retraction', () => {
       'chunk one',
       ' and two',
     ]);
+  });
+
+  it('omits a turn that ended unanswered from the history handed to the model', async () => {
+    const hooks = config([
+      { type: LlmEventType.Content, value: 'slot ran' },
+      { type: LlmEventType.Finished },
+    ]);
+    const crashedPromptId = 'arun_e2ca:input';
+    const crashedInput: ChatRecord = {
+      uuid: 'u0',
+      parentUuid: null,
+      sessionId: input.sessionId,
+      timestamp: '2026-10-08T00:00:00.000Z',
+      type: 'user',
+      cwd: input.cwd,
+      version: 'hosted-harness/1',
+      daemonPromptId: crashedPromptId,
+      message: {
+        role: 'user',
+        parts: [{ text: 'check the project file before answering' }],
+      },
+    };
+    const crashResult: ChatRecord = {
+      uuid: 'u1',
+      parentUuid: 'u0',
+      sessionId: input.sessionId,
+      timestamp: '2026-10-08T00:00:01.000Z',
+      type: 'system',
+      cwd: input.cwd,
+      version: 'hosted-harness/1',
+      subtype: 'turn_result',
+      systemPayload: {
+        promptId: crashedPromptId,
+        state: 'error',
+        stopReason: 'error',
+        endedAt: 1,
+      },
+    };
+    const olderPrompt: ChatRecord = {
+      uuid: 'u2',
+      parentUuid: 'u1',
+      sessionId: input.sessionId,
+      timestamp: '2026-10-08T00:00:02.000Z',
+      type: 'user',
+      cwd: input.cwd,
+      version: 'hosted-harness/1',
+      daemonPromptId: 'cron-older',
+      message: { role: 'user', parts: [{ text: 'an answered older prompt' }] },
+    };
+    const olderAnswer: ChatRecord = {
+      uuid: 'u3',
+      parentUuid: 'u2',
+      sessionId: input.sessionId,
+      timestamp: '2026-10-08T00:00:03.000Z',
+      type: 'assistant',
+      cwd: input.cwd,
+      version: 'hosted-harness/1',
+      daemonPromptId: 'cron-older',
+      message: { role: 'model', parts: [{ text: 'the older answer' }] },
+    };
+    await runHostedHarnessTextTurn({
+      ...input,
+      history: [crashedInput, crashResult, olderPrompt, olderAnswer],
+    });
+    expect(hooks.setHistory).toHaveBeenCalled();
+    const handed = hooks.setHistory.mock.calls.at(-1)?.[0] as Content[];
+    expect(
+      handed.some(
+        (entry) =>
+          entry.role === 'user' &&
+          entry.parts?.some(
+            (part) =>
+              'text' in part &&
+              part.text === 'check the project file before answering',
+          ),
+      ),
+    ).toBe(false);
+    expect(
+      handed.some(
+        (entry) =>
+          entry.role === 'user' &&
+          entry.parts?.some(
+            (part) =>
+              'text' in part && part.text === 'an answered older prompt',
+          ),
+      ),
+    ).toBe(true);
   });
 });

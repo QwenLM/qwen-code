@@ -2187,7 +2187,7 @@ describe('Hosted Harness no-tool session', () => {
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
-  it('refuses fires while blocked, and stops re-blocking once the crash is consumed', async () => {
+  it('settles, consumes and unblocks on a crash, and later fires run once', async () => {
     await prewriteAutomationCrashedTurnSession();
     mockBrokerBroker();
     const server = await app(true);
@@ -2207,19 +2207,26 @@ describe('Hosted Harness no-tool session', () => {
         ).send({ operationId: randomUUID(), ...fireBody() });
         expect(replayed.status).toBe(202);
         expect(replayed.body.run.state).toBe('failed');
+        expect(replayed.body.run.execution).toBe('outcome_unknown');
       },
-      { timeout: 10_000, interval: 50 },
+      { timeout: 10_000 },
     );
-    // A fire into the still-blocked Session is refused, never committed.
+    const crashed = automationRunId(AUTOMATION_ID, AUTOMATION_SLOT);
+    // The settlement of that crash is also its release: once settled and
+    // consumed, the Session takes the next fire without a reload.
     const slot = 'schedule:2026-03-08T11:00:00Z';
-    const refused = await authorize(
-      supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
-    ).send({ operationId: randomUUID(), ...fireBody(1, slot) });
-    expect(refused.status).toBe(409);
-    expect(refused.body.code).toBe('hosted_session_blocked');
     const zombieRun = automationRunId(AUTOMATION_ID, slot);
-    // The crashed input is consumed: a turn.settled covers its turnId.
-    const runId = automationRunId(AUTOMATION_ID, AUTOMATION_SLOT);
+    await vi.waitFor(
+      async () => {
+        const accepted = await authorize(
+          supertest(server).post(
+            `/session/${SESSION_ID}/automations/operations`,
+          ),
+        ).send({ operationId: randomUUID(), ...fireBody(1, slot) });
+        expect(accepted.status).toBe(202);
+      },
+      { timeout: 10_000 },
+    );
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -2233,21 +2240,19 @@ describe('Hosted Harness no-tool session', () => {
       journal.events.some(
         (event) =>
           event.kind === 'turn.settled' &&
-          event.payload['turnId'] === `${runId}:input`,
+          event.payload['turnId'] === `${crashed}:input`,
       ),
     ).toBe(true);
-    expect(
-      journal.events.some(
-        (event) =>
-          event.kind === 'domain.committed' &&
-          String(event.payload['operationId']).startsWith(`${zombieRun}:`),
-      ),
-    ).toBe(false);
     // Reload: the same crash no longer re-blocks, and the slot fires.
-    expect(
-      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
-        .status,
-    ).toBe(204);
+    await vi.waitFor(
+      async () => {
+        const closed = await headers(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        );
+        expect(closed.status).toBe(204);
+      },
+      { timeout: 15_000 },
+    );
     const reloaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
     ).send({ managedSessionStore: store() });
@@ -2261,19 +2266,93 @@ describe('Hosted Harness no-tool session', () => {
       supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
     ).send({ operationId: randomUUID(), ...fireBody(1, slot) });
     expect(fired.status).toBe(202);
-    expect(fired.body.replayed).toBe(false);
+    expect(fired.body.replayed).toBe(true);
     journal = await LocalJsonlManagedSessionJournalStore.read(
       path.join(state.root, `${SESSION_ID}.jsonl`),
       key,
     );
-    // Once, after the reload: the refused attempt committed nothing.
     expect(
-      journal.events.filter(
+      journal.events
+        .filter(
+          (event) =>
+            event.kind === 'domain.committed' &&
+            String(event.payload['operationId']).startsWith(`${zombieRun}:`),
+        )
+        .map((event) => event.payload['operationId']),
+    ).toEqual([`${zombieRun}:1`, `${zombieRun}:2`, `${zombieRun}:3`]);
+  }, 45_000);
+
+  it('still refuses a fire while a parked block persists, even after the close path', async () => {
+    await prewriteAutomationParkedSession();
+    mockBrokerBroker();
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    expect(loaded.body.recoveryRequired).toBe(true);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    // The parked prompt keeps the Session blocked: a fresh fire is refused
+    // before it could commit a run that cannot start.
+    const slot = 'schedule:2026-03-08T11:00:00Z';
+    const refused = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
+    ).send({ operationId: randomUUID(), ...fireBody(1, slot) });
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_session_blocked');
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const zombieRun = automationRunId(AUTOMATION_ID, slot);
+    expect(
+      (
+        await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          key,
+        )
+      ).events.some(
         (event) =>
           event.kind === 'domain.committed' &&
           String(event.payload['operationId']).startsWith(`${zombieRun}:`),
       ),
-    ).toHaveLength(2);
+    ).toBe(false);
+    // The close path settles inputs only of the monitor/automation
+    // sources, and the pinned prompt here is a user record: it keeps the
+    // Session parked across a reload, and every fire keeps answering 409
+    // instead of committing anything.
+    expect(
+      (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+        .status,
+    ).toBe(204);
+    const reloaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(reloaded.status).toBe(200);
+    const authorizeReloaded = (request: supertest.Test) =>
+      headers(request).set(
+        'X-Qwen-Client-Id',
+        reloaded.body.clientId as string,
+      );
+    const refusedAgain = await authorizeReloaded(
+      supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
+    ).send({ operationId: randomUUID(), ...fireBody(1, slot) });
+    expect(refusedAgain.status).toBe(409);
+    expect(refusedAgain.body.code).toBe('hosted_session_blocked');
+    expect(
+      (
+        await LocalJsonlManagedSessionJournalStore.read(
+          path.join(state.root, `${SESSION_ID}.jsonl`),
+          key,
+        )
+      ).events.some(
+        (event) =>
+          event.kind === 'domain.committed' &&
+          String(event.payload['operationId']).startsWith(`${zombieRun}:`),
+      ),
+    ).toBe(false);
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 

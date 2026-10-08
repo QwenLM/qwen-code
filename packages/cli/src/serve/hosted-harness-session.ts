@@ -129,6 +129,7 @@ import {
   type HostedRecoveryDeclineReason,
   type HostedRuntimeRecoveryReport,
 } from './hosted-runtime-recovery.js';
+import { SessionTranscriptChangedError } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import {
   HOSTED_WORKSPACE_FILE_PROFILE,
   HostedToolRecoveryRequiredError,
@@ -2497,25 +2498,99 @@ export function registerHostedHarnessSessionRoutes(
                         turn.turnId,
                       );
                     if (settled !== undefined) {
+                      // A crash inside a Runtime call parked the turn at
+                      // await_runtime: stop its executions, settle them
+                      // cancelled, advance the checkpoint out of
+                      // await_runtime, and give the wake session's lease
+                      // back — as a cancelled takeover does. Without this
+                      // every later turn refuses ("await_runtime is not a
+                      // model-start phase") and the Workspace mount stays
+                      // held for every Session on it. The Session unblocks
+                      // only once that residue is provably gone.
+                      let runtimePending = false;
+                      if (brokerOptions) {
+                        try {
+                          const authorization =
+                            await session.managed.authority.harnessRunAuthorization();
+                          runtimePending =
+                            authorization.status === 'runnable' &&
+                            authorization.checkpoint.identity.turnId ===
+                              turn.turnId &&
+                            (authorization.checkpoint.tools?.items ?? []).some(
+                              (item) =>
+                                item.state === 'in_progress' &&
+                                item.outcomeSource === 'runtime',
+                            );
+                          if (
+                            authorization.status === 'runnable' &&
+                            runtimePending
+                          ) {
+                            const broker = await stopParkedRuntimeExecutions({
+                              session: session.managed,
+                              promptId: turn.turnId,
+                              brokerOptions,
+                            });
+                            await settleParkedTurnCancelled({
+                              session: session.managed,
+                              sessionId,
+                              cwd: session.cwd,
+                              promptId: turn.turnId,
+                            });
+                            await broker.release();
+                            runtimePending = false;
+                          }
+                        } catch (cause) {
+                          // The park could not be proved settled: keep the
+                          // block rather than let a fire run against it.
+                          runtimePending = true;
+                          writeStderrLineSafe(
+                            `qwen serve: Hosted automation run of turn ${turn.turnId} could not recover the parked runtime: ${String(cause)}`,
+                          );
+                        }
+                      }
                       // Consume the crashed input too: until its turnId
                       // settles, every reload re-classifies it as recovery
-                      // and re-blocks the Session over the same crash.
-                      await session.managed.sink.write({
-                        uuid: randomUUID(),
-                        parentUuid: null,
-                        sessionId,
-                        timestamp: new Date().toISOString(),
-                        type: 'system',
-                        cwd: session.cwd,
-                        version: 'hosted-harness/1',
-                        subtype: 'turn_result',
-                        systemPayload: {
-                          promptId: turn.turnId,
-                          state: 'error',
-                          stopReason: 'error',
-                          endedAt: Date.now(),
-                        },
-                      });
+                      // and re-blocks the Session over the same crash (the
+                      // history-assembly rule in the model runner then keeps
+                      // its prompt out of later turns). A concurrent route
+                      // claim can move the journal mid-write: the
+                      // transcript-changed failure of one attempt is a
+                      // retry, not a drop, or the re-block loop this
+                      // consumes would come back.
+                      for (let attempt = 0; attempt < 3; attempt += 1) {
+                        try {
+                          await session.managed.sink.write({
+                            uuid: randomUUID(),
+                            parentUuid: null,
+                            sessionId,
+                            timestamp: new Date().toISOString(),
+                            type: 'system',
+                            cwd: session.cwd,
+                            version: 'hosted-harness/1',
+                            subtype: 'turn_result',
+                            systemPayload: {
+                              promptId: turn.turnId,
+                              state: 'error',
+                              stopReason: 'error',
+                              endedAt: Date.now(),
+                            },
+                          });
+                          break;
+                        } catch (cause) {
+                          if (!(cause instanceof SessionTranscriptChangedError))
+                            throw cause;
+                          if (attempt === 2) throw cause;
+                          await new Promise((resolve) =>
+                            setTimeout(resolve, 50 * (attempt + 1)),
+                          );
+                        }
+                      }
+                      // Nothing of this crash is left to settle: the pump
+                      // continues with the next input at once rather than
+                      // waiting on the reload only a restart would bring.
+                      if (!runtimePending) {
+                        session.blocked = false;
+                      }
                     }
                   } catch (cause) {
                     writeStderrLineSafe(
