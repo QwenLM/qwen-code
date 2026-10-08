@@ -7,6 +7,7 @@
 import { isShellResultDisplay } from '@qwen-code/qwen-code-core/shellResult';
 import { randomUUID } from 'node:crypto';
 import type {
+  ChatCompressionRecordPayload,
   ChatRecord,
   Config,
   GoalStateRecordPayloadV2,
@@ -258,7 +259,7 @@ function extractTaskToolTokens(record: ChatRecord): number {
 /**
  * Calculate token statistics from ChatRecords.
  * Aggregates usageMetadata from assistant records and TaskTool executionSummary to get total token usage.
- * Uses the last assistant record that has both a prompt size and contextWindowSize for calculating context usage percent.
+ * Uses the last assistant record that has both a prompt size and contextWindowSize, or a later compression, for calculating context usage percent.
  */
 function calculateTokenStats(records: ChatRecord[]): {
   totalTokens: number;
@@ -281,17 +282,35 @@ function calculateTokenStats(records: ChatRecord[]): {
       }
       // Context usage is the prompt size, as in the footer and on resume. The
       // total also counts this turn's output, which is not in the context yet.
+      // The recorder stores a prompt size the provider left out as 0, so fall
+      // back on any falsy value, and let no zero reading displace a real one.
       const contextTokenCount =
-        record.usageMetadata?.promptTokenCount ??
+        record.usageMetadata?.promptTokenCount ||
         record.usageMetadata?.totalTokenCount;
       // Only update lastValidRecord when BOTH values are present in the same record
-      if (
-        contextTokenCount !== undefined &&
-        record.contextWindowSize !== undefined
-      ) {
+      if (contextTokenCount && record.contextWindowSize !== undefined) {
         lastValidRecord = {
           contextTokenCount,
           contextWindowSize: record.contextWindowSize,
+        };
+      }
+    }
+
+    // A compression shrinks the context until the next reply reports a new
+    // prompt size. Resume and the footer read its new size, so do the same,
+    // keeping the window of the reply before it.
+    if (
+      record.type === 'system' &&
+      record.subtype === 'chat_compression' &&
+      lastValidRecord
+    ) {
+      const info = (
+        record.systemPayload as ChatCompressionRecordPayload | undefined
+      )?.info;
+      if (typeof info?.newTokenCount === 'number') {
+        lastValidRecord = {
+          contextTokenCount: info.newTokenCount,
+          contextWindowSize: lastValidRecord.contextWindowSize,
         };
       }
     }
