@@ -736,6 +736,68 @@ describe('MemoryDialog', () => {
     );
     expect(lastFrame()).toContain('Auto-memory: off');
   });
+  it.each([
+    ['safe', true],
+    ['safe', false],
+    ['bare', true],
+    ['bare', false],
+  ] as const)(
+    'toggles the effective setting in %s mode starting at %s',
+    (mode, initialValue) => {
+      const deliveryId = Symbol('dialog-registration');
+      mockedUseConfig.mockReturnValue({
+        ...mockedUseConfig(),
+        getBareMode: () => mode === 'bare',
+        isSafeMode: () => mode === 'safe',
+        getMemoryHookDeliveryId: () => deliveryId,
+      } as never);
+      const merged = {
+        memory: { enableManagedAutoMemory: Boolean(initialValue) },
+      };
+      const setValue = vi.fn((_scope: unknown, key: string, value: boolean) => {
+        if (key === 'memory.enableManagedAutoMemory') {
+          merged.memory.enableManagedAutoMemory = value;
+        }
+      });
+      mockedUseSettings.mockReturnValue({ setValue, merged } as never);
+      const view = render(<MemoryDialog onClose={vi.fn()} />);
+      const pressKey = (name: string) => {
+        act(() => {
+          const calls = mockedUseKeypress.mock.calls;
+          calls[calls.length - 1]![0]({ name } as never);
+        });
+      };
+      try {
+        for (let i = 0; i < 4; i++) pressKey('up');
+        expect(view.lastFrame()).toContain('› Auto-memory: off');
+        for (const [index, expected] of [
+          !initialValue,
+          initialValue,
+        ].entries()) {
+          pressKey('return');
+          expect(setValue).toHaveBeenNthCalledWith(
+            index + 1,
+            expect.anything(),
+            'memory.enableManagedAutoMemory',
+            expected,
+            undefined,
+            { throwOnWriteFailure: true },
+          );
+          expect(merged.memory.enableManagedAutoMemory).toBe(expected);
+          expect(notifyMemoryEnabledChange).toHaveBeenNthCalledWith(
+            index + 1,
+            '/tmp/project',
+            expected,
+            deliveryId,
+          );
+          expect(view.lastFrame()).toContain('› Auto-memory: off');
+        }
+      } finally {
+        view.unmount();
+      }
+    },
+  );
+
   it('does not announce a toggle whose disk write fails mid-session', async () => {
     const fs =
       await vi.importActual<typeof import('node:fs/promises')>(

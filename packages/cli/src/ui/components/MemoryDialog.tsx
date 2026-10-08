@@ -321,7 +321,6 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
   );
 
   const handleToggleAutoMemory = useCallback(() => {
-    const newValue = !autoMemoryOn;
     // setValue recomputes the merged view after committing, so read the
     // effective value back from it: a System-scope override (or an untrusted
     // workspace, whose settings are stripped from the merge) can mask a
@@ -329,6 +328,7 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
     // announce a change that did not take effect.
     const previousEffective =
       loadedSettings.merged.memory?.enableManagedAutoMemory ?? true;
+    const newValue = !previousEffective;
     try {
       loadedSettings.setValue(
         SettingScope.Workspace,
@@ -356,7 +356,7 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
         config.getMemoryHookDeliveryId(),
       );
     }
-  }, [autoMemoryOn, bareMode, safeMode, config, loadedSettings]);
+  }, [bareMode, safeMode, config, loadedSettings]);
 
   const handleToggleAutoDream = useCallback(() => {
     const newValue = !autoDreamOn;
