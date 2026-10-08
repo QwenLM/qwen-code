@@ -276,6 +276,44 @@ describe('ManagedToolRuntime', () => {
     },
   );
 
+  it.each(['before', 'after'] as const)(
+    'settles a shared history rejection %s physical execution',
+    async (phase) => {
+      const gate = deferred<void>();
+      const refusal = new Error('Shared history refused execution.');
+      useSharedHistory({
+        prepareTurn: async () => {},
+        execute: async (operation) => {
+          await gate.promise;
+          if (phase === 'after') await operation();
+          throw refusal;
+        },
+      });
+      const ref = await prepare();
+      await runtime.preflight(ref);
+      const pending = runtime.execute(ref);
+      const outcome = pending.catch((error: unknown) => error);
+      expect(runtime.status(ref).state).toBe('executing');
+      expect(runtime.hasActiveWork()).toBe(true);
+      gate.resolve();
+      expect(await outcome).toBe(refusal);
+      expect(runtime.status(ref)).toMatchObject({
+        state: 'settled',
+        result: {
+          executionStatus: phase === 'before' ? 'not_started' : 'success',
+        },
+      });
+      expect(tool.invocations[0].execute).toHaveBeenCalledTimes(
+        phase === 'before' ? 0 : 1,
+      );
+      expect(runtime.hasActiveWork()).toBe(false);
+      expect(runtime.cancel(ref).state).toBe('settled');
+      await expect(runtime.execute(ref)).rejects.toBe(refusal);
+      await expect(runtime.releasePrepared()).resolves.toBeUndefined();
+      await expect(runtime.dispose()).resolves.toBeUndefined();
+    },
+  );
+
   it('waits for queued execution cancellation before Runtime disposal finishes', async () => {
     const gate = deferred<void>();
     useSharedHistory({

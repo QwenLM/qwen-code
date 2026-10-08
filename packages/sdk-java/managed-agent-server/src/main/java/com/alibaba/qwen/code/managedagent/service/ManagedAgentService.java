@@ -96,7 +96,8 @@ public class ManagedAgentService {
 
     private boolean supportsClose(SessionRecord session) {
         return session.workspace() == null || store.workspaceFilesEnabled()
-                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose();
+                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
+                && harness.supportsLifecycle();
     }
 
     private boolean hasActions(SessionRecord session) {
@@ -131,6 +132,14 @@ public class ManagedAgentService {
             String idempotencyKey, String agentId, String agentRevision,
             String title, Map<String, Object> metadata,
             List<InputBlock> blocks) {
+        return createSession(tenantId, null, idempotencyKey, agentId,
+                agentRevision, title, metadata, blocks);
+    }
+
+    public CommandAdmission createSession(String tenantId, String actorId,
+            String idempotencyKey, String agentId, String agentRevision,
+            String title, Map<String, Object> metadata,
+            List<InputBlock> blocks) {
         validateIdempotencyKey(idempotencyKey);
         List<Map<String, Object>> input = input(blocks, false);
         if (!input.isEmpty()) {
@@ -155,7 +164,7 @@ public class ManagedAgentService {
                 : SubmitHarnessTurn.computePayloadDigest(input);
         Admission admission;
         try {
-            admission = store.insertSessionCommand(tenantId, CREATE,
+            admission = store.insertSessionCommand(tenantId, actorId, CREATE,
                     idempotencyKey, requestDigest, agentId, agentRevision,
                     effectiveTitle, input, payloadDigest);
         } catch (DuplicateKeyException error) {
@@ -596,7 +605,7 @@ public class ManagedAgentService {
                         true,
                         session.workspace() == null,
                         true,
-                        hasActions(session), supportsClose(session), retention, retention, retention),
+                        hasActions(session), supportsClose(session), retention, retention, supportsDelete(session, retention)),
                 publicWorkspace(session));
     }
 
@@ -665,7 +674,12 @@ public class ManagedAgentService {
                 // Stage H records its Session store holds (H0c).
                 new WebShellSessionCapabilities(true, hasArtifacts(session),
                         hasActions(session), maySubmit, supportsClose(session),
-                        retention, retention, retention));
+                        retention, retention, supportsDelete(session, retention)));
+    }
+
+    private boolean supportsDelete(SessionRecord session, boolean retention) {
+        return retention || session.workspace() != null && store.workspaceFilesEnabled()
+                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle();
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {
