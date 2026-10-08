@@ -13,9 +13,10 @@ O4（`managed-tool-output-retention.md`）让工具输出的物理回收变得�
 `managed-tool-result-page`（上限 256 KiB）或 `managed-tool-result-manifest`（上限
 64 KiB）三者之一。前台 Shell 的流式遗留输出与它是同一形状。
 
-生产代码里没有任何路径会删除 `qwen_managed_session_resource` 行或其字节。该表自 V4
-起就带着一个从未被使用的 `retention_until` 列；O4-2 的回收器只走发布目录。因此即使
-`gc-enabled = true`，一个长时间运行的后台 Shell 也会无限期持有它产生过的每一个字
+生产代码里没有任何路径会删除 `qwen_managed_session_resource` 行。该表自 V4 起就
+带着一个从未被使用的 `retention_until` 列；唯一释放内联字节的路径，是 O4-2 回收器
+对「已被某个已回收发布物编目」的副本所做的清空，它只触及 `REFERENCED` 行，永远不
+会触及本通道针对的 `PUBLISHED` 流式捕获行。因此即使 `gc-enabled = true`，一个长时间运行的后台 Shell 也会无限期持有它产生过的每一个字
 节：在托管存储下，这些行（前台遗留与后台捕获一样）以 `MYSQL_INLINE` 形式驻留在
 MySQL 里。Session 级退役墓碑（`qwen_output_session_retirement`，V30）已经能在
 Session 被永久删除时证明写入者已关闭；缺的是在同一策略下释放这些行字节的回收通道。
@@ -52,14 +53,23 @@ draining 与事件过期期间都保持钉住。Session 的永久删除会写入
 落在谓词之外的行保持钉住并保留全部字节，保守且永久：
 
 - `state = 'REFERENCED'` 的行。它们属于已提交事务与 tool-publication 的 admission
-  副本；被回收的发布物所编目的行，其字节已由 O4-2 回收器清空。
+  副本；O4-2 回收器只清空被已回收发布物编目在 `qwen_tool_publication_object` 中
+  的行的字节，而经由普通事务提交的 manifest 并不编目在其中。
 - monitor 观察输出（kind 为 `managed-monitor-observation`）、MCP 记录、media 对象、
   checkpoint 以及其它一切 kind。
-- 带有 journal 引用的 PUBLISHED 行。正常运行中 `/tool-results:publish` 行没有引用
-  行；要求 `qwen_managed_session_resource_ref` 不存在，是为了保护 CSI checkpoint
-  快照 —— 该快照要求每条引用行都能解析到一个存活资源。
-- 布局未知或处于完整性隔离观察中的行。`verifyStoredResource` 对这些行保持
-  fail-closed；回收通道绝不清空它们的字节。
+- 带有 journal 引用的 PUBLISHED 行。每一次已提交 Shell 捕获的封存 manifest 恰恰
+  就是这样的行 —— 前台回执携带 `resources: [manifestRef]`，后台捕获的 manifest
+  以 `child_run.outputRef` 到达 —— 因此它被永久钉住：P1 只释放分段、分页与内容
+  字节，#13534 的「封存 manifest」交付项保持开放，留待一个能在不破坏 CSI 不变量
+  的前提下回收带引用行的后续切片。要求 `qwen_managed_session_resource_ref` 不存
+  在，是为了保护 CSI checkpoint 快照 —— 该快照要求每条引用行都能解析到一个存活
+  资源。
+- 违反布局不变量的行：未知 `storage_kind`、`object_key`/`object_version_id`/
+  `encryption_key_id` 非 NULL、`schema_version` 不符、或 `byte_length` 列超出逐
+  kind 上界。`verifyStoredResource` 对这些行保持 fail-closed；回收通道绝不清空它们
+  的字节。但该谓词从不把存储的字节与 `byte_length` 或 `sha256` 比较：字节已与自身
+  元数据不符的行会像其他行一样被回收，而回收之后，`verifyStoredResource` 本可报告
+  的损坏在任何地方都不再可见。
 
 行状态词汇新增一个值：`COLLECTED`。处于 `COLLECTED` 状态的行保留其元数据、
 `inline_bytes = NULL`，且永远不会回到其它状态。不新增基于时间的 TTL 回收（永久
@@ -67,7 +77,7 @@ Session 删除之外的场景）：`retention_until` 继续闲置。
 
 ## 回收与记账
 
-一张新表按 Session scope 记录一份回收账本（迁移 V48）：
+一张新表按 Session scope 记录一份回收账本（迁移 V51）：
 
 ```
 qwen_managed_session_resource_collection
@@ -87,7 +97,7 @@ qwen_managed_session_resource_collection
 
 已完成的行以 `gc_next_at = -1` 落在 claim 扫描的 `gc_next_at >= 0` 区间之
 外，因此即使账本行永久保留，每 tick 扫描的开销也只与未完成工作量成正
-比。V48 同时新增 `idx_output_session_retirement_due (retired_at)`，使到
+比。V51 同时新增 `idx_output_session_retirement_due (retired_at)`，使到
 期候选扫描（`r.retired_at <= now - grace`）走索引：墓碑永不删除，没有
 索引时每个 60 秒节律周期的扫描代价将永久为 O（已退役 Session 数）。
 
@@ -120,8 +130,10 @@ qwen_managed_session_resource_collection
    被回收发布物的目录行一致。从未跑过流式捕获的 Session，合格行之和合法地为零。
 
 没有配额需要释放：`PUBLISHED` 行在任何地方都不携带 `capture_held_bytes` 式的计
-费。`collected_bytes` 精确等于被丢弃字节的总量，部署侧通过回收器日志观察。被阻塞
-的账本保持全部计费不动并记录其 blocker，与发布回收器的观察者模型一致。
+费。`collected_bytes` 是被丢弃各行的 `byte_length` 元数据之和：对生产路径写入的每
+一行，它等于实际释放的字节数；对字节已与自身元数据不符的行，则可能大于实际值。
+部署侧通过回收器日志观察它。被阻塞的账本保持全部计费不动并记录其 blocker，与发布
+回收器的观察者模型一致。
 
 claim 防护使用与 `ToolPublicationCollector` 相同的证据：一个过期 claim 只能经由原
 owner/generation 防护被接管（`generation + 1` 且 `owner = self`），因此两个 broker
@@ -167,17 +179,17 @@ head 为 `DELETED` 之后才可能进入 `COLLECTED`，而 `ManagedSessionStore`
 - 运维文档（`managed-tool-output-retention-operations.md`）补一段：开启 GC 现在同时
   会释放流式捕获字节；其部署门禁（先升级 Java 写者、隔离 OSS、数据库门禁）照旧适
   用。
-- 没有 V48 的旧版 broker 不会启动本通道。由于没有版本握手，第一台升级的 broker 在
-  `gc-enabled` 已为 true 时立刻开始回收；低于 V48 的 broker 会把合法回收的行误报
+- 没有 V51 的旧版 broker 不会启动本通道。由于没有版本握手，第一台升级的 broker 在
+  `gc-enabled` 已为 true 时立刻开始回收；低于 V51 的 broker 会把合法回收的行误报
   为 `resource_layout_unsupported`，因此升级期间仍可能回滚工作负载的集群应保持该
-  开关关闭，直到全部 broker 跑上 V48 —— 与 O4 发布已要求的「先升级全部写者」顺
+  开关关闭，直到全部 broker 跑上 V51 —— 与 O4 发布已要求的「先升级全部写者」顺
   序一致。
 
 ## 影响面与交付
 
 | 层                                                        | 变化                                                                                                          |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| 迁移 V48                                                  | 新增 `qwen_managed_session_resource_collection` 账本表；`qwen_output_session_retirement` 的 `retired_at` 索引 |
+| 迁移 V51                                                  | 新增 `qwen_managed_session_resource_collection` 账本表；`qwen_output_session_retirement` 的 `retired_at` 索引 |
 | `store/SessionResourceCollectionCollector.java`（新）     | tick、候选扫描、claim、分页、字节记账                                                                         |
 | `store/WorkspaceRecoveryReader.java`                      | `resource_collected` 命名检查                                                                                 |
 | `config/ToolPublicationConfiguration.java`                | 复用现有调度器的回收器 bean                                                                                   |
@@ -222,9 +234,11 @@ head 为 `DELETED` 之后才可能进入 `COLLECTED`，而 `ManagedSessionStore`
 - 本地文件运行时（`LocalToolResultSegmentStore`，运行时基目录下的文件系统布局）不
   归本设计管理；它的保留是独立的主机本地问题。
 - 回放容忍：`loadExtensionRevision` 在恢复工作区时会重读 `child_run.outputRef`。
-  如果某台机器在一个已退役 Session 的字节被回收之后回放它的 journal，回放会撞上
-  `resource_collected` —— 这是一个准确的结果 —— 但恢复是否应当对带墓碑的
-  Session 跳过引用闭包检查，是一个开放的产品决策。P1 不改动回放。
+  该 manifest 行带有 journal 引用、永远不会被回收，但它指向的分页与内容行不携带
+  引用行，是可回收的。如果某台机器在一个已退役 Session 的字节被回收之后回放它的
+  journal，回放会在某个分页或内容行上撞上 `resource_collected` —— 这是一个准确
+  的结果 —— 但恢复是否应当对带墓碑的 Session 跳过引用闭包检查，是一个开放的产
+  品决策。P1 不改动回放。
 - 按 tenant 的 `collected_bytes` 机群级汇报（metrics 端点）留待运维跟进。
 
 开放问题：

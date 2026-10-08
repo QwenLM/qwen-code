@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import java.time.Duration;
 import java.util.UUID;
+import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -17,7 +18,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 public final class SessionResourceCollectionCollector {
     private static final Logger LOG = LoggerFactory.getLogger(SessionResourceCollectionCollector.class);
     private static final long CLAIM_MILLIS = 60_000;
-    private static final long LEDGER_SCAN_MILLIS = 60_000;
+    private static final long LEDGER_SCAN_NANOS = Duration.ofMinutes(1).toNanos();
     private static final long PROTECTED_RECHECK_MILLIS = Duration.ofHours(24).toMillis();
     private static final int PAGE_ROWS = 100;
     private static final long PAGE_BYTES = 32L * 1024 * 1024;
@@ -41,11 +42,17 @@ public final class SessionResourceCollectionCollector {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final ManagedAgentProperties properties;
+    private final LongSupplier clock;
     private final String owner = UUID.randomUUID().toString();
-    private long lastLedgerScanMillis;
+    private long lastLedgerScanNanos;
 
     public SessionResourceCollectionCollector(JdbcTemplate jdbc, PlatformTransactionManager manager,
             ManagedAgentProperties properties) {
+        this(jdbc, manager, properties, System::nanoTime);
+    }
+
+    SessionResourceCollectionCollector(JdbcTemplate jdbc, PlatformTransactionManager manager,
+            ManagedAgentProperties properties, LongSupplier clock) {
         Duration grace = properties.getToolPublication().getDeletionGrace();
         if (grace == null || grace.isNegative()) {
             throw new IllegalStateException("Tool output deletion grace must be nonnegative");
@@ -53,6 +60,7 @@ public final class SessionResourceCollectionCollector {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(manager);
         this.properties = properties;
+        this.clock = clock;
     }
 
     @Scheduled(fixedDelay = 1000, scheduler = "managedToolOutputScheduler")
@@ -69,9 +77,11 @@ public final class SessionResourceCollectionCollector {
             return false;
         }
         // History-wide due scans run at a coarse cadence; claim-time re-evaluation is authoritative.
-        long scanNow = System.currentTimeMillis();
-        if (scanNow - lastLedgerScanMillis >= LEDGER_SCAN_MILLIS) {
-            lastLedgerScanMillis = scanNow;
+        // The cadence reads a monotonic clock: a wall-clock step back (NTP, VM resume) would
+        // otherwise keep the difference negative and silently stall ledger creation for the step.
+        long scanNow = clock.getAsLong();
+        if (scanNow - lastLedgerScanNanos >= LEDGER_SCAN_NANOS) {
+            lastLedgerScanNanos = scanNow;
             ensureLedgers();
         }
         Claim claim = claim();

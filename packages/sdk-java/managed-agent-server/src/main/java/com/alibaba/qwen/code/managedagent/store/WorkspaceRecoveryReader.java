@@ -79,8 +79,17 @@ final class WorkspaceRecoveryReader {
                         + " AND journal_revision <= ?", Long.class, text(head, "tenantId"), text(head, "workspaceId"),
                         text(head, "sessionId"), text(ref, "resourceId"), head.path("journalRevision").asLong());
                 check(published || references != null && references > 0, "resource_out_of_cut");
-                // The publication collector frees inline bytes without moving state off REFERENCED.
-                check(bytes != null, "resource_collected");
+                if (bytes == null) {
+                    // The publication collector frees inline bytes without moving state off
+                    // REFERENCED and marks the cataloged object COLLECTED in the same
+                    // transaction; that marker is the positive evidence separating a
+                    // collected row from an unexplained byte loss, which stays fail-closed.
+                    Long collected = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_tool_publication_object"
+                                    + " WHERE scope_key = ? AND resource_id = ? AND state = 'COLLECTED'",
+                            Long.class, scope(head), text(ref, "resourceId"));
+                    check(collected != null && collected > 0, "resource_corrupt");
+                    throw WorkspaceRecoveryStore.failure("resource_collected");
+                }
             } else {
                 check("TOOL_PUBLICATION".equals(row.get("storage_kind")) && "REFERENCED".equals(row.get("state"))
                         && row.get("inline_bytes") == null && row.get("object_version_id") == null

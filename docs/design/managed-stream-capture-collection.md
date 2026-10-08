@@ -16,9 +16,12 @@ and manifest is sent to `POST /tool-results:publish`
 256 KiB) or `managed-tool-result-manifest` (up to 64 KiB). Foreground Shell
 stream leftovers share the same shape.
 
-No production code path ever deletes a `qwen_managed_session_resource` row or
-its bytes. The table has carried an unused `retention_until` column since V4;
-the O4-2 collector only walks publications. Even with `gc-enabled = true`, a
+No production code path ever deletes a `qwen_managed_session_resource` row.
+The table has carried an unused `retention_until` column since V4; the only
+path that frees inline bytes is the O4-2 collector's clear of copies cataloged
+to a collected publication, which reaches `REFERENCED` rows and never the
+`PUBLISHED` stream-capture rows this pass targets. Even with `gc-enabled =
+true`, a
 long-running background Shell keeps every byte it ever produced: with hosted
 storage these rows sit `MYSQL_INLINE` in MySQL (foreground leftovers and
 background captures alike). The Session-rooted retirement tombstone
@@ -64,17 +67,31 @@ Rows outside the predicate stay pinned and keep all bytes, conservatively and
 permanently:
 
 - `state = 'REFERENCED'` rows. These belong to committed transactions and to
-  the tool-publication admission copies; the O4-2 collector already nulls the
-  bytes of rows cataloged by a collected publication.
+  the tool-publication admission copies; the O4-2 collector nulls the bytes
+  only of rows cataloged in `qwen_tool_publication_object` by a collected
+  publication, and a manifest committed through a plain transaction is not
+  cataloged there.
 - Monitor observation outputs (kind `managed-monitor-observation`), MCP
   records, media objects, checkpoints and every other kind.
-- PUBLISHED rows that carry a journal reference. In normal operation a
-  `/tool-results:publish` row has no reference rows; requiring the absence of
+- PUBLISHED rows that carry a journal reference. The sealed manifest of
+  every committed Shell capture is exactly such a row — the foreground receipt
+  carries `resources: [manifestRef]`, and a background capture's manifest
+  arrives as `child_run.outputRef` — so it is pinned permanently: P1 frees
+  segment, page and content bytes only, and the "sealed manifest" deliverable
+  of #13534 stays open for a follow-up that collects journal-referenced rows
+  without breaking the CSI invariant. Requiring the absence of
   `qwen_managed_session_resource_ref` protects the CSI checkpoint snapshot —
-  its snapshot requires every reference row to resolve against a live resource.
-- Any row whose layout is unknown or considered during integrity quarantine.
+  its snapshot requires every reference row to resolve against a live
+  resource.
+- Any row violating a layout invariant: an unknown `storage_kind`, a
+  non-NULL `object_key`/`object_version_id`/`encryption_key_id`, a wrong
+  `schema_version`, or a `byte_length` column outside the per-kind bounds.
   `verifyStoredResource` keeps failing closed for these; the collection pass
-  never clears their bytes.
+  never clears their bytes. The predicate never compares the stored blob
+  against `byte_length` or `sha256`, though: a row whose bytes no longer match
+  their own metadata is collected like any other, and afterwards the
+  corruption `verifyStoredResource` would have reported is no longer visible
+  anywhere.
 
 Row state vocabulary gains one value: `COLLECTED`. A row in `COLLECTED` state
 keeps its metadata with `inline_bytes = NULL` and never returns to another
@@ -84,7 +101,7 @@ not added: `retention_until` stays unused.
 ## Collection and accounting
 
 One new table records one collection ledger per Session scope
-(migration V48):
+(migration V51):
 
 ```
 qwen_managed_session_resource_collection
@@ -104,7 +121,7 @@ qwen_managed_session_resource_collection
 
 Completed rows leave `gc_next_at = -1`, outside the claim scan's
 `gc_next_at >= 0` range, so the per-tick scan stays proportional to unfinished
-work although ledger rows are kept forever. V48 also adds
+work although ledger rows are kept forever. V51 also adds
 `idx_output_session_retirement_due (retired_at)` so the due-candidate scan
 (`r.retired_at <= now - grace`) is index-served: tombstones are never deleted,
 and an unindexed scan would otherwise cost O(retired Sessions) on every
@@ -150,8 +167,11 @@ never hold the live-session scheduler.
    legitimately be zero for a Session that never ran stream captures.
 
 No quota is released: `PUBLISHED` rows carry no `capture_held_bytes`-style
-charge anywhere. `collected_bytes` is exactly the sum of dropped bytes, which
-deployment observes through the collector log. A blocked ledger keeps the full
+charge anywhere. `collected_bytes` is the sum of the `byte_length`
+metadata of the rows dropped — equal to the bytes actually freed for every row
+the producer wrote, and able to exceed it for a row whose blob no longer
+matches its own metadata — which deployment observes through the collector
+log. A blocked ledger keeps the full
 charge in place and records its blocker, matching the observer model of the
 publication collector.
 
@@ -211,18 +231,18 @@ Rollout notes:
   gains one paragraph: enabling GC now also frees stream-capture bytes; its
   deployment gates (upgrade of Java writers first, isolated OSS, database
   gates) already apply.
-- Older broker versions without V48 never start the pass. The first upgraded
+- Older broker versions without V51 never start the pass. The first upgraded
   broker starts collecting as soon as `gc-enabled` is already true, since
   there is no version handshake; pre-upgrade brokers misname legitimately
   collected rows as `resource_layout_unsupported`, so a fleet that may roll
-  workloads during the upgrade keeps the flag off until every broker runs V48
+  workloads during the upgrade keeps the flag off until every broker runs V51
   — the same every-writer-first order the O4 rollout already requires.
 
 ## Affected layers and delivery
 
 | Layer                                                     | Change                                                                                                              |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Migration V48                                             | New `qwen_managed_session_resource_collection` ledger table; `retired_at` index on `qwen_output_session_retirement` |
+| Migration V51                                             | New `qwen_managed_session_resource_collection` ledger table; `retired_at` index on `qwen_output_session_retirement` |
 | `store/SessionResourceCollectionCollector.java` (new)     | Tick, candidate scan, claim, paging, byte accounting                                                                |
 | `store/WorkspaceRecoveryReader.java`                      | `resource_collected` named check                                                                                    |
 | `config/ToolPublicationConfiguration.java`                | Collector bean on the existing scheduler                                                                            |
@@ -279,11 +299,13 @@ operators ask for fleet numbers.
   under the runtime base directory) is unmanaged by this design; its retention
   is a separate host-local problem.
 - Replay tolerance: `loadExtensionRevision` re-reads `child_run.outputRef`
-  when a workspace is restored. If a retired Session's bytes are collected
-  before another machine replays its journal, that replay now meets
-  `resource_collected` — an accurate outcome — but whether recovery should
-  skip the closure check for tombstoned Sessions is an open product decision.
-  P1 does not change replay.
+  when a workspace is restored. That manifest row is journal-referenced and
+  never collected, but the page and content rows it points at carry no
+  reference rows and are collectible. If a retired Session's bytes are
+  collected before another machine replays its journal, the replay meets
+  `resource_collected` on a page or content row — an accurate outcome — but
+  whether recovery should skip the closure check for tombstoned Sessions is an
+  open product decision. P1 does not change replay.
 - Per-tenant fleet reporting of `collected_bytes` (metrics endpoint) is left
   to the operations follow-up.
 

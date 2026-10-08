@@ -10,6 +10,7 @@ import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.function.LongSupplier;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -724,9 +725,16 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         initSession();
         publish("freed", MANIFEST, new byte[64], "REFERENCED", "MYSQL_INLINE");
         reference("freed");
-        // The shape ToolPublicationCollector.confirm() leaves: bytes nulled, state untouched.
+        // The shape ToolPublicationCollector.confirm() leaves: bytes nulled, state untouched,
+        // and the cataloged publication object marked COLLECTED in the same transaction.
         jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = NULL"
                 + " WHERE session_scope_key = ? AND resource_id = 'freed'", resScope);
+        jdbc.update("INSERT INTO qwen_tool_publication_object (scope_key, publication_id, slot_key,"
+                + " resource_id, byte_length, sha256, state, operation_id, created_at)"
+                + " VALUES (?, 'pub-collected', 'segment:stdout:0', 'freed', 64, ?, 'COLLECTED',"
+                + " 'op-1', CURRENT_TIMESTAMP(6))",
+                ToolPublicationDataStore.scope(tenant, "workspace-1", session),
+                ToolPublicationContract.sha256(new byte[64]));
         var reader = new WorkspaceRecoveryReader(jdbc, null);
         var source = new ObjectMapper().createObjectNode();
         source.putObject("head").put("tenantId", tenant).put("workspaceId", "workspace-1")
@@ -736,5 +744,80 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
                 .put("kind", MANIFEST).put("schemaVersion", 1).put("byteLength", 64)
                 .put("digest", ToolPublicationContract.sha256(new byte[64]));
         assertThatThrownBy(() -> reader.resource(source, ref)).hasMessageContaining("resource_collected");
+    }
+
+    @Test
+    void recoveryReaderAnswersResourceCorruptForAnUnexplainedByteLoss() {
+        initSession();
+        publish("lost", MANIFEST, new byte[64], "REFERENCED", "MYSQL_INLINE");
+        reference("lost");
+        // The same byteless shape with no collected publication cataloging the resource:
+        // nothing proves collection, so the read stays on the fail-closed path.
+        jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = NULL"
+                + " WHERE session_scope_key = ? AND resource_id = 'lost'", resScope);
+        var reader = new WorkspaceRecoveryReader(jdbc, null);
+        var source = new ObjectMapper().createObjectNode();
+        source.putObject("head").put("tenantId", tenant).put("workspaceId", "workspace-1")
+                .put("sessionId", session).put("journalRevision", 10)
+                .putNull("latest_checkpoint_resource_id");
+        var ref = new ObjectMapper().createObjectNode().put("resourceId", "lost")
+                .put("kind", MANIFEST).put("schemaVersion", 1).put("byteLength", 64)
+                .put("digest", ToolPublicationContract.sha256(new byte[64]));
+        assertThatThrownBy(() -> reader.resource(source, ref)).hasMessageContaining("resource_corrupt");
+    }
+
+    @Test
+    void ledgerScanRescansAtTheCadenceOnAMonotonicClock() {
+        initSession();
+        head(session);
+        publish("segment", CONTENT, new byte[64]);
+        retire();
+        var nanos = new java.util.concurrent.atomic.AtomicLong(Duration.ofSeconds(100).toNanos());
+        var collector = collector(true, Duration.ZERO, nanos::get);
+        collector.runOnce();
+        assertThat(countLedgers()).isEqualTo(1);
+
+        String later = "session-later";
+        String laterScope = ManagedSessionStore.sessionScopeKey(tenant, later);
+        retireSession(later, "purge-later");
+        // Inside the 60-second window the same instance does not re-scan.
+        nanos.addAndGet(Duration.ofSeconds(30).toNanos());
+        collector.runOnce();
+        assertThat(ledgerCount(laterScope)).isZero();
+        // Once the cadence elapses, the same instance re-scans and creates the ledger.
+        nanos.addAndGet(Duration.ofSeconds(31).toNanos());
+        collector.runOnce();
+        assertThat(ledgerCount(laterScope)).isEqualTo(1);
+
+        String third = "session-third";
+        String thirdScope = ManagedSessionStore.sessionScopeKey(tenant, third);
+        retireSession(third, "purge-third");
+        // A backward host-clock step (NTP, VM resume) reads as "within the window", not as a
+        // permanent stall: scanning resumes as soon as the monotonic clock catches up.
+        nanos.addAndGet(-Duration.ofHours(6).toNanos());
+        collector.runOnce();
+        assertThat(ledgerCount(thirdScope)).isZero();
+        nanos.addAndGet(Duration.ofHours(6).toNanos() + Duration.ofSeconds(61).toNanos());
+        collector.runOnce();
+        assertThat(ledgerCount(thirdScope)).isEqualTo(1);
+    }
+
+    private SessionResourceCollectionCollector collector(boolean enabled, Duration grace, LongSupplier clock) {
+        var props = new ManagedAgentProperties();
+        props.getToolPublication().setGcEnabled(enabled);
+        props.getToolPublication().setDeletionGrace(grace);
+        return new SessionResourceCollectionCollector(jdbc, manager, props, clock);
+    }
+
+    private void retireSession(String sessionId, String operationId) {
+        tx.executeWithoutResult(status -> {
+            ToolPublicationRetentionStore.lockDeletion(jdbc, tenant, sessionId);
+            ToolPublicationRetentionStore.retire(jdbc, tenant, sessionId, operationId);
+        });
+    }
+
+    private long ledgerCount(String sessionScope) {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource_collection"
+                + " WHERE session_scope_key = ?", Long.class, sessionScope);
     }
 }
