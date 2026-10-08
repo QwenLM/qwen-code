@@ -514,7 +514,7 @@ describe('createDaemonToolGuard', () => {
       await expect(
         guard(
           request(
-            `export GIT_DIR\nread x <<HEREDOC\n\${GIT_DIR=${cmdPath(outsideRepo)}/.git}\nHEREDOC\ngit reset --hard`,
+            `export GIT_DIR\nread -r line <<HEREDOC\n\${GIT_DIR=${cmdPath(outsideRepo)}/.git}\nHEREDOC\ngit reset --hard`,
           ),
         ),
       ).resolves.toMatchObject({
@@ -524,7 +524,7 @@ describe('createDaemonToolGuard', () => {
       await expect(
         guard(
           request(
-            `read x <<HEREDOC\n\${GIT_DIR:=${cmdPath(outsideRepo)}/.git}\nHEREDOC\nexport GIT_DIR\ngit reset --hard`,
+            `read -r line <<HEREDOC\n\${GIT_DIR:=${cmdPath(outsideRepo)}/.git}\nHEREDOC\nexport GIT_DIR\ngit reset --hard`,
           ),
         ),
       ).resolves.toMatchObject({
@@ -651,6 +651,72 @@ describe('createDaemonToolGuard', () => {
           ),
         ),
       ).resolves.toMatchObject({ allowed: false });
+    },
+  );
+
+  // Measured false positives from the old leftmost-match regex: a decoy
+  // `<<WORD` inside a quoted string must not latch when the line's real
+  // heredoc is quoted, and documentation or grep text about heredocs is not
+  // a marker at all.
+  it.runIf(bashSemanticsLane)(
+    'ignores decoy << spellings in favour of the real heredoc on the line',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(request(`echo "<<EOF"; cat <<'REAL'\nhello $(echo world)\nREAL`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request(`printf 'Usage: cat <<EOF then EOF'\necho "\${HOME}"`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request(`read -r x <<<hello\ngit status \${FLAG}`)),
+      ).resolves.toEqual({ allowed: true });
+      await expect(
+        guard(request(`grep -rn "cat <<EOF" docs/\necho "\${DONE}"`)),
+      ).resolves.toEqual({ allowed: true });
+    },
+  );
+
+  // The delimiter is the whole word, not a prefix of it: `<<EOF.txt` wants
+  // an `EOF.txt` line, and CRLF input carries the carriage return into every
+  // line. Misreading either drops the tail of the command from every later
+  // stage while bash still runs it.
+  it.runIf(bashSemanticsLane)(
+    'keeps the commands after a dotted or CRLF heredoc visible',
+    async () => {
+      const guard = createDaemonToolGuard();
+
+      await expect(
+        guard(
+          request(
+            `cat <<EOF.txt\nsome body\nEOF.txt\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(
+          'outside the session working directory',
+        ),
+      });
+      await expect(
+        guard(
+          request(
+            `cat <<EOF\r\nsome body\r\nEOF\r\ngit -C ${cmdPath(outsideRepo)} reset --hard`,
+          ),
+        ),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(
+          'outside the session working directory',
+        ),
+      });
+      // Control: a trailing SPACE on the terminator line makes bash swallow
+      // the tail as body after its end-of-file warning, so allowing the
+      // stripped shape is correct here, not a hole.
+      await expect(
+        guard(request(`cat <<EOF\nsome body\nEOF \ngit status`)),
+      ).resolves.toEqual({ allowed: true });
     },
   );
 

@@ -2406,7 +2406,7 @@ function findHeredocMarker(line: string): HeredocMarker | null {
         if (delimiter === '') return null;
         return { delimiter, quoted: true, stripTabs };
       }
-      const name = /^[A-Za-z_][A-Za-z0-9_]*/.exec(line.slice(cursor));
+      const name = /^[A-Za-z0-9_./~-]+/.exec(line.slice(cursor));
       if (!name) {
         index++;
         wordStart = false;
@@ -2571,7 +2571,10 @@ function stripHeredocBodies(command: string): HeredocStrip {
       index++;
       const body = lines[index]!;
       const trimmed = marker.stripTabs ? body.replace(/^\t+/, '') : body;
-      if (trimmed === marker.delimiter) break;
+      // CRLF input carries the carriage return into every line; bash folds
+      // it into the delimiter word itself, so tolerate it on the terminator.
+      const peeled = trimmed.endsWith('\r') ? trimmed.slice(0, -1) : trimmed;
+      if (peeled === marker.delimiter) break;
       bodyLines.push(body);
     }
     if (
