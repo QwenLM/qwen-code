@@ -515,8 +515,13 @@ public class ChildResultRelay {
             String child = row.childSessionId() != null ? row.childSessionId()
                     : relayStore.findLineageChild(row.tenantId(),
                             row.parentSessionId(), row.childRunId());
-            closed = child == null || childCloses.closeSupported();
-            if (child != null && childCloses.closeSupported()) {
+            // One read of the capability feeds both decisions: reading it
+            // twice could flip between the admit order and the retention
+            // flag and silently lose the debt either way.
+            boolean closeActionable = child != null
+                    && childCloses.closeSupported();
+            closed = child == null || closeActionable;
+            if (closeActionable) {
                 childCloses.admitChildClose(row.tenantId(),
                         row.parentSessionId(), child, row.childRunId());
             }
