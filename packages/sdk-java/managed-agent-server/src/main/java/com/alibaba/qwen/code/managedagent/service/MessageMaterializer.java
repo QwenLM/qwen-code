@@ -32,8 +32,11 @@ public class MessageMaterializer {
         this.store = store;
     }
 
-    @Scheduled(fixedDelayString =
-            "${qwen.managed-agent.events.materialize-interval:100ms}")
+    // Blocking JDBC rotation writes must never occupy the one-thread
+    // default pool that carries the dispatch scan and lease recovery.
+    @Scheduled(scheduler = "managedMaterializationScheduler",
+            fixedDelayString =
+                    "${qwen.managed-agent.events.materialize-interval:100ms}")
     public void materialize() {
         // Saturation means a row sits behind the selection window, so
         // probe one row past the limit rather than inferring it from an

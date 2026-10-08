@@ -320,8 +320,10 @@ public class ManagedAgentService {
                             refusal.getCode(), refusal.getMessage());
                 }
                 // Chain and log the root cause: a plain 503 leaves on-call
-                // unable to tell a network fault from a daemon bug.
-                LOG.warn("Hosted Harness rename failed tenant={} session={}",
+                // unable to tell a network fault from a daemon bug. The
+                // catch wraps the store calls too, so the WARN names the
+                // operation rather than a subsystem the fault may not be in.
+                LOG.warn("Managed Agent rename failed tenant={} session={}",
                         tenantId, sessionId, error);
                 throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE,
                         "hosted_harness_unavailable",

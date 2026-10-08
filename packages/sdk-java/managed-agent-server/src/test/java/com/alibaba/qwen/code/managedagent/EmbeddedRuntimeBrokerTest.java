@@ -378,9 +378,11 @@ class EmbeddedRuntimeBrokerTest {
                 "owner-1", claimed.getDispatchGeneration())).isNotNull();
         try (EmbeddedRuntimeBroker broker = new EmbeddedRuntimeBroker(store,
                 properties, bindings, sessions, executions)) {
-            // The reconcile of an UNKNOWN outcome is evidence work after the
-            // close: the fence must not answer it, so the path reaches the
-            // binding check and reports the retired generation.
+            // The reconcile of an UNKNOWN outcome is evidence work after
+            // the close: the fence must not answer it, so the path still
+            // resolves the Session's scope, and the binding check reports
+            // the execution's recorded generation as unanswerable — the
+            // binding it was dispatched to is gone from this Broker.
             RuntimeBrokerService service = serviceOf(broker);
             assertThatThrownBy(() -> service.reconcileExecution(SESSION_ID,
                     RUNTIME_ID, "call-1").toCompletableFuture().join())

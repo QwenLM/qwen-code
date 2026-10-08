@@ -600,11 +600,50 @@ class ManagedSessionLifecycleTest {
         assertThat(logged.list).singleElement().satisfies(event -> {
             assertThat(event.getLevel())
                     .isEqualTo(ch.qos.logback.classic.Level.WARN);
+            // The fault here is in the store, so the WARN names the
+            // operation; the chained cause carries the subsystem signal.
             assertThat(event.getFormattedMessage())
-                    .contains("Hosted Harness rename failed")
+                    .contains("Managed Agent rename failed")
                     .contains(tenant).contains(sessionId);
             assertThat(event.getThrowableProxy().getMessage())
                     .isEqualTo("completion unavailable");
+        });
+    }
+
+    @Test
+    void aHarnessFaultedRenameLogsAndChainsTheRootCause() throws Exception {
+        String tenant = tenant();
+        String sessionId = attachedSession(tenant);
+        harness.failNextRename();
+        ManagedAgentService subject = new ManagedAgentService(store,
+                new RequestDigests(), null, harness, null);
+        ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger)
+                org.slf4j.LoggerFactory.getLogger(ManagedAgentService.class);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>
+                logged = new ch.qos.logback.core.read.ListAppender<>();
+        logged.start();
+        logger.addAppender(logged);
+        try {
+            assertThatThrownBy(() -> subject.renameSession(tenant, null,
+                    "key", sessionId, "renamed"))
+                    .isInstanceOfSatisfying(ApiException.class, error -> {
+                        assertThat(error.getCode())
+                                .isEqualTo("hosted_harness_unavailable");
+                        assertThat(error.getCause())
+                                .isInstanceOf(IllegalStateException.class)
+                                .hasMessage("fixture rename failure");
+                    });
+        } finally {
+            logger.detachAppender(logged);
+        }
+        assertThat(logged.list).singleElement().satisfies(event -> {
+            assertThat(event.getLevel())
+                    .isEqualTo(ch.qos.logback.classic.Level.WARN);
+            assertThat(event.getFormattedMessage())
+                    .contains("Managed Agent rename failed")
+                    .contains(tenant).contains(sessionId);
+            assertThat(event.getThrowableProxy().getMessage())
+                    .isEqualTo("fixture rename failure");
         });
     }
 

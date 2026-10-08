@@ -3,8 +3,10 @@ package com.alibaba.qwen.code.managedagent.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -16,10 +18,24 @@ import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.scheduling.annotation.Scheduled;
 
 class MessageMaterializerTest {
     private static final MaterializationTarget POISON =
             new MaterializationTarget("tenant", "poison");
+
+    @Test
+    void materializeRunsOnItsOwnScheduler() throws Exception {
+        // The tick issues blocking JDBC writes, so it must not fall back to
+        // the one-thread default pool that carries the dispatch scan and
+        // turn lease recovery; the named bean is declared in
+        // ManagedArtifactConfiguration and pinned by the context tests.
+        Scheduled scheduled = MessageMaterializer.class
+                .getDeclaredMethod("materialize")
+                .getAnnotation(Scheduled.class);
+        assertThat(scheduled.scheduler())
+                .isEqualTo("managedMaterializationScheduler");
+    }
 
     @Test
     void backsOffAndRotatesAFailingTarget() {
@@ -133,9 +149,13 @@ class MessageMaterializerTest {
         // the pass.
         List<MaterializationTarget> targets = new ArrayList<>();
         targets.add(POISON);
-        for (int i = 1; i <= 32; i++) {
+        for (int i = 1; i <= 31; i++) {
             targets.add(new MaterializationTarget("tenant", "healthy-" + i));
         }
+        // Row 33 is the saturation probe: the pass derives `saturated` from
+        // it but must never work on it — a write would move a row the
+        // selection window was only peeking at.
+        targets.add(new MaterializationTarget("tenant", "probe-32"));
         when(store.findMaterializationTargets(33)).thenReturn(targets);
         when(store.materializeNextBatch(anyString(), anyString(), anyInt()))
                 .thenThrow(new IllegalStateException("gap"));
@@ -177,6 +197,10 @@ class MessageMaterializerTest {
                 200);
         verify(store, times(4)).deferMaterializationTarget("tenant",
                 "healthy-31");
+        verify(store, never()).materializeNextBatch(eq("tenant"),
+                eq("probe-32"), anyInt());
+        verify(store, never()).deferMaterializationTarget("tenant",
+                "probe-32");
         assertThat(logged.list).anySatisfy(event -> {
             assertThat(event.getLevel())
                     .isEqualTo(ch.qos.logback.classic.Level.WARN);

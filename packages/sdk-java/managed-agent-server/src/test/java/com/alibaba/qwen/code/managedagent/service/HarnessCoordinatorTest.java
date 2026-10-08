@@ -2735,6 +2735,29 @@ class HarnessCoordinatorTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("lease");
 
+        // A renew just under the duration orders below it but leaves no
+        // margin for the renewal's own execution.
+        ManagedAgentProperties tightRenew = new ManagedAgentProperties();
+        tightRenew.getDispatch().setLeaseRenewInterval(Duration.ofSeconds(59));
+        assertThatThrownBy(() -> new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(), tightRenew))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lease");
+
+        // A sub-millisecond pair whose truncated margin is zero: both sides
+        // round to 1 ms, so the renewal period equals the lease on the
+        // scheduler's clock.
+        ManagedAgentProperties zeroMargin = new ManagedAgentProperties();
+        zeroMargin.getDispatch().setLeaseDuration(Duration.ofNanos(1_900_000));
+        zeroMargin.getDispatch()
+                .setLeaseRenewInterval(Duration.ofNanos(1_500_000));
+        assertThatThrownBy(() -> new HarnessCoordinator(store, harness,
+                new HarnessEventProjector(), mock(RuntimeWarmer.class),
+                directExecutor(), Clock.systemUTC(), zeroMargin))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("lease");
+
         // The defaults (60 s lease / 20 s renew) keep passing.
         new HarnessCoordinator(store, harness, new HarnessEventProjector(),
                 mock(RuntimeWarmer.class), directExecutor(),

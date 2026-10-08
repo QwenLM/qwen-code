@@ -127,14 +127,14 @@ public class HarnessCoordinator {
         }
         // The scheduler receives toMillis(): a renew interval that is
         // positive but below a millisecond still dies on the worker thread,
-        // and a renew >= duration keeps losing the lease at the first
-        // renewal, surfacing later as hosted_harness_unavailable.
-        if (leaseDuration.toMillis() <= 0 || renewInterval.toMillis() <= 0
-                || renewInterval.compareTo(leaseDuration) >= 0) {
+        // and one without margin against the lease loses the lease to the
+        // first late renewal, surfacing later as hosted_harness_unavailable.
+        if (renewInterval.toMillis() <= 0
+                || renewInterval.toMillis() > leaseDuration.toMillis() / 2) {
             throw new IllegalStateException(
                     "Managed dispatch lease limits are invalid: renew"
-                            + " interval must be positive and below the lease"
-                            + " duration");
+                            + " interval must be at least one millisecond and"
+                            + " at most half the lease duration");
         }
     }
 
