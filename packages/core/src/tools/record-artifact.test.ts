@@ -216,10 +216,7 @@ describe('RecordArtifactTool', () => {
     const ws = await workspace();
     await ws.write('reports/ summary.html', 'ok');
 
-    const result = await ws.record(
-      'Workspace report',
-      'reports/ summary.html',
-    );
+    const result = await ws.record('Workspace report', 'reports/ summary.html');
 
     expectFirst(result, {
       title: 'Workspace report',
