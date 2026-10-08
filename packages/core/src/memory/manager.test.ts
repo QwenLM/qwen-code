@@ -2181,6 +2181,28 @@ describe('MemoryManager', () => {
       expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
     });
 
+    it('does not re-arm a session from a run that was in flight across a switch', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      let finish!: (value: ReturnType<typeof engagedNoop>) => void;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            finish = resolve;
+          }),
+      );
+      const inFlight = turn(mgr, 2);
+      await vi.waitFor(() => expect(runAutoMemoryExtract).toHaveBeenCalled());
+      // The switch lands while the extraction runs; the id can come back.
+      mgr.discardExtractCadence('sess', 'next');
+      finish(engagedNoop());
+      await inFlight;
+      await mgr.drain();
+
+      expect((await turn(mgr, 4)).skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+    });
+
     it('flushes the latest skipped turn once and then forgets it', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
       const mgr = new MemoryManager();

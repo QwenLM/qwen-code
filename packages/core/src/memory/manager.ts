@@ -677,6 +677,11 @@ export class MemoryManager {
       pending?: ScheduleExtractParams;
     }
   >();
+  // Bumped by every cadence discard. An extraction that was in flight across
+  // a discard drops its outcome: the discarded id can come back (/resume, or
+  // a failed resume restoring the old id), and must not be re-armed by a run
+  // the switch already left. Dropping an outcome only costs one arm.
+  private cadenceDiscardEpoch = 0;
   // One shared flush run per session (#13004), so overlapping boundaries wait
   // for the same extraction instead of each passing on an entry the first one
   // is already flushing. Each caller still applies its own timeout.
@@ -1306,7 +1311,9 @@ export class MemoryManager {
   private recordCadenceOutcome(
     params: ScheduleExtractParams,
     result: Awaited<ReturnType<typeof runAutoMemoryExtract>> | undefined,
+    startEpoch: number,
   ): void {
+    if (startEpoch !== this.cadenceDiscardEpoch) return;
     if (getExtractNoopSkipTurns() === 0) {
       this.extractCadence.delete(params.sessionId);
       return;
@@ -1397,6 +1404,7 @@ export class MemoryManager {
    * earlier skip.
    */
   discardExtractCadence(...sessionIds: string[]): void {
+    this.cadenceDiscardEpoch += 1;
     for (const sessionId of sessionIds) this.extractCadence.delete(sessionId);
   }
 
@@ -1516,6 +1524,7 @@ export class MemoryManager {
     });
 
     const t0 = Date.now();
+    const cadenceEpoch = this.cadenceDiscardEpoch;
     try {
       // Memory-pressure gate. Checked inside try so the finally block
       // always runs — extractRunning/extractCurrentTaskId are cleaned up
@@ -1551,7 +1560,7 @@ export class MemoryManager {
       }
 
       const result = await runAutoMemoryExtract(params);
-      this.recordCadenceOutcome(params, result);
+      this.recordCadenceOutcome(params, result, cadenceEpoch);
       if (result.touchedUserScope && params.config) {
         await this.recordUserMutation(
           params.projectRoot,
@@ -1593,7 +1602,7 @@ export class MemoryManager {
       return result;
     } catch (error) {
       const durationMs = Date.now() - t0;
-      this.recordCadenceOutcome(params, undefined);
+      this.recordCadenceOutcome(params, undefined, cadenceEpoch);
       this.update(record, {
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),
