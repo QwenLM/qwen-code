@@ -347,6 +347,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       returnDisplay: this.toToolResultDisplay(result),
     };
     if (this.mediaLimits) {
+      // Reading caps media bytes; the transport budget also includes metadata.
       const media = normalizeParts(llmContent).filter(
         (part) => part.inlineData !== undefined,
       );

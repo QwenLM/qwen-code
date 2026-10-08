@@ -924,6 +924,7 @@ describe('managed-runtime-provider/1', () => {
     it.each(['execute', 'status', 'cancel'] as const)(
       'preserves the entire maximum media result through %s fitting',
       (kind) => {
+        const caption = { text: 'caption "中"\n' };
         const toolResult = {
           llmContent: [
             {
@@ -932,13 +933,10 @@ describe('managed-runtime-provider/1', () => {
                 data: 'A'.repeat(MAX_PROVIDER_INLINE_MEDIA_BASE64_BYTES),
               },
             },
-            { text: 'caption "中"\n' },
+            caption,
           ],
           returnDisplay: 'original display',
         };
-        const caption = toolResult.llmContent[1];
-        if (!('text' in caption))
-          throw new Error('Caption fixture is missing.');
         caption.text += 'x'.repeat(
           MAX_PROVIDER_MEDIA_RESULT_BYTES -
             Buffer.byteLength(JSON.stringify(toolResult)),

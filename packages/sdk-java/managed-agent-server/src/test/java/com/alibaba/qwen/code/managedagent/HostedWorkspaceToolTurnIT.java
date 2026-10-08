@@ -39,6 +39,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.boot.builder.SpringApplicationBuilder;
@@ -157,11 +158,10 @@ class HostedWorkspaceToolTurnIT {
 
     @Test
     @Timeout(300)
+    @EnabledIfSystemProperty(named = "qwen.provider.media.bundle-ready", matches = "true")
     void providerMediaReachesModelAndSurvivesReplyLossAndBrokerRestartOnMySql() throws Exception {
         assertThat(System.getProperty("mysql.url")).as("M4 requires real MySQL").startsWith("jdbc:mysql:");
         assertThat(System.getProperty("mysql.user")).as("M4 requires -Dmysql.user").isNotBlank();
-        assertThat(System.getProperty("qwen.provider.media.bundle-ready"))
-                .as("Run only after the parent confirms bundle ready").isEqualTo("true");
         runDriver(List.of("png", "jpeg", "webp", "gif", "native-pdf", "pdf-text", "pdf-render",
                 "image-disabled", "image-missing", "pdf-too-large", "lost-start", "lost-execute"), "provider-media");
     }
