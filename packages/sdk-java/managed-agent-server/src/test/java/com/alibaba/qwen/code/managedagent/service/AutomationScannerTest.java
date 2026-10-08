@@ -1247,6 +1247,91 @@ class AutomationScannerTest {
     }
 
     @Test
+    void aSettledRunIsNeverSubtractedAgainWhenTheMirrorAlreadyDropsIt() {
+        PublicAutomation automation = define("* * * * *", "skip", "none", null,
+                true);
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        String id = automation.id();
+        String wedged = "schedule:2026-06-01T10:01:00Z";
+        String liveKey = "schedule:2026-06-01T10:02:00Z";
+        String wedgedRunId = AutomationLedgerStore.automationRunId(id, wedged);
+        // A second, genuinely live run beside the wedged one (a manual
+        // run, fired and never settled: the mirror has no terminal row).
+        AutomationLedgerStore.ScheduleRow row = ledger.findSchedule(tenant, id)
+                .orElseThrow();
+        long fence = ledger.claim(tenant, id, "scanner-a",
+                clock.get() + 60_000, clock.get());
+        ledger.recordOccurrence(AutomationLedgerStore.OccurrenceRow.decision(
+                row, liveKey, T0 + 2 * MINUTE, AutomationScanner.TRIGGER_MANUAL,
+                AutomationLedgerStore.OUTCOME_FIRING, null, fence, clock.get()),
+                "scanner-a");
+        assertThat(ledger.settleOccurrence(tenant, id, liveKey,
+                AutomationLedgerStore.OUTCOME_FIRED, null, "scanner-a", fence,
+                clock.get())).isTrue();
+        ledger.release(tenant, id, "scanner-a", fence, clock.get());
+        // Production's shape: the commit that settles the wedged run
+        // applies its `failed` mirror row inside the same commit that
+        // answers the reconcile (ManagedSessionStore). Subtracting the
+        // answered run again from the recounted active would admit this
+        // very slot past the wedge it was refused for.
+        FakeConnector applying = new FakeConnector(fake) {
+            private boolean applied;
+            @Override
+            public Map<String, Object> runAutomationOperation(String tenantId,
+                    String sessionId, Map<String, Object> body) {
+                Map<String, Object> answer = super.runAutomationOperation(
+                        tenantId, sessionId, body);
+                if (!applied && "reconcile_run".equals(body.get("kind"))) {
+                    applied = true;
+                    String scope = ManagedSessionStore.sessionScopeKey(tenant,
+                            sessionId);
+                    byte[] bytes = "{}".getBytes(StandardCharsets.UTF_8);
+                    jdbc.update("INSERT INTO qwen_managed_session_resource"
+                            + " (session_scope_key, tenant_id, workspace_id,"
+                            + " session_id, resource_id, kind, schema_version,"
+                            + " byte_length, sha256, storage_kind,"
+                            + " inline_bytes, publish_command_id, state,"
+                            + " created_at)"
+                            + " VALUES (?, ?, ?, ?, 'wedged-run-rev-3',"
+                            + " 'managed-automation-run', 1, ?, ?,"
+                            + " 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', ?)",
+                            scope, tenant, WORKSPACE, sessionId, bytes.length,
+                            AutomationLedgerStore.sha256(
+                                    new String(bytes, StandardCharsets.UTF_8)),
+                            bytes, new java.sql.Timestamp(clock.get()));
+                    jdbc.update(
+                            "INSERT INTO qwen_managed_session_extension_record"
+                            + " (session_scope_key, record_key, tenant_id,"
+                            + " workspace_id, session_id, domain, record_id,"
+                            + " operation_hash, revision, record_resource_id,"
+                            + " task_kind, task_state, definition_revision,"
+                            + " created_at)"
+                            + " VALUES (?, ?, ?, ?, ?, 'automation_run', ?, ?, 3,"
+                            + " 'wedged-run-rev-3', 'automation_run', 'failed',"
+                            + " 1, ?)",
+                            scope, ManagedExtensionProjection.recordKey(
+                                    sessionId, "automation_run", wedgedRunId),
+                            tenant, WORKSPACE, sessionId, wedgedRunId,
+                            "0".repeat(64), clock.get());
+                }
+                return answer;
+            }
+        };
+        AutomationScanner applyingScanner = new AutomationScanner(ledger,
+                applying, mapper, settings, clock::get, "scanner-a");
+        fake.crashedRuns.add(wedgedRunId);
+        clock.set(T0 + 3 * MINUTE + 1_000);
+        assertThat(applyingScanner.tick(clock.get())).isEqualTo(0);
+        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+                tenant, id, "schedule:2026-06-01T10:03:00Z").orElseThrow();
+        assertThat(skipped.outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+        assertThat(skipped.reason()).isEqualTo(AutomationScanner.REASON_OVERLAP);
+        assertThat(fake.firedOccurrences()).containsExactly(wedged);
+    }
+
+    @Test
     void anUnansweredReconcileKeepsTheRefusalAndTheNextSlotRetries() {
         PublicAutomation automation = define("* * * * *", "skip", "none", null,
                 true);
@@ -1775,7 +1860,7 @@ class AutomationScannerTest {
     }
 
     /** The connector the control plane sees: only the automation verb answers. */
-    static final class FakeConnector implements HarnessConnector {
+    static class FakeConnector implements HarnessConnector {
         private final AutomationHarnessFake fake;
         /** A test seam: the Harness is not configured. */
         volatile boolean unavailable;

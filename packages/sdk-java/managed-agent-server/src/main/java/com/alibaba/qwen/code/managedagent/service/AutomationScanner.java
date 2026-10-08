@@ -319,14 +319,31 @@ public class AutomationScanner {
             // nothing ever will. Ask the Harness to reconcile the blocking
             // runs first: a live one answers unchanged and the refusal
             // stands; a crashed one settles and frees the slot chain and
-            // the lease. The mirror's correction rides the event stream
-            // the reconcile just re-armed, so this decision prices the
-            // count off the answers.
+            // the lease.
             Set<String> resolved = reconcileBlockingRuns(row);
             if (!resolved.isEmpty()) {
-                refusal = countRefusal(row,
-                        store.countActive(row.tenantId(), row.scheduleId())
-                                - resolved.size());
+                // The mirror's correction rides the event stream the
+                // commit that answered just applied (the host store's
+                // commit applies the record synchronously); a mirror that
+                // lags is the unit-fake's shape. Price off the recounted
+                // active, subtracting only what STILL appears blocking:
+                // resolving what the answer proved terminal while the
+                // mirror already drops it must not subtract twice.
+                int after = store.countActive(row.tenantId(),
+                        row.scheduleId());
+                int lagging = 0;
+                Set<String> still = new HashSet<>();
+                for (OccurrenceView blocking : store.findBlockingRuns(
+                        row.tenantId(), row.scheduleId(),
+                        MAX_RECONCILE_RUNS)) {
+                    still.add(blocking.occurrence().occurrenceKey());
+                }
+                for (String asked : resolved) {
+                    if (still.contains(asked)) {
+                        lagging++;
+                    }
+                }
+                refusal = countRefusal(row, after - lagging);
             }
         }
         if (refusal != null) {
@@ -370,20 +387,16 @@ public class AutomationScanner {
                 Map<String, Object> answer = harness.runAutomationOperation(
                         row.tenantId(), row.sessionId(), body);
                 Object run = answer.get("run");
-                boolean unblocked = Boolean.TRUE
-                        .equals(answer.get("repaired"));
-                if (!unblocked) {
-                    // The route answers the run in the journal's own
-                    // vocabulary; `settled` is its `completed`.
-                    String state = run instanceof Map<?, ?> summary
-                            ? String.valueOf(summary.get("state"))
-                            : null;
-                    unblocked = "settled".equals(state)
-                            || "completed".equals(state)
-                            || "failed".equals(state)
-                            || "cancelled".equals(state);
-                }
-                if (unblocked) {
+                // Resolution keys on what the ASKED occurrence's run
+                // proves, never on the route's repaired flag: the route
+                // may have settled a different, older pending input
+                // while this run is still live, and the journal
+                // vocabulary's `settled` is the mirror's `completed`.
+                String state = run instanceof Map<?, ?> summary
+                        ? String.valueOf(summary.get("state"))
+                        : null;
+                if ("settled".equals(state) || "completed".equals(state)
+                        || "failed".equals(state) || "cancelled".equals(state)) {
                     resolved.add(blocking.occurrence().occurrenceKey());
                 }
             } catch (RuntimeException error) {
