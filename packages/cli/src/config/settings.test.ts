@@ -139,11 +139,16 @@ vi.mock('node:fs', async (importOriginal) => {
     openSync: vi.fn(),
     closeSync: vi.fn(),
     fchmodSync: vi.fn(),
+    chmodSync: vi.fn(),
     ftruncateSync: vi.fn(),
     mkdirSync: vi.fn(),
     mkdtempSync: vi.fn((prefix: string) => `${prefix}test`),
     rmSync: vi.fn(),
-    statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
+    statSync: vi.fn(() => ({
+      isDirectory: () => false,
+      isFile: () => true,
+      mode: 0o600,
+    })),
     realpathSync: vi.fn((p: fs.PathLike) => p.toString()),
   };
 });
@@ -166,11 +171,16 @@ vi.mock('fs', async (importOriginal) => {
     openSync: vi.fn(),
     closeSync: vi.fn(),
     fchmodSync: vi.fn(),
+    chmodSync: vi.fn(),
     ftruncateSync: vi.fn(),
     mkdirSync: vi.fn(),
     mkdtempSync: vi.fn((prefix: string) => `${prefix}test`),
     rmSync: vi.fn(),
-    statSync: vi.fn(() => ({ isDirectory: () => false, isFile: () => true })),
+    statSync: vi.fn(() => ({
+      isDirectory: () => false,
+      isFile: () => true,
+      mode: 0o600,
+    })),
     realpathSync: vi.fn((p: fs.PathLike) => p.toString()),
   };
 });
@@ -4218,6 +4228,48 @@ describe('Settings Loading and Merging', () => {
   });
 
   describe('WORKSPACE_RESTRICTED_SETTINGS as the single source', () => {
+    it.each([undefined, 0, 25])(
+      'ignores workspace memory budget zero while preserving user budget %s',
+      (budget) => {
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify({
+                memory: {
+                  agentMaxTurns: budget,
+                  agentTimeoutMinutes: budget,
+                },
+              });
+            if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+              return JSON.stringify({
+                memory: { agentMaxTurns: 0, agentTimeoutMinutes: 0 },
+              });
+            return '{}';
+          },
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(settings.merged.memory?.agentMaxTurns).toBe(budget);
+        expect(settings.merged.memory?.agentTimeoutMinutes).toBe(budget);
+        const warnings = getSettingsWarnings(settings);
+        for (const key of ['agentMaxTurns', 'agentTimeoutMinutes']) {
+          expect(
+            warnings.some((warning) => warning.includes(`memory.${key}`)),
+          ).toBe(true);
+        }
+      },
+    );
+
+    it('lists both memory budgets as workspace-restricted', () => {
+      expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
+        'memory.agentMaxTurns',
+      );
+      expect(WORKSPACE_RESTRICTED_SETTING_KEYS).toContain(
+        'memory.agentTimeoutMinutes',
+      );
+    });
+
     it('selects the complete highest-priority operator Mem0 config', () => {
       const mem0 = { baseUrl: 'https://system.example', protocol: 'mem0-v3' };
       (mockFsExistsSync as Mock).mockReturnValue(true);
@@ -4325,7 +4377,9 @@ describe('Settings Loading and Merging', () => {
         workspacePayload[section][key] =
           key === 'allowedInsecureVoiceBaseUrls'
             ? ['http://voice.example/v1']
-            : true;
+            : key === 'agentMaxTurns' || key === 'agentTimeoutMinutes'
+              ? 0 // numeric budgets; 0 disables the limit, the value being guarded against
+              : true;
       }
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {

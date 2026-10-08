@@ -33,6 +33,10 @@ import {
   updateMCPServerStatus,
 } from './mcp-client.js';
 import { ToolErrorType } from './tool-error.js';
+import {
+  generateLegacyMcpToolName,
+  normalizeMcpToolName,
+} from '../utils/tool-name-utils.js';
 import { ToolMode } from './code-mode.js';
 
 vi.mock('node:fs');
@@ -515,6 +519,93 @@ describe('ToolRegistry', () => {
       const rawName = `mcp__server__${'x'.repeat(80)}`;
       const legacyName = rawName.slice(0, 28) + '___' + rawName.slice(-32);
       expectLegacyNameHonored(legacyName, 'server', 'x'.repeat(80));
+    });
+
+    it('publishes the exact raw identity through getPermissionAliases (#10199)', () => {
+      const registry = new ToolRegistry(config);
+      const mcpTool = mcp('foo:bar', 'a.b');
+      registry.registerTool(mcpTool);
+
+      // The exact raw spelling comes first — it is the only spelling the
+      // permission matcher accepts as provenance for legacy unsafe rules —
+      // followed by the legacy reduction for pre-normalization settings.
+      expect(registry.getPermissionAliases(mcpTool.name)).toEqual([
+        'mcp__foo:bar__a.b',
+        generateLegacyMcpToolName('mcp__foo:bar__a.b'),
+      ]);
+      expect(registry.getPermissionAliases('read_file')).toBeUndefined();
+    });
+
+    it('disables an MCP tool whose disabledTools entry uses the legacy spelling', () => {
+      // The legacy reduction is the spelling `isToolDisabled`'s surviving
+      // `normalizeMcpToolName(entry) === name` arm cannot reach, so only the
+      // alias channel can disable this tool.
+      const legacyName = generateLegacyMcpToolName('mcp__foo:bar__a.b');
+      const registry = registryFor({ disabledTools: [legacyName] });
+      const mcpTool = mcp('foo:bar', 'a.b');
+
+      expect(mcpTool.name).not.toBe(legacyName);
+      expect(normalizeMcpToolName(legacyName)).not.toBe(mcpTool.name);
+      registry.registerTool(mcpTool);
+      expect(registry.getTool(mcpTool.name)).toBeUndefined();
+    });
+
+    it('keeps a legacy disabledTools entry effective when the reduction is withheld from permissionAliases (R4-2)', () => {
+      // A 24-char server key: the truncation cut reaches the key segment, so
+      // the R12-1 gate withholds the legacy reduction from the permission
+      // channel — but `disabledTools` over-matching is the permitted
+      // fail-closed direction, and a pre-normalization entry must still
+      // suppress registration (main's behavior, restored via the ungated
+      // disabledToolAliases channel).
+      const server = 's'.repeat(24);
+      const rawName = `mcp__${server}__${'t'.repeat(40)}`;
+      const legacyName = generateLegacyMcpToolName(rawName);
+      const registry = registryFor({ disabledTools: [legacyName] });
+      const mcpTool = mcp(server, 't'.repeat(40));
+
+      // Premise: the permission channel withholds this reduction, and the
+      // normalize fallback cannot reach it either — only the ungated
+      // disabled-tools channel can.
+      expect(mcpTool.permissionAliases).not.toContain(legacyName);
+      expect(normalizeMcpToolName(legacyName)).not.toBe(mcpTool.name);
+      registry.registerTool(mcpTool);
+      expect(registry.getTool(mcpTool.name)).toBeUndefined();
+    });
+
+    it('keeps a legacy disabledTools entry effective at the app-tool and registry-copy sites after setDisabledTools (R14-3)', () => {
+      // Same 24-char-key / 40-char-tool fixture as R4-2 above: the R12-1
+      // gate withholds this tool's legacy reduction from permissionAliases,
+      // so only the ungated disabledToolAliases channel can suppress it.
+      // Registration happens while disabledTools is empty (the tool lands
+      // in mcpAppTools); the ACP settings-reload path then calls
+      // config.setDisabledTools with the legacy spelling verbatim — no
+      // re-registration — and every consumer site must honor it.
+      const server = 's'.repeat(24);
+      const serverToolName = 't'.repeat(40);
+      const legacyName = generateLegacyMcpToolName(
+        `mcp__${server}__${serverToolName}`,
+      );
+      const registry = new ToolRegistry(config);
+      const mcpTool = appTool(server, serverToolName, ['app']);
+
+      // Premise: the permission channel withholds this reduction, and the
+      // normalize fallback cannot reach it either.
+      expect(mcpTool.permissionAliases).not.toContain(legacyName);
+      expect(normalizeMcpToolName(legacyName)).not.toBe(mcpTool.name);
+
+      registry.registerTool(mcpTool);
+      expect(registry.getMcpAppTool(server, serverToolName)).toBe(mcpTool);
+
+      // Mid-session disable in the pre-normalization legacy spelling, with
+      // no re-registration (acpAgent's settings-reload path).
+      config.setDisabledTools(new Set([legacyName]));
+
+      expect(registry.getMcpAppTool(server, serverToolName)).toBeUndefined();
+      expect(registry.hasMcpAppResource(server, 'ui://app/view')).toBe(false);
+
+      const dest = new ToolRegistry(config);
+      dest.copyDiscoveredToolsFrom(registry);
+      expect(dest.getMcpAppTool(server, serverToolName)).toBeUndefined();
     });
 
     it('skips lazy factories whose name is in Config.disabledTools', async () => {

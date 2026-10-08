@@ -14,6 +14,16 @@ public interface RuntimeBindingRepository {
     ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, ToolExecutionRecord candidate);
 
+    /** Authorizes DISPATCHING to EXECUTING under the parent admission lock.
+     * Native repositories retain the locked parent version and dispatch generation.
+     * A dispatch coordinator claim alone grants no execution permission. */
+    default ToolExecutionRecord authorizeDispatch(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, ToolExecutionRecord expected,
+            String owner, long dispatchGeneration) {
+        throw new RuntimeBrokerException(501, "runtime_dispatch_admission_unavailable",
+                "Runtime repository does not support atomic dispatch admission", false);
+    }
+
     /** Performs one bounded recovery transaction under the exact generation
      * claim. Returns LOST while more work or physical stop proof is needed. */
     RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
@@ -47,8 +57,35 @@ public interface RuntimeBindingRepository {
 
     boolean isHarnessDraining(String tenantId, String harnessSessionId);
 
+    default boolean isHarnessAdmissionClosed(String tenantId, String harnessSessionId) {
+        return isHarnessDraining(tenantId, harnessSessionId);
+    }
+
+    default void requireHarnessAdmission(RuntimeScope scope, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        if (authority != null || isHarnessDraining(scope.getTenantId(), harnessSessionId)) {
+            throw new RuntimeBrokerException(409, "runtime_admission_closed", "Session admission is closed", false);
+        }
+    }
+
+    default void requireHookAdmission(RuntimeScope scope, String harnessSessionId,
+            RuntimeLifecycleAuthority authority) {
+        requireHarnessAdmission(scope, harnessSessionId, authority);
+    }
+
+    default void verifyHarnessStopped(java.sql.Connection connection, String tenantId, String harnessSessionId)
+            throws java.sql.SQLException {
+        throw new RuntimeBrokerException(409, "workspace_close_identity_unverified", "Stop verification is unavailable", false);
+    }
+
     List<RuntimeBindingRecord> findByHarnessSession(String tenantId, String harnessSessionId,
             String afterBindingId, int limit);
+
+    void requestStorageFence(String tenantId, String storageId, String operationId);
+
+    boolean isStorageFenced(String tenantId, String storageId, String operationId);
+
+    List<RuntimeBindingRecord> findByStorage(String tenantId, String storageId, String afterBindingId, int limit);
 
     RuntimeBindingRecord findOrCreate(RuntimeProvisionRequest request);
 

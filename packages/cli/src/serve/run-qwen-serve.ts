@@ -5091,6 +5091,7 @@ async function runQwenServeImpl(
       stopScheduledTaskKeepalive?: () => void;
       stopWorkspaceGitState?: () => void;
       stopLiveCoordinator?: () => void;
+      stopAgentHostRestore?: () => void;
       stopWebTerminalRegistry?: () => void;
       subSessionStoppers?: Array<() => void>;
     };
@@ -5109,6 +5110,7 @@ async function runQwenServeImpl(
     stopSafely('scheduled-task keepalive', locals.stopScheduledTaskKeepalive);
     stopSafely('workspace git state', locals.stopWorkspaceGitState);
     stopSafely('Live Host coordinator', locals.stopLiveCoordinator);
+    stopSafely('Agent Host reconnect', locals.stopAgentHostRestore);
     stopSafely('web terminal registry', locals.stopWebTerminalRegistry);
     stopTrustPolicyMonitor(app);
     for (const stop of locals.subSessionStoppers ?? []) {

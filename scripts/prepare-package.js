@@ -349,6 +349,7 @@ function writeDistPackageJson(rootDir, distDir) {
       // Must ship in the tarball or the @-picker silently falls back to the
       // in-thread AsyncFzf path on big workspaces in npm-installed CLIs.
       'fzfWorker.js',
+      'glob-search-worker.js',
       'codeModeHost.js',
       'sandboxBwrapRelay.js',
       'sandboxLandlockRelay.js',
