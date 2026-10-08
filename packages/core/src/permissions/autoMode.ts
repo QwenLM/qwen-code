@@ -585,13 +585,27 @@ export function applyAutoModeDecision(
         recordAllow(denialState, actionFingerprint),
       );
       return { kind: 'approved' };
-    case 'blocked:destructive-command':
-      config.setAutoModeDenialState(recordBlock(denialState));
+    case 'blocked:destructive-command': {
+      const blockedState = recordBlock(denialState, actionFingerprint);
+      const fallback = shouldFallback(blockedState);
+      if (fallback.fallback) {
+        config.setAutoModeDenialState(consumePendingManualRetry(blockedState));
+        return {
+          kind: 'fallback',
+          reason: fallback.reason,
+          message: formatDenialFallbackMessage(
+            fallback.reason,
+            decision.reason,
+          ),
+        };
+      }
+      config.setAutoModeDenialState(blockedState);
       return {
         kind: 'blocked',
         errorMessage: `${decision.reason}\n${AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE}`,
         reason: 'classifier_blocked',
       };
+    }
     case 'classifier':
       if (decision.shouldBlock) {
         if (decision.unavailable) {

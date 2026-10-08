@@ -1366,3 +1366,73 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
     expect(setAutoModeDenialState).toHaveBeenCalled();
   });
 });
+
+// ─── destructive-command denial escalation ───────────────────────────────
+
+describe('applyAutoModeDecision — blocked:destructive-command escalation', () => {
+  type DestructiveVerdict = Extract<
+    Parameters<typeof applyAutoModeDecision>[0],
+    { via: 'blocked:destructive-command' }
+  >;
+  const destructive = (
+    reason = 'Blocked destructive git command',
+  ): DestructiveVerdict => ({ via: 'blocked:destructive-command', reason });
+  const fingerprint = 'shell:git-reset-hard';
+
+  it('hard-blocks the first destructive denial without falling back', () => {
+    // Escalation must not fire early: one denial is below every cap.
+    const { result } = apply(destructive(), counters(0, 0, 0, 0), fingerprint);
+    expect(result.kind).toBe('blocked');
+    if (result.kind === 'blocked') {
+      expect(result.reason).toBe('classifier_blocked');
+    }
+  });
+
+  it('arms the exact-action manual retry on a destructive denial', () => {
+    // Without the fingerprint the user has no way to get this exact action
+    // re-reviewed, which is what the denial guidance points them at.
+    const { setAutoModeDenialState } = apply(
+      destructive(),
+      counters(0, 0, 0, 0),
+      fingerprint,
+    );
+    expect(setAutoModeDenialState).toHaveBeenCalledWith(
+      expect.objectContaining({ pendingManualRetryFingerprint: fingerprint }),
+    );
+  });
+
+  it('degrades to manual approval at the consecutive-block cap', () => {
+    // counters(2, ...) + this denial reaches maxConsecutiveBlock (3), the same
+    // cap that already escalates on the classifier path.
+    const { result } = apply(destructive(), counters(2, 0, 2, 0), fingerprint);
+    expect(result.kind).toBe('fallback');
+    if (result.kind === 'fallback') {
+      expect(result.reason).toBe('consecutive_block');
+    }
+  });
+
+  it('degrades to manual approval at the session total-denial cap', () => {
+    // totalBlock 19 + this denial reaches maxTotalDenials (20). Destructive
+    // denials previously counted towards the cap but could never trigger it.
+    const { result } = apply(destructive(), counters(0, 0, 19, 0), fingerprint);
+    expect(result.kind).toBe('fallback');
+    if (result.kind === 'fallback') {
+      expect(result.reason).toBe('total_denial');
+    }
+  });
+
+  it('consumes the pending retry once it escalates', () => {
+    // Mirrors the classifier path: the one-shot retry is consumed in the same
+    // call that falls back, so it cannot fire twice.
+    const { setAutoModeDenialState } = apply(
+      destructive(),
+      { ...counters(2, 0, 2, 0), pendingManualRetryFingerprint: fingerprint },
+      fingerprint,
+    );
+    expect(setAutoModeDenialState).toHaveBeenCalledWith(
+      expect.not.objectContaining({
+        pendingManualRetryFingerprint: fingerprint,
+      }),
+    );
+  });
+});
