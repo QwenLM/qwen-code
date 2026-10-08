@@ -2048,7 +2048,12 @@ describe('subagent.ts', () => {
         const scope = await createAgent(config);
         await expectExecuteError(scope, 'x'.repeat(50));
         const retained = scope.getLastError()!;
-        expect(retained).toHaveLength(501); // the 500-char bound plus the '…'
+        // Bounded, and still carrying real message text rather than only an
+        // ellipsis. The exact 500-char outer bound is pinned by the long-cause
+        // case below — that is the shape which actually reaches it now that the
+        // message is bounded short of the total to leave the cause room.
+        expect(retained.length).toBeLessThanOrEqual(500);
+        expect(retained).toContain('x'.repeat(50));
         expect(retained.endsWith('…')).toBe(true);
         expect(retained).not.toContain('\u001b[31m');
       });
@@ -2069,6 +2074,63 @@ describe('subagent.ts', () => {
         await expectExecuteError(scope, 'upstream request failed');
         expect(scope.getLastError()).toContain('socket hang up');
         expect(scope.getLastError()).toContain('ECONNRESET');
+      });
+
+      it('keeps the folded cause when the message alone exceeds the bound (#13597)', async () => {
+        // The bound used to be applied to `getErrorMessage`'s composed
+        // `<message> (cause: <detail>)` string head-first, so a provider body
+        // long enough to trip it deleted precisely the cause the fold adds: the
+        // parent read 500 chars of opaque body and never learned it was an
+        // ECONNRESET. Reserving headroom for the cause is what keeps the two
+        // halves of the same fix from working against each other.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('M'.repeat(600)), {
+            cause: Object.assign(new Error('socket hang up'), {
+              code: 'ECONNRESET',
+            }),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'M'.repeat(50));
+        const retained = scope.getLastError()!;
+        expect(retained).toContain('ECONNRESET');
+        expect(retained).toContain('socket hang up');
+        expect(retained.length).toBeLessThanOrEqual(501);
+      });
+
+      it('still bounds the retained message when a long cause pushes it over (#13597)', async () => {
+        // Headroom for the cause must not become an unbounded total: a cause
+        // long enough to exceed the budget still lands on the outer 500-char
+        // bound, which is the guarantee the model-visible copy exists to give.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('M'.repeat(600)), {
+            cause: new Error('C'.repeat(400)),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'M'.repeat(50));
+        const retained = scope.getLastError()!;
+        expect(retained).toHaveLength(501); // the 500-char bound plus the '…'
+        expect(retained.endsWith('…')).toBe(true);
+      });
+
+      it('keeps token boundaries in a multi-line failure message (#13597)', async () => {
+        // `stripAnsiAndControl` deletes `\n`/`\r`/`\t` outright, which would weld
+        // 'quota exceeded' onto '{"code":429}' and hand the parent a token that
+        // never existed — in the one field #13597 added to make the failure
+        // actionable. Collapsing whitespace to a single space keeps the result
+        // single-line without merging tokens (same shape as `sanitizeForStderr`
+        // in packages/cli/src/utils/errors.ts).
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          new Error('quota exceeded\n{"code":429}'),
+        );
+        const scope = await createAgent(config);
+        await expectExecuteError(scope, 'quota exceeded');
+        expect(scope.getLastError()).toBe('quota exceeded {"code":429}');
+        expect(scope.getLastError()).not.toContain('\n');
       });
     });
 
