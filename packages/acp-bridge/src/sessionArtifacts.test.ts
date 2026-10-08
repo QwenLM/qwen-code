@@ -6279,11 +6279,7 @@ describe('SessionArtifactStore', () => {
       rebuilt.artifacts[1]!.id,
     ]);
 
-    for (const override of [
-      { source: 'client' as const },
-      { source: 'hook' as const },
-      { toolName: 'record_artifact' },
-    ]) {
+    for (const override of [{ source: 'client' as const }]) {
       const rejected = new SessionArtifactStore({
         sessionId,
         workspaceCwd: workspace,
@@ -6295,6 +6291,45 @@ describe('SessionArtifactStore', () => {
       expect(warnings).toContain(
         'artifact snapshot restore failed; kept existing live artifacts',
       );
+      expect((await rejected.list()).artifacts).toEqual([]);
+    }
+
+    // R3-1 (#12473): hook-origin records also go through the upgrade
+    // path (mergeArtifact keeps existing.source), so the gate accepts
+    // both tool and hook. A hook-source override is quiet-dropped like
+    // a tool-source one — the record disappears without a `skipped `
+    // warning and the all-legacy RESTORE_FAILED branch fires.
+    {
+      const rejected = new SessionArtifactStore({
+        sessionId,
+        workspaceCwd: workspace,
+      });
+      const warnings = await rejected.restore({
+        ...rebuilt,
+        artifacts: [{ ...first, source: 'hook' as const }],
+      });
+      expect(warnings.some((w) => w.startsWith('skipped '))).toBe(false);
+      expect(warnings.join('\n')).toContain('artifact snapshot restore failed');
+      expect((await rejected.list()).artifacts).toEqual([]);
+    }
+
+    // R2-1 (#12473): toolName is not provenance. A non-'artifact' tool
+    // name with source 'tool' (the workspace→published upgrade keeps the
+    // workspace producer's name, e.g. write_file) is the mainstream
+    // legacy shape — it drops quietly instead of loud: no `skipped `
+    // warning, the single-record snapshot classifies as an all-legacy
+    // no-op restore, and the record stays absent from list().
+    {
+      const rejected = new SessionArtifactStore({
+        sessionId,
+        workspaceCwd: workspace,
+      });
+      const warnings = await rejected.restore({
+        ...rebuilt,
+        artifacts: [{ ...first, toolName: 'record_artifact' }],
+      });
+      expect(warnings.some((w) => w.startsWith('skipped '))).toBe(false);
+      expect(warnings.join('\n')).toContain('artifact snapshot restore failed');
       expect((await rejected.list()).artifacts).toEqual([]);
     }
   });
@@ -7123,6 +7158,539 @@ describe('SessionArtifactStore', () => {
         },
       ],
     });
+  });
+
+  // Issue #12389: a locally published file:// page (artifact tool) was
+  // journaled with retention='restorable' before write-time coercion
+  // landed. Restore must drop the legacy record quietly, not as a
+  // `skipped artifact restore:` warning (which would trip
+  // isArtifactSnapshotCompletenessWarning and could roll back the
+  // whole restore or block snapshot reclamation).
+  it('drops legacy tool-produced published file:// records without skipped warning', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-legacy-published-file',
+      workspaceCwd: workspace,
+    });
+    const live = await store.upsertMany([
+      { title: 'Live', url: 'https://example.com/live' },
+    ]);
+    const liveId = live.changes[0]!.artifactId;
+
+    const warnings = await store.restore({
+      v: 2,
+      sessionId: 's11-restore-legacy-published-file',
+      sequence: 9,
+      artifacts: [
+        {
+          id: 'legacy-published-file',
+          kind: 'link',
+          storage: 'published',
+          source: 'tool',
+          toolName: 'artifact',
+          status: 'available',
+          title: 'Legacy local page',
+          url: 'file:///Users/example/.qwen/artifacts/legacy-1/index.html',
+          retention: 'restorable',
+          clientRetained: false,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+
+    // No `skipped artifact restore` warning — the legacy record is
+    // dropped quietly and the live artifact is preserved. The
+    // all-legacy path still carries the RESTORE_FAILED prefix so
+    // `isArtifactRestoreFailureWarning` reports this no-op restore to
+    // the control plane as failed (R1-1), while the text avoids a
+    // leading `skipped ` so the snapshot-completeness channel does
+    // not fire as well.
+    expect(warnings).toEqual([
+      'artifact snapshot restore failed; 1 snapshot records were all legacy published file:// drops; live state preserved without a restore attempt',
+    ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: liveId,
+          title: 'Live',
+        },
+      ],
+    });
+  });
+
+  // R2-1 (#12473): the mainstream legacy shape — a published local page
+  // that was also a workspace record (write_file auto-record → artifact
+  // tool publish → workspace path re-recorded) — journals with the
+  // workspace producer's toolName, not 'artifact'. toolName is not
+  // provenance: the quiet gate must drop this shape without a `skipped `
+  // warning while a valid sibling restores normally.
+  it('drops a journaled workspace→published record with a write_file toolName without skipped warnings (R2-1)', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-upgrade-writefile-journal',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const artifactPath = path.join(workspace, 'reports/dashboard.html');
+    const artifactUrl = pathToFileURL(artifactPath).href;
+    await fs.writeFile(artifactPath, 'hello');
+    const managedId = managedIdForWorkspacePath('reports/dashboard.html');
+
+    // 1. write_file-style workspace auto-record — durable, restorable.
+    await source.upsertMany(
+      [
+        {
+          title: 'Draft',
+          workspacePath: 'reports/dashboard.html',
+          source: 'tool',
+          toolName: 'write_file',
+          retention: 'restorable',
+        },
+      ],
+      { strict: true },
+    );
+    // 2. artifact-tool publish of the same path (trusted, local file://).
+    await source.upsertMany(
+      [
+        {
+          title: 'Published dashboard',
+          storage: 'published',
+          managedId,
+          url: artifactUrl,
+          mimeType: 'text/html',
+          source: 'tool',
+          toolName: 'write_file',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+    // 3. workspace path re-recorded — strongestRetention pushes the
+    // merged record back to restorable, making it durable and journaling
+    // the published+file:// shape with the workspace producer's name.
+    await source.upsertMany(
+      [
+        {
+          title: 'Draft again',
+          workspacePath: 'reports/dashboard.html',
+          source: 'tool',
+          toolName: 'write_file',
+          retention: 'restorable',
+        },
+      ],
+      { strict: true },
+    );
+    // A valid sibling so the restore takes the normal path (restoredCount > 0).
+    await source.upsertMany(
+      [
+        {
+          title: 'Sibling',
+          storage: 'external_url',
+          url: 'https://example.com/sibling',
+        },
+      ],
+      { strict: true },
+    );
+
+    const rebuilt = rebuildSessionArtifactSnapshot(
+      events.map((systemPayload) => ({
+        type: 'system',
+        subtype: 'session_artifact_event',
+        systemPayload,
+      })),
+    )!;
+    const legacy = rebuilt.artifacts.find(
+      (a) => a.storage === 'published' && a.url === artifactUrl,
+    );
+    expect(legacy).toBeDefined();
+    expect(legacy!.toolName).toBe('write_file');
+    expect(legacy!.retention).toBe('restorable');
+    expect(legacy!.source).toBe('tool');
+
+    const restored = new SessionArtifactStore({
+      sessionId: 's11-upgrade-writefile-journal',
+      workspaceCwd: workspace,
+    });
+    const warnings = await restored.restore(rebuilt);
+    // The quiet gate drops the legacy record: no `skipped ` warning at
+    // all, so the completeness cascade cannot fire, and the valid
+    // sibling restores through the normal path.
+    expect(warnings.filter((w) => w.startsWith('skipped '))).toEqual([]);
+    expect(warnings).toEqual([]);
+    const listed = (await restored.list()).artifacts;
+    expect(listed.some((a) => a.url === artifactUrl)).toBe(false);
+    expect(listed.some((a) => a.url === 'https://example.com/sibling')).toBe(
+      true,
+    );
+  });
+
+  // R1-5 (#12473): the marker-loop quiet strip — a tombstoned legacy
+  // published file:// marker must not leave a `skipped marker artifact`
+  // warning (the strip at the marker loop pops it), and the gate uses the
+  // same shape rules as the main loop: source + storage/URL/snapshot
+  // shape, no toolName.
+  it('drops a tombstoned legacy file:// marker without a skipped marker warning (R1-5)', async () => {
+    const markerId = 'marker-legacy-page';
+    const restored = new SessionArtifactStore({
+      sessionId: 's11-legacy-marker-strip',
+      workspaceCwd: workspace,
+    });
+    const warnings = await restored.restore({
+      v: 2,
+      sessionId: 's11-legacy-marker-strip',
+      sequence: 1,
+      artifacts: [],
+      markerArtifacts: [
+        {
+          id: markerId,
+          kind: 'link',
+          storage: 'published',
+          source: 'tool',
+          toolName: 'write_file',
+          status: 'missing',
+          title: 'Legacy local page',
+          url: 'file:///Users/example/.qwen/artifacts/marker-legacy/index.html',
+          retention: 'restorable',
+          clientRetained: false,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      tombstonedIds: [markerId],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+    expect(warnings.filter((w) => w.includes('skipped marker'))).toEqual([]);
+    expect((await restored.list()).artifacts).toEqual([]);
+  });
+
+  // Issue #12389: write-time coercion of tool-produced published file://
+  // records to 'ephemeral', so they never reach the journal.
+  it('coerces tool-produced published file:// records to ephemeral on write', async () => {
+    // R1-4: the store must carry a persistence adapter — without one
+    // normalizeRetention already answers 'ephemeral' and the coercion is
+    // unreachable, so the test could never fail. With one, the default
+    // for an unstated retention is 'restorable' and this assertion pins
+    // the coercion flipping it.
+    const store = new SessionArtifactStore({
+      sessionId: 's11-write-published-file',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    const { changes } = await store.upsertMany(
+      [
+        {
+          title: 'Local published page',
+          storage: 'published',
+          source: 'tool',
+          toolName: 'artifact',
+          url: 'file:///Users/example/.qwen/artifacts/new-1/index.html',
+        },
+      ],
+      { trustedPublisher: true },
+    );
+    const artifactId = changes[0]!.artifactId;
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: artifactId,
+          retention: 'ephemeral',
+        },
+      ],
+    });
+  });
+
+  // Issue #12389 R1-2/R4-1: the upgrade merge used to re-coerce the
+  // successor to `ephemeral`; the coercion now lives in the upsert apply
+  // loop and only fires without a durable predecessor, so the upgrade
+  // keeps the record restorable across publish and workspace re-record.
+  it('keeps the workspace-published upgrade restorable across publish and workspace re-record (R2-2 / R1-2)', async () => {
+    // Three steps, mirroring the R1-2 witness: a non-explicit workspace
+    // record (write_file auto-record), a trusted local publish of the
+    // same managedId, then a workspace re-record with no stated
+    // retention. R4-1 scoped the write-time coercion to standalone
+    // publishes, so the upgrade no longer coerces to ephemeral: the
+    // merged record stays restorable and the re-record keeps it
+    // restorable. The coerced-ephemeral pin itself (mergeArtifact's
+    // retentionExplicit propagation) is covered by the standalone
+    // publish pin test below.
+    const store = new SessionArtifactStore({
+      sessionId: 's11-pin-propagates',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const artifactPath = path.join(workspace, 'reports/pin-probe.html');
+    const artifactUrl = pathToFileURL(artifactPath).href;
+    await fs.writeFile(artifactPath, 'hello');
+    const managedId = managedIdForWorkspacePath('reports/pin-probe.html');
+
+    await store.upsertMany(
+      [{ title: 'Draft', workspacePath: 'reports/pin-probe.html' }],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'Published',
+          storage: 'published',
+          managedId,
+          url: artifactUrl,
+          mimeType: 'text/html',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+    await store.upsertMany(
+      [{ title: 'Draft again', workspacePath: 'reports/pin-probe.html' }],
+      { strict: true },
+    );
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: expect.any(String),
+          storage: 'published',
+          retention: 'restorable',
+        },
+      ],
+    });
+  });
+
+  it('holds the coerced ephemeral pin across a standalone publish and later workspace re-record (R4-1 pin)', async () => {
+    // The R4-1 scope change leaves the standalone-publish coercion in
+    // place: with no durable predecessor the publish still coerces to
+    // ephemeral + explicit, and a later non-explicit workspace re-record
+    // must not upgrade it — mergeRetention's pin branch has to hold.
+    // (The retentionExplicit OR-propagation itself is pinned by the
+    // persist-failure downgrade test below.)
+    const store = new SessionArtifactStore({
+      sessionId: 's11-pin-standalone',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const artifactPath = path.join(workspace, 'reports/pin-standalone.html');
+    await fs.writeFile(artifactPath, 'hello');
+    const managedId = managedIdForWorkspacePath('reports/pin-standalone.html');
+
+    await store.upsertMany(
+      [
+        {
+          title: 'Published',
+          storage: 'published',
+          managedId,
+          url: pathToFileURL(artifactPath).href,
+          mimeType: 'text/html',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+    await store.upsertMany(
+      [{ title: 'Draft again', workspacePath: 'reports/pin-standalone.html' }],
+      { strict: true },
+    );
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: expect.any(String),
+          storage: 'published',
+          retention: 'ephemeral',
+        },
+      ],
+    });
+  });
+
+  it('keeps the same-batch workspace upgrade restorable without stranding (R5-3)', async () => {
+    // ONE upsertMany carrying the workspace record and the trusted local
+    // publish: the coercion is decided at apply time, where the
+    // predecessor is already stored. Deciding it during normalization
+    // fired the coercion first and stranded the durable predecessor
+    // behind a batch boundary — the exact R4-1 stranding, batch-dependent.
+    const store = new SessionArtifactStore({
+      sessionId: 's11-same-batch-upgrade',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const artifactPath = path.join(workspace, 'reports/same-batch.html');
+    await fs.writeFile(artifactPath, 'hello');
+    const managedId = managedIdForWorkspacePath('reports/same-batch.html');
+
+    const { changes } = await store.upsertMany(
+      [
+        { title: 'Draft', workspacePath: 'reports/same-batch.html' },
+        {
+          title: 'Published',
+          storage: 'published',
+          managedId,
+          url: pathToFileURL(artifactPath).href,
+          mimeType: 'text/html',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+
+    expect(
+      changes.some(
+        (change) =>
+          change.action === 'removed' && change.reason === 'unpin_to_ephemeral',
+      ),
+    ).toBe(false);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          storage: 'published',
+          retention: 'restorable',
+        },
+      ],
+    });
+  });
+
+  it('holds the ephemeral pin across a persist-failure downgrade and explicit re-pin (R5-2)', async () => {
+    // downgradeDurableChanges sets retention='ephemeral' WITHOUT the
+    // explicit flag; the explicit-ephemeral re-write must propagate
+    // retentionExplicit through mergeArtifact so the later non-explicit
+    // re-record still holds the pin instead of silently becoming durable
+    // again. Three separate upsertMany calls: coalescing would bypass
+    // mergeArtifact entirely.
+    let fail = true;
+    const store = new SessionArtifactStore({
+      sessionId: 's11-downgrade-pin',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          if (fail) throw new Error('persist failed');
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const artifactPath = path.join(workspace, 'reports/downgrade-pin.html');
+    await fs.writeFile(artifactPath, 'hello');
+
+    await store.upsertMany([
+      { title: 'Draft', workspacePath: 'reports/downgrade-pin.html' },
+    ]);
+    fail = false;
+    await store.upsertMany([
+      {
+        title: 'Draft again',
+        workspacePath: 'reports/downgrade-pin.html',
+        retention: 'ephemeral',
+      },
+    ]);
+    await store.upsertMany([
+      { title: 'Draft once more', workspacePath: 'reports/downgrade-pin.html' },
+    ]);
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ retention: 'ephemeral' }],
+    });
+  });
+
+  it('keeps the workspace-published local page recoverable across a resume rebuild (R4-1)', async () => {
+    // A workspace auto-record (no stated retention) upgraded by a trusted
+    // local publish of the same managedId must stay restorable: the
+    // write-time coercion is scoped to standalone publishes. Coercing the
+    // upgrade successor used to strand the durable workspace record — the
+    // coerced ephemeral successor never reached the journal, so the
+    // rebuilt snapshot was empty, restore stayed silent, and the control
+    // plane skipped artifact re-ingest on resume, losing the page even
+    // though its file is still on disk.
+    const sessionId = 's11-published-upgrade-resume';
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const artifactPath = path.join(workspace, 'reports/resume-page.html');
+    await fs.writeFile(artifactPath, '<html></html>');
+    const artifactUrl = pathToFileURL(artifactPath).href;
+    const managedId = managedIdForWorkspacePath('reports/resume-page.html');
+
+    await source.upsertMany(
+      [{ title: 'Draft', workspacePath: 'reports/resume-page.html' }],
+      { strict: true },
+    );
+    await source.upsertMany(
+      [
+        {
+          title: 'Published',
+          storage: 'published',
+          managedId,
+          url: artifactUrl,
+          mimeType: 'text/html',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+
+    await expect(source.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          storage: 'published',
+          retention: 'restorable',
+        },
+      ],
+    });
+
+    const rebuilt = rebuildSessionArtifactSnapshot(
+      events.map((systemPayload) => ({
+        type: 'system',
+        subtype: 'session_artifact_event',
+        systemPayload,
+      })),
+    )!;
+    expect(rebuilt.artifacts).toHaveLength(1);
+
+    const restored = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    // The restore gate still refuses to relink local published file://
+    // records (fail-closed), but the refusal must stay loud: the
+    // RESTORE_FAILED-prefixed warning is what makes the control plane set
+    // ingestArtifacts and recover the page from the transcript replay on
+    // resume.
+    const warnings = await restored.restore(rebuilt);
+    expect(
+      warnings.some((warning) =>
+        warning.startsWith('artifact snapshot restore failed'),
+      ),
+    ).toBe(true);
   });
 
   it('prunes over-limit restored artifacts and records eviction tombstones', async () => {
