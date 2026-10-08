@@ -359,6 +359,7 @@ public class ManagedActionStore {
             String actionId,
             JsonNode body,
             long now) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         // Serialize admission with journal projection and other Session commands.
         jdbc.queryForObject(
                 "SELECT session_id FROM managed_agent_session WHERE tenant_id = ? AND session_id ="
@@ -388,6 +389,7 @@ public class ManagedActionStore {
             }
             return new OperationAdmission(existing, true);
         }
+        WorkspaceMigrationAdmission.requireSessionOpen(jdbc, tenantId, sessionId);
         String sessionStatus = jdbc.queryForObject("SELECT status FROM managed_agent_session"
                 + " WHERE tenant_id = ? AND session_id = ?", String.class, tenantId, sessionId);
         if (!"ACTIVE".equals(sessionStatus)) {

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import {
@@ -29,6 +30,10 @@ import {
   type ManagedSessionEvent,
   type ManagedSessionJsonValue,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  MANAGED_MESSAGE_PART_KIND,
+  readManagedMessageBody,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-message-chunks.js';
 import {
   MANAGED_TOOL_RESULT_KINDS,
   isToolResultEnvelopeOf,
@@ -176,6 +181,8 @@ const RESOURCE_KINDS = new Set([
   'managed-action-options',
   'managed-action-decision',
   'managed-message',
+  'managed-message-part',
+  'managed-message-chunks',
   'managed-turn-result',
   'managed-compaction-summary',
   'managed-checkpoint',
@@ -285,6 +292,7 @@ function settledCheckpoint(checkpoint: HarnessCheckpointV1): boolean {
 export async function verifyRecoverySession(
   source: RecoverySessionSource,
   io: RecoverySessionIO,
+  purpose: 'recovery' | 'migration' = 'recovery',
 ): Promise<{ fileHistory: 'captured' | 'not_captured' }> {
   encodeManagedContextBinding(source.binding);
   const head = source.head;
@@ -310,6 +318,9 @@ export async function verifyRecoverySession(
             head.writerLeaseUntil === null))),
     'invalid pinned retirement',
   );
+  if (purpose === 'migration') {
+    requireValue(Boolean(head || retirement), 'uninitialized migration member');
+  }
   let revision = 0;
   let sequence = 0;
   let commitDigest: string | null = null;
@@ -373,6 +384,14 @@ export async function verifyRecoverySession(
       for (const [filePath, backup] of Object.entries(
         snapshot.trackedFileBackups,
       )) {
+        if (purpose === 'migration') {
+          requireValue(
+            !path.isAbsolute(filePath) &&
+              path.normalize(filePath) === filePath &&
+              filePath !== '.',
+            'external migration history path',
+          );
+        }
         requireValue(!backup.failed, 'file history backup failed');
         if (backup.backupFileName !== null) {
           await io.verifyBackup({
@@ -762,6 +781,15 @@ export async function verifyRecoverySession(
             isHostedWorkspaceProfile(definition['toolProfile'])),
         'unsupported Hosted profile',
       );
+      if (purpose === 'migration') {
+        requireValue(
+          definition['toolProfile'] === 'hosted-workspace-files/1' &&
+            definition['hookCatalog'] === undefined &&
+            definition['mcpServers'] === undefined &&
+            definition['captureBytes'] === undefined,
+          'unsupported migration profile',
+        );
+      }
       requireValue(
         readHostedApprovalDefinition(definition) &&
           (definition['captureBytes'] === undefined ||
@@ -905,7 +933,7 @@ export async function verifyRecoverySession(
               : null;
       if (recordRef) {
         const record = readerRecord(
-          json(await read(durableRef(recordRef))),
+          json(await readManagedMessageBody(read, durableRef(recordRef))),
           source.sessionId,
         );
         if (event.kind === 'message.committed')
@@ -971,7 +999,12 @@ export async function verifyRecoverySession(
       const history = json(bytes);
       requireValue(Array.isArray(history), 'invalid API history');
       await enqueueRefs(history, io);
-    } else if (ref.kind !== MANAGED_TOOL_RESULT_KINDS.content)
+    } else if (
+      // A message part is a raw byte slice of its document, not JSON, and
+      // references nothing.
+      ref.kind !== MANAGED_TOOL_RESULT_KINDS.content &&
+      ref.kind !== MANAGED_MESSAGE_PART_KIND
+    )
       await enqueueRefs(json(bytes), io);
     await io.completeReference(ref);
   }

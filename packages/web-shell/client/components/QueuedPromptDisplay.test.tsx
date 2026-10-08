@@ -365,6 +365,31 @@ describe('QueuedPromptDisplay', () => {
     ).toBeTruthy();
   });
 
+  it('allows deleting an ordinary submission while keeping other busy actions locked', () => {
+    const { container, handlers } = setup({
+      prompts: [
+        { id: 1, text: 'pending admission', serverState: 'submitting' },
+        { id: 2, text: 'mid-turn admission', midTurnState: 'submitting' },
+        { id: 3, text: 'already running', serverState: 'running' },
+      ],
+    });
+    const deletes = container.querySelectorAll<HTMLButtonElement>(
+      `[aria-label="${t('queue.delete')}"]`,
+    );
+    expect([...deletes].map((button) => button.disabled)).toEqual([
+      false,
+      true,
+      true,
+    ]);
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        `[aria-label="${t('queue.edit')}"]`,
+      )?.disabled,
+    ).toBe(true);
+    act(() => deletes[0]!.click());
+    expect(handlers.onDelete).toHaveBeenCalledWith(1);
+  });
+
   it('renders queued reference annotations as tags', () => {
     const serialized = '<context id="orders">orders</context>';
     const text = `inspect ${serialized} now`;
