@@ -36,7 +36,11 @@ import type {
 } from '../tools/tools.js';
 import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { classifyAction, type ClassifierResult } from './classifier.js';
+import {
+  classifyAction,
+  sanitizeClassifierReason,
+  type ClassifierResult,
+} from './classifier.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import {
   consumePendingManualRetry,
@@ -593,9 +597,14 @@ export function applyAutoModeDecision(
         return {
           kind: 'fallback',
           reason: fallback.reason,
+          // The guard's reason is derived from the raw model-authored command
+          // (`isDestructiveCommand` can fall back to the whole command), and it
+          // lands in the approval-dialog banner. The classifier producer
+          // sanitizes its own reason at the same boundary (classifier.ts); this
+          // new interpolation point needs the same defence.
           message: formatDenialFallbackMessage(
             fallback.reason,
-            decision.reason,
+            sanitizeClassifierReason(decision.reason),
           ),
         };
       }
