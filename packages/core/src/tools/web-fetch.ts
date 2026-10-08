@@ -91,6 +91,12 @@ interface CacheEntry {
    */
   content: string;
   persistedTextPath?: string;
+  /**
+   * Whether the producer-level truncation below actually reduced `content`.
+   * Tracked by content identity, not by the spill path: a failed spill write
+   * returns a bounded preview with no `persistedTextPath`.
+   */
+  reduced?: boolean;
   /** Size of `content` before the producer-level truncation below. */
   rawOutputSize?: ToolOutputSize | null;
   persistedPath?: string;
@@ -507,6 +513,7 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
 
     let persistedTextPath: string | undefined;
     let rawOutputSize: ToolOutputSize | undefined;
+    let reduced = false;
     if (content.length > MAX_CONTENT_CHARS) {
       rawOutputSize = measureToolOutput(content);
       const shortened = await truncateToolOutput(
@@ -521,12 +528,14 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
           layer: 'producer',
         },
       );
+      reduced = content !== shortened.content;
       content = shortened.content;
       persistedTextPath = shortened.outputFile;
     }
 
     const entry: CacheEntry = {
       persistedTextPath,
+      reduced,
       rawOutputSize,
       fetchedAt: Date.now(),
       status: response.status,
@@ -602,9 +611,11 @@ Status: ${entry.status} ${entry.statusText || 'OK'} | Content-Type: ${entry.cont
         entry.contentType.includes('text/markdown') &&
         entry.content.length <= MAX_CONTENT_CHARS &&
         // Length alone is not "nothing was reduced": the producer's stub lands
-        // just under the cap, and a spill path means this content WAS cut — so
-        // hand it to the side query that answers the prompt instead.
-        !entry.persistedTextPath
+        // just under the cap, and a reduced page means this content WAS cut —
+        // so hand it to the side query that answers the prompt instead. Keyed
+        // on the reduction, not the spill path: a failed spill write still
+        // returns a bounded preview, with no path to test.
+        !entry.reduced
       ) {
         return {
           llmContent: `${header}\n\n${entry.content}${binaryNote}`,

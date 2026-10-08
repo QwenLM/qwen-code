@@ -1014,6 +1014,35 @@ describe('WebFetchTool', () => {
       expect(mockGenerateContent).toHaveBeenCalled();
       expect(result.llmContent).toContain('Summary');
     });
+
+    it('should not pass through a preapproved page whose spill write failed', async () => {
+      // A failed spill returns a bounded preview with NO outputFile, so gating
+      // the passthrough on the spill path still lets a cut-off stub stand in
+      // for the side query's answer.
+      const blocker = path.join(toolResultsDir, 'blocker');
+      fs.writeFileSync(blocker, 'not a directory');
+      const configWithBrokenSpill = {
+        ...mockConfig,
+        storage: {
+          getToolResultsDir: () => toolResultsDir,
+          getProjectTempDir: () => path.join(blocker, 'temp'),
+        },
+      } as unknown as Config;
+      stubSummary({
+        contentType: 'text/markdown',
+        body: Buffer.from('# Docs\n' + 'word '.repeat(30_000)),
+        finalUrl: 'https://docs.python.org/3/library/json.md',
+      });
+
+      const result = await run(
+        'https://docs.python.org/3/library/json.md',
+        'summarize',
+        { config: configWithBrokenSpill },
+      );
+
+      expect(mockGenerateContent).toHaveBeenCalled();
+      expect(result.llmContent).toContain('Summary');
+    });
   });
 
   describe('cache', () => {
