@@ -34,6 +34,7 @@ import {
   channelInputText,
   channelResendDeliveryId,
   channelRouteId,
+  CHANNEL_TRUNCATION_NOTICE,
   channelRouteOpenBody,
   channelRouteRolloverBody,
   decodeChannelInputEnvelope,
@@ -42,6 +43,7 @@ import {
   encodeChannelPolicy,
   encodeChannelReply,
   planChannelSegments,
+  truncateChannelTextUtf8,
   type ChannelAttachment,
   type ChannelInputEnvelope,
   type ChannelPolicy,
@@ -395,22 +397,34 @@ export class HostedChannelSession {
     // Publish the planned segment text, not the raw turn output: the reply
     // resource must satisfy the inline bound itself, or a long answer
     // would fail the publish before the truncation plan could truncate it.
-    const segmentPlan = planChannelSegments(text);
     // And the envelope bound is measured on the serialized reply: JSON
     // escaping can push an escape-heavy answer past the inline limit even
-    // after the raw text truncated at the segment bound.
-    let replyText = segmentPlan.join('');
-    let fitted = replyText.length === 0;
-    for (let attempt = 0; attempt < 4 && !fitted; attempt++) {
+    // after the raw text truncated at the segment bound. Every further
+    // shrink re-runs a bounded cut — the truncation notice stays and the
+    // cut always lands on a code-point boundary.
+    let replyText = planChannelSegments(text).join('');
+    let budget = MANAGED_CHANNEL_LIMITS.maxSegmentBytes / 2;
+    for (let attempt = 0; attempt < 4; attempt++) {
       const candidate = encodeChannelReply({
         text: replyText,
         replyContext: envelope.replyContext,
       });
-      if (candidate.byteLength <= MANAGED_CHANNEL_LIMITS.maxEnvelopeBytes) {
-        fitted = true;
+      if (
+        candidate.byteLength <= MANAGED_CHANNEL_LIMITS.maxEnvelopeBytes ||
+        replyText.length === 0
+      ) {
         break;
       }
-      replyText = replyText.slice(0, Math.floor(replyText.length / 2));
+      const endsWithNotice = replyText.endsWith(CHANNEL_TRUNCATION_NOTICE);
+      const core = endsWithNotice
+        ? replyText.slice(
+            0,
+            replyText.length - CHANNEL_TRUNCATION_NOTICE.length,
+          )
+        : replyText;
+      if (core.length === 0) return undefined;
+      replyText = truncateChannelTextUtf8(core, budget);
+      budget = Math.floor(budget / 2);
     }
     if (replyText.length === 0) return undefined;
     const reply: ChannelReply = {
@@ -421,16 +435,16 @@ export class HostedChannelSession {
       CHANNEL_RESOURCE_KINDS.reply,
       encodeChannelReply(reply),
     );
-    const segments = [];
-    for (const [ordinal, part] of segmentPlan.entries()) {
-      segments.push({
-        segmentId: `${deliveryId}:${ordinal}`,
+    // The email plan is one segment, and it replies with the fitted text.
+    const segments = [
+      {
+        segmentId: `${deliveryId}:0`,
         contentRef: await this.store.resources.publish(
           CHANNEL_RESOURCE_KINDS.segment,
-          Buffer.from(ordinal === 0 ? replyText : part, 'utf8'),
+          Buffer.from(replyText, 'utf8'),
         ),
-      });
-    }
+      },
+    ];
     const record = channelDeliveryPlanBody({
       deliveryId,
       routeId: envelope.routeId,

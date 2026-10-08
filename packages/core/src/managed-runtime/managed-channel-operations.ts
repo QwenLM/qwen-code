@@ -525,23 +525,37 @@ export function decodeChannelReply(bytes: Buffer): ChannelReply {
 const TRUNCATION_NOTICE =
   '\n\n[Reply truncated because it exceeded the channel segment size limit.]';
 
+/** The notice a truncation appends, exported so further shrinks keep it. */
+export const CHANNEL_TRUNCATION_NOTICE = TRUNCATION_NOTICE;
+
+/**
+ * Cuts text at a code-point boundary under a UTF-8 byte budget and keeps
+ * the truncation notice; within the budget the text returns unchanged.
+ */
+export function truncateChannelTextUtf8(
+  text: string,
+  maxBytes: number,
+): string {
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.byteLength <= maxBytes) {
+    return text;
+  }
+  const limit = Math.max(
+    0,
+    maxBytes - Buffer.byteLength(TRUNCATION_NOTICE, 'utf8'),
+  );
+  let end = limit;
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString('utf8') + TRUNCATION_NOTICE;
+}
+
 /**
  * The email plan: one segment, bounded. A provider with cards or threads
  * supplies its own plan against the same segment contract.
  */
 export function planChannelSegments(text: string): readonly string[] {
-  const bytes = Buffer.from(text, 'utf8');
-  if (bytes.byteLength <= MANAGED_CHANNEL_LIMITS.maxSegmentBytes) {
-    return Object.freeze([text]);
-  }
-  const limit =
-    MANAGED_CHANNEL_LIMITS.maxSegmentBytes -
-    Buffer.byteLength(TRUNCATION_NOTICE, 'utf8');
-  // Cut on a UTF-8 boundary, so the segment stays valid text.
-  let end = limit;
-  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
   return Object.freeze([
-    bytes.subarray(0, end).toString('utf8') + TRUNCATION_NOTICE,
+    truncateChannelTextUtf8(text, MANAGED_CHANNEL_LIMITS.maxSegmentBytes),
   ]);
 }
 

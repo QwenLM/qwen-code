@@ -33,6 +33,7 @@ import {
   channelRouteId,
   channelRouteOpenBody,
   channelRouteRolloverBody,
+  CHANNEL_TRUNCATION_NOTICE,
   channelSessionCreationKey,
   decodeChannelInputEnvelope,
   decodeChannelPolicy,
@@ -41,6 +42,7 @@ import {
   encodeChannelPolicy,
   encodeChannelReply,
   planChannelSegments,
+  truncateChannelTextUtf8,
   type ChannelInputEnvelope,
 } from './managed-channel-operations.js';
 import { ManagedSessionRecordError } from './managed-session-records.js';
@@ -310,6 +312,25 @@ describe('channel policy and envelopes', () => {
     );
     expect(segment).toMatch(/€\n\n\[Reply truncated/);
     expect(segment).not.toContain('�');
+  });
+
+  it('truncates emoji-heavy text only on code-point boundaries under any byte budget', () => {
+    expect(truncateChannelTextUtf8('short', 128)).toBe('short');
+    const noticeBytes = Buffer.byteLength(CHANNEL_TRUNCATION_NOTICE, 'utf8');
+    for (const budget of [4, 5, 100, 1_000]) {
+      const cut = truncateChannelTextUtf8(`${'🙂'.repeat(10_000)}x`, budget);
+      expect(cut.endsWith(CHANNEL_TRUNCATION_NOTICE)).toBe(true);
+      // The notice is irreducible: below its byte length the budget can
+      // only hold the notice itself.
+      expect(Buffer.byteLength(cut, 'utf8')).toBeLessThanOrEqual(
+        Math.max(budget, noticeBytes),
+      );
+      // No orphan surrogate and no replacement character — an emoji at
+      // the cut point is dropped whole, never split into U+D83D.
+      expect(cut).not.toContain('�');
+      const core = cut.slice(0, cut.length - CHANNEL_TRUNCATION_NOTICE.length);
+      if (core.length > 0) expect(core.endsWith('🙂')).toBe(true);
+    }
   });
 });
 

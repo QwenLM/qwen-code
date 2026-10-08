@@ -14,6 +14,7 @@ import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-w
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import {
+  CHANNEL_TRUNCATION_NOTICE,
   channelInputId,
   channelRouteId,
   encodeChannelReply,
@@ -541,7 +542,7 @@ describe('HostedChannelSession outbound', () => {
       const inputId = (await channels.submitInput(inbound())).inputId;
       // Newlines and quotes double in the reply's JSON: a 48 KiB raw plan
       // serializes to about 96 KiB — past the inline envelope bound.
-      settleTurn(harness, inputId, '\n"'.repeat(60_000));
+      settleTurn(harness, inputId, '\n"'.repeat(50_000) + '🙂'.repeat(40_000));
       await settleInJournal(authority, inputId);
       const planned = (await channels.planReply(inputId))!;
       const claimed = await channels.claim(planned.deliveryId);
@@ -551,6 +552,15 @@ describe('HostedChannelSession outbound', () => {
       expect(claimed.segments).toHaveLength(1);
       expect(claimed.segments[0]!.text).toBe(claimed.reply.text);
       expect(claimed.reply.text.length).toBeLessThan(48 * 1024);
+      // A further shrink still carries the truncation notice, and an emoji
+      // at the cut point is dropped whole — never split into U+D83D that
+      // the SMTP text would render as U+FFFD.
+      expect(claimed.reply.text.endsWith(CHANNEL_TRUNCATION_NOTICE)).toBe(true);
+      expect(
+        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(
+          claimed.reply.text,
+        ),
+      ).toBe(false);
     });
   });
 
