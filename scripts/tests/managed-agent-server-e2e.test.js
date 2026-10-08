@@ -146,11 +146,6 @@ describe('managed-agent-server e2e runner', () => {
   };
 
   it('keeps service and proxy ports distinct when an ephemeral port repeats', async () => {
-    const outputText = extracted([
-      'freePort',
-      'startHeldExecutionStartProxy',
-      'allocatedPorts',
-    ]);
     const sequence = [
       33061, 33231, 36301, 36302, 36301, 36303, 38943, 36417, 36417, 36418,
       36417, 36418, 36419,
@@ -171,9 +166,10 @@ describe('managed-agent-server e2e runner', () => {
         done?.();
       },
     });
-    const { freePort, startHeldExecutionStartProxy } = new Function(
+    const { freePort, startHeldExecutionStartProxy } = load(
+      ['freePort', 'startHeldExecutionStartProxy', 'allocatedPorts'],
+      'freePort, startHeldExecutionStartProxy',
       'createServer',
-      `${outputText}\nreturn { freePort, startHeldExecutionStartProxy };`,
     )(createServer);
     const ports = [];
     for (const count of [4, 3]) {
@@ -922,10 +918,10 @@ describe('managed-agent-server e2e runner', () => {
   it('names the jar explicitly on both surfaces — pom-derived name in the runner, classifier exclusion at image build', () => {
     const script = read('scripts/run-managed-agent-server-e2e.ts');
     expect(script).not.toContain('qwen-managed-agent-server-0.1.0-alpha');
-    // The pom's repackage executions leave three matching artifacts in
-    // target/. The runner derives the unclassified name from the pom (one
-    // source of truth); the Dockerfile selects by classifier exclusion
-    // with a loud cardinality guard.
+    // The pom's repackage executions leave the unclassified jar plus one
+    // artifact per classifier in target/. The runner derives the
+    // unclassified name from the pom (one source of truth); the Dockerfile
+    // selects by classifier exclusion with a loud cardinality guard.
     expect(script).toContain('qwen-managed-agent-server-${pomVersion}.jar');
     expect(script).not.toContain('packagedJars');
     const dockerfile = read(
@@ -933,9 +929,19 @@ describe('managed-agent-server e2e runner', () => {
     );
     expect(dockerfile).not.toContain('qwen-managed-agent-server-0.1.0-alpha');
     expect(dockerfile).toContain('/tmp/qwen-managed-agent-server.jar');
-    expect(dockerfile).toContain(
-      'workspace-bundle.jar|*-operator-recovery.jar',
-    );
+    // The exclusion set must cover every classifier the pom declares, or a
+    // pom edit surfaces as an operator's failed docker build ("found 2")
+    // instead of a red here: derive the set from the pom, the one source
+    // of truth, rather than pinning a literal copy of it.
+    const classifiers = [
+      ...read('packages/sdk-java/managed-agent-server/pom.xml').matchAll(
+        /<classifier>([^<]+)<\/classifier>/g,
+      ),
+    ].map((match) => match[1]);
+    expect(classifiers.length).toBeGreaterThan(0);
+    for (const classifier of classifiers) {
+      expect(dockerfile).toContain(`*-${classifier}.jar`);
+    }
   });
 
   it('unrefs the waitUntil stall timer so a fast success does not idle the runner', () => {
@@ -991,9 +997,16 @@ describe('managed-agent-server e2e runner', () => {
     // explicit -e opt-in at docker run, documented in the README's
     // container section. The cardinality guard stays loud, so the build
     // fails rather than shipping a wrong or glob-stat jar.
-    expect(dockerfile).not.toMatch(/^ENV\s+QWEN_MANAGED_AGENT_SERVER_ADDRESS/m);
+    // Dockerfile instructions are case-insensitive and tolerate leading
+    // whitespace, so anchor on the instruction rather than its
+    // conventional spelling: a lowercase or indented ENV would
+    // reintroduce the published wide bind with an uppercase-only pin
+    // green.
     expect(dockerfile).not.toMatch(
-      /^ENV\s+QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST/m,
+      /^[ \t]*ENV[ \t]+QWEN_MANAGED_AGENT_SERVER_ADDRESS/im,
+    );
+    expect(dockerfile).not.toMatch(
+      /^[ \t]*ENV[ \t]+QWEN_MANAGED_AGENT_RUNTIME_BROKER_HOST/im,
     );
     // Pin the bind default at the file that owns it, not only at one
     // downstream file declining to override it: every Java test passes
@@ -1155,6 +1168,15 @@ describe('managed-agent-server e2e runner', () => {
           jars: [
             'qwen-managed-agent-server-1.0.jar',
             'qwen-managed-agent-server-1.0-workspace-bundle.jar',
+            'qwen-managed-agent-server-1.0-operator-recovery.jar',
+          ],
+          status: 0,
+        },
+        {
+          jars: [
+            'qwen-managed-agent-server-1.0.jar',
+            'qwen-managed-agent-server-1.0-workspace-bundle.jar',
+            'qwen-managed-agent-server-1.0-workspace-migration.jar',
             'qwen-managed-agent-server-1.0-operator-recovery.jar',
           ],
           status: 0,

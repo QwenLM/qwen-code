@@ -113,9 +113,9 @@ const springModule = path.join(
   'managed-agent-server',
 );
 const springTarget = path.join(springModule, 'target');
-// The pom attaches classified repackage executions (workspace-bundle,
-// operator-recovery) alongside the unclassified server jar, so a wildcard
-// over target/ matches three artifacts. Read the project version from the
+// The pom attaches classified repackage executions alongside the
+// unclassified server jar, so a wildcard over target/ matches several
+// artifacts. Read the project version from the
 // pom and name the unclassified jar exactly — version-independent without
 // assuming it is the only packaged artifact. The <version> immediately
 // following the module's own <artifactId> (not the <parent> block's). The

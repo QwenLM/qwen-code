@@ -15,9 +15,9 @@ RUN mvn --batch-mode --no-transfer-progress \
     && mvn --batch-mode --no-transfer-progress \
       -f packages/sdk-java/managed-agent-server/pom.xml \
       -DskipTests package \
-    # The pom attaches classified repackage executions (workspace-bundle,
-    # operator-recovery) alongside the unclassified server jar, so a
-    # wildcard matches three artifacts and a pinned version drifts. Select
+    # The pom attaches classified repackage executions alongside the
+    # unclassified server jar, so a wildcard matches several artifacts and
+    # a pinned version drifts. Select
     # the unclassified jar by exclusion and publish it under a fixed name;
     # fail the build (rather than ship a bad image) unless exactly one
     # exists. sh has no nullglob, so a zero-match glob yields the pattern
@@ -28,7 +28,7 @@ RUN mvn --batch-mode --no-transfer-progress \
     && for f in qwen-managed-agent-server-*.jar; do \
          [ -e "$f" ] || break; \
          case "$f" in \
-           *-workspace-bundle.jar|*-operator-recovery.jar) ;; \
+           *-workspace-bundle.jar|*-operator-recovery.jar|*-workspace-migration.jar) ;; \
            *) main="$f"; count=$((count+1)) ;; \
          esac; \
        done \
