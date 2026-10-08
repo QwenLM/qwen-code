@@ -3537,4 +3537,56 @@ describe('SessionOverviewPanel standalone sessions', () => {
     act(() => click(rows()[0]!.querySelectorAll('td')[2] as HTMLElement));
     expect(onOpenSession).toHaveBeenCalledWith('s1', '/w', undefined);
   });
+
+  it('keeps the split and tab buttons disabled for a standalone selection', async () => {
+    useStandaloneCapabilities();
+    standalonePages = [
+      {
+        sessions: [
+          standaloneSession('st1', {
+            displayName: 'Solo',
+            updatedAt: '2026-07-06T11:00:00.000Z',
+          }),
+        ],
+      },
+    ];
+    render({ onOpenSplit: vi.fn() });
+    await flushAsync();
+    const row = rows().find((tr) => tr.textContent?.includes('Solo'))!;
+    act(() => click(rowCheckbox(row)));
+    expect(footerButton('Open in split')?.disabled).toBe(true);
+    expect(footerButton('Open in new tab')?.disabled).toBe(true);
+  });
+
+  it('skips poll ticks while a standalone walk is still in flight', async () => {
+    useStandaloneCapabilities();
+    let resolveFirstPage!: (value: {
+      sessions: DaemonStandaloneSessionSummary[];
+    }) => void;
+    const firstPage = new Promise<{
+      sessions: DaemonStandaloneSessionSummary[];
+    }>((resolve) => {
+      resolveFirstPage = resolve;
+    });
+    standaloneListPage.mockImplementation(async () => firstPage);
+    vi.useFakeTimers();
+    try {
+      render();
+      // The initial walk is still in flight when the 3s cadence fires:
+      // the ticks must be skipped, not started as duplicate walks.
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(standaloneListPage).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(standaloneListPage).toHaveBeenCalledTimes(1);
+      resolveFirstPage({
+        sessions: [standaloneSession('st1', { displayName: 'Solo' })],
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(rowTitles()).toEqual(['Solo']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

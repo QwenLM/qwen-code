@@ -102,8 +102,8 @@ import styles from './SessionOverviewPanel.module.css';
 const LIST_POLL_MS = 3000;
 const STATUS_POLL_MS = 10000;
 const PAGE_SIZE = 50;
-// The standalone listing route caps a page at 50 entries (larger sizes
-// answer 400); the standalone sidebar walks the catalog the same way.
+// The standalone route accepts up to 100 entries per page; 50 matches the
+// sidebar's standalone walk so both views fetch the same page shape.
 const STANDALONE_SESSIONS_PAGE_SIZE = 50;
 const PAGE_SIZES = [10, 50, 100] as const;
 const PAGE_SIZE_STORAGE_KEY = 'qwen-web-shell-session-overview-page-size';
@@ -421,18 +421,25 @@ function SessionOverviewPanelInner({
   // must not get the request at all.
   const standaloneFeatures = connection.capabilities?.features;
   const standaloneSessionsSupported =
-    standaloneFeatures?.includes(STANDALONE_SESSIONS_CAPABILITY) === true ||
-    standaloneFeatures?.includes('standalone_sessions') === true;
+    standaloneFeatures?.includes(STANDALONE_SESSIONS_CAPABILITY) === true;
   const [standaloneSessions, setStandaloneSessions] = useState<
     DaemonStandaloneSessionSummary[]
   >([]);
+  // A re-run or unmount supersedes an in-flight walk: its pages must not
+  // land after the effect they belonged to is gone.
+  const standalonePollGenerationRef = useRef(0);
   useEffect(() => {
     if (!standaloneSessionsSupported) {
       setStandaloneSessions([]);
       return;
     }
-    let unmounted = false;
+    const generation = ++standalonePollGenerationRef.current;
+    let inFlight = false;
     const run = async () => {
+      // A multi-page walk can outlast the 3s cadence; never overlap walks
+      // so a stale page set cannot overwrite a newer one.
+      if (inFlight) return;
+      inFlight = true;
       // Walk the whole catalog page by page; a partial walk would hide the
       // tail of the list for a whole poll interval.
       const collected: DaemonStandaloneSessionSummary[] = [];
@@ -444,26 +451,36 @@ function SessionOverviewPanelInner({
             pageSize: STANDALONE_SESSIONS_PAGE_SIZE,
             ...(cursor ? { cursor } : {}),
           });
-          if (unmounted) return;
+          if (standalonePollGenerationRef.current !== generation) return;
           collected.push(...page.sessions);
           cursor = page.nextCursor;
         } while (cursor);
-        if (!unmounted) setStandaloneSessions(collected);
+        if (standalonePollGenerationRef.current === generation) {
+          setStandaloneSessions(collected);
+        }
       } catch (error) {
-        if (!unmounted) {
+        if (standalonePollGenerationRef.current === generation) {
           console.warn(
             '[web-shell] overview standalone sessions list failed:',
             error,
           );
         }
+      } finally {
+        inFlight = false;
       }
     };
     void run();
-    // Same cadence as the workspace catalog poll above.
-    const timer = window.setInterval(() => void run(), LIST_POLL_MS);
+    // Same cadence as the workspace catalog poll above; unlike that poll,
+    // the live-state channel does not cover standalone sessions, so this is
+    // their only refresh path — it pauses only while the tab is hidden,
+    // like the status poll below.
+    const timer = window.setInterval(() => {
+      if (document.hidden) return;
+      void run();
+    }, LIST_POLL_MS);
     return () => {
-      unmounted = true;
       window.clearInterval(timer);
+      standalonePollGenerationRef.current += 1;
     };
   }, [standaloneSessionsSupported, workspace.client]);
   const mergedSessions = useMemo(() => {
@@ -1567,7 +1584,10 @@ function SessionOverviewPanelInner({
           card.sessionId !== selected.sessionId ||
           card.workspaceCwd === selected.workspaceCwd,
       ),
-    );
+    ) &&
+    // Standalone rows open through the standalone route only: the split/tab
+    // paths sanitize them away, so an enabled button would no-op silently.
+    selectedCards.every((selected) => !openSessionContext(selected));
   const canArchiveSelection =
     selectedCount > 0 && selectedCards.every(canArchiveCard);
   const canDeleteSelection =
