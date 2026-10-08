@@ -133,8 +133,20 @@ public class ManagedAutomationService {
         // The definition id is derived from the key, so a retry after a
         // crash between the Harness answer and the command row meets the
         // same definition (the funnel answers unchanged content as a
-        // replay) instead of minting a second one.
+        // replay) instead of minting a second one. The identity is
+        // tenant-scoped while a journal is Session-scoped, so the lost
+        // row case is checked against the durable mirror first: the key
+        // having landed on another Session is a conflict, never a relay
+        // that would mint a second definition the mirror then shadows.
         String scheduleId = scheduleIdFor(tenantId, idempotencyKey);
+        Optional<ScheduleRow> landed = ledger.findSchedule(tenantId,
+                scheduleId);
+        if (landed.isPresent()
+                && !landed.get().sessionId().equals(request.sessionId())) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "automation_operation_conflict",
+                    "The Idempotency-Key already landed on another Session.");
+        }
         Map<String, Object> answer = define(session, actorId, scheduleId,
                 definition, operationIdFor(tenantId, idempotencyKey));
         PublicAutomation created = mirror(session, actorId, answer);

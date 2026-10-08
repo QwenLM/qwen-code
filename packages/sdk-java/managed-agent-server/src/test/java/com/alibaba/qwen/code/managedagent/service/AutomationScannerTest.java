@@ -1226,6 +1226,41 @@ class AutomationScannerTest {
     }
 
     @Test
+    void aCrossSessionCreateReusingTheKeyConflictsAfterTheCommandRowWasLost() {
+        String key = "key-" + UUID.randomUUID();
+        PublicAutomation first = service.create(tenant, ACTOR, key,
+                new AutomationDefinitionRequest(sessionId, "Goal",
+                        "0 2 * * *", "UTC", "Run it.", null, "skip", "none",
+                        null, true)).body();
+        String otherSession = sessions.createWorkspaceSession(tenant, ACTOR,
+                "create-" + UUID.randomUUID(), "qwen-code", null, "Other",
+                Map.of(), List.of(), new WorkspaceSelection(WORKSPACE, "."))
+                .sessionId();
+        jdbc.update("UPDATE managed_agent_session SET status = 'ACTIVE'"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant,
+                otherSession);
+        // The crash window: the command row is gone while the durable
+        // mirror still proves the identity landed — on the first Session.
+        jdbc.update("DELETE FROM qwen_managed_automation_command"
+                + " WHERE tenant_id = ? AND idempotency_key = ?", tenant, key);
+        assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
+                new AutomationDefinitionRequest(otherSession, "Goal 2",
+                        "15 3 * * *", "UTC", "Run that.", null, "skip", "none",
+                        null, true)))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode())
+                            .isEqualTo("automation_operation_conflict");
+                });
+        // Nothing relayed to the other Session's Harness, and the mirror
+        // still names the first Session — no shadowed second definition.
+        assertThat(fake.scheduleOf(otherSession, first.id())).isNull();
+        ScheduleRow mirror = ledger.findSchedule(tenant, first.id())
+                .orElseThrow();
+        assertThat(mirror.sessionId()).isEqualTo(sessionId);
+    }
+
+    @Test
     void aManualRunsDefinitiveRefusalAnswers409AndItsRetryTheDecision() {
         PublicAutomation automation = define("0 2 * * *", "allow", "none",
                 null, true);
