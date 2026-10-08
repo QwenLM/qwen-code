@@ -748,6 +748,85 @@ describe('AgentCore skill-gate inputs', () => {
       );
     });
 
+    it('keeps direct declarations a nested-only allowlist does not name', async () => {
+      // A nested-only allowlist is additive-only: it narrows the exec
+      // binding set, never the direct declaration surface.
+      const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));
+      registry.registerTool(new MockTool({ name: ToolNames.WRITE_FILE }));
+      const core = new AgentCore(
+        'nested-only-allowlist-keeps-direct',
+        config,
+        { systemPrompt: '' },
+        { model: 'test-model' },
+        { max_turns: 1 },
+        {
+          tools: ['*'],
+          executionAllowedTools: [
+            ToolNames.EXEC,
+            ToolNames.READ_FILE,
+            ToolNames.WRITE_FILE,
+          ],
+          nestedExecutionAllowedTools: [ToolNames.READ_FILE],
+        },
+      );
+
+      const declarations = await core.prepareTools();
+      expect(declarations.map((declaration) => declaration.name)).toEqual([
+        ToolNames.EXEC,
+        ToolNames.READ_FILE,
+        ToolNames.WRITE_FILE,
+      ]);
+      expect(executable(core, ToolNames.WRITE_FILE)).toBe(true);
+      expect(codeModeAllowed(core)).toEqual([ToolNames.READ_FILE]);
+      const exec = declarations.find(
+        (declaration) => declaration.name === ToolNames.EXEC,
+      );
+      expect(exec?.description).toContain('"name":"read_file"');
+      expect(exec?.description).not.toContain('"name":"write_file"');
+    });
+
+    it.each([
+      {
+        tools: [ToolNames.EXEC, ToolNames.READ_FILE],
+        executionAllowedTools: [ToolNames.READ_FILE],
+      },
+      {
+        tools: [ToolNames.EXEC, ToolNames.READ_FILE, ToolNames.WRITE_FILE],
+        executionAllowedTools: [] as string[],
+        nestedExecutionAllowedTools: [ToolNames.READ_FILE],
+      },
+    ])(
+      'closes the listing/gate gap when the config bounds the exec route: %j',
+      async (toolConfig) => {
+        const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+        const registry = new ToolRegistry(config);
+        vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+        registry.registerTool(new ExecTool(config));
+        registry.registerTool(new MockTool({ name: ToolNames.SKILL }));
+        registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));
+        registry.registerTool(new MockTool({ name: ToolNames.WRITE_FILE }));
+        const core = new AgentCore(
+          'skill-exec-route-bounded',
+          config,
+          { systemPrompt: '' },
+          { model: 'test-model' },
+          { max_turns: 1 },
+          toolConfig,
+        );
+
+        const willHaveSkill = (
+          core as unknown as { willHaveSkillTool: () => boolean }
+        ).willHaveSkillTool();
+        const declared = await declaredNames(core);
+        expect(willHaveSkill).toBe(false);
+        expect(gate(core, declared)).toBe(false);
+      },
+    );
+
     it('honors MCP execution patterns in the hybrid nested binding set', async () => {
       const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
       const registry = new ToolRegistry(config);

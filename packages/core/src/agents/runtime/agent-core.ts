@@ -740,21 +740,23 @@ export class AgentCore {
         : new Set(stringTools);
       const inheritsCodeModeBindings =
         configuredNames?.has(ToolNames.EXEC) === true;
-      const allowedNames = toolRegistry
-        .getAllToolNames()
-        .filter(
-          (name) =>
-            (!configuredNames ||
-              configuredNames.has(name) ||
-              name === ToolNames.EXEC ||
-              (inheritsCodeModeBindings &&
-                getToolExposure(name) === 'code-mode-callable')) &&
-            !isExcluded(name) &&
-            (this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly ||
-              !isHiddenByEagerAllowList(name)) &&
-            !this.isToolDisallowedByAgentConfig(name, toolRegistry) &&
-            this.isToolExecutionAllowed(name, true),
-        );
+      const admissionPool = (forNestedBinding: boolean) =>
+        toolRegistry
+          .getAllToolNames()
+          .filter(
+            (name) =>
+              (!configuredNames ||
+                configuredNames.has(name) ||
+                name === ToolNames.EXEC ||
+                (inheritsCodeModeBindings &&
+                  getToolExposure(name) === 'code-mode-callable')) &&
+              !isExcluded(name) &&
+              (this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly ||
+                !isHiddenByEagerAllowList(name)) &&
+              !this.isToolDisallowedByAgentConfig(name, toolRegistry) &&
+              this.isToolExecutionAllowed(name, forNestedBinding),
+          );
+      const allowedNames = admissionPool(true);
       if (
         this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly &&
         allowedNames.some(
@@ -772,14 +774,18 @@ export class AgentCore {
           (name) => getToolExposure(name) === 'code-mode-callable',
         ),
       );
+      // Hybrid declarations draw from a pool filtered by the DIRECT
+      // predicate: `allowedNames` is nested-filtered, and a nested-only
+      // allowlist is additive-only — it must never revoke a tool's direct
+      // declaration (agent-types.ts documents `nestedExecutionAllowedTools`
+      // as "never grants direct tool calls", not "revokes" either).
       const declarationNames =
         this.runtimeContext.getToolMode?.() === ToolMode.CodeMode
-          ? allowedNames.filter(
+          ? admissionPool(false).filter(
               (name) =>
-                (!configuredNames ||
-                  name === ToolNames.EXEC ||
-                  configuredNames.has(name)) &&
-                this.isToolExecutionAllowed(name),
+                !configuredNames ||
+                name === ToolNames.EXEC ||
+                configuredNames.has(name),
             )
           : allowedNames;
       const declarations = toolRegistry.getFunctionDeclarationsFiltered(
