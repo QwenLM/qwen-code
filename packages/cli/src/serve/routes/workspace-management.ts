@@ -2238,14 +2238,16 @@ export function registerWorkspaceManagementRoutes(
         // Also match by workspaceId to handle cases where the client sends
         // the canonical path hash instead of a stored path hash (alias paths).
         let targetEntry: WorkspaceEntry | undefined;
-        const entries = workspaceRegistry.listAllEntries();
-        for (const entry of entries) {
-          if (
-            entry.registrationIds.includes(requestedId) ||
-            entry.workspaceId === requestedId
-          ) {
-            targetEntry = entry;
-            break;
+        if (typeof workspaceRegistry.listAllEntries === 'function') {
+          const entries = workspaceRegistry.listAllEntries();
+          for (const entry of entries) {
+            if (
+              entry.registrationIds.includes(requestedId) ||
+              entry.workspaceId === requestedId
+            ) {
+              targetEntry = entry;
+              break;
+            }
           }
         }
         if (!targetEntry) {
@@ -2319,16 +2321,18 @@ export function registerWorkspaceManagementRoutes(
           let pinnedAt = snapshot.pinnedAts?.[requestedId];
           if (pinnedAt === undefined) {
             // Fallback: scan all entries for this requestedId.
-            const entries = workspaceRegistry.listAllEntries();
-            for (const entry of entries) {
-              if (entry.registrationIds.includes(requestedId)) {
-                for (const regId of entry.registrationIds) {
-                  if (snapshot.pinnedAts?.[regId] !== undefined) {
-                    pinnedAt = snapshot.pinnedAts[regId];
-                    break;
+            if (typeof workspaceRegistry.listAllEntries === 'function') {
+              const entries = workspaceRegistry.listAllEntries();
+              for (const entry of entries) {
+                if (entry.registrationIds.includes(requestedId)) {
+                  for (const regId of entry.registrationIds) {
+                    if (snapshot.pinnedAts?.[regId] !== undefined) {
+                      pinnedAt = snapshot.pinnedAts[regId];
+                      break;
+                    }
                   }
+                  break;
                 }
-                break;
               }
             }
           }
