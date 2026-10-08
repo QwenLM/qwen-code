@@ -11879,6 +11879,17 @@ describe('LlmChat', async () => {
             total + (typeof output === 'string' ? output.length : 0),
           0,
         );
+    /** The string outputs of the `index`th request's function responses. */
+    const resultOutputs = (index: number) =>
+      (requestAt(index).contents as Content[])
+        .flatMap((entry) => entry.parts ?? [])
+        .map((part) => part.functionResponse?.response?.['output'])
+        .filter((output): output is string => typeof output === 'string');
+    /** A per-tool-layer spill envelope whose recovery pointer sits at the front. */
+    const spillEnvelope = (n: number) =>
+      `<persisted-output>\nOutput too large (512 KB). Full output saved to: /home/runner/.qwen/tmp/project-temp-dir/shell_${'a'.repeat(12)}${n}.log\nFull output sha256: ${'f'.repeat(64)}\nNote: this file may be cleaned up after 24 hours.\n\nPreview (up to 2100 chars):\n${'p'.repeat(1_900)}\n</persisted-output>`;
+    const SPILL_PATH_PREFIX =
+      'Full output saved to: /home/runner/.qwen/tmp/project-temp-dir/shell_';
     const reportUsage = async (promptTokenCount: number, target = chat) => {
       mockStreamsOnce(
         textStream('ok', {
@@ -11929,6 +11940,70 @@ describe('LlmChat', async () => {
       ).toBe(true);
     });
 
+    it('shrinks a batch whose total exceeds the headroom, not just one result', async () => {
+      await reportUsage(840_000);
+      await sendDrain(
+        [0, 1, 2, 3].map((n) =>
+          fnResponse('shell', { output: 'x'.repeat(24_000) }, `big-${n}`),
+        ),
+        'second',
+      );
+      expect(resultChars(1)).toBeLessThanOrEqual(30_000);
+    });
+
+    it('keeps every parallel result whole when the floor covers the batch', async () => {
+      // Floor band: 4,000 characters per result across eight results, so all of
+      // them fit and none is replaced by a bare stub that drops its spill path.
+      await reportUsage(849_500);
+      await sendDrain(
+        [0, 1, 2, 3, 4, 5, 6, 7].map((n) =>
+          fnResponse(
+            'shell',
+            { output: `${spillEnvelope(n)}${'x'.repeat(18_000)}` },
+            `spilled-${n}`,
+          ),
+        ),
+        'second',
+      );
+      expect(resultChars(1)).toBe(32_000);
+      expect(
+        resultOutputs(1).every((output) => output.includes(SPILL_PATH_PREFIX)),
+      ).toBe(true);
+    });
+
+    it('charges exempt tool output to the headroom instead of shrinking around it', async () => {
+      await reportUsage(NEAR_AUTO);
+      await sendDrain(
+        [
+          fnResponse('search_memory', { output: 'm'.repeat(12_000) }, 'mem'),
+          result(),
+        ],
+        'second',
+      );
+      expect(resultChars(1)).toBe(32_000);
+    });
+
+    it('keeps the tighter of the aggregate budget and the headroom', async () => {
+      mockConfig.getToolOutputBatchBudget = () => 5_000;
+      await reportUsage(NEAR_AUTO);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBeLessThanOrEqual(5_000);
+    });
+
+    it('leaves results whole when the aggregate budget is disabled', async () => {
+      mockConfig.getToolOutputBatchBudget = () => Number.POSITIVE_INFINITY;
+      await reportUsage(NEAR_AUTO);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBe(20_000);
+    });
+
+    it('applies the default window when the route reports none', async () => {
+      mockGeneratorConfig();
+      await reportUsage(163_000);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBeLessThan(20_000);
+    });
+
     it.each(['explicit', 'estimated', 'restored', 'foreign', 'other-chat'])(
       'keeps static output for %s ownership',
       async (mode) => {
@@ -11957,8 +12032,12 @@ describe('LlmChat', async () => {
 
     it('does not reuse a report once a later request was dispatched', async () => {
       await reportUsage(NEAR_AUTO);
-      // The follow-up's response reports no usage, so nothing re-anchors.
-      await sendDrain('follow-up', 'second');
+      // Cancel the follow-up before it accepts a turn, so the anchor can only be
+      // cleared by the dispatch itself: a completing response would clear it too
+      // and hide a missing dispatch-time clear.
+      const followUp = await send('follow-up', 'second');
+      await followUp.next();
+      await followUp.return(undefined);
       mockStreamsOnce(textStream('done'));
       await sendDrain([result()], 'third');
       expect(resultChars(2)).toBe(20_000);
