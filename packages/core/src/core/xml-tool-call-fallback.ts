@@ -330,9 +330,10 @@ function recoverableToolCallBlocks(text: string): ToolCallBlock[] {
 
   // Regions a closed parameter value owns. A call matched inside one is markup
   // the value quotes rather than a call the model emitted, so it must not be
-  // dispatched: documentation would otherwise execute, and the block quoting
-  // it stays behind as prose. Skipping the match whole also keeps the
-  // rejected-block rescan below out of the value it belongs to. See #13492.
+  // dispatched: documentation would otherwise execute. The block quoting it is
+  // still recovered, with that value intact. Skipping the match whole also
+  // keeps the rejected-block rescan below out of the value it belongs to. See
+  // #13492.
   const valueSpans = closedParameterSpans(text).sort(
     ([startA, endA], [startB, endB]) => startA - startB || endB - endA,
   );
