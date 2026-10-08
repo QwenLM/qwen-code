@@ -59,7 +59,8 @@ class SessionEventHubPinningTest {
                         + "; a pin-capable shape would still have a"
                         + " carrier for the probe");
         SessionEventHub hub = new SessionEventHub();
-        int carriers = ForkJoinPool.getCommonPoolParallelism();
+        int carriers = Integer.getInteger("jdk.virtualThreadScheduler.parallelism",
+                Runtime.getRuntime().availableProcessors());
         List<SessionEventHub.Subscription> subscriptions =
                 new ArrayList<>();
         for (int index = 0; index < SUBSCRIBERS; index++) {
