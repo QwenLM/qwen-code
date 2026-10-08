@@ -27,9 +27,14 @@ import {
   writeClipboardText,
 } from '../../utils/clipboard';
 import { useCopiedFlash } from '../../hooks/useCopiedFlash';
-import type { DaemonSessionGenerationEvent } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionGenerationEvent,
+  QwenAgentMessageMeta,
+} from '@qwen-code/sdk/daemon';
 import type { DaemonMessageAuthor } from '../../adapters/messageTypes';
 import { AuthorAvatar } from './AuthorAvatar';
+import { SquadTag } from './squad-tag';
+import { AgentMessageDetails, isBlankAgentText } from './agent-message-details';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import flashStyles from '../MessageLocateFlash.module.css';
@@ -38,6 +43,8 @@ import styles from './AssistantMessage.module.css';
 interface AssistantMessageProps {
   content: string;
   author?: DaemonMessageAuthor;
+  /** A workspace agent's reply: its run status, error, steps and tokens. */
+  agentMessage?: QwenAgentMessageMeta;
   isStreaming?: boolean;
   timestamp?: number;
   onBranchSession?: () => void | Promise<void>;
@@ -58,6 +65,7 @@ interface AssistantMessageProps {
 export const AssistantMessage = memo(function AssistantMessage({
   content,
   author,
+  agentMessage,
   isStreaming,
   timestamp,
   onBranchSession,
@@ -76,8 +84,16 @@ export const AssistantMessage = memo(function AssistantMessage({
   const { renderAssistantTurnFooter } = useWebShellCustomization();
   const [copied, flashCopied] = useCopiedFlash();
   const [branchPending, setBranchPending] = useState(false);
+  // An agent reply of only whitespace or invisible characters (a leader's
+  // U+200B, recorded before the daemon classified it) shows no bubble text;
+  // a squad leader's such reply is its `no_action` line.
+  const blankAgentReply =
+    agentMessage?.kind === 'agent_message' &&
+    !isStreaming &&
+    isBlankAgentText(content);
   const showFooter =
     !!content &&
+    !blankAgentReply &&
     !isStreaming &&
     (showFooterActions || (turnSources?.length ?? 0) > 0) &&
     !documentMode;
@@ -136,15 +152,55 @@ export const AssistantMessage = memo(function AssistantMessage({
     },
     [assistantFeedbackRating],
   );
+  const squadName =
+    agentMessage?.kind === 'agent_message'
+      ? agentMessage.author?.squadName
+      : undefined;
+  // The squad shown beside the author: the one it leads, or the one whose
+  // leader it answered as a member. Only the leader's counts for no_action.
+  const squadLabel =
+    squadName ??
+    (agentMessage?.kind === 'agent_message'
+      ? agentMessage.author?.memberSquadName
+      : undefined);
+  if (
+    agentMessage?.kind === 'agent_message' &&
+    (agentMessage.squadOutcome === 'no_action' ||
+      (blankAgentReply &&
+        !!squadName &&
+        (agentMessage.status ?? 'completed') === 'completed'))
+  ) {
+    // A squad leader that decided nothing was needed: one muted line, not a
+    // message: the squad's tag, then a plain sentence. The sentence is in the
+    // main dictionary so exported transcripts can show it (the collaboration
+    // dictionary is stubbed there).
+    const noActionKey = 'agentMessage.noAction';
+    const noActionLabel = t(noActionKey, {
+      name: author?.name ?? agentMessage.author?.name ?? '',
+    }).trim();
+    return (
+      <div
+        className={styles.squadNoAction}
+        data-squad-outcome="no_action"
+        role="note"
+      >
+        {squadName && <SquadTag name={squadName} />}
+        <span className={styles.squadNoActionText}>
+          {noActionLabel === noActionKey ? '—' : noActionLabel}
+        </span>
+      </div>
+    );
+  }
   return (
     <div className={styles.message}>
       {author && (
         <div className={styles.author}>
           <AuthorAvatar name={author.name} color={author.color} />
           <span className={styles.authorName}>{author.name}</span>
+          {squadLabel && <SquadTag name={squadLabel} />}
         </div>
       )}
-      {content && (
+      {content && !blankAgentReply && (
         <div
           className={`${styles.content}${
             isLocateFlashing ? ` ${flashStyles.flash}` : ''
@@ -158,6 +214,9 @@ export const AssistantMessage = memo(function AssistantMessage({
             />
           </div>
         </div>
+      )}
+      {agentMessage?.kind === 'agent_message' && (
+        <AgentMessageDetails meta={agentMessage} />
       )}
       {customFooter && (
         <div className={styles.customFooter}>{customFooter}</div>
