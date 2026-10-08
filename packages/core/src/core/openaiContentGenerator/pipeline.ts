@@ -357,9 +357,17 @@ function hasNonThoughtCandidateParts(
  * - visible prose parked behind an unattributable tool call is discarded by
  *   the error handler, so releasing the tail alone would leave a bare closing
  *   tag as the turn's only content;
+ * - a turn the converter quarantined as an unresolved thinking-tag candidate
+ *   is the turn the loop below rejects with `PROTOCOL_TAG_LEAK`, so handing
+ *   its withheld tail over as ordinary prose would make the verdict depend on
+ *   how the stream terminated rather than on its bytes;
  * - ownership of the tags moved to the tagged-thinking parser mid-stream, so
  *   what the filter still holds is stranded rather than withheld for this
  *   turn's end, and the same pass may still reject the turn as a leak.
+ *
+ * The parked array is created even when nothing is parked (the converter
+ * `??=`s it inside the hold branch), so its existence -- not its length -- is
+ * the signal that a hold is in effect.
  *
  * The tail the filter can hold is whitespace plus a tag fragment and never
  * prose, so withholding it in these states loses no model output.
@@ -368,12 +376,20 @@ function flushTrailingThinkingTag(
   abortSignal: AbortSignal | undefined,
   context: RequestContext,
   finishSeen: boolean,
+  /**
+   * Whether the stream is `FinishReason.STOP`-equivalent where it ended: a
+   * clean end with no finish frame reports an absent reason, which the
+   * converter's own mapper treats as finished normally, so a complete orphan
+   * closer still has to be stripped. A transport failure is a truncation and
+   * releases the tail verbatim instead.
+   */
+  completed: boolean,
 ): GenerateContentResponse | undefined {
   if (
     abortSignal?.aborted === true ||
     context.hasThinkingTagInReasoning ||
     finishSeen ||
-    (context.pendingUntrustedResponseParts?.length ?? 0) > 0 ||
+    context.pendingUntrustedResponseParts !== undefined ||
     context.taggedThinkingParser !== undefined
   ) {
     return undefined;
@@ -381,7 +397,7 @@ function flushTrailingThinkingTag(
   const trailingText = context.trailingThinkingTagFilter?.parse(
     '',
     true,
-    false,
+    completed,
   );
   if (!trailingText) return undefined;
   const response = new GenerateContentResponse();
@@ -910,6 +926,10 @@ export class ContentGenerationPipeline {
         request.config?.abortSignal,
         context,
         finishSeen,
+        // A clean end with no finish chunk is the absent-reason case the
+        // converter's own mapper reports as STOP, so this tail belongs to a
+        // finished turn and a complete orphan closer still has to be stripped.
+        true,
       );
       if (flushedTail) {
         contentYielded ||= hasNonThoughtCandidateParts(flushedTail);
@@ -946,6 +966,9 @@ export class ContentGenerationPipeline {
         request.config?.abortSignal,
         context,
         finishSeen,
+        // An error mid-stream is a truncation, not an absent reason: the tail
+        // is released verbatim so a genuinely cut answer is not edited.
+        false,
       );
       if (flushedTail) {
         contentYielded ||= hasNonThoughtCandidateParts(flushedTail);

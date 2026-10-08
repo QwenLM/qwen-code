@@ -2849,6 +2849,48 @@ describe('ContentGenerationPipeline', () => {
         );
       }));
 
+    it.each(['transport error', 'clean end'] as const)(
+      'withholds the filter tail on a quarantined tag candidate (%s)',
+      async (termination) =>
+        withRealChunkConverter(async () => {
+          // The converter quarantines `{text: '<thi'}` and parks nothing, so
+          // `pendingUntrustedResponseParts` exists but is empty. One byte
+          // stream, two terminations: the leak verdict the loop ends with has
+          // to agree with the error path.
+          const streamError = new Error('connection reset');
+          const { items, error } = await settle(
+            await streamFrom(
+              streamOf(
+                chunkOf({ reasoning_content: 'Let me think.' }),
+                chunkOf({ content: '<thi' }),
+                chunkOf({ content: '\n</thinking>' }),
+                ...(termination === 'transport error' ? [streamError] : []),
+              ),
+            ),
+          );
+          if (termination === 'transport error') {
+            expect(error).toBe(streamError);
+          } else {
+            expect(error).toMatchObject({ type: 'PROTOCOL_TAG_LEAK' });
+          }
+          expect(visibleText(items)).toBe('');
+        }),
+    );
+
+    it('strips a complete orphan closer when the stream ends with no finish frame', async () =>
+      withRealChunkConverter(async () => {
+        // An endpoint that closes the SSE stream after the final content delta
+        // reports no reason at all, which the converter's own mapper treats as
+        // finished normally -- so the tail must be stripped, not released.
+        const { items, error } = await settle(
+          await streamFrom(
+            streamOf(chunkOf({ content: 'Answer.\n</thinking>' })),
+          ),
+        );
+        expect(error).toBeUndefined();
+        expect(visibleText(items)).toBe('Answer.');
+      }));
+
     it('leaves the chunk-converter stub unimplemented for later tests', () => {
       // Placed after every real-converter case above: the module-level stub
       // must be back at its factory default (a bare `vi.fn()`), or every later
