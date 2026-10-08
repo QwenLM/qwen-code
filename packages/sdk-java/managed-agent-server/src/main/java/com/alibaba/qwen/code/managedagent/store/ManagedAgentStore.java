@@ -340,13 +340,21 @@ public class ManagedAgentStore implements AgentStateStore {
         // among them), then retire — while a lease-losing worker that
         // paused before this call is about to mint the Session anyway.
         // The row lock serializes that verdict against this read, so a
-        // settled record refuses the mint inside its own transaction.
+        // settled record refuses the mint inside its own transaction —
+        // addressed by the parent's launch row's own primary key, which
+        // is the same key the idempotent admission derives, so the
+        // locking read never becomes a cross-tenant table scan under
+        // REPEATABLE READ.
+        String fenceScopeKey = ManagedSessionStore.sessionScopeKey(tenantId,
+                parentSessionId);
+        String fenceRecordKey = ManagedExtensionProjection.recordKey(
+                parentSessionId, "child_run", lineage.parentChildRunId());
         List<String> runState = jdbc.query("SELECT task_state FROM"
-                + " qwen_managed_session_extension_record WHERE tenant_id = ?"
-                + " AND session_id = ? AND domain = 'child_run'"
-                + " AND record_id = ? FOR UPDATE",
-                (result, row) -> result.getString(1), tenantId,
-                parentSessionId, lineage.parentChildRunId());
+                + " qwen_managed_session_extension_record"
+                + " WHERE session_scope_key = ? AND record_key = ?"
+                + " FOR UPDATE",
+                (result, row) -> result.getString(1), fenceScopeKey,
+                fenceRecordKey);
         if (!runState.isEmpty()
                 && ("completed".equals(runState.getFirst())
                         || "failed".equals(runState.getFirst())

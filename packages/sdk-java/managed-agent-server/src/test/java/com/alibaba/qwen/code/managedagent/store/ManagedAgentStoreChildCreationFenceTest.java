@@ -70,17 +70,24 @@ class ManagedAgentStoreChildCreationFenceTest {
 
     private void plantRun(String childRunId, String deliveryState,
             String taskState) {
+        // The fence reads the parent's real launch row — the same key the
+        // idempotent admission derives — so keeping the fence on exactly
+        // that key proves it evaluates the run's own row and not a
+        // physically-near but unrelated record.
         jdbc.update("INSERT INTO qwen_managed_session_extension_record"
                         + " (session_scope_key, record_key, tenant_id,"
                         + " workspace_id, session_id, domain, record_id,"
                         + " operation_hash, revision, record_resource_id,"
                         + " task_kind, task_state, delivery_target,"
                         + " delivery_state, created_at)"
-                        + " VALUES ('scope-x', ?, 'tenant', 'workspace', ?,"
+                        + " VALUES (?, ?, 'tenant', 'workspace', ?,"
                         + " 'child_run', ?, 'h', 1, ?, 'child_agent', ?,"
                         + " 'session', ?, 1)",
-                childRunId + "-key", parent, childRunId,
-                "resource-" + childRunId, taskState, deliveryState);
+                ManagedSessionStore.sessionScopeKey("tenant", parent),
+                ManagedExtensionProjection.recordKey(parent, "child_run",
+                        childRunId),
+                parent, childRunId, "resource-" + childRunId, taskState,
+                deliveryState);
     }
 
     private StoreModels.Admission mint(String childRunId) {

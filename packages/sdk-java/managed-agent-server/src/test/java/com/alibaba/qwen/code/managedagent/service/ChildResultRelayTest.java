@@ -188,6 +188,7 @@ class ChildResultRelayTest {
                 }).when(store).defer(any(RelayRow.class), anyString(),
                         anyLong(), any(), anyLong(), anyLong());
         when(store.sessionStatus(TENANT, PARENT)).thenReturn("ACTIVE");
+        when(store.sessionStatus(TENANT, CHILD)).thenReturn("ACTIVE");
         when(store.hasAcceptance(TENANT, PARENT, RUN)).thenReturn(false);
         when(store.readResource(TENANT, "resource-body")).thenReturn(
                 "{\"inputRef\":{\"resourceId\":\"resource-input\"},"
@@ -531,6 +532,21 @@ class ChildResultRelayTest {
         assertThat(harness.operations).isEmpty();
     }
 
+    // A debt whose child no longer stands is discharged by fact: no
+    // admission fires, and the row retires `done` instead of parking
+    // forever against a permanently-shut Session.
+    @Test
+    void anAlreadyClosedChildDischargesTheDebtByFact() {
+        when(store.sessionStatus(TENANT, CHILD)).thenReturn("CLOSED");
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "close_debt", "owner", now + 30_000, 0, 0, null, now, now));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("done");
+        assertThat(harness.operations).isEmpty();
+        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
     // An answered acceptance short-circuits arms the relay owes nothing
     // — never the retained close debt: a delivered run parked on a
     // capability-less host discharges like every sibling.
@@ -643,20 +659,6 @@ class ChildResultRelayTest {
         assertThat(row.get().state()).isEqualTo("close_debt");
         assertThat(row.get().childSessionId()).isEqualTo(CHILD);
         assertThat(harness.operations).isEmpty();
-        verify(childCloses, never()).admitChildClose(anyString(), anyString(),
-                anyString(), anyString());
-    }
-
-    // The orphaned arm still owns every walk whose child no longer
-    // stands: a ledger row with no Session row to close classifies
-    // orphaned, exactly as it always has.
-    @Test
-    void anUnsettledRowStillOrphansAtParentClose() {
-        when(store.sessionStatus(TENANT, PARENT)).thenReturn("CLOSED");
-        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
-                "watching", "owner", now + 30_000, 0, 0, null, now, now));
-        relay.scan();
-        assertThat(row.get().state()).isEqualTo("orphaned");
         verify(childCloses, never()).admitChildClose(anyString(), anyString(),
                 anyString(), anyString());
     }

@@ -488,6 +488,13 @@ public class ChildResultRelay {
                     now + LEASE_MS, now);
             return;
         }
+        // A debt whose child no longer stands is discharged by fact, not
+        // retried by suspicion: admission would refuse permanently, and
+        // nothing but this re-read can tell the two apart for days.
+        if (!childSessionNeedsClose(row.tenantId(), row.childSessionId())) {
+            relayStore.classify(row, owner, "done", row.lastError(), now);
+            return;
+        }
         try {
             childCloses.admitChildClose(row.tenantId(),
                     row.parentSessionId(), row.childSessionId(),
