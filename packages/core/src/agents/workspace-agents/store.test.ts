@@ -31,6 +31,7 @@ import {
   withAgentStoreTransaction,
 } from './store.js';
 import {
+  AGENT_HOST_REPLACEMENT_REQUIRED,
   AGENTS_SCHEMA_VERSION,
   hostAvailablePrograms,
   hostOffersProgram,
@@ -424,6 +425,50 @@ describe('removing and replacing an Agent Host', () => {
       mode: 'managed-host',
       hostIds: [staged.id],
     });
+  });
+
+  it('refuses a heartbeat carrying a superseding token without consuming it', async () => {
+    const old = await enroll('old');
+    const { token } = await issueAgentHostEnrollment(PROJECT_ROOT, old.host.id);
+
+    await expect(
+      heartbeatAgentHost(PROJECT_ROOT, old.host.id, old.secret, {
+        workspaceCwd: '/worker',
+        providers: ['Qwen Code ACP'],
+        enrollmentToken: token,
+      }),
+    ).rejects.toThrow(AGENT_HOST_REPLACEMENT_REQUIRED);
+
+    // Unlike a fresh token (see 'consumes a fresh enrollment token without
+    // replacing a valid host'), a superseding token survives the refused
+    // heartbeat and still enrolls the replacement.
+    const replacement = await enrollAgentHost(PROJECT_ROOT, {
+      token,
+      name: 'new',
+      workspaceCwd: '/worker',
+      providers: ['Qwen Code ACP'],
+    });
+    expect(replacement.host.id).not.toBe(old.host.id);
+    expect((await readAgentHosts(PROJECT_ROOT)).map((host) => host.id)).toEqual(
+      [replacement.host.id],
+    );
+  });
+
+  it('rejects a superseding enrollment once the replaced Host is gone', async () => {
+    const old = await enroll('old');
+    const { token } = await issueAgentHostEnrollment(PROJECT_ROOT, old.host.id);
+
+    await expect(
+      removeAgentHost(PROJECT_ROOT, old.host.id),
+    ).resolves.toMatchObject({ removed: true });
+    await expect(
+      enrollAgentHost(PROJECT_ROOT, {
+        token,
+        name: 'new',
+        workspaceCwd: '/worker',
+        providers: ['Qwen Code ACP'],
+      }),
+    ).rejects.toThrow('Agent Host to replace not found.');
   });
 });
 

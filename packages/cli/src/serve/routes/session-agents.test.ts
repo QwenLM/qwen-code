@@ -352,4 +352,47 @@ describe('session agent routes', () => {
       vi.useRealTimers();
     }
   });
+
+  it('leaves the agent sessions alone when agents stop for any other reason', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const bridge = {
+        listWorkspaceSessions: vi.fn(() => [
+          { sessionId: 'agent-session', sourceType: 'agent' },
+        ]),
+        cancelSession: vi.fn(async () => {}),
+        closeSession: vi.fn(async () => {}),
+      };
+      const runtime = {
+        workspaceId: 'ws',
+        workspaceCwd: '/work/ws-untrusted',
+        trusted: true,
+        bridge,
+      };
+      const app = express();
+      registerSessionAgentRoutes(app, {
+        workspaceRegistry: {
+          list: () => [runtime as unknown as WorkspaceRuntime],
+        } as unknown as WorkspaceRegistry,
+        mutate: () => (_req, _res, next) => next(),
+        isAgentCollaborationEnabledFor: () => true,
+      });
+      apps.push(app);
+
+      // Torn down for a reason other than opting out: sessions a person may
+      // still reach are not the agents' to close.
+      runtime.trusted = false;
+      vi.advanceTimersByTime(5_000);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(disposeSessionAgentOrchestrator).toHaveBeenCalledWith(
+        '/work/ws-untrusted',
+        'workspace_untrusted',
+      );
+      expect(bridge.cancelSession).not.toHaveBeenCalled();
+      expect(bridge.closeSession).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

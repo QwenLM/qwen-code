@@ -16,11 +16,19 @@ import {
   revokeA2AGrant,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-grants.js';
 import { updateWorkspaceAgents } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
+import type { AgentAdapterTurnResult } from '@qwen-code/qwen-code-core/agents/session-agents/contract.js';
 import { Storage, type A2ASessionPort } from '@qwen-code/qwen-code-core';
+import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { SessionAgentEventHub } from '../session-agents/events.js';
+import {
+  disposeSessionAgentOrchestrator,
+  ensureSessionAgentOrchestrator,
+  type SessionAgentBridge,
+} from '../session-agents/orchestrator.js';
 import { registerA2ATransportRoutes } from './a2a.js';
 
 const PROJECT_ROOT = '/a2a-route-test';
@@ -398,3 +406,205 @@ it.each(['replaced', 'untrusted', 'disabled'] as const)(
     expect(sessions.posts).toEqual([]);
   },
 );
+
+describe('the default session port factory', () => {
+  it('reads replies from, and discards sessions under, the runtime session dir', async () => {
+    // A workspace whose own session runtime dir is NOT the ambient default,
+    // so reading the ambient dir would silently miss its transcripts.
+    const projectRoot = path.join(runtimeDir, 'default-port-ws');
+    const sessionRuntimeDir = path.join(runtimeDir, 'default-port-runtime');
+    await updateWorkspaceAgents(projectRoot, () => [
+      {
+        id: 'ag_lead',
+        name: 'lead',
+        createdAt: 1,
+        execution: { mode: 'local', provider: 'claude' },
+      },
+    ]);
+    const transcripts = new SessionService(projectRoot, {
+      runtimeBaseDir: sessionRuntimeDir,
+    });
+    const spawned: string[] = [];
+    /** Track the transcript chain per session, as a transcript would grow. */
+    const chains = new Map<string, string[]>();
+    const fakes = {
+      spawnOrAttach: async () => {
+        const sessionId = randomUUID();
+        spawned.push(sessionId);
+        // A spawned session's transcript exists before any agent record.
+        await fs.mkdir(
+          path.dirname(transcripts.getSessionTranscriptPath(sessionId)),
+          { recursive: true },
+        );
+        await fs.appendFile(
+          transcripts.getSessionTranscriptPath(sessionId),
+          `${JSON.stringify({
+            uuid: 'seed-0',
+            parentUuid: null,
+            sessionId,
+            cwd: projectRoot,
+            timestamp: new Date().toISOString(),
+            type: 'system',
+          })}\n`,
+        );
+        chains.set(sessionId, ['seed-0']);
+        return { sessionId, workspaceCwd: projectRoot, attached: false };
+      },
+      updateSessionMetadata: () => ({}),
+      killSession: async () => true,
+      resumeSession: async () => ({}),
+      // The ACP child's side: every external record lands in the workspace's
+      // own session transcripts, durably, before the answer.
+      appendExternalRecord: async (
+        sessionId: string,
+        record: {
+          kind: string;
+          modelText: string;
+          payload: unknown;
+          recordKey: string;
+        },
+      ) => {
+        const chain = chains.get(sessionId)!;
+        const uuid = `rec-${chain.length}`;
+        await fs.appendFile(
+          transcripts.getSessionTranscriptPath(sessionId),
+          `${JSON.stringify({
+            uuid,
+            parentUuid: chain[chain.length - 1] ?? null,
+            sessionId,
+            cwd: projectRoot,
+            timestamp: new Date().toISOString(),
+            type: 'user',
+            subtype: record.kind,
+            message: { role: 'user', parts: [{ text: record.modelText }] },
+            systemPayload: record.payload,
+            externalRecordKey: record.recordKey,
+          })}\n`,
+        );
+        chain.push(uuid);
+        return { sessionId, recordId: uuid, created: true };
+      },
+    };
+    const appendExternalRecord = vi.fn(fakes.appendExternalRecord);
+    const bridge = {
+      ...fakes,
+      appendExternalRecord,
+    } as unknown as SessionAgentBridge;
+    const runtime = {
+      workspaceId: 'primary',
+      workspaceCwd: projectRoot,
+      sessionRuntimeBaseDir: sessionRuntimeDir,
+      primary: true,
+      trusted: true,
+      bridge,
+    } as WorkspaceRuntime;
+    ensureSessionAgentOrchestrator({
+      workspaceCwd: projectRoot,
+      bridge,
+      hub: new SessionAgentEventHub(0),
+      chainLimit: () => 0,
+      loadRecords: async () => [],
+      getAdapter: (program) => ({
+        program,
+        runTurn: (input) =>
+          new Promise<AgentAdapterTurnResult>((resolve) => {
+            input.signal.addEventListener(
+              'abort',
+              () => resolve({ status: 'cancelled', outputText: '' }),
+              { once: true },
+            );
+            resolve({
+              status: 'completed',
+              outputText: 'The painted session dir.',
+            });
+          }),
+      }),
+      startTimers: false,
+      recordWatchMs: 5,
+    });
+    const app = express();
+    // No factory argument: the transport's own default is under test.
+    registerA2ATransportRoutes(
+      app,
+      createWorkspaceRegistry([runtime]),
+      undefined,
+      undefined,
+    );
+    const grants = {
+      share_1: await issueA2AGrant(projectRoot, {
+        callerId: 'share_1',
+        agentId: 'ag_lead',
+      }),
+      share_2: await issueA2AGrant(projectRoot, {
+        callerId: 'share_2',
+        agentId: 'ag_lead',
+      }),
+    };
+    const call = (
+      callerId: 'share_1' | 'share_2',
+      method: string,
+      params: unknown,
+    ) =>
+      request(app)
+        .post('/a2a/v1')
+        .set({
+          'x-qwen-workspace-id': 'primary',
+          'x-qwen-agent-id': 'ag_lead',
+          authorization: `Bearer ${grants[callerId].secret}`,
+          'x-qwen-caller-id': callerId,
+          'A2A-Version': '1.0',
+        })
+        .send({ jsonrpc: '2.0', id: 1, method, params });
+
+    try {
+      const sent = await call('share_1', 'SendMessage', {
+        message: {
+          role: 'ROLE_USER',
+          messageId: 'msg-1',
+          parts: [{ text: 'Which dir does the transcript live in?' }],
+        },
+      });
+      expect(sent.body.error).toBeUndefined();
+      const taskId = sent.body.result.task.id as string;
+      const contextId = sent.body.result.task.contextId as string;
+
+      // COMPLETED with the answer only if the default factory reads the
+      // reply record from THIS workspace's session runtime dir.
+      await vi.waitFor(
+        async () => {
+          const polled = await call('share_1', 'GetTask', { id: taskId });
+          expect(polled.body.result).toMatchObject({
+            id: taskId,
+            contextId,
+            status: { state: 'TASK_STATE_COMPLETED' },
+          });
+          expect(JSON.stringify(polled.body.result.artifacts)).toContain(
+            'The painted session dir.',
+          );
+        },
+        { timeout: 5_000 },
+      );
+
+      // A session created for a refused message is discarded from that same
+      // dir: its transcript is gone, not merely forgotten.
+      appendExternalRecord.mockRejectedValueOnce(
+        new Error('managed_session_unsupported'),
+      );
+      const refused = await call('share_2', 'SendMessage', {
+        message: {
+          role: 'ROLE_USER',
+          messageId: 'msg-2',
+          parts: [{ text: 'This mention is refused.' }],
+        },
+      });
+      expect(refused.body.error).toMatchObject({ code: -32010 });
+      expect(spawned).toHaveLength(2);
+      expect(await transcripts.getSessionLocation(spawned[1]!)).toBeUndefined();
+      // The completed task's session is untouched: only the discarded one
+      // was removed.
+      expect(await transcripts.getSessionLocation(contextId)).toBeDefined();
+    } finally {
+      await disposeSessionAgentOrchestrator(projectRoot);
+    }
+  });
+});

@@ -16,6 +16,7 @@ import {
   heartbeatAgentHost,
   issueAgentHostEnrollment,
   getAgentsDir,
+  readAgentHosts,
   readWorkspaceAgents,
   updateWorkspaceAgents,
 } from '@qwen-code/qwen-code-core/agents/workspace-agents/store.js';
@@ -215,6 +216,32 @@ it('refuses to move an agent while it has a live session-agent run', async () =>
   ).toBeUndefined();
 });
 
+it('disables an agent and reports it offline', async () => {
+  const workspaceCwd = path.join(runtimeDir, 'disable-agent');
+  await updateWorkspaceAgents(workspaceCwd, () => [
+    { id: 'ag_alice', name: 'alice', createdAt: 1 },
+  ]);
+  const app = appFor(runtimeAt(workspaceCwd));
+
+  await request(app)
+    .patch('/workspaces/workspace/agent/agents/ag_alice')
+    .send({ enabled: false })
+    .expect(200, { id: 'ag_alice', enabled: false, updated: true });
+
+  // The 200 echoes the patch; the roster proves it was written (the store
+  // answers 'updated' even when nothing was).
+  expect((await readWorkspaceAgents(workspaceCwd))[0]?.enabled).toBe(false);
+
+  const listed = await request(app)
+    .get('/workspaces/workspace/agent/agents')
+    .expect(200);
+  expect(listed.body.agents[0]).toMatchObject({
+    id: 'ag_alice',
+    enabled: false,
+    status: 'offline',
+  });
+});
+
 it('ends the runs a removed Host leaves stranded', async () => {
   const workspaceCwd = path.join(runtimeDir, 'remove-host');
   const { token } = await issueAgentHostEnrollment(workspaceCwd);
@@ -240,6 +267,54 @@ it('ends the runs a removed Host leaves stranded', async () => {
   expect(liveRuns.endRunsForRemovedHost).toHaveBeenCalledWith(host.id, [
     'ag_alice',
   ]);
+});
+
+it('answers a committed host removal even when ending its runs fails', async () => {
+  const workspaceCwd = path.join(runtimeDir, 'remove-host-dirty-sessions');
+  const { token } = await issueAgentHostEnrollment(workspaceCwd);
+  const { host } = await enrollAgentHost(workspaceCwd, {
+    token,
+    name: 'gone',
+    workspaceCwd: '/remote/gone',
+    providers: ['Qwen Code ACP'],
+  });
+  await updateWorkspaceAgents(workspaceCwd, () => [
+    {
+      id: 'ag_alice',
+      name: 'alice',
+      createdAt: 1,
+      execution: { mode: 'managed-host', hostIds: [host.id] },
+    },
+  ]);
+  liveRuns.value = [];
+  // The post-commit cleanup stumbles on a damaged session-agents file.
+  liveRuns.endRunsForRemovedHost.mockRejectedValueOnce(
+    new Error('Malformed JSON in sessions/s1.json'),
+  );
+  // The route logs the cleanup failure to stderr instead of answering 5xx.
+  const stderr = vi
+    .spyOn(process.stderr, 'write')
+    .mockImplementation(() => true);
+
+  try {
+    await request(appFor(runtimeAt(workspaceCwd)))
+      .delete(`/workspaces/workspace/agent/hosts/${host.id}`)
+      .expect(200, { agentsMadeLocal: ['ag_alice'] });
+
+    expect(
+      stderr.mock.calls.some(([chunk]) =>
+        String(chunk).includes('Malformed JSON in sessions/s1.json'),
+      ),
+    ).toBe(true);
+  } finally {
+    stderr.mockRestore();
+  }
+
+  expect(
+    (await readAgentHosts(workspaceCwd)).some(
+      (candidate) => candidate.id === host.id,
+    ),
+  ).toBe(false);
 });
 
 it("closes only the retired agent's hidden sessions", async () => {

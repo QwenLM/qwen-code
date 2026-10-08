@@ -1719,6 +1719,12 @@ export class SessionAgentOrchestrator {
         status: 'offline',
         outputText: live.frame.outputText ?? '',
         error: SESSION_AGENT_HOST_REMOVED_ERROR,
+        // A queued run never started a turn: charging it the unreported-turn
+        // fallback would burn the session's agent chain budget for nothing
+        // (cancelLive skips finishRun for queued runs for the same reason).
+        // Zero is not nullish, so it overrides the `?? UNREPORTED_TURN_TOKENS`
+        // default and lands as `totalTokens: 0` on the run and record.
+        ...(live.run.status === 'queued' ? { totalTokens: 0 } : {}),
       });
     }
     return stranded.length;

@@ -62,6 +62,7 @@ import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
 } from '../workspace-route-runtime.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -514,12 +515,21 @@ export function registerWorkspaceAgentRoutes(
         }
         // Its runs, and queued runs nothing can start any more, end now
         // rather than wait for a lease that a revoked Host cannot renew.
-        await getSessionAgentOrchestrator(
-          runtime.workspaceCwd,
-        )?.endRunsForRemovedHost(
-          String(req.params['hostId']),
-          result.agentsMadeLocal,
-        );
+        // The removal has already committed: a cleanup failure is logged and
+        // must not turn this answer into a 5xx, which the caller would read
+        // as "the Host is still enrolled", leaving the stranded runs live
+        // with no signal.
+        await getSessionAgentOrchestrator(runtime.workspaceCwd)
+          ?.endRunsForRemovedHost(
+            String(req.params['hostId']),
+            result.agentsMadeLocal,
+          )
+          .catch((error) => {
+            writeStderrLine(
+              `qwen serve: ending the runs of removed Host ${String(req.params['hostId'])} failed: ` +
+                (error instanceof Error ? error.message : String(error)),
+            );
+          });
         res.json({ agentsMadeLocal: result.agentsMadeLocal });
       } catch (error) {
         fail(res, error);

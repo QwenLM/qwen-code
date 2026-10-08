@@ -6,6 +6,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { A2ASessionError } from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-server.js';
+import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import {
   createA2ASessionPort,
   type A2AOrchestrator,
@@ -29,6 +30,7 @@ function setup(
       attached: false,
     })),
     updateSessionMetadata: vi.fn(() => ({})),
+    killSession: vi.fn(async () => true),
   };
   const orchestrator =
     options.orchestrator === null
@@ -75,6 +77,30 @@ describe('A2A session port', () => {
       titleSource: 'auto',
     });
   });
+
+  it.each([true, false])(
+    'removes the transcript only when the session was killed (killed: %s)',
+    async (killed) => {
+      const { bridge, port } = setup();
+      bridge.killSession.mockResolvedValue(killed);
+      const removeSession = vi
+        .spyOn(SessionService.prototype, 'removeSession')
+        .mockResolvedValue(true);
+      try {
+        await port.discardSession(SESSION);
+        expect(bridge.killSession).toHaveBeenCalledWith(SESSION, {
+          requireZeroAttaches: true,
+        });
+        if (killed) {
+          expect(removeSession).toHaveBeenCalledWith(SESSION);
+        } else {
+          expect(removeSession).not.toHaveBeenCalled();
+        }
+      } finally {
+        removeSession.mockRestore();
+      }
+    },
+  );
 
   it('is unavailable without the workspace orchestrator', async () => {
     const missing = setup({ orchestrator: null });
