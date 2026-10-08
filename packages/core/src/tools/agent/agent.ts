@@ -4810,7 +4810,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         return {
           llmContent: [
             {
-              text: `${reason}\n\nPartial result follows:\n\n${visibleFinalText}${wtSuffix}`,
+              // Compose off `finalText`, not `visibleFinalText`: that
+              // placeholder was written for the GOAL return above, so announcing
+              // 'Partial result follows:' in front of it promises agent output
+              // and then hands over a framework string the parent can quote as
+              // the subagent's finding. The ERROR branch above omits the section
+              // on the same empty input; do the same here.
+              text: finalText
+                ? `${reason}\n\nPartial result follows:\n\n${finalText}${wtSuffix}`
+                : `${reason}${wtSuffix}`,
             },
           ],
           returnDisplay: this.currentDisplay!,

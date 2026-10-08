@@ -5602,6 +5602,31 @@ describe('AgentTool', () => {
       );
     });
 
+    it('foreground MAX_TURNS on an external ACP executor names no knob the launch would reject', async () => {
+      // ACP is the external executor that actually reaches MAX_TURNS
+      // (acp-subagent-executor.ts maps the peer's `max_turn_requests` stop to
+      // it), and `AcpSubagentExecutor.create()` throws 'External ACP agents
+      // cannot enforce max_turns.' on any definition that follows the built-in
+      // advice — so the carve-out has to be pinned on this kind too. Codex
+      // rejects every turn cap at create() and only ever writes
+      // CANCELLED/GOAL/ERROR/TIMEOUT, so the case above cannot regress on its
+      // own (#13597).
+      loadAs({
+        name: 'file-search',
+        background: undefined,
+        executor: { kind: 'acp', command: 'acp-agent' },
+      });
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('halfway through');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.MAX_TURNS,
+      );
+      expectText(
+        textOf(await invoke(fg()).execute()),
+        ['terminate mode: MAX_TURNS', 'halfway through', 'External executor'],
+        ['max_turns', 'Subagent execution failed.'],
+      );
+    });
+
     it('foreground ERROR with no retained message still names the mode', async () => {
       // getLastError() is optional on SubagentExecutor (external executors do
       // not implement it), so the reason line must not leak 'undefined'.
@@ -5615,6 +5640,27 @@ describe('AgentTool', () => {
         textOf(await invoke(fg()).execute()),
         ['terminate mode: ERROR'],
         ['undefined', 'Subagent execution failed.'],
+      );
+    });
+
+    it('foreground TIMEOUT with nothing captured announces no partial result', async () => {
+      // A run that stops during its first turn has getFinalText() === '', so the
+      // GOAL-only placeholder would be announced as the subagent's partial
+      // output — a framework string the parent can quote as a finding. The
+      // ERROR branch omits the section on the same empty input (#13597).
+      loadForeground();
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.TIMEOUT,
+      );
+      vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
+      expectText(
+        textOf(await invoke(fg()).execute()),
+        ['terminate mode: TIMEOUT', 'max_time_minutes'],
+        [
+          'Partial result follows',
+          '(subagent produced no model-visible output)',
+        ],
       );
     });
 
