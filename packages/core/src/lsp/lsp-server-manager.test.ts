@@ -5,12 +5,15 @@
  */
 
 import path from 'node:path';
+import * as fs from 'node:fs';
+import os from 'node:os';
+import { globSync } from 'glob';
 import { pathToFileURL } from 'node:url';
 import type { ChildProcess } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config as CoreConfig } from '../config/config.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
-import type { WorkspaceContext } from '../utils/workspaceContext.js';
+import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { LspServerManager } from './lsp-server-manager.js';
 import { LspConnectionFactory } from './LspConnectionFactory.js';
 import type {
@@ -20,6 +23,11 @@ import type {
   LspServerConfig,
   LspTextDocumentSync,
 } from './types.js';
+
+vi.mock('glob', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('glob')>();
+  return { ...actual, globSync: vi.fn(actual.globSync) };
+});
 
 const debugLoggerMock = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -250,6 +258,140 @@ describe('LspServerManager', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  describe('real TypeScript warmup discovery', () => {
+    let directory: string;
+    let root: string;
+    let workspace: WorkspaceContext;
+    let manager: LspServerManager;
+    let handle: LspServerHandle;
+
+    beforeEach(() => {
+      directory = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-warmup-')),
+      );
+      root = path.join(directory, 'primary');
+      fs.mkdirSync(root);
+      workspace = new WorkspaceContext(root);
+      manager = new LspServerManager(
+        {} as CoreConfig,
+        workspace,
+        { shouldIgnoreFile: () => false } as unknown as FileDiscoveryService,
+        { workspaceRoot: root, requireTrustedWorkspace: false },
+      );
+      handle = tsHandle({
+        config: {
+          ...serverConfig,
+          name: 'typescript',
+          languages: ['typescript'],
+          workspaceFolder: root,
+          rootUri: pathToRootUri(root),
+        },
+        connection: createMockConnection(),
+      });
+    });
+
+    afterEach(() => {
+      fs.rmSync(directory, { recursive: true, force: true });
+    });
+
+    it('finds a JS-only candidate with one recursive glob', () => {
+      const candidate = path.join(root, 'a.js');
+      fs.writeFileSync(candidate, '');
+      expect(privates(manager).findFirstTypescriptFile(handle)).toBe(candidate);
+      expect(globSync).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['file', 'directory'])(
+      'retries a no-match warmup after adding a %s',
+      async (change) => {
+        vi.useFakeTimers();
+        const synchronize = vi.fn(() => true);
+        await manager.warmupTypescriptServer(handle, synchronize);
+        expect(handle.warmedUp).not.toBe(true);
+        expect(synchronize).not.toHaveBeenCalled();
+        expect(globSync).toHaveBeenCalledTimes(1);
+
+        const candidateRoot =
+          change === 'directory' ? path.join(directory, 'included') : root;
+        if (change === 'directory') {
+          fs.mkdirSync(candidateRoot);
+          workspace.addDirectory(candidateRoot);
+        }
+        const candidate = path.join(candidateRoot, 'main.ts');
+        fs.writeFileSync(candidate, '');
+        const pending = manager.warmupTypescriptServer(handle, synchronize);
+        await vi.runAllTimersAsync();
+        await pending;
+        expect(synchronize).toHaveBeenCalledExactlyOnceWith(
+          pathToFileURL(candidate).toString(),
+          'typescript',
+        );
+        expect(handle.warmedUp).toBe(true);
+      },
+    );
+
+    it('skips warmup when the explicit map has no TypeScript extensions', async () => {
+      handle.config.extensionToLanguage = { '.vue': 'vue' };
+      fs.writeFileSync(path.join(root, 'App.vue'), '');
+      fs.writeFileSync(path.join(root, 'main.ts'), '');
+      const synchronize = vi.fn(() => true);
+      await manager.warmupTypescriptServer(handle, synchronize);
+      expect(synchronize).not.toHaveBeenCalled();
+      expect(globSync).not.toHaveBeenCalled();
+      expect(handle.warmedUp).not.toBe(true);
+    });
+
+    it('keeps TypeScript priority for case-insensitive glob results', () => {
+      const javascript = path.join(root, 'script.JS');
+      const candidate = path.join(root, 'main.ts');
+      fs.writeFileSync(javascript, '');
+      fs.writeFileSync(candidate, '');
+      vi.mocked(globSync).mockReturnValueOnce([javascript, candidate]);
+      expect(privates(manager).findFirstTypescriptFile(handle)).toBe(candidate);
+    });
+
+    it.each<Record<string, string>>([
+      { js: 'javascript', ts: 'typescript' },
+      { vue: 'vue', ts: 'typescript' },
+    ])('prefers TypeScript regardless of routing-map order %j', (mapping) => {
+      handle.config.extensionToLanguage = mapping;
+      fs.writeFileSync(path.join(root, 'a.js'), '');
+      fs.writeFileSync(path.join(root, 'App.vue'), '');
+      const candidate = path.join(root, 'b.ts');
+      fs.writeFileSync(candidate, '');
+      expect(privates(manager).findFirstTypescriptFile(handle)).toBe(candidate);
+      expect(globSync).toHaveBeenCalledTimes(1);
+    });
+
+    it('uses a plain glob for a single mapped extension', () => {
+      handle.config.extensionToLanguage = { '.ts': 'typescript' };
+      const candidate = path.join(root, 'main.ts');
+      fs.writeFileSync(candidate, '');
+      expect(privates(manager).findFirstTypescriptFile(handle)).toBe(candidate);
+      expect(globSync).toHaveBeenCalledWith('**/*.ts', expect.anything());
+    });
+
+    it('skips dangling and outside symlinks without losing a valid candidate', () => {
+      const candidate = path.join(root, 'main.ts');
+      fs.writeFileSync(candidate, '');
+      fs.symlinkSync(
+        path.join(root, 'missing.ts'),
+        path.join(root, 'poison.ts'),
+      );
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-outside-'));
+      try {
+        const external = path.join(outside, 'external.ts');
+        fs.writeFileSync(external, '');
+        fs.symlinkSync(external, path.join(root, 'zzz.ts'));
+        expect(privates(manager).findFirstTypescriptFile(handle)).toBe(
+          candidate,
+        );
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    });
   });
 
   it('contains TypeScript warmup callback failures without marking the handle warm', async () => {

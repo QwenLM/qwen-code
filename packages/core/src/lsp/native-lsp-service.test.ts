@@ -1165,12 +1165,7 @@ describe('NativeLspService', () => {
 
     beforeEach(() => {
       tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-edits-error-'));
-      // Override the workspace mock so any path inside tmpDir is in-scope.
-      (
-        mockWorkspace as unknown as {
-          isPathWithinWorkspace: (p: string) => boolean;
-        }
-      ).isPathWithinWorkspace = (p: string) => p.startsWith(tmpDir);
+      mockWorkspace.getDirectories = () => [fs.realpathSync(tmpDir)];
     });
 
     afterEach(() => {

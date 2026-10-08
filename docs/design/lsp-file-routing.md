@@ -2,13 +2,16 @@
 
 [English](lsp-file-routing.md) | [简体中文](lsp-file-routing.zh-CN.md)
 
+> Status: Implemented locally; verification is recorded separately.
+
 ## Problem and scope
 
-PR #13568 adds file applicability and workspace-root filtering, but explicit
-server selection, warmup and tracked-document replay do not enforce the same
-workspace boundary. Incomplete language inference also rejects previously usable
-configurations. This change addresses review R1-1 through R1-13 without changing
-startup, transport, diagnostic pull/push handling or workspace-edit behavior.
+[PR #13568](https://github.com/QwenLM/qwen-code/pull/13568) introduced file
+applicability and workspace-root filtering. Its initial implementation did not
+apply the same workspace boundary to explicit server selection, warmup and
+tracked-document replay, and incomplete language inference rejected previously
+usable configurations. The fixes align those paths without changing startup or
+transport. Workspace edits use the same fresh containment check as reads.
 
 ## Routing decisions
 
@@ -17,13 +20,18 @@ startup, transport, diagnostic pull/push handling or workspace-edit behavior.
    failures and outside-workspace refusals have separate errors and debug logs.
 2. Explicit server selection bypasses language and per-server root selection,
    never workspace containment. Unknown or unready names fail document queries;
-   calls without a URI retain name-filtered handles for hierarchy continuations.
+   workspace queries and hierarchy continuations also report unavailable servers.
+   Internal calls without a URI retain name-filtered handles for reload bookkeeping.
+   Document queries reject non-file URIs, including explicit server overrides.
 3. A non-empty `extensionToLanguage` is the complete extension routing set.
    Otherwise one LSP-language extension table determines known applicability;
    TypeScript includes JavaScript and module extensions, and versioned clangd
    names admit C. No display-language-name inversion or `.mm` special case.
-4. Unknown configured languages and undetected extensionless filenames retain
-   scope-checked legacy dispatch. Known languages still reject unknown non-empty
+4. Only an absent or empty `extensionToLanguage` permits scope-checked legacy
+   dispatch for unknown configured languages and undetected extensionless filenames.
+   Non-empty maps match extensions, with an optional leading dot, not filenames;
+   `Gemfile` and `Makefile` cannot be expressed as keys. A map whose extensions
+   match no files disables routing for that server. Known languages still reject unknown non-empty
    extensions and positive mismatches, including Python/Cython and C++ wrappers
    that have not declared C. Standard aliases such as JSONC and zsh belong in the
    same table. This is not an unrestricted unknown-extension fallback.
@@ -31,14 +39,24 @@ startup, transport, diagnostic pull/push handling or workspace-edit behavior.
    accepts only the intersection of that root and the registered directories.
    Share this decision between routing and both warmup finders. A bad handle root
    is logged and excludes only that handle. Compute routing containment and the
-   primary root once, with no document-resolution cache.
+   primary root once, with no persistent document-resolution cache. Root refusals
+   explain the explicit `serverName` override rather than duplicating server-root
+   routing in output formatting.
+6. TypeScript warmup uses one glob per root, prioritizes TypeScript extensions
+   independently of map insertion order and filename case, and skips unusable
+   candidates individually. It only uses the intersection of routed extensions
+   and the built-in TypeScript set; an empty intersection skips discovery rather
+   than opening an excluded file. A no-match attempt stays retryable so newly
+   created files and newly registered directories can warm the same connection.
 
 ## Delivery and navigation
 
 The shared synchronization entry point rechecks current containment before any
 read or notification. Revoked or unresolvable URIs lose delivered text snapshots
-and replay obligations, but retain version and pending-close metadata for the
-existing connection. No document notification or content read occurs while scope
+but retain replay obligations, version and pending-close metadata for the
+existing connection. A revoked durable-only URI stays parked across connection
+replacement and is delivered at version 1 once scope returns. Configuration reload
+intentionally discards revoked replay obligations. No document notification or content read occurs while scope
 is invalid. Once scope returns, file queries and workspace sweeps finish the old
 close before fresh delivery, without resetting the version or stranding healthy
 survivors when a close fails. Connection replacement discards obsolete close
@@ -48,7 +66,11 @@ their errors.
 
 External definition, implementation and reference locations remain visible, but
 are marked as requiring `/directory add` before another file query. No automatic
-allow-list or expansion of trusted directories is introduced. User documentation
+allow-list or expansion of trusted directories is introduced. Workspace diagnostics
+and symbols omit results outside current workspace scope so revoked buffers are not
+presented as current. Output formatting snapshots directories and scope decisions
+only for one response, safely labels malformed and non-file URIs, and appends scope
+advice after protocol JSON without modifying its data. User documentation
 explains explicit maps, root exceptions, override limits and distinct errors.
 The manual E2E harness uses real `WorkspaceContext` root normalization.
 
@@ -67,10 +89,11 @@ The manual E2E harness uses real `WorkspaceContext` root normalization.
 - Preserve explicit-map exclusions, unrelated-server rejection, primary-root
   included-directory routing, symlink-retarget freshness, missing-file errors and
   no-URI hierarchy semantics. Instrument routing directory reads once per filter.
-- Run package-local focused suites, build, typecheck, bundle and independent
-  reproduction verification; record blocked E2E/platform checks honestly.
-- Verify new regression tests fail on baseline or targeted mutants, audit the
-  entire diff and obtain independent review. Do not stage, commit or publish.
+- Unavailable workspace queries cannot report clean results. Revoked durable-only
+  documents must replay after scope restoration; revoked workspace results must
+  not be returned. Mixed valid/malformed URI output preserves valid diagnostics.
+- Regression tests must fail on baseline or targeted mutants; verification reports
+  distinguish focused tests, build checks and blocked E2E/platform coverage.
 
 ## Constraints and risks
 
@@ -78,4 +101,6 @@ Unknown-language dispatch intentionally cannot prove a server's applicability;
 configure an explicit map for strict routing. Realpath checks observe filesystem
 state, not an atomic transaction against concurrent writers. macOS symlink tests
 run locally; Windows junction behavior still needs a Windows runner. No new
-watcher, cache, dependency, public configuration field or navigation allow-list.
+watcher, persistent cache, dependency, public configuration field or navigation
+allow-list. Display-only scope decisions are cached for one response, never reused
+for authorization.

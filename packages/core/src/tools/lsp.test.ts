@@ -6,6 +6,9 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import path from 'node:path';
+import * as fs from 'node:fs';
+import os from 'node:os';
+import { resolveWorkspacePath } from '../utils/workspaceContext.js';
 import { pathToFileURL } from 'node:url';
 import type { Config } from '../config/config.js';
 import type {
@@ -83,6 +86,9 @@ const createMockClient = () => ({
   prepareCallHierarchy: vi.fn().mockResolvedValue([]),
   incomingCalls: vi.fn().mockResolvedValue([]),
   outgoingCalls: vi.fn().mockResolvedValue([]),
+  workspaceDiagnostics: vi.fn().mockResolvedValue([]),
+  diagnostics: vi.fn().mockResolvedValue([]),
+  codeActions: vi.fn().mockResolvedValue([]),
 });
 type MockClient = ReturnType<typeof createMockClient>;
 
@@ -351,6 +357,210 @@ describe('LspTool', () => {
       expect(result.llmContent).not.toContain('outside workspace');
     });
 
+    it('resolves symlinked result paths and snapshots directories once per response', async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-tool-'));
+      try {
+        const real = path.join(root, 'real');
+        const alias = path.join(root, 'alias');
+        fs.mkdirSync(real);
+        const files = ['a.ts', 'b.ts', 'c.ts'];
+        for (const file of files) fs.writeFileSync(path.join(real, file), '');
+        fs.symlinkSync(real, alias, 'junction');
+        const directories = vi.fn(() => [resolveWorkspacePath(real)]);
+        const client = createMockClient();
+        client.references.mockResolvedValue(
+          files.map((file) => createLocation(path.join(alias, file), 0, 0)),
+        );
+        const tool = new LspTool({
+          getLspClient: () => client,
+          isLspEnabled: () => true,
+          getProjectRoot: () => real,
+          getWorkspaceContext: () => ({ getDirectories: directories }),
+        } as unknown as Config);
+        const result = await tool
+          .build(at('findReferences'))
+          .execute(abortSignal);
+        expect(result.llmContent).not.toContain('outside workspace');
+        expect(result.llmContent).not.toContain('unresolvable');
+        expect(directories).toHaveBeenCalledTimes(1);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it.each(['documentSymbol', 'workspaceSymbol'] as const)(
+      'marks outside-workspace %s locations',
+      async (operation) => {
+        const outside = symbol('external', 'Function', 0, {
+          location: createLocation(
+            path.resolve(workspaceRoot, '../outside/lib.ts'),
+            0,
+            0,
+          ),
+        });
+        const { result } = await run(
+          { ...at(operation), query: 'external' },
+          (client) =>
+            client[
+              operation === 'documentSymbol'
+                ? 'documentSymbols'
+                : 'workspaceSymbols'
+            ].mockResolvedValue([outside]),
+        );
+        expectContains(
+          result.llmContent,
+          'outside workspace',
+          '/directory add',
+        );
+      },
+    );
+
+    it('passes the explicit workspace-symbol server override to the client', async () => {
+      const { client } = await run({
+        operation: 'workspaceSymbol',
+        query: 'fn',
+        serverName: 'chosen',
+      });
+      expect(client.workspaceSymbols).toHaveBeenCalledWith('fn', 20, 'chosen');
+    });
+
+    it('shows availability and non-file failures instead of clean diagnostics', async () => {
+      const { result } = await run(
+        { operation: 'workspaceDiagnostics', serverName: 'absent' },
+        (client) =>
+          client.workspaceDiagnostics.mockRejectedValue(
+            new Error('absent is not configured'),
+          ),
+      );
+      expect(result.llmContent).toContain('failed: absent is not configured');
+      expect(result.llmContent).not.toContain('No diagnostics found');
+      const { result: virtual } = await run(
+        { operation: 'diagnostics', filePath: 'https://example.com/a.ts' },
+        (client) =>
+          client.diagnostics.mockRejectedValue(new Error('not a file URI')),
+      );
+      expect(virtual.llmContent).toContain('failed: not a file URI');
+    });
+
+    it('preserves valid workspace diagnostics beside an invalid server URI', async () => {
+      const { result } = await run(
+        { operation: 'workspaceDiagnostics' },
+        (client) =>
+          client.workspaceDiagnostics.mockResolvedValue([
+            {
+              uri: 'file://[invalid',
+              diagnostics: [
+                {
+                  range: lineSpan(0, 0, 1),
+                  message: 'bad-uri',
+                  severity: 'error',
+                },
+              ],
+            },
+            {
+              uri: toUri(appPath),
+              diagnostics: [
+                {
+                  range: lineSpan(0, 0, 1),
+                  message: 'good-diagnostic',
+                  severity: 'error',
+                },
+              ],
+            },
+          ]),
+      );
+      expectContains(
+        result.llmContent,
+        'src/app.ts',
+        'good-diagnostic',
+        'unresolvable file',
+      );
+    });
+
+    it('keeps protocol JSON intact and puts scope advice after it', async () => {
+      const outside = toUri(path.resolve(workspaceRoot, '../outside/lib.ts'));
+      const { result } = await run(
+        {
+          operation: 'codeActions',
+          filePath: 'src/app.ts',
+          line: 1,
+          endLine: 1,
+        },
+        (client) =>
+          client.codeActions.mockResolvedValue([
+            { title: 'Fix', edit: { changes: { [outside]: [] } } },
+          ]),
+      );
+      const json = String(result.llmContent).split('Code actions (JSON):')[1]!;
+      expectContains(json, outside, 'outside workspace', '/directory add');
+    });
+
+    it('appends scope advice after incoming-call JSON without changing its URI', async () => {
+      const item = callItem('caller', 'caller.ts', 0, 1, {
+        uri: toUri(path.resolve(workspaceRoot, '../outside/caller.ts')),
+      });
+      const { result } = await run(
+        { operation: 'incomingCalls', callHierarchyItem: testItem() },
+        (client) =>
+          client.incomingCalls.mockResolvedValue([
+            { from: item, fromRanges: [] },
+          ]),
+      );
+      const json = String(result.llmContent).split(
+        'Incoming calls (JSON):',
+      )[1]!;
+      expectContains(json, item.uri, 'outside workspace', '/directory add');
+      expect(JSON.parse(json.split('\nNote:')[0]!)[0].from.uri).toBe(item.uri);
+    });
+
+    it('does not prescribe directory-add for virtual code-action edit URIs', async () => {
+      const { result } = await run(
+        {
+          operation: 'codeActions',
+          filePath: 'src/app.ts',
+          line: 1,
+          endLine: 1,
+        },
+        (client) =>
+          client.codeActions.mockResolvedValue([
+            { title: 'Fix', edit: { changes: { 'untitled:buffer': [] } } },
+          ]),
+      );
+      expectContains(result.llmContent, 'untitled:buffer', 'non-file URI');
+      expect(result.llmContent).not.toContain('/directory add');
+    });
+
+    it('formats uppercase file URIs and leaves non-file URIs verbatim', async () => {
+      const { result } = await run(
+        { operation: 'workspaceDiagnostics' },
+        (client) =>
+          client.workspaceDiagnostics.mockResolvedValue([
+            {
+              uri: toUri(appPath).replace('file:', 'FILE:'),
+              diagnostics: [
+                {
+                  range: lineSpan(0, 0, 1),
+                  message: 'file',
+                  severity: 'error',
+                },
+              ],
+            },
+            {
+              uri: 'untitled:buffer',
+              diagnostics: [
+                {
+                  range: lineSpan(0, 0, 1),
+                  message: 'virtual',
+                  severity: 'error',
+                },
+              ],
+            },
+          ]),
+      );
+      expectContains(result.llmContent, 'src/app.ts', 'untitled:buffer');
+      expect(result.llmContent).not.toContain('FILE:');
+    });
+
     it('marks an invalid server-produced file URI without failing formatting', async () => {
       const { result } = await run(at('goToDefinition'), (client) =>
         client.definitions.mockResolvedValue([
@@ -503,7 +713,11 @@ describe('LspTool', () => {
           },
         );
 
-        expect(client.workspaceSymbols).toHaveBeenCalledWith('Widget', 10);
+        expect(client.workspaceSymbols).toHaveBeenCalledWith(
+          'Widget',
+          10,
+          undefined,
+        );
         expectContains(
           result.llmContent,
           'symbols for query "Widget"',

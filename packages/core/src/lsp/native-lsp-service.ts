@@ -346,12 +346,8 @@ export class NativeLspService {
    * new connection never received. Callers keep lastConnections bookkeeping themselves.
    */
   private parkTrackedUris(serverName: string): void {
-    const prior = this.openedDocuments.get(serverName);
-    if (prior && prior.size > 0) {
-      const durable = this.replayUris.get(serverName) ?? new Set<string>();
-      for (const tracked of prior.keys()) durable.add(tracked);
-      this.replayUris.set(serverName, durable);
-    }
+    const durable = this.trackedUrisFor(serverName);
+    if (durable.size > 0) this.replayUris.set(serverName, durable);
     this.openedDocuments.delete(serverName);
     this.documentLifecycles.delete(serverName);
   }
@@ -395,8 +391,9 @@ export class NativeLspService {
       for (const uri of documents) {
         this.throwIfReinitializeAborted(signal);
         try {
-          openedAny =
-            this.synchronizeDocument(name, handle, uri).sent || openedAny;
+          const synchronized = this.synchronizeDocument(name, handle, uri);
+          if (synchronized.deferred) this.replayUris.get(name)?.delete(uri);
+          openedAny = synchronized.sent || openedAny;
         } catch (error) {
           debugLogger.warn(
             `Failed to replay document ${uri} for LSP server ${name}:`,
@@ -548,16 +545,13 @@ export class NativeLspService {
     const resolvedFilePath = /^file:/i.test(uri)
       ? this.resolveWorkspaceDocument(uri, directories)
       : undefined;
-    if (handles.length === 0) {
-      const message = serverName
-        ? `LSP server ${serverName} is ${configured.has(serverName) ? 'not ready' : 'not configured'}; check /lsp`
-        : configured.size === 0
-          ? 'No LSP servers are configured; configure .lsp.json and check /lsp'
-          : 'No LSP servers are ready; check /lsp';
-      debugLogger.warn(message);
-      throw new Error(message);
+    this.assertServersAvailable(handles.length, serverName);
+    if (!resolvedFilePath) {
+      throw new Error(
+        `LSP document ${uri} is not a file URI; only file: documents can be queried`,
+      );
     }
-    if (!resolvedFilePath || serverName) return handles;
+    if (serverName) return handles;
 
     const primaryRoot = resolveWorkspacePath(this.workspaceRoot);
     const scoped = handles.filter(([, handle]) => {
@@ -569,7 +563,7 @@ export class NativeLspService {
       return roots === directories || isSubpaths(roots, resolvedFilePath);
     });
     if (scoped.length === 0) {
-      const message = `Document ${uri} is outside every ready LSP server's workspaceFolder or its root is unusable`;
+      const message = `Document ${uri} is outside every ready LSP server's workspaceFolder or its root is unusable; retry with serverName to bypass the workspaceFolder filter (not workspace containment)`;
       debugLogger.warn(message);
       throw new Error(message);
     }
@@ -582,6 +576,30 @@ export class NativeLspService {
       throw new Error(message);
     }
     return applicable;
+  }
+
+  private assertServersAvailable(count: number, serverName?: string): void {
+    if (count > 0) return;
+    const configured = this.serverManager.getHandles();
+    const message = serverName
+      ? `LSP server ${serverName} is ${configured.has(serverName) ? 'not ready' : 'not configured'}; check /lsp`
+      : configured.size === 0
+        ? 'No LSP servers are configured; configure .lsp.json and check /lsp'
+        : 'No LSP servers are ready; check /lsp';
+    debugLogger.warn(message);
+    throw new Error(message);
+  }
+
+  private isCurrentWorkspaceDocument(uri: string): boolean {
+    try {
+      this.resolveWorkspaceDocument(
+        uri,
+        this.workspaceContext.getDirectories(),
+      );
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private resolveWorkspaceDocument(
@@ -628,7 +646,7 @@ export class NativeLspService {
     uri: string,
     languageId?: string,
     force = false,
-  ): { sent: boolean; opened: boolean } {
+  ): { sent: boolean; opened: boolean; deferred?: boolean } {
     if (!/^file:/i.test(uri)) {
       return { sent: false, opened: false };
     }
@@ -651,8 +669,7 @@ export class NativeLspService {
         });
       }
       this.openedDocuments.get(serverName)?.delete(uri);
-      this.replayUris.get(serverName)?.delete(uri);
-      return { sent: false, opened: false };
+      return { sent: false, opened: false, deferred: true };
     }
     if (
       !handle.connection ||
@@ -1051,15 +1068,13 @@ export class NativeLspService {
   async workspaceSymbols(
     query: string,
     limit = 50,
+    selectedServer?: string,
   ): Promise<LspSymbolInformation[]> {
+    const handles = this.getReadyHandles(selectedServer);
+    this.assertServersAvailable(handles.length, selectedServer);
     const results: LspSymbolInformation[] = [];
 
-    for (const [serverName, handle] of Array.from(
-      this.serverManager.getHandles(),
-    )) {
-      if (handle.status !== 'READY' || !handle.connection) {
-        continue;
-      }
+    for (const [serverName, handle] of handles) {
       try {
         await this.warmupAndTrack(serverName, handle);
         const warmedUp = this.serverManager.isTypescriptServer(handle)
@@ -1096,7 +1111,7 @@ export class NativeLspService {
             item,
             serverName,
           );
-          if (symbol) {
+          if (symbol && this.isCurrentWorkspaceDocument(symbol.location.uri)) {
             results.push(symbol);
           }
           if (results.length >= limit) {
@@ -1486,7 +1501,7 @@ export class NativeLspService {
     );
     // Observations are shared only within one synchronous checkpoint/batch.
     const observations = new Map<string, string | undefined>();
-    if (!snapshots.has(uri) && uri.startsWith('file://')) {
+    if (!snapshots.has(uri) && /^file:/i.test(uri)) {
       const text = readText(uri);
       observations.set(uri, text);
       if (text !== undefined)
@@ -1525,7 +1540,7 @@ export class NativeLspService {
       // Name the root file so a cross-file item whose own file was delivered then
       // closed guides the model to re-prepare there, instead of a generic stale
       // error that only re-syncs the original root and reproduces the same item.
-      if (uri.startsWith('file://') && !isFresh(uri))
+      if (/^file:/i.test(uri) && !isFresh(uri))
         throw new StaleCallHierarchyItemError(uri);
     };
     assertRoot();
@@ -1541,7 +1556,7 @@ export class NativeLspService {
       },
       sign: (item) => {
         assertActive();
-        if (!item.uri.startsWith('file://')) return undefined;
+        if (!/^file:/i.test(item.uri)) return undefined;
         if (!isFresh(item.uri)) {
           if (item.uri === uri) throw new StaleCallHierarchyItemError();
           return undefined;
@@ -1571,7 +1586,7 @@ export class NativeLspService {
     item: LspCallHierarchyItem,
     revision: CallHierarchyRevision,
   ): void {
-    if (!item.uri.startsWith('file://')) {
+    if (!/^file:/i.test(item.uri)) {
       throw new Error(
         `Call hierarchy item ${item.uri} has no verifiable disk snapshot and cannot be traversed; prepare call hierarchy at a file location instead.`,
       );
@@ -1603,7 +1618,7 @@ export class NativeLspService {
       let revision: CallHierarchyRevision | undefined;
       try {
         let originalText: string | undefined;
-        if (location.uri.startsWith('file://')) {
+        if (/^file:/i.test(location.uri)) {
           try {
             originalText = fs.readFileSync(
               fileURLToPath(location.uri),
@@ -1710,6 +1725,7 @@ export class NativeLspService {
   ): Promise<LspCallHierarchyIncomingCall[]> {
     const targetServer = serverName ?? item.serverName;
     const handles = this.getReadyHandles(targetServer);
+    this.assertServersAvailable(handles.length, targetServer);
     if (handles.length !== 1) throw new StaleCallHierarchyItemError();
 
     for (const [name, handle] of handles) {
@@ -1772,6 +1788,7 @@ export class NativeLspService {
   ): Promise<LspCallHierarchyOutgoingCall[]> {
     const targetServer = serverName ?? item.serverName;
     const handles = this.getReadyHandles(targetServer);
+    this.assertServersAvailable(handles.length, targetServer);
     if (handles.length !== 1) throw new StaleCallHierarchyItemError();
 
     for (const [name, handle] of handles) {
@@ -1884,6 +1901,7 @@ export class NativeLspService {
     limit = 100,
   ): Promise<LspFileDiagnostics[]> {
     const handles = this.getReadyHandles(serverName);
+    this.assertServersAvailable(handles.length, serverName);
     const results: LspFileDiagnostics[] = [];
 
     for (const [name, handle] of handles) {
@@ -1915,9 +1933,9 @@ export class NativeLspService {
         // The shared helper bounds consecutive read failures; a URI whose send
         // threw stays parked for the next sweep.
         try {
-          openedAny =
-            this.synchronizeDocument(name, handle, uri).opened || openedAny;
-          this.replayUris.get(name)?.delete(uri);
+          const synchronized = this.synchronizeDocument(name, handle, uri);
+          openedAny = synchronized.opened || openedAny;
+          if (!synchronized.deferred) this.replayUris.get(name)?.delete(uri);
         } catch (error) {
           syncError ??= error;
         }
@@ -1954,7 +1972,11 @@ export class NativeLspService {
                 item,
                 name,
               );
-              if (normalized && normalized.diagnostics.length > 0) {
+              if (
+                normalized &&
+                normalized.diagnostics.length > 0 &&
+                this.isCurrentWorkspaceDocument(normalized.uri)
+              ) {
                 results.push(normalized);
               }
             }
@@ -2078,11 +2100,16 @@ export class NativeLspService {
     uri: string,
     edits: LspTextEdit[],
   ): Promise<void> {
-    let filePath = uri.startsWith('file://') ? fileURLToPath(uri) : uri;
+    let filePath = /^file:/i.test(uri) ? fileURLToPath(uri) : uri;
     if (!path.isAbsolute(filePath)) {
       filePath = path.resolve(this.workspaceRoot, filePath);
     }
-    if (!this.workspaceContext.isPathWithinWorkspace(filePath)) {
+    if (
+      !isSubpaths(
+        this.workspaceContext.getDirectories(),
+        resolveWorkspacePath(filePath),
+      )
+    ) {
       throw new Error(`Refusing to apply edits outside workspace: ${filePath}`);
     }
 

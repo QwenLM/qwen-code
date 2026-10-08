@@ -289,9 +289,7 @@ export class LspServerManager {
     }
     const connection = handle.connection;
     const tsFile = this.findFirstTypescriptFile(handle);
-    if (!tsFile) {
-      return;
-    }
+    if (!tsFile) return;
     // A failed forced attempt must stay retryable instead of latching warm. Kept
     // below the discovery guard so a forced attempt that never reaches delivery
     // (no TypeScript file found) cannot permanently destroy an established latch.
@@ -1364,10 +1362,15 @@ export class LspServerManager {
    * Find a representative TypeScript/JavaScript file to warm up tsserver.
    */
   private findFirstTypescriptFile(handle: LspServerHandle): string | undefined {
-    const patterns = getLspServerExtensions({
+    const tsExtensions = getLspServerExtensions({
       ...handle.config,
+      extensionToLanguage: undefined,
       languages: ['typescript'],
-    }).map((extension) => `**/*.${extension}`);
+    });
+    const routed = getLspServerExtensions(handle.config);
+    const extensions = tsExtensions.filter((ext) => routed.includes(ext));
+    if (extensions.length === 0) return undefined;
+    const pattern = `**/*.${extensions.length === 1 ? extensions[0] : `{${extensions.join(',')}}`}`;
     const excludePatterns = [
       '**/node_modules/**',
       '**/.git/**',
@@ -1381,26 +1384,32 @@ export class LspServerManager {
       this.workspaceContext.getDirectories(),
     );
     for (const root of roots) {
-      for (const pattern of patterns) {
+      let matches: string[];
+      try {
+        matches = globSync(pattern, {
+          cwd: root,
+          ignore: excludePatterns,
+          absolute: true,
+          nodir: true,
+        });
+      } catch {
+        // ignore glob errors
+        continue;
+      }
+      matches.sort(
+        (a, b) =>
+          extensions.indexOf(path.extname(a).slice(1).toLowerCase()) -
+          extensions.indexOf(path.extname(b).slice(1).toLowerCase()),
+      );
+      for (const file of matches) {
+        if (this.fileDiscoveryService.shouldIgnoreFile(file)) continue;
+        let resolved: string;
         try {
-          const matches = globSync(pattern, {
-            cwd: root,
-            ignore: excludePatterns,
-            absolute: true,
-            nodir: true,
-          });
-          for (const file of matches) {
-            if (
-              this.fileDiscoveryService.shouldIgnoreFile(file) ||
-              !isSubpaths(roots, resolveWorkspacePath(file))
-            ) {
-              continue;
-            }
-            return file;
-          }
-        } catch (_error) {
-          // ignore glob errors
+          resolved = resolveWorkspacePath(file);
+        } catch {
+          continue;
         }
+        if (isSubpaths(roots, resolved)) return file;
       }
     }
 

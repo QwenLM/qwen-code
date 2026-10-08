@@ -113,6 +113,9 @@ const ITEM_REQUIRED_OPERATIONS = new Set<LspOperation>([
 const RANGE_REQUIRED_OPERATIONS = new Set<LspOperation>(['codeActions']);
 
 class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
+  private scopeDirectories: readonly string[] | undefined;
+  private scopeSuffixes = new Map<string, string>();
+
   constructor(
     private readonly config: Config,
     params: LspToolParams,
@@ -146,6 +149,8 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
+    this.scopeDirectories = undefined;
+    this.scopeSuffixes.clear();
     const client = this.config.getLspClient();
     if (!client || !this.config.isLspEnabled()) {
       const message = `LSP ${this.getOperationLabel()} is unavailable (LSP disabled or not initialized).`;
@@ -401,7 +406,11 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     const query = this.params.query ?? '';
     let symbols: LspSymbolInformation[] = [];
     try {
-      symbols = await client.workspaceSymbols(query, limit);
+      symbols = await client.workspaceSymbols(
+        query,
+        limit,
+        this.params.serverName,
+      );
     } catch (error) {
       const message = `LSP workspace symbol search failed: ${
         (error as Error)?.message || String(error)
@@ -710,7 +719,9 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
       const serverSuffix = fileDiag.serverName
         ? ` [${fileDiag.serverName}]`
         : '';
-      lines.push(`\n${fileLabel}${serverSuffix}:`);
+      lines.push(
+        `\n${fileLabel}${serverSuffix}${this.scopeSuffixForUri(fileDiag.uri)}:`,
+      );
 
       for (const diag of fileDiag.diagnostics) {
         const severity = diag.severity
@@ -864,24 +875,8 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     workspaceRoot: string,
   ): string {
     const start = location.range.start;
-    let filePath = location.uri;
-    let scopeSuffix = '';
-
-    if (/^file:/i.test(filePath)) {
-      try {
-        const absolutePath = fileURLToPath(filePath);
-        filePath = path.relative(workspaceRoot, absolutePath) || '.';
-        const directories = this.config
-          .getWorkspaceContext?.()
-          .getDirectories() ?? [resolveWorkspacePath(workspaceRoot)];
-        if (!isSubpaths(directories, resolveWorkspacePath(absolutePath))) {
-          scopeSuffix =
-            ' [outside workspace; add its directory with /directory add before file queries]';
-        }
-      } catch {
-        scopeSuffix = ' [unresolvable file; cannot query]';
-      }
-    }
+    const filePath = this.formatUriForDisplay(location.uri, workspaceRoot);
+    const scopeSuffix = this.scopeSuffixForUri(location.uri);
 
     const serverSuffix =
       location.serverName && location.serverName !== ''
@@ -939,8 +934,12 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
 
   private formatUriForDisplay(uri: string, workspaceRoot: string): string {
     let filePath = uri;
-    if (uri.startsWith('file://')) {
-      filePath = fileURLToPath(uri);
+    if (/^file:/i.test(uri)) {
+      try {
+        filePath = fileURLToPath(uri);
+      } catch {
+        return uri;
+      }
     }
     if (path.isAbsolute(filePath)) {
       return path.relative(workspaceRoot, filePath) || '.';
@@ -948,8 +947,58 @@ class LspToolInvocation extends BaseToolInvocation<LspToolParams, ToolResult> {
     return filePath;
   }
 
+  private scopeSuffixForUri(uri: string): string {
+    const cached = this.scopeSuffixes.get(uri);
+    if (cached !== undefined) return cached;
+    let suffix = '';
+    if (!/^file:/i.test(uri)) {
+      suffix = ' [non-file URI; cannot query with file operations]';
+    } else {
+      try {
+        this.scopeDirectories ??= this.config
+          .getWorkspaceContext()
+          .getDirectories();
+        if (
+          !isSubpaths(
+            this.scopeDirectories,
+            resolveWorkspacePath(fileURLToPath(uri)),
+          )
+        ) {
+          suffix =
+            ' [outside workspace; add its directory with /directory add before file queries]';
+        }
+      } catch {
+        suffix = ' [unresolvable file; cannot query]';
+      }
+    }
+    this.scopeSuffixes.set(uri, suffix);
+    return suffix;
+  }
+
   private formatJsonSection(label: string, data: unknown): string {
-    return `\n\n${label}:\n${JSON.stringify(data, null, 2)}`;
+    const notes = new Set<string>();
+    const inspect = (value: unknown): void => {
+      if (!value || typeof value !== 'object') return;
+      for (const [key, child] of Object.entries(value)) {
+        if (/^[a-z][a-z\d+.-]*:/i.test(key)) {
+          notes.add(this.scopeSuffixForUri(key));
+        }
+        if (
+          ['uri', 'oldUri', 'newUri'].includes(key) &&
+          typeof child === 'string'
+        ) {
+          notes.add(this.scopeSuffixForUri(child));
+        } else {
+          inspect(child);
+        }
+      }
+    };
+    inspect(data);
+    notes.delete('');
+    const advice = [...notes]
+      .map((note) => `\nNote: URI scope above:${note}`)
+      .join('');
+    return `\n\n${label}:\n${JSON.stringify(data, null, 2)}${advice}`;
   }
 
   private describeCallHierarchyItemShort(): string {

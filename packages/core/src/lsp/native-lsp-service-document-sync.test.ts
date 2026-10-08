@@ -37,7 +37,11 @@ import type {
   LspTextDocumentSync,
 } from './types.js';
 
-const logger = vi.hoisted(() => ({ warn: vi.fn(), info: vi.fn() }));
+const logger = vi.hoisted(() => ({
+  warn: vi.fn(),
+  info: vi.fn(),
+  error: vi.fn(),
+}));
 vi.mock('../utils/debugLogger.js', () => ({ createDebugLogger: () => logger }));
 
 vi.mock('node:fs', async (importOriginal) => ({
@@ -164,6 +168,88 @@ describe('NativeLspService disk document synchronization', () => {
     if ('error' in result) throw result.error;
     return result.value;
   }
+
+  it.each(['workspace', 'symbols', 'incomingCalls', 'outgoingCalls'] as const)(
+    'reports unavailable explicit servers for %s',
+    async (operation) => {
+      const item = { name: 'fn', uri, range, selectionRange: range };
+      const query =
+        operation === 'workspace'
+          ? service.workspaceDiagnostics('absent')
+          : operation === 'symbols'
+            ? service.workspaceSymbols('fn', 50, 'absent')
+            : service[operation](item, 'absent');
+      await expect(run<unknown>(query)).rejects.toThrow(
+        'absent is not configured',
+      );
+      expect(connection.request).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    'document',
+    'workspace',
+    'symbols',
+    'incomingCalls',
+    'outgoingCalls',
+  ] as const)(
+    'distinguishes configured but unready servers for %s',
+    async (operation) => {
+      handle.status = 'IN_PROGRESS';
+      const item = { name: 'fn', uri, range, selectionRange: range };
+      const query =
+        operation === 'document'
+          ? service.diagnostics(uri)
+          : operation === 'workspace'
+            ? service.workspaceDiagnostics()
+            : operation === 'symbols'
+              ? service.workspaceSymbols('fn')
+              : service[operation](item, 'test');
+      await expect(run<unknown>(query)).rejects.toThrow(
+        operation.endsWith('Calls')
+          ? 'test is not ready'
+          : 'No LSP servers are ready',
+      );
+      expect(connection.request).not.toHaveBeenCalled();
+    },
+  );
+
+  it('continues workspace symbol requests after a usable warmup send fails', async () => {
+    failNextSend();
+    await run(service.workspaceSymbols('fn'));
+    expect(connection.request).toHaveBeenCalledExactlyOnceWith(
+      'workspace/symbol',
+      { query: 'fn' },
+    );
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('warmup skipped'),
+      expect.any(Error),
+    );
+  });
+
+  it('rejects non-file document queries without opening or requesting', async () => {
+    await expect(
+      run(service.diagnostics('https://example.com/a.ts')),
+    ).rejects.toThrow('not a file URI');
+    expect(connection.send).not.toHaveBeenCalled();
+    expect(connection.request).not.toHaveBeenCalled();
+  });
+
+  it.each(['file:/', 'FILE:///'])(
+    'certifies and traverses hierarchy items with URI prefix %s',
+    async (prefix) => {
+      const target = uri.replace('file:///', prefix);
+      const [item] = await run(
+        service.prepareCallHierarchy({ uri: target, range }),
+      );
+      expect(item!.documentRevision).toBeDefined();
+      await expect(run(service.incomingCalls(item!))).resolves.toEqual([]);
+      expect(connection.request).toHaveBeenCalledWith(
+        'callHierarchy/incomingCalls',
+        expect.anything(),
+      );
+    },
+  );
 
   const AGAIN = 'prepare call hierarchy again';
   const againError = () => ({ message: expect.stringContaining(AGAIN) });
@@ -878,7 +964,9 @@ describe('NativeLspService disk document synchronization', () => {
             const replay = (
               service as unknown as { replayUris: Map<string, Set<string>> }
             ).replayUris;
-            expect(replay.get('test')?.has(extraUri)).toBeFalsy();
+            expect(replay.get('test')?.has(extraUri) ?? false).toBe(
+              replacement,
+            );
           } finally {
             read.mockRestore();
           }
@@ -987,6 +1075,61 @@ describe('NativeLspService disk document synchronization', () => {
         },
       );
 
+      it.each([false, true])(
+        'retains revoked replay across a connection swap, prior revoked sweep %s',
+        async (priorSweep) => {
+          await run(service.diagnostics(extraUri));
+          workspace.removeDirectory(extra);
+          if (priorSweep) await workspaceDiagnostics();
+          const replacement = replaceConnection();
+          await workspaceDiagnostics();
+          expect(replacement.send).not.toHaveBeenCalled();
+
+          workspace.addDirectory(extra);
+          await workspaceDiagnostics();
+          expect(replacement.send).toHaveBeenCalledExactlyOnceWith(
+            didOpen('extra', 1, extraUri),
+          );
+        },
+      );
+
+      it.each(['workspace/diagnostic', 'workspace/symbol'] as const)(
+        'does not surface revoked buffers in %s results',
+        async (method) => {
+          await run(service.diagnostics(extraUri));
+          workspace.removeDirectory(extra);
+          const healthyFile = path.join(primary, 'healthy.ts');
+          fs.writeFileSync(healthyFile, 'healthy');
+          const healthyUri = pathToFileURL(healthyFile).toString();
+          connection.request.mockImplementation(async (requested) => {
+            if (requested !== method) return [];
+            const targets = [extraUri, healthyUri];
+            return method === 'workspace/diagnostic'
+              ? {
+                  items: targets.map((target) => ({
+                    uri: target,
+                    items: [{ range, message: 'diagnostic', severity: 1 }],
+                  })),
+                }
+              : targets.map((target) => ({
+                  name: 'fn',
+                  kind: 12,
+                  location: { uri: target, range },
+                }));
+          });
+
+          const results =
+            method === 'workspace/diagnostic'
+              ? await workspaceDiagnostics()
+              : await run(service.workspaceSymbols('fn'));
+          expect(
+            results.map((result) =>
+              'uri' in result ? result.uri : result.location.uri,
+            ),
+          ).toEqual([healthyUri]);
+        },
+      );
+
       it('does not revive hierarchy tokens after same-text scope restoration', async () => {
         const [previous] = await prepare(extraUri);
         workspace.removeDirectory(extra);
@@ -1090,6 +1233,41 @@ describe('NativeLspService disk document synchronization', () => {
         ]);
       });
 
+      it('warms an in-scope file after revocation without replacing the connection', async () => {
+        const candidate = path.join(primary, 'main.ts');
+        fs.writeFileSync(candidate, 'primary');
+        await run(service.diagnostics(extraUri));
+        workspace.removeDirectory(extra);
+        connection.send.mockClear();
+        await run(service.workspaceSymbols('main'));
+        expect(connection.send).toHaveBeenCalledWith(
+          didOpen('primary', 1, pathToFileURL(candidate).toString()),
+        );
+      });
+
+      it('rejects hierarchy preparation when scope is revoked during warmup', async () => {
+        vi.spyOn(manager, 'warmupTypescriptServer').mockImplementation(
+          async () => {
+            workspace.removeDirectory(extra);
+          },
+        );
+        const read = vi.spyOn(fs, 'readFileSync');
+        try {
+          await expect(
+            run(service.prepareCallHierarchy({ uri: extraUri, range })),
+          ).rejects.toThrow(AGAIN);
+          expect(
+            read.mock.calls.filter(
+              ([target]) => target === path.join(extra, 'source file.ts'),
+            ),
+          ).toHaveLength(1);
+          expect(connection.send).not.toHaveBeenCalled();
+          expect(connection.request).not.toHaveBeenCalled();
+        } finally {
+          read.mockRestore();
+        }
+      });
+
       it('does not replay revoked files during configuration reload', async () => {
         const targetFile = path.join(primary, 'main.ts');
         fs.writeFileSync(targetFile, 'primary');
@@ -1097,6 +1275,8 @@ describe('NativeLspService disk document synchronization', () => {
         await run(service.diagnostics(extraUri));
         await run(service.diagnostics(primaryUri));
         workspace.removeDirectory(extra);
+        replaceConnection();
+        await workspaceDiagnostics();
         const replacement = createConnection();
         vi.spyOn(manager, 'reconcileServerConfigs').mockImplementation(
           async () => {
@@ -1115,6 +1295,13 @@ describe('NativeLspService disk document synchronization', () => {
 
         expect(openedUris(replacement)).toEqual([primaryUri]);
         expect(openedDocuments().get('test')?.has(extraUri)).toBe(false);
+        expect(
+          (
+            service as unknown as { replayUris: Map<string, Set<string>> }
+          ).replayUris
+            .get('test')
+            ?.has(extraUri),
+        ).toBeFalsy();
       });
 
       it.each(['incomingCalls', 'outgoingCalls'] as const)(
@@ -1420,6 +1607,25 @@ describe('NativeLspService disk document synchronization', () => {
         expect(connection.request).not.toHaveBeenCalled();
       });
 
+      it('refuses edits through a cached alias replaced outside the workspace', async () => {
+        const alias = path.join(directory, 'write-alias');
+        fs.symlinkSync(extra, alias, 'junction');
+        const targetFile = path.join(alias, 'source file.ts');
+        expect(workspace.isPathWithinWorkspace(targetFile)).toBe(true);
+        fs.unlinkSync(alias);
+        fs.mkdirSync(alias);
+        fs.writeFileSync(targetFile, 'unchanged');
+
+        expect(
+          await service.applyWorkspaceEdit({
+            changes: {
+              [targetFile]: [{ range, newText: 'bad' }],
+            },
+          }),
+        ).toBe(false);
+        expect(fs.readFileSync(targetFile, 'utf-8')).toBe('unchanged');
+      });
+
       it('preserves missing-file diagnostics errors for a valid subroot alias', async () => {
         const subroot = path.join(primary, 'sub');
         fs.mkdirSync(subroot);
@@ -1583,6 +1789,10 @@ describe('NativeLspService disk document synchronization', () => {
         path.join(directory, 'other'),
       ).toString();
 
+      await expect(run(service.diagnostics(uri))).rejects.toThrow(
+        'retry with serverName',
+      );
+      expect(connection.request).not.toHaveBeenCalled();
       await run(service.diagnostics(uri, 'test'));
 
       expect(connection.request).toHaveBeenCalled();
@@ -1655,23 +1865,39 @@ describe('NativeLspService disk document synchronization', () => {
       }
     });
 
-    it('reads workspace directories once for a multi-server routing filter', () => {
+    it('reads workspace directories and primary root once for a multi-server routing filter', () => {
+      const subroot = path.join(directory, 'subroot');
+      fs.mkdirSync(subroot);
       useHandles([
         ['test', handle],
         ['second', { ...handle }],
         ['third', { ...handle }],
+        [
+          'subroot',
+          { ...handle, config: { ...handle.config, workspaceFolder: subroot } },
+        ],
       ]);
       const workspace = (
         service as unknown as { workspaceContext: WorkspaceContext }
       ).workspaceContext;
       const directories = vi.spyOn(workspace, 'getDirectories');
       const containment = vi.spyOn(pathUtils, 'isSubpaths');
+      const realpath = vi.spyOn(fs, 'realpathSync');
       const router = service as unknown as {
         getReadyHandles(serverName?: string, target?: string): unknown[];
       };
-      expect(router.getReadyHandles(undefined, uri)).toHaveLength(3);
-      expect(directories).toHaveBeenCalledOnce();
-      expect(containment).toHaveBeenCalledOnce();
+      try {
+        expect(router.getReadyHandles(undefined, uri)).toHaveLength(3);
+        expect(directories).toHaveBeenCalledOnce();
+        expect(containment).toHaveBeenCalledTimes(2);
+        expect(
+          realpath.mock.calls.filter(([target]) => target === directory),
+        ).toHaveLength(1);
+      } finally {
+        directories.mockRestore();
+        containment.mockRestore();
+        realpath.mockRestore();
+      }
     });
 
     it('keeps workspace diagnostics querying all ready servers', async () => {
@@ -2293,6 +2519,25 @@ describe('NativeLspService disk document synchronization', () => {
 
       expect(connection.send).toHaveBeenCalledExactlyOnceWith(
         didOpen('module', 1, target, languageId),
+      );
+    },
+  );
+
+  it.each([{ '.jsx': 'custom-jsx' }, undefined])(
+    'uses the mapped or built-in JSX warmup language ID for %j',
+    async (mapping) => {
+      fs.unlinkSync(file);
+      const [, target] = addFile('component.jsx', 'component');
+      handle.config.extensionToLanguage = mapping;
+      useTypescriptManager();
+      await run(service.workspaceSymbols('component'));
+      expect(connection.send).toHaveBeenCalledExactlyOnceWith(
+        didOpen(
+          'component',
+          1,
+          target,
+          mapping ? 'custom-jsx' : 'javascriptreact',
+        ),
       );
     },
   );
@@ -3012,7 +3257,7 @@ describe('NativeLspService disk document synchronization', () => {
       connection.request.mockClear();
       await expect(
         service[method]({ ...item!, serverName: undefined }),
-      ).rejects.toThrow(AGAIN);
+      ).rejects.toThrow(count === 0 ? 'No LSP servers are configured' : AGAIN);
       expect(connection.request).not.toHaveBeenCalled();
       expect(second.request).not.toHaveBeenCalled();
       if (count === 2) {
@@ -3026,39 +3271,37 @@ describe('NativeLspService disk document synchronization', () => {
   it.each(['incomingCalls', 'outgoingCalls'] as const)(
     'gives non-retryable guidance for non-file %s',
     async (method) => {
-      const [item] = await run(
-        service.prepareCallHierarchy({
-          uri: 'jdt://contents/Foo.class',
-          range,
-        }),
-      );
-      expect(item?.documentRevision).toBeUndefined();
+      const item = {
+        name: 'virtual',
+        uri: 'jdt://contents/Foo.class',
+        range,
+        selectionRange: range,
+      };
       await expect(service[method](item!)).rejects.toThrow(
         'cannot be traversed',
       );
       await expect(service[method](item!)).rejects.not.toThrow(AGAIN);
       expect(connection.send).not.toHaveBeenCalled();
-      expect(connection.request).toHaveBeenCalledOnce();
+      expect(connection.request).not.toHaveBeenCalled();
     },
   );
 
   it.each(['hover', 'references', 'diagnostics'] as const)(
-    'passes non-file URIs to %s without reading or notifying',
+    'rejects non-file URIs for %s without reading or notifying',
     async (method) => {
       const virtualUri = 'jdt://contents/Foo.java?=%2Fsrc';
       const read = vi.spyOn(fs, 'readFileSync');
       try {
-        await run<unknown>(
-          method === 'diagnostics'
-            ? service.diagnostics(virtualUri)
-            : service[method]({ uri: virtualUri, range }),
-        );
+        await expect(
+          run<unknown>(
+            method === 'diagnostics'
+              ? service.diagnostics(virtualUri)
+              : service[method]({ uri: virtualUri, range }),
+          ),
+        ).rejects.toThrow('not a file URI');
         expect(read).not.toHaveBeenCalled();
         expect(connection.send).not.toHaveBeenCalled();
-        expect(connection.request).toHaveBeenCalledWith(
-          `textDocument/${method === 'diagnostics' ? 'diagnostic' : method}`,
-          expect.objectContaining({ textDocument: { uri: virtualUri } }),
-        );
+        expect(connection.request).not.toHaveBeenCalled();
       } finally {
         read.mockRestore();
       }

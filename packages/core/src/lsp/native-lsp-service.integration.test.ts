@@ -518,10 +518,16 @@ describe('NativeLspService Integration Tests', () => {
       await expect(service.discoverAndPrepare()).resolves.not.toThrow();
     });
 
-    it('should return empty results when no server is ready', async () => {
-      // Before starting any servers, operations should return empty
-      const results = await lspService.workspaceSymbols('test');
-      expect(results).toEqual([]);
+    it('reports unavailable workspace queries instead of empty results', async () => {
+      await expect(lspService.workspaceSymbols('test')).rejects.toThrow(
+        'No LSP servers are configured',
+      );
+      await expect(lspService.workspaceDiagnostics()).rejects.toThrow(
+        'No LSP servers are configured',
+      );
+      await expect(lspService.workspaceDiagnostics('absent')).rejects.toThrow(
+        'absent is not configured',
+      );
     });
 
     it('should report unavailable diagnostics when no server is ready', async () => {
