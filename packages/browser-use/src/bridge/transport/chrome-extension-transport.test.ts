@@ -432,12 +432,17 @@ it.skipIf(process.platform === 'win32')(
 );
 
 it('names Windows as unsupported instead of advising an extension install', () => {
-  // No Native Messaging host is ever registered on Windows, so the Web Store
-  // advice that helps on macOS and Linux is a dead end there.
+  // No Native Messaging host is ever registered off macOS and Linux, so the
+  // Web Store advice that helps there is a dead end everywhere else.
   const windows = disconnectedMessage('Chrome extension disconnected', 'win32');
   expect(windows).toContain('Windows');
-  expect(windows).not.toContain('install the extension from');
-  expect(windows).not.toContain('chrome://extensions');
+  const other = disconnectedMessage('Chrome extension disconnected', 'freebsd');
+  expect(other).toContain('freebsd');
+  expect(other).not.toContain('Windows');
+  for (const message of [windows, other]) {
+    expect(message).not.toContain('install the extension from');
+    expect(message).not.toContain('chrome://extensions');
+  }
   for (const platform of ['darwin', 'linux'] as const) {
     expect(
       disconnectedMessage('Chrome extension disconnected', platform),

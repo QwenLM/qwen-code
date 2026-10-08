@@ -75,7 +75,7 @@ describe('bundled browser-use skill', () => {
       'Windows is not supported: no Native Messaging host is ever registered there',
     );
     expect(prose).toContain(
-      'every browser call fails with `BROWSER_DISCONNECTED`',
+      'Calls that start a browser session fail with `BROWSER_DISCONNECTED`, and `browsers.list()` waits out the connect budget and returns an empty list',
     );
     expect(prose).toContain(
       'tell them Browser Use needs macOS or Linux and stop',
