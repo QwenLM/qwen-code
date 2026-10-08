@@ -103,6 +103,14 @@ interface QQReplyContext {
   timestamp: number;
 }
 
+/** Accumulation buffer entry for cron/non-prompt textChunk events. */
+interface CronBufferEntry {
+  buffer: string;
+  timer: ReturnType<typeof setTimeout> | null;
+  pendingRetry?: string;
+  retryCount?: number;
+}
+
 /**
  * Why a send did not put its text on the wire. `transient` can resolve on a
  * later attempt (token refresh failure, empty token); `permanent` cannot
@@ -401,15 +409,7 @@ export class QQChannel extends ChannelBase {
   private _lastKeywordNoMatchLog: Map<string, number> = new Map();
 
   /** Accumulation buffer for cron/non-prompt textChunk events. */
-  private cronBuffer: Map<
-    string,
-    {
-      buffer: string;
-      timer: ReturnType<typeof setTimeout> | null;
-      pendingRetry?: string;
-      retryCount?: number;
-    }
-  > = new Map();
+  private cronBuffer: Map<string, CronBufferEntry> = new Map();
 
   /** Named handler for permanent textChunk listener (cron/non-prompt). */
   private _cronTextHandler: ((sessionId: string, text: string) => void) | null =
@@ -708,194 +708,225 @@ export class QQChannel extends ChannelBase {
         this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH;
       const delay = entry.buffer.length >= limit ? 0 : 2000;
       entry.timer = setTimeout(() => {
-        const toFlush = entry!.buffer;
-        entry!.buffer = '';
         entry!.timer = null;
-        if (toFlush) {
-          const target = this.router.getTarget(sessionId);
-          if (target) {
-            this.sendMessageWithReplyContext(target.chatId, toFlush)
-              .then((blocked) => {
-                // A route-blocked send resolves without reaching the wire (see
-                // resolveRoute), so the success body below would delete the
-                // entry and silently lose toFlush. Route the block into the
-                // .catch() below, which already retries a transient block and
-                // drops a permanent one with a log.
-                if (blocked !== undefined) {
-                  throw blocked === 'permanent'
-                    ? new DeliveryError(
-                        'FALLBACK_FAILED',
-                        `outgoing route permanently blocked for ${target.chatId}`,
-                      )
-                    : new Error('outgoing route unresolved');
-                }
-                if (!entry!.buffer && this.cronBuffer.get(sessionId) === entry)
-                  this.cronBuffer.delete(sessionId);
-              })
-              .catch((err) => {
-                const code = err instanceof DeliveryError ? err.code : null;
-                const codeStr = code ? ` (${code})` : '';
+        this.flushCronEntry(sessionId, entry!);
+      }, delay).unref();
+    });
+  }
+
+  /**
+   * Flush `entry`'s accumulated cron text through the delivery ladder: one
+   * send plus its two bounded retries. A successful attempt deletes the
+   * entry when its buffer is empty, or re-arms the normal flush when a chunk
+   * arrived while the send was in flight.
+   */
+  private flushCronEntry(sessionId: string, entry: CronBufferEntry): void {
+    const toFlush = entry.buffer;
+    entry.buffer = '';
+    if (toFlush) {
+      const target = this.router.getTarget(sessionId);
+      if (target) {
+        this.sendMessageWithReplyContext(target.chatId, toFlush)
+          .then((blocked) => {
+            // A route-blocked send resolves without reaching the wire (see
+            // resolveRoute), so the success body below would delete the
+            // entry and silently lose toFlush. Route the block into the
+            // .catch() below, which already retries a transient block and
+            // drops a permanent one with a log.
+            if (blocked !== undefined) {
+              throw blocked === 'permanent'
+                ? new DeliveryError(
+                    'FALLBACK_FAILED',
+                    `outgoing route permanently blocked for ${target.chatId}`,
+                  )
+                : new Error('outgoing route unresolved');
+            }
+            this.settleCronFlushSuccess(sessionId, entry);
+          })
+          .catch((err) => {
+            const code = err instanceof DeliveryError ? err.code : null;
+            const codeStr = code ? ` (${code})` : '';
+            process.stderr.write(
+              `[QQ:${this.name}] Cron flush send error${codeStr}: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
+            );
+            if (
+              code === 'RETRY_EXHAUSTED' ||
+              code === 'ACTIVE_MSG_DISABLED' ||
+              code === 'FALLBACK_FAILED'
+            ) {
+              this.cronBuffer.delete(sessionId);
+              return;
+            }
+            entry.pendingRetry = toFlush;
+            entry.retryCount = 1;
+            if (entry.timer) {
+              clearTimeout(entry.timer);
+            }
+            entry.timer = setTimeout(() => {
+              entry.timer = null;
+              entry.pendingRetry = '';
+              // Guard: if cronBuffer entry was removed (e.g., group deleted),
+              // bail out instead of sending to a deleted group.
+              if (this.cronBuffer.get(sessionId) !== entry) {
+                return;
+              }
+              const retryTarget = this.router.getTarget(sessionId);
+              if (!retryTarget) {
                 process.stderr.write(
-                  `[QQ:${this.name}] Cron flush send error${codeStr}: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
+                  `[QQ:${this.name}] Cron flush dropped after retry: no target for session ${sanitizeLogText(sessionId, 32)}\n`,
                 );
-                if (
-                  code === 'RETRY_EXHAUSTED' ||
-                  code === 'ACTIVE_MSG_DISABLED' ||
-                  code === 'FALLBACK_FAILED'
-                ) {
-                  this.cronBuffer.delete(sessionId);
-                  return;
-                }
-                entry!.pendingRetry = toFlush;
-                entry!.retryCount = 1;
-                if (entry!.timer) {
-                  clearTimeout(entry!.timer);
-                }
-                entry!.timer = setTimeout(() => {
-                  entry!.timer = null;
-                  entry!.pendingRetry = '';
-                  // Guard: if cronBuffer entry was removed (e.g., group deleted),
-                  // bail out instead of sending to a deleted group.
-                  if (this.cronBuffer.get(sessionId) !== entry) {
+                this.cronBuffer.delete(sessionId);
+                return;
+              }
+              this.sendMessageWithReplyContext(retryTarget.chatId, toFlush)
+                .then((blocked) => {
+                  // A route-blocked send resolves without reaching the wire,
+                  // so throw it into the .catch() below instead of running
+                  // the success body and dropping toFlush.
+                  if (blocked !== undefined) {
+                    throw blocked === 'permanent'
+                      ? new DeliveryError(
+                          'FALLBACK_FAILED',
+                          `outgoing route permanently blocked for ${retryTarget.chatId}`,
+                        )
+                      : new Error('outgoing route unresolved');
+                  }
+                  entry.pendingRetry = '';
+                  this.settleCronFlushSuccess(sessionId, entry);
+                })
+                .catch((retryErr) => {
+                  const retryCode =
+                    retryErr instanceof DeliveryError ? retryErr.code : null;
+                  const retryCodeStr = retryCode ? ` (${retryCode})` : '';
+                  process.stderr.write(
+                    `[QQ:${this.name}] Cron flush retry failed${retryCodeStr}: ${sanitizeLogText(retryErr instanceof Error ? retryErr.message : String(retryErr), 200)}\n`,
+                  );
+                  entry.pendingRetry = '';
+                  if (
+                    retryCode === 'RETRY_EXHAUSTED' ||
+                    retryCode === 'ACTIVE_MSG_DISABLED' ||
+                    retryCode === 'FALLBACK_FAILED'
+                  ) {
+                    if (
+                      !entry.buffer &&
+                      this.cronBuffer.get(sessionId) === entry
+                    ) {
+                      this.cronBuffer.delete(sessionId);
+                    }
                     return;
                   }
-                  const retryTarget = this.router.getTarget(sessionId);
-                  if (!retryTarget) {
-                    process.stderr.write(
-                      `[QQ:${this.name}] Cron flush dropped after retry: no target for session ${sanitizeLogText(sessionId, 32)}\n`,
-                    );
-                    this.cronBuffer.delete(sessionId);
-                    return;
+                  // Transient error on retry (RATE_LIMITED, etc.) — re-schedule with backoff
+                  entry.retryCount = (entry.retryCount ?? 1) + 1;
+                  if (entry.timer) {
+                    clearTimeout(entry.timer);
                   }
-                  this.sendMessageWithReplyContext(retryTarget.chatId, toFlush)
-                    .then((blocked) => {
-                      // A route-blocked send resolves without reaching the wire,
-                      // so throw it into the .catch() below instead of running
-                      // the success body and dropping toFlush.
-                      if (blocked !== undefined) {
-                        throw blocked === 'permanent'
-                          ? new DeliveryError(
-                              'FALLBACK_FAILED',
-                              `outgoing route permanently blocked for ${retryTarget.chatId}`,
-                            )
-                          : new Error('outgoing route unresolved');
-                      }
-                      entry!.pendingRetry = '';
-                      if (
-                        !entry!.buffer &&
-                        this.cronBuffer.get(sessionId) === entry
-                      )
-                        this.cronBuffer.delete(sessionId);
-                    })
-                    .catch((retryErr) => {
-                      const retryCode =
-                        retryErr instanceof DeliveryError
-                          ? retryErr.code
-                          : null;
-                      const retryCodeStr = retryCode ? ` (${retryCode})` : '';
-                      process.stderr.write(
-                        `[QQ:${this.name}] Cron flush retry failed${retryCodeStr}: ${sanitizeLogText(retryErr instanceof Error ? retryErr.message : String(retryErr), 200)}\n`,
-                      );
-                      entry!.pendingRetry = '';
-                      if (
-                        retryCode === 'RETRY_EXHAUSTED' ||
-                        retryCode === 'ACTIVE_MSG_DISABLED' ||
-                        retryCode === 'FALLBACK_FAILED'
-                      ) {
-                        if (
-                          !entry!.buffer &&
-                          this.cronBuffer.get(sessionId) === entry
-                        ) {
-                          this.cronBuffer.delete(sessionId);
-                        }
+                  entry.pendingRetry = toFlush;
+                  entry.timer = setTimeout(
+                    () => {
+                      entry.timer = null;
+                      entry.pendingRetry = '';
+                      if (this.cronBuffer.get(sessionId) !== entry) {
                         return;
                       }
-                      // Transient error on retry (RATE_LIMITED, etc.) — re-schedule with backoff
-                      entry!.retryCount = (entry!.retryCount ?? 1) + 1;
-                      if (entry!.timer) {
-                        clearTimeout(entry!.timer);
+                      const retryTarget2 = this.router.getTarget(sessionId);
+                      if (!retryTarget2) {
+                        process.stderr.write(
+                          `[QQ:${this.name}] Cron flush dropped after retry: no target for session ${sanitizeLogText(sessionId, 32)}\n`,
+                        );
+                        this.cronBuffer.delete(sessionId);
+                        return;
                       }
-                      entry!.pendingRetry = toFlush;
-                      entry!.timer = setTimeout(
-                        () => {
-                          entry!.timer = null;
-                          entry!.pendingRetry = '';
-                          if (this.cronBuffer.get(sessionId) !== entry) {
-                            return;
+                      this.sendMessageWithReplyContext(
+                        retryTarget2.chatId,
+                        toFlush,
+                      )
+                        .then((blocked) => {
+                          // Same as the first retry: a route-blocked send
+                          // resolves without reaching the wire, so throw it
+                          // into the .catch() below rather than running the
+                          // success body and dropping toFlush.
+                          if (blocked !== undefined) {
+                            throw blocked === 'permanent'
+                              ? new DeliveryError(
+                                  'FALLBACK_FAILED',
+                                  `outgoing route permanently blocked for ${retryTarget2.chatId}`,
+                                )
+                              : new Error('outgoing route unresolved');
                           }
-                          const retryTarget2 = this.router.getTarget(sessionId);
-                          if (!retryTarget2) {
-                            process.stderr.write(
-                              `[QQ:${this.name}] Cron flush dropped after retry: no target for session ${sanitizeLogText(sessionId, 32)}\n`,
-                            );
+                          entry.pendingRetry = '';
+                          this.settleCronFlushSuccess(sessionId, entry);
+                        })
+                        .catch((err2) => {
+                          const code2 =
+                            err2 instanceof DeliveryError ? err2.code : null;
+                          const code2Str = code2 ? ` (${code2})` : '';
+                          process.stderr.write(
+                            `[QQ:${this.name}] Cron flush re-retry failed${code2Str}: ${sanitizeLogText(err2 instanceof Error ? err2.message : String(err2), 200)}, toFlush=${toFlush.length}, session=${sanitizeLogText(sessionId, 32)}\n`,
+                          );
+                          entry.pendingRetry = '';
+                          if (
+                            code2 === 'RETRY_EXHAUSTED' ||
+                            code2 === 'ACTIVE_MSG_DISABLED' ||
+                            code2 === 'FALLBACK_FAILED'
+                          ) {
                             this.cronBuffer.delete(sessionId);
                             return;
                           }
-                          this.sendMessageWithReplyContext(
-                            retryTarget2.chatId,
-                            toFlush,
-                          )
-                            .then((blocked) => {
-                              // Same as the first retry: a route-blocked send
-                              // resolves without reaching the wire, so throw it
-                              // into the .catch() below rather than running the
-                              // success body and dropping toFlush.
-                              if (blocked !== undefined) {
-                                throw blocked === 'permanent'
-                                  ? new DeliveryError(
-                                      'FALLBACK_FAILED',
-                                      `outgoing route permanently blocked for ${retryTarget2.chatId}`,
-                                    )
-                                  : new Error('outgoing route unresolved');
-                              }
-                              entry!.pendingRetry = '';
-                              if (
-                                !entry!.buffer &&
-                                this.cronBuffer.get(sessionId) === entry
-                              )
-                                this.cronBuffer.delete(sessionId);
-                            })
-                            .catch((err2) => {
-                              const code2 =
-                                err2 instanceof DeliveryError
-                                  ? err2.code
-                                  : null;
-                              const code2Str = code2 ? ` (${code2})` : '';
-                              process.stderr.write(
-                                `[QQ:${this.name}] Cron flush re-retry failed${code2Str}: ${sanitizeLogText(err2 instanceof Error ? err2.message : String(err2), 200)}, toFlush=${toFlush.length}, session=${sanitizeLogText(sessionId, 32)}\n`,
-                              );
-                              entry!.pendingRetry = '';
-                              if (
-                                code2 === 'RETRY_EXHAUSTED' ||
-                                code2 === 'ACTIVE_MSG_DISABLED' ||
-                                code2 === 'FALLBACK_FAILED'
-                              ) {
-                                this.cronBuffer.delete(sessionId);
-                                return;
-                              }
-                              // Transient error: retries exhausted after 3 total attempts
-                              process.stderr.write(
-                                `[QQ:${this.name}] Cron flush retries exhausted, dropped ${toFlush.length} chars for session ${sanitizeLogText(sessionId, 32)}\n`,
-                              );
-                              this.cronBuffer.delete(sessionId);
-                            });
-                        },
-                        entry!.retryCount === 2 ? 10000 : 5000,
-                      );
-                      entry!.timer.unref();
-                    });
-                }, 5000);
-                entry!.timer.unref();
-              });
-            return;
-          }
-        }
-        process.stderr.write(
-          `[QQ:${this.name}] Cron flush dropped: no target for session ${sanitizeLogText(sessionId, 32)}, lost ${toFlush.length} chars\n`,
-        );
-        this.cronBuffer.delete(sessionId);
-      }, delay).unref();
-    });
+                          // Transient error: retries exhausted after 3 total attempts
+                          process.stderr.write(
+                            `[QQ:${this.name}] Cron flush retries exhausted, dropped ${toFlush.length} chars for session ${sanitizeLogText(sessionId, 32)}\n`,
+                          );
+                          this.cronBuffer.delete(sessionId);
+                        });
+                    },
+                    entry.retryCount === 2 ? 10000 : 5000,
+                  );
+                  entry.timer.unref();
+                });
+            }, 5000);
+            entry.timer.unref();
+          });
+        return;
+      }
+    }
+    process.stderr.write(
+      `[QQ:${this.name}] Cron flush dropped: no target for session ${sanitizeLogText(sessionId, 32)}, lost ${toFlush.length} chars\n`,
+    );
+    this.cronBuffer.delete(sessionId);
+  }
+
+  /**
+   * Tail of a successful cron send. If the entry still owns the session and
+   * a chunk arrived while the send was in flight, arm the normal flush for
+   * that residual; otherwise drop the entry once its buffer is empty.
+   */
+  private settleCronFlushSuccess(
+    sessionId: string,
+    entry: CronBufferEntry,
+  ): void {
+    if (this.cronBuffer.get(sessionId) !== entry) return;
+    if (entry.buffer) {
+      this.armCronFlush(sessionId, entry);
+      return;
+    }
+    this.cronBuffer.delete(sessionId);
+  }
+
+  /**
+   * Arm the normal 2s idle flush (immediate at the buffer length limit) for
+   * `entry`, unless one is already armed. The callback re-checks that the
+   * entry still owns the session before flushing.
+   */
+  private armCronFlush(sessionId: string, entry: CronBufferEntry): void {
+    if (entry.timer) return;
+    const limit =
+      this.qqConfig.bufferFlushLength ?? QQChannel.MAX_BUFFER_LENGTH;
+    const delay = entry.buffer.length >= limit ? 0 : 2000;
+    entry.timer = setTimeout(() => {
+      entry.timer = null;
+      if (this.cronBuffer.get(sessionId) !== entry) return;
+      this.flushCronEntry(sessionId, entry);
+    }, delay).unref();
   }
 
   /**

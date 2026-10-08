@@ -547,6 +547,92 @@ describe('cronTextHandler', () => {
     stderrSpy.mockRestore();
   });
 
+  // Regression: a chunk that arrives while a send is genuinely in flight must
+  // not be stranded when that attempt fails and its retry succeeds. The retry
+  // scheduling clears the in-flight chunk's own flush timer, so the successful
+  // attempt has to re-arm it instead of leaving the buffer with no timer.
+  it('re-arms the flush for a chunk that arrived while the cron send was in flight', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+    pvt['_inCronFlow'] = 1;
+
+    // Attempt 1 hangs in resolveRoute so chunk B can arrive mid-send; the
+    // retry then resolves a usable route.
+    const realResolveRoute = pvt['resolveRoute'] as (
+      chatId: string,
+    ) => Promise<unknown>;
+    let releaseFirstRoute: (() => void) | null = null;
+    let routeCalls = 0;
+    pvt['resolveRoute'] = async (chatId: string) => {
+      routeCalls++;
+      if (routeCalls === 1) {
+        await new Promise<void>((resolve) => {
+          releaseFirstRoute = resolve;
+        });
+        return { block: 'transient' };
+      }
+      return realResolveRoute.call(ch, chatId);
+    };
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    triggerTextChunk('sess-midflight', 'A');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown; pendingRetry?: string }
+    >;
+
+    // The 2s flush fires and attempt 1 stays in flight.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(routeCalls).toBe(1);
+    expect(cronBuffer.get('sess-midflight')!.buffer).toBe('');
+
+    // Chunk B arrives while attempt 1 is in flight, arming its own flush.
+    triggerTextChunk('sess-midflight', 'B');
+    await flushSetImmediate();
+    expect(cronBuffer.get('sess-midflight')!.buffer).toBe('B');
+    expect(cronBuffer.get('sess-midflight')!.timer).not.toBeNull();
+
+    // Attempt 1 resolves route-blocked (transient): A is parked for the retry
+    // and B's flush timer is cleared by the retry scheduling.
+    releaseFirstRoute!();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cronBuffer.get('sess-midflight')!.pendingRetry).toBe('A');
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+
+    // Retry 1 resolves a route and A reaches the wire.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage).toHaveBeenLastCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'A' } },
+    );
+    // The residual must already be owned by a fresh flush timer.
+    expect(cronBuffer.has('sess-midflight')).toBe(true);
+    expect(cronBuffer.get('sess-midflight')!.buffer).toBe('B');
+    expect(cronBuffer.get('sess-midflight')!.timer).not.toBeNull();
+
+    // No further chunk arrives: B must still be delivered by that timer.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    expect(mockSendQQMessage).toHaveBeenLastCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat/messages',
+      'test-token',
+      { msg_type: 2, markdown: { content: 'B' } },
+    );
+    expect(cronBuffer.has('sess-midflight')).toBe(false);
+
+    stderrSpy.mockRestore();
+  });
+
   it('drops a route-blocked cron flush with a loss log, not silently (permanent)', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as Record<string, unknown>;
