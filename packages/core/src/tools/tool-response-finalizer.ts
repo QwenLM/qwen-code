@@ -4,6 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  getToolOutputProvenance,
+  measureToolOutput,
+  updateToolOutputBudget,
+} from './tool-output-size.js';
+import { logToolResultSize } from '../telemetry/loggers.js';
+import { ToolResultSizeEvent } from '../telemetry/types.js';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ToolArtifact } from './tools.js';
@@ -325,7 +332,7 @@ export function enforceFunctionResponseBudget(
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) return entries;
 
-  return replaceTextSlots(
+  const reduced = replaceTextSlots(
     entries,
     slots,
     allocateTextBudget(
@@ -333,6 +340,14 @@ export function enforceFunctionResponseBudget(
       budget,
     ),
   );
+  for (let index = 0; index < reduced.length; index++) {
+    if (
+      toolResponseTextLength(reduced[index].responseParts) <
+      toolResponseTextLength(entries[index].responseParts)
+    )
+      updateToolOutputBudget(reduced[index].responseParts, budget, 'batch');
+  }
+  return reduced;
 }
 
 export async function finalizeToolResponses(
@@ -479,6 +494,39 @@ export async function finalizeToolResponses(
   }
 
   const finalized = replaceTextSlots(withPersistence, slots, allocations);
+  for (let index = 0; index < finalized.length; index++) {
+    if (!entriesToPersist.has(index)) continue;
+    const entry = finalized[index];
+    const before = measureToolOutput(entries[index].responseParts);
+    const after = measureToolOutput(entry.responseParts);
+    for (const part of entry.responseParts) {
+      const provenance = getToolOutputProvenance(part);
+      if (provenance)
+        provenance.persistedOutputFiles = entry.persistedOutputFiles;
+    }
+    updateToolOutputBudget(entry.responseParts, budget, 'batch');
+    try {
+      logToolResultSize(
+        config,
+        new ToolResultSizeEvent(
+          entry.toolName,
+          entry.toolName.startsWith('mcp__') ? 'mcp' : 'native',
+          'batch',
+          before.chars,
+          after.chars,
+          before.estimatedTokens,
+          after.estimatedTokens,
+          true,
+          budget,
+          'batch',
+          entry.callId,
+          promptIds?.get(entry.callId),
+        ),
+      );
+    } catch {
+      /* Telemetry is observational. */
+    }
+  }
   if (observeBoundary)
     observeFinalizerEntries(
       config,

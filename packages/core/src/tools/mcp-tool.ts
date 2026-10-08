@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { measureToolOutput } from './tool-output-size.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type {
   ToolCallConfirmationDetails,
@@ -778,6 +779,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: truncated.parts,
+        rawOutputSize: measureToolOutput(transformedParts),
         returnDisplay: appDisplay ?? fallbackText,
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
@@ -1021,6 +1023,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: truncated.parts,
+        rawOutputSize: measureToolOutput(transformedParts),
         returnDisplay: getDisplayFromPartsWithPersistedOutput(
           transformedParts,
           truncated.persistedOutputFiles,
@@ -1044,6 +1047,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     rawResponseParts: Part[],
     functionCall: FunctionCall,
   ): Promise<ToolResult> {
+    const rawOutputSize = measureToolOutput(
+      transformMcpContentToParts(rawResponseParts),
+    );
     const imageContent = getMcpErrorImageContent(rawResponseParts);
     let llmContent: PartListUnion;
     let errorMessage: string;
@@ -1070,6 +1076,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
     return {
       llmContent,
+      rawOutputSize,
       returnDisplay: `Error: MCP tool '${this.serverToolName}' reported an error.`,
       error: {
         message: errorMessage,
@@ -1135,6 +1142,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           // tables) would otherwise truncate while chars remain. Consistent
           // with the shell tool's in-tool truncation.
           {
+            layer: 'producer',
+            source: 'per_tool',
             threshold: 500_000,
             previewChars: 2000,
             lines: Number.POSITIVE_INFINITY,

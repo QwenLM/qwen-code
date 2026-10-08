@@ -572,7 +572,9 @@ async function shellReceiptScenario(
     envelope,
     'model',
   );
-  expect(replayed).toEqual(result);
+  expect(JSON.parse(JSON.stringify(replayed))).toEqual(
+    JSON.parse(JSON.stringify(result)),
+  );
   expect(
     request.mock.calls.filter(([route]) =>
       String(route).endsWith('/admissions/prepare'),
@@ -919,7 +921,9 @@ it.each(['read_file', 'write_file', 'edit'])(
         'tool_result',
       ]);
       expect(history.at(-2)?.message?.parts).toEqual(original);
-      expect(history.at(-1)?.message?.parts).toEqual(responses);
+      expect(history.at(-1)?.message?.parts).toEqual(
+        JSON.parse(JSON.stringify(responses)),
+      );
     }
     expect(broker.acquire).not.toHaveBeenCalled();
     expect(broker.prepare).not.toHaveBeenCalled();
@@ -1070,7 +1074,9 @@ it.each([
       'tool_result',
     ]);
     expect(history.at(-2)?.message?.parts).toEqual(original);
-    expect(history.at(-1)?.message?.parts).toEqual(responses);
+    expect(history.at(-1)?.message?.parts).toEqual(
+      JSON.parse(JSON.stringify(responses)),
+    );
     expect(broker.acquire).not.toHaveBeenCalled();
     expect(broker.prepare).not.toHaveBeenCalled();
     expect(broker.execute).not.toHaveBeenCalled();
@@ -1237,7 +1243,9 @@ it('truncates an oversized glob result to a fitting prefix with a narrowing hint
   )?.[1];
   expect(outcome?.byteLength).toBeLessThanOrEqual(64 * 1024);
   const receipt = (await session.sink.project()).at(-1);
-  expect(receipt?.message?.parts).toEqual(responses);
+  expect(receipt?.message?.parts).toEqual(
+    JSON.parse(JSON.stringify(responses)),
+  );
   expect(Buffer.byteLength(JSON.stringify(receipt))).toBeLessThanOrEqual(
     64 * 1024,
   );
@@ -1634,7 +1642,9 @@ it.each([
     )?.[1];
     expect(outcome?.byteLength).toBeLessThanOrEqual(64 * 1024);
     const receipt = (await session.sink.project()).at(-1);
-    expect(receipt?.message?.parts).toEqual(responses);
+    expect(receipt?.message?.parts).toEqual(
+      JSON.parse(JSON.stringify(responses)),
+    );
     expect(Buffer.byteLength(JSON.stringify(receipt))).toBeLessThanOrEqual(
       64 * 1024,
     );
@@ -2071,7 +2081,7 @@ it('returns durable errors for a refused Shell batch and permits a corrected cal
     'tool_result',
   ]);
   expect((await session.sink.project()).at(-1)?.message?.parts).toEqual(
-    responses,
+    JSON.parse(JSON.stringify(responses)),
   );
   expect(broker.acquire).not.toHaveBeenCalled();
   expect(broker.prepare).not.toHaveBeenCalled();
@@ -4471,7 +4481,7 @@ it('persists capacity refusals without dispatch or pending history and releases 
     (await session.sink.project())
       .filter((record) => record.type === 'tool_result')
       .flatMap((record) => record.message?.parts ?? []),
-  ).toEqual(responses);
+  ).toEqual(JSON.parse(JSON.stringify(responses)));
   await turn.finish();
   expect(broker.release).toHaveBeenCalledOnce();
 });
@@ -4552,7 +4562,7 @@ it.each([false, true])(
       (await session.sink.project())
         .filter((record) => record.type === 'tool_result')
         .flatMap((record) => record.message?.parts ?? []),
-    ).toEqual(responses);
+    ).toEqual(JSON.parse(JSON.stringify(responses)));
     if (mixed) await turn.consumeResults();
     await turn.finish();
     expect(broker.release).toHaveBeenCalledOnce();

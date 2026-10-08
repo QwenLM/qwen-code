@@ -472,8 +472,14 @@ async function runSpeculativeLoop(
                 id ?? '',
                 result.llmContent,
                 result.error.message,
+                result,
               )
-            : convertToFunctionResponse(name, id ?? '', result.llmContent);
+            : convertToFunctionResponse(
+                name,
+                id ?? '',
+                result.llmContent,
+                result,
+              );
           const bridgedResponseParts = stripToolResultImages(
             convertedResponseParts,
           );

@@ -230,6 +230,12 @@ export function estimatePartChars(
       total += output.length;
     } else if (typeof error === 'string') {
       total += error.length;
+    } else if (part.functionResponse.response !== undefined) {
+      try {
+        total += JSON.stringify(part.functionResponse.response).length;
+      } catch {
+        // Unserializable payloads contribute only the wrapper floor.
+      }
     }
     const nested = getFunctionResponseParts(part);
     if (nested) {

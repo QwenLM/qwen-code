@@ -16068,11 +16068,13 @@ export class Session implements SessionContext {
                   callId,
                   toolResult.llmContent,
                   toolResult.error.message,
+                  toolResult,
                 )
               : convertToFunctionResponse(
                   modelFacingToolName,
                   callId,
                   toolResult.llmContent,
+                  toolResult,
                 );
 
           // A tool can fail "softly" by returning toolResult.error without
