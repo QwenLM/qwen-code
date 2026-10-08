@@ -253,6 +253,95 @@ class ManagedSessionStoreIntegrationTest {
     }
 
     @Test
+    void commitsChunkedMessagesAtomicallyAndKeepsTheAggregateBudget() throws Exception {
+        String session = SESSION + "-chunked";
+        String base = "/internal/managed-session-store/v1/sessions/" + session;
+        mvc.perform(post(base + "/writers:acquire")
+                .header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(writerRequest(WRITER_A).toString())).andExpect(status().isOk());
+        ObjectNode request = genesisRequest("{\"subtype\":\"session_execution_engine\"}\n"
+                + "{\"subtype\":\"managed_session_header_v1\"}\n", new byte[0]);
+        ArrayNode resources = request.withArray("resources");
+        ObjectNode manifest = objectMapper.createObjectNode();
+        ArrayNode parts = manifest.putArray("parts");
+        byte[] body = ("{\"text\":\"" + "长😀".repeat(32_000) + "\"}").getBytes(StandardCharsets.UTF_8);
+        for (int offset = 0; offset < body.length; offset += 60 * 1024) {
+            byte[] bytes = Arrays.copyOfRange(body, offset, Math.min(body.length, offset + 60 * 1024));
+            ObjectNode part = resources.addObject().put("resourceId", "part-" + offset)
+                    .put("kind", "managed-message-part").put("schemaVersion", 1)
+                    .put("byteLength", bytes.length).put("digest", sha256(bytes))
+                    .put("bytesBase64", Base64.getEncoder().encodeToString(bytes));
+            ObjectNode ref = part.deepCopy();
+            ref.remove("bytesBase64");
+            parts.add(ref);
+        }
+        byte[] manifestBytes = objectMapper.writeValueAsBytes(manifest);
+        resources.addObject().put("resourceId", "message-manifest")
+                .put("kind", "managed-message-chunks").put("schemaVersion", 1)
+                .put("byteLength", manifestBytes.length).put("digest", sha256(manifestBytes))
+                .put("bytesBase64", Base64.getEncoder().encodeToString(manifestBytes));
+        int resourceCount = resources.size();
+        resources.addObject().put("resourceId", "missing-part")
+                .put("kind", "managed-message-part").put("schemaVersion", 1)
+                .put("byteLength", 1).put("digest", sha256(new byte[1]));
+        mvc.perform(post(base + "/transactions:commit")
+                .header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(request.toString()))
+                .andExpect(status().isConflict());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE session_id=?",
+                Integer.class, session)).isZero();
+        resources.remove(resourceCount);
+        for (int attempt = 0; attempt < 2; attempt++) {
+            mvc.perform(post(base + "/transactions:commit")
+                    .header(TenantContextFilter.HEADER, TENANT)
+                    .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                    .contentType(MediaType.APPLICATION_JSON).content(request.toString()))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.journalRevision").value(1))
+                    .andExpect(jsonPath("$.replayed").value(attempt == 1));
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE session_id=?",
+                Integer.class, session)).isEqualTo(resourceCount);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE session_id=? AND resource_id='resource-context'",
+                Integer.class, session)).isEqualTo(1);
+        ObjectNode oversized = request.deepCopy();
+        ArrayNode oversizedResources = oversized.withArray("resources");
+        int inlineBytes = 0;
+        for (JsonNode resource : oversizedResources) {
+            inlineBytes += resource.get("byteLength").asInt();
+        }
+        for (int index = 0; inlineBytes < ManagedSessionStoreModels.MAX_TRANSACTION_BYTES; index++) {
+            byte[] bytes = new byte[Math.min(ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES,
+                    ManagedSessionStoreModels.MAX_TRANSACTION_BYTES - inlineBytes)];
+            oversizedResources.addObject().put("resourceId", "budget-part-" + index)
+                    .put("kind", "managed-message-part").put("schemaVersion", 1)
+                    .put("byteLength", bytes.length).put("digest", sha256(bytes))
+                    .put("bytesBase64", Base64.getEncoder().encodeToString(bytes));
+            inlineBytes += bytes.length;
+        }
+        assertThat(inlineBytes).isEqualTo(8 * 1024 * 1024);
+        mvc.perform(post(base + "/transactions:commit")
+                .header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(oversized.toString()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.replayed").value(true));
+        byte[] excess = new byte[1];
+        oversizedResources.addObject().put("resourceId", "budget-overflow")
+                .put("kind", "managed-message-part").put("schemaVersion", 1)
+                .put("byteLength", excess.length).put("digest", sha256(excess))
+                .put("bytesBase64", Base64.getEncoder().encodeToString(excess));
+        mvc.perform(post(base + "/transactions:commit")
+                .header(TenantContextFilter.HEADER, TENANT)
+                .header(ManagedSessionStoreModels.WRITER_TOKEN_HEADER, TOKEN_A)
+                .contentType(MediaType.APPLICATION_JSON).content(oversized.toString()))
+                .andExpect(status().isPayloadTooLarge());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_resource WHERE session_id=?",
+                Integer.class, session)).isEqualTo(resourceCount);
+    }
+
+    @Test
     void fencesWritersAndReplaysExactTransactions() throws Exception {
         JsonNode grantA = json(postWithToken("/writers:acquire", TOKEN_A,
                 writerRequest(WRITER_A)).getResponse()

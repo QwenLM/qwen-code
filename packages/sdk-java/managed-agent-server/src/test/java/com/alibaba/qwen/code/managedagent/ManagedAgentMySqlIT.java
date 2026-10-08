@@ -797,8 +797,9 @@ class ManagedAgentMySqlIT {
         // Begin the delete mid-life: it stays pending while this journal's
         // writer holds the Session, so the Session is DELETING when the next
         // revision lands.
-        agents.beginOperation(tenant, session, OperationKind.DELETE,
-                "sha256:" + "d".repeat(64), "delete", "digest-delete");
+        OperationRecord deletion = agents.beginOperation(tenant, session,
+                OperationKind.DELETE, "sha256:" + "d".repeat(64), "delete",
+                "digest-delete").operation();
         assertThat(jdbc.queryForObject("SELECT status FROM"
                         + " managed_agent_session WHERE tenant_id = ?"
                         + " AND session_id = ?", String.class, tenant,
@@ -816,11 +817,48 @@ class ManagedAgentMySqlIT {
                         + " qwen_managed_session_extension_record WHERE"
                         + " tenant_id = ? AND session_id = ?", Long.class,
                 tenant, session)).isEqualTo(2L);
+        OperationRecord operation = inTransaction(transactions,
+                () -> agents.claimOperation(tenant, session,
+                        deletion.operationId(), "worker",
+                        Duration.ofMinutes(1))).orElseThrow();
+        assertThatThrownBy(() -> inTransaction(transactions,
+                () -> agents.completeOperation(tenant, session,
+                        operation.operationId(), "worker",
+                        operation.claimGeneration(), true)))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getCode()).isEqualTo(
+                                "managed_session_writer_active"));
+        assertThat(count(jdbc, "qwen_output_session_retirement",
+                tenant, session)).isZero();
+        long generation = jdbc.queryForObject("SELECT writer_generation FROM"
+                + " qwen_managed_session_journal_head WHERE tenant_id = ? AND"
+                + " session_id = ?", Long.class, tenant, session);
+        inTransaction(transactions, () -> new ManagedSessionStore(jdbc)
+                .sealWriter(tenant, session,
+                        "extension-writer-token-0123456789",
+                        new SealWriterRequest("mysql-journal-workspace",
+                                "writer-extension", generation)));
+        assertThat(inTransaction(transactions,
+                () -> agents.completeOperation(tenant, session,
+                        operation.operationId(), "worker",
+                        operation.claimGeneration(), true))).isTrue();
+        assertThat(jdbc.queryForObject("SELECT state FROM"
+                + " qwen_managed_session_journal_head WHERE tenant_id = ? AND"
+                + " session_id = ?", String.class, tenant, session))
+                .isEqualTo("DELETED");
+        assertThat(count(jdbc, "qwen_managed_session_extension_record",
+                tenant, session)).isEqualTo(1);
+        List<String> events = jdbc.queryForList("SELECT event_type FROM"
+                        + " managed_agent_event WHERE tenant_id = ? AND"
+                        + " session_id = ? ORDER BY sequence_id",
+                String.class, tenant, session);
+        assertThat(events).endsWith("session.deleted")
+                .doesNotContain("task.updated");
     }
 
     @Test
     @Order(9)
-    void journalsNothingWhenTheDeletionCommitsMidCommit() throws Exception {
+    void serializesDeletionBehindTheRecordCommit() throws Exception {
         DriverManagerDataSource dataSource = dataSource();
         Flyway.configure().dataSource(dataSource)
                 .locations("classpath:db/migration").load().migrate();
@@ -848,8 +886,8 @@ class ManagedAgentMySqlIT {
         assertThat(count(jdbc, "qwen_managed_session_task_journal", tenant,
                 session)).isEqualTo(1);
         // A second connection holds the record row, so the next commit
-        // blocks at its UPDATE: after its first consistent read took the
-        // snapshot, and before the deletion guard runs.
+        // blocks at its UPDATE while retaining the placement guard that
+        // deletion admission also needs.
         try (java.sql.Connection holder = dataSource.getConnection()) {
             holder.setAutoCommit(false);
             try (var lock = holder.prepareStatement("SELECT record_key FROM"
@@ -883,19 +921,36 @@ class ManagedAgentMySqlIT {
                 assertThat(System.nanoTime()).isLessThan(deadline);
                 Thread.sleep(50);
             }
-            // The deletion begins and commits while the record commit waits
-            // behind its snapshot.
-            agents.beginOperation(tenant, session, OperationKind.DELETE,
-                    "sha256:" + "e".repeat(64), "delete-mid", "digest-mid");
+            CompletableFuture<Object> deletion = CompletableFuture.supplyAsync(
+                    () -> inTransaction(transactions,
+                            () -> agents.beginOperation(tenant, session,
+                                    OperationKind.DELETE,
+                                    "sha256:" + "e".repeat(64), "delete-mid",
+                                    "digest-mid")));
+            String admissionBlocked = "SELECT COUNT(*) FROM"
+                    + " information_schema.PROCESSLIST WHERE DB = DATABASE()"
+                    + " AND COMMAND = 'Query' AND TIME >= 1 AND INFO LIKE"
+                    + " 'INSERT INTO qwen_runtime_placement_guard%'";
+            while (jdbc.queryForObject(admissionBlocked, Integer.class) == 0) {
+                assertThat(deletion).as("deletion admission must wait for"
+                        + " the record commit's placement guard").isNotDone();
+                assertThat(commit).isNotDone();
+                assertThat(System.nanoTime()).isLessThan(deadline);
+                Thread.sleep(50);
+            }
+            assertThat(deletion).isNotDone();
             holder.commit();
             commit.get(30, TimeUnit.SECONDS);
+            deletion.get(30, TimeUnit.SECONDS);
         }
         assertThat(jdbc.queryForObject("SELECT revision FROM"
                         + " qwen_managed_session_extension_record WHERE"
                         + " tenant_id = ? AND session_id = ?", Long.class,
                 tenant, session)).isEqualTo(2L);
         assertThat(count(jdbc, "qwen_managed_session_task_journal", tenant,
-                session)).isEqualTo(1);
+                session)).isEqualTo(2);
+        assertThat(agents.requireSession(tenant, session).status())
+                .isEqualTo("DELETING");
     }
 
     @Test

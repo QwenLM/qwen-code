@@ -96,7 +96,8 @@ public class ManagedAgentService {
 
     private boolean supportsClose(SessionRecord session) {
         return session.workspace() == null || store.workspaceFilesEnabled()
-                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose();
+                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose()
+                && harness.supportsLifecycle();
     }
 
     private boolean hasActions(SessionRecord session) {
@@ -604,7 +605,7 @@ public class ManagedAgentService {
                         true,
                         session.workspace() == null,
                         true,
-                        hasActions(session), supportsClose(session), retention, retention, retention),
+                        hasActions(session), supportsClose(session), retention, retention, supportsDelete(session, retention)),
                 publicWorkspace(session));
     }
 
@@ -673,7 +674,12 @@ public class ManagedAgentService {
                 // Stage H records its Session store holds (H0c).
                 new WebShellSessionCapabilities(true, hasArtifacts(session),
                         hasActions(session), maySubmit, supportsClose(session),
-                        retention, retention, retention));
+                        retention, retention, supportsDelete(session, retention)));
+    }
+
+    private boolean supportsDelete(SessionRecord session, boolean retention) {
+        return retention || session.workspace() != null && store.workspaceFilesEnabled()
+                && runtimeWarmer != null && runtimeWarmer.supportsWorkspaceClose() && harness.supportsLifecycle();
     }
 
     private static WebShellWorkspace webShellWorkspace(SessionRecord session) {

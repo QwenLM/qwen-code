@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { summarizeReplay } from './replay-summary.js';
 import {
+  createAgentRecordTranscriptUpdate,
   createTranscriptReplayMachine,
   createTranscriptToolCallResultUpdate,
   MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE,
@@ -256,6 +257,122 @@ describe('createTranscriptReplayMachine', () => {
       'assistant-1:0',
       'assistant-1:2',
     ]);
+  });
+
+  it('replays an agent_message record as an authored assistant message', () => {
+    const payload = {
+      displayText: 'Fixed the parser.',
+      author: { agentId: 'agent-1', name: 'claude-B', color: '#f80' },
+      runId: 'run-7',
+      status: 'completed',
+      totalTokens: 1200,
+    };
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('agent-rec-1', 'user', {
+        subtype: 'agent_message',
+        message: {
+          role: 'user',
+          parts: [{ text: '<agent_message from="claude-B">…' }],
+        },
+        systemPayload: payload,
+      }),
+    );
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'Fixed the parser.' },
+      _meta: {
+        source: 'agent_message',
+        qwenDiscreteMessage: true,
+        qwenAgentMessage: {
+          kind: 'agent_message',
+          author: { agentId: 'agent-1', name: 'claude-B', color: '#f80' },
+          runId: 'run-7',
+          status: 'completed',
+          totalTokens: 1200,
+        },
+        qwenTranscript: {
+          segmentId: 'agent:run-7',
+          sourceRecordIds: ['agent-rec-1'],
+        },
+      },
+    });
+    // Live emission uses the same helper, so it equals the replay.
+    expect(
+      createAgentRecordTranscriptUpdate({
+        recordId: 'agent-rec-1',
+        subtype: 'agent_message',
+        payload,
+        timestamp: '2026-07-14T00:00:00.000Z',
+      }),
+    ).toEqual(projected[0]);
+  });
+
+  it('keeps the squad a member reply answered for on its author', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('agent-rec-2', 'user', {
+        subtype: 'agent_message',
+        message: {
+          role: 'user',
+          parts: [{ text: '<agent_message from="alice">…' }],
+        },
+        systemPayload: {
+          displayText: 'Fixed in auth.ts.',
+          author: {
+            agentId: 'ag_alice',
+            name: 'alice',
+            memberSquadName: 'crew',
+          },
+          runId: 'run-8',
+          status: 'completed',
+        },
+      }),
+    );
+    const meta = projected[0]?._meta as
+      | { qwenAgentMessage?: { author?: Record<string, unknown> } }
+      | undefined;
+    expect(meta?.qwenAgentMessage?.author).toEqual({
+      agentId: 'ag_alice',
+      name: 'alice',
+      memberSquadName: 'crew',
+    });
+  });
+
+  it('replays an agent_mention record as a user message, not the envelope', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('mention-rec-1', 'user', {
+        subtype: 'agent_mention',
+        message: {
+          role: 'user',
+          parts: [{ text: '<agent_mention to="claude-B">…' }],
+        },
+        systemPayload: {
+          displayText: '@claude-B look at this',
+          mentionedAgentIds: ['agent-1'],
+        },
+      }),
+    );
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: '@claude-B look at this' },
+      _meta: {
+        source: 'agent_mention',
+        qwenAgentMessage: {
+          kind: 'agent_mention',
+          mentionedAgentIds: ['agent-1'],
+        },
+        qwenTranscript: {
+          segmentId: 'mention:mention-rec-1',
+          sourceRecordIds: ['mention-rec-1'],
+        },
+      },
+    });
   });
 
   it('keeps raw function responses out of the safe result preview', () => {

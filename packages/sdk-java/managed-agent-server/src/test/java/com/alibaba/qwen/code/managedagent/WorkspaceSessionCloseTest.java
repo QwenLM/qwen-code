@@ -5,13 +5,19 @@ import static org.awaitility.Awaitility.await;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
+import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.SealWriterRequest;
+import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -63,7 +69,7 @@ class WorkspaceSessionCloseTest {
         await().untilAsserted(() -> assertThat(runtime.fenced).containsKey(session));
         assertThat(store.requireSession(tenant, session).status()).isEqualTo("CLOSING");
         assertThatThrownBy(() -> journal.acquireWriter(tenant, session, "a".repeat(43),
-                new AcquireWriterRequest("ws", "writer", 10_000L))).hasMessageContaining("closing");
+                new AcquireWriterRequest("ws", "writer", 10_000L))).isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("managed_session_lifecycle_active"));
         mvc.perform(post("/api/agent/web-shell/v1/sessions/close").header(TenantContextFilter.HEADER, tenant)
                 .principal(actor(tenant, "owner")).contentType(MediaType.APPLICATION_JSON)
                 .content("{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"close\"}"))
@@ -197,6 +203,15 @@ class WorkspaceSessionCloseTest {
 
     @TestConfiguration
     static class Configuration {
+        @Bean RuntimeBindingRepository lifecycleBindings(javax.sql.DataSource source) {
+            return new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        }
+        @Bean @Primary HarnessConnector uninitializedHarness() {
+            return new UnavailableHarnessConnector() {
+                public boolean supportsLifecycle() { return true; }
+                public void detachLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {}
+            };
+        }
         @Bean @Primary CloseRuntime closeRuntime() { return new CloseRuntime(); }
         @Bean @Primary ManagedAgentStore closeStore(JdbcTemplate jdbc, ObjectMapper mapper,
                 com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry registry) {
@@ -213,8 +228,9 @@ class WorkspaceSessionCloseTest {
         public boolean supportsWorkspaceClose() { return true; }
         public CompletionStage<Void> warm(String id) { return CompletableFuture.completedFuture(null); }
         public CompletionStage<Void> drain(String id) { return CompletableFuture.completedFuture(null); }
-        public void requestWorkspaceClose(String tenant, String id) { fenced.put(id, tenant); }
+        public void requestWorkspaceClose(String tenant, String id) { throw new AssertionError("Unexpected legacy close"); }
         public CompletionStage<Void> closeWorkspace(String tenant, String id) {
+            fenced.put(id, tenant);
             return results.computeIfAbsent(id, ignored -> CompletableFuture.completedFuture(null));
         }
     }

@@ -504,12 +504,12 @@ jobs:
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     runs-on: 'ubuntu-latest'
-    # The step ceilings (25 + 8×10 + 12 = 117 — the Verify step's 25
+    # The step ceilings (25 + 9×10 + 12 = 127 — the Verify step's 25
     # sits above its failsafe fork timeout) plus ~10 minutes for the
     # uncapped setup steps (Checkout..Install MySQL binaries, the report
-    # checks) need ~127; 130 keeps a thin margin, and each arm buys its
+    # checks) need ~137; 140 keeps a thin margin, and each arm buys its
     # own 10 instead of sharing an envelope.
-    timeout-minutes: 130
+    timeout-minutes: 140
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -553,6 +553,12 @@ jobs:
           # These steps only stage jars; the SpotBugs gate lives on the
           # `clean verify` invocations (pinned by scripts/tests/spotbugs-gate.test.js).
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests -Dspotbugs.skip=true install
+      # The drivers' proxy header filter only shows up in the gates below as
+      # an intermittent socket-reuse failure, so pin it directly first.
+      - name: 'Check Hosted proxy header relay'
+        run: |-
+          cd integration-tests
+          npx vitest run helpers/hosted-relay-headers.test.ts
       - name: 'Verify Hosted Java, Spring and MySQL processes'
         # Must outlive the hosted-harness-mysql failsafe fork timeout (900 s)
         # plus the wrapped compile/surefire/spotbugs/checkstyle work: a step
@@ -602,6 +608,10 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-continuation-failover
+      - name: 'Run long-answer persistence E2E'
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-big-output
       - name: 'Run Harness-restart session failover E2E'
         timeout-minutes: 10
         run: >-
