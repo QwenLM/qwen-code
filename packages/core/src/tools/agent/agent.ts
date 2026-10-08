@@ -4777,10 +4777,25 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
         const stopHookWarning = await runFramed();
         const terminateMode = subagent.getTerminateMode();
+        // Kept apart from `finalText`: the framing returns below decide their
+        // header off the agent's own model-visible text, not off text the
+        // stop-hook loop appended. A run that produced nothing but a cap
+        // warning would otherwise announce 'Partial result follows:' and hand
+        // the parent a framework sentence it can quote as the subagent's
+        // finding — the false positive `resultSummaryPresent` avoids by reading
+        // the raw text (#13597).
+        const modelVisibleText = toModelVisibleSubagentResult(
+          subagent.getFinalText(),
+          terminateMode,
+        );
         const finalText = appendStopHookBlockingCapWarning(
-          toModelVisibleSubagentResult(subagent.getFinalText(), terminateMode),
+          modelVisibleText,
           stopHookWarning,
         );
+        // The warning still has to reach llmContent. It rides ahead of
+        // `wtSuffix` so the framing returns keep the order they had when it was
+        // baked into the body, and the budget trim never cuts into it.
+        const stopHookSuffix = stopHookWarning ? `\n\n${stopHookWarning}` : '';
         const wtSuffix =
           (await cleanupAfterExecution()) +
           (subagentConfig.executor !== undefined ? EXTERNAL_USAGE_NOTICE : '');
@@ -4799,8 +4814,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             llmContent: composeIncompleteResult(
               reason,
               'Output captured before the failure follows:',
-              finalText,
-              wtSuffix,
+              modelVisibleText,
+              stopHookSuffix + wtSuffix,
             ),
             returnDisplay: this.currentDisplay!,
           };
@@ -4858,17 +4873,19 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         return {
           llmContent: [
             {
-              // Compose off `finalText`, not `visibleFinalText`: that
-              // placeholder was written for the GOAL return above, so announcing
-              // 'Partial result follows:' in front of it promises agent output
-              // and then hands over a framework string the parent can quote as
-              // the subagent's finding. The ERROR branch above omits the section
-              // on the same empty input; do the same here.
+              // Compose off `modelVisibleText` — not `visibleFinalText`, and
+              // not `finalText`. The first is a placeholder written for the GOAL
+              // return above; the second can be nothing but the stop-hook cap
+              // warning. Announcing 'Partial result follows:' in front of either
+              // promises agent output and then hands over a framework string the
+              // parent can quote as the subagent's finding. The warning still
+              // reaches the parent, via the suffix. The ERROR branch above omits
+              // the section on the same empty input; do the same here.
               text: composeIncompleteResult(
                 reason,
                 'Partial result follows:',
-                finalText,
-                wtSuffix,
+                modelVisibleText,
+                stopHookSuffix + wtSuffix,
               ),
             },
           ],

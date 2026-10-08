@@ -3914,6 +3914,48 @@ describe('AgentTool', () => {
       );
     });
 
+    it('omits the partial-result header when the cap warning is the only text', async () => {
+      // A run that produced no model-visible text of its own (tool-only turns)
+      // and then hit the blocking cap reaches the framing return with nothing
+      // but framework text. Announcing 'Partial result follows:' in front of it
+      // hands the parent a sentence it can quote as the subagent's finding, so
+      // the header has to be decided off the agent's own text before the
+      // warning is appended — the warning itself must still arrive (#13597).
+      vi.mocked(config.getStopHookBlockingCap).mockReturnValue(2);
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockResolvedValue(
+        stopOutput('Keep working'),
+      );
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.MAX_TURNS,
+      );
+      const text = textOf(await runFg());
+      expect(text).toContain(
+        'SubagentStop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+      );
+      expect(text).not.toContain('Partial result follows:');
+    });
+
+    it('omits the captured-output header on ERROR when the cap warning is the only text', async () => {
+      // Same shape on the ERROR return, which shares the `finalText` local: a
+      // non-throwing ERROR still runs the hook loop, so its 'Output captured
+      // before the failure follows:' header can also front pure framework text.
+      vi.mocked(config.getStopHookBlockingCap).mockReturnValue(2);
+      vi.mocked(mockHookSystem.fireSubagentStopEvent).mockResolvedValue(
+        stopOutput('Keep working'),
+      );
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.ERROR,
+      );
+      vi.mocked(mockAgent.getLastError).mockReturnValue('subagent exploded');
+      const text = textOf(await runFg());
+      expect(text).toContain(
+        'SubagentStop hook blocked continuation 2 consecutive times; overriding and ending the turn.',
+      );
+      expect(text).not.toContain('Output captured before the failure follows:');
+    });
+
     it('should allow stop when SubagentStop hook fails', async () => {
       vi.mocked(mockHookSystem.fireSubagentStopEvent).mockRejectedValue(
         new Error('Stop hook failed'),
