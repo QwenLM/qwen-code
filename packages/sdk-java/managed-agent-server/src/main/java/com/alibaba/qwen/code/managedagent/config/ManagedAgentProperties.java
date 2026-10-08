@@ -81,6 +81,14 @@ public class ManagedAgentProperties {
         if (timeout < 1000 || timeout > 86400000) {
             throw new IllegalStateException("Hosted approval timeout must be between 1s and 24h");
         }
+        String mode = harness.getApprovalMode();
+        if (harness.isWorkspaceShellEnabled()
+                && (!harness.isWorkspaceFilesEnabled()
+                        || mode == null
+                        || !Set.of("default", "auto-edit").contains(mode.toLowerCase(Locale.ROOT)))) {
+            throw new IllegalStateException("Hosted Workspace Shell requires Workspace files"
+                    + " and default or auto-edit approval mode");
+        }
         if (harness.isWorkspaceFilesEnabled()
                 && (!harness.isEnabled()
                         || !sessionStore.isEnabled()
@@ -88,10 +96,10 @@ public class ManagedAgentProperties {
                         || !"local-process".equals(runtimeBroker.getProvisioner())
                         || !"session".equals(runtimeBroker.getIsolationClass())
                         || runtimeBroker.getWorkspaceMounts().isEmpty()
+                        || mode == null
                         || !Set.of("yolo", "default", "auto-edit")
                                 .contains(
-                                        harness.getApprovalMode()
-                                                .toLowerCase(Locale.ROOT)))) {
+                                        mode.toLowerCase(Locale.ROOT)))) {
             throw new IllegalStateException(
                     "Hosted Workspace files require"
                             + " a supported Harness, Session Store and Session-isolated"
@@ -102,6 +110,7 @@ public class ManagedAgentProperties {
     public static class Harness {
         private boolean enabled;
         private boolean workspaceFilesEnabled;
+        private boolean workspaceShellEnabled;
         private String baseUrl = "http://127.0.0.1:4170";
         private String token = "";
         private String capabilityDigest = "";
@@ -142,6 +151,14 @@ public class ManagedAgentProperties {
 
         public void setWorkspaceFilesEnabled(boolean workspaceFilesEnabled) {
             this.workspaceFilesEnabled = workspaceFilesEnabled;
+        }
+
+        public boolean isWorkspaceShellEnabled() {
+            return workspaceShellEnabled;
+        }
+
+        public void setWorkspaceShellEnabled(boolean workspaceShellEnabled) {
+            this.workspaceShellEnabled = workspaceShellEnabled;
         }
 
         public String getBaseUrl() {

@@ -132,7 +132,8 @@ class QwenHostedHarnessConnectorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/2"})
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/2",
+            "hosted-workspace-shell/1", "hosted-workspace-shell/2"})
     void boundCreateConflictLoadsOriginalWorkspaceAndProfileAndRechecksCachedGrant(String profile) {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
@@ -148,7 +149,7 @@ class QwenHostedHarnessConnectorTest {
         SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
                 null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
                 new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
-                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "yolo", profile);
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "default", profile);
         when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
         WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
         ManagedAgentProperties properties = properties();
@@ -198,6 +199,50 @@ class QwenHostedHarnessConnectorTest {
         properties.getHarness().setWorkspaceFilesEnabled(false);
         assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
                 .hasMessage("Hosted Workspace files are disabled");
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" ", "yolo", "plan", "unknown"})
+    void invalidPersistedShellApprovalRefusesEveryAttachmentPathEvenAfterCaching(String mode) {
+        var sessions = sessions();
+        SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
+                null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant-a", "selected-workspace", 1, "storage", ".",
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "default", "hosted-workspace-shell/1");
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        var properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        var actions = mock(ManagedActionStore.class);
+        var client = mock(HostedHarnessClient.class);
+        var capabilities = mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        var attached = mock(HarnessSessionRef.class);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("default");
+        when(client.loadSession(any())).thenReturn(attached);
+        var connector = new QwenHostedHarnessConnector(properties, sessions, mock(WorkspaceExecutionStore.class), actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn(mode);
+        for (boolean exists : new boolean[] {false, true}) {
+            assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, exists))
+                    .hasMessageContaining("requires persisted default or auto-edit");
+        }
+        verifyNoInteractions(client);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        connector.createOrLoad("tenant-a", SESSION_ID, true);
+        clearInvocations(client);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn(mode);
+        assertThatThrownBy(() -> connector.createOrLoad("tenant-a", SESSION_ID, true))
+                .hasMessageContaining("requires persisted default or auto-edit");
+        assertThatThrownBy(() -> connector.recoverManagedRuntime("tenant-a", SESSION_ID, false))
+                .hasMessageContaining("requires persisted default or auto-edit");
+        assertThatThrownBy(() -> connector.recoverManagedCancellation("tenant-a", SESSION_ID))
+                .hasMessageContaining("requires persisted default or auto-edit");
+        assertThatThrownBy(() -> connector.cancel("tenant-a", SESSION_ID))
+                .hasMessageContaining("requires persisted default or auto-edit");
+        verifyNoInteractions(client);
     }
 
     @ParameterizedTest

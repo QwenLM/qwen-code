@@ -105,6 +105,7 @@ public class ManagedAgentStore implements AgentStateStore {
     private final ManagedWorkspaceRegistry workspaces;
     private final String agentRevision;
     private final boolean workspaceFilesEnabled;
+    private final boolean workspaceShellEnabled;
     private final List<ManagedAgentProperties.RuntimeBroker.WorkspaceMount> workspaceMounts;
     private final RowMapper<SessionRecord> sessionMapper = (result, row) ->
             new SessionRecord(result.getString("tenant_id"),
@@ -230,6 +231,7 @@ public class ManagedAgentStore implements AgentStateStore {
         this.workspaces = workspaces;
         this.agentRevision = properties.getAgentRevision();
         this.workspaceFilesEnabled = properties.getHarness().isWorkspaceFilesEnabled();
+        this.workspaceShellEnabled = properties.getHarness().isWorkspaceShellEnabled();
         this.workspaceMounts = properties.getRuntimeBroker().getWorkspaceMounts();
         if (agentRevision == null || agentRevision.isBlank()
                 || agentRevision.length() > 128) {
@@ -419,7 +421,8 @@ public class ManagedAgentStore implements AgentStateStore {
                 workspace == null ? null : workspace.getContextRevision(),
                 resolved == null ? null : resolved.configRef(),
                 resolved == null ? null : resolved.policyRef(),
-                workspace == null ? null : "hosted-workspace-files/1",
+                workspace == null ? null : workspaceShellEnabled
+                        ? WorkspaceToolProfiles.SHELL : WorkspaceToolProfiles.FILES,
                 actorId == null ? null
                         : ManagedWorkspaceRegistry.actorKey(tenantId,
                                 actorId));
@@ -483,6 +486,9 @@ public class ManagedAgentStore implements AgentStateStore {
         if (existing.isPresent()) {
             return replayCommand(tenantId, operation, idempotencyKey,
                     requestDigest);
+        }
+        if (WorkspaceToolProfiles.isShell(session.toolProfile()) && !workspaceShellEnabled) {
+            throw workspaceExecutionUnavailable();
         }
         if (session.workspace() != null) {
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
@@ -697,6 +703,11 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Override
+    public boolean workspaceShellEnabled() {
+        return workspaceShellEnabled;
+    }
+
+    @Override
     @Transactional
     public OperationAdmission beginWorkspaceClose(String tenantId, String sessionId, String actorId,
             String actorDigest, String key, String digest, boolean supported) {
@@ -770,6 +781,9 @@ public class ManagedAgentStore implements AgentStateStore {
             }
             return new SessionMutation(session, true);
         }
+        if (WorkspaceToolProfiles.isShell(session.toolProfile())) {
+            throw workspaceExecutionUnavailable();
+        }
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());
         requireSessionStatus(session.status(), "ARCHIVED");
         requireNoOpenOperation(tenantId, sessionId);
@@ -819,6 +833,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         "The idempotency key was reused with different content.");
             }
             return new OperationAdmission(existing.get(), true);
+        }
+        if (WorkspaceToolProfiles.isShell(session.toolProfile())) {
+            throw workspaceExecutionUnavailable();
         }
         if (session.workspace() != null) {
             WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, session.workspace().getStorageId());

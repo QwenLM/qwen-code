@@ -70,10 +70,12 @@ class WorkspaceSessionRetentionTest {
     @Autowired PlatformTransactionManager transactions;
     @Autowired SessionLifecycleCoordinator lifecycle;
 
-    @Test
-    void archivesAndUnarchivesAcrossSurfacesWithoutReopeningOrRepeatingCleanup() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"hosted-workspace-files/1", "hosted-workspace-files/2"})
+    void archivesAndUnarchivesAcrossSurfacesWithoutReopeningOrRepeatingCleanup(String profile) throws Exception {
         String tenant = tenant();
         String session = closed(tenant, true);
+        jdbc.update("UPDATE managed_agent_session SET tool_profile = ? WHERE tenant_id = ? AND session_id = ?", profile, tenant, session);
         request(get(PUBLIC + session), tenant, "owner", null)
                 .andExpect(jsonPath("$.capabilities.session_archive").value(true))
                 .andExpect(jsonPath("$.capabilities.session_unarchive").value(true))

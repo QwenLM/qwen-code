@@ -80,6 +80,93 @@ class ManagedWorkspaceAdmissionTest {
     @Autowired
     private PlatformTransactionManager transactionManager;
 
+    @ParameterizedTest
+    @ValueSource(strings = {"default", "auto-edit"})
+    void shellFlagChangesPreserveCreationAndTurnReplayButBlockFreshWorkAndLifecycle(String mode) {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-shell", "storage-shell", WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-shell", "actor-a", true);
+        grant(tenant, "ws-shell", "reader", false);
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setWorkspaceShellEnabled(true);
+        properties.getHarness().setApprovalMode(mode);
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, "storage-shell", "/workspace")));
+        ManagedAgentStore enabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {
+        }, registry, properties);
+        var transaction = new TransactionTemplate(transactionManager);
+        String digest = "sha256:" + "a".repeat(64);
+        var selection = new WorkspaceSelection("ws-shell", ".");
+        String session = transaction.execute(status -> enabled.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create-shell", digest, "qwen-code", null, null, List.of(), null, selection)).sessionId();
+        var initial = transaction.execute(status -> enabled.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "initial-shell", digest, "qwen-code", null, null,
+                List.of(Map.of("type", "text", "text", "initial")), digest, selection));
+        for (String id : List.of(session, initial.sessionId())) {
+            assertThat(enabled.requireSession(tenant, id).toolProfile()).isEqualTo("hosted-workspace-shell/1");
+            assertThat(enabled.requireSession(tenant, id).approvalMode()).isEqualTo(mode);
+        }
+        UnavailableHarnessConnector harness = new UnavailableHarnessConnector() {
+            @Override
+            public boolean isAvailable() { return true; }
+            @Override
+            public boolean isWorkspaceFilesAvailable() { return true; }
+        };
+        var coordinator = mock(com.alibaba.qwen.code.managedagent.service.HarnessCoordinator.class);
+        ManagedAgentService admitted = new ManagedAgentService(enabled, new RequestDigests(), coordinator, harness, registry);
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+        var original = transaction.execute(status -> admitted.submitTurn(tenant, "actor-a", "original", session, input));
+        assertThat(admitted.getPublicSession(tenant, "actor-a", session).capabilities().foregroundShell()).isTrue();
+        properties.getHarness().setWorkspaceShellEnabled(false);
+        ManagedAgentStore disabled = new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {
+        }, registry, properties);
+        ManagedAgentService stopped = new ManagedAgentService(disabled, new RequestDigests(), coordinator, harness, registry);
+        assertThat(transaction.execute(status -> disabled.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create-shell", digest, "qwen-code", null, null, List.of(), null, selection)).sessionId())
+                .isEqualTo(session);
+        assertThat(transaction.execute(status -> stopped.submitTurn(tenant, "actor-a", "original", session, input)).turnId())
+                .isEqualTo(original.turnId());
+        assertThatThrownBy(() -> transaction.execute(status -> stopped.submitTurn(tenant, "actor-a", "fresh", session, input)))
+                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("workspace_unavailable"));
+        assertThatThrownBy(() -> stopped.submitTurn(tenant, "reader", "original", session, input))
+                .isInstanceOf(ApiException.class);
+        var capabilities = stopped.getWebShellSession(tenant, "actor-a", session).capabilities();
+        assertThat(capabilities.workspaceTurns()).isTrue();
+        assertThat(capabilities.foregroundShell()).isFalse();
+        assertThat(capabilities.sessionClose()).isFalse();
+        assertThat(capabilities.sessionDelete()).isFalse();
+        var cancellation = transaction.execute(status -> stopped.cancelTurn(tenant, "actor-a", "cancel", session, original.turnId()));
+        assertThat(cancellation).isNotNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_turn WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session)).isEqualTo(1);
+        for (String state : List.of("ACTIVE", "CLOSED", "ARCHIVED")) {
+            jdbc.update("UPDATE managed_agent_session SET status = ? WHERE tenant_id = ? AND session_id = ?", state, tenant, session);
+            for (var kind : List.of(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind.CLOSE,
+                    com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind.ARCHIVE,
+                    com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind.DELETE)) {
+                assertThatThrownBy(() -> transaction.execute(status -> disabled.beginWorkspaceLifecycle(tenant, session,
+                        kind, "actor-a", digest, state + kind, digest, true, 1))).isInstanceOf(ApiException.class);
+            }
+            assertThatThrownBy(() -> transaction.execute(status -> disabled.unarchiveWorkspaceSession(tenant, session,
+                    "actor-a", "unarchive-" + state, digest))).isInstanceOf(ApiException.class);
+            var read = stopped.getPublicSession(tenant, "actor-a", session).capabilities();
+            assertThat(read.sessionArchive()).isFalse();
+            assertThat(read.sessionUnarchive()).isFalse();
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command WHERE tenant_id = ? AND session_id = ?",
+                Integer.class, tenant, session)).isEqualTo(2);
+        String files = transaction.execute(status -> disabled.insertWorkspaceSessionCommand(tenant,
+                "actor-a", "create-files", digest, "qwen-code", null, null, List.of(), null, selection)).sessionId();
+        assertThat(disabled.requireSession(tenant, files).toolProfile()).isEqualTo("hosted-workspace-files/1");
+        assertThat(stopped.getPublicSession(tenant, "actor-a", files).capabilities().foregroundShell()).isNull();
+        var fileTurn = transaction.execute(status -> stopped.submitTurn(tenant, "actor-a", "files-turn", files, input));
+        assertThat(fileTurn).isNotNull();
+    }
+
     @Test
     void migrationFenceBlocksNewTurnsAndMutationsButPreservesReceipts() throws Exception {
         String tenant = "tenant-" + UUID.randomUUID();

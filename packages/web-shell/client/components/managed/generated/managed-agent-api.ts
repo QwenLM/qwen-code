@@ -556,6 +556,11 @@ export interface components {
              * @default false
              */
             sessionDelete?: boolean;
+            /**
+             * @description Present only for persisted Shell Sessions. True when deployment admission and mandatory approval are available; false disables fresh sending while accepted cancellation and approval remain supported. Missing means no foreground Shell capability.
+             * @default false
+             */
+            foregroundShell?: boolean;
         };
         WebShellSessionPage: {
             data: components["schemas"]["WebShellSession"][];

@@ -455,6 +455,29 @@ Harness or Runtime Broker credentials.
 
 ## Embedded Runtime Broker
 
+### Public foreground Shell admission
+
+`QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED=true` selects the server-owned
+`hosted-workspace-shell/1` profile for newly created Workspace Sessions on both
+public REST and WebShell, including empty creation. It defaults to false and
+requires Workspace files plus its deployment prerequisites. Set
+`QWEN_MANAGED_AGENT_APPROVAL_MODE` to `default` or `auto-edit`; Shell opt-in with
+`yolo`, an empty or unknown mode fails startup. Shell always asks permission.
+Existing Sessions keep their stored profile and approval mode.
+
+Disabling only the Shell flag refuses fresh Turns on existing Shell Sessions
+with `409 workspace_unavailable`; original idempotency keys, accepted approval
+responses, cancellation and settlement remain supported. Files Sessions retain
+their existing behavior. Shell Session responses add `foreground_shell` (public)
+or `foregroundShell` (WebShell); false disables sending without disabling
+accepted cancellation. Files and unbound Sessions omit the field.
+
+Shell close/archive/unarchive/delete remain unavailable, and are refused before
+creating a lifecycle operation. Existing G3 recovery refusals remain in force;
+no dispatched Shell is automatically replayed. Keep the opt-in off until the
+deployment passes #12904, #13010 and public FG6f physical failure gates. See
+[the complete design](../../../docs/design/public-hosted-shell-admission.md).
+
 ### Initial Workspace file Turn (G0)
 
 `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED=true` opts in to an initial

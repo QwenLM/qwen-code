@@ -95,6 +95,10 @@ public interface AgentStateStore {
         return false;
     }
 
+    default boolean workspaceShellEnabled() {
+        return false;
+    }
+
     default OperationAdmission beginWorkspaceClose(String tenantId, String sessionId,
             String actorId, String actorDigest, String key, String digest, boolean supported) {
         throw new UnsupportedOperationException("Workspace close is unavailable");

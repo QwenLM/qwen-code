@@ -16,6 +16,7 @@ import com.alibaba.qwen.code.daemon.SessionCreationOutcomeUnknownException;
 import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.store.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
@@ -219,6 +220,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private Attachment doCreateOrLoad(String tenantId, String sessionId,
             boolean loadExisting, boolean passiveManagedRuntimeRecovery) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
+        requireShellApproval(session);
         if (session.workspace() != null) {
             if (!isWorkspaceFilesAvailable()) {
                 throw new IllegalStateException("Hosted Workspace files are disabled");
@@ -495,6 +497,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private HarnessSessionRef attachment(String tenantId, String sessionId, boolean newWork) {
+        requireShellApproval(sessions.requireSession(tenantId, sessionId));
         AttachmentKey key = new AttachmentKey(tenantId, sessionId);
         HarnessSessionRef attachment = attachments.get(key);
         if (attachment == null) {
@@ -510,6 +513,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             return;
         }
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
+        requireShellApproval(session);
         if (session.workspace() != null) {
             if (!isWorkspaceFilesAvailable()) {
                 throw new IllegalStateException("Hosted Workspace files are disabled");
@@ -639,6 +643,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private SessionRecord requireRecoverableSession(String tenantId,
             String sessionId, boolean cancellation) {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
+        requireShellApproval(session);
         if (session.workspace() != null) {
             if (!isWorkspaceFilesAvailable()) {
                 throw new IllegalStateException("Hosted Workspace files are disabled");
@@ -691,6 +696,14 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                         : null,
                 cached.getHarnessLastEventId(),
                 cached.getHarnessEventEpoch());
+    }
+
+    private void requireShellApproval(SessionRecord session) {
+        if (session.workspace() != null && WorkspaceToolProfiles.isShell(session.toolProfile())
+                && (actions == null || !WorkspaceToolProfiles.requiresApproval(
+                        actions.approvalMode(session.tenantId(), session.sessionId())))) {
+            throw new IllegalStateException("Hosted Workspace Shell requires persisted default or auto-edit approval mode");
+        }
     }
 
     private static String toolProfile(SessionRecord session) {

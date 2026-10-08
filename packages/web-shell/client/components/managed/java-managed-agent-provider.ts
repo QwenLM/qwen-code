@@ -352,7 +352,10 @@ function toSessionSummary(
     capabilities: {
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
       canSend:
-        sessionActive && !active && (!session.workspace || workspaceTurns),
+        sessionActive &&
+        !active &&
+        (!session.workspace ||
+          (workspaceTurns && session.capabilities?.foregroundShell !== false)),
       canCancel:
         sessionActive &&
         active &&
