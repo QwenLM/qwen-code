@@ -316,8 +316,14 @@ export class ManagedEmailAdapter {
       });
       this.registeredGeneration = state.generation;
     } catch (error) {
+      const status = (error as { status?: unknown }).status;
+      // A 4xx verdict is a refusal, not an unanswered answer: say so
+      // before throwing, or the log claims the exact opposite of a
+      // deterministic 409.
       this.log(
-        `Managed email register of generation ${state.generation} did not answer; the next poll re-drives it: ${String(error)}`,
+        typeof status === 'number' && status >= 400 && status < 500
+          ? `Managed email register of generation ${state.generation} was refused (${status}): ${String(error)}`
+          : `Managed email register of generation ${state.generation} did not answer; the next poll re-drives it: ${String(error)}`,
       );
       throw error;
     }

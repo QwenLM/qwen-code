@@ -1929,9 +1929,16 @@ describe('Hosted Harness no-tool session', () => {
     expect(
       vi.mocked(HostedWorkspaceBroker.prototype.status),
     ).toHaveBeenCalled();
-    expect(
-      vi.mocked(HostedWorkspaceBroker.prototype.release),
-    ).toHaveBeenCalled();
+    // The handback lands after the durable markers the waitFor blocks on
+    // above; asserting it synchronously races them (round 6's flaky probe).
+    await vi.waitFor(
+      async () => {
+        expect(
+          vi.mocked(HostedWorkspaceBroker.prototype.release),
+        ).toHaveBeenCalled();
+      },
+      { timeout: 10_000 },
+    );
     expect(
       (
         await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(

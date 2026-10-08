@@ -176,7 +176,10 @@ function append(source: Buffer): number {
   return uid;
 }
 
-function make(extra: Record<string, unknown> = {}): ManagedEmailAdapter {
+function make(
+  extra: Record<string, unknown> = {},
+  depsExtra: Record<string, unknown> = {},
+): ManagedEmailAdapter {
   const adapter = new ManagedEmailAdapter({
     name: 'mail',
     cwd: directory,
@@ -209,6 +212,7 @@ function make(extra: Record<string, unknown> = {}): ManagedEmailAdapter {
       },
       now: () => 1_750_000_000_000,
       log: () => {},
+      ...depsExtra,
     },
   });
   adapters.push(adapter);
@@ -851,6 +855,22 @@ describe('managed email outbound', () => {
     };
     await adapter.disconnect();
     expect(lifecycle).toEqual(['remote', 'lock']);
+  });
+
+  it('logs a deterministically refused register as refused, not unanswered', async () => {
+    // A 409 register threw "did not answer … re-drives" before the exit:
+    // the wording claims the verdict is latency, which it is not (R6).
+    const lines: string[] = [];
+    plane.register = async () => {
+      throw Object.assign(new Error('HTTP 409'), {
+        status: 409,
+        code: 'channel_ownership_conflict',
+      });
+    };
+    const adapter = make({}, { log: (line: string) => lines.push(line) });
+    await expect(adapter.connect()).rejects.toThrow('HTTP 409');
+    expect(lines.some((line) => line.includes('was refused (409)'))).toBe(true);
+    expect(lines.some((line) => line.includes('did not answer'))).toBe(false);
   });
 
   it('replays the persisted provider receipt on restart instead of settling unknown', async () => {
