@@ -18,6 +18,8 @@ import {
 
 interface ChatContextHeaderProps {
   content: ReactNode;
+  /** Names where the chat runs, beside the actions; hidden when omitted. */
+  location?: ReactNode;
   /**
    * Workspace shown as the header's leading icon. Omitting it means the shell
    * has no workspace: the icon stays the same folder and only its tooltip says
@@ -43,6 +45,7 @@ interface ChatContextHeaderProps {
 
 export function ChatContextHeader({
   content,
+  location,
   workspaceName,
   workspacePath,
   environmentOpen,
@@ -95,6 +98,11 @@ export function ChatContextHeader({
         </Tooltip>
       </TooltipProvider>
       <div className={styles.content}>{content}</div>
+      {location && (
+        <div className="mr-2 flex min-w-0 max-w-[40%] shrink items-center">
+          {location}
+        </div>
+      )}
       <div className={styles.actions}>
         {onOpenLocalControlSettings && (
           <LocalControlQrButton
