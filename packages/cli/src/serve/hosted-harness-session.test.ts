@@ -11006,6 +11006,96 @@ describe('Hosted Harness Runtime turn takeover', () => {
     });
   });
 
+  it.each(['removed', 'closing'] as const)(
+    'refuses a resident inapplicable redrive when its attachment is %s',
+    async (attachmentState) => {
+      await parkToolTurn();
+      vi.mocked(HostedWorkspaceBroker.prototype.execute).mockResolvedValue({
+        executionStatus: 'success',
+        responseParts: [{ text: 'written' }],
+      } as never);
+      const { server, loaded } = await loadReplacement();
+      expect(loaded.status).toBe(200);
+      const originalAuthorization =
+        LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
+      let resumeAuthorization!: () => void;
+      const authorizationGate = new Promise<void>((resolve) => {
+        resumeAuthorization = resolve;
+      });
+      let authorizationCalls = 0;
+      let authorizationHeld = false;
+      vi.spyOn(
+        LocalManagedSessionAuthority.prototype,
+        'harnessRunAuthorization',
+      ).mockImplementation(async function (this: LocalManagedSessionAuthority) {
+        const authorization = await originalAuthorization.call(this);
+        if (authorization.status !== 'runnable') return authorization;
+        if (++authorizationCalls === 2) {
+          authorizationHeld = true;
+          await authorizationGate;
+        }
+        return {
+          ...authorization,
+          checkpoint: {
+            ...authorization.checkpoint,
+            continuation: {
+              ...authorization.checkpoint.continuation,
+              phase: 'await_approval',
+            },
+            approval: { state: 'requested' },
+          },
+        } as never;
+      });
+      let resumeClose!: () => void;
+      const closeGate = new Promise<void>((resolve) => {
+        resumeClose = resolve;
+      });
+      let closeHeld = false;
+      if (attachmentState === 'closing') {
+        vi.mocked(
+          HostedWorkspaceBroker.prototype.release,
+        ).mockImplementationOnce(async () => {
+          closeHeld = true;
+          await closeGate;
+        });
+      }
+      const load = replacementHeaders(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      )
+        .send({
+          managedSessionStore: storeFor(BOOT_ID_2),
+          toolProfile: FILE_PROFILE,
+          driveRuntimeRecovery: true,
+        })
+        .then((response) => response);
+      let close: Promise<supertest.Response> | undefined;
+      try {
+        await vi.waitFor(() => expect(authorizationHeld).toBe(true));
+        close = replacementHeaders(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        ).then((response) => response);
+        if (attachmentState === 'closing') {
+          await vi.waitFor(() => expect(closeHeld).toBe(true));
+        } else {
+          expect((await close).status).toBe(204);
+        }
+        resumeAuthorization();
+        const refused = await load;
+        expect(refused.status).toBe(attachmentState === 'removed' ? 404 : 409);
+        expect(refused.body.code).toBe(
+          attachmentState === 'removed'
+            ? 'hosted_session_not_found'
+            : 'hosted_session_closing',
+        );
+      } finally {
+        resumeAuthorization();
+        resumeClose();
+        await Promise.allSettled(close ? [load, close] : [load]);
+      }
+      expect((await close!).status).toBe(204);
+    },
+  );
+
   it('refuses a cancellation takeover attachment deleted during settlement', async () => {
     const { server } = await parkToolTurn(true);
     const authorize =
