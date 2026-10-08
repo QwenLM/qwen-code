@@ -1256,6 +1256,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
           placeholderColor={C.dim}
           textColor={C.text}
           cursorColor={C.accent}
+          // The library default asks the terminal for a blinking block. ink
+          // never emits DECSCUSR, and a caret the terminal blinks away reads as
+          // a missing caret, so pin the shape and keep it steady.
+          cursorStyle={{ style: 'block', blinking: false }}
           selectionBg={C.selectionBg}
           selectionFg={C.selectionFg}
           wrapMode="char"

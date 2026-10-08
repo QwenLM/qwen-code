@@ -1966,3 +1966,17 @@ describe('OpenTuiInputPrompt @ completion categories (#143)', () => {
     expect(container.textContent).not.toContain('hit-file.txt');
   });
 });
+
+describe('OpenTuiInputPrompt caret', () => {
+  beforeEach(() => {
+    mocks.state.textareaProps = null;
+  });
+
+  it('pins a steady block caret instead of the library blinking default', () => {
+    render(<OpenTuiInputPrompt onSubmit={() => {}} userMessages={[]} />);
+    expect(mocks.state.textareaProps?.['cursorStyle']).toEqual({
+      style: 'block',
+      blinking: false,
+    });
+  });
+});
