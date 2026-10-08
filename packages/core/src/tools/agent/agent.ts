@@ -1431,25 +1431,33 @@ const EARLIER_OUTPUT_OMITTED = '[earlier output omitted]\n';
  * `truncateKeep: 'tail'` deletes the head of an oversized result outright, and
  * the head is exactly the reason line, so a long partial would hand the parent
  * the #13597 shape again. Trim the text from its front instead, keeping its
- * tail as the scheduler would.
+ * tail the way the scheduler's own tail-keep truncation would.
+ *
+ * Fitting the budget here does mean the scheduler never spills this result:
+ * its `truncateToolOutput` returns early once `content.length <= threshold`, so
+ * no `outputFile` is written for the trimmed head. `transcriptPath` is what
+ * keeps that head reachable — without it the marker would be the only trace.
  */
 function composeIncompleteResult(
   reason: string,
   header: string,
   text: string,
   suffix: string,
+  transcriptPath?: string,
 ): string {
   if (!text) return reason + suffix;
   const prefix = `${reason}\n\n${header}\n\n`;
   const room = AGENT_TOOL_MAX_OUTPUT_CHARS - prefix.length - suffix.length;
-  const body =
-    text.length <= room
-      ? text
-      : EARLIER_OUTPUT_OMITTED +
-        text.slice(
-          text.length - Math.max(0, room - EARLIER_OUTPUT_OMITTED.length),
-        );
-  return prefix + body + suffix;
+  if (text.length <= room) return prefix + text + suffix;
+  const marker = transcriptPath
+    ? `${EARLIER_OUTPUT_OMITTED}The full output is in ${transcriptPath}. Read it with the ${ToolNames.READ_FILE} tool.\n`
+    : EARLIER_OUTPUT_OMITTED;
+  return (
+    prefix +
+    marker +
+    text.slice(text.length - Math.max(0, room - marker.length)) +
+    suffix
+  );
 }
 
 /**
@@ -4816,6 +4824,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               'Output captured before the failure follows:',
               modelVisibleText,
               stopHookSuffix + wtSuffix,
+              fgJsonlPath,
             ),
             returnDisplay: this.currentDisplay!,
           };
@@ -4847,6 +4856,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   'Partial result follows:',
                   finalText,
                   wtSuffix,
+                  fgJsonlPath,
                 ),
               },
             ],
@@ -4886,6 +4896,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 'Partial result follows:',
                 modelVisibleText,
                 stopHookSuffix + wtSuffix,
+                fgJsonlPath,
               ),
             },
           ],

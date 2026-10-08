@@ -5744,6 +5744,13 @@ describe('AgentTool', () => {
         expect(text.length).toBeLessThanOrEqual(agentTool.maxOutputChars);
         expect(text.startsWith(expectedHead)).toBe(true);
         expectText(text, ['[earlier output omitted]', 'TAIL-MARKER']);
+        // A composition that already fits maxOutputChars never reaches
+        // `truncateAndSaveToFile`, so nothing spills the trimmed head to disk
+        // and no `outputFile` names it. The marker has to carry the one
+        // recovery path that is left: the subagent's JSONL transcript.
+        expect(text).toMatch(
+          /subagents[\\/]test-session-id[\\/]agent-[A-Za-z0-9_-]+\.jsonl/,
+        );
       },
     );
 
