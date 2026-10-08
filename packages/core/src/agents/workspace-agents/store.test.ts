@@ -65,6 +65,8 @@ import {
   issueAgentHostEnrollment,
   enrollAgentHost,
   heartbeatAgentHost,
+  normalizeHostProgramProbes,
+  readAgentHosts,
   isAgentAddressable,
   updateWorkspaceAgents,
   withAgentStoreTransaction,
@@ -78,6 +80,8 @@ import {
   AGENTS_SCHEMA_VERSION,
   DEFAULT_THREAD_TOKEN_BUDGET,
   MAX_THREAD_RUNS,
+  hostAvailablePrograms,
+  hostOffersProgram,
   type WorkspaceAgent,
   type Thread,
   type ThreadEvent,
@@ -675,6 +679,60 @@ describe('agent versioned store', () => {
         providers: ['Qwen Code ACP'],
       }),
     ).rejects.toThrow('Invalid or expired Agent Host enrollment token.');
+  });
+
+  it('stores a v2 Host program probe and forgets it when the Host drops back to v1', async () => {
+    const first = await issueAgentHostEnrollment(PROJECT_ROOT);
+    const enrolled = await enrollAgentHost(PROJECT_ROOT, {
+      token: first.token,
+      name: 'mac',
+      workspaceCwd: '/worker',
+      providers: ['qwen'],
+    });
+    const programs = [
+      { program: 'qwen' as const, available: true },
+      { program: 'claude' as const, available: true, version: '2.1.0' },
+      { program: 'codex' as const, available: false, reason: 'missing' },
+    ];
+
+    const host = await heartbeatAgentHost(
+      PROJECT_ROOT,
+      enrolled.host.id,
+      enrolled.secret,
+      { workspaceCwd: '/worker', providers: [], programs, protocol: 2 },
+    );
+    expect(host).toMatchObject({ programs, protocol: 2, providers: [] });
+    expect(hostAvailablePrograms(host!)).toEqual(['qwen', 'claude']);
+    expect((await readAgentHosts(PROJECT_ROOT))[0]).toMatchObject({
+      programs,
+      protocol: 2,
+    });
+
+    const v1 = await heartbeatAgentHost(
+      PROJECT_ROOT,
+      enrolled.host.id,
+      enrolled.secret,
+      { workspaceCwd: '/worker', providers: ['Qwen Code ACP'] },
+    );
+    expect(v1?.programs).toBeUndefined();
+    expect(v1?.protocol).toBeUndefined();
+    expect(hostOffersProgram(v1!, 'qwen')).toBe(true);
+    expect(hostOffersProgram(v1!, 'claude')).toBe(false);
+  });
+
+  it('normalizes a Host program probe and rejects unknown programs', () => {
+    expect(
+      normalizeHostProgramProbes([
+        { program: 'claude', available: false },
+        { program: 'claude', available: true, version: 'v'.repeat(500) },
+      ]),
+    ).toEqual([
+      { program: 'claude', available: true, version: 'v'.repeat(200) },
+    ]);
+    expect(
+      normalizeHostProgramProbes([{ program: 'vim', available: true }]),
+    ).toBeUndefined();
+    expect(normalizeHostProgramProbes('qwen')).toBeUndefined();
   });
 
   it('keeps a fresh enrollment token when the saved credential is invalid', async () => {
