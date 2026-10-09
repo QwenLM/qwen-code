@@ -54,6 +54,7 @@ import {
   type ManagedSessionDurableRef,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import type { ManagedHarnessHandle } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
+import type { HarnessAgentWaitRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import {
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
   ManagedSessionStoreHttpError,
@@ -417,6 +418,63 @@ export class HostedToolRecoveryRequiredError extends Error {
       { cause },
     );
   }
+}
+
+/**
+ * The abandoned-wait answer's exact text, shared by every arm that can
+ * write it: the live wait's abort branch, the continue route's resume arm
+ * and the cancel route's settlement. One durable story of one situation.
+ */
+export const HOSTED_AGENT_WAIT_ABANDONED_TEXT =
+  'The turn was cancelled before the child agent finished; the child keeps running and its committed result is retained.';
+
+/**
+ * The never-admitted answer for a sibling call the dead batch never
+ * reached: the live admission's own wording, also what the continue
+ * route's gap fill writes for the parked round's remaining agent calls.
+ */
+export const HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT =
+  'The turn was cancelled before this child agent was admitted.';
+
+/**
+ * Which of this Turn's tool_result parts are already durable — the
+ * exactly-once predicate every replayed fold rides (never the process):
+ * keyed on the functionResponse id, so a replay skips only the commit
+ * while the replays-safe marks still run.
+ */
+export async function journaledToolResultIds(
+  session: ManagedSession,
+  promptId: string,
+): Promise<Set<string>> {
+  return new Set(
+    (await session.sink.project())
+      .filter(
+        (entry) =>
+          entry.daemonPromptId === promptId && entry.type === 'tool_result',
+      )
+      .flatMap((entry) => entry.message?.parts ?? [])
+      .map((part) => part.functionResponse?.id)
+      .filter((id): id is string => typeof id === 'string'),
+  );
+}
+
+/**
+ * The one derivation of the child run id shared by the launcher, the
+ * recovery probe and the gap fill: a wake turn's turn id already embeds
+ * its commissioning child run (`<childRunId>:accept:notify`), so using it
+ * verbatim as the launch base grows the next run id one suffix per hop
+ * and walks a chained helper into the 128-char lineage bound by the
+ * third hop. The replay-stable key needs determinism, not readability:
+ * collapse the wake turn's identity to a bounded digest of its own
+ * stable name — never grow across hops, always 17 chars plus the call
+ * id. Calls keyed verbatim for every other turn — re-driven batches and
+ * resumed Hook results both name the same run again and again.
+ */
+export function hostedChildRunIdFor(promptId: string, callId: string): string {
+  const promptKey = promptId.endsWith(':accept:notify')
+    ? createHash('sha256').update(promptId).digest('hex').slice(0, 16)
+    : promptId;
+  return `${promptKey}:${callId}`;
 }
 
 export class HostedWorkspaceToolTurn {
@@ -2056,7 +2114,7 @@ export class HostedWorkspaceToolTurn {
         }
         if (request.agent) {
           responses.push(
-            ...(await this.acceptChildAgent(request, model, signal)),
+            ...(await this.acceptChildAgent(request, model, signal, messageId)),
           );
           continue;
         }
@@ -2615,10 +2673,7 @@ export class HostedWorkspaceToolTurn {
    * and resumed Hook results both name the same run again and again.
    */
   private childRunIdFor(callId: string): string {
-    const promptKey = this.promptId.endsWith(':accept:notify')
-      ? createHash('sha256').update(this.promptId).digest('hex').slice(0, 16)
-      : this.promptId;
-    return `${promptKey}:${callId}`;
+    return hostedChildRunIdFor(this.promptId, callId);
   }
 
   /**
@@ -2635,6 +2690,7 @@ export class HostedWorkspaceToolTurn {
     },
     model: string,
     signal: AbortSignal,
+    modelMessageId: string,
   ): Promise<Part[]> {
     // A cancelled turn admits nothing further: keeping an already-launched
     // child running is documented, but a batch that re-enters here after
@@ -2645,7 +2701,7 @@ export class HostedWorkspaceToolTurn {
         request.call.name,
         request.call.callId,
         [],
-        'The turn was cancelled before this child agent was admitted.',
+        HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
       );
       await this.commit('tool_result', skipped, model);
       return skipped;
@@ -2703,7 +2759,7 @@ export class HostedWorkspaceToolTurn {
         return refused;
       }
     }
-    await children.admit({
+    const launched = await children.admit({
       childRunId,
       ownerScopeId: key.sessionId,
       rootSessionId: key.sessionId,
@@ -2716,6 +2772,25 @@ export class HostedWorkspaceToolTurn {
     });
     this.agentDispatched.add(request.call.callId);
     if (!request.agentBackground) {
+      // The durable wait (#13708): a restarted Harness re-enters it from
+      // the checkpoint instead of declining the parked Turn. The intent
+      // ledger above is the evidence; this checkpoint is what recovery
+      // classifies, committed immediately after the admission so the
+      // uncovered window is two statements (the same shape the Runtime
+      // batch accepts between its intents and commitAwaitRuntimeBatch).
+      await this.harness.commitAwaitAgent(
+        [
+          {
+            childRunId,
+            functionCallId: request.call.callId,
+            toolName: request.call.name,
+            modelMessageId,
+            consumed: false,
+          },
+        ],
+        { turnId: this.promptId, promptId: this.promptId },
+        { attemptId: modelMessageId, routeRef: launched.inputRef },
+      );
       return await this.awaitChildToolResult(
         children,
         request,
@@ -2741,6 +2816,36 @@ export class HostedWorkspaceToolTurn {
   }
 
   /**
+   * The recovered arm of the foreground wait (#13708): re-enter the poll
+   * the dead owner's awaitChildToolResult ran, for every run the checkpoint
+   * still owes. Exactly-once rides the journaled set, never the process:
+   * a replayed resume meets the run's already-committed tool_result and
+   * skips only the commit — the acceptance and the resolve are themselves
+   * replay-safe and must still run so the wait leaves its consumed marker.
+   */
+  async resumeAgentWaitRuns(
+    runs: readonly HarnessAgentWaitRun[],
+    model: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const children = this.childAgents;
+    if (children === undefined)
+      throw new Error('Recovered agent wait has no child agent funnel.');
+    const journaled = await journaledToolResultIds(this.session, this.promptId);
+    for (const run of runs) {
+      if (run.consumed) continue;
+      await this.awaitChildToolResult(
+        children,
+        { call: { name: run.toolName, callId: run.functionCallId } },
+        run.childRunId,
+        model,
+        signal,
+        journaled,
+      );
+    }
+  }
+
+  /**
    * The foreground arm: the call's answer always re-derives from the
    * committed chain — a crashed Session resumes into this same wait and
    * answers from the settled run and its acceptance, never from relay
@@ -2748,10 +2853,11 @@ export class HostedWorkspaceToolTurn {
    */
   private async awaitChildToolResult(
     children: HostedChildAgentSession,
-    request: { call: ToolCallRequestInfo },
+    request: { call: Pick<ToolCallRequestInfo, 'name' | 'callId'> },
     childRunId: string,
     model: string,
     signal: AbortSignal,
+    journaled?: ReadonlySet<string>,
   ): Promise<Part[]> {
     for (;;) {
       if (signal.aborted) {
@@ -2759,9 +2865,11 @@ export class HostedWorkspaceToolTurn {
           request.call.name,
           request.call.callId,
           [],
-          'The turn was cancelled before the child agent finished; the child keeps running and its committed result is retained.',
+          HOSTED_AGENT_WAIT_ABANDONED_TEXT,
         );
-        await this.commit('tool_result', abandoned, model);
+        if (!journaled?.has(request.call.callId))
+          await this.commit('tool_result', abandoned, model);
+        await this.harness.resolveAwaitAgent(childRunId);
         return abandoned;
       }
       const record = children.record(childRunId);
@@ -2773,7 +2881,9 @@ export class HostedWorkspaceToolTurn {
             [],
             `Child agent run ${record.run.state.replace(/^\w/, (letter) => letter.toLowerCase())} (${record.stopReason ?? 'unknown'}).`,
           );
-          await this.commit('tool_result', ended, model);
+          if (!journaled?.has(request.call.callId))
+            await this.commit('tool_result', ended, model);
+          await this.harness.resolveAwaitAgent(childRunId);
           return ended;
         }
         const acceptance = children.acceptance(childRunId);
@@ -2812,9 +2922,11 @@ export class HostedWorkspaceToolTurn {
           }
           if (fitted === undefined)
             throw new Error('Child agent result cannot be recorded.');
-          await this.commit('tool_result', fitted, model);
+          if (!journaled?.has(request.call.callId))
+            await this.commit('tool_result', fitted, model);
           await children.markAccepted(childRunId);
           this.childConsumption(childRunId);
+          await this.harness.resolveAwaitAgent(childRunId);
           return fitted;
         }
       }

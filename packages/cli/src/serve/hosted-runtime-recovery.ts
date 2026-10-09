@@ -12,7 +12,10 @@ import type {
   HarnessRunAuthorization,
   HarnessToolItem,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
-import { HARNESS_MODEL_START_PHASES } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
+import {
+  HARNESS_MODEL_START_PHASES,
+  harnessCheckpointIsAgentWait,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import {
   assertManagedSessionStableId,
   type ManagedSessionDurableRef,
@@ -24,7 +27,10 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import type { ManagedToolResultPayload } from './managed-runtime-tool-executor.js';
-import { truncateHostedGlobResponse } from './hosted-workspace-tool-turn.js';
+import {
+  journaledToolResultIds,
+  truncateHostedGlobResponse,
+} from './hosted-workspace-tool-turn.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   HostedWorkspaceBroker,
@@ -44,7 +50,7 @@ export interface HostedRuntimeRecoveryExecution {
 }
 
 export interface HostedRuntimeRecoveryReport {
-  phase: 'await_runtime' | 'results_ready';
+  phase: 'await_runtime' | 'await_agent' | 'results_ready';
   checkpointId: string;
   activationId: string;
   executions: HostedRuntimeRecoveryExecution[];
@@ -262,17 +268,7 @@ export async function settleParkedTurnCancelled(input: {
   const harness = createManagedHarnessHandle(input.session);
   // A write-then-resolve crash window must not journal a tool_result twice
   // when the cancel retries: collect what is already durable.
-  const journaled = new Set(
-    (await input.session.sink.project())
-      .filter(
-        (entry) =>
-          entry.daemonPromptId === input.promptId &&
-          entry.type === 'tool_result',
-      )
-      .flatMap((entry) => entry.message?.parts ?? [])
-      .map((part) => part.functionResponse?.id)
-      .filter((id): id is string => typeof id === 'string'),
-  );
+  const journaled = await journaledToolResultIds(input.session, input.promptId);
   for (const item of pending) {
     const parts = convertToFunctionErrorResponse(
       item.toolName,
@@ -496,6 +492,37 @@ export async function recoverHostedRuntimeTurn(input: {
         );
       }
     }
+    // The agent wait (#13708): the fold belongs to the continue/cancel
+    // route's resume arm — it owns the Turn's commit channel, the inline
+    // fit predicate and the consumption set — so recovery only classifies.
+    // The report mirrors the wait runs exactly: a consumed run reads as
+    // settled, an outstanding one as still executing. Their outcomes are
+    // always known: the relay ledger keeps a waiting child observable, and
+    // the coordinator's unknown-outcome gate must never fire on this phase.
+    // No Runtime lease is owed: the wait holds no Broker binding. The
+    // carried group on model_output_committed is the same wait a breath
+    // past its last fold (every run consumed, a model round owed) — a
+    // crash there must never fall back to model_start, or the settled
+    // work would be read as a false terminal.
+    if (harnessCheckpointIsAgentWait(checkpoint)) {
+      return recovered({
+        promptId,
+        acquiredRuntime: false,
+        report: {
+          phase: 'await_agent',
+          checkpointId: checkpoint.identity.checkpointId,
+          activationId: session.activation.activationId,
+          executions: (checkpoint.agentWait?.runs ?? []).map((run) => ({
+            functionCallId: run.functionCallId,
+            toolName: run.toolName,
+            executionCallId: run.childRunId,
+            runtimeSessionId: promptId,
+            outcome: 'known',
+            status: { state: run.consumed ? 'settled' : 'executing' },
+          })),
+        },
+      });
+    }
     // Settled in the checkpoint while the journal never landed the settle:
     // it completed and must never be recorded as a failure — answering
     // inapplicable hands the load route the one case it DOES project
@@ -582,17 +609,7 @@ export async function recoverHostedRuntimeTurn(input: {
         const harness = createManagedHarnessHandle(session);
         // A write-then-resolve crash window must not journal a tool_result
         // twice when the recovery retries: collect what is already durable.
-        const journaled = new Set(
-          (await session.sink.project())
-            .filter(
-              (entry) =>
-                entry.daemonPromptId === promptId &&
-                entry.type === 'tool_result',
-            )
-            .flatMap((entry) => entry.message?.parts ?? [])
-            .map((part) => part.functionResponse?.id)
-            .filter((id): id is string => typeof id === 'string'),
-        );
+        const journaled = await journaledToolResultIds(session, promptId);
         const intents = new Map(
           session.authority
             .eventsInSequenceRange(1, session.authority.committedSequence)
