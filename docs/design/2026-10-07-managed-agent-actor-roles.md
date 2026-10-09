@@ -224,9 +224,9 @@ certifies the same facts at admission, whichever arm — recorded owner or
 Workspace operator — admitted the caller. The failure is the family's
 domain `409 workspace_unavailable`, answered synchronously at admission
 rather than as an asynchronously failing Turn. A cwd operation's settlement re-verifies both the recorded
-creator-keyed facts and the V54-persisted initiator's role, so an
+creator-keyed facts and the V55-persisted initiator's role, so an
 operation fails with `workspace_unavailable` when either actor is
-demoted after admission (pre-V54 rows carry no initiator key and settle
+demoted after admission (pre-V55 rows carry no initiator key and settle
 on the creator-keyed facts alone); that is the W2 design's "grant
 revoked after admission still blocks the change", now covering the
 widened admission.

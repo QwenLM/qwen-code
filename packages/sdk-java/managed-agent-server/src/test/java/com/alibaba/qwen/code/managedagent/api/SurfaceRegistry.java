@@ -567,9 +567,11 @@ public enum SurfaceRegistry {
         /**
          * The lifecycle family (close, archive, unarchive and delete —
          * D4's OWNER): the Session's recorded owner ({@code
-         * owner_actor_key}, falling back to the creator records for
-         * Sessions written before V40) with a current read grant is
-         * admitted. Below the Workspace read grant: {@code 404
+         * owner_actor_key}; with no owner record the create-command
+         * actor — H4b child Sessions register the cascade's synthetic
+         * one — and a command-less pre-V40 row its creator) with a
+         * current read grant is admitted. Below the Workspace read
+         * grant: {@code 404
          * session_not_found}; a readable non-owner gets {@code 403
          * session_operation_forbidden}. The legacy arm is tenant-wide.
          */

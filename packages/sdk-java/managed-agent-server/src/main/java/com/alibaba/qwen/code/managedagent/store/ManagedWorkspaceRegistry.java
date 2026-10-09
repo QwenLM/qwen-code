@@ -53,8 +53,12 @@ public class ManagedWorkspaceRegistry {
 
     /**
      * Whether the actor owns this Session: the recorded owner
-     * ({@code owner_actor_key}), falling back to the creator records for
-     * Sessions written before V40.
+     * ({@code owner_actor_key}) when one is set — the handover's own
+     * keying, so a transferred Session answers only its new owner. With
+     * no owner record, a Session with a create command answers its
+     * command actor — H4b child Sessions register the parent cascade's
+     * synthetic one — and only a command-less, pre-V40 row falls back to
+     * {@code creator_actor_key}.
      */
     public boolean isSessionOwner(String tenantId, String actorId,
             String sessionId) {
@@ -67,18 +71,26 @@ public class ManagedWorkspaceRegistry {
         } catch (IllegalArgumentException error) {
             return false;
         }
-        List<byte[]> owners = jdbc.query(
-                "SELECT owner_actor_key, creator_actor_key FROM"
-                        + " managed_agent_session WHERE tenant_id = ?"
-                        + " AND session_id = ?",
-                (result, row) -> {
-                    byte[] owner = result.getBytes(1);
-                    return owner != null ? owner : result.getBytes(2);
-                }, tenantId, sessionId);
+        List<byte[]> owners = jdbc.queryForList(
+                "SELECT owner_actor_key FROM managed_agent_session WHERE"
+                        + " tenant_id = ? AND session_id = ?",
+                byte[].class, tenantId, sessionId);
         if (!owners.isEmpty() && owners.getFirst() != null) {
             return java.util.Arrays.equals(owners.getFirst(), key);
         }
-        return createdSession(tenantId, actorId, sessionId);
+        List<String> commands = jdbc.queryForList(
+                "SELECT 1 FROM managed_workspace_create_command WHERE"
+                        + " tenant_id = ? AND session_id = ? LIMIT 1",
+                String.class, tenantId, sessionId);
+        if (!commands.isEmpty()) {
+            return createdSession(tenantId, actorId, sessionId);
+        }
+        List<byte[]> creators = jdbc.queryForList(
+                "SELECT creator_actor_key FROM managed_agent_session WHERE"
+                        + " tenant_id = ? AND session_id = ?",
+                byte[].class, tenantId, sessionId);
+        return !creators.isEmpty() && creators.getFirst() != null
+                && java.util.Arrays.equals(creators.getFirst(), key);
     }
 
     /**

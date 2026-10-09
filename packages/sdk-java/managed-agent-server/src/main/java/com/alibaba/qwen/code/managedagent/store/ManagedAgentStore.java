@@ -212,7 +212,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     result.getString("error_code"),
                     hasColumn(result, "lifecycle_protocol_version")
                             ? result.getInt("lifecycle_protocol_version") : 0,
-                    // NULL on a pre-V54 operation: those operations settle
+                    // NULL on a pre-V55 operation: those operations settle
                     // against the creator-keyed facts alone.
                     hasColumn(result, "actor_key")
                             ? result.getBytes("actor_key") : null);
@@ -1303,10 +1303,10 @@ public class ManagedAgentStore implements AgentStateStore {
                 owner, claimGeneration, now) == 1;
     }
 
-    // The initiator, persisted at V54 admission: settlement fails when the
+    // The initiator, persisted at V55 admission: settlement fails when the
     // operating actor no longer holds OPERATOR — revoking one in-flight
     // initiator stops only their own admitted change, as the W2 guard
-    // intends. A pre-V54 (NULL key) row settles on the creator-keyed facts
+    // intends. A pre-V55 (NULL key) row settles on the creator-keyed facts
     // alone. The vocabulary filter keeps an out-of-enum stored role (only
     // reachable by an out-of-band write past V53's CHECK) on the same
     // fail-closed workspace_unavailable verdict as a revocation, rather
