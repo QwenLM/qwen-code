@@ -214,6 +214,166 @@ describe('NativeLspService disk document synchronization', () => {
     },
   );
 
+  describe.each(['workspace/symbol', 'workspace/diagnostic'] as const)(
+    '%s result filtering',
+    (method) => {
+      let outside: string;
+      let outsideUri: string;
+
+      beforeEach(() => {
+        useTypescriptManager();
+        handle.warmedUp = true;
+        outside = `${directory}.ts`;
+        fs.writeFileSync(outside, 'outside');
+        outsideUri = pathToFileURL(outside).toString();
+      });
+
+      afterEach(() => {
+        fs.rmSync(outside, { force: true });
+      });
+
+      const response = (targets: string[]) =>
+        method === 'workspace/symbol'
+          ? targets.map((target, index) => ({
+              name: `fn${index}`,
+              location: { uri: target, range },
+            }))
+          : {
+              items: targets.map((target) => ({
+                uri: target,
+                items: [{ range, message: 'issue', severity: 1 }],
+              })),
+            };
+      const query = (limit = 20) =>
+        run<unknown[]>(
+          method === 'workspace/symbol'
+            ? service.workspaceSymbols('fn', limit)
+            : service.workspaceDiagnostics(undefined, limit),
+        );
+
+      it('resolves duplicate URIs once per response, not across requests', async () => {
+        connection.request.mockResolvedValue(
+          response(Array<string>(500).fill(outsideUri)),
+        );
+        const realpath = vi.spyOn(fs, 'realpathSync');
+        try {
+          expect(await query()).toEqual([]);
+          expect(realpath).toHaveBeenCalledExactlyOnceWith(outside);
+          expect(await query()).toEqual([]);
+          expect(realpath).toHaveBeenCalledTimes(2);
+          expect(logger.warn).not.toHaveBeenCalled();
+        } finally {
+          realpath.mockRestore();
+        }
+      });
+
+      it('rechecks a symlink retargeted outside on the next request', async () => {
+        const alias = path.join(directory, 'alias.ts');
+        fs.symlinkSync(file, alias);
+        const aliasUri = pathToFileURL(alias).toString();
+        connection.request.mockResolvedValue(response([aliasUri]));
+        expect(await query()).toHaveLength(1);
+        fs.unlinkSync(alias);
+        fs.symlinkSync(outside, alias);
+        expect(await query()).toEqual([]);
+      });
+
+      it('finishes an empty response exactly at the scan budget', async () => {
+        connection.request.mockResolvedValue(
+          response(Array<string>(1000).fill(outsideUri)),
+        );
+        expect(await query()).toEqual([]);
+      });
+
+      it('rejects a scan beyond budget instead of hiding a valid tail', async () => {
+        connection.request.mockResolvedValue(
+          response([...Array<string>(1000).fill(outsideUri), uri]),
+        );
+        const filter = vi.spyOn(
+          service as unknown as {
+            isCurrentWorkspaceDocument(target: string): boolean;
+          },
+          'isCurrentWorkspaceDocument',
+        );
+        await expect(query()).rejects.toThrow('scan limit (1000) exceeded');
+        expect(filter).toHaveBeenCalledTimes(1000);
+        expect(filter.mock.calls.map(([target]) => target)).not.toContain(uri);
+      });
+
+      it('rechecks the same URI in a later asynchronous server response', async () => {
+        const alias = path.join(directory, 'alias.ts');
+        fs.symlinkSync(outside, alias);
+        const aliasUri = pathToFileURL(alias).toString();
+        const second = createConnection();
+        useHandles([
+          ['test', handle],
+          ['second', { ...handle, connection: second }],
+        ]);
+        connection.request.mockResolvedValue(response([aliasUri]));
+        second.request.mockImplementation(async () => {
+          fs.unlinkSync(alias);
+          fs.symlinkSync(file, alias);
+          return response([aliasUri]);
+        });
+        const realpath = vi.spyOn(fs, 'realpathSync');
+        try {
+          expect(await query()).toHaveLength(1);
+          expect(
+            realpath.mock.calls.filter(([target]) => target === alias),
+          ).toHaveLength(2);
+        } finally {
+          realpath.mockRestore();
+        }
+      });
+
+      it('shares the scan budget across servers', async () => {
+        const second = createConnection();
+        useHandles([
+          ['test', handle],
+          ['second', { ...handle, connection: second }],
+        ]);
+        const rejected = response(Array<string>(600).fill(outsideUri));
+        connection.request.mockResolvedValue(rejected);
+        second.request.mockResolvedValue(rejected);
+        await expect(query()).rejects.toThrow('scan limit (1000) exceeded');
+        expect(second.request).toHaveBeenCalledOnce();
+      });
+
+      it('stops at the output limit before an oversized tail', async () => {
+        connection.request.mockResolvedValue(
+          response([uri, ...Array<string>(1001).fill(outsideUri)]),
+        );
+        expect(await query(1)).toHaveLength(1);
+      });
+
+      it('allows a requested output limit larger than the default scan budget', async () => {
+        connection.request.mockResolvedValue(
+          response(Array<string>(1001).fill(uri)),
+        );
+        expect(await query(1001)).toHaveLength(1001);
+      });
+
+      it('reports budget exhaustion through the tool, not a clean result', async () => {
+        connection.request.mockResolvedValue(
+          response([...Array<string>(1000).fill(outsideUri), uri]),
+        );
+        const result = await execute(lspTool(), {
+          operation:
+            method === 'workspace/symbol'
+              ? 'workspaceSymbol'
+              : 'workspaceDiagnostics',
+          query: 'fn',
+          limit: 20,
+        });
+        for (const content of [result.llmContent, result.returnDisplay]) {
+          expect(content).toContain('scan limit (1000) exceeded');
+          expect(content).not.toContain('No symbols found');
+          expect(content).not.toContain('No diagnostics found');
+        }
+      });
+    },
+  );
+
   it('continues workspace symbol requests after a usable warmup send fails', async () => {
     failNextSend();
     await run(service.workspaceSymbols('fn'));
@@ -1103,7 +1263,16 @@ describe('NativeLspService disk document synchronization', () => {
           const healthyUri = pathToFileURL(healthyFile).toString();
           connection.request.mockImplementation(async (requested) => {
             if (requested !== method) return [];
-            const targets = [extraUri, healthyUri];
+            const targets = [
+              extraUri,
+              'jdt://contents/Foo.class',
+              'untitled:buffer',
+              healthyUri,
+              healthyFile,
+              'file://[invalid',
+              'https://[invalid',
+              123,
+            ];
             return method === 'workspace/diagnostic'
               ? {
                   items: targets.map((target) => ({
@@ -1126,19 +1295,146 @@ describe('NativeLspService disk document synchronization', () => {
             results.map((result) =>
               'uri' in result ? result.uri : result.location.uri,
             ),
-          ).toEqual([healthyUri]);
+          ).toEqual([
+            'jdt://contents/Foo.class',
+            'untitled:buffer',
+            healthyUri,
+          ]);
         },
       );
 
-      it('does not revive hierarchy tokens after same-text scope restoration', async () => {
-        const [previous] = await prepare(extraUri);
-        workspace.removeDirectory(extra);
-        await workspaceDiagnostics();
-        workspace.addDirectory(extra);
-        const [current] = await prepare(extraUri);
+      it.each(
+        ([1, undefined, 0, { openClose: false, change: 0 }] as const).flatMap(
+          (sync) =>
+            (
+              [
+                'workspace',
+                'symbols',
+                'diagnostics',
+                'incomingCalls',
+                'outgoingCalls',
+              ] as const
+            ).map((operation) => ({ sync, operation })),
+        ),
+      )(
+        'does not revive hierarchy tokens after $operation scope loss with sync $sync',
+        async ({ sync, operation }) => {
+          handle.textDocumentSync = sync;
+          const [previous] = await prepare(extraUri);
+          workspace.removeDirectory(extra);
+          if (operation === 'workspace') {
+            connection.request.mockResolvedValueOnce({
+              items: [
+                {
+                  uri: extraUri,
+                  items: [{ range, message: 'revoked', severity: 1 }],
+                },
+              ],
+            });
+            expect(await workspaceDiagnostics()).toEqual([]);
+          } else if (operation === 'symbols') {
+            connection.request.mockResolvedValueOnce([
+              { name: 'fn', location: { uri: extraUri, range } },
+            ]);
+            expect(await run(service.workspaceSymbols('fn'))).toEqual([]);
+          } else if (operation === 'diagnostics') {
+            await expect(run(service.diagnostics(extraUri))).rejects.toThrow(
+              'outside the current workspace directories',
+            );
+          } else {
+            await expect(service[operation](previous!)).rejects.toThrow(AGAIN);
+          }
+          workspace.addDirectory(extra);
+          connection.request.mockClear();
+          await expect(service.incomingCalls(previous!)).rejects.toThrow(AGAIN);
+          expect(connection.request).not.toHaveBeenCalled();
+          const [current] = await prepare(extraUri);
 
-        expect(current!.documentRevision).not.toBe(previous!.documentRevision);
-        await expect(service.incomingCalls(previous!)).rejects.toThrow(AGAIN);
+          expect(current!.documentRevision).not.toBe(
+            previous!.documentRevision,
+          );
+          await expect(service.incomingCalls(previous!)).rejects.toThrow(AGAIN);
+          await expect(run(service.incomingCalls(current!))).resolves.toEqual(
+            [],
+          );
+        },
+      );
+
+      it.each([1, undefined, 0, { openClose: false, change: 0 }] as const)(
+        'invalidates revoked hierarchy items on every owner with sync %j',
+        async (sync) => {
+          handle.textDocumentSync = sync;
+          const second = createConnection();
+          useHandles([
+            ['test', handle],
+            ['second', { ...handle, connection: second }],
+          ]);
+          const [firstItem] = await run(
+            service.prepareCallHierarchy({ uri: extraUri, range }, 'test'),
+          );
+          const [secondItem] = await run(
+            service.prepareCallHierarchy({ uri: extraUri, range }, 'second'),
+          );
+          workspace.removeDirectory(extra);
+          connection.send.mockClear();
+          second.send.mockClear();
+          await expect(service.incomingCalls(firstItem!)).rejects.toThrow(
+            AGAIN,
+          );
+          expect(openedDocuments().get('test')?.has(extraUri) ?? false).toBe(
+            false,
+          );
+          expect(openedDocuments().get('second')?.has(extraUri) ?? false).toBe(
+            false,
+          );
+          expect(connection.send).not.toHaveBeenCalled();
+          expect(second.send).not.toHaveBeenCalled();
+          workspace.addDirectory(extra);
+          second.request.mockClear();
+          await expect(service.incomingCalls(secondItem!)).rejects.toThrow(
+            AGAIN,
+          );
+          expect(second.request).not.toHaveBeenCalled();
+          const [current] = await run(
+            service.prepareCallHierarchy({ uri: extraUri, range }, 'second'),
+          );
+          expect(current!.documentRevision).not.toBe(
+            secondItem!.documentRevision,
+          );
+          await expect(run(service.incomingCalls(current!))).resolves.toEqual(
+            [],
+          );
+          if (sync !== 1) expect(second.send).not.toHaveBeenCalled();
+        },
+      );
+
+      it('keeps unrelated disk hierarchy items valid after another URI is revoked', async () => {
+        handle.textDocumentSync = 0;
+        const healthyFile = path.join(primary, 'main.ts');
+        fs.writeFileSync(healthyFile, 'primary');
+        const healthyUri = pathToFileURL(healthyFile).toString();
+        const [revoked] = await prepare(extraUri);
+        const [healthy] = await prepare(healthyUri);
+        workspace.removeDirectory(extra);
+        await expect(service.incomingCalls(revoked!)).rejects.toThrow(AGAIN);
+        await expect(run(service.incomingCalls(healthy!))).resolves.toEqual([]);
+        workspace.addDirectory(extra);
+        await expect(run(service.outgoingCalls(healthy!))).resolves.toEqual([]);
+        expect(connection.send).not.toHaveBeenCalled();
+      });
+
+      it('rejects a pending disk hierarchy response after observed revocation and regrant', async () => {
+        handle.textDocumentSync = 0;
+        const [item] = await prepare(extraUri);
+        const respond = deferNextRequest();
+        const pending = caught(service.incomingCalls(item!));
+        await vi.runAllTimersAsync();
+        workspace.removeDirectory(extra);
+        await expect(service.outgoingCalls(item!)).rejects.toThrow(AGAIN);
+        workspace.addDirectory(extra);
+        respond([]);
+        await expect(pending).resolves.toMatchObject(againError());
+        expect(connection.send).not.toHaveBeenCalled();
       });
 
       it.each(['query', 'workspace'])(
@@ -1245,6 +1541,91 @@ describe('NativeLspService disk document synchronization', () => {
         );
       });
 
+      describe.each([
+        'definitions',
+        'references',
+        'hover',
+        'documentSymbols',
+        'implementations',
+        'prepareCallHierarchy',
+        'diagnostics',
+        'codeActions',
+      ] as const)('%s scope across awaits', (operation) => {
+        const query = () => {
+          if (operation === 'documentSymbols' || operation === 'diagnostics') {
+            return service[operation](extraUri);
+          }
+          if (operation === 'codeActions') {
+            return service.codeActions(extraUri, range, { diagnostics: [] });
+          }
+          return service[operation]({ uri: extraUri, range });
+        };
+        const refusal =
+          /current workspace directories|prepare call hierarchy again/;
+
+        it('refuses a query revoked during warmup without reading or requesting', async () => {
+          await run(service.diagnostics(extraUri));
+          connection.send.mockClear();
+          connection.request.mockClear();
+          const read = vi.spyOn(fs, 'readFileSync');
+          vi.spyOn(manager, 'warmupTypescriptServer').mockImplementation(
+            async () => {
+              workspace.removeDirectory(extra);
+              read.mockClear();
+            },
+          );
+          try {
+            await expect(run<unknown>(query())).rejects.toThrow(refusal);
+            expect(read).not.toHaveBeenCalled();
+            expect(connection.send).not.toHaveBeenCalled();
+            expect(connection.request).not.toHaveBeenCalled();
+            expect(openedDocuments().get('test')?.has(extraUri)).toBe(false);
+          } finally {
+            read.mockRestore();
+          }
+        });
+
+        it('refuses a query revoked during the didOpen indexing delay', async () => {
+          setTimeout(() => workspace.removeDirectory(extra), 1);
+          await expect(run<unknown>(query())).rejects.toThrow(refusal);
+          expect(connection.send).toHaveBeenCalledExactlyOnceWith(
+            didOpen('extra', 1, extraUri),
+          );
+          expect(connection.request).not.toHaveBeenCalled();
+          expect(openedDocuments().get('test')?.has(extraUri)).toBe(false);
+        });
+
+        it.each([false, true])(
+          'refuses a response revoked while the request awaits, peer fails %s',
+          async (fails) => {
+            connection.request.mockImplementation(async () => {
+              workspace.removeDirectory(extra);
+              if (fails) throw new Error('peer request failed');
+              return [];
+            });
+            await expect(run<unknown>(query())).rejects.toThrow(refusal);
+            expect(connection.request).toHaveBeenCalledTimes(1);
+            expect(openedDocuments().get('test')?.has(extraUri)).toBe(false);
+          },
+        );
+
+        if (
+          operation !== 'diagnostics' &&
+          operation !== 'codeActions' &&
+          operation !== 'prepareCallHierarchy'
+        ) {
+          it('does not retry a query after scope is revoked during retry delay', async () => {
+            connection.request.mockImplementation(async () => {
+              setTimeout(() => workspace.removeDirectory(extra), 1);
+              return [];
+            });
+            await expect(run<unknown>(query())).rejects.toThrow(refusal);
+            expect(connection.request).toHaveBeenCalledTimes(1);
+            expect(openedDocuments().get('test')?.has(extraUri)).toBe(false);
+          });
+        }
+      });
+
       it('rejects hierarchy preparation when scope is revoked during warmup', async () => {
         vi.spyOn(manager, 'warmupTypescriptServer').mockImplementation(
           async () => {
@@ -1298,10 +1679,11 @@ describe('NativeLspService disk document synchronization', () => {
         expect(
           (
             service as unknown as { replayUris: Map<string, Set<string>> }
-          ).replayUris
-            .get('test')
-            ?.has(extraUri),
-        ).toBeFalsy();
+          ).replayUris.get('test'),
+        ).toBeUndefined();
+        workspace.addDirectory(extra);
+        await workspaceDiagnostics();
+        expect(openedUris(replacement)).toEqual([primaryUri]);
       });
 
       it.each(['incomingCalls', 'outgoingCalls'] as const)(
@@ -3286,19 +3668,39 @@ describe('NativeLspService disk document synchronization', () => {
     },
   );
 
-  it.each(['hover', 'references', 'diagnostics'] as const)(
-    'rejects non-file URIs for %s without reading or notifying',
-    async (method) => {
+  it.each(
+    (
+      [
+        'hover',
+        'definitions',
+        'implementations',
+        'references',
+        'documentSymbols',
+        'prepareCallHierarchy',
+        'diagnostics',
+        'codeActions',
+      ] as const
+    ).flatMap((method) =>
+      [undefined, 'test'].map((serverName) => ({ method, serverName })),
+    ),
+  )(
+    'rejects non-file URIs for $method with server $serverName without reading or notifying',
+    async ({ method, serverName }) => {
       const virtualUri = 'jdt://contents/Foo.java?=%2Fsrc';
       const read = vi.spyOn(fs, 'readFileSync');
       try {
-        await expect(
-          run<unknown>(
-            method === 'diagnostics'
-              ? service.diagnostics(virtualUri)
-              : service[method]({ uri: virtualUri, range }),
-          ),
-        ).rejects.toThrow('not a file URI');
+        const query =
+          method === 'diagnostics' || method === 'documentSymbols'
+            ? service[method](virtualUri, serverName)
+            : method === 'codeActions'
+              ? service.codeActions(
+                  virtualUri,
+                  range,
+                  { diagnostics: [] },
+                  serverName,
+                )
+              : service[method]({ uri: virtualUri, range }, serverName);
+        await expect(run<unknown>(query)).rejects.toThrow('not a file URI');
         expect(read).not.toHaveBeenCalled();
         expect(connection.send).not.toHaveBeenCalled();
         expect(connection.request).not.toHaveBeenCalled();

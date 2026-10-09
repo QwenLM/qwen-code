@@ -24,6 +24,10 @@ import type {
   LspTextDocumentSync,
 } from './types.js';
 
+vi.mock('node:fs', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:fs')>()),
+}));
+
 vi.mock('glob', async (importOriginal) => {
   const actual = await importOriginal<typeof import('glob')>();
   return { ...actual, globSync: vi.fn(actual.globSync) };
@@ -332,10 +336,31 @@ describe('LspServerManager', () => {
       },
     );
 
+    it.each([undefined, {}])(
+      'warms legacy display-language configurations with map %j',
+      async (mapping) => {
+        vi.useFakeTimers();
+        handle.config.languages = ['react'];
+        handle.config.extensionToLanguage = mapping;
+        const candidate = path.join(root, 'main.ts');
+        fs.writeFileSync(candidate, '');
+        const synchronize = vi.fn(() => true);
+        const pending = manager.warmupTypescriptServer(handle, synchronize);
+        await vi.runAllTimersAsync();
+        await pending;
+        expect(synchronize).toHaveBeenCalledExactlyOnceWith(
+          pathToFileURL(candidate).toString(),
+          'typescript',
+        );
+        expect(handle.warmedUp).toBe(true);
+      },
+    );
+
     it('skips warmup when the explicit map has no TypeScript extensions', async () => {
       handle.config.extensionToLanguage = { '.vue': 'vue' };
       fs.writeFileSync(path.join(root, 'App.vue'), '');
       fs.writeFileSync(path.join(root, 'main.ts'), '');
+      handle.config.languages = ['react'];
       const synchronize = vi.fn(() => true);
       await manager.warmupTypescriptServer(handle, synchronize);
       expect(synchronize).not.toHaveBeenCalled();
@@ -373,6 +398,38 @@ describe('LspServerManager', () => {
       expect(globSync).toHaveBeenCalledWith('**/*.ts', expect.anything());
     });
 
+    it('skips unreadable candidates and latches warmup on a healthy file', async () => {
+      vi.useFakeTimers();
+      const unreadable = path.join(root, 'unreadable.ts');
+      const candidate = path.join(root, 'main.ts');
+      fs.writeFileSync(unreadable, '');
+      fs.writeFileSync(candidate, '');
+      vi.mocked(globSync).mockReturnValueOnce([unreadable, candidate]);
+      const originalAccess = fs.accessSync;
+      const access = vi
+        .spyOn(fs, 'accessSync')
+        .mockImplementation((file, mode) => {
+          if (file === unreadable) throw new Error('EACCES');
+          originalAccess(file, mode);
+        });
+      try {
+        const synchronize = vi.fn(() => true);
+        const pending = manager.warmupTypescriptServer(handle, synchronize);
+        await vi.runAllTimersAsync();
+        await pending;
+        expect(access).toHaveBeenCalledWith(unreadable, fs.constants.R_OK);
+        expect(synchronize).toHaveBeenCalledExactlyOnceWith(
+          pathToFileURL(candidate).toString(),
+          'typescript',
+        );
+        expect(handle.warmedUp).toBe(true);
+        await manager.warmupTypescriptServer(handle, synchronize);
+        expect(globSync).toHaveBeenCalledOnce();
+      } finally {
+        access.mockRestore();
+      }
+    });
+
     it('skips dangling and outside symlinks without losing a valid candidate', () => {
       const candidate = path.join(root, 'main.ts');
       fs.writeFileSync(candidate, '');
@@ -384,7 +441,13 @@ describe('LspServerManager', () => {
       try {
         const external = path.join(outside, 'external.ts');
         fs.writeFileSync(external, '');
-        fs.symlinkSync(external, path.join(root, 'zzz.ts'));
+        const escaping = path.join(root, 'zzz.ts');
+        fs.symlinkSync(external, escaping);
+        vi.mocked(globSync).mockReturnValueOnce([
+          path.join(root, 'poison.ts'),
+          escaping,
+          candidate,
+        ]);
         expect(privates(manager).findFirstTypescriptFile(handle)).toBe(
           candidate,
         );

@@ -9,6 +9,7 @@ import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as path from 'path';
+import * as fs from 'node:fs';
 import { pathToFileURL } from 'url';
 import { globSync } from 'glob';
 import { LspConnectionFactory } from './LspConnectionFactory.js';
@@ -37,6 +38,7 @@ import { lspServerConfigHash } from './configHash.js';
 import {
   getLspServerExtensions,
   getLspWorkspaceRoots,
+  isLspDocumentApplicable,
 } from './file-routing.js';
 import { isSubpaths } from '../utils/paths.js';
 import { resolveWorkspacePath } from '../utils/workspaceContext.js';
@@ -289,7 +291,12 @@ export class LspServerManager {
     }
     const connection = handle.connection;
     const tsFile = this.findFirstTypescriptFile(handle);
-    if (!tsFile) return;
+    if (!tsFile) {
+      debugLogger.info(
+        `TypeScript server ${handle.config.name} warm-up skipped: no usable applicable file`,
+      );
+      return;
+    }
     // A failed forced attempt must stay retryable instead of latching warm. Kept
     // below the discovery guard so a forced attempt that never reaches delivery
     // (no TypeScript file found) cannot permanently destroy an established latch.
@@ -1367,8 +1374,9 @@ export class LspServerManager {
       extensionToLanguage: undefined,
       languages: ['typescript'],
     });
-    const routed = getLspServerExtensions(handle.config);
-    const extensions = tsExtensions.filter((ext) => routed.includes(ext));
+    const extensions = tsExtensions.filter((ext) =>
+      isLspDocumentApplicable(handle.config, `warmup.${ext}`),
+    );
     if (extensions.length === 0) return undefined;
     const pattern = `**/*.${extensions.length === 1 ? extensions[0] : `{${extensions.join(',')}}`}`;
     const excludePatterns = [
@@ -1406,6 +1414,7 @@ export class LspServerManager {
         let resolved: string;
         try {
           resolved = resolveWorkspacePath(file);
+          fs.accessSync(file, fs.constants.R_OK);
         } catch {
           continue;
         }

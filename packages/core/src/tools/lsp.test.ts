@@ -316,7 +316,7 @@ describe('LspTool', () => {
       ['goToImplementation', 'implementations'],
       ['findReferences', 'references'],
     ] as const)(
-      'marks outside-workspace %s targets as requiring authorization',
+      'marks outside-workspace %s results as requiring authorization',
       async (operation, method) => {
         const outside = createLocation(
           path.resolve(workspaceRoot, '../outside/lib.ts'),
@@ -339,6 +339,55 @@ describe('LspTool', () => {
           result.returnDisplay,
           'outside workspace',
           '/directory add',
+        );
+      },
+    );
+
+    it('does not annotate request descriptions with result-scope advice', async () => {
+      const { result } = await run(
+        at('goToDefinition', {
+          filePath: '../outside/input.ts',
+          serverName: 'test',
+        }),
+        (client) =>
+          client.definitions.mockResolvedValue([createLocation(appPath, 0, 0)]),
+      );
+      expect(result.llmContent).toContain(
+        'Definitions for ../outside/input.ts:5:10 [test]:',
+      );
+      expect(result.llmContent).not.toContain('outside workspace');
+    });
+
+    it('marks every external reference but gives directory-add advice only once', async () => {
+      const { result } = await run(at('findReferences'), (client) =>
+        client.references.mockResolvedValue(
+          ['a.ts', 'b.ts'].map((file) =>
+            createLocation(
+              path.resolve(workspaceRoot, '../outside', file),
+              0,
+              0,
+            ),
+          ),
+        ),
+      );
+      for (const content of [result.llmContent, result.returnDisplay]) {
+        expect(String(content).match(/outside workspace/g)).toHaveLength(2);
+        expect(String(content).match(/\/directory add/g)).toHaveLength(1);
+        expect(content).toContain('../outside/b.ts:1:1 [outside workspace]');
+      }
+    });
+
+    it.each(['workspaceSymbol', 'workspaceDiagnostics'] as const)(
+      'discloses workspace filtering even when %s returns no results',
+      async (operation) => {
+        const { result } = await run({ operation, query: 'missing' });
+        expectContains(
+          result.llmContent,
+          'out-of-scope file results are omitted',
+        );
+        expectContains(
+          result.returnDisplay,
+          'out-of-scope file results are omitted',
         );
       },
     );
@@ -493,24 +542,39 @@ describe('LspTool', () => {
       );
       const json = String(result.llmContent).split('Code actions (JSON):')[1]!;
       expectContains(json, outside, 'outside workspace', '/directory add');
+      const [body, ...notes] = json.split('\nNote:');
+      expect(JSON.parse(body!)[0].edit.changes).toEqual({ [outside]: [] });
+      expect(notes).toEqual([
+        ` ${outside} [outside workspace; add its directory with /directory add before file queries]`,
+      ]);
     });
 
     it('appends scope advice after incoming-call JSON without changing its URI', async () => {
       const item = callItem('caller', 'caller.ts', 0, 1, {
         uri: toUri(path.resolve(workspaceRoot, '../outside/caller.ts')),
       });
+      const inside = callItem('inside', 'app.ts', 0, 1);
       const { result } = await run(
         { operation: 'incomingCalls', callHierarchyItem: testItem() },
         (client) =>
           client.incomingCalls.mockResolvedValue([
+            { from: inside, fromRanges: [] },
+            { from: item, fromRanges: [] },
             { from: item, fromRanges: [] },
           ]),
       );
       const json = String(result.llmContent).split(
         'Incoming calls (JSON):',
       )[1]!;
-      expectContains(json, item.uri, 'outside workspace', '/directory add');
-      expect(JSON.parse(json.split('\nNote:')[0]!)[0].from.uri).toBe(item.uri);
+      const [body, ...notes] = json.split('\nNote:');
+      expect(JSON.parse(body!)[1].from.uri).toBe(item.uri);
+      expect(notes).toEqual([` ${item.uri} [outside workspace]`]);
+      expect(String(result.llmContent).match(/\/directory add/g)).toHaveLength(
+        1,
+      );
+      expect(
+        String(result.returnDisplay).match(/\/directory add/g),
+      ).toHaveLength(1);
     });
 
     it('does not prescribe directory-add for virtual code-action edit URIs', async () => {
@@ -557,7 +621,11 @@ describe('LspTool', () => {
             },
           ]),
       );
-      expectContains(result.llmContent, 'src/app.ts', 'untitled:buffer');
+      expectContains(
+        result.llmContent,
+        '\nsrc/app.ts:',
+        'untitled:buffer [non-file URI',
+      );
       expect(result.llmContent).not.toContain('FILE:');
     });
 
@@ -722,6 +790,7 @@ describe('LspTool', () => {
           result.llmContent,
           'symbols for query "Widget"',
           'Widget',
+          'out-of-scope file results are omitted',
         );
       });
     });
@@ -762,6 +831,7 @@ describe('LspTool', () => {
           'Call hierarchy items (JSON):',
           '"name": "myFunction"',
         );
+        expect(result.llmContent).not.toContain('\nNote:');
       });
     });
 
