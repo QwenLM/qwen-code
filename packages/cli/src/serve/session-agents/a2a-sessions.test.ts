@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { A2ASessionError } from '@qwen-code/qwen-code-core/agents/workspace-agents/a2a-server.js';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
@@ -21,6 +24,8 @@ function setup(
   options: {
     orchestrator?: Partial<A2AOrchestrator> | null;
     records?: A2ATranscriptRecord[];
+    /** Read transcripts this service writes, instead of the test seam. */
+    transcriptsIn?: string;
   } = {},
 ) {
   const bridge = {
@@ -49,7 +54,9 @@ function setup(
     workspaceCwd: '/ws',
     bridge: bridge as unknown as A2ASessionBridge,
     orchestrator,
-    loadRecords: async () => options.records,
+    ...(options.transcriptsIn !== undefined
+      ? { runtimeBaseDir: options.transcriptsIn }
+      : { loadRecords: async () => options.records }),
   });
   return { bridge, orchestrator, port };
 }
@@ -198,4 +205,38 @@ describe('A2A session port', () => {
     });
     await expect(port.recordedReply(SESSION, 'sr_1')).resolves.toBeUndefined();
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'rejects a reply lookup when the transcript cannot be read',
+    async () => {
+      const runtimeBaseDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'a2a-port-'),
+      );
+      try {
+        const transcript = new SessionService('/ws', {
+          runtimeBaseDir,
+        }).getSessionTranscriptPath(SESSION);
+        const { port } = setup({ transcriptsIn: runtimeBaseDir });
+
+        // No transcript at all: nothing recorded a reply for the run.
+        await expect(
+          port.recordedReply(SESSION, 'sr_1'),
+        ).resolves.toBeUndefined();
+
+        // A transcript that is there but cannot be resolved is not "no reply":
+        // the caller settles a finished run on that answer, so the lookup has
+        // to reject instead of failing a completed task for good.
+        await fs.mkdir(path.dirname(transcript), { recursive: true });
+        const loop = path.join(runtimeBaseDir, 'loop');
+        await fs.symlink(loop, transcript);
+        await fs.symlink(transcript, loop);
+
+        await expect(port.recordedReply(SESSION, 'sr_1')).rejects.toThrow(
+          /could not be read/,
+        );
+      } finally {
+        await fs.rm(runtimeBaseDir, { recursive: true, force: true });
+      }
+    },
+  );
 });
