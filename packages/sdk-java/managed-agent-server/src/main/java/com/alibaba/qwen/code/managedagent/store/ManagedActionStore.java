@@ -417,15 +417,31 @@ public class ManagedActionStore {
                 Optional<Action> action = failedResponse.actionId() == null
                         ? Optional.empty()
                         : find(tenantId, sessionId, failedResponse.actionId());
-                String replaySessionStatus = jdbc.queryForObject(
-                        "SELECT status FROM managed_agent_session WHERE"
-                                + " tenant_id = ? AND session_id = ?",
-                        String.class, tenantId, sessionId);
+                var replaySession = jdbc.queryForMap(
+                        "SELECT status, workspace_storage_id FROM"
+                                + " managed_agent_session WHERE tenant_id = ?"
+                                + " AND session_id = ?",
+                        tenantId, sessionId);
+                String replaySessionStatus =
+                        (String) replaySession.get("status");
+                String replayStorage =
+                        (String) replaySession.get("workspace_storage_id");
+                // A workspace migration holding the storage fence blocks a
+                // resurrected delivery exactly like a fresh admission
+                // (requireSessionOpen below): the fence is the migration's
+                // own evidence that a new write must wait. The heal path
+                // must not throw, though — a held fence falls through to the
+                // recorded terminal failure, which keeps replaying with its
+                // re-admissibility intact until the fence lifts (review
+                // round 7, R7-4).
                 if (action.isPresent()
                         && "requested".equals(action.get().state())
                         && now < action.get().options().path("expiresAt")
                                 .asLong()
-                        && "ACTIVE".equals(replaySessionStatus)) {
+                        && "ACTIVE".equals(replaySessionStatus)
+                        && (replayStorage == null
+                                || WorkspaceMigrationAdmission.owner(jdbc,
+                                        tenantId, replayStorage) == null)) {
                     jdbc.update("UPDATE managed_agent_operation SET state ="
                                     + " 'PENDING', delivery_state ="
                                     + " 'PENDING', error_code = NULL,"

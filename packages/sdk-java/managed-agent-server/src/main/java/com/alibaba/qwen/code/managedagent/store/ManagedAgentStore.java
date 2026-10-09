@@ -148,6 +148,7 @@ public class ManagedAgentStore implements AgentStateStore {
                     result.getString("dispatch_owner"),
                     nullableLong(result, "dispatch_lease_until"),
                     result.getInt("retry_count"),
+                    additiveInt(result, "consecutive_failures"),
                     nullableLong(result, "retry_after"),
                     result.getString("error_code"),
                     result.getString("error_message"),
@@ -2138,6 +2139,7 @@ public class ManagedAgentStore implements AgentStateStore {
     public void scheduleTurnRetry(String tenantId, String sessionId,
             String turnId, String owner, long retryAfter) {
         jdbc.update("UPDATE managed_agent_turn SET retry_count = retry_count"
+                        + " + 1, consecutive_failures = consecutive_failures"
                         + " + 1, retry_after = ?, dispatch_owner = NULL,"
                         + " dispatch_lease_until = NULL, updated_at = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
@@ -2255,10 +2257,13 @@ public class ManagedAgentStore implements AgentStateStore {
         long now = clock.millis();
         // The admission proves coordination made progress, so the retry
         // budget restarts: it counts consecutive failures without progress.
+        // retry_count is not reset — it paces the backoff, which must keep
+        // growing across a crash loop that keeps making progress (review
+        // round 8, R8-3).
         int updated = jdbc.update("UPDATE managed_agent_turn SET status ="
                         + " CASE WHEN status = 'CANCELLING' THEN status ELSE"
                         + " 'RUNNING' END, harness_event_epoch = ?,"
-                        + " harness_last_event_id = ?, retry_count = 0,"
+                        + " harness_last_event_id = ?, consecutive_failures = 0,"
                         + " updated_at = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
@@ -2312,11 +2317,12 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         // The recovery admission proves coordination made progress, so the
         // retry budget restarts: it counts consecutive failures without
-        // progress.
+        // progress. retry_count is not reset — it paces the backoff (review
+        // round 8, R8-3).
         int updated = jdbc.update("UPDATE managed_agent_turn SET status ="
                         + " CASE WHEN status = 'CANCELLING' THEN status ELSE"
                         + " 'RUNNING' END, harness_event_epoch = ?,"
-                        + " harness_last_event_id = ?, retry_count = 0,"
+                        + " harness_last_event_id = ?, consecutive_failures = 0,"
                         + " updated_at = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
@@ -2567,10 +2573,11 @@ public class ManagedAgentStore implements AgentStateStore {
             long lastSourceId, long now) {
         // Journaling new events proves coordination made progress, so the
         // retry budget restarts: it counts consecutive failures without
-        // progress.
+        // progress. retry_count is not reset — it paces the backoff (review
+        // round 8, R8-3).
         return jdbc.update("UPDATE managed_agent_turn SET"
                         + " harness_event_epoch = ?,"
-                        + " harness_last_event_id = ?, retry_count = 0,"
+                        + " harness_last_event_id = ?, consecutive_failures = 0,"
                         + " updated_at = ?,"
                         + " version = version + 1 WHERE tenant_id = ? AND"
                         + " session_id = ? AND turn_id = ? AND"
@@ -3401,7 +3408,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     // The cwd columns arrive with V46 and the budget-exempt watermark with
-    // V53; an operation read against an additive-upgrade schema that predates
+    // V54; an operation read against an additive-upgrade schema that predates
     // them must treat the columns as absent instead of erroring the whole
     // query.
     private static String additiveString(java.sql.ResultSet result,

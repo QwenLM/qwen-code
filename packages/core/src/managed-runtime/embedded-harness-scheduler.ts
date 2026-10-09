@@ -92,11 +92,14 @@ function toError(error: unknown): Error {
 const RECHECK_INTERVAL_MS = 1_000;
 
 /**
- * Consecutive transient store failures that halt the worker. A store that
- * keeps failing across every path is a persistent outage, not a transient
- * one — the worker fails loudly instead of spinning silently.
+ * Consecutive transient store failures per active slot that halt the
+ * worker. A store that keeps failing across every path is a persistent
+ * outage, not a transient one — the worker fails loudly instead of spinning
+ * silently. The bound scales with the worker's own concurrency: one shared
+ * journal blip lands on every in-flight run at once, charging the streak
+ * once per concurrent run, and that blip must not exhaust the budget.
  */
-const MAX_TRANSIENT_STORE_FAILURES = 10;
+const MAX_TRANSIENT_STORE_FAILURES_PER_SLOT = 10;
 
 /**
  * Transient failures one activation absorbs across re-runs before the
@@ -560,7 +563,11 @@ export class EmbeddedHarnessScheduler {
     // A dispose or halt raced the failure: the streak still counts, but the
     // escalation must not record a bogus store halt on a dead worker.
     if (this.disposed || this.fatalError) return;
-    if (this.transientStoreFailures >= MAX_TRANSIENT_STORE_FAILURES) {
+    if (
+      this.transientStoreFailures >=
+      MAX_TRANSIENT_STORE_FAILURES_PER_SLOT *
+        Math.max(1, this.options.maxActiveSlots)
+    ) {
       this.halt(
         new Error(
           `Harness Worker '${this.options.workerId}' halted after` +

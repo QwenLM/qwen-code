@@ -165,12 +165,17 @@ public class SessionLifecycleCoordinator {
             }
         }, period, period, java.util.concurrent.TimeUnit.MILLISECONDS);
         Boolean harnessConfirmed = null;
+        // settle() reports its irreversible Harness-facing step out of band:
+        // a settle that asked the Harness to stop but threw later must not
+        // be recorded as one that never happened (review round 7, R7-2).
+        var harnessSettled =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
         try {
             if (claimed.kind() == OperationKind.CWD_CHANGE) {
                 settleCwdChange(claimed);
                 return;
             }
-            harnessConfirmed = settle(claimed);
+            harnessConfirmed = settle(claimed, harnessSettled);
             if (!valid.get()) {
                 return;
             }
@@ -244,8 +249,14 @@ public class SessionLifecycleCoordinator {
             // plain reschedule below, bounded by CWD_CHANGE_ATTEMPT_BUDGET
             // inside settleCwdChange.
             boolean cwdChange = claimed.kind() == OperationKind.CWD_CHANGE;
-            boolean writerLive = !cwdChange && retryable(cause)
-                    && writerStillLive(claimed);
+            // The writer is consulted on the fact, not behind the failure's
+            // retryability: a permanent refusal thrown before the Harness
+            // was asked to stop leaves the writer live, and the terminal arm
+            // below must not release the Runtime binding under it even
+            // though such a refusal is never a writer wait (review round 7,
+            // R7-3). Only the exemption accounting keeps the conjunction.
+            boolean writerLive = !cwdChange && writerStillLive(claimed);
+            boolean exemptWait = writerLive && retryable(cause);
             boolean staleBoot =
                     cause instanceof HostedHarnessGenerationException;
             // The budget bounds every settle outcome that could have made
@@ -256,9 +267,10 @@ public class SessionLifecycleCoordinator {
             // session_lifecycle_delivery_failed would certify the opposite;
             // the completion write is simply retried (settle is idempotent).
             if (!cwdChange && harnessConfirmed == null
+                    && !harnessSettled.get()
                     && claimed.attemptCount() - claimed.budgetExemptAttempt()
                             >= maxOperationRetries
-                    && valid.get() && !writerLive && !staleBoot) {
+                    && valid.get() && !exemptWait && !staleBoot) {
                 LOG.error("Managed Session operation exhausted retries"
                                 + " tenant={} session={} operation={}"
                                 + " attempts={}",
@@ -271,10 +283,24 @@ public class SessionLifecycleCoordinator {
                 // without the original worker's stop verified is what the
                 // blocked code exists to refuse — and a delete of an
                 // already closed Session makes zero calls, as settle() does.
+                // Under a live journal writer nothing is released either:
+                // the terminal arm is reachable here only because the settle
+                // never reached the Harness (a permanent refusal thrown
+                // before the stop), so the writer lease is live and stays
+                // live — and settle() itself refuses this same release
+                // behind a live writer. The terminal record stands; the
+                // release waits for the writer (review round 7, R7-3).
                 try {
                     boolean bound = store.requireSession(tenantId, sessionId)
                             .workspace() != null;
-                    if (bound && closedSessionDeletion(claimed)) {
+                    if (writerLive) {
+                        LOG.warn("Managed Session operation terminal with a"
+                                        + " live journal writer; the Runtime"
+                                        + " binding is not released"
+                                        + " tenant={} session={}"
+                                        + " operation={}",
+                                tenantId, sessionId, operationId);
+                    } else if (bound && closedSessionDeletion(claimed)) {
                         // The completed CLOSE is the cleanup authority.
                     } else if (bound) {
                         if (runtimeWarmer.supportsWorkspaceClose()) {
@@ -345,8 +371,8 @@ public class SessionLifecycleCoordinator {
             if (valid.get() && blocked != null) {
                 store.blockLifecycleOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(), blocked, Math.addExact(clock.millis(), delay),
-                        writerLive || staleBoot);
-            } else if (valid.get() && writerLive && !staleBoot
+                        exemptWait || staleBoot);
+            } else if (valid.get() && exemptWait && !staleBoot
                     && claimed.attemptCount() >= maxOperationRetries) {
                 // Past the budget the writer wait is published: the row reads
                 // recovery_blocked with its code rather than a healthy
@@ -374,7 +400,7 @@ public class SessionLifecycleCoordinator {
                         operationId, owner, claimed.claimGeneration(),
                         "hosted_harness_generation_mismatch",
                         Math.addExact(clock.millis(), delay), true);
-            } else if (valid.get() && (writerLive || staleBoot)) {
+            } else if (valid.get() && (exemptWait || staleBoot)) {
                 store.retryOperation(tenantId, sessionId, operationId, owner,
                         claimed.claimGeneration(),
                         Math.addExact(clock.millis(), delay), true);
@@ -526,7 +552,8 @@ public class SessionLifecycleCoordinator {
     // Returns whether the Harness that held the Session acknowledged closing
     // it. A Harness that never held it, or that replaced the one that did,
     // answers too, but its answer confirms nothing about the Session.
-    private boolean settle(OperationRecord operation) {
+    private boolean settle(OperationRecord operation,
+            java.util.concurrent.atomic.AtomicBoolean harnessSettled) {
         boolean harnessConfirmed = false;
         boolean bound = store.requireSession(operation.tenantId(), operation.sessionId()).workspace() != null;
         if (bound && closedSessionDeletion(operation)) {
@@ -542,6 +569,11 @@ public class SessionLifecycleCoordinator {
                 }
                 lifecycle.saveEffects(operation, harness.settleLifecycle(operation));
             }
+            // The effects receipt is durable from here on — whether it was
+            // just saved or recovered from a prior attempt — so the settle
+            // did reach the Harness; a later failure of this attempt is not
+            // "the settle never happened".
+            harnessSettled.set(true);
             harness.detachLifecycle(operation);
             if (sessionStore.hasLiveWriter(operation.tenantId(), operation.sessionId())) {
                 throw com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.blocked("workspace_lifecycle_writer_active");
@@ -562,6 +594,11 @@ public class SessionLifecycleCoordinator {
             if (harness.isAvailable()) {
                 String answered = harness.closeSession(operation.tenantId(),
                         operation.sessionId());
+                // The Harness was asked and answered: even when another
+                // server's Harness replied (confirming nothing about the
+                // Session), the close was delivered — a later failure of
+                // this attempt is not "the settle never happened".
+                harnessSettled.set(true);
                 harnessConfirmed = holder != null && holder.equals(answered);
             } else if (holder != null && !bound) {
                 throw new IllegalStateException(

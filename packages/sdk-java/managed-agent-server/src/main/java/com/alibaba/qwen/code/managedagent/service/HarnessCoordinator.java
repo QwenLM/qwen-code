@@ -1070,14 +1070,17 @@ public class HarnessCoordinator {
     private boolean transientFailure(TurnRecord turn,
             boolean submissionAttempted, RuntimeException error,
             boolean exemptFromRetryBudget) {
-        // The budget counts consecutive failures without journaled progress:
-        // the fenced cursor updates reset the counter, so the claim-time
-        // record is stale for a delivery that admitted or journaled since.
+        // The budget counts consecutive failures without journaled
+        // progress: the fenced cursor updates reset that counter (the pacing
+        // counter retry_count is never reset — the backoff must keep growing
+        // across a crash loop that keeps making progress, review round 8
+        // R8-3), so the claim-time record is stale for a delivery that
+        // admitted or journaled since.
         TurnRecord current = store.findTurn(turn.tenantId(),
                 turn.sessionId(), turn.turnId()).orElse(turn);
         if (!submissionAttempted
                 && !exemptFromRetryBudget
-                && current.retryCount() >= maxPreAdmissionRetries) {
+                && current.consecutiveFailures() >= maxPreAdmissionRetries) {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),
@@ -1122,7 +1125,7 @@ public class HarnessCoordinator {
         // resolving on its own.
         if (submissionAttempted
                 && !exemptFromRetryBudget
-                && current.retryCount() >= maxPostAdmissionRetries) {
+                && current.consecutiveFailures() >= maxPostAdmissionRetries) {
             LOG.error("Managed Turn coordination exhausted retries tenant={}"
                             + " session={} turn={} failure={}",
                     turn.tenantId(), turn.sessionId(), turn.turnId(),

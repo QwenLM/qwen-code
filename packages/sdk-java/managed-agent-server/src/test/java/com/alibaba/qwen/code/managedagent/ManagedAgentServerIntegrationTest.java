@@ -1328,7 +1328,10 @@ class ManagedAgentServerIntegrationTest {
     // The terminal retry budget counts consecutive failures without
     // journaled progress: every fenced cursor update — admission, recovery
     // admission, and the journaled-event cursor — restarts it (review round
-    // 6, R6-1).
+    // 6, R6-1). The pacing counter is NOT restarted with it: retry_count
+    // feeds the dispatch backoff, and a crash loop that keeps making
+    // progress must still see growing delays and still converge to the
+    // terminal arm (review round 8, R8-3).
     @Test
     void journaledProgressRestartsTheRetryBudget() {
         pauseRecoveryScanning();
@@ -1351,16 +1354,22 @@ class ManagedAgentServerIntegrationTest {
         assertThat(store.claimTurn(tenant, session.sessionId(),
                 turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
         assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
-                .get().satisfies(record -> assertThat(record.retryCount())
-                        .isEqualTo(2));
+                .get().satisfies(record -> {
+                    assertThat(record.retryCount()).isEqualTo(2);
+                    assertThat(record.consecutiveFailures()).isEqualTo(2);
+                });
 
         store.markSubmissionAttempted(tenant, session.sessionId(),
                 turn.turnId(), owner);
         store.recordAdmission(tenant, session.sessionId(), turn.turnId(),
                 owner, "epoch-1", 0);
         assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
-                .get().satisfies(record -> assertThat(record.retryCount())
-                        .isZero());
+                .get().satisfies(record -> {
+                    // The budget restarts on journaled progress...
+                    assertThat(record.consecutiveFailures()).isZero();
+                    // ...but the pacing counter never rewinds.
+                    assertThat(record.retryCount()).isEqualTo(2);
+                });
 
         store.scheduleTurnRetry(tenant, session.sessionId(), turn.turnId(),
                 owner, 0);
@@ -1370,8 +1379,10 @@ class ManagedAgentServerIntegrationTest {
                 owner, "epoch-1",
                 List.of(new HarnessEvent(1, "boot:epoch-1:1", null)));
         assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
-                .get().satisfies(record -> assertThat(record.retryCount())
-                        .isZero());
+                .get().satisfies(record -> {
+                    assertThat(record.consecutiveFailures()).isZero();
+                    assertThat(record.retryCount()).isEqualTo(3);
+                });
 
         store.scheduleTurnRetry(tenant, session.sessionId(), turn.turnId(),
                 owner, 0);
@@ -1380,8 +1391,40 @@ class ManagedAgentServerIntegrationTest {
         store.recordRecoveryAdmission(tenant, session.sessionId(),
                 turn.turnId(), owner, "epoch-1", "epoch-1", "epoch-2", 5);
         assertThat(store.findTurn(tenant, session.sessionId(), turn.turnId()))
-                .get().satisfies(record -> assertThat(record.retryCount())
-                        .isZero());
+                .get().satisfies(record -> {
+                    assertThat(record.consecutiveFailures()).isZero();
+                    assertThat(record.retryCount()).isEqualTo(4);
+                });
+
+        // Three more crash-loop rounds — schedule a retry, claim it, then
+        // recovery-admit with a fresh boot epoch. The budget counter
+        // restarts every round, while the retry_after the coordinator would
+        // write keeps growing: the pacing mirrors retryDelay under the
+        // default properties (1s initial, 1min cap).
+        long previousDelay = 0;
+        String epoch = "epoch-2";
+        for (int round = 0; round < 3; round++) {
+            int retryCount = store.findTurn(tenant, session.sessionId(),
+                    turn.turnId()).orElseThrow().retryCount();
+            long delay = Math.min(1000L << Math.min(retryCount, 62), 60_000L);
+            assertThat(delay).isGreaterThan(previousDelay);
+            previousDelay = delay;
+            store.scheduleTurnRetry(tenant, session.sessionId(),
+                    turn.turnId(), owner, System.currentTimeMillis() + delay);
+            assertThat(store.claimTurn(tenant, session.sessionId(),
+                    turn.turnId(), owner, Duration.ofMinutes(1))).isPresent();
+            String nextEpoch = "epoch-" + (3 + round);
+            store.recordRecoveryAdmission(tenant, session.sessionId(),
+                    turn.turnId(), owner, epoch, epoch, nextEpoch, 6 + round);
+            epoch = nextEpoch;
+            int expectedRetryCount = 5 + round;
+            assertThat(store.findTurn(tenant, session.sessionId(),
+                    turn.turnId())).get().satisfies(record -> {
+                        assertThat(record.consecutiveFailures()).isZero();
+                        assertThat(record.retryCount())
+                                .isEqualTo(expectedRetryCount);
+                    });
+        }
     }
 
     @Test

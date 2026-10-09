@@ -138,7 +138,7 @@ class AdmittedTurnRetryTerminalStateTest {
                 "11111111-1111-4111-8111-111111111111",
                 List.of(Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), "RUNNING", false, null, null,
-                "previous-owner", Long.MAX_VALUE, 5, null, null,
+                "previous-owner", Long.MAX_VALUE, 5, 5, null, null,
                 null, 1, 1, null, 1);
         // The durable record advanced past the claim: the submission and its
         // recorded admission landed between the claim and the failure.
@@ -146,7 +146,7 @@ class AdmittedTurnRetryTerminalStateTest {
                 "11111111-1111-4111-8111-111111111111",
                 List.of(Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), "RUNNING", true, "epoch-1", 5L,
-                "previous-owner", Long.MAX_VALUE, 5, null, null,
+                "previous-owner", Long.MAX_VALUE, 5, 5, null, null,
                 null, 1, 1, null, 1);
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class)))
@@ -306,13 +306,13 @@ class AdmittedTurnRetryTerminalStateTest {
                 promptId,
                 List.of(Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), "RUNNING", true, "epoch-1", 5L,
-                "previous-owner", Long.MAX_VALUE, retryCount, null, null,
-                null, 1, 1, null, 1);
+                "previous-owner", Long.MAX_VALUE, retryCount, retryCount,
+                null, null, null, 1, 1, null, 1);
         TurnRecord progressed = new TurnRecord("tenant", "session", "turn",
                 promptId,
                 List.of(Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), "RUNNING", true, "epoch-1", 6L,
-                "previous-owner", Long.MAX_VALUE, 0, null, null,
+                "previous-owner", Long.MAX_VALUE, retryCount, 0, null, null,
                 null, 1, 1, null, 1);
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class)))
@@ -390,7 +390,7 @@ class AdmittedTurnRetryTerminalStateTest {
                 promptId,
                 List.of(Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), "RUNNING", false, null, null,
-                "previous-owner", Long.MAX_VALUE, 0, null, null,
+                "previous-owner", Long.MAX_VALUE, 0, 0, null, null,
                 null, 1, 1, null, 1);
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class)))
@@ -465,8 +465,8 @@ class AdmittedTurnRetryTerminalStateTest {
                 "11111111-1111-4111-8111-111111111111",
                 List.of(Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), "RUNNING", true, admittedEpoch,
-                null, "previous-owner", Long.MAX_VALUE, retryCount, null,
-                null, null, 1, 1, null, 1);
+                null, "previous-owner", Long.MAX_VALUE, retryCount,
+                retryCount, null, null, null, 1, 1, null, 1);
         when(store.claimTurn(eq("tenant"), eq("session"), eq("turn"),
                 anyString(), any(Duration.class)))
                 .thenReturn(Optional.of(claimed));

@@ -554,6 +554,13 @@ class OperationRetryTerminalStateTest {
             verify(store, never()).retryOperation(anyString(), anyString(),
                     anyString(), anyString(), anyLong(), anyLong(),
                     anyBoolean());
+            // The terminal record stands, but under a live writer the
+            // Runtime binding is not released: the only
+            // requestWorkspaceClose is settle()'s own, and closeWorkspace
+            // is never reached (review round 7, R7-3).
+            verify(runtimeWarmer).requestWorkspaceClose("tenant", "session");
+            verify(runtimeWarmer, never()).closeWorkspace(anyString(),
+                    anyString());
         } finally {
             coordinator.stopRenewals();
         }
@@ -652,9 +659,116 @@ class OperationRetryTerminalStateTest {
 
     // The terminal arm mirrors settle()'s bound routing: a bound Session's
     // Runtime binding is released through the workspace close pair, never
-    // through the unbound drain.
+    // through the unbound drain. The Harness was unreachable here, so the
+    // settle never happened and the terminal record is honest; with no live
+    // writer the binding is released on the way (review round 7,
+    // R7-2/R7-3).
     @Test
     void boundSessionExhaustionRoutesThroughTheWorkspaceClose() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = lifecycleOperation(10);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.closeSession("tenant", "session"))
+                .thenThrow(new IllegalStateException("harness unreachable"));
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(false);
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(runtimeWarmer.closeWorkspace("tenant", "session"))
+                .thenReturn(CompletableFuture.completedFuture(null));
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            verify(runtimeWarmer, times(2)).requestWorkspaceClose("tenant",
+                    "session");
+            verify(runtimeWarmer).closeWorkspace("tenant", "session");
+            verify(runtimeWarmer, never()).drain(anyString());
+            verify(store).failOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L),
+                    eq("session_lifecycle_delivery_failed"));
+            verify(store, never()).completeOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyBoolean());
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // A settle that reached the Harness and only failed the workspace close
+    // must not record "the settle never happened": the stop was delivered,
+    // so the operation waits and retries instead of terminating (review
+    // round 7, R7-2). The v1 shape: the durable effects receipt is the
+    // settle's evidence.
+    @Test
+    void aSettleThatReachedTheHarnessIsNotTerminallyRecorded() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = lifecycleOperation(10, 0, 1);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(false);
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore
+                lifecycle = mock(
+                        com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class);
+        // The settle's effects are already durable — saved by a previous
+        // attempt — so the Harness did settle the lifecycle.
+        when(lifecycle.recoverEffects(any(OperationRecord.class)))
+                .thenReturn(new ObjectMapper().createObjectNode()
+                        .put("settled", true));
+        when(runtimeWarmer.closeWorkspace("tenant", "session"))
+                .thenReturn(CompletableFuture.failedFuture(
+                        new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(
+                                409, "workspace_close_execution_unsettled",
+                                "The workspace close has not settled.",
+                                true)));
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        coordinator.setWorkspaceLifecycleStore(lifecycle);
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
+            verify(store, never()).failOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyString());
+            verify(store).blockLifecycleOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L),
+                    eq("workspace_close_execution_unsettled"), anyLong(),
+                    eq(false));
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // The v0 shape of the same gate: closeSession answered — the Harness
+    // was asked to stop and replied — and only the workspace close failed.
+    // A spent budget does not make that a terminal delivery failure (review
+    // round 7, R7-2).
+    @Test
+    void aSettleThatAnsweredTheHarnessReschedulesInsteadOfTerminating() {
         AgentStateStore store = mock(AgentStateStore.class);
         ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
         HarnessConnector harness = mock(HarnessConnector.class);
@@ -672,13 +786,12 @@ class OperationRetryTerminalStateTest {
         when(sessionStore.hasLiveWriter("tenant", "session"))
                 .thenReturn(false);
         when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
-        // The original binding is still in use, so the workspace close
-        // keeps refusing — the settle failure the budget cannot fix.
         when(runtimeWarmer.closeWorkspace("tenant", "session"))
                 .thenReturn(CompletableFuture.failedFuture(
                         new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(
-                                409, "runtime_close_claim_pending",
-                                "Original binding is still in use", false)));
+                                409, "workspace_close_execution_unsettled",
+                                "The workspace close has not settled.",
+                                true)));
 
         SessionLifecycleCoordinator coordinator =
                 new SessionLifecycleCoordinator(store, sessionStore, harness,
@@ -687,16 +800,65 @@ class OperationRetryTerminalStateTest {
         try {
             coordinator.dispatch("tenant", "session", "op-close");
 
-            verify(runtimeWarmer, times(2)).requestWorkspaceClose("tenant",
-                    "session");
-            verify(runtimeWarmer, times(2)).closeWorkspace("tenant",
-                    "session");
-            verify(runtimeWarmer, never()).drain(anyString());
+            verify(store, never()).failOperation(anyString(), anyString(),
+                    anyString(), anyString(), anyLong(), anyString());
+            verify(store).blockLifecycleOperation(eq("tenant"), eq("session"),
+                    eq("op-close"), anyString(), eq(1L),
+                    eq("workspace_close_execution_unsettled"), anyLong(),
+                    eq(false));
+            // The settle's own workspace-close attempt happened once;
+            // nothing terminal re-minted the fence.
+            verify(runtimeWarmer).requestWorkspaceClose("tenant", "session");
+            verify(runtimeWarmer).closeWorkspace("tenant", "session");
+        } finally {
+            coordinator.stopRenewals();
+        }
+    }
+
+    // The v1 terminal arm under a live writer: the permanent refusal came
+    // before the Harness was asked to stop (this Harness speaks no
+    // lifecycle protocol), so the terminal record stands — but the Runtime
+    // binding stays bound: closing the workspace now would race a journal
+    // writer that is still live (review round 7, R7-3).
+    @Test
+    void aV1TerminalRecordSkipsTheWorkspaceCloseWhileAWriterIsLive() {
+        AgentStateStore store = mock(AgentStateStore.class);
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        HarnessConnector harness = mock(HarnessConnector.class);
+        RuntimeWarmer runtimeWarmer = mock(RuntimeWarmer.class);
+        OperationRecord claimed = lifecycleOperation(10, 0, 1);
+        when(store.claimOperation(eq("tenant"), eq("session"),
+                eq("op-close"), anyString(), any(Duration.class)))
+                .thenReturn(Optional.of(claimed));
+        when(store.requireSession("tenant", "session")).thenReturn(
+                new SessionRecord("tenant", "session", "qwen-code", null,
+                        null, "ACTIVE", "boot-1", null, 0, 0, 0, 1, 1, null,
+                        1, BOUND_WORKSPACE, "yolo", TOOL_PROFILE));
+        when(runtimeWarmer.supportsWorkspaceClose()).thenReturn(true);
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.supportsLifecycle()).thenReturn(false);
+        // The refusal fired before the Harness was asked to stop, so the
+        // writer lease is still live.
+        when(sessionStore.hasLiveWriter("tenant", "session"))
+                .thenReturn(true);
+
+        SessionLifecycleCoordinator coordinator =
+                new SessionLifecycleCoordinator(store, sessionStore, harness,
+                        runtimeWarmer, CoordinatorTestSupport.directExecutor(),
+                        Clock.systemUTC(), new ManagedAgentProperties());
+        coordinator.setWorkspaceLifecycleStore(mock(
+                com.alibaba.qwen.code.managedagent.store.WorkspaceLifecycleStore.class));
+        try {
+            coordinator.dispatch("tenant", "session", "op-close");
+
             verify(store).failOperation(eq("tenant"), eq("session"),
                     eq("op-close"), anyString(), eq(1L),
-                    eq("runtime_close_claim_pending"));
-            verify(store, never()).completeOperation(anyString(), anyString(),
-                    anyString(), anyString(), anyLong(), anyBoolean());
+                    eq("workspace_lifecycle_protocol_unavailable"));
+            verify(runtimeWarmer, never()).closeWorkspace(anyString(),
+                    anyString());
+            verify(runtimeWarmer, never()).requestWorkspaceClose(anyString(),
+                    anyString());
+            verify(runtimeWarmer, never()).drain(anyString());
         } finally {
             coordinator.stopRenewals();
         }
@@ -1788,10 +1950,15 @@ class OperationRetryTerminalStateTest {
 
     private static OperationRecord lifecycleOperation(int attemptCount,
             int budgetExemptAttempt) {
+        return lifecycleOperation(attemptCount, budgetExemptAttempt, 0);
+    }
+
+    private static OperationRecord lifecycleOperation(int attemptCount,
+            int budgetExemptAttempt, int lifecycleProtocol) {
         return new OperationRecord("tenant", "session", "op-close",
                 OperationKind.CLOSE, "digest", "RUNNING", "JAVA_DURABLE",
                 "LEASED", "ACTIVE", null, "owner", 1, attemptCount, null,
-                null, null, null, budgetExemptAttempt, 0);
+                null, null, null, budgetExemptAttempt, lifecycleProtocol);
     }
 
     private static OperationRecord actionOperation(int attemptCount) {

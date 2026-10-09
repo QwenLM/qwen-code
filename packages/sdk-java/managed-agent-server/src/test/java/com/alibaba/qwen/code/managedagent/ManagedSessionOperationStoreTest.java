@@ -302,6 +302,57 @@ class ManagedSessionOperationStoreTest {
                 .isPresent();
     }
 
+    // The upgrade backfill: an operation already retrying when the budget
+    // column arrived accumulated its attempt_count under a regime with no
+    // terminal budget at all, so none of those attempts was ever classified
+    // against one. V54 marks the in-flight rows' existing attempts exempt —
+    // each starts with a full budget instead of terminating on its first
+    // post-upgrade failure (review round 7, R7-5). An ACTION_RESPONSE row is
+    // excluded: there a nonzero watermark is the durable "the Harness
+    // already answered" latch, not a budget fact.
+    @Test
+    void theUpgradeBackfillExemptsAttemptsTheOldRegimeAlreadyCharged() {
+        dataSource = new JdbcDataSource();
+        dataSource.setURL("jdbc:h2:mem:operation-store-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").target("53").load()
+                .migrate();
+        jdbc = new JdbcTemplate(dataSource);
+        jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
+                + " session_id, agent_id, status, created_at, updated_at)"
+                + " VALUES (?, 'session', 'qwen-code', 'CLOSING', 0, 0)",
+                TENANT);
+        // In flight at upgrade time: 40 attempts the pre-budget regime
+        // charged without classifying any of them.
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                + " session_id, operation_id, operation_kind, actor_digest,"
+                + " idempotency_key, request_digest, state, admission_stage,"
+                + " delivery_state, session_status_before, attempt_count,"
+                + " available_at, created_at, updated_at) VALUES (?,"
+                + " 'session', 'op-close', 'CLOSE', 'digest', 'close',"
+                + " 'digest', 'RUNNING', 'JAVA_DURABLE', 'PENDING', 'ACTIVE',"
+                + " 40, 0, 0, 0)", TENANT);
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                + " session_id, operation_id, operation_kind, actor_digest,"
+                + " idempotency_key, request_digest, state, admission_stage,"
+                + " delivery_state, session_status_before, attempt_count,"
+                + " available_at, created_at, updated_at) VALUES (?,"
+                + " 'session', 'op-action', 'ACTION_RESPONSE', 'digest',"
+                + " 'answer', 'digest', 'RUNNING', 'JAVA_DURABLE', 'PENDING',"
+                + " 'ACTIVE', 40, 0, 0, 0)", TENANT);
+
+        Flyway.configure().dataSource(dataSource)
+                .locations("classpath:db/migration").load().migrate();
+
+        assertThat(jdbc.queryForObject("SELECT budget_exempt_attempt FROM"
+                        + " managed_agent_operation WHERE operation_id ="
+                        + " 'op-close'", Integer.class)).isEqualTo(40);
+        assertThat(jdbc.queryForObject("SELECT budget_exempt_attempt FROM"
+                        + " managed_agent_operation WHERE operation_id ="
+                        + " 'op-action'", Integer.class)).isZero();
+    }
+
     // A delete admitted on an ACTIVE Session publishes its writer wait like
     // a close, so the recovery scan must re-drive it from BLOCKED: blocking
     // the shape would otherwise strand it forever (review round 6, R6-2).
@@ -363,8 +414,8 @@ class ManagedSessionOperationStoreTest {
                 TENANT, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, 'workspace', ?, TRUE, TRUE)",
+                        + " workspace_id, actor_id, role)"
+                        + " VALUES (?, 'workspace', ?, 'OPERATOR')",
                 TENANT, "owner".getBytes(StandardCharsets.UTF_8));
         return store;
     }

@@ -5,6 +5,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
@@ -146,6 +149,78 @@ class ManagedActionStoreTest {
         assertThat(actions.deliverable(Long.MAX_VALUE))
                 .anySatisfy(target -> assertThat(target.operationId())
                         .isEqualTo("op-action"));
+    }
+
+    // A migration fence on the Session's storage holds the resurrection
+    // back: a fresh admission would refuse it 409 workspace_unavailable, so
+    // the replay keeps returning the recorded terminal failure — and its
+    // re-admissibility — until the fence lifts, instead of resurrecting a
+    // delivery the migration needs quiesced (review round 7, R7-4).
+    @Test
+    void aReplayedFailedResponseIsNotReadmittedWhileTheStorageIsFenced()
+            throws Exception {
+        ManagedAgentStore agents = agents();
+        ManagedActionStore actions = new ManagedActionStore(jdbc, agents);
+        String sessionId = agents.insertSessionCommand(TENANT,
+                "CREATE_SESSION", "create", "digest", "qwen-code", null, null,
+                List.of(), null).sessionId();
+        jdbc.update("INSERT INTO managed_workspace_create_command (tenant_id,"
+                        + " actor_id, idempotency_key, request_digest,"
+                        + " session_id, created_at) VALUES (?, ?, 'create',"
+                        + " 'digest', ?, 0)",
+                TENANT, ManagedWorkspaceRegistry.actorKey(TENANT, "owner"),
+                sessionId);
+        jdbc.update("INSERT INTO managed_agent_action (tenant_id, session_id,"
+                        + " action_id, state, options_json, created_at)"
+                        + " VALUES (?, ?, ?, 'requested', ?, 0)",
+                TENANT, sessionId, ACTION_ID,
+                "{\"inputRevision\":1,\"policyRevision\":\"p/1\","
+                        + "\"expiresAt\":9999999999999}");
+        jdbc.update("INSERT INTO managed_agent_operation (tenant_id,"
+                        + " session_id, operation_id, operation_kind,"
+                        + " actor_digest, idempotency_key, request_digest,"
+                        + " state, admission_stage, delivery_state,"
+                        + " session_status_before, receipt_id, attempt_count,"
+                        + " available_at, created_at, updated_at,"
+                        + " completed_at, action_id, response_json,"
+                        + " error_code) VALUES (?, ?, 'op-action',"
+                        + " 'ACTION_RESPONSE', 'digest', 'idem-key',"
+                        + " 'digest', 'FAILED', 'JAVA_DURABLE', 'CONFIRMED',"
+                        + " 'ACTIVE', 'rcpt-1', 10, 0, 0, 0, 0, ?, ?,"
+                        + " 'action_response_delivery_failed')",
+                TENANT, sessionId, ACTION_ID,
+                "{\"optionId\":\"allow\",\"inputRevision\":1,"
+                        + "\"policyRevision\":\"p/1\"}");
+        // Bind the Session to a storage, then fence the storage for a
+        // migration — the resurrection arm's evidence that a new delivery
+        // must wait.
+        jdbc.update("UPDATE managed_agent_session SET workspace_id ="
+                        + " 'workspace', workspace_generation = 1,"
+                        + " workspace_storage_id = 'storage', cwd_relative ="
+                        + " '.', context_config_ref = ?, context_revision ="
+                        + " 1, workspace_config_ref = ?,"
+                        + " workspace_policy_ref = ? WHERE tenant_id = ? AND"
+                        + " session_id = ?",
+                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF,
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF, TENANT, sessionId);
+        new JdbcRuntimeBindingRepository(jdbc.getDataSource(),
+                new AesGcmSecretProtector("test", new byte[32]))
+                .requestStorageFence(TENANT, "storage",
+                        UUID.randomUUID().toString());
+
+        var admission = actions.admit(TENANT, sessionId, "owner", "digest",
+                "idem-key", "digest", ACTION_ID,
+                new ObjectMapper().readTree("{\"optionId\":\"allow\","
+                        + "\"inputRevision\":1,\"policyRevision\":\"p/1\"}"),
+                now.get());
+
+        assertThat(admission.replayed()).isTrue();
+        assertThat(admission.operation().state()).isEqualTo("FAILED");
+        assertThat(admission.operation().failureCode())
+                .isEqualTo("action_response_delivery_failed");
+        assertThat(admission.operation().attemptCount()).isEqualTo(10);
+        assertThat(actions.deliverable(Long.MAX_VALUE)).isEmpty();
     }
 
     // A replay whose Action has expired must not resurrect the delivery

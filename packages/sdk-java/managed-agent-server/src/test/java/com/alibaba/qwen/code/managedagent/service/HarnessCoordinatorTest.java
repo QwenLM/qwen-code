@@ -2701,7 +2701,7 @@ class HarnessCoordinatorTest {
                 List.of(Map.of("type", "text", "text", "recover")),
                 "sha256:" + "a".repeat(64), status, submissionAttempted,
                 eventEpoch, lastEventId, "previous-owner", Long.MAX_VALUE,
-                retryCount, null, null, null, 1, 1, null, 1);
+                retryCount, retryCount, null, null, null, 1, 1, null, 1);
     }
 
     private static SourceStream cancelledStream(String promptId) {

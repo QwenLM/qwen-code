@@ -1236,6 +1236,46 @@ describe('EmbeddedHarnessScheduler', () => {
     );
   });
 
+  // One shared journal blip lands on every in-flight run at once: the
+  // streak is charged per concurrent attempt, so the halt bound must scale
+  // with the worker's own concurrency — a burst the size of the slot count
+  // is a blip, not an outage (review round 7, R7-1).
+  it('does not halt when one store blip fails every concurrent release at once', async () => {
+    const store = await FileManagedActivationStore.open(filePath);
+    const releasesEntered: string[] = [];
+    const allowRelease = deferred();
+    const originalRelease = store.release.bind(store);
+    vi.spyOn(store, 'release').mockImplementation(async (lease, outcome) => {
+      releasesEntered.push(lease.activationId);
+      await allowRelease.promise;
+      return originalRelease(lease, outcome);
+    });
+    const scheduler = new EmbeddedHarnessScheduler({
+      store,
+      workerId: 'worker-a',
+      maxActiveSlots: 10,
+      maxQueued: 10,
+      maxQueuedPerTenant: 10,
+      leaseDurationMs: 60_000,
+      hasMemoryHeadroom: () => true,
+      handler: async () => {},
+    });
+    schedulers.push(scheduler);
+    const items = Array.from({ length: 10 }, (_, i) => activation(`a${i}`));
+    for (const item of items) await scheduler.submit(item);
+    await scheduler.start();
+    // All ten runs are inside their release call; the blip fails every
+    // first attempt, charging the streak ten times at once.
+    await waitUntil(() => releasesEntered.length === 10);
+    fsFault.failAppends = 10;
+    allowRelease.resolve();
+
+    await waitUntil(() =>
+      items.every((i) => store.get(i)?.status === 'released'),
+    );
+    expect(scheduler.haltedError).toBeUndefined();
+  });
+
   it('does not launch a handler after disposal races with a durable claim', async () => {
     const store = await FileManagedActivationStore.open(filePath);
     const item = activation('a1');
