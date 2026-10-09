@@ -4,7 +4,7 @@
 
 ## 问题与范围
 
-同一 Workspace 内切换 cwd 的持久化接口已经存在，但 WebShell Session 能力字段仍预留。浏览器需要明确的调用者支持与权限信号，才能提供操作入口。本 BFF 切片仅实现 `capabilities.cwdChange`，在 OpenAPI v1.34 标记已实现并重新生成 WebShell 类型。不增加接口、表、operation 列表、公共能力或 WorkspaceContext 状态推导。
+同一 Workspace 内切换 cwd 的持久化接口已经存在，但 WebShell Session 能力字段仍预留。浏览器需要明确的调用者支持与权限信号，才能提供操作入口。合并后的 W2 PR 中，BFF 部分仅实现 `capabilities.cwdChange`，在 OpenAPI v1.34 标记已实现并重新生成 WebShell 类型。[WebShell 设计](2026-10-09-managed-workspace-w2-webshell.zh-CN.md)说明同一 PR 交付的界面与恢复行为。能力变更不增加接口、表、operation 列表、公共能力或 WorkspaceContext 状态推导。
 
 ## 权限与实现
 
@@ -18,7 +18,7 @@
 
 #13545 仍 open。其更广泛调用者权限合入时，需要与此共用 admission 谓词统一；本切片不提前启用其角色语义。前端读取 BFF 能力，不推断 creator/角色。
 
-在 #13564 cwd 项目规则缓存修复及联合验收通过前，不合入或部署会返回 true 的 BFF 变更。在一个既有 Hosted attachment 内，A→B 必须同时改变下一轮的实际写入目录与 QWEN.md/AGENTS.md 规则，无需重建 Session。确定性模型验证工具写入，不能证明规则采用。rewind 与会话内规则编辑不属于此切片。不增加额外前端发布开关。
+整个合并后的前端/BFF PR 保持 draft，在 #13564 cwd 项目规则缓存修复及联合验收通过前不合入或部署。在一个既有 Hosted attachment 内，A→B 必须同时改变下一轮的实际写入目录与 QWEN.md/AGENTS.md 规则，无需重建 Session。确定性模型验证工具写入，不能证明规则采用。rewind 与会话内规则编辑不属于此切片。不增加额外前端发布开关。
 
 ## 验证与行为 E2E 计划
 

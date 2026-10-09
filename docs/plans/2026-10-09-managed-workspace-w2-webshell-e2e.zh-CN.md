@@ -23,7 +23,7 @@
 
 ## 发布验收与兼容性
 
-能返回 true 的 BFF 合入/部署前，#13564 必须通过同 Hosted attachment A→B 验收：下一轮写入 B 并采用 B 的 QWEN.md/AGENTS.md，无需重建 Session。还需验证真实文件系统中文/空格/边界与执行中/审批 admission、React 18/19 键盘/ref-sensitive 弹窗行为及 portal 主题。在此之前，前端可安全合入并对缺少能力的服务端隐藏入口。确定性模型不能作为真实规则测试的证据。
+前端与 BFF 通过一个 draft PR 交付。合并后的 PR 合入/部署前，#13564 必须通过同 Hosted attachment A→B 验收：下一轮写入 B 并采用 B 的 QWEN.md/AGENTS.md，无需重建 Session。还需验证真实文件系统中文/空格/边界与执行中/审批 admission、React 18/19 键盘/ref-sensitive 弹窗行为及 portal 主题。运行时对缺少能力的服务端仍须隐藏入口。确定性模型不能作为真实规则测试的证据。
 
 ## 验证记录
 

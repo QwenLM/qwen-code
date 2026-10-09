@@ -23,7 +23,7 @@ Run root `npm run build`, `npm run typecheck`, `npm run bundle`. Under JDK 21 ru
 
 ## Release acceptance and compatibility
 
-Before the BFF capable of returning true is merged/deployed, #13564 must pass same-Hosted-attachment A→B acceptance: the next Turn writes in B and uses B's QWEN.md/AGENTS.md rules, without recreating the Session. Also verify real filesystem Unicode/spaces/containment and busy/approval admission, React 18/19 keyboard/ref-sensitive dialog behavior and portal theme. Until then the frontend is safe to land against capability-less servers. No live rule test is claimed from a deterministic model.
+The frontend and BFF are delivered in one draft PR. Before the combined PR is merged/deployed, #13564 must pass same-Hosted-attachment A→B acceptance: the next Turn writes in B and uses B's QWEN.md/AGENTS.md rules, without recreating the Session. Also verify real filesystem Unicode/spaces/containment and busy/approval admission, React 18/19 keyboard/ref-sensitive dialog behavior and portal theme. Runtime compatibility with capability-less servers still requires hiding the entry. No live rule test is claimed from a deterministic model.
 
 ## Verification record
 

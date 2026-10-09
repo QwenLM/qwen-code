@@ -16,7 +16,7 @@ Disable new changes during an active turn, pending approval, unconfirmed prompt 
 
 Use existing BFF `/sessions/cwd/change`, `/operations/query` and `/sessions/get`. The optional provider `cwdChange` group has submit/query methods returning the existing cwd operation shape. Extend the summary with optional contextRevision/state and cwdChange capability. Java exposes the group only with an explicit productScope containing tenant/account identity. Daemon and old servers remain unsupported.
 
-The separate BFF slice implements the existing optional `cwdChange` capability using the deployment execution flag, active Session, binding/Registry facts and the same caller authorization predicate as cwd admission. Batch page reads; do not reuse workspaceTurns, which has additional execution-profile constraints. Permission remains authoritative on the server and evolves with #13545. Capability does not promise an idle Session. No endpoints, database tables, operation history, public capability expansion or context-state derivation are added.
+The BFF implements the existing optional `cwdChange` capability using the deployment execution flag, active Session, binding/Registry facts and the same caller authorization predicate as cwd admission. Batch page reads; do not reuse workspaceTurns, which has additional execution-profile constraints. Permission remains authoritative on the server and evolves with #13545. Capability does not promise an idle Session. No endpoints, database tables, operation history, public capability expansion or context-state derivation are added.
 
 ## Durable browser intent
 
@@ -34,7 +34,7 @@ Project context changes as Session events; refresh only the summary, without rel
 
 ## Delivery and acceptance
 
-Two independently reviewable PRs: frontend adapter/control/recovery/events; BFF capability/OpenAPI/generated types/tests. The frontend is inert against servers without the capability. The BFF must not merge or deploy advertising true until #13564's cwd invalidation fix passes joint acceptance: within the same Hosted attachment, A→B changes both the next turn's file writes and its QWEN.md/AGENTS.md rules. This slice does not fix rewind or instruction editing.
+One PR delivers the frontend adapter/control/recovery/events together with the BFF capability/OpenAPI/generated types/tests. The frontend is inert against servers without the capability. The entire combined PR must remain draft and must not merge or deploy until #13564's cwd invalidation fix passes joint acceptance: within the same Hosted attachment, A→B changes both the next turn's file writes and its QWEN.md/AGENTS.md rules. The [capability design](2026-10-09-managed-workspace-w2-capability.md) details the server authorization and query budget. This slice does not fix rewind or instruction editing.
 
 Focused provider, hook, component, event and Java capability/query-budget tests cover lost acknowledgements, refresh, failure, permissions, stale revisions, concurrent requests, account isolation, storage refusal and old servers. Browser verification covers portals, focus and draft/history preservation. Real Java/Hosted verification covers root, spaces/non-ASCII, invalid/escaped paths, busy admission and post-change writes. Run build/typecheck/bundle, focused tests and two clean self-audit passes. Record any unavailable joint gate honestly; do not enable prematurely.
 

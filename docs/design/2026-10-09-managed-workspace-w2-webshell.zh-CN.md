@@ -16,7 +16,7 @@ W2 控制面（#13247）已有同一 Workspace 内持久化、幂等的 cwd 变�
 
 复用 BFF `/sessions/cwd/change`、`/operations/query` 和 `/sessions/get`。可选 provider `cwdChange` 操作组提供 submit/query，返回已有 cwd operation。summary 补可选 contextRevision/state 和 cwdChange capability。Java 仅在显式提供含租户、账号身份的 productScope 时暴露操作组。Daemon 和旧服务端保持不支持。
 
-独立 BFF 切片实现已预留的可选 `cwdChange`，依据部署执行开关、活跃 Session、绑定/Registry 事实和与 cwd admission 相同的调用者授权判定。页面采用批量查询，不能复用有额外执行 profile 限制的 workspaceTurns。权限由服务端裁决并随 #13545 演进。能力不保证 Session 当前空闲。不增加 endpoint、数据库表、operation 历史、公共能力字段或 context state 推导。
+BFF 实现已预留的可选 `cwdChange`，依据部署执行开关、活跃 Session、绑定/Registry 事实和与 cwd admission 相同的调用者授权判定。页面采用批量查询，不能复用有额外执行 profile 限制的 workspaceTurns。权限由服务端裁决并随 #13545 演进。能力不保证 Session 当前空闲。不增加 endpoint、数据库表、operation 历史、公共能力字段或 context state 推导。
 
 ## 浏览器持久化意图
 
@@ -34,7 +34,7 @@ completed 后刷新 summary，revision 达到 resultContextRevision 才清除意
 
 ## 交付与验收
 
-拆为两个独立可评审 PR：前端 adapter/控件/恢复/事件；BFF capability/OpenAPI/生成类型/测试。前端对缺能力的服务端不显示入口。BFF 在 #13564 的 cwd 缓存失效修复通过联合验收前不能合入或部署并返回 true：同一 Hosted attachment 中 A→B 后，下一轮的文件写入与 QWEN.md/AGENTS.md 规则必须同步变化。本切片不修 rewind 或规则编辑。
+以一个 PR 一起交付前端 adapter/控件/恢复/事件与 BFF capability/OpenAPI/生成类型/测试。前端对缺能力的服务端不显示入口。整个合并后的 PR 保持 draft，在 #13564 的 cwd 缓存失效修复通过联合验收前不能合入或部署：同一 Hosted attachment 中 A→B 后，下一轮的文件写入与 QWEN.md/AGENTS.md 规则必须同步变化。[能力设计](2026-10-09-managed-workspace-w2-capability.zh-CN.md)详细说明服务端授权和查询预算。本切片不修 rewind 或规则编辑。
 
 Provider、hook、组件、事件以及 Java capability/查询预算测试覆盖丢 ACK、刷新、失败、权限、旧 revision、竞争、账号隔离、存储拒绝和旧服务端。浏览器验证 portal、焦点、草稿/历史保留。真实 Java/Hosted 验证根目录、空格/中文、非法/越界路径、忙时拒绝和切换后写入。完成 build/typecheck/bundle、聚焦测试和两次干净 self-audit。如联合门槛不可验证，明确记录，不提前启用。
 

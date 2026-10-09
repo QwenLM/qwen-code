@@ -4,7 +4,7 @@
 
 ## Problem and scope
 
-The durable same-Workspace cwd routes already exist, but the WebShell Session capability is reserved. A browser needs an explicit per-caller support/permission signal before offering the operation. This BFF slice implements only `capabilities.cwdChange`, marks it implemented in OpenAPI v1.34 and regenerates the WebShell type. It adds no route, table, operation list, public capability or WorkspaceContext state derivation.
+The durable same-Workspace cwd routes already exist, but the WebShell Session capability is reserved. A browser needs an explicit per-caller support/permission signal before offering the operation. The BFF portion of the combined W2 PR implements only `capabilities.cwdChange`, marks it implemented in OpenAPI v1.34 and regenerates the WebShell type. The [WebShell design](2026-10-09-managed-workspace-w2-webshell.md) describes the UI and recovery delivered in the same PR. This capability change adds no route, table, operation list, public capability or WorkspaceContext state derivation.
 
 ## Authority and implementation
 
@@ -18,7 +18,7 @@ For list pages, union cwd-shaped and Turn-shaped candidates for the existing bat
 
 #13545 is still open. Its broader actor authority must converge with this shared admission predicate when that change lands; this slice does not pre-enable its role semantics. Frontend code uses the BFF capability and never infers creator/roles.
 
-Do not merge or deploy this BFF change returning true before #13564's cwd instruction-cache fix and joint acceptance pass. In one existing Hosted attachment, A→B must change the next Turn's physical write directory and its QWEN.md/AGENTS.md instructions without rebuilding the Session. A deterministic model proving tool writes does not prove instruction adoption. Rewind and in-session rule editing are outside this slice. There is no additional frontend release switch.
+Keep the entire combined frontend/BFF PR draft; do not merge or deploy it before #13564's cwd instruction-cache fix and joint acceptance pass. In one existing Hosted attachment, A→B must change the next Turn's physical write directory and its QWEN.md/AGENTS.md instructions without rebuilding the Session. A deterministic model proving tool writes does not prove instruction adoption. Rewind and in-session rule editing are outside this slice. There is no additional frontend release switch.
 
 ## Verification and behavior E2E plan
 

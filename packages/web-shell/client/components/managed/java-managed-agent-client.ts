@@ -20,12 +20,9 @@ export interface JavaAgentEnvironment {
 
 export type JavaAgentSession = Omit<
   Schemas['WebShellSession'],
-  'environment' | 'capabilities'
+  'environment'
 > & {
   environment?: JavaAgentEnvironment | null;
-  capabilities: Schemas['WebShellSessionCapabilities'] & {
-    cwdChange?: boolean;
-  };
 };
 
 export type JavaAgentWorkspace = Schemas['WebShellWorkspace'];
