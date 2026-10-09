@@ -400,6 +400,8 @@ public class ManagedAgentStore implements AgentStateStore {
         String turnId = input.isEmpty() ? null : publicId("turn");
         String promptId = input.isEmpty() ? null
                 : UUID.randomUUID().toString();
+        byte[] actorKey = actorId == null ? null
+                : ManagedWorkspaceRegistry.actorKey(tenantId, actorId);
         jdbc.update("INSERT INTO managed_agent_session (tenant_id,"
                         + " session_id, agent_id, agent_revision, title,"
                         + " status, created_at, updated_at, workspace_id,"
@@ -407,9 +409,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " cwd_relative, context_config_ref,"
                         + " context_revision, workspace_config_ref,"
                         + " workspace_policy_ref, tool_profile,"
-                        + " creator_actor_key) VALUES"
+                        + " creator_actor_key, owner_actor_key) VALUES"
                         + " (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?,"
-                        + " ?, ?, ?, ?, ?)",
+                        + " ?, ?, ?, ?, ?, ?)",
                 tenantId, sessionId, agentId, agentRevision, title, now, now,
                 workspace == null ? null : workspace.getWorkspaceId(),
                 workspace == null ? null : workspace.getWorkspaceGeneration(),
@@ -420,9 +422,7 @@ public class ManagedAgentStore implements AgentStateStore {
                 resolved == null ? null : resolved.configRef(),
                 resolved == null ? null : resolved.policyRef(),
                 workspace == null ? null : "hosted-workspace-files/1",
-                actorId == null ? null
-                        : ManagedWorkspaceRegistry.actorKey(tenantId,
-                                actorId));
+                actorKey, actorKey);
         jdbc.update("INSERT INTO managed_agent_consumer_progress"
                         + " (tenant_id, session_id, consumer_name,"
                         + " covered_sequence, updated_at) VALUES"
@@ -440,8 +440,7 @@ public class ManagedAgentStore implements AgentStateStore {
                             + " (tenant_id, actor_id, idempotency_key,"
                             + " request_digest, session_id, turn_id, created_at)"
                             + " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    tenantId, ManagedWorkspaceRegistry.actorKey(tenantId,
-                            actorId), idempotencyKey, requestDigest,
+                    tenantId, actorKey, idempotencyKey, requestDigest,
                     sessionId, turnId, now);
         }
         if (workspace != null) {
@@ -1132,8 +1131,8 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " WHERE s.tenant_id = ? AND s.session_id = ? AND"
                         + " r.workspace_generation = s.workspace_generation"
                         + " AND r.storage_id = s.workspace_storage_id AND"
-                        + " r.state = 'ACTIVE' AND a.can_read = TRUE AND"
-                        + " a.can_create = TRUE",
+                        + " r.state = 'ACTIVE' AND a.role IN ('OPERATOR',"
+                        + " 'OWNER')",
                 (row, index) -> Boolean.TRUE, session.tenantId(),
                 session.sessionId());
         return rows.size() == 1;
@@ -1508,7 +1507,7 @@ public class ManagedAgentStore implements AgentStateStore {
                         + "managed_agent_session.workspace_id, '!')"
                         + " AS BINARY(513))"
                         + " AND wa.actor_id = ?"
-                        + " AND wa.can_read = TRUE))"
+                        + " AND wa.role IN ('READER', 'OPERATOR', 'OWNER')))"
                         + cursorClause
                         + " ORDER BY updated_at DESC, session_id DESC LIMIT ?",
                 sessionMapper, arguments.toArray());
