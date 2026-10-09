@@ -135,8 +135,11 @@ public final class ToolPublicationAdmissionStore {
                 "Original referenced publication conflicts");
         long revision = positiveCounter(publication.get("receipt_revision"));
         long sequence = positiveCounter(publication.get("receipt_sequence"));
-        var head = jdbc.queryForMap("SELECT journal_revision, committed_sequence FROM qwen_managed_session_journal_head"
+        var head = jdbc.queryForMap("SELECT journal_revision, committed_sequence, storage_version FROM qwen_managed_session_journal_head"
                 + " WHERE tenant_id = ? AND session_id = ?" + suffix, text(key, "tenantId"), text(key, "sessionId"));
+        require(((Number) head.get("storage_version")).intValue() >= 1
+                && ((Number) head.get("storage_version")).intValue() <= ManagedSessionReaderVersion.SUPPORTED,
+                "Managed Session storage version is unsupported");
         require(positiveCounter(head.get("journal_revision")) >= revision
                 && positiveCounter(head.get("committed_sequence")) >= sequence,
                 "Original receipt exceeds the committed Session head");

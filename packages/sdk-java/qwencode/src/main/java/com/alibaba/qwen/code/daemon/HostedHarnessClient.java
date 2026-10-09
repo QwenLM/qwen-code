@@ -926,9 +926,21 @@ public final class HostedHarnessClient implements AutoCloseable {
             throw new HostedHarnessCapabilityMismatchException(
                     expectedDigest, digest);
         }
+        List<String> hostedFeatures = new ArrayList<>();
+        if (hosted.containsKey("features")) {
+            if (!(hosted.get("features") instanceof List<?>)) {
+                throw new DaemonProtocolException("Hosted Harness features must be an array");
+            }
+            for (Object value : (List<?>) hosted.get("features")) {
+                if (!(value instanceof String) || ((String) value).isBlank() || hostedFeatures.contains(value)) {
+                    throw new DaemonProtocolException("Invalid Hosted Harness feature");
+                }
+                hostedFeatures.add((String) value);
+            }
+        }
         return new HostedHarnessCapabilities(current, supported, bootId,
                 digest, hosted.containsKey("lifecycleProtocolVersion")
-                        ? JsonSupport.requiredInt(hosted, "lifecycleProtocolVersion", "capabilities.hostedHarness") : 0);
+                        ? JsonSupport.requiredInt(hosted, "lifecycleProtocolVersion", "capabilities.hostedHarness") : 0, hostedFeatures);
     }
 
     private HarnessSessionRef parseSession(String body,

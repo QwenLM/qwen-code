@@ -17,6 +17,9 @@ import { ApiError } from '@google/genai';
 import { AuthType, type ContentGenerator } from './contentGenerator.js';
 import {
   LlmChat,
+  LlmRequestPreparationError,
+  llmPreparedProviderPin,
+  type LlmPreparedRequest,
   InvalidStreamError,
   approvedPlanRedactionText,
   redactApprovedPlansInHistory,
@@ -837,6 +840,145 @@ describe('LlmChat', async () => {
       );
       expect(instruction).toContain('Legitimate content');
       expect(instruction).toContain(block('Ctx1'));
+    });
+  });
+
+  describe('prepared model request recovery', () => {
+    it('awaits durability after normalization and before the first provider call', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let entered!: () => void;
+      const preparedReady = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let saved: LlmPreparedRequest | undefined;
+      streamMock().mockResolvedValue(
+        streamOf(stopResponse([{ text: 'done' }])),
+      );
+      const response = await chat.sendMessageStream(
+        'test-model',
+        {
+          message: 'original',
+          config: {
+            abortSignal: new AbortController().signal,
+            httpOptions: { headers: { Authorization: 'secret-test' } },
+          },
+        },
+        'prompt',
+        undefined,
+        {
+          onPreparedRequest: async (prepared) => {
+            saved = prepared;
+            entered();
+            await gate;
+          },
+        },
+      );
+      const done = drain(response);
+      await preparedReady;
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(saved!.history.at(-1)?.parts).toEqual([{ text: 'original' }]);
+      expect(saved!.request.config.maxOutputTokens).toBeGreaterThan(0);
+      expect(saved!.request.config).not.toHaveProperty('abortSignal');
+      expect(saved!.request.config).not.toHaveProperty('httpOptions');
+      expect(JSON.stringify(saved)).not.toContain('secret-test');
+      release();
+      await done;
+      expect(streamMock()).toHaveBeenCalledOnce();
+    });
+
+    it('does not send, retry or fall back after a failed durability barrier', async () => {
+      const callback = vi
+        .fn()
+        .mockRejectedValue(new Error('Store unavailable'));
+      const response = await chat.sendMessageStream(
+        'test-model',
+        { message: 'original' },
+        'prompt',
+        undefined,
+        { onPreparedRequest: callback },
+      );
+      await expect(drain(response)).rejects.toBeInstanceOf(
+        LlmRequestPreparationError,
+      );
+      expect(callback).toHaveBeenCalledOnce();
+      expect(streamMock()).not.toHaveBeenCalled();
+      expect(mockRetryWithBackoff).not.toHaveBeenCalled();
+    });
+
+    it('reissues saved normalized history without another push, compaction or clamp', async () => {
+      const routeConfig = {
+        model: 'test-model',
+        authType: AuthType.USE_GEMINI,
+        samplingParams: { temperature: 0.3 },
+      };
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue(
+        routeConfig,
+      );
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          model: 'test-model',
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: routeConfig,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      const saved: LlmPreparedRequest = {
+        request: {
+          model: 'test-model',
+          contents: [userText('normalized request')],
+          config: {
+            maxOutputTokens: 77,
+            systemInstruction: 'original context',
+          },
+        },
+        history: [userText('normalized request')],
+        completedToolCallIds: [],
+        routeSelector: `${AuthType.USE_GEMINI}:test-model`,
+        providerPin: llmPreparedProviderPin(routeConfig),
+        promptTokensForClamp: 15,
+      };
+      const compression = vi.spyOn(chat, 'tryCompress');
+      streamMock().mockResolvedValue(
+        streamOf(stopResponse([{ text: 'recovered' }])),
+      );
+      const prepared = vi.fn();
+      await drain(
+        await chat.sendPreparedMessageStream(
+          saved,
+          'original-prompt',
+          new AbortController().signal,
+          prepared,
+        ),
+      );
+      expect(compression).not.toHaveBeenCalled();
+      expect(streamMock().mock.calls[0][0]).toMatchObject(saved.request);
+      expect(prepared.mock.calls[0][0]).toMatchObject(saved);
+      expect(
+        chat.getHistory().filter((item) => item.role === 'user'),
+      ).toHaveLength(1);
+      expect(chat.getHistory().at(-1)?.parts).toContainEqual({
+        text: 'recovered',
+      });
+    });
+
+    it('pins provider semantics while excluding credential rotation', () => {
+      const base = {
+        model: 'test',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://example.test',
+        samplingParams: { temperature: 0.3 },
+      };
+      expect(llmPreparedProviderPin({ ...base, apiKey: 'first' })).toBe(
+        llmPreparedProviderPin({ ...base, apiKey: 'second' }),
+      );
+      expect(llmPreparedProviderPin(base)).not.toBe(
+        llmPreparedProviderPin({
+          ...base,
+          samplingParams: { temperature: 0.4 },
+        }),
+      );
     });
   });
 
@@ -10364,6 +10506,38 @@ describe('LlmChat', async () => {
       return served;
     }
 
+    it.each([false, true])(
+      'marks prefix continuations and propagates a durability refusal (%s)',
+      async (refuse) => {
+        const served = serveStreams(
+          truncated('discarded'),
+          truncated('kept prefix'),
+          streamOf(stopResponse([{ text: 'suffix' }])),
+        );
+        const flags: boolean[] = [];
+        const response = await chat.sendMessageStream(
+          'gemini-pro',
+          { message: 'original' },
+          'prepared-continuation',
+          undefined,
+          {
+            onPreparedRequest: async (_request, continuing) => {
+              flags.push(continuing === true);
+              if (refuse && continuing)
+                throw new Error('Store unavailable during continuation');
+            },
+          },
+        );
+        if (refuse)
+          await expect(drain(response)).rejects.toBeInstanceOf(
+            LlmRequestPreparationError,
+          );
+        else await drain(response);
+        expect(flags).toEqual([false, false, true]);
+        expect(served.calls).toBe(refuse ? 2 : 3);
+      },
+    );
+
     const sendOn = (
       model: string,
       message: string | Part[],
@@ -13029,4 +13203,22 @@ describe('LlmChat', async () => {
       });
     });
   });
+});
+
+it('pins the reasoning registry route independently of credentials', () => {
+  const config = {
+    model: 'fixture',
+    authType: AuthType.USE_OPENAI,
+    baseUrl: 'https://fixture.invalid',
+    reasoningRouteBaseUrl: 'https://route-a.invalid',
+  };
+  expect(llmPreparedProviderPin(config)).not.toBe(
+    llmPreparedProviderPin({
+      ...config,
+      reasoningRouteBaseUrl: 'https://route-b.invalid',
+    }),
+  );
+  expect(llmPreparedProviderPin(config)).toBe(
+    llmPreparedProviderPin({ ...config, apiKey: 'rotated' }),
+  );
 });

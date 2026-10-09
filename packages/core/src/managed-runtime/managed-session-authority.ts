@@ -1084,7 +1084,16 @@ export class LocalManagedSessionAuthority {
    */
   async commitCheckpoint(
     command: ManagedSessionCommand,
-    request: { state: Buffer; boundary: string | null },
+    request: {
+      state: Buffer;
+      boundary: string | null;
+      toolAction?: {
+        readonly requestId: string;
+        readonly kind: string;
+        readonly inputRevision: number;
+        readonly optionsRef: ManagedSessionDurableRef;
+      };
+    },
     actor: ManagedSessionActor,
   ): Promise<ManagedSessionCheckpointReceipt> {
     const store = this.resources;
@@ -1100,8 +1109,12 @@ export class LocalManagedSessionAuthority {
       );
     }
     return this.runSerial(async () => {
+      const action = request.toolAction;
+      if (action && this.actions.has(action.requestId)) {
+        throw new ManagedSessionConflictError('The approval already exists.');
+      }
       const previous = this.checkpoint;
-      const checkpointId = `ckpt-${this.committed + 1}`;
+      const checkpointId = `ckpt-${this.committed + (action ? 2 : 1)}`;
       const covered = this.committed;
       const previousCheckpointId = previous?.checkpointId ?? null;
       const parsed = tryParseHarnessCheckpointV1(request.state);
@@ -1129,9 +1142,33 @@ export class LocalManagedSessionAuthority {
       const receipt = await this.commit(
         command,
         [
+          ...(action
+            ? [
+                {
+                  v: MANAGED_SESSION_FORMAT_VERSION,
+                  sequence: this.committed + 1,
+                  eventId: `action:${action.requestId}:requested`,
+                  sessionKey: command.sessionKey,
+                  kind: 'action.changed',
+                  occurredAt: this.now(),
+                  subject: {
+                    type: 'activation',
+                    scopeId: held.activationId,
+                    activationId: held.activationId,
+                    epoch: held.epoch,
+                  },
+                  payload: {
+                    ...action,
+                    source: 'tool_call',
+                    state: 'requested',
+                    decisionRef: null,
+                  },
+                },
+              ]
+            : []),
           {
             v: MANAGED_SESSION_FORMAT_VERSION,
-            sequence: this.committed + 1,
+            sequence: this.committed + (action ? 2 : 1),
             eventId: checkpointId,
             sessionKey: command.sessionKey,
             kind: 'checkpoint.committed',
@@ -1151,7 +1188,7 @@ export class LocalManagedSessionAuthority {
             },
           },
         ],
-        [actor],
+        action ? [actor, actor] : [actor],
       );
       const checkpoint = this.checkpoint;
       if (checkpoint === undefined) {

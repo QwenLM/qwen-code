@@ -5,8 +5,15 @@
  */
 
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
-import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import {
+  type ManagedSessionDurableRef,
+  assertManagedSessionDurableRef,
+  assertManagedSessionStableId,
+  parseManagedSessionRecordJson,
+  type ManagedSessionJsonValue,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 import {
   ManagedSessionConflictError,
   type ManagedSessionAction,
@@ -134,7 +141,81 @@ export type HostedActionOptions = HostedActionOptionsBase &
   (
     | { readonly v: 1 }
     | { readonly v: 2; readonly inputRef: ManagedSessionDurableRef }
+    | {
+        readonly v: 3;
+        readonly inputRef?: ManagedSessionDurableRef;
+        readonly continuationRef: ManagedSessionDurableRef;
+      }
   );
+
+export function parseHostedActionOptions(bytes: Buffer): HostedActionOptions {
+  const value = parseManagedSessionRecordJson(
+    bytes.toString('utf8'),
+    64 * 1024,
+  );
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Invalid Hosted Action options.');
+  const options = value as Record<string, ManagedSessionJsonValue>;
+  const fields = [
+    'v',
+    'requestId',
+    'turnId',
+    'functionCallId',
+    'toolName',
+    'policyRevision',
+    'inputRevision',
+    'createdAt',
+    'expiresAt',
+    'options',
+  ];
+  if (options['v'] === 2 || (options['v'] === 3 && options['inputRef']))
+    fields.push('inputRef');
+  if (options['v'] === 3) fields.push('continuationRef');
+  if (
+    ![1, 2, 3].includes(options['v'] as number) ||
+    Object.keys(options).length !== fields.length ||
+    fields.some((field) => !Object.hasOwn(options, field)) ||
+    !Number.isSafeInteger(options['inputRevision']) ||
+    (options['inputRevision'] as number) < 1 ||
+    options['policyRevision'] !== HOSTED_TOOL_APPROVAL_POLICY ||
+    !Number.isSafeInteger(options['createdAt']) ||
+    !Number.isSafeInteger(options['expiresAt']) ||
+    (options['createdAt'] as number) < 0 ||
+    (options['expiresAt'] as number) <= (options['createdAt'] as number) ||
+    !Array.isArray(options['options']) ||
+    options['options'].length !== 2 ||
+    !isDeepStrictEqual(
+      options['options'].map((option) =>
+        option && typeof option === 'object' && !Array.isArray(option)
+          ? option['id']
+          : null,
+      ),
+      ['allow', 'deny'],
+    ) ||
+    options['options'].some(
+      (option) =>
+        !option ||
+        typeof option !== 'object' ||
+        Array.isArray(option) ||
+        Object.keys(option).length !== 2 ||
+        typeof option['label'] !== 'string' ||
+        !option['label'],
+    )
+  )
+    throw new Error('Invalid Hosted Action options.');
+  for (const field of ['requestId', 'turnId', 'functionCallId', 'toolName'])
+    assertManagedSessionStableId(options[field], field);
+  for (const [field, kind] of [
+    ['inputRef', 'managed-tool-input'],
+    ['continuationRef', 'hosted-approval-continuation'],
+  ]) {
+    if (!Object.hasOwn(options, field)) continue;
+    const ref = assertManagedSessionDurableRef(options[field], field);
+    if (ref.kind !== kind || ref.schemaVersion !== 1)
+      throw new Error('Invalid Hosted Action reference.');
+  }
+  return options as unknown as HostedActionOptions;
+}
 
 function decisionBytes(
   optionId: string,
@@ -151,6 +232,19 @@ function decisionBytes(
  * recorded. Decision bytes are deterministic, so their recorded digest says
  * which option was chosen without reading them.
  */
+export function hostedActionDenied(
+  action: ManagedSessionAction,
+  policyRevision: string,
+): boolean {
+  return (
+    action.state === 'decided' &&
+    action.decisionRef?.digest ===
+      createHash('sha256')
+        .update(decisionBytes('deny', action.inputRevision, policyRevision))
+        .digest('hex')
+  );
+}
+
 export function hostedActionAllowed(
   action: ManagedSessionAction,
   policyRevision: string,
@@ -245,9 +339,15 @@ export async function readHostedActionOptions(
 ): Promise<HostedActionOptions> {
   if (action.optionsRef === null)
     throw new Error(`Action ${action.requestId} has no options.`);
-  return JSON.parse(
-    (await session.resources.read(action.optionsRef)).toString('utf8'),
-  ) as HostedActionOptions;
+  const options = parseHostedActionOptions(
+    await session.resources.read(action.optionsRef),
+  );
+  if (
+    options.requestId !== action.requestId ||
+    options.inputRevision !== action.inputRevision
+  )
+    throw new Error('Hosted Action options do not match the Action.');
+  return options;
 }
 
 export type HostedActionResolution =

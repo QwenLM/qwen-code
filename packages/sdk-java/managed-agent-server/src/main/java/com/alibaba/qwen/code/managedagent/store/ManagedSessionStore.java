@@ -299,6 +299,7 @@ public class ManagedSessionStore {
             throw conflict("managed_session_not_writable", "The Session is closing or closed.");
         }
         String tokenHash = tokenHash(writerToken);
+        ManagedSessionReaderVersion.requireReadable(1);
         Timestamp createdAt = databaseNow();
         Timestamp initialLeaseUntil = plusMillis(createdAt,
                 request.leaseMillis());
@@ -503,6 +504,17 @@ public class ManagedSessionStore {
         ValidatedCommit validated = validateCommit(request);
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
+        boolean promotes = ManagedHostedRecoveryRecords.requiresVersionTwo(validated.recordBytes(), request.resources())
+                || validated.resources().stream().anyMatch(resource -> {
+                    if (!"managed-action-options".equals(resource.resource().kind()) || resource.bytes() == null) {
+                        return false;
+                    }
+                    JsonNode body = ManagedExtensionRecordStore.parse(new String(resource.bytes(), StandardCharsets.UTF_8));
+                    return body != null && body.path("v").asInt() == 3;
+                });
+        if (promotes) {
+            ManagedSessionReaderVersion.requireReadable(2);
+        }
         TransactionRow existing = findTransactionByCommand(tenantId,
                 sessionId, commandKeyHash(request.operation(),
                         request.commandId()));
@@ -520,6 +532,30 @@ public class ManagedSessionStore {
         String scopeKey = sessionScopeKey(tenantId, sessionId);
         commitResources(scopeKey, tenantId, sessionId, request, revision,
                 now, validated.resources());
+        Set<String> declaredResources = new HashSet<>();
+        for (var resource : request.resources() == null ? List.<CommitResource>of() : request.resources()) {
+            declaredResources.add(resource.resourceId());
+        }
+        java.util.function.Function<String, StoredResource> closureReader = resourceId -> {
+            if (!declaredResources.contains(resourceId)) {
+                throw invalid("Hosted nested reference is absent from the transaction census.");
+            }
+            return storedResource(scopeKey, tenantId, request.workspaceId(), sessionId, resourceId);
+        };
+        for (var resource : request.resources() == null ? List.<CommitResource>of() : request.resources()) {
+            if (ManagedHostedRecoveryRecords.KINDS.contains(resource.kind()) || "managed-action-options".equals(resource.kind())) {
+                ManagedHostedRecoveryRecords.validateResource(closureReader.apply(resource.resourceId()), tenantId,
+                        request.workspaceId(), sessionId, closureReader);
+            }
+        }
+        for (String line : new String(validated.recordBytes(), StandardCharsets.UTF_8).split("\n")) {
+            JsonNode record = ManagedExtensionRecordStore.parse(line);
+            if (record != null && record.has("managedSession")) {
+                JsonNode event = record.get("managedSession");
+                ManagedHostedRecoveryRecords.validateEvent(event.path("kind").asText(), event.path("payload"), tenantId,
+                        request.workspaceId(), sessionId, closureReader);
+            }
+        }
         if (authority != null && extensionRecords.hasNewLifecycleDispatch(tenantId, sessionId, validated.recordBytes(),
                 resourceId -> storedResource(scopeKey, tenantId, request.workspaceId(), sessionId, resourceId))) {
             if (lifecycleExecution == null || lifecycleSessions == null) {
@@ -619,7 +655,7 @@ public class ManagedSessionStore {
                         + " activation_id = ?, activation_phase = ?,"
                         + " activation_event_epoch = ?,"
                         + " activation_expires_at = ?,"
-                        + " activation_head_revision = ?, updated_at = ?"
+                        + " activation_head_revision = ?, storage_version = ?, updated_at = ?"
                         + " WHERE tenant_id = ?"
                         + " AND session_id = ?",
                 revision, request.lastSequence(), request.commitDigest(),
@@ -633,7 +669,7 @@ public class ManagedSessionStore {
                         : fits ? activation.epoch() : null,
                 activation == null ? head.activationExpiresAt()
                         : fits ? activation.expiresAt() : null,
-                activationHeadRevision, now, tenantId, sessionId);
+                activationHeadRevision, Math.max(head.storageVersion(), promotes ? 2 : 1), now, tenantId, sessionId);
         if (toolResults != null) {
             toolResults.captureEvents(tenantId, request.workspaceId(), sessionId, revision, receiptEvents);
         }
@@ -1517,10 +1553,11 @@ public class ManagedSessionStore {
                 || !sessionId.equals(head.sessionId())) {
             throw sessionNotFound();
         }
-        if (head.storageVersion() != STORAGE_VERSION) {
+        if (head.storageVersion() < 1 || head.storageVersion() > ManagedSessionReaderVersion.SUPPORTED) {
             throw conflict("managed_session_storage_version_unsupported",
                     "The Managed Session storage version is unsupported.");
         }
+        ManagedSessionReaderVersion.requireReadable(head.storageVersion());
         if (!HEAD_STATES.contains(head.state())
                 || !RECOVERY_STATES.contains(head.recoveryStatus())
                 || head.writerGeneration() < 1

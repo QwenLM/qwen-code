@@ -128,7 +128,7 @@ public final class WorkspaceCsiCheckpointSnapshotStore {
                 "SELECT * FROM qwen_managed_session_journal_head WHERE tenant_id = ? AND session_id = ?",
                 key.path("tenantId").asText(), key.path("sessionId").asText());
         scope(head, key);
-        require(number(head, "storage_version") == 1 && "READY".equals(head.get("recovery_status"))
+        require((number(head, "storage_version") == 1 || number(head, "storage_version") == 2) && "READY".equals(head.get("recovery_status"))
                 && Set.of("ACTIVE", "SEALED").contains(text(head, "state"))
                 && number(head, "compacted_through_revision") == 0
                 && number(head, "activation_epoch") == binding.path("activationEpoch").longValue());

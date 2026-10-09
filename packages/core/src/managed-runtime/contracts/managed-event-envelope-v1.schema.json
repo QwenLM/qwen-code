@@ -46,7 +46,9 @@
         "domain.committed",
         "message.delta",
         "message.retracted",
-        "operation.replayed"
+        "operation.replayed",
+        "hosted.batch.planned",
+        "hosted.cleanup"
       ]
     },
     "streams": {
@@ -226,7 +228,9 @@
             "domain.committed",
             "message.delta",
             "message.retracted",
-            "operation.replayed"
+            "operation.replayed",
+            "hosted.batch.planned",
+            "hosted.cleanup"
           ]
         },
         "occurredAt": {

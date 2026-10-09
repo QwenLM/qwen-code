@@ -179,6 +179,59 @@ describe('HTTP Managed Session store', () => {
     return { stores, session };
   }
 
+  it.each([undefined, 1, 2])(
+    'requires Store acknowledgement before a bounded retraction (version=%s)',
+    async (version) => {
+      const server = new FakeManagedSessionStore();
+      server.supportedStorageVersion = version;
+      const { session } = await bootStoresAndSession(server);
+      try {
+        const before = server.commits.length;
+        const commit = session.authority.appendExecutionEvent(
+          {
+            operation: 'assistantRetract',
+            commandId: 'bounded',
+            sessionKey: SESSION_KEY,
+            contentDigest: 'a'.repeat(64),
+          },
+          (sequence) => ({
+            v: 1,
+            sequence,
+            eventId: 'bounded',
+            sessionKey: SESSION_KEY,
+            kind: 'message.retracted',
+            occurredAt: Date.now(),
+            subject: {
+              type: 'activation',
+              scopeId: session.activation.activationId,
+              ...session.activation,
+            },
+            payload: {
+              messageId: 'message',
+              turnId: 'turn',
+              fromSequence: 1,
+              sourceBootId: 'boot',
+              sourceEventEpoch: 'epoch',
+              throughSequence: 1,
+            },
+          }),
+          { class: 'harness', activation: session.activation },
+        );
+        if (version === 2) {
+          await commit;
+          expect(server.commits.length).toBe(before + 1);
+        } else {
+          await expect(commit).rejects.toThrow(
+            'does not support Hosted recovery storage version 2',
+          );
+          expect(server.commits.length).toBe(before);
+        }
+      } finally {
+        await session.close().catch(() => undefined);
+      }
+    },
+  );
+
   async function appendMessage(
     session: Awaited<ReturnType<typeof openManagedSession>>,
     index: number,
@@ -241,6 +294,9 @@ describe('HTTP Managed Session store', () => {
         const headers = new Headers(init?.headers);
         expect(headers.get('X-Qwen-Tenant-Id')).toBe(SESSION_KEY.tenantId);
         expect(headers.get('X-Qwen-Managed-Writer-Token')).toBe(TOKEN_A);
+        expect(headers.get('X-Qwen-Managed-Max-Readable-Storage-Version')).toBe(
+          '2',
+        );
         expect(init?.method).toBe('POST');
         expect(JSON.parse(String(init?.body))).toEqual(request);
         return jsonResponse(request);
@@ -1372,9 +1428,8 @@ describe('HTTP Managed Session store', () => {
       { class: 'harness', activation: first.activation },
     );
     expect(server.commits.at(-1)!['resources']).toEqual([
-      {
-        ...checkpointRef,
-      },
+      checkpointRef,
+      historyRef,
     ]);
     const snapshotResources = new Map<
       string,
@@ -2601,7 +2656,7 @@ describe('HTTP Managed Session store', () => {
 
   it.each([
     ['recoveryStatus', 'BLOCKED_RESOURCE'],
-    ['storageVersion', 2],
+    ['storageVersion', 3],
     ['state', 'SEALED'],
     ['writerGeneration', 2],
     ['compactedThroughRevision', 1],
@@ -2616,7 +2671,7 @@ describe('HTTP Managed Session store', () => {
       await expect(journal.read()).resolves.toBeDefined();
       server.headOverrides[key] = value;
       await expect(journal.read()).rejects.toThrow(
-        /not readable by this v1 writer/,
+        /not readable by this writer/,
       );
       await session.close();
     },
@@ -3032,6 +3087,7 @@ describe('HTTP Managed Session store', () => {
 });
 
 class FakeManagedSessionStore {
+  supportedStorageVersion: number | undefined = 2;
   readonly commits: Array<Record<string, unknown>> = [];
   readonly recoveryBlocks: Array<Record<string, unknown>> = [];
   readonly headOverrides: Record<string, unknown> = {};
@@ -3132,7 +3188,10 @@ class FakeManagedSessionStore {
         ...this.pageOverrides,
       });
     }
-    if (suffix === '/transactions:commit') {
+    if (
+      suffix === '/transactions:commit' ||
+      suffix === '/transactions:commit-v2'
+    ) {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       this.commits.push(body);
       const resources = body['resources'] as Array<Record<string, unknown>>;
@@ -3251,6 +3310,9 @@ class FakeManagedSessionStore {
 
   private grant(): Record<string, unknown> {
     return {
+      ...(this.supportedStorageVersion === undefined
+        ? {}
+        : { supportedStorageVersion: this.supportedStorageVersion }),
       writerGeneration: this.writerGeneration,
       leaseUntil: this.leaseUntil,
       journalRevision: this.transactions.length,

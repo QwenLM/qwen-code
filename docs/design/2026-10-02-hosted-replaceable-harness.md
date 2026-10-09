@@ -531,6 +531,16 @@ NOT close on the model-round slice alone: the Boundaries bullet keeps
 #12952's Q2 half open until a separate multi-instance control-plane
 tracker proves it, so closing waits on both.
 
+The [G3 Step 3 detailed design](2026-10-09-hosted-g3-step3-recovery.md)
+refines these follow-ups: retain requested Actions and drive the saved batch
+after Allow/Deny; Cancel/expiry settle only with safe ownership evidence.
+It also defines saved effective model requests, bounded prefix retraction,
+durable cleanup and cursor gates. The detailed design records the current
+working-tree implementation and its verified scope; its full acceptance matrix
+remains broader than the five packaged gates completed so far. D4's null epoch
+proves a missing admission reply, with safety from original-command journal
+idempotency and the parked-input refusal as specified in D4 above.
+
 ## Changes and ownership
 
 | Layer                     | Files                                                                                       | Change                                                                                                                                          |

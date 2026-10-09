@@ -545,7 +545,7 @@ public final class WorkspaceRecoveryStore {
             Timestamp lease = (Timestamp) head.get("writer_lease_until");
             check(!"ACTIVE".equals(head.get("state")) || lease != null && !lease.after(now(jdbc)), "source_drift");
             check(Set.of("ACTIVE", "SEALED", "DELETING", "DELETED").contains(head.get("state"))
-                    && ((Number) head.get("storage_version")).intValue() == 1
+                    && List.of(1, 2).contains(((Number) head.get("storage_version")).intValue())
                     && ((Number) head.get("compacted_through_revision")).longValue() == 0
                     && "READY".equals(head.get("recovery_status")), "source_drift");
             ObjectNode value = source.putObject("head");

@@ -702,10 +702,22 @@ public class HarnessCoordinator {
                     flush(turn, stream.eventEpoch(), batch, leaseLost);
                     batchBytes = 0;
                     flushAt = 0;
-                    store.retractHarnessTurnOutput(turn.tenantId(),
-                            turn.sessionId(), turn.turnId(), owner,
-                            stream.eventEpoch(), retractionFromSequence(source),
-                            source.id());
+                    Map<?, ?> retraction = source.data() instanceof Map<?, ?> data ? data : Map.of();
+                    if (retraction.containsKey("throughSequence")) {
+                        Object through = retraction.get("throughSequence");
+                        Object sourceBoot = retraction.get("sourceBootId");
+                        Object sourceEpoch = retraction.get("sourceEventEpoch");
+                        if (!(through instanceof Number) || !(sourceBoot instanceof String) || !(sourceEpoch instanceof String)) {
+                            throw new IllegalStateException("Invalid bounded Hosted retraction source");
+                        }
+                        store.retractHarnessTurnOutput(turn.tenantId(), turn.sessionId(), turn.turnId(), owner,
+                                stream.eventEpoch(), retractionFromSequence(source), source.id(),
+                                (String) sourceBoot, (String) sourceEpoch, ((Number) through).longValue());
+                    } else {
+                        store.retractHarnessTurnOutput(turn.tenantId(), turn.sessionId(), turn.turnId(), owner,
+                                stream.eventEpoch(), retractionFromSequence(source), source.id());
+                    }
+
                     // The replay's first chunk is the new first visible text:
                     // the transcript it replaces was just blanked.
                     flushFirstVisibleText = true;

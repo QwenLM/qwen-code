@@ -69,6 +69,8 @@ export const MANAGED_SESSION_EVENT_KINDS = [
   'message.delta',
   'message.retracted',
   'operation.replayed',
+  'hosted.batch.planned',
+  'hosted.cleanup',
 ] as const;
 
 export type ManagedSessionEventKind =
@@ -879,7 +881,9 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         inputCheckpointRef: 'refOrNull',
         state: 'text',
         usageRef: 'refOrNull',
+        recoveryRef: 'ref',
       },
+      optional: ['recoveryRef'],
     },
     'message.committed': {
       fields: {
@@ -917,7 +921,17 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         messageId: 'id',
         turnId: 'id',
         fromSequence: 'sequence',
+        sourceBootId: 'id',
+        sourceEventEpoch: 'id',
+        throughSequence: 'sequence',
       },
+      optional: ['sourceBootId', 'sourceEventEpoch', 'throughSequence'],
+    },
+    'hosted.batch.planned': {
+      fields: { batchId: 'id', planRevision: 'sequence', planRef: 'ref' },
+    },
+    'hosted.cleanup': {
+      fields: { cleanupId: 'id', descriptorRef: 'ref', state: 'text' },
     },
     'action.changed': {
       fields: {
@@ -1026,6 +1040,8 @@ const EVENT_ACTORS: Readonly<
   'tool.intent': ['harness'],
   'message.delta': ['harness'],
   'message.retracted': ['harness'],
+  'hosted.batch.planned': ['harness'],
+  'hosted.cleanup': ['harness'],
   'action.changed': ['harness', 'trusted_entry'],
   'tool.receipt': ['trusted_entry'],
   'checkpoint.committed': ['harness'],
@@ -1049,6 +1065,8 @@ const ACTIVATION_SUBJECT_KINDS: Readonly<
   'tool.intent': true,
   'message.delta': true,
   'message.retracted': true,
+  'hosted.batch.planned': true,
+  'hosted.cleanup': true,
   'action.changed': false,
   'tool.receipt': false,
   'checkpoint.committed': true,
@@ -1212,6 +1230,59 @@ function assertPayloadRules(
       if (state === 'started' && payload['usageRef'] !== null) {
         fail(`${at}.usageRef must be null while the attempt is started.`);
       }
+      if (Object.hasOwn(payload, 'recoveryRef')) {
+        const ref = payload[
+          'recoveryRef'
+        ] as unknown as ManagedSessionDurableRef;
+        if (ref.kind !== 'hosted-model-request' || ref.schemaVersion !== 1) {
+          fail(`${at}.recoveryRef must be a hosted-model-request/1.`);
+        }
+      }
+      return;
+    }
+    case 'hosted.batch.planned': {
+      if ((payload['planRevision'] as number) < 1) {
+        fail(`${at}.planRevision must start at 1.`);
+      }
+      const ref = payload['planRef'] as unknown as ManagedSessionDurableRef;
+      if (
+        ref.kind !== 'hosted-approval-continuation' ||
+        ref.schemaVersion !== 1
+      ) {
+        fail(`${at}.planRef must be a hosted-approval-continuation/1.`);
+      }
+      return;
+    }
+    case 'hosted.cleanup': {
+      assertEnum(
+        payload['state'],
+        ['owed', 'confirmed'] as const,
+        `${at}.state`,
+      );
+      const ref = payload[
+        'descriptorRef'
+      ] as unknown as ManagedSessionDurableRef;
+      if (ref.kind !== 'hosted-turn-cleanup' || ref.schemaVersion !== 1) {
+        fail(`${at}.descriptorRef must be a hosted-turn-cleanup/1.`);
+      }
+      return;
+    }
+    case 'message.retracted': {
+      const fields = ['sourceBootId', 'sourceEventEpoch', 'throughSequence'];
+      const count = fields.filter((name) =>
+        Object.hasOwn(payload, name),
+      ).length;
+      if (count !== 0 && count !== fields.length) {
+        fail(`${at} bounded source fields must be present together.`);
+      }
+      if (
+        (payload['fromSequence'] as number) < 1 ||
+        (count > 0 &&
+          (payload['throughSequence'] as number) <
+            (payload['fromSequence'] as number))
+      ) {
+        fail(`${at} retraction range is invalid.`);
+      }
       return;
     }
     case 'action.changed': {
@@ -1339,7 +1410,6 @@ function assertPayloadRules(
     case 'input.accepted':
     case 'tool.intent':
     case 'message.delta':
-    case 'message.retracted':
     case 'tool.receipt':
     case 'cancel.requested':
     case 'turn.settled':

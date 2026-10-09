@@ -1603,6 +1603,36 @@ public final class RuntimeBrokerService implements AutoCloseable {
         }
     }
 
+    public CompletionStage<Boolean> releaseOriginal(String harnessSessionId, String runtimeSessionId,
+            String bindingId, long generation) {
+        return releaseOriginal(harnessSessionId, runtimeSessionId, bindingId, generation, null);
+    }
+
+    public CompletionStage<Boolean> releaseOriginal(String harnessSessionId, String runtimeSessionId,
+            String bindingId, long generation, RuntimeLifecycleAuthority authority) {
+        requireOpen();
+        RuntimeBindingRecord binding = bindingRepository.findById(bindingId);
+        if (binding == null || binding.getGeneration() != generation
+                || !harnessSessionId.equals(binding.getRequest().getIsolationKey())
+                || !"session".equals(binding.getRequest().getScope().getIsolationClass())) {
+            return failed(conflict("runtime_session_conflict", "Cleanup owner differs from original binding"));
+        }
+        RuntimeSessionRecord stored = sessionRepository.findById(binding.getRequest().getScope(), runtimeSessionId);
+        if (stored == null) {
+            // Admission and this tombstone serialize under the binding lock. A late
+            // acquire must observe RELEASED instead of creating a new owner.
+            stored = bindingRepository.admitSession(sessionRepository, new RuntimeSessionRecord(
+                    new RuntimeSession(harnessSessionId, runtimeSessionId, "bootstrap", binding.getRequest().getScope().withLifecycleAuthority(authority)),
+                    bindingId, generation, RuntimeSessionRecord.State.RELEASED, 0, clock.instant()));
+        }
+        if (!bindingId.equals(stored.getBindingId()) || stored.getRuntimeGeneration() != generation
+                || !harnessSessionId.equals(stored.getSession().getHarnessSessionId())) {
+            return failed(conflict("runtime_session_conflict", "Cleanup owner differs from original Session"));
+        }
+        return stored.getState() == RuntimeSessionRecord.State.RELEASED
+                ? CompletableFuture.completedFuture(true) : release(harnessSessionId, runtimeSessionId);
+    }
+
     public CompletionStage<Boolean> release(String harnessSessionId,
             String runtimeSessionId) {
         requireOpen();

@@ -266,7 +266,7 @@ public class ManagedActionService {
         JsonNode options = action.options();
         String tool = options.path("toolName").asText();
         if (!"requested".equals(action.state())
-                || options.path("v").asLong() != 2
+                || !List.of(2L, 3L).contains(options.path("v").asLong())
                 || !PREVIEW_TOOLS.contains(tool)) {
             return null;
         }

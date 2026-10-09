@@ -447,6 +447,13 @@ profile）、以及 `turn_settled` 的换绑续读——是架在 D5 类型化 d
 保持开放，留待一个独立的多实例控制面 tracker 证明——关闭须两边同时
 成立。
 
+[G3 第三步详细设计](2026-10-09-hosted-g3-step3-recovery.zh-CN.md)细化这些
+后续切片：保留 requested Action，Allow/Deny 后驱动保存的批次，Cancel/expiry
+仅在所有权证据证明安全时结算；同时定义保存有效模型请求、有界 prefix 撤回、
+持久清理和游标门禁。详细设计记录当前工作区实现和已验证范围；完整验收矩阵
+仍大于目前已完成的五种打包门禁。D4 的 null epoch 仅证明 admission 回答
+缺失，安全性来自上文 D4 指定的原命令 journal 幂等与停靠输入拒绝。
+
 ## 改动与属主
 
 | 层                        | 文件                                                                                        | 改动                                                                                                  |

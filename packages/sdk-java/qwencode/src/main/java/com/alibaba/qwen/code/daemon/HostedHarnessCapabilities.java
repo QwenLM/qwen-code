@@ -11,6 +11,9 @@ public final class HostedHarnessCapabilities {
     private final String bootId;
     private final String capabilityDigest;
     private final int lifecycleProtocolVersion;
+    private final List<String> features;
+
+    public List<String> getFeatures() { return features; }
 
     public int getLifecycleProtocolVersion() { return lifecycleProtocolVersion; }
 
@@ -22,6 +25,12 @@ public final class HostedHarnessCapabilities {
 
     HostedHarnessCapabilities(int currentProtocolVersion, List<Integer> supportedProtocolVersions,
             String bootId, String capabilityDigest, int lifecycleProtocolVersion) {
+        this(currentProtocolVersion, supportedProtocolVersions, bootId, capabilityDigest, lifecycleProtocolVersion, List.of());
+    }
+
+    HostedHarnessCapabilities(int currentProtocolVersion, List<Integer> supportedProtocolVersions,
+            String bootId, String capabilityDigest, int lifecycleProtocolVersion, List<String> features) {
+        this.features = List.copyOf(features);
         this.lifecycleProtocolVersion = lifecycleProtocolVersion;
         this.currentProtocolVersion = currentProtocolVersion;
         this.supportedProtocolVersions = Collections.unmodifiableList(

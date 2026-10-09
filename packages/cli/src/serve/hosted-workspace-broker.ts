@@ -139,7 +139,8 @@ export class HostedWorkspaceBroker {
   }
 
   async warm(): Promise<void> {
-    await this.request('/runtimes:warm', {});
+    const response = await this.request('/runtimes:warm', {});
+    if (response['runtime'] !== undefined) this.readRuntime(response);
   }
 
   async authorizeLifecycle(): Promise<void> {
@@ -160,9 +161,14 @@ export class HostedWorkspaceBroker {
           }
         : {}),
     });
+    if (response['acquired'] !== true)
+      throw new Error('Runtime did not acquire the Session.');
+    this.readRuntime(response);
+  }
+
+  private readRuntime(response: Record<string, unknown>): void {
     const scope = object(response['scope']);
     if (
-      response['acquired'] !== true ||
       scope['tenantId'] !== this.key.tenantId ||
       scope['workspaceId'] !== this.key.workspaceId ||
       scope['capabilityDigest'] !== WORKSPACE_CAPABILITY_DIGEST
@@ -610,10 +616,18 @@ export class HostedWorkspaceBroker {
     }
   }
 
-  async release(): Promise<void> {
+  async release(expected?: {
+    bindingId: string;
+    generation: string;
+  }): Promise<void> {
     const response = await this.request(
       `/tool-sessions/${encodeURIComponent(this.identity.runtimeSessionId)}:release`,
-      {},
+      expected
+        ? {
+            cleanupBindingId: expected.bindingId,
+            cleanupGeneration: expected.generation,
+          }
+        : {},
     );
     if (response['released'] !== true)
       throw new Error('Runtime Session release is unconfirmed.');

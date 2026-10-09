@@ -450,6 +450,7 @@ export interface ServeOptions {
  * `v` is the wire schema version; bumped only on breaking frame changes.
  */
 export interface HostedHarnessCapabilities {
+  readonly features?: readonly string[];
   readonly lifecycleProtocolVersion?: 1;
   readonly protocolVersions: {
     readonly current: 1;
