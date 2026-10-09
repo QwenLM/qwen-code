@@ -15289,8 +15289,8 @@ export class Session implements SessionContext {
                         );
                       }
                       // AUTO mode judges the replacement like any input: its
-                      // own allow rule, else the classifier. Only a block
-                      // overrides this hook's one-time allow.
+                      // own allow rule, else the classifier. A block denies it;
+                      // a destructive guard fallback still needs a human.
                       const replacementParams = replacement.params as Record<
                         string,
                         unknown
@@ -15341,17 +15341,29 @@ export class Session implements SessionContext {
                       trackAgentInvocation();
                     }
 
-                    await confirmationDetails.onConfirm(
-                      ToolConfirmationOutcome.ProceedOnce,
-                    );
-                    const hookConfirmationCancellation =
-                      cancelBeforeExecutionIfAborted(toolName);
-                    if (hookConfirmationCancellation) {
-                      return hookConfirmationCancellation;
+                    if (autoModeFallbackRequiresHuman) {
+                      if (autoModeFallback) {
+                        confirmationDetails =
+                          decorateAutoModeFallbackConfirmation(
+                            confirmationDetails,
+                            autoModeFallback.reason,
+                            autoModeFallback.message,
+                          );
+                      }
+                      hookHandled = false;
+                    } else {
+                      await confirmationDetails.onConfirm(
+                        ToolConfirmationOutcome.ProceedOnce,
+                      );
+                      const hookConfirmationCancellation =
+                        cancelBeforeExecutionIfAborted(toolName);
+                      if (hookConfirmationCancellation) {
+                        return hookConfirmationCancellation;
+                      }
+                      recordAutoModeFallbackResolution(
+                        ToolConfirmationOutcome.ProceedOnce,
+                      );
                     }
-                    recordAutoModeFallbackResolution(
-                      ToolConfirmationOutcome.ProceedOnce,
-                    );
                   }
                 } else {
                   return earlyErrorResponse(

@@ -1,5 +1,7 @@
 # Auto classifier unavailable fallback
 
+[中文](auto-classifier-unavailable-fallback.zh-CN.md)
+
 ## Problem
 
 Auto Mode currently converts every classifier infrastructure failure into an execution denial. A network error, timeout, invalid structured response, unavailable fast model, or context overflow therefore fails the pending tool call before the standard confirmation flow can ask the user what to do.
@@ -52,6 +54,8 @@ Unavailable counters remain useful. Approving a fallback resets the consecutive 
 
 Confirmation details will gain optional Auto Mode fallback metadata shared across edit, execute, info, MCP, and other confirmation shapes. A new approval outcome will represent “proceed once and switch to Default.” The CLI scheduler will switch the runtime session mode and normalize that outcome to ordinary `ProceedOnce` before invoking tool-specific confirmation callbacks or recording the tool decision.
 
+Destructive guard escalations set `requiresHumanDecision: true` on the permission outcome. Both the scheduler and ACP ignore a PermissionRequest hook's allow for that escalation, including a hook replacement input that triggers the guard at a cap. Hook denies still apply. Ordinary classifier fallback retains its existing hook approval behavior.
+
 `Config.setApprovalMode` already provides the required session transition: it restores rules temporarily stripped on Auto Mode entry, resets denial counters, and increments the approval-mode revision. No settings file is changed.
 
 ## CLI presentation
@@ -67,7 +71,7 @@ ACP clients that only choose Allow or Reject continue to use the existing protoc
 ## Failure boundaries
 
 - User cancellation of the classifier request remains an abort and does not become an approval prompt.
-- Explicit permission denies remain errors. Deterministic destructive-command blocks remain errors until denial tracking reaches the consecutive-block or session-total cap; at a cap they fall back to manual approval the same way classifier blocks do (see `applyAutoModeDecision`).
+- Explicit permission denies remain errors. Deterministic destructive-command blocks remain errors until denial tracking reaches the consecutive-block or session-total cap; at a cap they require a human decision. Shared denial counters, including classifier-unavailable events, can reach the total cap but cannot authorize execution through a PermissionRequest hook allow.
 - Non-interactive calls without a permission transport and background agents that cannot prompt still deny through their existing manual-confirmation fallback handling.
 - A failed policy review in classifier Stage 2 is considered unavailable and therefore asks the user; a completed Stage 2 policy block remains denied.
 

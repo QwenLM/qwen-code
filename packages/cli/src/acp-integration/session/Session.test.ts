@@ -36575,7 +36575,10 @@ describe('Session', () => {
       mockToolRegistry.getTool.mockReturnValue({
         name: core.ToolNames.SHELL,
         kind: core.Kind.Execute,
-        build: vi.fn().mockReturnValue(invocation),
+        build: vi.fn((params: Record<string, unknown>) => ({
+          ...invocation,
+          params,
+        })),
       });
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.AUTO);
       mockConfig.getCwd = vi.fn().mockReturnValue('/repo');
@@ -36627,6 +36630,92 @@ describe('Session', () => {
         onConfirm,
       };
     }
+
+    it.each([
+      {
+        label: 'direct destructive escalation',
+        command: 'git reset --hard',
+        state: { totalBlock: 19 },
+        updatedInput: undefined,
+        allow: true,
+        asks: true,
+      },
+      {
+        label: 'destructive hook replacement',
+        command: 'python -c "print(1)"',
+        state: { totalBlock: 20 },
+        updatedInput: { command: 'git reset --hard' },
+        allow: true,
+        asks: true,
+      },
+      {
+        label: 'ordinary fallback hook allow',
+        command: 'python -c "print(1)"',
+        state: { totalBlock: 20 },
+        updatedInput: undefined,
+        allow: true,
+        asks: false,
+      },
+      {
+        label: 'destructive fallback hook deny',
+        command: 'git reset --hard',
+        state: { totalBlock: 19 },
+        updatedInput: undefined,
+        allow: false,
+        asks: false,
+      },
+    ])(
+      'keeps ACP manual approval for $label',
+      async ({ command, state, updatedInput, allow, asks }) => {
+        const { execute, onConfirm } = configureAutoModeShellFallback({
+          callId: 'destructive-fallback',
+          command,
+          denialState: {
+            consecutiveBlock: 0,
+            consecutiveUnavailable: 0,
+            totalUnavailable: 0,
+            ...state,
+          },
+        });
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({
+          request: vi.fn().mockResolvedValue({ success: true, output: {} }),
+        });
+        const permissionHook = vi
+          .spyOn(core, 'firePermissionRequestHook')
+          .mockResolvedValue({
+            hasDecision: true,
+            shouldAllow: allow,
+            updatedInput,
+          });
+        vi.mocked(mockClient.requestPermission)
+          .mockReset()
+          .mockImplementation(async (request) => {
+            expect(execute).not.toHaveBeenCalled();
+            expect(onConfirm).not.toHaveBeenCalled();
+            expect(request.toolCall.rawInput).toEqual({
+              command: 'git reset --hard',
+            });
+            return {
+              outcome: {
+                outcome: 'selected',
+                optionId: core.ToolConfirmationOutcome.ProceedOnce,
+              },
+            };
+          });
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'run tool' }],
+        });
+
+        expect(permissionHook).toHaveBeenCalledOnce();
+        expect(mockClient.requestPermission).toHaveBeenCalledTimes(
+          asks ? 1 : 0,
+        );
+        expect(execute).toHaveBeenCalledTimes(allow ? 1 : 0);
+      },
+    );
 
     it('routes an exact ACP retry to manual approval without reclassifying it', async () => {
       const command = 'python -c "print(1)"';
