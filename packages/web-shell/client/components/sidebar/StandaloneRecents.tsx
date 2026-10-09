@@ -50,6 +50,7 @@ interface StandaloneRecentsProps {
     },
   ) => ReactNode;
   onLoadSession: (sessionId: string) => Promise<void> | void;
+  onLeaveCurrentSession: (sessionId: string) => Promise<boolean>;
   onRenameSession?: (sessionId: string, displayName: string) => void;
   onMutated?: () => void;
   onStatusChange?: (status: {
@@ -112,6 +113,7 @@ export function StandaloneRecents({
   onNewSession,
   renderSession,
   onLoadSession,
+  onLeaveCurrentSession,
   onRenameSession,
   onMutated,
   onStatusChange,
@@ -126,6 +128,7 @@ export function StandaloneRecents({
   const loadedRef = useRef(false);
   const previousRefreshKeyRef = useRef(refreshKey);
   const busySessionIdRef = useRef<string | undefined>(undefined);
+  const pendingDeleteLeaveSessionIdRef = useRef<string | undefined>(undefined);
   const openGenerationRef = useRef(0);
   const openingSessionIdRef = useRef<string | undefined>(undefined);
   const { t } = useI18n();
@@ -270,15 +273,14 @@ export function StandaloneRecents({
   const run = useCallback(
     async (
       sessionId: string,
-      action: () => Promise<void>,
+      action: () => Promise<void | boolean>,
     ): Promise<boolean> => {
       if (busySessionIdRef.current) return false;
       busySessionIdRef.current = sessionId;
       setBusySessionId(sessionId);
       setSessionError(undefined);
       try {
-        await action();
-        return true;
+        return (await action()) !== false;
       } catch (error) {
         if (isSessionWriterBlockedCode(getDaemonErrorCode(error))) {
           console.warn(
@@ -375,7 +377,18 @@ export function StandaloneRecents({
 
   const deleteSession = useCallback(
     async (session: DaemonStandaloneSessionSummary): Promise<boolean> => {
+      let leftCurrentSession = false;
       const succeeded = await run(session.sessionId, async () => {
+        if (
+          !leftCurrentSession &&
+          (session.sessionId === currentSessionId ||
+            session.sessionId === pendingDeleteLeaveSessionIdRef.current)
+        ) {
+          pendingDeleteLeaveSessionIdRef.current = session.sessionId;
+          if (!(await onLeaveCurrentSession(session.sessionId))) return false;
+          pendingDeleteLeaveSessionIdRef.current = undefined;
+          leftCurrentSession = true;
+        }
         const result = await workspace.client.deleteStandaloneSessions([
           session.sessionId,
         ]);
@@ -396,9 +409,19 @@ export function StandaloneRecents({
         }
         removeMutated(session.sessionId);
       });
+      if (leftCurrentSession && !succeeded) void load(true);
       return succeeded;
     },
-    [onNotice, removeMutated, run, t, workspace.client],
+    [
+      currentSessionId,
+      load,
+      onLeaveCurrentSession,
+      onNotice,
+      removeMutated,
+      run,
+      t,
+      workspace.client,
+    ],
   );
 
   const openSession = useCallback(
@@ -451,6 +474,18 @@ export function StandaloneRecents({
   const displayedSessions = sessionsLimited
     ? visibleSessions.slice(0, SIDEBAR_SESSION_PREVIEW_LIMIT)
     : visibleSessions;
+  const deleteBusy =
+    !!deleteCandidate && busySessionId === deleteCandidate.sessionId;
+  const closeDeleteCandidate = () => {
+    if (
+      busySessionIdRef.current &&
+      busySessionIdRef.current === deleteCandidate?.sessionId
+    ) {
+      return;
+    }
+    pendingDeleteLeaveSessionIdRef.current = undefined;
+    setDeleteCandidate(undefined);
+  };
 
   return (
     <>
@@ -562,7 +597,10 @@ export function StandaloneRecents({
                   archiveState === 'archived'
                     ? () => void unarchiveSession(session)
                     : undefined,
-                onDelete: () => setDeleteCandidate(session),
+                onDelete: () => {
+                  pendingDeleteLeaveSessionIdRef.current = undefined;
+                  setDeleteCandidate(session);
+                },
               });
             })}
             {!loading && !loadError && visibleSessions.length === 0 && (
@@ -650,7 +688,8 @@ export function StandaloneRecents({
         <DialogShell
           title={t('sidebar.delete')}
           size="sm"
-          onClose={() => setDeleteCandidate(undefined)}
+          dismissible={!deleteBusy}
+          onClose={closeDeleteCandidate}
         >
           <div className="flex flex-col gap-4">
             <p className="text-sm text-muted-foreground">
@@ -660,20 +699,23 @@ export function StandaloneRecents({
               <Button
                 type="button"
                 variant="outline"
-                onClick={() => setDeleteCandidate(undefined)}
+                disabled={deleteBusy}
+                onClick={closeDeleteCandidate}
               >
                 {t('common.cancel')}
               </Button>
               <Button
                 type="button"
                 variant="destructive"
+                disabled={!!busySessionId}
+                aria-busy={deleteBusy}
                 onClick={() => {
                   void deleteSession(deleteCandidate).then((succeeded) => {
                     if (succeeded) setDeleteCandidate(undefined);
                   });
                 }}
               >
-                {t('sidebar.delete')}
+                {deleteBusy ? t('delete.deleting') : t('sidebar.delete')}
               </Button>
             </div>
           </div>
