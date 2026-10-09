@@ -1824,280 +1824,180 @@ class LeadingProtocolTagLeakDetector {
 const SYSTEM_REMINDER_ECHO_MAX_BUFFER = 16_000;
 
 /**
- * Strips `<system-reminder>…</system-reminder>` blocks that the model echoes
- * back verbatim inside a backtick code span or fence (#10797 Shape B).
- *
- * Injected reminders (stale-todo nudges, ACP context) never belong in
- * user-visible model output, but such an echo is nearly indistinguishable
- * from a legitimately quoted example, so this filter is deliberately
- * conservative and fails open:
- *
- *   - only blocks whose opening backtick run (1-3 ticks) sits at stream start
- *     or at the start of a line are candidates — an inline mid-sentence
- *     mention never triggers;
- *   - the block must be COMPLETE: a line-start `</system-reminder>` followed
- *     by the matching backtick run. Inline spans close on the same line;
- *     three-tick fences may close on the next line. Anything else —
- *     unterminated block, early-closing code span,
- *     oversized candidate or intervening fence — is released unchanged;
- *   - a backtick run on the opener's line means the code span closed early
- *     (an inline mention like "`<system-reminder>`"), which also releases
- *     everything unchanged.
- *
- * Unlike the leading protocol-tag detector this never retries the turn: the
- * echo is stripped in place and the surrounding reply is preserved, because
- * the reported shape pairs the echo with a real tool call that must survive.
+ * Only bodies already injected into this conversation identify an echo.
+ * Markdown wrappers are removed with a matched echo, never used as evidence
+ * that an arbitrary code example is internal context.
  */
 class SystemReminderEchoFilter {
-  private holding = false;
   private buffer = '';
-  private carry = '';
-  private carryAnchored = false;
-  private atStreamStart = true;
-  private openingTicks = 0;
-  private openingRunEnd = 0;
+  private skipLineBreak = false;
+  private readonly bodies: string[];
 
-  /**
-   * Evaluate `s`, which starts at a candidate line start, against the echo
-   * trigger grammar: `[ \t]* (`{1,3}) [ \t]* (\r?\n)? [ \t]* <system-reminder>`.
-   * Returns undefined when `s` can no longer become a trigger.
-   */
-  private static matchTrigger(
-    s: string,
-  ): { ticks: number; triggered: boolean } | undefined {
-    let i = 0;
-    while (i < s.length && (s[i] === ' ' || s[i] === '\t')) i++;
-    let ticks = 0;
-    while (i < s.length && s[i] === '`' && ticks < 3) {
-      ticks++;
-      i++;
+  constructor(history: Content[]) {
+    const bodies = new Set<string>();
+    for (const entry of history) {
+      if (entry.role !== 'user') continue;
+      for (const part of entry.parts ?? []) {
+        if (!isSystemReminderContent({ ...entry, parts: [part] })) continue;
+        const text = part.text!.trimEnd();
+        const body = text
+          .slice(SYSTEM_REMINDER_OPEN.length, -SYSTEM_REMINDER_CLOSE.length)
+          .trim();
+        if (body && body.length < SYSTEM_REMINDER_ECHO_MAX_BUFFER) {
+          bodies.add(body);
+        }
+      }
     }
-    if (ticks === 0) {
-      return i === s.length ? { ticks: 0, triggered: false } : undefined;
-    }
-    if (i === s.length) return { ticks, triggered: false };
-    let j = i;
-    while (j < s.length && (s[j] === ' ' || s[j] === '\t')) j++;
-    if (j < s.length && s[j] === '\r') {
-      j++;
-      if (j < s.length && s[j] === '\n') j++;
-    } else if (j < s.length && s[j] === '\n') {
-      j++;
-    }
-    while (j < s.length && (s[j] === ' ' || s[j] === '\t')) j++;
-    if (j === s.length) return { ticks, triggered: false };
-    const tag = s.slice(j);
-    if (tag.startsWith(SYSTEM_REMINDER_OPEN)) {
-      return { ticks, triggered: true };
-    }
-    if (SYSTEM_REMINDER_OPEN.startsWith(tag)) {
-      return { ticks, triggered: false };
-    }
-    return undefined;
-  }
-
-  /** Longest backtick run of length ≥ minTicks inside [from, to), or -1. */
-  private static findTickRun(
-    text: string,
-    from: number,
-    to: number,
-    minTicks: number,
-  ): number {
-    let run = 0;
-    for (let i = from; i < to; i++) {
-      run = text[i] === '`' ? run + 1 : 0;
-      if (run >= minTicks) return i - minTicks + 1;
-    }
-    return -1;
+    this.bodies = [...bodies];
   }
 
   accept(text: string): string {
-    if (this.holding) {
-      this.buffer += text;
-      return this.resolveHeld();
-    }
-    return this.scan(this.carry + text);
+    if (this.bodies.length === 0) return text;
+    this.buffer += text;
+    return this.drain();
   }
 
-  /** True while the filter withholds unresolved bytes (held block or carry). */
   get pending(): boolean {
-    return this.holding || this.carry !== '';
+    return this.buffer !== '';
   }
 
   finish(): string {
-    if (this.holding) return this.resolveHeld(true) + this.flushCarry();
-    return this.flushCarry();
+    return this.drain(true);
   }
 
-  private flushCarry(): string {
-    const out = this.carry;
-    this.carry = '';
-    this.carryAnchored = false;
-    return out;
+  private static partialTagLength(text: string, tag: string): number {
+    for (
+      let length = Math.min(text.length, tag.length - 1);
+      length > 0;
+      length--
+    ) {
+      if (tag.startsWith(text.slice(-length).toLowerCase())) return length;
+    }
+    return 0;
   }
 
-  /**
-   * Passthrough scan: emit everything that cannot be part of a trigger and
-   * keep an ambiguous tail in `carry` for the next chunk.
-   *
-   * `startsAtLineStart` re-anchors `text` at a line start when the anchor
-   * would otherwise be lost — the caller has already consumed the newline
-   * that made it one. The post-strip rescan in `resolveHeld` needs it:
-   * everything this filter consumed sits ahead of the outer scan's
-   * bookkeeping (`atStreamStart`/`carryAnchored`), so without the flag a
-   * remainder that begins exactly at a line start is scanned as mid-line and
-   * a second consecutive echoed reminder line leaks verbatim. The fail-open
-   * release path must NOT pass it: the released buffer begins with the very
-   * candidate we just decided to emit, and re-anchoring it would re-trigger
-   * a hold-release loop over the same bytes.
-   */
-  private scan(text: string, startsAtLineStart = false): string {
-    if (!text) {
-      this.carryAnchored ||= startsAtLineStart;
-      return '';
-    }
-    // `text` may begin with the previous carry, which was held precisely
-    // because it starts at a line start (or at the absolute stream start).
-    const startIsLineStart =
-      startsAtLineStart || this.atStreamStart || this.carryAnchored;
-    this.carry = '';
-    this.carryAnchored = false;
-    let emit = '';
-    let lineStart: number | null = startIsLineStart ? 0 : null;
-    for (;;) {
-      if (lineStart === null) {
-        const nl = text.indexOf('\n');
-        if (nl === -1) break;
-        lineStart = nl + 1;
-      }
-      const candidate = text.slice(lineStart);
-      const match = SystemReminderEchoFilter.matchTrigger(candidate);
-      if (match === undefined) {
-        if (lineStart === 0) this.atStreamStart = false;
-        // A candidate may itself start with '\n' (empty line), so advance
-        // from `lineStart`, not `lineStart + 1`, or the next line start
-        // would be skipped.
-        const nl = text.indexOf('\n', lineStart);
-        if (nl === -1) break;
-        lineStart = nl + 1;
-        continue;
-      }
-      if (match.triggered) {
-        emit += text.slice(0, lineStart);
-        this.atStreamStart = false;
-        this.holding = true;
-        this.buffer = candidate;
-        this.openingTicks = match.ticks;
-        this.openingRunEnd = candidate.indexOf('`') + match.ticks;
-        return emit + this.resolveHeld();
-      }
-      // Still ambiguous: hold from this line start onward.
-      emit += text.slice(0, lineStart);
-      this.carry = candidate;
-      this.carryAnchored = true;
-      this.atStreamStart = false;
-      return emit;
-    }
-    // No resolved anchor; hold back a trailing partial line that could still
-    // grow into one (e.g. "\n  `<system-rem").
-    const nl = text.lastIndexOf('\n');
-    const tail = nl === -1 ? text : text.slice(nl + 1);
-    const holdable = SystemReminderEchoFilter.matchTrigger(tail);
-    if (nl >= 0 && holdable !== undefined) {
-      this.carry = text.slice(nl + 1);
-      this.carryAnchored = true;
-      emit += text.slice(0, nl + 1);
-    } else if (this.atStreamStart && holdable !== undefined) {
-      this.carry = text;
-      this.carryAnchored = true;
-    } else {
-      emit += text;
-      if (text.length > 0) this.atStreamStart = false;
-    }
-    return emit;
+  private static wrapper(prefix: string): RegExpMatchArray | null {
+    return prefix.match(
+      /(?:^|\n)[ \t]*(`{3,}|~{3,})[^\r\n`~]*\r?\n[ \t]*$|(?:^|\n)[ \t]*(`+)[ \t]*$/,
+    );
   }
 
-  /** Resolve the held candidate: strip complete echoes, release otherwise. */
-  private resolveHeld(final = false): string {
-    let emitted = '';
-    for (;;) {
-      if (!this.holding) return emitted;
-      const closeIdx = this.buffer.indexOf(SYSTEM_REMINDER_CLOSE);
-      const lineEnd = this.buffer.indexOf('\n', this.openingRunEnd);
-      const searchEnd = Math.min(
-        closeIdx === -1 ? this.buffer.length : closeIdx,
-        lineEnd === -1 ? this.buffer.length : lineEnd,
-      );
-      const earlyClose =
-        SystemReminderEchoFilter.findTickRun(
+  private drain(final = false): string {
+    let output = '';
+    while (this.buffer) {
+      if (this.skipLineBreak) {
+        if (!final && this.buffer === '\r') break;
+        if (this.buffer.startsWith('\r\n')) this.buffer = this.buffer.slice(2);
+        else if (this.buffer.startsWith('\n'))
+          this.buffer = this.buffer.slice(1);
+        this.skipLineBreak = false;
+      }
+      const open = this.buffer.search(/<system-reminder>/i);
+      if (open === -1) {
+        const partial = SystemReminderEchoFilter.partialTagLength(
           this.buffer,
-          this.openingRunEnd,
-          searchEnd,
-          this.openingTicks,
-        ) !== -1;
-      const crossesFence = /^[ \t]*`{3,}/m.test(
-        this.buffer.slice(
-          this.openingRunEnd,
-          closeIdx === -1 ? undefined : closeIdx,
-        ),
-      );
-      let decidedLiteral = false;
-      if (closeIdx !== -1) {
-        const after = closeIdx + SYSTEM_REMINDER_CLOSE.length;
-        const closeLineStart = this.buffer.lastIndexOf('\n', closeIdx) + 1;
-        const closeIsAnchored = /^[ \t]*$/.test(
-          this.buffer.slice(closeLineStart, closeIdx),
+          SYSTEM_REMINDER_OPEN,
         );
-        const gap = (
-          this.openingTicks === 3 ? /^[ \t]*\r?\n?[ \t]*/ : /^[ \t]*/
-        ).exec(this.buffer.slice(after))![0];
-        let ticksAfter = 0;
-        const ticksAt = after + gap.length;
-        while (
-          ticksAt + ticksAfter < this.buffer.length &&
-          this.buffer[ticksAt + ticksAfter] === '`'
-        ) {
-          ticksAfter++;
-        }
+        const prefix = partial ? this.buffer.slice(0, -partial) : this.buffer;
+        const wrapper = SystemReminderEchoFilter.wrapper(prefix);
+        const trailingWrapper = prefix.match(
+          /(?:^|\n)[ \t]*(?:`+[^\r\n`]*|~{3,}[^\r\n~]*)$/,
+        );
+        const held = wrapper ?? trailingWrapper;
+        const start = held
+          ? held.index! + (held[0].startsWith('\n') ? 1 : 0)
+          : this.buffer.length - partial;
         if (
-          !earlyClose &&
-          !crossesFence &&
-          closeIsAnchored &&
-          (ticksAfter === this.openingTicks ||
-            (this.openingTicks === 3 && ticksAfter > this.openingTicks))
+          final ||
+          this.buffer.length - start > SYSTEM_REMINDER_ECHO_MAX_BUFFER
         ) {
-          let end = ticksAt + ticksAfter;
-          if (this.buffer[end] === '\r' && this.buffer[end + 1] === '\n') {
-            end += 2;
-          } else if (this.buffer[end] === '\n' || this.buffer[end] === '\r') {
-            end += 1;
-          }
-          const remainder = this.buffer.slice(end);
-          const startsAtLineStart =
-            this.buffer[end - 1] === '\n' || this.buffer[end - 1] === '\r';
-          this.holding = false;
+          output += this.buffer;
           this.buffer = '';
-          emitted += this.scan(remainder, startsAtLineStart);
-          continue;
+        } else {
+          output += this.buffer.slice(0, start);
+          this.buffer = this.buffer.slice(start);
         }
-        decidedLiteral = ticksAt + ticksAfter < this.buffer.length;
+        break;
       }
-      if (
-        decidedLiteral ||
-        earlyClose ||
-        crossesFence ||
-        this.buffer.length > SYSTEM_REMINDER_ECHO_MAX_BUFFER ||
-        final
-      ) {
-        // Fail-open: release the candidate verbatim.
-        const release = this.buffer;
-        this.holding = false;
-        this.buffer = '';
-        emitted += this.scan(release);
+
+      const prefix = this.buffer.slice(0, open);
+      const wrapper = SystemReminderEchoFilter.wrapper(prefix);
+      const start = wrapper
+        ? wrapper.index! + (wrapper[0].startsWith('\n') ? 1 : 0)
+        : open;
+      output += this.buffer.slice(0, start);
+      this.buffer = this.buffer.slice(start);
+      const bodyStart = open - start + SYSTEM_REMINDER_OPEN.length;
+      const closeOffset = this.buffer
+        .slice(bodyStart)
+        .search(/<\/system-reminder>/i);
+      const close = closeOffset === -1 ? -1 : bodyStart + closeOffset;
+      if (close === -1) {
+        const partial = SystemReminderEchoFilter.partialTagLength(
+          this.buffer.slice(bodyStart),
+          SYSTEM_REMINDER_CLOSE,
+        );
+        const body = this.buffer
+          .slice(bodyStart, this.buffer.length - partial)
+          .trimStart();
+        const possible = this.bodies.some(
+          (known) =>
+            known.startsWith(body) ||
+            (body.startsWith(known) && !body.slice(known.length).trim()),
+        );
+        if (
+          possible &&
+          !final &&
+          this.buffer.length <= SYSTEM_REMINDER_ECHO_MAX_BUFFER
+        )
+          break;
+        output += this.buffer.slice(0, bodyStart);
+        this.buffer = this.buffer.slice(bodyStart);
         continue;
       }
-      return emitted;
+
+      const body = this.buffer.slice(bodyStart, close).trim();
+      const after = close + SYSTEM_REMINDER_CLOSE.length;
+      if (!this.bodies.includes(body)) {
+        output += this.buffer.slice(0, after);
+        this.buffer = this.buffer.slice(after);
+        continue;
+      }
+
+      let end = after;
+      if (wrapper) {
+        const ticks = wrapper[1] ?? wrapper[2];
+        const fenced = wrapper[1] !== undefined;
+        const tail = this.buffer.slice(after);
+        const gap = (fenced ? /^[ \t]*\r?\n?[ \t]*/ : /^[ \t]*/).exec(tail)![0];
+        let count = 0;
+        while (tail[gap.length + count] === ticks[0]) count++;
+        if (count >= ticks.length && (fenced || count === ticks.length)) {
+          if (
+            !final &&
+            gap.length + count === tail.length &&
+            this.buffer.length <= SYSTEM_REMINDER_ECHO_MAX_BUFFER
+          )
+            break;
+          end += gap.length + count;
+        } else if (
+          !final &&
+          this.buffer.length <= SYSTEM_REMINDER_ECHO_MAX_BUFFER &&
+          /^[ \t\r\n`~]*$/.test(tail)
+        ) {
+          break;
+        } else {
+          output += this.buffer.slice(
+            0,
+            bodyStart - SYSTEM_REMINDER_OPEN.length,
+          );
+        }
+      }
+      this.buffer = this.buffer.slice(end);
+      this.skipLineBreak = true;
     }
+    if (final) this.skipLineBreak = false;
+    return output;
   }
 }
 
@@ -6273,10 +6173,10 @@ export class LlmChat {
       return released;
     };
     let protocolTextWasSuppressed = false;
-    // #10797 Shape B: strips backtick-wrapped <system-reminder> echoes from
+    // #10797 Shape B: strips known injected <system-reminder> echoes from
     // user-visible text. Strip-only (never retries), so mid-stream holds do
     // not need the whole-chunk atomicity that a leak-retry requires.
-    const systemReminderEchoFilter = new SystemReminderEchoFilter();
+    const systemReminderEchoFilter = new SystemReminderEchoFilter(this.history);
     let textReleasedThroughDetectors = false;
     const isVisibleProtocolText = (
       part: Part,

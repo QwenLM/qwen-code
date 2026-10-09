@@ -62,7 +62,10 @@ import {
   estimateContentTokens,
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
-import { SYSTEM_REMINDER_OPEN } from './environmentContext.js';
+import {
+  SYSTEM_REMINDER_OPEN,
+  wrapSystemReminder,
+} from './environmentContext.js';
 import { formatAgentMessageModelText } from '../agents/session-agents/envelope.js';
 import { SessionStartSource } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
@@ -9805,6 +9808,129 @@ describe('LlmChat', async () => {
     expect(chat.getLastModelMessageText()).toBe(response);
   });
 
+  const injectReminders = (bodies: string[], target: LlmChat = chat) => {
+    target.setHistory([
+      ...target.getHistory(),
+      content(
+        'user',
+        ...bodies.map((body) => ({ text: wrapSystemReminder(body) })),
+      ),
+    ]);
+  };
+
+  it.each([
+    ['bare', (body: string) => `${wrapSystemReminder(body)}\nAnswer.`],
+    [
+      'xml fence',
+      (body: string) =>
+        `\`\`\`xml\n${wrapSystemReminder(body)}\n\`\`\`\nAnswer.`,
+    ],
+    [
+      'longer fence closer split across chunks',
+      (body: string) =>
+        `\`\`\`xml\n${wrapSystemReminder(body)}\n\`\`\`\`\nAnswer.`,
+    ],
+    [
+      'four-tick fence',
+      (body: string) =>
+        `\`\`\`\`xml\n${wrapSystemReminder(body)}\n\`\`\`\`\nAnswer.`,
+    ],
+    [
+      'case-varied namespace',
+      (body: string) =>
+        `<System-Reminder>\n${body}\n</System-Reminder>\nAnswer.`,
+    ],
+    [
+      'issue single-line span',
+      (body: string) =>
+        `\`<system-reminder> ${body} </system-reminder>\`\nAnswer.`,
+    ],
+  ])(
+    'strips the actually injected body in a %s (#10797)',
+    async (_name, render) => {
+      const body = 'The actual injected todo reminder.';
+      const record = vi.fn();
+      const target = chatWithRecorder(record);
+      const response = render(body);
+      mockStreamsOnce(
+        streamOf(
+          ...Array.from(response, (text) => textChunk(text)),
+          stopResponse([]),
+        ),
+      );
+      const stream = await send(
+        [{ text: wrapSystemReminder(body) }, { text: 'Continue the task.' }],
+        'prompt-10797-injected-body',
+        target,
+      );
+      const events: StreamEvent[] = [];
+      let delivered = '';
+      for await (const event of stream) {
+        events.push(event);
+        if (event.type === StreamEventType.CHUNK) {
+          delivered += (event.value.candidates?.[0]?.content?.parts ?? [])
+            .map((part) => part.text ?? '')
+            .join('');
+        }
+      }
+      expect(delivered).toBe('Answer.');
+      expect(target.getLastModelMessageText()).toBe('Answer.');
+      expect(record).toHaveBeenCalledWith(
+        expect.objectContaining({ message: [{ text: 'Answer.' }] }),
+      );
+      expect(hasRetry(events)).toBe(false);
+      expectStreamCalls(1);
+    },
+  );
+
+  it.each([
+    [
+      'an already-open text fence',
+      'Here is the raw envelope:\n\n```text\n`<system-reminder>\nNever injected.\n</system-reminder>`\n```\nExample follows.',
+    ],
+    [
+      'an indented code block',
+      'Here is the raw envelope:\n\n    `<system-reminder>\n    Never injected.\n    </system-reminder>`\nExample follows.',
+    ],
+  ])(
+    'preserves never-injected documentation in %s (#10797)',
+    async (_name, response) => {
+      const record = vi.fn();
+      const target = chatWithRecorder(record);
+      injectReminders(['A different actual reminder.'], target);
+      mockStreamsOnce(
+        streamOf(
+          ...Array.from(response, (text) => textChunk(text)),
+          stopResponse([]),
+        ),
+      );
+      const stream = await send(
+        'Explain the envelope.',
+        'prompt-10797-literal-doc',
+        target,
+      );
+      const events: StreamEvent[] = [];
+      let delivered = '';
+      for await (const event of stream) {
+        events.push(event);
+        if (event.type === StreamEventType.CHUNK) {
+          delivered += (event.value.candidates?.[0]?.content?.parts ?? [])
+            .map((part) => part.text ?? '')
+            .join('');
+        }
+      }
+      expect(delivered).toBe(response);
+      expect(target.getLastModelMessageText()).toBe(response);
+      expect(record).toHaveBeenCalledWith(
+        expect.objectContaining({ message: [{ text: response }] }),
+      );
+      expect(JSON.stringify(requestAt(0).contents)).not.toContain(
+        'Never injected.',
+      );
+      expectStreamCalls(1);
+    },
+  );
+
   it.each([
     [
       'literal inline tag mention',
@@ -9829,6 +9955,7 @@ describe('LlmChat', async () => {
   ])(
     'preserves the answer for %s (#10797)',
     async (_name, chunks, expected) => {
+      injectReminders(['- [ ] fix `quoted name`']);
       mockStreamsOnce(
         streamOf(...chunks.map((text) => textChunk(text)), stopResponse([])),
       );
@@ -9847,6 +9974,7 @@ describe('LlmChat', async () => {
   );
 
   it('preserves signed text and its signature as one part (#10797)', async () => {
+    injectReminders(['held']);
     const signedPart = {
       text: '`<system-reminder>\nheld',
       thoughtSignature: 'opaque-signature',
@@ -9899,6 +10027,7 @@ describe('LlmChat', async () => {
   ])(
     'streams %s before the next delta (#10797)',
     async (_name, first, expected) => {
+      injectReminders(['stale todos']);
       mockStreamsOnce(
         streamOf(textChunk(first), textChunk(' More.'), stopResponse([])),
       );
@@ -9945,6 +10074,7 @@ describe('LlmChat', async () => {
     async (_name, text) => {
       const record = vi.fn();
       const target = chatWithRecorder(record);
+      injectReminders(['unfinished reminder'], target);
       const call = fnCall('read_file', { path: 'fixture' }, 'ordered-call');
       mockStreamsOnce(streamOf(textChunk(text), modelChunk([call])));
       const delivered: Part[] = [];
@@ -9978,6 +10108,7 @@ describe('LlmChat', async () => {
   );
 
   it('retains the line anchor between separate complete echoes (#10797)', async () => {
+    injectReminders(['stale todos']);
     const echo = '`<system-reminder>\nstale todos\n</system-reminder>`\n';
     mockStreamsOnce(
       streamOf(textChunk(echo), textChunk(echo + 'Answer'), stopResponse([])),
@@ -10023,6 +10154,7 @@ describe('LlmChat', async () => {
   });
 
   it('filters echoes held behind a leading JSON reply (#10797)', async () => {
+    injectReminders(['stale todos']);
     const call = fnCall('read_file', { path: 'fixture' }, 'json-call');
     mockStreamsOnce(
       streamOf(
@@ -10067,6 +10199,7 @@ describe('LlmChat', async () => {
       }),
       modelText('Done.'),
     ]);
+    injectReminders(['unfinished reminder'], recordingChat);
     mockStreamsOnce(
       (async function* () {
         yield textChunk('Before\n`<system-reminder>unfinished');
@@ -10113,6 +10246,7 @@ describe('LlmChat', async () => {
     const controller = new AbortController();
     const record = vi.fn();
     const recordingChat = chatWithRecorder(record);
+    injectReminders(['unfinished reminder'], recordingChat);
     const deliveredCall = {
       functionCall: {
         id: 'delivered-call',
@@ -10179,6 +10313,7 @@ describe('LlmChat', async () => {
   });
 
   it('releases unfinished echo-looking answer text before a stream failure (#10797)', async () => {
+    injectReminders(['unfinished reminder']);
     mockStreamsOnce(
       (async function* () {
         yield modelChunk([
@@ -10207,6 +10342,9 @@ describe('LlmChat', async () => {
   });
 
   it('strips a backtick-wrapped system-reminder echo without retrying (#10797)', async () => {
+    injectReminders([
+      'The current task still has unfinished todo items:\n- [ ] write tests',
+    ]);
     vi.mocked(
       mockContentGenerator.generateContentStream,
     ).mockImplementationOnce(async () =>
@@ -10259,7 +10397,7 @@ describe('LlmChat', async () => {
       .filter((event) => event.type === StreamEventType.CHUNK)
       .flatMap((event) => event.value.candidates?.[0]?.content?.parts ?? []);
     const emittedText = emittedParts.map((part) => part.text ?? '').join('');
-    expect(emittedText).toBe('\n\nUpdating the todo list now.');
+    expect(emittedText).toBe('\nUpdating the todo list now.');
     expect(emittedText).not.toContain('system-reminder');
     expect(emittedParts).toContainEqual({
       functionCall: {
@@ -10271,10 +10409,11 @@ describe('LlmChat', async () => {
     const recordedText = (chat.getHistory().at(-1)?.parts ?? [])
       .map((part) => part.text ?? '')
       .join('');
-    expect(recordedText).toBe('\n\nUpdating the todo list now.');
+    expect(recordedText).toBe('\nUpdating the todo list now.');
   });
 
   it('strips a fenced system-reminder echo between paragraphs (#10797)', async () => {
+    injectReminders(['stale todos']);
     const response =
       'First paragraph.\n\n```\n<system-reminder>\nstale todos\n</system-reminder>\n```\nLast paragraph.';
     vi.mocked(
@@ -10323,6 +10462,9 @@ describe('LlmChat', async () => {
   });
 
   it('releases an unterminated backtick-wrapped reminder echo verbatim (#10797)', async () => {
+    injectReminders([
+      'The current task still has unfinished todo items:\n- [ ] write tests',
+    ]);
     const response =
       '`<system-reminder>\nThe current task still has unfinished todo items:';
     vi.mocked(
@@ -10369,6 +10511,10 @@ describe('LlmChat', async () => {
   });
 
   it('strips two consecutive echoed reminder lines without leaking the second (#10797)', async () => {
+    injectReminders([
+      'The current task still has unfinished todo items:\n- [ ] write tests',
+      'Another stale reminder arrived meanwhile.',
+    ]);
     const response =
       '`<system-reminder>\nThe current task still has unfinished todo items:\n' +
       '- [ ] write tests\n' +
@@ -10405,6 +10551,9 @@ describe('LlmChat', async () => {
   });
 
   it('retries an echo-only reply that strips to empty instead of leaking it (#10797)', async () => {
+    injectReminders([
+      'The current task still has unfinished todo items:\n- [ ] write tests',
+    ]);
     // An echo-only reply (no tool call, no thought part) strips to an empty
     // response, fails closed through NO_RESPONSE_TEXT, and burns one
     // transient retry — pinned here because the PR description's
