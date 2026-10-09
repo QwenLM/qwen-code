@@ -15360,6 +15360,107 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it.each([false, true])(
+    'keeps a same-session replacement reconnecting after detach (strict clear: %s)',
+    async (strictClear) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => new Response(null, { status: 204 })),
+      );
+      const detach = createDeferred<void>();
+      const loaded = createDeferred<MockSession>();
+      const close = createDeferred<void>();
+      const first = createMockSession({
+        sessionId: 'session-a',
+        clientId: 'client-a',
+        detach: vi.fn(() => detach.promise),
+      });
+      const events = vi.fn(async function* (
+        opts: { signal?: AbortSignal } = {},
+      ) {
+        const aborted = new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) resolve();
+          else
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+        });
+        if (events.mock.calls.length === 1)
+          await Promise.race([close.promise, aborted]);
+        else await aborted;
+        yield* [];
+      });
+      const replacement = createMockSession({
+        sessionId: 'session-a',
+        clientId: 'client-a',
+        events,
+      });
+      sdkMocks.sessions.push(first);
+      let actions: DaemonSessionActions | undefined;
+      let connection: DaemonConnectionState | undefined;
+      function Harness() {
+        actions = useDaemonActions();
+        connection = useDaemonConnection();
+        return null;
+      }
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        sessionId: 'session-a',
+      });
+      await act(async () => flushPromises());
+      expect(connection?.sessionId).toBe('session-a');
+      sdkMocks.MockDaemonSessionClient.load.mockReturnValueOnce(loaded.promise);
+      let loading!: Promise<void>;
+      act(() => {
+        loading = requireActions(actions).loadSession('session-a');
+      });
+      await act(async () => {
+        await vi.waitFor(() =>
+          expect(
+            sdkMocks.MockDaemonSessionClient.load.mock.calls.at(-1)?.[1],
+          ).toBe('session-a'),
+        );
+      });
+      const rejected = vi.fn();
+      let clearing: Promise<void> | undefined;
+      if (strictClear) {
+        act(() => {
+          clearing = requireActions(actions)
+            .clearSession({ requireDetachSessionId: 'session-a' })
+            .catch(rejected);
+        });
+      }
+      await act(async () => {
+        loaded.resolve(replacement);
+        await loading;
+        await flushPromises();
+      });
+      if (strictClear) expect(events).not.toHaveBeenCalled();
+      await act(async () => {
+        detach.resolve();
+        await clearing;
+        await flushPromises();
+      });
+      if (strictClear) {
+        expect(rejected).toHaveBeenCalledWith(
+          new Error('Current session changed during detach'),
+        );
+      } else {
+        expect(rejected).not.toHaveBeenCalled();
+      }
+      expect(events).toHaveBeenCalledOnce();
+      expect(connection?.sessionId).toBe('session-a');
+      await act(async () => {
+        close.resolve();
+        await expect
+          .poll(() => events.mock.calls.length, { timeout: 2000 })
+          .toBeGreaterThan(1);
+      });
+      expect(connection?.sessionId).toBe('session-a');
+      expect(replacement.detach).not.toHaveBeenCalled();
+    },
+  );
+
   it('uses session-scoped client IDs when switching between loaded sessions', async () => {
     const firstSession = createMockSession({
       sessionId: 'session-a',

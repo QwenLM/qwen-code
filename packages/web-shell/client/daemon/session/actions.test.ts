@@ -6189,6 +6189,7 @@ describe('createDaemonSessionActions', () => {
   it('does not clear a replacement attachment after strict detach completes', async () => {
     const session = createMockSession('session-a');
     const replacement = createMockSession('session-b');
+    const manualSessionClearRef = { current: false };
     const detach = createDeferred<void>();
     session.detach.mockReturnValueOnce(detach.promise);
     const { actions, getConnection, replaceConnection, sessionRef, store } =
@@ -6199,11 +6200,13 @@ describe('createDaemonSessionActions', () => {
           clientId: session.clientId,
         },
         session,
+        manualSessionClearRef,
       });
 
-    const clearing = actions.clearSession({
-      requireDetachSessionId: session.sessionId,
-    });
+    const rejected = vi.fn();
+    const clearing = actions
+      .clearSession({ requireDetachSessionId: session.sessionId })
+      .catch(rejected);
     sessionRef.current = replacement as unknown as DaemonSessionClient;
     const replacementConnection: DaemonConnectionState = {
       status: 'connected',
@@ -6214,11 +6217,15 @@ describe('createDaemonSessionActions', () => {
     detach.resolve();
     await clearing;
 
+    expect(rejected).toHaveBeenCalledExactlyOnceWith(
+      new Error('Current session changed during detach'),
+    );
     expect(session.detach).toHaveBeenCalledOnce();
     expect(replacement.detach).not.toHaveBeenCalled();
     expect(sessionRef.current).toBe(replacement);
     expect(getConnection()).toBe(replacementConnection);
     expect(store.reset).not.toHaveBeenCalled();
+    expect(manualSessionClearRef.current).toBe(false);
   });
 
   it('rejects a strict clear when the connection attachment changed', async () => {

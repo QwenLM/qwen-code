@@ -14233,6 +14233,18 @@ export function App({
   const leaveCurrentStandaloneForDelete = useCallback(
     (sessionId: string) => {
       const current = connectionRef.current;
+      // A retry can outlive a successful leave. An unsettled connection must
+      // not certify that this tab no longer holds the candidate attachment.
+      if (
+        current.sessionId !== sessionId &&
+        current.status === 'connected' &&
+        !current.error &&
+        !current.loadingTranscript &&
+        !current.catchingUp &&
+        (!current.sessionId || current.clientId)
+      ) {
+        return Promise.resolve(true);
+      }
       if (
         current.sessionId !== sessionId ||
         current.sessionContext?.kind !== 'standalone'

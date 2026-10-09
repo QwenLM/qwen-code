@@ -2420,7 +2420,10 @@ export function createDaemonSessionActions({
             manualSessionClearRef.current === detach &&
             (!sessionRef.current || sessionRef.current === session);
           if (manualSessionClearRef.current === detach) {
-            manualSessionClearRef.current = true;
+            manualSessionClearRef.current = strictClearOwnsSession;
+          }
+          if (!strictClearOwnsSession) {
+            throw new Error('Current session changed during detach');
           }
         } catch (error) {
           if (manualSessionClearRef.current === detach) {
