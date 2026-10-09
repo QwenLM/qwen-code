@@ -357,6 +357,7 @@ import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShort
 import {
   isAgentCollaborationEnabledForWorkspace,
   workspaceLabel,
+  disambiguateWorkspaceLabels,
   workspaceLabelForCwd,
 } from './utils/workspace';
 import { loadReadyWorkspaceSkills } from './daemon/workspace/load-ready-skills';
@@ -3925,7 +3926,9 @@ export function App({
       );
     })
   ) {
-    composerWorkspacesRef.current = nextComposerWorkspaces;
+    composerWorkspacesRef.current = nextComposerWorkspaces
+      ? disambiguateWorkspaceLabels(nextComposerWorkspaces)
+      : undefined;
   }
   const composerWorkspaces = composerWorkspacesRef.current;
   const workspacesRef = useRef(ordinaryWorkspaces);
