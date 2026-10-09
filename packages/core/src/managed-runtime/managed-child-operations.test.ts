@@ -153,6 +153,7 @@ describe('managed child operations (H4b)', () => {
       closing: false,
       depth: 1,
       activeInScope: 0,
+      launchedInScope: 0,
       envelopeBytes: 100,
       workspaceMode: 'shared',
       sameDefinition: true,
@@ -174,6 +175,10 @@ describe('managed child operations (H4b)', () => {
           'count_limit',
         ],
         [
+          { launchedInScope: MANAGED_CHILD_LIMITS.maxLaunchesPerScope },
+          'budget_exhausted',
+        ],
+        [
           { envelopeBytes: MANAGED_CHILD_LIMITS.maxEnvelopeBytes + 1 },
           'byte_limit',
         ],
@@ -184,6 +189,24 @@ describe('managed child operations (H4b)', () => {
           reason,
         });
       }
+    });
+
+    it('spends the launch budget on every launch, ended ones included', () => {
+      expect(
+        admitChildLaunch({
+          ...base,
+          launchedInScope: MANAGED_CHILD_LIMITS.maxLaunchesPerScope - 1,
+        }),
+      ).toEqual({ admitted: true });
+      // A spent budget never recovers, so it wins over the concurrency
+      // cap, which a later launch may find cleared.
+      expect(
+        admitChildLaunch({
+          ...base,
+          activeInScope: MANAGED_CHILD_LIMITS.maxActivePerScope,
+          launchedInScope: MANAGED_CHILD_LIMITS.maxLaunchesPerScope,
+        }),
+      ).toEqual({ admitted: false, reason: 'budget_exhausted' });
     });
   });
 
