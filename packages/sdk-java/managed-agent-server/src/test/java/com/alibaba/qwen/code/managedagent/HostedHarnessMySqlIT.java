@@ -63,8 +63,10 @@ class HostedHarnessMySqlIT {
             "listening on http://127\\.0\\.0\\.1:(\\d+)");
     // The CI job's MySQL service container can stall journal writes for tens
     // of seconds when its InnoDB redo log fills under fork load (MY-014084);
-    // a 30s settlement poll expires mid-stall (#13780).
-    private static final int SETTLEMENT_POLL_SECONDS = 90;
+    // a 30s settlement poll expires mid-stall (#13780). 60s keeps a fully
+    // stalled run of this class inside the shared 900s failsafe fork budget
+    // (hosted-harness-mysql profile), so the sibling classes still report.
+    private static final int SETTLEMENT_POLL_SECONDS = 60;
     private final ObjectMapper json = new ObjectMapper();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
@@ -210,7 +212,7 @@ class HostedHarnessMySqlIT {
     }
 
     @Test
-    @Timeout(360)
+    @Timeout(240)
     void lifecycleOperationsCloseThePackagedHarnessSession() throws Exception {
         Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath();
         assertThat(cli).as("Build and bundle the packaged CLI first").isRegularFile();
