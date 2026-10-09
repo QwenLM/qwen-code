@@ -231,7 +231,9 @@ test('Settings adds a verified computer and returns to Connections @smoke', asyn
       .getByRole('navigation', { name: 'Settings' })
       .getByRole('button', { name: /^Connections/ }),
   ).toHaveAttribute('aria-current', 'page');
-  await expect(page.getByText('127.0.0.1:5199', { exact: true })).toBeVisible();
+  // The host group label now renders this host too, so scope to the saved
+  // connection chip that adding the computer created.
+  await expect(page.locator(`button[title="${REMOTE_ORIGIN}"]`)).toBeVisible();
   await expect
     .poll(() =>
       page.evaluate(() =>
