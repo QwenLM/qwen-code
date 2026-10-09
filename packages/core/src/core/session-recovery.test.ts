@@ -443,13 +443,60 @@ describe('explicitly cancelled recorded turns', () => {
       planFor(conversationFromRecords([prompt(), toolResult()])).canContinue,
     ).toBe(true);
   });
+  it.each(['missing owner', 'duplicate owner', 'superseded'] as const)(
+    'conservatively gates the latest legacy cancellation with %s',
+    (ownership) => {
+      const owner = prompt();
+      if (ownership === 'missing owner') delete owner.daemonPromptId;
+      const terminal = result();
+      delete (terminal.systemPayload as { cancelReason?: string }).cancelReason;
+      const records = [
+        owner,
+        ...(ownership === 'duplicate owner'
+          ? [{ ...prompt(), uuid: 'duplicate' }]
+          : []),
+        terminal,
+        ...(ownership === 'superseded'
+          ? [result('completed', 'later-daemon')]
+          : []),
+      ];
+      const plan = buildSessionRecoveryPlan({
+        sessionId: 'session-1',
+        conversation: conversationFromRecords(records),
+        options: { allowAutoContinue: true },
+      });
+      expect(plan.cancellationConfirmationId).toBe(
+        ownership === 'superseded' ? undefined : 'daemon-1',
+      );
+      expect(plan.canAutoContinue).toBe(ownership === 'superseded');
+      expect(plan.canContinue).toBe(true);
+    },
+  );
+
+  it('requires confirmation for legacy cancellation even when auto continuation is enabled', () => {
+    const terminal = result();
+    delete (terminal.systemPayload as { cancelReason?: string }).cancelReason;
+    const plan = buildSessionRecoveryPlan({
+      sessionId: 'session-1',
+      conversation: conversationFromRecords([prompt(), terminal]),
+      options: { allowAutoContinue: true },
+    });
+    expect(plan.canContinue).toBe(true);
+    expect(plan.canAutoContinue).toBe(false);
+    expect(plan.requiresUserConfirmation).toBe(true);
+    expect(plan.cancellationConfirmationId).toBe('daemon-1');
+  });
+
   it('keeps abort-only or legacy cancellation recoverable without user-cancel provenance', () => {
     const terminal = result();
     delete (terminal.systemPayload as { cancelReason?: string }).cancelReason;
-    expect(
-      planFor(conversationFromRecords([prompt(), toolResult(), terminal]))
-        .canContinue,
-    ).toBe(true);
+    const plan = planFor(
+      conversationFromRecords([prompt(), toolResult(), terminal]),
+    );
+    expect(plan.canContinue).toBe(true);
+    expect(plan.cancellationConfirmationId).toBe('daemon-1');
+    expect(plan.canAutoContinue).toBe(false);
+    expect(plan.requiresUserConfirmation).toBe(true);
   });
   it('keeps an unanswered reminder-bearing notification after an older user cancellation', () => {
     const notification = notificationRecord(2, 'Agent done.');

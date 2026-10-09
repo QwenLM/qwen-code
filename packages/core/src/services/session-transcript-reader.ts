@@ -49,7 +49,7 @@ import {
   isApiHistoryCompressionCandidate,
   SessionApiHistoryAccumulator,
   getSessionTurnSettlementHint,
-  isLastApiPromptCancelled,
+  getLastApiPromptCancellation,
   type SessionTurnSettlementHint,
 } from './session-api-history.js';
 import {
@@ -277,6 +277,7 @@ export interface SessionRestoreReplayPage {
 export interface SessionRuntimeResumeState extends SessionSourcesRestoreState {
   apiHistory: Content[];
   cancelledLastTurn?: boolean;
+  cancellationConfirmationId?: string;
   completedToolCallIds?: string[];
   resumeTokenCounts?: ResumeTokenCounts;
   uiTelemetryEvents: UiEvent[];
@@ -390,14 +391,18 @@ function buildManagedSessionRestoreProjection(
   const restoredTokenCounts = resumeTokenCounts.finish();
   const restoredFileHistory = fileHistory.finish();
   const restoredHistory = apiHistory.finishSession();
+  const cancellationReason = getLastApiPromptCancellation(
+    restoredHistory.apiHistory,
+    records.map(getSessionTurnSettlementHint),
+    restoredHistory.trailingSystemNotifications,
+  );
   const runtime: SessionRuntimeResumeState = {
     apiHistory: restoredHistory.apiHistory,
-    ...(isLastApiPromptCancelled(
-      restoredHistory.apiHistory,
-      records.map(getSessionTurnSettlementHint),
-      restoredHistory.trailingSystemNotifications,
-    )
+    ...(cancellationReason?.reason === 'user'
       ? { cancelledLastTurn: true }
+      : {}),
+    ...(cancellationReason?.reason === 'unknown'
+      ? { cancellationConfirmationId: cancellationReason.promptId }
       : {}),
     ...(restoredTokenCounts ? { resumeTokenCounts: restoredTokenCounts } : {}),
     uiTelemetryEvents,
@@ -3506,16 +3511,20 @@ export class SessionTranscriptReader {
     const artifactSnapshot = artifacts.finish();
     const completedToolCallIds = apiHistory.getCompletedToolCallIds();
     const restoredHistory = apiHistory.finishSession();
+    const cancellationReason = getLastApiPromptCancellation(
+      restoredHistory.apiHistory,
+      index.runtimeUuids.map(
+        (uuid) => index.byUuid.get(uuid)?.turnSettlementHint,
+      ),
+      restoredHistory.trailingSystemNotifications,
+    );
     const runtime: SessionRuntimeResumeState = {
       apiHistory: restoredHistory.apiHistory,
-      ...(isLastApiPromptCancelled(
-        restoredHistory.apiHistory,
-        index.runtimeUuids.map(
-          (uuid) => index.byUuid.get(uuid)?.turnSettlementHint,
-        ),
-        restoredHistory.trailingSystemNotifications,
-      )
+      ...(cancellationReason?.reason === 'user'
         ? { cancelledLastTurn: true }
+        : {}),
+      ...(cancellationReason?.reason === 'unknown'
+        ? { cancellationConfirmationId: cancellationReason.promptId }
         : {}),
       ...(completedToolCallIds.length > 0 ? { completedToolCallIds } : {}),
       ...(restoredTokenCounts

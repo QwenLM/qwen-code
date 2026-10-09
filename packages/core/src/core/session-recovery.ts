@@ -44,6 +44,7 @@ export interface SessionRecoveryPlan {
   canContinue: boolean;
   canAutoContinue: boolean;
   requiresUserConfirmation: boolean;
+  cancellationConfirmationId?: string;
   visibleNotice?: string;
   continuation?: SessionRecoveryContinuation;
 }
@@ -63,6 +64,7 @@ export interface BuildSessionRecoveryPlanFromApiHistoryInput {
   completedToolCallIds?: readonly string[];
   /** Verified cancellation of the current history, independent of Content cloning. */
   cancelledLastTurn?: boolean;
+  cancellationConfirmationId?: string;
   /**
    * Authoritative count of trailing `apiHistory` entries whose source record
    * the recorder stamped as a system-injected notification AND that is a cold
@@ -141,6 +143,7 @@ export function buildSessionRecoveryPlanFromApiHistory({
   apiHistory: inputApiHistory,
   completedToolCallIds,
   cancelledLastTurn,
+  cancellationConfirmationId,
   trailingSystemNotifications,
   historyGaps,
   options,
@@ -219,8 +222,12 @@ export function buildSessionRecoveryPlanFromApiHistory({
       apiHistory,
       repairs,
       canContinue: true,
-      canAutoContinue: options?.allowAutoContinue === true,
-      requiresUserConfirmation: options?.allowAutoContinue !== true,
+      canAutoContinue:
+        !cancellationConfirmationId && options?.allowAutoContinue === true,
+      requiresUserConfirmation:
+        Boolean(cancellationConfirmationId) ||
+        options?.allowAutoContinue !== true,
+      ...(cancellationConfirmationId ? { cancellationConfirmationId } : {}),
       visibleNotice: buildVisibleNotice('interrupted_prompt', repairs, gaps),
       continuation,
     };
@@ -239,6 +246,7 @@ export function buildSessionRecoveryPlanFromApiHistory({
     planId,
     sessionId,
     kind: 'interrupted_turn',
+    ...(cancellationConfirmationId ? { cancellationConfirmationId } : {}),
     originalApiHistory,
     apiHistory,
     repairs,

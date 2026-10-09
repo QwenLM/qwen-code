@@ -13744,7 +13744,11 @@ class QwenAgent implements Agent {
           );
         }
         const session = this.sessionOrThrow(sessionId);
-        const result = await session.continueLastTurn();
+        const result = await session.continueLastTurn(
+          typeof params['confirmCancellation'] === 'string'
+            ? params['confirmCancellation']
+            : undefined,
+        );
         debugLogger.info(
           `sessionContinue sessionId=${sessionId} accepted=${result.accepted} interruption=${result.interruption}`,
         );

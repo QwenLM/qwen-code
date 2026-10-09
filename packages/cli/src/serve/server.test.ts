@@ -12371,7 +12371,10 @@ describe('createServeApp', () => {
         .set('Host', `127.0.0.1:${tokenOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('X-Qwen-Client-Id', 'client-xyz')
-        .send({ prompt: 'must not appear in logs' });
+        .send({
+          prompt: 'must not appear in logs',
+          confirmCancellation: 'legacy-daemon',
+        });
 
       expect(res.status).toBe(200);
       // The originator + a generated promptId must reach the bridge so the
@@ -12379,6 +12382,7 @@ describe('createServeApp', () => {
       expect(bridge.continueSessionContexts).toHaveLength(1);
       expect(bridge.continueSessionContexts[0]).toMatchObject({
         clientId: 'client-xyz',
+        confirmCancellation: 'legacy-daemon',
       });
       const promptId = bridge.continueSessionContexts[0]?.promptId;
       expect(typeof promptId).toBe('string');

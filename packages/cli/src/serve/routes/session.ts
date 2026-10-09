@@ -7540,6 +7540,9 @@ export function registerSessionRoutes(
         const promptId = crypto.randomUUID();
         const result = await runtime.bridge.continueSession(sessionId, {
           ...(clientId !== undefined ? { clientId } : {}),
+          ...(typeof req.body?.confirmCancellation === 'string'
+            ? { confirmCancellation: req.body.confirmCancellation }
+            : {}),
           promptId,
         });
         if (daemonLog && result.accepted) {

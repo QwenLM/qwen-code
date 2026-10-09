@@ -2365,14 +2365,21 @@ export class LlmChat {
   }
 
   private cancelledHistory?: {
+    reason: 'user' | 'unknown';
+    confirmationId?: string;
     history: Content[];
     length: number;
     lastEntry: Content | undefined;
     userPushCount: number;
   };
 
-  markLastTurnCancelled(): void {
+  markLastTurnCancelled(
+    reason: 'user' | 'unknown' = 'user',
+    confirmationId?: string,
+  ): void {
     this.cancelledHistory = {
+      reason,
+      confirmationId,
       history: this.history,
       length: this.history.length,
       lastEntry: this.history.at(-1),
@@ -2381,14 +2388,24 @@ export class LlmChat {
   }
 
   isLastTurnCancelled(): boolean {
+    return this.getLastTurnCancellationReason() === 'user';
+  }
+
+  getLastTurnCancellationConfirmationId(): string | undefined {
+    return this.getLastTurnCancellationReason() === 'unknown'
+      ? this.cancelledHistory?.confirmationId
+      : undefined;
+  }
+
+  getLastTurnCancellationReason(): 'user' | 'unknown' | undefined {
     const basis = this.cancelledHistory;
-    return (
-      basis !== undefined &&
+    return basis !== undefined &&
       basis.history === this.history &&
       basis.length === this.history.length &&
       basis.lastEntry === this.history.at(-1) &&
       basis.userPushCount === this.userContentPushCount
-    );
+      ? basis.reason
+      : undefined;
   }
 
   /**

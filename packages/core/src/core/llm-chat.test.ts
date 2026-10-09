@@ -313,6 +313,16 @@ describe('LlmChat', async () => {
       const fresh = new LlmChat(mockConfig, {}, chat.getHistory());
       expect(fresh.isLastTurnCancelled()).toBe(false);
     });
+
+    it('binds an unknown cancellation confirmation to the current history only', () => {
+      chat.markLastTurnCancelled('unknown', 'legacy-daemon');
+      expect(chat.isLastTurnCancelled()).toBe(false);
+      expect(chat.getLastTurnCancellationConfirmationId()).toBe(
+        'legacy-daemon',
+      );
+      chat.addHistory(userText('new work'));
+      expect(chat.getLastTurnCancellationConfirmationId()).toBeUndefined();
+    });
   });
 
   beforeEach(() => {

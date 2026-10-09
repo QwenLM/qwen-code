@@ -632,6 +632,11 @@ export class LlmClient {
       const chat = this.getChat();
       chat.setCompletedToolCallIds(restoreRuntime.completedToolCallIds);
       if (restoreRuntime.cancelledLastTurn) chat.markLastTurnCancelled();
+      else if (restoreRuntime.cancellationConfirmationId)
+        chat.markLastTurnCancelled(
+          'unknown',
+          restoreRuntime.cancellationConfirmationId,
+        );
       if (restoreRuntime.resumeTokenCounts) {
         const counts = restoreRuntime.resumeTokenCounts;
         uiTelemetryService.setLastPromptTokenCount(counts.promptTokenCount);
@@ -663,6 +668,11 @@ export class LlmClient {
       const chat = this.getChat();
       chat.setCompletedToolCallIds(restored.completedToolCallIds);
       if (restored.cancelledLastTurn) chat.markLastTurnCancelled();
+      else if (restored.cancellationConfirmationId)
+        chat.markLastTurnCancelled(
+          'unknown',
+          restored.cancellationConfirmationId,
+        );
       if (resumeTokenCounts) {
         chat.seedResumeTokenCounts(
           resumeTokenCounts.promptTokenCount,
@@ -2046,12 +2056,16 @@ export class LlmClient {
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
     const chat = this.getChat();
-    const cancelledLastTurn = chat.isLastTurnCancelled();
+    const cancellationReason =
+      chat.getLastTurnCancellationReason?.() ??
+      (chat.isLastTurnCancelled() ? 'user' : undefined);
+    const confirmationId = chat.getLastTurnCancellationConfirmationId?.();
     chat.setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
       chat.getCompletedToolCallIds(),
     );
-    if (cancelledLastTurn) chat.markLastTurnCancelled();
+    if (cancellationReason)
+      chat.markLastTurnCancelled(cancellationReason, confirmationId);
   }
 
   /**

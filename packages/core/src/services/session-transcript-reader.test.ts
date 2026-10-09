@@ -645,6 +645,11 @@ describe('SessionTranscriptReader', () => {
         expect(projection?.runtime.cancelledLastTurn === true).toBe(
           cancelReason === 'user',
         );
+        expect(projection?.runtime.cancellationConfirmationId).toBe(
+          cancelledAt !== undefined && cancelReason === undefined
+            ? user.daemonPromptId
+            : undefined,
+        );
         expect(structuredClone(projection?.runtime.apiHistory)).toEqual([
           user.message,
         ]);

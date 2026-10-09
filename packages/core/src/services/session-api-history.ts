@@ -125,23 +125,31 @@ export function getLastApiHistoryPromptId(
 }
 
 /** Client prompt IDs identify history entries; daemon IDs identify terminal outcomes. */
-export function isLastApiPromptCancelled(
+export function getLastApiPromptCancellation(
   history: readonly Content[],
   hints: ReadonlyArray<SessionTurnSettlementHint | undefined>,
   trailingSystemNotifications?: number,
-): boolean {
+): { reason: 'user' | 'unknown'; promptId: string } | undefined {
+  const latest = hints.findLast((hint) => hint !== undefined);
+  const unknown =
+    latest?.kind === 'result' &&
+    latest.state === 'cancelled' &&
+    latest.cancelledAt !== undefined &&
+    latest.cancelReason === undefined
+      ? { reason: 'unknown' as const, promptId: latest.promptId }
+      : undefined;
   const promptId = getLastApiHistoryPromptId(
     history,
     trailingSystemNotifications,
   );
   if (!promptId || findApiHistoryPromptIndex(history, promptId) === -1)
-    return false;
+    return unknown;
   const matches = hints.flatMap((hint, index) =>
     hint?.kind === 'prompt' && hint.promptId === promptId
       ? [{ hint, index }]
       : [],
   );
-  if (matches.length !== 1) return false;
+  if (matches.length !== 1) return unknown;
   let { hint: owner, index: ownerIndex } = matches[0]!;
   for (let index = ownerIndex + 1; index < hints.length; index++) {
     const hint = hints[index];
@@ -158,18 +166,32 @@ export function isLastApiPromptCancelled(
         hint?.daemonPromptId === owner.daemonPromptId,
     ).length !== 1
   )
-    return false;
+    return unknown;
   const results = hints.flatMap((hint, index) =>
     hint?.kind === 'result' && hint.promptId === owner.daemonPromptId
       ? [{ hint, index }]
       : [],
   );
+  if (
+    results.length !== 1 ||
+    results[0]!.index <= ownerIndex ||
+    results[0]!.hint.state !== 'cancelled' ||
+    results[0]!.hint.cancelledAt === undefined
+  )
+    return unknown;
+  return results[0]!.hint.cancelReason === 'user'
+    ? { reason: 'user', promptId: owner.daemonPromptId }
+    : unknown;
+}
+
+export function isLastApiPromptCancelled(
+  history: readonly Content[],
+  hints: ReadonlyArray<SessionTurnSettlementHint | undefined>,
+  trailingSystemNotifications?: number,
+): boolean {
   return (
-    results.length === 1 &&
-    results[0]!.index > ownerIndex &&
-    results[0]!.hint.state === 'cancelled' &&
-    results[0]!.hint.cancelledAt !== undefined &&
-    results[0]!.hint.cancelReason === 'user'
+    getLastApiPromptCancellation(history, hints, trailingSystemNotifications)
+      ?.reason === 'user'
   );
 }
 
@@ -521,6 +543,7 @@ export function buildSessionHistoryFromConversation(
   completedToolCallIds?: string[];
   trailingSystemNotifications: number;
   cancelledLastTurn?: boolean;
+  cancellationConfirmationId?: string;
 } {
   const accumulator = new SessionApiHistoryAccumulator();
   for (const record of conversation.messages) accumulator.add(record);
@@ -529,6 +552,11 @@ export function buildSessionHistoryFromConversation(
   const completedToolCallIds = accumulator
     .getCompletedToolCallIds()
     .filter((toolCallId) => hasUniqueToolResult(apiHistory, toolCallId));
+  const cancellationReason = getLastApiPromptCancellation(
+    apiHistory,
+    conversation.messages.map(getSessionTurnSettlementHint),
+    trailingSystemNotifications,
+  );
   return {
     apiHistory,
     ...(completedToolCallIds.length > 0 ? { completedToolCallIds } : {}),
@@ -538,12 +566,11 @@ export function buildSessionHistoryFromConversation(
     // envelope-shaped real prompt from being trimmed. Omitting it would drop
     // the consumer back to shape-only guessing.
     trailingSystemNotifications,
-    ...(isLastApiPromptCancelled(
-      apiHistory,
-      conversation.messages.map(getSessionTurnSettlementHint),
-      trailingSystemNotifications,
-    )
+    ...(cancellationReason?.reason === 'user'
       ? { cancelledLastTurn: true }
+      : {}),
+    ...(cancellationReason?.reason === 'unknown'
+      ? { cancellationConfirmationId: cancellationReason.promptId }
       : {}),
   };
 }

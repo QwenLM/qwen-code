@@ -795,6 +795,7 @@ describe('Session', () => {
       }),
       getCompletedToolCallIds: vi.fn(() => completedToolCallIds),
       isLastTurnCancelled: vi.fn().mockReturnValue(false),
+      getLastTurnCancellationConfirmationId: vi.fn().mockReturnValue(undefined),
       markLastTurnCancelled: vi.fn(),
       // continueLastTurn classifies from a bounded tail; delegate to getHistory
       // so tests that set getHistory drive detection (fixtures are small).
@@ -6651,6 +6652,80 @@ describe('Session', () => {
         _meta: { 'qwen.daemon.continueLastTurn': true },
       });
       expect(result.stopReason).toBe('end_turn');
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('requires current legacy confirmation at admission and final execution', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unfinished' }] },
+      ]);
+      vi.mocked(mockChat.getLastTurnCancellationConfirmationId).mockReturnValue(
+        'legacy-daemon',
+      );
+      expect(session.getRecoveryStatus()).toMatchObject({
+        canContinue: true,
+        cancellationConfirmationId: 'legacy-daemon',
+      });
+      for (const confirmation of [undefined, 'older-daemon']) {
+        expect(await session.continueLastTurn(confirmation)).toEqual({
+          accepted: false,
+          interruption: 'interrupted_prompt',
+          cancellationConfirmationId: 'legacy-daemon',
+        });
+        await session.prompt({
+          sessionId: session.sessionId,
+          prompt: [],
+          _meta: {
+            'qwen.daemon.continueLastTurn': true,
+            'qwen.daemon.confirmCancellation': confirmation,
+          },
+        });
+      }
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(await session.continueLastTurn('legacy-daemon')).toEqual({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+      await session.prompt({
+        sessionId: session.sessionId,
+        prompt: [],
+        _meta: {
+          'qwen.daemon.continueLastTurn': true,
+          'qwen.daemon.confirmCancellation': 'legacy-daemon',
+        },
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+    });
+
+    it('rejects an old confirmation after the boundary becomes an ordinary interruption', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'new interrupted work' }] },
+      ]);
+      expect(await session.continueLastTurn('older-daemon')).toEqual({
+        accepted: false,
+        interruption: 'interrupted_prompt',
+      });
+      await session.prompt({
+        sessionId: session.sessionId,
+        prompt: [],
+        _meta: {
+          'qwen.daemon.continueLastTurn': true,
+          'qwen.daemon.confirmCancellation': 'older-daemon',
+        },
+      });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(await session.continueLastTurn()).toEqual({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+    });
+
+    it('confirmation never overrides an explicit user cancellation', async () => {
+      vi.mocked(mockChat.isLastTurnCancelled).mockReturnValue(true);
+      expect(await session.continueLastTurn('legacy-daemon')).toEqual({
+        accepted: false,
+        interruption: 'none',
+      });
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
     });
 

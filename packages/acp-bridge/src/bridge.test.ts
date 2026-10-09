@@ -16601,6 +16601,7 @@ describe('createAcpSessionBridge', () => {
       // mirroring the POST /prompt 202 contract.
       const decision = await bridge.continueSession(session.sessionId, {
         promptId: 'cont-1',
+        confirmCancellation: 'legacy-daemon',
       });
       expect(decision).toMatchObject({
         accepted: true,
@@ -16620,6 +16621,9 @@ describe('createAcpSessionBridge', () => {
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen.daemon.continueLastTurn'],
       ).toBe(true);
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.confirmCancellation'],
+      ).toBe('legacy-daemon');
 
       await bridge.shutdown();
     });

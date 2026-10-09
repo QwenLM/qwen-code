@@ -5848,6 +5848,8 @@ export class Session implements SessionContext {
       sessionId: this.sessionId,
       completedToolCallIds: chat.getCompletedToolCallIds?.(),
       cancelledLastTurn: chat.isLastTurnCancelled?.(),
+      cancellationConfirmationId:
+        chat.getLastTurnCancellationConfirmationId?.(),
       apiHistory: fullHistory
         ? chat.getHistory()
         : (chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
@@ -5878,6 +5880,11 @@ export class Session implements SessionContext {
     // task capture is queued for no admission-side reason.
     return {
       kind: recoveryPlan?.kind ?? 'clean',
+      ...(recoveryPlan?.cancellationConfirmationId
+        ? {
+            cancellationConfirmationId: recoveryPlan.cancellationConfirmationId,
+          }
+        : {}),
       canContinue:
         recoveryPlan?.canContinue === true &&
         !this.closing &&
@@ -5898,9 +5905,10 @@ export class Session implements SessionContext {
    * tracked like any other prompt; `prompt()` then re-detects/strips
    * authoritatively. Powers `qwen/control/session/continue`.
    */
-  async continueLastTurn(): Promise<{
+  async continueLastTurn(confirmCancellation?: string): Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+    cancellationConfirmationId?: string;
   }> {
     const recovery = this.getRecoveryStatus();
     if (!recovery.canContinue && recovery.kind !== 'clean') {
@@ -5932,7 +5940,13 @@ export class Session implements SessionContext {
       });
     }
     return {
-      accepted: recovery.canContinue,
+      accepted:
+        recovery.canContinue &&
+        confirmCancellation === recovery.cancellationConfirmationId,
+      ...(recovery.cancellationConfirmationId &&
+      confirmCancellation !== recovery.cancellationConfirmationId
+        ? { cancellationConfirmationId: recovery.cancellationConfirmationId }
+        : {}),
       interruption:
         recovery.kind === 'interrupted_prompt' ||
         recovery.kind === 'interrupted_turn'
@@ -6375,7 +6389,11 @@ export class Session implements SessionContext {
               );
             } else if (isContinue) {
               const recoveryPlan = this.#getRecoveryPlan(true);
-              if (!recoveryPlan?.continuation) {
+              if (
+                !recoveryPlan?.continuation ||
+                promptMetadata?.['qwen.daemon.confirmCancellation'] !==
+                  recoveryPlan.cancellationConfirmationId
+              ) {
                 // History moved between continueLastTurn()'s accept and this
                 // re-detection (e.g. a concurrent turn settled it). Nothing to
                 // continue; log so an abandoned continuation is diagnosable.

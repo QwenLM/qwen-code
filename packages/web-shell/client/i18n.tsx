@@ -919,6 +919,10 @@ const EN: Messages = {
   'session.recovery.continue': 'Continue execution',
   'session.recovery.continuing': 'Continuing…',
   'session.recovery.failed': 'Could not continue the conversation.',
+  'session.recovery.unknownCancellation':
+    'This older session was cancelled, but the reason was not recorded. Confirm before continuing.',
+  'session.recovery.confirmCancellation':
+    'This turn may have been stopped intentionally. Do you want to continue it?',
   'session.archived': 'This conversation is archived',
   'session.archivedDescription':
     'Unarchive it before opening the conversation.',
@@ -5209,6 +5213,10 @@ const ZH: Messages = {
   'session.recovery.continue': '继续执行',
   'session.recovery.continuing': '正在继续…',
   'session.recovery.failed': '无法继续此会话。',
+  'session.recovery.unknownCancellation':
+    '此旧会话已取消，但未记录来源。继续前需要你确认。',
+  'session.recovery.confirmCancellation':
+    '此轮任务可能是你主动停止的。确定要继续执行吗？',
   'session.archived': '该会话已归档',
   'session.archivedDescription': '需要先取消归档，才能打开该会话。',
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',
