@@ -2477,6 +2477,35 @@ describe.skipIf(process.platform === 'win32')(
       expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
     });
 
+    it.skipIf(process.getuid?.() === 0)(
+      'an uncreatable ledger directory fails the call, not the environment',
+      async () => {
+        // A project temp dir this user cannot write — what a one-off root
+        // run leaves behind: the read-side heal must not turn the failure
+        // the launch path reports per call into a refusal of every session.
+        const projectTemp = config.storage.getProjectTempDir();
+        await mkdir(projectTemp, { recursive: true });
+        chmodSync(projectTemp, 0o555);
+        try {
+          const env = create('ok');
+          await env.prepare(
+            {
+              id: 'write',
+              toolName: 'write_file',
+              params: { file_path: path.join(root, 'w.txt'), content: 'x' },
+            },
+            signal,
+          );
+          await expect(
+            promptIdContext.run('prompt-1', () => env.execute('write', signal)),
+          ).rejects.toThrow('EACCES');
+          expect(await executeRequests()).toEqual([]);
+        } finally {
+          chmodSync(projectTemp, 0o755);
+        }
+      },
+    );
+
     it(
       'a second environment creation never sweeps the first live worker',
       { timeout: 30_000 },

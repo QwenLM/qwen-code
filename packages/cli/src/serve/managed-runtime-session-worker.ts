@@ -1255,8 +1255,14 @@ export function createManagedRuntimeEnvironment(
   // own ledger and its own close-time sweep, so it is never untracked work.
   // The sweep is the read side of the directory and runs before any launch,
   // so the owner-only heal runs here too: a session whose admissions are
-  // refused never reaches the launch-path heal at all.
-  ensureLedgerDirectory(ledgerDir);
+  // refused never reaches the launch-path heal at all. Only the heal, though:
+  // a directory that cannot be created fails the first Runtime call at its
+  // launch, never the creation of every Managed session.
+  try {
+    ensureLedgerDirectory(ledgerDir);
+  } catch {
+    // The launch path's own ensureLedgerDirectory reports it, per call.
+  }
   sweepStaleRuntimeLedgers(ledgerDir, quarantine);
   const worker = new ManagedSessionRuntimeWorker(
     config.getSessionId(),
