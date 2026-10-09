@@ -178,7 +178,19 @@ export class HostedMonitorWakeScheduler {
       // blocked meanwhile, that accurate blocked is where this pump stops;
       // anything else that leaves the input in place is a programming
       // error and is thrown.
-      const again = await this.deps.next();
+      let again: HostedMonitorWakeTurn | undefined;
+      try {
+        again = await this.deps.next();
+      } catch (cause) {
+        // The settle-verify read walks the same durable path as the intake
+        // read: a transient fault there owes the retry cadence too, or the
+        // Session latches blocked behind a verified settle (R10 P2).
+        if (cause instanceof MonitorWakeTransientReadError) {
+          this.armRetry();
+          return;
+        }
+        throw cause;
+      }
       if (again?.turnId === next.turnId) {
         if (this.deps.state() === 'blocked') return;
         throw new Error(

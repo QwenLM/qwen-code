@@ -126,21 +126,49 @@ public class ChannelInstanceStore {
             }
             // The monotonic-generation check rides in the write itself: an
             // overlapping registration that moved the row forward can no
-            // longer slip between the earlier SELECT and this UPDATE.
-            int updated = jdbc.update("UPDATE qwen_managed_channel_instance"
-                            + " SET account_generation = ?, state = ?,"
-                            + " actor_id = ?, workspace_id = ?,"
-                            + " cwd_relative = ?, policy_json = ?,"
-                            + " updated_at = ?"
-                            + " WHERE tenant_id = ? AND channel_id = ?"
-                            + " AND account_generation <= ?",
-                    candidate.accountGeneration(), candidate.state(),
-                    candidate.actorId(), candidate.workspaceId(),
-                    candidate.cwdRelative(), candidate.policyJson(), now,
-                    candidate.tenantId(), candidate.channelId(),
-                    candidate.accountGeneration());
-            if (updated == 0) {
-                throw new IllegalStateException("channel_generation_stale");
+            // longer slip between the earlier SELECT and this UPDATE. An
+            // ownership move's binding count rides in this same statement:
+            // a racing bind committed between the pre-check and now makes
+            // the subquery flatten the write to zero rows (R10 P2).
+            if (ownershipMoves) {
+                int rows = jdbc.update("UPDATE qwen_managed_channel_instance"
+                                + " SET account_generation = ?, state = ?,"
+                                + " actor_id = ?, workspace_id = ?,"
+                                + " cwd_relative = ?, policy_json = ?,"
+                                + " updated_at = ?"
+                                + " WHERE tenant_id = ? AND channel_id = ?"
+                                + " AND account_generation <= ?"
+                                + " AND (SELECT COUNT(*) FROM"
+                                + " qwen_managed_channel_binding b"
+                                + " WHERE b.tenant_id = ?"
+                                + " AND b.channel_id = ?) = 0",
+                        candidate.accountGeneration(), candidate.state(),
+                        candidate.actorId(), candidate.workspaceId(),
+                        candidate.cwdRelative(), candidate.policyJson(), now,
+                        candidate.tenantId(), candidate.channelId(),
+                        candidate.accountGeneration(), candidate.tenantId(),
+                        candidate.channelId());
+                if (rows == 0) {
+                    throw new IllegalStateException(
+                            "channel_ownership_conflict");
+                }
+            } else {
+                int rows = jdbc.update("UPDATE qwen_managed_channel_instance"
+                                + " SET account_generation = ?, state = ?,"
+                                + " actor_id = ?, workspace_id = ?,"
+                                + " cwd_relative = ?, policy_json = ?,"
+                                + " updated_at = ?"
+                                + " WHERE tenant_id = ? AND channel_id = ?"
+                                + " AND account_generation <= ?",
+                        candidate.accountGeneration(), candidate.state(),
+                        candidate.actorId(), candidate.workspaceId(),
+                        candidate.cwdRelative(), candidate.policyJson(), now,
+                        candidate.tenantId(), candidate.channelId(),
+                        candidate.accountGeneration());
+                if (rows == 0) {
+                    throw new IllegalStateException(
+                            "channel_generation_stale");
+                }
             }
         }
         return findInstance(candidate.tenantId(), candidate.channelId())

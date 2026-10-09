@@ -222,6 +222,41 @@ describe('HostedMonitorWakeScheduler', () => {
     scheduler.close();
   });
 
+  it('retries a transient settle-verify read instead of latching the Session blocked', async () => {
+    // The verify re-read walks the same durable path as the intake read:
+    // one Store flap there must not hand the resident Session to failed()
+    // after the turn already settled (R10 P2).
+    const queue: HostedMonitorWakeTurn[] = [{ turnId: 'm:1', text: 'x' }];
+    let reads = 0;
+    let failures = 0;
+    const ran: string[] = [];
+    const scheduler = new HostedMonitorWakeScheduler(
+      {
+        next: async () => {
+          reads += 1;
+          if (reads === 2)
+            throw new MonitorWakeTransientReadError('store flap');
+          return queue[0];
+        },
+        state: () => 'idle',
+        runTurn: async (turn) => {
+          ran.push(turn.turnId);
+          queue.shift();
+          return 'settled';
+        },
+        failed: () => {
+          failures += 1;
+        },
+      },
+      10,
+    );
+    scheduler.kick();
+    await poll(() => queue.length === 0);
+    expect(ran).toEqual(['m:1']);
+    expect(failures).toBe(0);
+    scheduler.close();
+  });
+
   it('leaves a blocked Session’s remainder pending', async () => {
     const queue: HostedMonitorWakeTurn[] = [{ turnId: 'm:1', text: 'x' }];
     const ran: string[] = [];

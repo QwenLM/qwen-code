@@ -514,6 +514,69 @@ class ManagedChannelServiceTest {
     }
 
     @Test
+    void keepsTheOwnershipGuardAtomicAgainstARacingBind()
+            throws InterruptedException {
+        // R10 P2: the binding-count pre-check and the UPDATE must not be two
+        // separate statements — a bind committed between them would slip
+        // the move past. Hold the COUNT at a latch until the bind commits,
+        // then the UPDATE's own subquery must still flatten the write to
+        // zero rows.
+        service.submitInbound(TENANT, channel, event(1, "1710:1", "hi"));
+        java.util.concurrent.CountDownLatch atCount =
+                new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch bound =
+                new java.util.concurrent.CountDownLatch(1);
+        JdbcTemplate latching = new JdbcTemplate(jdbc.getDataSource()) {
+            @Override
+            public <T> T queryForObject(String sql, Class<T> requiredType,
+                    Object... args) {
+                T value = super.queryForObject(sql, requiredType, args);
+                if (sql.contains(
+                        "SELECT COUNT(*) FROM qwen_managed_channel_binding")) {
+                    atCount.countDown();
+                    try {
+                        bound.await();
+                    } catch (InterruptedException error) {
+                        throw new RuntimeException(error);
+                    }
+                }
+                return value;
+            }
+        };
+        ChannelInstanceStore.ChannelInstance snapshot = instances
+                .findInstance(TENANT, channel).orElseThrow();
+        ChannelInstanceStore racingStore = new ChannelInstanceStore(latching);
+        Thread binder = new Thread(() -> {
+            try {
+                atCount.await();
+                instances.bind(new ChannelInstanceStore.ChannelBinding(TENANT,
+                        channel, "chrt-race", "sess-race", "chat_thread",
+                        null, "alice@example.com", "thread-1",
+                        instances.databaseNow()));
+            } catch (InterruptedException error) {
+                throw new RuntimeException(error);
+            } finally {
+                bound.countDown();
+            }
+        });
+        binder.start();
+        assertThatThrownBy(() -> racingStore.register(
+                        new ChannelInstanceStore.ChannelInstance(TENANT,
+                                channel, "email", "agent@example.com", 1,
+                                "connected", "other-actor", WORKSPACE, ".",
+                                snapshot.policyJson(), 0, 0)))
+                .isInstanceOfSatisfying(IllegalStateException.class, error ->
+                        assertThat(error.getMessage()).isEqualTo(
+                                "channel_ownership_conflict"));
+        binder.join(10_000);
+        // The bind raced in mid-check, and the stored connection still
+        // names its original owner.
+        assertThat(instances.findInstance(TENANT, channel)).get()
+                .extracting(ChannelInstanceStore.ChannelInstance::actorId)
+                .isEqualTo(ACTOR);
+    }
+
+    @Test
     void sweepsPastUnprogressedClaimsInsteadOfStarvingNewerOnes() {
         // Fifty claims that never committed their claimed delivery (the
         // record stays planned) crowd the sweep page; a live claim on a

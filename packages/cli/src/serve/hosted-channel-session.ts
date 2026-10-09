@@ -256,13 +256,58 @@ export class HostedChannelSession {
           params.accountGeneration,
         );
       }
-      const attachments = await this.stageAttachments(params.attachments);
       const routeRevision =
         existing === undefined
           ? 1
           : existing.accountGeneration === params.accountGeneration
             ? existing.routeRevision
             : existing.routeRevision + 1;
+      // The byte verdict of the envelope must land before any attachment
+      // byte is published: encode with each publishable attachment's
+      // eventual (fixed-width, 36-char) identity, so an over-bound input
+      // refuses here — the staging below then publishes nothing behind a
+      // refusal (R10 P1).
+      encodeChannelInputEnvelope({
+        channelInstanceId: params.channelInstanceId,
+        accountId: params.accountId,
+        accountGeneration: params.accountGeneration,
+        platformEventId: params.platformEventId,
+        semanticRevision: params.semanticRevision,
+        routeId,
+        routeRevision,
+        senderId: params.senderId,
+        chatId: params.chatId,
+        threadId: params.threadId,
+        subject: params.subject,
+        text: params.text,
+        attachments: params.attachments.map((attachment) => {
+          const digest = sha256(attachment.bytes);
+          return attachment.bytes.byteLength >
+            MANAGED_CHANNEL_LIMITS.maxInlineAttachmentBytes
+            ? {
+                fileName: attachment.fileName,
+                mimeType: attachment.mimeType,
+                byteLength: attachment.bytes.byteLength,
+                digest,
+                omitted: 'too_large' as const,
+              }
+            : {
+                fileName: attachment.fileName,
+                mimeType: attachment.mimeType,
+                byteLength: attachment.bytes.byteLength,
+                digest,
+                ref: {
+                  kind: CHANNEL_RESOURCE_KINDS.attachment,
+                  resourceId: '00000000-0000-4000-8000-000000000000',
+                  schemaVersion: 1,
+                  byteLength: attachment.bytes.byteLength,
+                  digest,
+                },
+              };
+        }),
+        replyContext: params.replyContext,
+      });
+      const attachments = await this.stageAttachments(params.attachments);
       const envelope: ChannelInputEnvelope = {
         channelInstanceId: params.channelInstanceId,
         accountId: params.accountId,
@@ -423,6 +468,13 @@ export class HostedChannelSession {
           event.kind === 'turn.settled' && event.payload['turnId'] === turnId,
       );
     if (settled?.payload['outcome'] !== 'completed') return undefined;
+    // The envelope pin must still hold before any byte is published: a
+    // plan whose route re-keyed since its input was admitted would be
+    // refused at commitDelivery, and every refused attempt would orphan a
+    // fresh reply+segment resource pair behind it (R10 P2).
+    const route = this.route(envelope.routeId);
+    if (route === undefined || route.routeRevision !== envelope.routeRevision)
+      return undefined;
     const text = (await this.store.sink.project())
       .filter(
         (entry) =>
@@ -655,6 +707,10 @@ export class HostedChannelSession {
       const delivery = this.mustDelivery(deliveryId);
       const state = delivery.run.delivery?.state;
       if (state === 'cancelled') return delivery;
+      // A delivered, failed or cancelled chain admits no further revision,
+      // and a flag-only flip fails the successor rule forever — answer it
+      // unchanged, the same terminal guard settle() uses.
+      if (isTerminalRunState(delivery.run.state)) return delivery;
       if (state === 'planned') {
         return this.revise(
           delivery,

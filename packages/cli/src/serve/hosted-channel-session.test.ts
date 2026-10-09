@@ -423,6 +423,37 @@ describe('HostedChannelSession inbound', () => {
       expect(text).toContain('omitted="too_large"');
     });
   });
+
+  it('refuses an over-byte envelope before any attachment byte is staged', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (channels) => {
+      const publishes = vi.spyOn(harness.store, 'publish');
+      // 30,000 €-characters fit the documented 32,000-char line, yet at
+      // three UTF-8 bytes each they overflow the envelope's 64 KiB byte
+      // bound. The refuse must land before anything is staged (R10 P1).
+      await expect(
+        channels.submitInput(
+          inbound({
+            text: '€'.repeat(30_000),
+            attachments: [
+              {
+                fileName: 'a.txt',
+                mimeType: 'text/plain',
+                bytes: Buffer.from('note'),
+              },
+            ],
+          }),
+        ),
+      ).rejects.toThrow(/byte_limit/);
+      expect(publishes).not.toHaveBeenCalled();
+      // The route admits the next valid input normally.
+      const second = (
+        await channels.submitInput(inbound({ platformEventId: '1700:77' }))
+      ).inputId;
+      expect(second).toMatch(/^chin-/);
+      expect(publishes.mock.calls.length).toBeGreaterThan(0);
+    });
+  });
 });
 
 describe('HostedChannelSession outbound', () => {
@@ -498,9 +529,9 @@ describe('HostedChannelSession outbound', () => {
       await settleInJournal(authority, rolled);
       // No turn_result record exists in the projection — none arrives
       // through the production sink — so this settle gate is journal-only.
-      await expect(channels.planReply(stuck)).rejects.toThrow(
-        /committed route at the pinned revision/,
-      );
+      // A re-keyed pin no longer publishes behind its own refuse: the plan
+      // simply never happens (R10 P2).
+      expect(await channels.planReply(stuck)).toBeUndefined();
       expect(await channels.reconcileReplies()).toEqual([rolled]);
       expect(channels.delivery(`${rolled}:reply`)).toMatchObject({
         run: { delivery: { state: 'planned' } },
@@ -604,6 +635,53 @@ describe('HostedChannelSession outbound', () => {
       await expect(
         channels.receipt(planned.deliveryId, 0, RECEIPT),
       ).resolves.toMatchObject({ run: { delivery: { state: 'delivered' } } });
+    });
+  });
+
+  it('cancels a terminally run delivery unchanged instead of refusing endlessly (R10 P1)', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (channels, authority) => {
+      const inputId = (await channels.submitInput(inbound())).inputId;
+      settleTurn(harness, inputId, 'Done.');
+      await settleInJournal(authority, inputId);
+      const planned = (await channels.planReply(inputId))!;
+      await channels.claim(planned.deliveryId);
+      await channels.settle(planned.deliveryId, 'rejected');
+      expect(channels.delivery(planned.deliveryId)!.run.delivery?.state).toBe(
+        'rejected',
+      );
+      const before = authority.extensionRecord(
+        'channel_delivery',
+        planned.deliveryId,
+      )?.revision;
+      // The terminal-run line admits no further revision: answering
+      // unchanged is the only idempotent cancel.
+      const cancelled = await channels.cancel(planned.deliveryId);
+      expect(cancelled.run.delivery?.state).toBe('rejected');
+      expect(cancelled.cancelRequested).toBe(false);
+      expect(
+        authority.extensionRecord('channel_delivery', planned.deliveryId)
+          ?.revision,
+      ).toBe(before);
+    });
+  });
+
+  it('plans nothing after a route re-keys, publishing nothing behind the stale pin (R10 P2)', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (channels, authority) => {
+      const first = (await channels.submitInput(inbound())).inputId;
+      settleTurn(harness, first, 'Late answer.');
+      await settleInJournal(authority, first);
+      // The account re-key rolls the route forward: the settled turn's
+      // reply may not plan, or every retry orphans a fresh resource pair.
+      await channels.submitInput(
+        inbound({ accountGeneration: 2, platformEventId: '1800:2' }),
+      );
+      const publishes = vi.spyOn(harness.store, 'publish');
+      expect(await channels.planReply(first)).toBeUndefined();
+      expect(publishes).not.toHaveBeenCalled();
+      expect(await channels.reconcileReplies()).toEqual([]);
+      expect(publishes).not.toHaveBeenCalled();
     });
   });
 
@@ -852,11 +930,12 @@ describe('HostedChannelSession outbound', () => {
       );
       settleTurn(harness, inputId, 'Late answer.');
       await settleInJournal(authority, inputId);
-      // The plan pins the input's revision; the binding has moved on, and
-      // the old generation creates no new effect.
-      await expect(channels.planReply(inputId)).rejects.toThrow(
-        /committed route at the pinned revision/,
-      );
+      // The plan pins the input's revision; the binding has moved on, so
+      // the old generation creates no new effect AND no orphan byte pair
+      // (R10 P2: the pin is checked before anything is published).
+      const publishes = vi.spyOn(harness.store, 'publish');
+      expect(await channels.planReply(inputId)).toBeUndefined();
+      expect(publishes).not.toHaveBeenCalled();
       expect(channels.delivery(`${inputId}:reply`)).toBeUndefined();
     });
   });
