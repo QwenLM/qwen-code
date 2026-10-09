@@ -669,7 +669,7 @@ receipt 尚不存在时，原随机 message ID 或 timestamp 也尚未耐久建�
 
 #### 6.8.5 结果消费前的完整模型输出
 
-状态：候选实现已接通原子完整输出和冷恢复；新鲜正向进程断点验收尚待完成。第 7.12 节保留原提交仅有标记形态的实际拒绝基线。旧 `model.attempt(output_committed)` 保存 attempt 标记、route/checkpoint ref 与 usage，完整 assistant Parts 却在消费结果后才取得。可见 delta 不能证明完整输出，也不能证明没有新 tool call。对这种仅有标记的旧形状继续拒绝 C8，不能追认为完整输出已耐久保存。
+状态：原子完整输出和冷恢复已实现，第 7.14 节记录有界本地正向进程断点验收；后续断点及目标环境资格仍待完成。第 7.12 节保留原提交仅有标记形态的实际拒绝基线。旧 `model.attempt(output_committed)` 保存 attempt 标记、route/checkpoint ref 与 usage，完整 assistant Parts 却在消费结果后才取得。可见 delta 不能证明完整输出，也不能证明没有新 tool call。对这种仅有标记的旧形状继续拒绝 C8，不能追认为完整输出已耐久保存。
 
 针对无 tool call 的私有 CSI final output，将现有 `model.attempt(output_committed)`、`message.committed` 连同原完整 ChatRecord 与 usage resources 放在同一 native journal 事务提交。保留实际 stream message ID 或首个耐久建立的 ID、timestamp、model、parent 和全部 Parts，包括 thought。消息绑定原 model attempt 与 input checkpoint。两个 event sequence 必须在 authority 的串行 commit 内分配；caller 预先计算会与 activation renewal 竞争。复用现有 message/resource 格式，不另加 output ledger 或 event。Hook、普通 Hosted 和新 tool call 路径保持既有行为。
 
@@ -920,8 +920,18 @@ Root 独立核对342项封存 artifact、当前 source/product/dependency/class 
 
 另一轮全新专属 MySQL 在同一干净 `af5a0e544d4690b7073fc40a6d77d7b1a8734095` 上，于真实 model2 单个 `output_committed` 标记事务返回200后、结果消费前切断。原工具成员为 results-ready，三条结果已 settled、尚未 consumed，完整最后 assistant Parts 尚未耐久提交。仅终止登记原 Main/Hosted、等待自然过期后，真实 native acquire 返回409 `csi_original_activation_unavailable`，与 Hosted wrapper503 区分。该准确拒绝事务前后全部57表精确相同。没有 model3、新 final assistant、结果消费、settlement 或重复工具效果。
 
-编译、producer、完整 auditor 均 exit0：一个实际拒绝组、28项 producer 检查、33项 auditor 谓词。Root 核对256项封存 artifact、原 SQL/journal 保留、当前及删除 input bridge、38次 PID/group 缺席探测、11关闭端口和专属 MySQL/临时目录清理后解除窗口。Producer 启动时合格原身份的只读 attestation 三请求与拒绝事务的全表不变分别核验。报告组装对 row/key 的错误假设保留，只读修正后未重跑 producer。只验证旧形态的拒绝边界；第6.8.5节候选已实现完整输出原子提交、零 model3 恢复，但新鲜正向进程断点验收仍待完成，不赋予完整 K2 或物理/Linux/云门禁资格。
+编译、producer、完整 auditor 均 exit0：一个实际拒绝组、28项 producer 检查、33项 auditor 谓词。Root 核对256项封存 artifact、原 SQL/journal 保留、当前及删除 input bridge、38次 PID/group 缺席探测、11关闭端口和专属 MySQL/临时目录清理后解除窗口。Producer 启动时合格原身份的只读 attestation 三请求与拒绝事务的全表不变分别核验。报告组装对 row/key 的错误假设保留，只读修正后未重跑 producer。只验证旧形态拒绝边界；后续完整输出原子提交实现及有界正向观察分别记录于第6.8.5和7.14节，不赋予完整 K2 或物理/Linux/云门禁资格。
 
 ### 7.13 与已发布 operation actor migration 合并后的最终交付
 
 最终交付还合入 main `5b1c701400c949a6e943909db6fcbcb2273dc721`，包含已发布的 operation actor-key migration V56，并在 bound Session 上同时校验 caller role 与原 creator execution facts。源码 inventory 检查在修复前复现 V56 冲突。已发布 V1–V56 字节全部保持，只将三个仍未发布的 CSI 文件顺延为 request V57、activation V58、native authorization V59，SQL 字节/顺序不变。升级测试覆盖已发布 V56、仅 request 的 V57、仅 activation 的 V58；完整序列止于 V59。私有创建保留 creator/owner key 与 request pin，child/close/delete 门禁保持关闭。合并后须在新推送提交运行检查，不能把原进程断点验收转移到新 head；更早未发布编号仍需独立明确迁移方案。
+
+### 7.14 有界完整输出 C8 冷恢复
+
+全新专属 MySQL8.4.11 观察绑定干净生产提交 `5fdb0eef595cd3cd71769e9ff25ce299d76599e9`，于真实 model2 输出与完整 assistant 原子事务提交后、结果消费前切断。仅终止登记原 Main/Hosted，保留原 Worker、数据库和文件直到自然过期。后继保留原 assistant Parts、stream/parent/model 身份、全部五项 usage 和每份原 SQL execution/grant/result，再消费/结算一次进入 next-turn-ready checkpoint，实际 provider 请求精确为两个、无重复工具效果。编译、producer、完整 auditor 均 exit0：一个实际组、22项 producer 检查和11项 auditor 谓词。派生谓词与保存字节的诊断不计作额外行为组。
+
+首轮实际观察仍保留为失败：observer 将资源读取校验时间误作不可变内容。既有 native 读取只更新 `last_verified_at`；修正后保留原资源其余全部字段，并将该时间关联成功同 scope GET 的原响应字节、单调数据库时间及实测数据库偏移。Binding metadata 使用独立 UTC 合约。保存字节的诊断还修正了 initial-idle 假设：next-turn-ready 保留精确原已结算 prompt/turn 身份，同时清空 pending events、attempt、tools、runtime 和 approval。原读取错误及旧实际失败保留；验收来自全新实际组。
+
+Root 独立解码全部57表、原输出和结果字节，再核对288项封存 artifact、4279项保留 input pin 和332项原 parent artifact。44次登记 PID/group 探测全部缺席、11端口关闭、专属临时目录缺席，专属 MySQL database/user/server 清理并 shutdown exit0 后才解除 source/product 窗口。删除的临时副本保留清理前哈希及原 dependency bridge，删除后无法重新核哈希。两个 Agent 产物内完整 Broker 和 SDK 字节均与 standalone 产物相同。
+
+本轮只接受有界本地消费前 C8 断点，仍有 MockMvc transport、合成 Kubernetes/attestation、确定性 SSE 和 Darwin mount 适配限制。不证明 provider 作者身份、穷尽媒体覆盖、完整 Node 依赖启动前闭包、后续消费/结算断点、剩余故障谓词、生产 isolation 竞争、物理退役/复用、公开选择、Linux/云资格、原生独立批准、维护者批准或完整 K2。
