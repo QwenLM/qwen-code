@@ -1545,6 +1545,17 @@ describe('ChatRecordingService', () => {
       ).toBe(valid);
     });
 
+    it('requires a cancelled outcome and timestamp for explicit user intent', () => {
+      const cancelled = { state: 'cancelled', cancelledAt: 0 };
+      expect(isValid(cancelled)).toBe(true);
+      expect(isValid({ ...cancelled, cancelReason: 'user' })).toBe(true);
+      expect(isValid({ ...cancelled, cancelReason: 'interrupted' })).toBe(
+        false,
+      );
+      expect(isValid({ cancelReason: 'user', cancelledAt: 0 })).toBe(false);
+      expect(isValid({ state: 'cancelled', cancelReason: 'user' })).toBe(false);
+    });
+
     it('caps promptId, stopReason, and originatorClientId in turn_result payloads', () => {
       const oversized = 'x'.repeat(TURN_RESULT_IDENTIFIER_MAX_CHARS + 1);
       expect(isValid({ promptId: oversized })).toBe(false);

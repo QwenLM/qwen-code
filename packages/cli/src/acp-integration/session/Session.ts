@@ -8832,7 +8832,9 @@ export class Session implements SessionContext {
       ...(recording.startedAt !== undefined
         ? { startedAt: recording.startedAt }
         : {}),
-      ...(cancelledAt !== undefined ? { cancelledAt } : {}),
+      ...(cancelledAt !== undefined
+        ? { cancelledAt, cancelReason: 'user' as const }
+        : {}),
       endedAt: Date.now(),
       promptText: recording.promptText,
       ...(recording.promptTextTruncated ? { promptTextTruncated: true } : {}),

@@ -599,12 +599,13 @@ describe('SessionTranscriptReader', () => {
     );
 
   it.each([
-    [false, 0],
-    [true, 0],
-    [false, undefined],
+    [false, 0, 'user'],
+    [true, 0, 'user'],
+    [false, undefined, undefined],
+    [false, 0, undefined],
   ])(
-    'restores cancellation independently of replay with compression=%s, cancelledAt=%s',
-    async (compressed, cancelledAt) => {
+    'restores cancellation independently of replay with compression=%s, cancelledAt=%s, cancelReason=%s',
+    async (compressed, cancelledAt, cancelReason) => {
       const user = {
         ...record('u1', null, 'unfinished'),
         promptId: `${sessionId}########1`,
@@ -627,6 +628,7 @@ describe('SessionTranscriptReader', () => {
           promptId: user.daemonPromptId,
           state: 'cancelled',
           cancelledAt,
+          cancelReason,
           endedAt: 1,
         },
       );
@@ -641,7 +643,7 @@ describe('SessionTranscriptReader', () => {
           options,
         );
         expect(projection?.runtime.cancelledLastTurn === true).toBe(
-          cancelledAt !== undefined,
+          cancelReason === 'user',
         );
         expect(structuredClone(projection?.runtime.apiHistory)).toEqual([
           user.message,
@@ -680,6 +682,7 @@ describe('SessionTranscriptReader', () => {
         promptId: 'daemon-1',
         state: 'cancelled',
         cancelledAt: 1,
+        cancelReason: 'user',
         endedAt: 2,
       });
       const attempt = sys(
@@ -709,6 +712,7 @@ describe('SessionTranscriptReader', () => {
           promptId: 'daemon-2',
           state: 'cancelled',
           cancelledAt: 3,
+          cancelReason: 'user',
           endedAt: 4,
         },
       );
@@ -739,6 +743,7 @@ describe('SessionTranscriptReader', () => {
       promptId: 'old-daemon',
       state: 'cancelled',
       cancelledAt: 0,
+      cancelReason: 'user',
       endedAt: 1,
     });
     const replacement = {

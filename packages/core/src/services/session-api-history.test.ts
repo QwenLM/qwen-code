@@ -642,6 +642,7 @@ describe('cancelled prompt identity with automatic tails', () => {
             promptId: 'daemon-2',
             state: 'cancelled',
             cancelledAt: 100,
+            cancelReason: 'user',
           },
         ]),
       ).toBe(true);

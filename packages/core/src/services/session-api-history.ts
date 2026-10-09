@@ -60,6 +60,7 @@ export type SessionTurnSettlementHint =
       promptId: string;
       state: 'completed' | 'cancelled' | 'error';
       cancelledAt?: number;
+      cancelReason?: 'user';
     };
 
 export function getSessionTurnSettlementHint(
@@ -92,6 +93,7 @@ export function getSessionTurnSettlementHint(
       promptId: record.systemPayload.promptId,
       state: record.systemPayload.state,
       cancelledAt: record.systemPayload.cancelledAt,
+      cancelReason: record.systemPayload.cancelReason,
     };
   }
   return undefined;
@@ -166,7 +168,8 @@ export function isLastApiPromptCancelled(
     results.length === 1 &&
     results[0]!.index > ownerIndex &&
     results[0]!.hint.state === 'cancelled' &&
-    results[0]!.hint.cancelledAt !== undefined
+    results[0]!.hint.cancelledAt !== undefined &&
+    results[0]!.hint.cancelReason === 'user'
   );
 }
 

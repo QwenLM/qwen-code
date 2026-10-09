@@ -387,6 +387,7 @@ describe('explicitly cancelled recorded turns', () => {
       promptId,
       state,
       cancelledAt: 0,
+      ...(state === 'cancelled' ? { cancelReason: 'user' } : {}),
       endedAt: 1,
     } as ChatRecord['systemPayload'],
   });
@@ -444,7 +445,7 @@ describe('explicitly cancelled recorded turns', () => {
   });
   it('keeps abort-only or legacy cancellation recoverable without user-cancel provenance', () => {
     const terminal = result();
-    delete (terminal.systemPayload as { cancelledAt?: number }).cancelledAt;
+    delete (terminal.systemPayload as { cancelReason?: string }).cancelReason;
     expect(
       planFor(conversationFromRecords([prompt(), toolResult(), terminal]))
         .canContinue,

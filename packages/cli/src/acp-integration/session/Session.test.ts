@@ -12146,6 +12146,7 @@ describe('Session', () => {
               state: 'cancelled',
               stopReason: 'cancelled',
               cancelledAt: 4_500,
+              cancelReason: 'user',
               endedAt: 9_500,
             }),
           );
@@ -12178,6 +12179,7 @@ describe('Session', () => {
             mockChatRecordingService.recordTurnResult.mock.calls[0][0];
           expect(payload.state).toBe('error');
           expect(payload).not.toHaveProperty('cancelledAt');
+          expect(payload).not.toHaveProperty('cancelReason');
           expect(mockChat.markLastTurnCancelled).not.toHaveBeenCalled();
         },
       );
@@ -12216,8 +12218,10 @@ describe('Session', () => {
             expect(payload.state).toBe('cancelled');
             if (cancelReason) {
               expect(payload.cancelledAt).toEqual(expect.any(Number));
+              expect(payload.cancelReason).toBe('user');
             } else {
               expect(payload).not.toHaveProperty('cancelledAt');
+              expect(payload).not.toHaveProperty('cancelReason');
             }
           } finally {
             releaseClose();
@@ -12250,8 +12254,10 @@ describe('Session', () => {
             expect(payload.state).toBe('cancelled');
             if (cancelReason) {
               expect(payload.cancelledAt).toEqual(expect.any(Number));
+              expect(payload.cancelReason).toBe('user');
             } else {
               expect(payload).not.toHaveProperty('cancelledAt');
+              expect(payload).not.toHaveProperty('cancelReason');
               expect(mockChat.markLastTurnCancelled).not.toHaveBeenCalled();
             }
           } finally {
@@ -12404,6 +12410,7 @@ describe('Session', () => {
             state: 'cancelled',
             startedAt: 1_000,
             cancelledAt: 4_500,
+            cancelReason: 'user',
             endedAt: 9_500,
           }),
         );
