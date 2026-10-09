@@ -1217,7 +1217,8 @@ public class ManagedAgentStore implements AgentStateStore {
                 || hasDecidableAction(session)
                 || hasRetainedRuntimeSession(tenantId, sessionId)) {
             failure = "session_context_busy";
-        } else if (!hasCwdChangeRegistryFacts(session)) {
+        } else if (!hasExecutionRegistryFacts(session.tenantId(),
+                session.sessionId())) {
             failure = "workspace_unavailable";
         }
         if (failure != null) {
@@ -1286,7 +1287,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     private void requireCwdChangeRegistryFacts(SessionRecord session) {
-        if (!hasCwdChangeRegistryFacts(session)) {
+        if (!hasExecutionRegistryFacts(session.tenantId(), session.sessionId())) {
             throw workspaceExecutionUnavailable();
         }
     }
@@ -1295,8 +1296,16 @@ public class ManagedAgentStore implements AgentStateStore {
     // the creation actor's grants survive — the passive-attachment subset the
     // settlement gates on; the frozen profile and agent checks stay the next
     // turn's acquire-time gate.
-    private boolean hasCwdChangeRegistryFacts(SessionRecord session) {
-        List<Boolean> rows = jdbc.query("SELECT 1 FROM"
+    @Override
+    public Set<String> sessionsWithExecutionRegistryFacts(String tenantId,
+            java.util.Collection<String> sessionIds) {
+        if (sessionIds.isEmpty()) {
+            return Set.of();
+        }
+        List<Object> arguments = new ArrayList<>(sessionIds.size() + 1);
+        arguments.add(tenantId);
+        arguments.addAll(sessionIds);
+        List<String> rows = jdbc.query("SELECT s.session_id FROM"
                         + " managed_agent_session s JOIN"
                         + " managed_workspace_registry r ON r.tenant_id ="
                         + " s.tenant_id AND r.workspace_id = s.workspace_id"
@@ -1305,14 +1314,14 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " s.session_id JOIN managed_workspace_access a ON"
                         + " a.tenant_id = r.tenant_id AND a.workspace_id ="
                         + " r.workspace_id AND a.actor_id = c.actor_id"
-                        + " WHERE s.tenant_id = ? AND s.session_id = ? AND"
+                        + " WHERE s.tenant_id = ? AND s.session_id IN ("
+                        + placeholders(sessionIds.size()) + ") AND"
                         + " r.workspace_generation = s.workspace_generation"
                         + " AND r.storage_id = s.workspace_storage_id AND"
                         + " r.state = 'ACTIVE' AND a.role IN ('OPERATOR',"
-                        + " 'OWNER')",
-                (row, index) -> Boolean.TRUE, session.tenantId(),
-                session.sessionId());
-        return rows.size() == 1;
+                        + " 'OWNER') GROUP BY s.session_id HAVING COUNT(*) = 1",
+                (row, index) -> row.getString("session_id"), arguments.toArray());
+        return new HashSet<>(rows);
     }
 
     private boolean hasOpenOperation(String tenantId, String sessionId) {

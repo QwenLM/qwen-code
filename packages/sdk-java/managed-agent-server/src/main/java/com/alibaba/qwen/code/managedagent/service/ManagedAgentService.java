@@ -724,31 +724,39 @@ public class ManagedAgentService {
         Map<String, EventRecord> environmentEvents = store
                 .findLatestEnvironmentEvents(tenantId, latestTurns);
         Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
-        // The creator-submit capability batches its registry reads like the
-        // close state: one IN query over the submit-shaped Sessions, then
-        // one over the creator-owned ones' workspaces.
+        // Cwd admission has no Turn execution-profile restriction. Share
+        // creator reads across both shapes, retaining each capability's gates.
         Set<String> shaped = sessions.stream().filter(this::maySubmitShape)
                 .map(SessionRecord::sessionId)
                 .collect(java.util.stream.Collectors.toSet());
-        Set<String> creatorOwns = shaped.isEmpty() ? Set.of()
+        Set<String> cwdShaped = sessions.stream().filter(this::mayChangeCwdShape)
+                .map(SessionRecord::sessionId)
+                .collect(java.util.stream.Collectors.toSet());
+        Set<String> creatorCandidates = new java.util.HashSet<>(shaped);
+        creatorCandidates.addAll(cwdShaped);
+        Set<String> creatorOwns = creatorCandidates.isEmpty() ? Set.of()
                 : workspaces.createdSessions(tenantId, actorId,
-                        List.copyOf(shaped));
+                        List.copyOf(creatorCandidates));
         Set<String> grantWorkspaces = creatorOwns.isEmpty() ? Set.of()
                 : sessions.stream()
-                        .filter(session -> creatorOwns.contains(
-                                session.sessionId()))
+                        .filter(session -> shaped.contains(session.sessionId())
+                                && creatorOwns.contains(session.sessionId()))
                         .map(session -> session.workspace().getWorkspaceId())
                         .collect(java.util.stream.Collectors.toSet());
         Map<String, ManagedWorkspaceRegistry.ReadableGrant> grants =
                 grantWorkspaces.isEmpty() ? Map.of()
                         : workspaces.findReadable(tenantId, actorId,
                                 grantWorkspaces);
+        cwdShaped.retainAll(creatorOwns);
+        Set<String> cwdAllowed = cwdShaped.isEmpty() ? Set.of()
+                : store.sessionsWithExecutionRegistryFacts(tenantId, cwdShaped);
         return sessions.stream()
                 .map(session -> webShellSession(session,
                         latestTurns.get(session.sessionId()),
                         environmentEvents.get(session.sessionId()),
                         retention(session, closed),
-                        maySubmitWorkspaceTurn(session, creatorOwns, grants)))
+                        maySubmitWorkspaceTurn(session, creatorOwns, grants),
+                        cwdAllowed.contains(session.sessionId())))
                 .toList();
     }
 
@@ -759,7 +767,7 @@ public class ManagedAgentService {
 
     private WebShellSession webShellSession(SessionRecord session,
             TurnSummary latestTurn, EventRecord environmentEvent,
-            boolean retention, boolean maySubmit) {
+            boolean retention, boolean maySubmit, boolean mayChangeCwd) {
         return new WebShellSession(
                 session.sessionId(),
                 session.title(),
@@ -775,7 +783,8 @@ public class ManagedAgentService {
                 // Stage H records its Session store holds (H0c).
                 new WebShellSessionCapabilities(true, hasArtifacts(session),
                         hasActions(session), maySubmit, supportsClose(session),
-                        retention, retention, supportsDelete(session, retention)));
+                        retention, retention, supportsDelete(session, retention),
+                        mayChangeCwd));
     }
 
     private boolean supportsDelete(SessionRecord session, boolean retention) {
@@ -1023,6 +1032,11 @@ public class ManagedAgentService {
                 && "qwen-code".equals(session.agentId())
                 && WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(
                         session.workspace().getContextConfigRef());
+    }
+
+    private boolean mayChangeCwdShape(SessionRecord session) {
+        return session.workspace() != null && "ACTIVE".equals(session.status())
+                && session.deletedAt() == null && store.workspaceFilesEnabled();
     }
 
     void requireLegacyWorkspace(String tenantId, String actorId,
