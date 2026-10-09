@@ -1719,6 +1719,43 @@ describe('DiscoveredMCPTool', () => {
       expectDiscardedLimitWarn('timeout', '"60000"');
     });
 
+    it('treats a written null server timeout as unset, not as a discarded value', async () => {
+      const mcpClient = appClient(
+        vi.fn(async () => {
+          throw new Error('boom');
+        }),
+      );
+      // `mcpServers` carries no runtime validation, so a hand-written
+      // `"timeout": null` reaches the tool. Production reads it as "use the
+      // default" (`timeout ?? MCP_DEFAULT_TIMEOUT_MSEC`) and the pool
+      // fingerprint collapses null and absent, so the App path must not
+      // announce a discard on every load.
+      const written = null as unknown as number;
+      await createAppTool(mcpClient, undefined, written, { timeout: written })
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+      expectDiscardedLimitWarn('timeout', undefined);
+    });
+
+    it('names the deadline actually used as the fallback for a discarded server timeout', async () => {
+      const mcpClient = appClient(
+        vi.fn(async () => {
+          throw new Error('boom');
+        }),
+      );
+      // An explicit appResourceTimeoutMs owns the deadline, so the discard
+      // line for `timeout` must name 30000 -- the value the read is given --
+      // and not the App resource default the deadline never reaches.
+      const handEdited = '60000' as unknown as number;
+      await createAppTool(mcpClient, undefined, handEdited, {
+        timeout: handEdited,
+        appResourceTimeoutMs: 30_000,
+      })
+        .build({ param: 'test' })
+        .execute(new AbortController().signal);
+      expectDiscardedLimitWarn('timeout', 'falling back to 30000');
+    });
+
     it.each(['text', 'blob'] as const)(
       'loads larger configured %s resources through tool projections',
       async (encoding) => {

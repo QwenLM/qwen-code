@@ -1542,6 +1542,56 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       });
     });
 
+    it('App resource limits carries no timeout key when the server config omits one', async () => {
+      const ui = {
+        csp: { connectDomains: ['https://api.example.com'] },
+        permissions: { clipboardWrite: {} },
+      };
+      mockStdioClient({
+        getProtocolEra: vi.fn().mockReturnValue('modern'),
+        getServerCapabilities: vi.fn().mockReturnValue({
+          tools: {},
+          resources: {},
+        }),
+        listTools: vi.fn().mockResolvedValue({
+          tools: [
+            {
+              name: 'show_dashboard',
+              _meta: { ui: { resourceUri: 'ui://demo/dash' } },
+            },
+          ],
+        }),
+        listResources: vi.fn().mockResolvedValue({
+          resources: [{ uri: 'ui://demo/dash', name: 'dash', _meta: { ui } }],
+        }),
+        listPrompts: vi.fn().mockResolvedValue({ prompts: [] }),
+        request: vi.fn().mockResolvedValue({ prompts: [] }),
+      });
+      mockToolDecls('show_dashboard');
+
+      const client = await connectedClient(
+        'apps',
+        {
+          command: 'test-command',
+          appResourceMaxBytes: 2_097_152,
+          appResourceTimeoutMs: 30_000,
+        },
+        toolReg(),
+        promptReg(),
+      );
+      const snapshot = await client.discoverAndReturn(cfgWithResources(), {
+        applyConfigFilters: false,
+      });
+
+      // Nothing was written, so no `timeout` key rides along. Defaulting the
+      // field at the construction site would restore the defect this PR fixes
+      // for the majority configuration, and only this case witnesses it.
+      expect(snapshot.tools[0]?.appResourceLimits).toEqual({
+        appResourceMaxBytes: 2_097_152,
+        appResourceTimeoutMs: 30_000,
+      });
+    });
+
     it('lists tools via request when a modern server omits the tools capability', async () => {
       const mockedClient = {
         getProtocolEra: vi.fn().mockReturnValue('modern'),

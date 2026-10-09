@@ -904,10 +904,22 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     // the value was ignored on every load, not only when a read times out.
     // The returned number is deliberately unused -- `defaultTimeoutMs` above
     // owns the deadline and must stay on the already-defaulted `mcpTimeout`.
-    if (this.appResourceLimits?.timeout !== undefined) {
+    //
+    // `!= null`, not `!== undefined`: `mcpServers` has no runtime validation,
+    // so a hand-written `"timeout": null` reaches here, and every other reader
+    // of the same field treats null as unset -- production resolves it with
+    // `timeout ?? MCP_DEFAULT_TIMEOUT_MSEC` and the pool fingerprint collapses
+    // the two spellings. Warning on it would announce a discard the rest of
+    // the codebase does not make, on every App load.
+    //
+    // The fallback named is `timeoutMs`, the deadline this read is actually
+    // given: an explicit `appResourceTimeoutMs` outranks the App resource
+    // default, so naming the constant would point the operator at a number
+    // the read never uses.
+    if (this.appResourceLimits?.timeout != null) {
       this.appResourceLimit(
         this.appResourceLimits.timeout,
-        MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS,
+        timeoutMs,
         1,
         MCP_APP_RESOURCE_TIMEOUT_DEFAULT_MS,
         'timeout',
