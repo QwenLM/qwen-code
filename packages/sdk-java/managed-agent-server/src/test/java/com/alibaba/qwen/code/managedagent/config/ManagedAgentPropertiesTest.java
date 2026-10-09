@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.alibaba.qwen.code.managedagent.service.ActionResponseCoordinator;
+import com.alibaba.qwen.code.managedagent.service.ChildResultRelay;
 import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.service.MessageMaterializer;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
@@ -110,6 +111,7 @@ class ManagedAgentPropertiesTest {
         var pending = new java.util.ArrayDeque<Class<?>>();
         var seen = java.util.Collections.newSetFromMap(
                 new java.util.IdentityHashMap<Class<?>, Boolean>());
+        var visited = new java.util.LinkedHashSet<String>();
         pending.add(ManagedAgentProperties.class);
         while (!pending.isEmpty()) {
             Class<?> current = pending.removeFirst();
@@ -126,6 +128,7 @@ class ManagedAgentPropertiesTest {
                     // SessionStore.writerLeaseDuration to MILLIS goes red.
                     String name = current.getSimpleName() + "."
                             + field.getName();
+                    visited.add(name);
                     var unit = field.getAnnotation(
                             org.springframework.boot.convert.DurationUnit.class);
                     assertThat(unit).as(name).isNotNull();
@@ -137,6 +140,12 @@ class ManagedAgentPropertiesTest {
             }
             pending.addAll(java.util.List.of(current.getDeclaredClasses()));
         }
+        // The walk must not pass vacuously: extracting a group out of
+        // the properties class empties it and the millisecond
+        // exceptions would go unchecked. 25 is the current field
+        // inventory — update it in the same change that adds or
+        // removes a Duration field.
+        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(25);
     }
 
     @Test
@@ -327,7 +336,7 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
-    void materializeIntervalDrivesTheScheduledCadence() {
+    void materializeIntervalDrivesTheScheduledCadence() throws java.io.IOException {
         // The typed field is the cadence's only driving source:
         // ManagedArtifactConfiguration.messageMaterializerTask schedules
         // the pass with it on the dedicated single-thread scheduler, and a
@@ -335,6 +344,11 @@ class ManagedAgentPropertiesTest {
         assertThat(new ManagedAgentProperties().getEvents()
                 .getMaterializeInterval())
                 .isEqualTo(java.time.Duration.ofMillis(100));
+        // A property-less boot never sees the yml, so pin the shipped
+        // entry too — it, not the field default, is the deployed
+        // cadence.
+        assertThat(applicationYmlValues()).containsEntry(
+                "qwen.managed-agent.events.materialize-interval", "100ms");
         // An empty fragment matches every schedule attribute on every
         // declared method, so any reintroduced @Scheduled — package-private
         // or repeated — fails here.
@@ -362,7 +376,26 @@ class ManagedAgentPropertiesTest {
     }
 
     @Test
-    void theThreeScanDelaySchedulesShareOneFallback() {
+    void theChildRelayScanDelayReadsBareNumbersAsMilliseconds() {
+        // The third @Scheduled placeholder cadence the README's unit
+        // rule names: it has no typed field, so the annotation fallback
+        // is the deployed default and the startup sweep can never see
+        // an override — placeholder, dedicated scheduler and the
+        // millisecond timeUnit are pinned together.
+        var schedules = schedulesOn(ChildResultRelay.class,
+                "child-relay.scan-delay");
+        assertThat(schedules).hasSize(1).allSatisfy(scheduled -> {
+            assertThat(scheduled.fixedDelayString()).isEqualTo(
+                    "${qwen.managed-agent.child-relay.scan-delay:2s}");
+            assertThat(scheduled.scheduler()).isEqualTo(
+                    "childRelayScheduler");
+            assertThat(scheduled.timeUnit())
+                    .isEqualTo(TimeUnit.MILLISECONDS);
+        });
+    }
+
+    @Test
+    void theThreeScanDelaySchedulesShareOneFallback() throws java.io.IOException {
         // The Dispatch comment claims the three sites read the identical
         // "${...scan-delay:1s}" placeholder; only this pin keeps the claim
         // true when one fallback is retuned without the others. The unit
@@ -374,6 +407,11 @@ class ManagedAgentPropertiesTest {
         // unspecified, so a second scan-delay sweep on one coordinator
         // must fail here, not slip past a sampled first match.
         String expected = "${qwen.managed-agent.dispatch.scan-delay:1s}";
+        // application.yml supplies the key in a packaged server, making
+        // the annotation fallback inert there — pin the shipped value
+        // the Dispatch comment names as the deployed default.
+        assertThat(applicationYmlValues()).containsEntry(
+                "qwen.managed-agent.dispatch.scan-delay", "1s");
         for (Class<?> coordinator : List.of(ActionResponseCoordinator.class,
                 HarnessCoordinator.class, SessionLifecycleCoordinator.class)) {
             assertThat(schedulesOn(coordinator, "dispatch.scan-delay"))
@@ -411,7 +449,12 @@ class ManagedAgentPropertiesTest {
     @Test
     void droppedConfigSurfacesStayDropped() {
         // The kubernetes* and cliEntry blocks had no consumer; they come
-        // back only together with their provisioner/invocation.
+        // back only together with their provisioner/invocation. Dispatch's
+        // scanDelay is the third dropped surface: the cadence lives only
+        // in application.yml and the three @Scheduled placeholders.
+        assertThat(ManagedAgentProperties.Dispatch.class
+                .getDeclaredFields()).noneMatch(field -> field.getName()
+                        .equals("scanDelay"));
         assertThat(ManagedAgentProperties.RuntimeBroker.class
                 .getDeclaredFields()).noneMatch(field -> field.getName()
                         .startsWith("kubernetes"))

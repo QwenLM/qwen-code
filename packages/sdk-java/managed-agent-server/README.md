@@ -647,17 +647,18 @@ export QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW='30m'
 ```
 
 The same unit rule applies to every `qwen.managed-agent.*` duration setting: a
-suffix-less number binds as seconds, except five settings that keep
-milliseconds — `auth.allowed-drift` (so a stale `300000` keeps meaning five
-minutes instead of widening the signature-replay window to ~83 hours), the
-sub-second `events.batch-interval` and `events.materialize-interval`, and the
-two scheduler cadences `dispatch.scan-delay` and
-`artifacts.projection-interval`, which bind through `@Scheduled` placeholders.
-Always write the suffix (`90s`, `500ms`). At startup the server reads each
-seconds-convention setting's written value and warns on a bare integer — the
-shape of a stale milliseconds-style override — naming what the number binds as
-now (seconds) and what it would have bound before (milliseconds); a suffixed
-value never warns.
+suffix-less number binds as seconds, except `auth.allowed-drift` (so a stale
+`300000` keeps meaning five minutes instead of widening the signature-replay
+window to ~83 hours) and the sub-second `events.batch-interval` and
+`events.materialize-interval`, which keep milliseconds. Always write the
+suffix (`90s`, `500ms`). At startup the server reads each seconds-convention
+setting's written value and warns on a bare integer — the shape of a stale
+milliseconds-style override — naming what the number binds as now (seconds)
+and what it would have bound before (milliseconds); a suffixed value never
+warns. Cadences bound through `@Scheduled` placeholders —
+`dispatch.scan-delay`, `child-relay.scan-delay` and
+`artifacts.projection-interval` — also read a bare number as milliseconds,
+and the startup warning cannot see them, so always write the suffix there.
 
 When `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
 16-character SHA-256 workspace ID that Qwen Code uses from the canonical

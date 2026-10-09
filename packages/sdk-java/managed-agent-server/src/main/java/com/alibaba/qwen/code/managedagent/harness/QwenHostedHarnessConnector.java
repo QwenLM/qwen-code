@@ -113,7 +113,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 || turnDeadline.compareTo(
                         Duration.ofMillis(Integer.MAX_VALUE)) > 0) {
             throw new IllegalStateException("Hosted Harness turn deadline must"
-                    + " be between 1 and 2147483647 milliseconds");
+                    + " be between 1ms and about 24.8 days; a suffix-less"
+                    + " number binds as seconds, so write 3600s rather than"
+                    + " 3600000");
         }
         this.approvalMode = parseApprovalMode(
                 this.properties.getApprovalMode());
