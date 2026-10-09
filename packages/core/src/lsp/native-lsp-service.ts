@@ -859,8 +859,14 @@ export class NativeLspService {
    * widening, so a javascript-only server does not own `.ts` (a family
    * widened set would let its empty answer back a refusal it knows nothing
    * about), and the diagnostics-local alias map so `rust` owns `.rs`.
+   * Positive answers pass `widenTypescriptFamily` so a TypeScript server can
+   * back the JavaScript side of the family without giving JavaScript-only
+   * servers the reverse ownership.
    */
-  private declaredOwnerExtensions(handle: LspServerHandle): Set<string> {
+  private declaredOwnerExtensions(
+    handle: LspServerHandle,
+    widenTypescriptFamily = false,
+  ): Set<string> {
     const owned = new Set(this.getWorkspaceSymbolExtensions(handle));
     const ids = [...handle.config.languages];
     const extMapping = handle.config.extensionToLanguage;
@@ -869,6 +875,15 @@ export class NativeLspService {
     }
     for (const language of ids) {
       const id = language.toLowerCase();
+      if (
+        widenTypescriptFamily &&
+        (id === 'typescript' || id === 'typescriptreact')
+      ) {
+        for (const ext of JS_TS_FAMILY_EXTENSIONS) {
+          owned.add(ext);
+        }
+        continue;
+      }
       for (const ext of DIAGNOSTIC_LANGUAGE_ALIASES[id] ??
         LANGUAGE_ID_TO_EXTENSIONS[id] ?? [id]) {
         owned.add(ext);
@@ -2163,9 +2178,9 @@ export class NativeLspService {
     }> = [];
     // Queried servers that answered `-32601`: they do not implement the pull
     // at all, so unlike `failures` they never veto a sibling's answer. They
-    // are kept apart to be named when nothing else answered, and carry their
-    // handle so the veto below can tell a refusal by a declared owner of the
-    // queried file from a refusal by a server that could never own it.
+    // are kept apart to be named when no positively attributable answer exists;
+    // their handles let the error name only a refusal whose declaration proves
+    // ownership of a document query.
     const unsupported: Array<{
       name: string;
       error: unknown;
@@ -2173,12 +2188,12 @@ export class NativeLspService {
     }> = [];
     // Queried servers that answered with a usable report, including an
     // authoritative empty one, and of those the ones the queried file does not
-    // positively exclude. Only the latter can back a clean answer: an empty
-    // report from a server that could never own the file certifies nothing.
+    // positively exclude. A separate owner ledger prevents an empty report
+    // from an unknown or unowned server from certifying the file.
     let answeredRelevant = 0;
-    // An excused `-32601` refusal must not outvote a file no owner backed:
-    // count the answers from servers that positively declare the queried
-    // extension, so a refusal beside only non-owners stays a refusal.
+    // Count only answers that positively own the queried extension. TypeScript
+    // answers widen directionally to the JS/TS family; JavaScript answers stay
+    // strict so they cannot back a TypeScript refusal.
     let answeredOwner = 0;
 
     for (const [name, handle] of handles) {
@@ -2231,8 +2246,9 @@ export class NativeLspService {
             } else if (!this.serverDeclaredIrrelevant(handle, extension)) {
               answeredRelevant++;
               if (
-                extension !== undefined &&
-                this.declaredOwnerExtensions(handle).has(extension)
+                extension === undefined
+                  ? !uri.startsWith('file:')
+                  : this.declaredOwnerExtensions(handle, true).has(extension)
               ) {
                 answeredOwner++;
               }
@@ -2289,38 +2305,22 @@ export class NativeLspService {
       if (relevantFailures.length > 0 || unreachable.length > 0) {
         throw nothingRetrievedForDiagnostics(relevantFailures, unreachable);
       }
-      // The relevance rule excuses a server from vetoing *another* server's
-      // answer; it cannot excuse the only answer there is, and a `-32601`
-      // cannot either: nothing relevant answered, so the empty result
-      // certifies a file no queried server could analyze. Every queried server
-      // either answers, records a failure or refuses the method outright, so
-      // both ledgers are empty here only when an excused server answered and
-      // nothing else went wrong — that case needs its own reason string.
-      //
-      // The owner test keys on the *refusing* server's own declaration, not on
-      // `unsupported.length > 0`. Reading only the answers would fail closed
-      // on every extension whose declared language ID is not the extension —
-      // `languages: ['rust']` derives `{'rust'}` through the `?? [id]`
-      // fallback, which never contains `rs` — so a clean `main.rs` that
-      // rust-analyzer answered authoritatively would be vetoed by an
-      // unrelated push-only sibling. Requiring the refusal to come from a
-      // declared owner keeps `rs`, `mts` and `yml` outside the rule, the same
-      // exclusion `serverDeclaredIrrelevant` states.
-      const refusedOwner =
-        extension !== undefined &&
-        unsupported.some(({ handle: refusing }) =>
-          this.declaredOwnerExtensions(refusing).has(extension),
-        );
-      if (answeredRelevant === 0 || (refusedOwner && answeredOwner === 0)) {
-        // Name only servers the file does not provably exclude: an irrelevant
-        // server's failure or refusal says nothing about this file, and
-        // naming it would suppress the coverage fallback that exists for
-        // exactly this state. A server that set `refusedOwner` declares the
-        // queried extension, so it always survives this filter.
+      // A -32601 refusal is excluded from `failures`, but an empty result is
+      // clean only when a relevant answer is also positively attributable.
+      // Relevance may excuse one server from vetoing another's answer; it
+      // cannot make an unknown or unowned answer certify the file.
+      if (answeredRelevant === 0 || answeredOwner === 0) {
+        // For a document query, name only a refusal whose strict declaration
+        // proves ownership. A server-name key or a language alias that cannot
+        // prove ownership cannot explain why this file has no backing answer.
+        // Workspace queries have no extension to attribute, so retain their
+        // existing refusal details.
         const blame = [
           ...relevantFailures,
           ...unsupported.filter(
-            ({ handle }) => !this.serverDeclaredIrrelevant(handle, extension),
+            ({ handle }) =>
+              extension === undefined ||
+              this.declaredOwnerExtensions(handle).has(extension),
           ),
         ];
         throw blame.length > 0

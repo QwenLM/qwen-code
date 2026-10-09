@@ -3124,6 +3124,56 @@ describe('NativeLspService disk document synchronization', () => {
       );
     });
 
+    it('lets a typescript answerer back a javascript refusal for a .jsx file', async () => {
+      const [jsxPath] = addFile('main.jsx', 'const value = "";\n');
+      const typescript = createConnection();
+      mockDiagnosticsResponses(typescript);
+      withServers([
+        [
+          'typescript',
+          serverOn('typescript-language-server', ['typescript'], typescript),
+        ],
+        [
+          'javascript',
+          serverOn(
+            'javascript-language-server',
+            ['javascript'],
+            refusingConnection(-32601),
+          ),
+        ],
+      ]);
+      const result = await execute(lspTool(), {
+        operation: 'diagnostics',
+        filePath: jsxPath,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(/^No diagnostics found/);
+    });
+
+    it.each([
+      ['pyright', 'python', 'main.go'],
+      ['kotlin', 'kotlin', 'main.ts'],
+    ] as const)(
+      'refuses an empty answer with no attributable owner from %s',
+      async (name, language, fileName) => {
+        const [targetPath] = addFile(fileName, 'const value = "";\n');
+        const answerer = createConnection();
+        mockDiagnosticsResponses(answerer);
+        withServers([[name, serverOn(name, [language], answerer)]]);
+        const result = await execute(lspTool(), {
+          operation: 'diagnostics',
+          filePath: targetPath,
+        });
+        expect(result.error).toMatchObject({
+          type: ToolErrorType.EXECUTION_FAILED,
+        });
+        expect(result.error?.message).toContain(
+          'no configured server covers the queried file',
+        );
+        expect(result.llmContent).not.toContain('No diagnostics found');
+      },
+    );
+
     it('lets an excused -32601 refusal veto when no answering server owns the file', async () => {
       // clangd is the only server that can own main.cpp and answers -32601;
       // pyright returns an empty report for a file it never declared. The
@@ -3677,11 +3727,10 @@ describe('NativeLspService disk document synchronization', () => {
       expect(result.llmContent).not.toContain('No diagnostics found');
     });
 
-    it('keeps a clean answer from a ready server keyed by its server name', async () => {
+    it('refuses a clean answer from a ready server keyed only by its server name', async () => {
       // `.lsp.json` keys reach `languages` unvalidated, so a `pyright` key
       // derives the guess `{'pyright'}`. That set proves nothing about
-      // main.py — the server does own the file — so its authoritative empty
-      // report is the backing and the query stays clean instead of failing.
+      // main.py, so its authoritative empty report cannot certify the file.
       addFile('main.py', 'x = 1\n');
       withServers([
         [
@@ -3704,8 +3753,13 @@ describe('NativeLspService disk document synchronization', () => {
           })
           .execute(new AbortController().signal),
       );
-      expect(result.error).toBeUndefined();
-      expect(result.llmContent).toMatch(/^No diagnostics found/);
+      expect(result.error).toMatchObject({
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
+      expect(result.error?.message).toContain(
+        'no configured server covers the queried file',
+      );
+      expect(result.llmContent).not.toContain('No diagnostics found');
     });
 
     it.each(['pyright', 'remote-lsp'])(
