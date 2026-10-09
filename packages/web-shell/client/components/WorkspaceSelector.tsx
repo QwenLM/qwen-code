@@ -3,7 +3,7 @@ import {
   CircleDashedIcon,
   FolderClosedIcon,
   FolderPlusIcon,
-  GlobeIcon,
+  Globe2Icon,
   LockIcon,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
@@ -240,10 +240,21 @@ export function WorkspaceSelector({
                     >
                       <span className="flex min-w-0 flex-1 items-center gap-1.5 truncate">
                         {remoteHost && (
-                          <GlobeIcon
-                            className="size-3.5 shrink-0 text-muted-foreground"
-                            aria-hidden="true"
-                          />
+                          <span
+                            className="relative inline-flex size-3.5 shrink-0 items-center justify-center"
+                            data-testid="remote-workspace-folder-icon"
+                          >
+                            <FolderClosedIcon
+                              className="size-3.5"
+                              strokeWidth={1.4}
+                              aria-hidden="true"
+                            />
+                            <Globe2Icon
+                              className="absolute -right-0.5 -bottom-0.5 size-2 rounded-full bg-popover text-[var(--agent-blue-500)]"
+                              strokeWidth={2}
+                              aria-hidden="true"
+                            />
+                          </span>
                         )}
                         {workspace.label}
                       </span>
