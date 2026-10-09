@@ -303,7 +303,7 @@ class ManagedExtensionRecordStoreTest {
         ExtensionRecordJournal missingJournal = journal(missingChild);
         assertRefused("an acceptance without its child run", missingChild,
                 ManagedExtensionRecordStore.ERROR_REJECTED,
-                "must name a child agent run of this Session",
+                "must name a child Session run of this Session",
                 () -> missingJournal.commit(missingJournal.requestDomain(
                         "accept-1", "child_acceptance",
                         acceptance(resultResource, receiptResource, "accepted"),
@@ -382,7 +382,7 @@ class ManagedExtensionRecordStoreTest {
         namingShell.put("childRunId", "shell-x");
         assertRefused("an acceptance naming a background Shell", shellSession,
                 ManagedExtensionRecordStore.ERROR_REJECTED,
-                "must name a child agent run of this Session",
+                "must name a child Session run of this Session",
                 () -> shellJournal.commit(shellJournal.requestDomain(
                         "accept-1", "child_acceptance", namingShell,
                         List.of(resultResource, receiptResource), 1_000)));
@@ -482,6 +482,74 @@ class ManagedExtensionRecordStoreTest {
                 () -> journal.commit(journal.requestDomain("accept-1",
                         "child_acceptance", claimingSibling,
                         List.of(resultResource, receiptResource), 1_000)));
+    }
+
+    /** A child agent body reshaped into the workflow kind (H4c): the pin
+     * names the workflow revision the launch runs. */
+    private static ObjectNode workflow(ObjectNode body) {
+        body.put("kind", "workflow");
+        ObjectNode definition = body.withObject("/run")
+                .withObject("/definition");
+        definition.put("definitionId", "workflow-review");
+        definition.put("definitionRevision", 3);
+        definition.put("definitionDigest", "9".repeat(64));
+        return body;
+    }
+
+    @Test
+    void commitsAWorkflowChainUnderTheChildSessionRules() throws Exception {
+        CommitResource inputResource = hookResource("input-w", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-w",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-w",
+                "managed-runtime-receipt",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        ObjectNode foreign = workflow(childAgent(sessionId, "sent",
+                "admitted", "intent", null, inputResource));
+        foreign.put("rootSessionId", "session-other");
+        assertRefused("a first-level workflow rooted at another Session",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "rootSessionId must be this Session for a first-level child",
+                () -> journal.commit(journal.requestDomain("agent-0",
+                        "child_run", foreign, List.of(inputResource), 500)));
+        settleChildSessionChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource,
+                ManagedExtensionRecordStoreTest::workflow);
+        String taskId = ManagedExtensionProjection.taskId(
+                ManagedExtensionProjection.recordKey(sessionId, "child_run",
+                        "run-x"));
+        var task = records.findTask(TENANT, sessionId, taskId).orElseThrow();
+        assertThat(task.kind()).isEqualTo("workflow");
+        assertThat(task.projection().state()).isEqualTo("completed");
+        assertThat(task.projection().definitionRevision()).isEqualTo(3L);
+        // The acceptance gate and its reverse bind a workflow run exactly
+        // as they bind a child agent.
+        ObjectNode accepted = workflow(childAgent(sessionId, "sent",
+                "settled", "settled", "binding-1", inputResource));
+        accepted.withObject("/run").put("dispatchId", "dispatch-1");
+        accepted.put("childSessionId", "session-child");
+        accepted.put("stopReason", "completed");
+        accepted.set("resultRef", hookRef(resultResource));
+        accepted.set("terminalReceiptRef", hookRef(receiptResource));
+        accepted.withObject("/run").withObject("/delivery")
+                .put("state", "accepted");
+        assertRefused("a workflow delivery reaching accepted ahead of its"
+                        + " acceptance", sessionId,
+                ManagedExtensionRecordStore.ERROR_REJECTED,
+                "reaches accepted or consumed only with its acceptance record",
+                () -> journal.commit(journal.requestDomain("agent-5",
+                        "child_run", accepted, List.of(), 5_000)));
+        commitDomain(journal, "accept-1", "child_acceptance",
+                acceptance(resultResource, receiptResource, "accepted"),
+                List.of(resultResource, receiptResource));
+        commitDomain(journal, "agent-6", "child_run", accepted, List.of());
+        assertThat(records.listRecords(TENANT, sessionId, "child_run")
+                .get(0).required("run").required("delivery")
+                .required("state").textValue()).isEqualTo("accepted");
     }
 
     @Test
@@ -613,21 +681,33 @@ class ManagedExtensionRecordStoreTest {
             String completion, ExtensionRecordJournal journal,
             CommitResource inputResource, CommitResource resultResource,
             CommitResource receiptResource) {
+        settleChildSessionChain(sessionId, completion, journal,
+                inputResource, resultResource, receiptResource,
+                body -> body);
+    }
+
+    /** Commits a child Session run through its settled result, each body
+     * shaped into its kind by {@code shape}. */
+    private static void settleChildSessionChain(String sessionId,
+            String completion, ExtensionRecordJournal journal,
+            CommitResource inputResource, CommitResource resultResource,
+            CommitResource receiptResource,
+            UnaryOperator<ObjectNode> shape) {
         commitDomain(journal, "agent-1", "child_run",
-                childAgent(sessionId, completion, "admitted", "intent", null,
-                        inputResource),
+                shape.apply(childAgent(sessionId, completion, "admitted",
+                        "intent", null, inputResource)),
                 List.of(inputResource));
-        ObjectNode dispatching = childAgent(sessionId, completion, "running",
-                "dispatch_started", "binding-1", inputResource);
+        ObjectNode dispatching = shape.apply(childAgent(sessionId, completion,
+                "running", "dispatch_started", "binding-1", inputResource));
         dispatching.withObject("/run").put("dispatchId", "dispatch-1");
         commitDomain(journal, "agent-2", "child_run", dispatching, List.of());
-        ObjectNode attached = childAgent(sessionId, completion, "running",
-                "running_attached", "binding-1", inputResource);
+        ObjectNode attached = shape.apply(childAgent(sessionId, completion,
+                "running", "running_attached", "binding-1", inputResource));
         attached.withObject("/run").put("dispatchId", "dispatch-1");
         attached.put("childSessionId", "session-child");
         commitDomain(journal, "agent-3", "child_run", attached, List.of());
-        ObjectNode settled = childAgent(sessionId, completion, "settled",
-                "settled", "binding-1", inputResource);
+        ObjectNode settled = shape.apply(childAgent(sessionId, completion,
+                "settled", "settled", "binding-1", inputResource));
         settled.withObject("/run").put("dispatchId", "dispatch-1");
         settled.put("childSessionId", "session-child");
         settled.put("stopReason", "completed");

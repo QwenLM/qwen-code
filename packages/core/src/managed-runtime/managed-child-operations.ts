@@ -31,6 +31,13 @@ export const MANAGED_CHILD_LIMITS = Object.freeze({
   /** The contract cap is 8; the first runtime slice admits depth 1 only. */
   maxDepth: 1,
   maxActivePerScope: 4,
+  /**
+   * The launches one owner scope may make over the Session's lifetime
+   * (H4c): every committed child Session run counts, ended or not, since
+   * each one cost a creation attempt and grows the journal its rebuild
+   * replays.
+   */
+  maxLaunchesPerScope: 64,
   maxEnvelopeBytes: 32 * 1024,
   maxDescriptionBytes: 512,
   // The result copy is pinned to the parent Session's durable inline
@@ -141,6 +148,7 @@ export type ChildAdmissionRefusal =
   | 'closing'
   | 'depth_limit'
   | 'count_limit'
+  | 'budget_exhausted'
   | 'byte_limit'
   | 'workspace_mode'
   | 'definition_scope';
@@ -155,6 +163,8 @@ export function admitChildLaunch(params: {
   readonly closing: boolean;
   readonly depth: number;
   readonly activeInScope: number;
+  /** Every child Session run this scope ever committed, ended or not. */
+  readonly launchedInScope: number;
   readonly envelopeBytes: number;
   readonly workspaceMode: ChildWorkspaceMode;
   readonly sameDefinition: boolean;
@@ -168,6 +178,11 @@ export function admitChildLaunch(params: {
   }
   if (params.depth > MANAGED_CHILD_LIMITS.maxDepth) {
     return { admitted: false, reason: 'depth_limit' };
+  }
+  // The spent budget never recovers, so it is reported ahead of the
+  // concurrency cap, which a later launch may find cleared.
+  if (params.launchedInScope >= MANAGED_CHILD_LIMITS.maxLaunchesPerScope) {
+    return { admitted: false, reason: 'budget_exhausted' };
   }
   if (params.activeInScope >= MANAGED_CHILD_LIMITS.maxActivePerScope) {
     return { admitted: false, reason: 'count_limit' };

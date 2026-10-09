@@ -523,6 +523,7 @@ public class ManagedAgentProperties {
         private Duration batchInterval = Duration.ofMillis(75);
         private int batchMaxEvents = 64;
         private int batchMaxBytes = 65536;
+        private boolean replayFloorEnabled;
 
         public Duration getPollInterval() {
             return pollInterval;
@@ -583,6 +584,19 @@ public class ManagedAgentProperties {
 
         public void setBatchMaxBytes(int batchMaxBytes) {
             this.batchMaxBytes = batchMaxBytes;
+        }
+
+        /**
+         * Whether the scheduled pass raises each Session's replay floor as
+         * far as its Snapshot proves safe. Disabled by default; events are
+         * never deleted here either way.
+         */
+        public boolean isReplayFloorEnabled() {
+            return replayFloorEnabled;
+        }
+
+        public void setReplayFloorEnabled(boolean replayFloorEnabled) {
+            this.replayFloorEnabled = replayFloorEnabled;
         }
     }
 

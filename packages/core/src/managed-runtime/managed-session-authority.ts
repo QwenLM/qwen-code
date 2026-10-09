@@ -2113,7 +2113,7 @@ export class LocalManagedSessionAuthority {
     if (domain === 'child_run') {
       const child = parseChildRun(parsed.record);
       if (
-        child.kind === 'child_agent' &&
+        child.kind !== 'shell' &&
         child.depth === 1 &&
         child.rootSessionId !== this.sessionKey.sessionId
       ) {
@@ -2127,8 +2127,10 @@ export class LocalManagedSessionAuthority {
       const target = this.extensionRecord('child_run', acceptance.childRunId);
       const child =
         target === undefined ? undefined : parseChildRun(target.record);
-      if (child === undefined || child.kind !== 'child_agent') {
-        reject('Child acceptance must name a child agent run of this Session.');
+      if (child === undefined || child.kind === 'shell') {
+        reject(
+          'Child acceptance must name a child Session run of this Session.',
+        );
       }
       if (child.run.state !== 'settled' || child.stopReason !== 'completed') {
         reject(
@@ -2169,7 +2171,7 @@ export class LocalManagedSessionAuthority {
       // does. Before any acceptance, accepting → unknown stays legal as
       // the relay's retry vocabulary.
       const child = parseChildRun(parsed.record);
-      if (child.kind === 'child_agent') {
+      if (child.kind !== 'shell') {
         const delivery = child.run.delivery!.state;
         const acceptance = this.extensionRecord(
           'child_acceptance',
