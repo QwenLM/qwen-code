@@ -647,6 +647,36 @@ Main transport、保留 worker、原 ledgers 和共享 Harness，不另建公开
 或第二授权 ledger。聚合 writer 收口、物理终止/NodeUnpublish、释放/复用与目标集群资格
 仍为独立门禁，并保留既有审查边界。
 
+#### 6.8.4 receipt 缺失前的合格 SETTLED 结果
+
+状态：提议，实现及新鲜 C4 验收尚待完成。当前冷准入要求所有原 receipt；因此原最后一条 SQL execution 已结算、但 Hosted 尚未收到其终态结果响应时会拒绝。
+
+保留专用 cold writer 与 successor install 资格检查。每个相关成员仍须为 SETTLED，具有完整原 success/error 结果、原持久 immutable native grant 且未取消。将每个已存在 receipt 与同一 SQL 结果核对；允许明确缺失的 receipt，但不能把它当作 execution 不存在。保留原单个 pending batch、首个模型输出、完整 resource/reference inventory、无 deadline prompt 与数据库自然过期约束。PREPARED、执行中、UNKNOWN、遗漏/孤儿成员及不支持的 continuation，仍须在 writer authority 改变前拒绝。
+
+仅为 SETTLED 成员扩展原鉴权私有 `executions:read-batch` 响应。同一事务 Connection 必须先核验原 binding/READY Session、完整成员/resources、当前存活已安装 head 与每条原持久 result/grant，再返回有界的 `result_json`、`native_authorization_json` UTF-8 bytes。这些是数据库保存的序列化 bytes，不宣称保留了序列化前 Worker HTTP 原响应 bytes。未安装的 claim 或旧 owner 不具有读写资格。该响应不给 dispatch，不调用 prepare/execute，不新增公开 selector 或替换 Worker。
+
+现有 preparation reader 继续读取 reference/input/declaration/state。cold reader 必须在写入任何 outcome 或 resolve 成员前，验证整个返回 accepted batch 的原 scope、execution/reference 身份、input/declaration bytes、ordinal gap 与存储 grant 关系。结果/grant 缺失、无效或超限，须在部分修复前拒绝。已有 receipt 仍是精确 `history.messageId`、timestamp、model 与 Parts 的 authority。
+
+receipt 尚不存在时，原随机 message ID 或 timestamp 也尚未耐久建立。合格 successor 使用原 accepted function 身份、首个 model route 与正常 result converter，在首个 atomic outcome publication 加 receipt 事务中建立一次新 history 身份。native commit 独立将结果与原 SQL settlement、immutable grant 再核验。若该事务响应丢失，之后恢复以已提交原 outcome 为 authority；已有 receipt 绝不生成新身份。这项一次性耐久规则不宣称单次 C4 window 已实测重复中断；重复 message/resolve cut 归 C5。
+
+所有原 receipt/message/resolve 完成后，恢复才能关闭保留的 schema2 result history，并进入实际 model2/consumed/settlement/idle 链。原 SQL result/grant bytes、计划 mixed fixture 前两条固定 outcome 身份、working/backup bytes/device/inode、原 Worker request/effect 计数及完整 batch 成员均须保持精确。C4 不新增 execution、tool intent 或文件修改。完整 K2、C8 模型输出恢复、物理退役、安全卷复用与 Linux/云上资格，仍是独立门禁。
+
+新鲜测试计划仅在实际 Main/Broker 返回 final Edit 终态 GET-execution 200 `settled` 及 result，且三条原 SQL 成员均 SETTLED 后，切断该响应交付。不能使用 accepted `:start` 响应或仅 Worker 200 代替。只杀已登记旧 Main/Hosted，保留原 Worker/数据库/文件，等待数据库时钟自然过期，再进入精确原 prompt。实现前，预期 cold acquire 拒绝，且实际 acquire 事务前后所有表/文件不变；更早的原 binding 启动 reconcile 须单独核验。实现后，要求原私有 readback、一次新 atomic final outcome/receipt、原前两条身份保留、实际 model2 包含三个 accepted 结果，且没有 model3 或重复文件 I/O。测试 fixture 证据不能验收物理释放或完整 K2。
+
+受影响 consumer 是专用 JDBC 冷准入、原私有 batch read、私有 Hosted cold receipt repair 与 native receipt commit qualification。普通 preparation/live execution、legacy continuation 保持当前门禁。Java 与 CLI 聚焦回归覆盖 result/grant 缺失/格式错误/不匹配、成员不完整、cancelled/UNKNOWN、已有 receipt 身份与 inline-size 拒绝；新鲜自有 MySQL 观察提供 C4 行为证据。
+
+#### 6.8.5 结果消费前的完整模型输出
+
+状态：提议，C8 实现与验收尚待完成。当前 `model.attempt(output_committed)` 保存 attempt 标记、route/checkpoint ref 与 usage，完整 assistant Parts 却在消费结果后才取得。可见 delta 不能证明完整输出，也不能证明没有新 tool call。对这种仅有标记的旧形状继续拒绝 C8，不能追认为完整输出已耐久保存。
+
+针对无 tool call 的私有 CSI final output，将现有 `model.attempt(output_committed)`、`message.committed` 连同原完整 ChatRecord 与 usage resources 放在同一 native journal 事务提交。保留实际 stream message ID 或首个耐久建立的 ID、timestamp、model、parent 和全部 Parts，包括 thought。消息绑定原 model attempt 与 input checkpoint。两个 event sequence 必须在 authority 的串行 commit 内分配；caller 预先计算会与 activation renewal 竞争。复用现有 message/resource 格式，不另加 output ledger 或 event。Hook、普通 Hosted 和新 tool call 路径保持既有行为。
+
+native qualification 必须明确识别这一种双 event final-output 事务，并独立核验两个既有 body、attempt/route/checkpoint、原 scoped resources、完整 assistant Parts 与零 function call。只有该合格 final output 才允许 assistant 已提交时消费结果。原 results-ready 成员、receipt/outcome、SQL result/grant 与已闭合 schema2 history 保持精确；采用 successor activation 仅改变 checkpoint 许可的 activation 身份。
+
+独立 C8 cold-tail 分类要求该原完整 final output、原成功 model2 attempt/input checkpoint、完整 SETTLED 且未 consumed 成员、原闭合 history，以及现有 scoped expiry/claim/install 证明。私有 text 恢复分支随后直接消费并结算原 turn，提交既有 turn-result/idle 链，返回原 assistant。它绕过 model runner，不新增第三次模型请求、attempt、assistant 身份、execution 或文件效果。正常 live 路径也须识别已原子提交的 assistant，避免外层再提交一次消息。具体 completion 接口须在实现前确定；必须由实际私有 CSI caller 填充，普通 consumer 有回归覆盖。
+
+新鲜 C8 测试只能在实际 atomic full-output 事务提交后、结果消费前切断；仅终止已登记 Main/Hosted，保留原 Worker/DB/文件直到自然过期。要求实际模型请求总数精确为二，原完整 output/Parts/stream 身份精确，一次消费/结算，零重复文件 I/O。仅有 marker、Parts/thought/parent/model/attempt/checkpoint/scope 改变、新 tool call 或未闭合 history 均须拒绝。覆盖 commit 响应丢失、renewal 竞争中的 sequence 分配及普通 Hook/Hosted 兼容。此设计不接受尚未执行的 C8、物理释放、安全复用或完整 K2。
+
 ## 7. 验证与验收
 
 生产编辑前，由 test-engineer dry-run 全局 CLI 与实际当前原始 producer，记录真实
@@ -830,3 +860,13 @@ attestation、Darwin mount/descriptor 适配和确定性 SSE 模型响应仍是�
 独立 publication、生产 isolation 竞争、聚合 DRAINED、物理 writer/后代终止、CSI
 NodeUnpublish、原子 RELEASED、安全卷复用、目标 Linux/云和公开 CSI 选择仍待完成。
 原生独立 review 与 maintainer approval 也仍待完成。
+
+### 7.8 因观察器协议错误停止的 C6 观察
+
+在 `311b29ef5dec41f0a9da6d57885eade3ecd2e5fb` 上，首次 C6 launcher 因 root freeze 遗漏一个必需源码路径，在 javac 或产品/DB 启动前停止。原 freeze/错误与零资源记录均保留；root 独立解除该窗口后，才签发修正的新 scope。第二次 invocation 运行一个实际 producer：ignored helper 编译 exit 0，producer exit 1，完整 C6 auditor 未运行。
+
+原三条 SETTLED/success 结果与 receipt 在 revision/sequence 23 耐久，final Edit message/resolve 尚缺。已登记旧 Main/Hosted 经 SIGKILL 退出；54 次原数据库时钟采样证明 writer/activation 自然过期。第二个真实 claimant 随后取得 generation 2，实际提交的 200 响应在交付/install 前被 held，再杀死其已登记 Main/Hosted。已安装 activation 仍为 epoch 1，journal revision/sequence 仍为 23，仅四个许可 head 列改变；原 scoped token hash 与所有原 execution/grant/result bytes 保持精确。after-acquire、after-crash 与 pre-drop final 的全部 54 表 snapshot 精确相同。
+
+ignored Worker snapshot 协议仅接受 `/^[a-z-]+$/`，但新增标签 `cold-c6-after-claimant2-crash` 含数字。helper 拒绝该观察请求后退出；原错误、coordinator wait/join 错误和 outer exit 均保留。失败清理 inventory 不能代替缺失的 post-crash 存活 Worker snapshot 或 I/O 计数。尚未观察 claimant2 自然过期、claimant3 generation3/epoch2、实际 model2、消费/idle 与完整 auditor。C6 尚未验收，也不宣称产品拒绝。
+
+root 独立核验 238 项封存 artifact、4407 个当前 selected input 加 4 个 product、4562 个 closing selected input 与 18 份历史 ref 后，解除失败窗口。记录的 Node load 与 load-before/terminal bytes 吻合，事前冻结范围仍具有 7.7 所述有界限制。自有数据库/用户已删除，MySQL shutdown exit 0，21 个已登记进程组通过 42 次缺席探测，11 个端口关闭，自有临时 data/socket 目录删除。修复观察器协议后仍须新鲜完整运行；此次部分观察不能验收 Linux CSI、物理释放或完整 K2。
