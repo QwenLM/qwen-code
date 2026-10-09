@@ -44,6 +44,10 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { SessionService } from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { extractErrorMessage } from '@qwen-code/acp-bridge/bridge';
+import {
+  PROMPT_CANCEL_REASON_META_KEY,
+  USER_CANCEL_ABORT_REASON,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   AgentAdapter,
   AgentAdapterTurnInput,
@@ -492,8 +496,19 @@ export function createQwenAcpAdapter(
       const cancel = async (): Promise<AgentAdapterTurnResult> => {
         // Bounded: a child that never acknowledges must not hold the run.
         const deadline = Date.now() + cancelSettleMs;
+        // The orchestrator aborts this signal for stalls and shutdowns too:
+        // without the reason, the bridge reads the cancel as a person's stop.
+        const cancelReason =
+          input.signal.reason === USER_CANCEL_ABORT_REASON
+            ? 'user'
+            : 'interrupted';
         await Promise.race([
-          bridge.cancelSession(sessionId).catch(() => {}),
+          bridge
+            .cancelSession(sessionId, {
+              sessionId,
+              _meta: { [PROMPT_CANCEL_REASON_META_KEY]: cancelReason },
+            })
+            .catch(() => {}),
           delay(cancelSettleMs, undefined, { ref: false }),
         ]);
         // Wait for the turn's terminal, so nothing it emits on the way down

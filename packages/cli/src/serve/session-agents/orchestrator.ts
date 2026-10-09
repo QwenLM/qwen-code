@@ -121,6 +121,10 @@ import {
   type BridgeClientRequestContext,
 } from '../acp-session-bridge.js';
 import {
+  INTERRUPTED_PROMPT_ABORT_REASON,
+  USER_CANCEL_ABORT_REASON,
+} from '@qwen-code/acp-bridge/bridgeTypes';
+import {
   MAX_EXTERNAL_RECORD_ID_LENGTH,
   MAX_EXTERNAL_RECORD_MENTION_IDS,
   MAX_EXTERNAL_RECORD_STEP_TITLE_LENGTH,
@@ -1410,7 +1414,7 @@ export class SessionAgentOrchestrator {
         pending.reject(new Error('daemon stopping'));
       }
       live.pendingPermissions.clear();
-      live.controller?.abort();
+      live.controller?.abort(INTERRUPTED_PROMPT_ABORT_REASON);
     }
     for (const state of this.dirty) await this.persist(state).catch(() => {});
     this.dirty.clear();
@@ -1727,7 +1731,7 @@ export class SessionAgentOrchestrator {
       if (live.frame.permission) continue;
       if (now - live.frame.activityAt >= this.stallTimeoutMs) {
         live.abortReason = 'stalled';
-        live.controller?.abort();
+        live.controller?.abort(INTERRUPTED_PROMPT_ABORT_REASON);
       }
     }
   }
@@ -2584,7 +2588,7 @@ export class SessionAgentOrchestrator {
       run.status = 'running';
       this.publish(live);
     }
-    live.controller?.abort();
+    live.controller?.abort(USER_CANCEL_ABORT_REASON);
   }
 
   /**
