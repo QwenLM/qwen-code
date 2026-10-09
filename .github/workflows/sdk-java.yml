@@ -30,6 +30,7 @@ on:
       - 'scripts/run-managed-agent-server-e2e.ts'
       - 'scripts/check-failsafe-reports.js'
       - 'scripts/check-flyway-migrations.js'
+      - 'scripts/flyway-migration-utils.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
   push:
@@ -60,6 +61,7 @@ on:
       - 'scripts/run-managed-agent-server-e2e.ts'
       - 'scripts/check-failsafe-reports.js'
       - 'scripts/check-flyway-migrations.js'
+      - 'scripts/flyway-migration-utils.js'
       - '.github/workflows/sdk-java.yml'
       - '.github/workflows/release-sdk-java.yml'
 
