@@ -19,6 +19,7 @@ import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
+import { HostedModelUnavailableError } from './hosted-agent-definition.js';
 
 const state = vi.hoisted(() => ({
   config: undefined as unknown as {
@@ -1326,6 +1327,29 @@ it.each([
     expect(mocks.requests).toHaveLength(0);
   },
 );
+
+it('preserves model_unavailable when early config cleanup fails', async () => {
+  const mocks = config([]);
+  state.config['getAllConfiguredModels'] = () => [];
+  mocks.shutdown.mockRejectedValueOnce(new Error('cleanup failed'));
+  await expect(
+    runHostedHarnessTextTurn({
+      ...input,
+      agentDefinition: {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+        model: { id: 'pinned' },
+      },
+    }),
+  ).rejects.toBeInstanceOf(HostedModelUnavailableError);
+  expect(mocks.shutdown).toHaveBeenCalledExactlyOnceWith({
+    shutdownTelemetry: false,
+    strictResourceCleanup: true,
+  });
+  expect(mocks.initialize).not.toHaveBeenCalled();
+  expect(mocks.requests).toHaveLength(0);
+});
 
 it('keeps agent instructions ahead of refreshed project context', async () => {
   const mocks = config([{ type: LlmEventType.Finished }]);

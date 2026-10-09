@@ -1167,6 +1167,47 @@
     {
       "template": "child_agent",
       "domain": "child_run",
+      "id": "agent-creation-failed-named",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "creation_failed",
+        "run": {
+          "state": "failed",
+          "execution": "not_started_proven",
+          "dispatchId": "dispatch-1",
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
+      "id": "agent-close-unstarted-named",
+      "patch": {
+        "childSessionId": "session-2",
+        "stopReason": "stop_requested",
+        "stopRequested": true,
+        "run": {
+          "state": "cancelled",
+          "execution": "not_started_proven",
+          "dispatchId": "dispatch-1",
+          "delivery": {
+            "target": "session",
+            "state": "cancelled"
+          }
+        }
+      },
+      "valid": true,
+      "start": false
+    },
+    {
+      "template": "child_agent",
+      "domain": "child_run",
       "id": "agent-child-failed",
       "patch": {
         "childSessionId": "session-2",

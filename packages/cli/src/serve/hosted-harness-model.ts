@@ -134,7 +134,16 @@ export async function runHostedHarnessTextTurn(input: {
           : {}),
       });
     } catch (cause) {
-      await config.shutdown();
+      try {
+        await config.shutdown({
+          shutdownTelemetry: false,
+          strictResourceCleanup: true,
+        });
+      } catch (cleanupCause) {
+        writeStderrLineSafe(
+          `qwen serve: Hosted Harness model cleanup failed: ${String(cleanupCause)}`,
+        );
+      }
       throw new HostedModelUnavailableError(cause);
     }
   }
@@ -241,6 +250,8 @@ export async function runHostedHarnessTextTurn(input: {
   };
   try {
     await input.hooks?.ensureReady(input.signal);
+    // Seed instructions when memory reload is skipped; restore them after
+    // initialize() when its hierarchical memory refresh replaces user memory.
     if (input.agentInstructions)
       config.setUserMemory(
         contextWithInstructions(input.workspaceContext?.read()),

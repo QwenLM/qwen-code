@@ -11,6 +11,7 @@ public final class CreateHarnessSession {
     private final String toolProfile;
     private final Long approvalTimeoutMs;
     private final Map<String, Object> agentDefinition;
+    private final Map<String, Object> lineage;
 
     private CreateHarnessSession(Builder builder) {
         this.harnessSessionId = HostedHarnessClient.requireUuid(
@@ -20,6 +21,7 @@ public final class CreateHarnessSession {
         this.toolProfile = builder.toolProfile;
         this.approvalTimeoutMs = builder.approvalTimeoutMs;
         this.agentDefinition = builder.agentDefinition;
+        this.lineage = builder.lineage;
     }
 
     public static Builder builder() {
@@ -49,6 +51,9 @@ public final class CreateHarnessSession {
         if (agentDefinition != null) {
             result.put("agentDefinition", agentDefinition);
         }
+        if (lineage != null) {
+            result.put("lineage", lineage);
+        }
         return result;
     }
 
@@ -59,6 +64,7 @@ public final class CreateHarnessSession {
         private String toolProfile;
         private Long approvalTimeoutMs;
         private Map<String, Object> agentDefinition;
+        private Map<String, Object> lineage;
 
         public Builder agentDefinition(Map<String, Object> value) {
             this.agentDefinition = Map.copyOf(value);
@@ -106,6 +112,36 @@ public final class CreateHarnessSession {
 
         public Builder toolProfile(String toolProfile) {
             this.toolProfile = toolProfile;
+            return this;
+        }
+
+        /**
+         * H4b: a child Session's ancestry. The body names the parent and
+         * root Sessions, the launching child run id and the tree depth; the
+         * Hosted side persists it with the Session's definition, so a load
+         * answers the same depth.
+         */
+        public Builder lineage(String parentSessionId, String rootSessionId,
+                String parentChildRunId, int depth) {
+            HostedHarnessClient.requireUuid(parentSessionId,
+                    "lineage.parentSessionId");
+            HostedHarnessClient.requireUuid(rootSessionId,
+                    "lineage.rootSessionId");
+            if (parentChildRunId == null || parentChildRunId.isBlank()
+                    || parentChildRunId.length() > 128) {
+                throw new IllegalArgumentException(
+                        "Invalid lineage child run id");
+            }
+            if (depth < 1 || depth > 8) {
+                throw new IllegalArgumentException(
+                        "lineage depth must be 1..8");
+            }
+            Map<String, Object> value = new LinkedHashMap<>();
+            value.put("parentSessionId", parentSessionId);
+            value.put("rootSessionId", rootSessionId);
+            value.put("parentChildRunId", parentChildRunId);
+            value.put("depth", depth);
+            this.lineage = value;
             return this;
         }
     }

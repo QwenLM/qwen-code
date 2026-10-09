@@ -195,13 +195,15 @@ instructionsRef?}`。
 - 创建：补充 `404 agent_not_found` 和 `409 agent_definition_unsupported` 的
   描述，并把 `agent_revision` 描述为"省略时在准入时解析为最新 revision 并固定"。
 - `PublicSession` 增加可选字段 `agent_digest`。
+- 固定模型缺少已配置路由、路由歧义或凭据不可用时，Turn 在推理前失败，
+  `turn.failed` 的错误码为 `model_unavailable`。
 - 不收紧 `AgentDefinitionRequest`，D8a 已存储的 revision 保持有效。v1 的形状
   写在路由描述和本文中。
 - WebShell 创建走同一条准入路径（已有 `agentId`），无需单独修改。
 
 ## 6. 交付
 
-原计划分为两个交付切片。目前两个切片已在 #13530 实现：
+原计划分为两个交付切片。目前两个切片已在 #13530 实现，因为它们共用不可变的定义固定与资源边界；一起交付可以端到端评审完整的执行契约：
 
 1. **PR A，D8b 与 D8c-1（只改 Java）：** 固定版本、编译审批模式与工具 profile、
    拒绝规则、新增列（取合入时 `main` 上下一个空闲的 Flyway 版本号）以及契约
@@ -283,4 +285,4 @@ D8b 不单独发布。固定一个字段都不生效的定义，就是静默丢�
 
 Java 将非空 instructions 作为原始 UTF-8 的 `managed-agent-instructions` 资源发布到 Session Store，以 SHA-256 摘要寻址。引用进入不可变 `managed-definition` 资源的事务闭包与 W1 恢复闭包。创建、冷加载及每个 Turn 都核验资源字节；load 仅接受固定的 agent ID、revision 和 digest，身份缺失或变化返回 `409 hosted_agent_definition_conflict`，驻留会话的恢复和生命周期加载同样检查。Agent instructions 位于项目上下文之前，刷新上下文时仍然保留。
 
-数据库迁移采用 V54，因为 main 已用 V53 增加 Workspace 角色。冲突处理同时保留主干的 creator/owner actor 身份与固定的定义身份。`QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` 默认仍为 `hosted-workspace-files/1`；仅在按 #13166 排空旧 worker 并升级所有 provisioner 后，才加入 `files/2`。
+数据库迁移采用 V55，因为 main 已用 V53 增加 Workspace 角色、V54 增加 child Session 血缘。冲突处理同时保留主干的 creator/owner actor 身份、child 血缘与固定的定义身份。`QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` 默认仍为 `hosted-workspace-files/1`；仅在按 #13166 排空旧 worker 并升级所有 provisioner 后，才加入 `files/2`。

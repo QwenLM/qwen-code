@@ -233,6 +233,8 @@ hosted_agent_definition_conflict` on a mismatch, as it does for
 agent_definition_unsupported`, and describe `agent_revision` as "omitted
   resolves the latest revision at admission and pins it".
 - `PublicSession` gains the optional `agent_digest`.
+- A pinned model with a missing, ambiguous or unauthenticated configured route
+  fails the Turn before inference with `turn.failed` code `model_unavailable`.
 - `AgentDefinitionRequest` is not tightened, so revisions stored under D8a
   stay valid. The v1 shapes are documented in route descriptions and here.
 - WebShell creation uses the same admission path (it already has `agentId`)
@@ -240,7 +242,7 @@ agent_definition_unsupported`, and describe `agent_revision` as "omitted
 
 ## 6. Delivery
 
-The original plan splits delivery into two slices. Both slices are now implemented in #13530:
+The original plan splits delivery into two slices. Both slices are now implemented in #13530 because they share the immutable definition pin and resource boundary; delivering them together makes the complete execution contract reviewable end to end:
 
 1. **PR A, D8b and D8c-1 (Java only):** pinning, compilation of the approval
    mode and tool profile, the refusal rules, the new column (the next free
@@ -340,4 +342,4 @@ The model allowlist defaults to empty. Set `QWEN_MANAGED_AGENT_DEFINITION_MODELS
 
 Java publishes non-empty instructions as raw UTF-8 `managed-agent-instructions` resources in the Session Store, addressed by their SHA-256 digest. The reference joins the immutable `managed-definition` resource's transaction closure and W1 recovery closure. Create, cold load and each Turn verify its bytes; load accepts only the pinned agent ID, revision and digest and refuses missing or changed identity with `409 hosted_agent_definition_conflict`, including resident recovery and lifecycle loads. Agent instructions precede project context and survive context refreshes.
 
-The database migration is V54 because main uses V53 for Workspace roles. Conflict resolution keeps main's creator/owner actor identity together with the pinned definition identity. `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` remains `hosted-workspace-files/1` by default; add `files/2` only after draining old workers and upgrading all provisioners as required by #13166.
+The database migration is V55 because main uses V53 for Workspace roles and V54 for child Session lineage. Conflict resolution keeps main's creator/owner actor identity and child lineage together with the pinned definition identity. `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` remains `hosted-workspace-files/1` by default; add `files/2` only after draining old workers and upgrading all provisioners as required by #13166.

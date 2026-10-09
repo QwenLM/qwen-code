@@ -19,8 +19,12 @@ class HostedAgentDefinitionRequestTest {
                 "instructionsRef", Map.of("resourceId", "instructions",
                         "kind", "managed-agent-instructions", "schemaVersion", 1,
                         "byteLength", 4, "digest", "c".repeat(64)));
-        assertEquals(full, CreateHarnessSession.builder().harnessSessionId(SESSION)
-                .agentDefinition(full).build().toJson().get("agentDefinition"));
+        Map<String, Object> create = CreateHarnessSession.builder().harnessSessionId(SESSION)
+                .agentDefinition(full).lineage(SESSION, SESSION, "child-run-1", 1)
+                .build().toJson();
+        assertEquals(full, create.get("agentDefinition"));
+        assertEquals(Map.of("parentSessionId", SESSION, "rootSessionId", SESSION,
+                "parentChildRunId", "child-run-1", "depth", 1), create.get("lineage"));
         Map<String, Object> load = new LoadHarnessSession(SESSION)
                 .withAgentDefinition(identity).forLifecycle("close-1", 2).toJson();
         assertEquals(identity, load.get("agentDefinition"));
