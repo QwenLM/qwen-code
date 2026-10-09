@@ -845,7 +845,7 @@ describe('Gemini Client (client.ts)', () => {
       warmAll: vi.fn().mockResolvedValue(undefined),
       ensureTool: vi.fn().mockResolvedValue(null),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
-      getAllToolNames: vi.fn().mockReturnValue([ToolNames.AGENT]),
+      getAllToolNames: vi.fn(),
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       clearRevealedDeferredTools: vi.fn(),
       clearReviewedDeclarations: vi.fn(),
@@ -857,6 +857,15 @@ describe('Gemini Client (client.ts)', () => {
       getTool: vi.fn().mockReturnValue(null),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
     };
+    // Keep getAllToolNames consistent with the per-test getTool stub: a real
+    // ToolRegistry that returns a tool from getTool always lists that name,
+    // and isDeferredToolBridgeAvailable now reads this factory-aware view.
+    mockToolRegistry.getAllToolNames.mockImplementation(() =>
+      [ToolNames.AGENT, ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL].filter(
+        (name) =>
+          name === ToolNames.AGENT || mockToolRegistry.getTool(name) != null,
+      ),
+    );
     const fileService = new FileDiscoveryService('/test/dir');
     const contentGeneratorConfig: ContentGeneratorConfig = {
       model: 'test-model',
