@@ -3267,9 +3267,11 @@ describe('SessionService', () => {
         message: userText('backend task'),
       };
 
-      expect(historyOf([realtimeUser, realtimeAssistant, backendUser])).toEqual(
-        [backendUser.message],
-      );
+      const history = historyOf([realtimeUser, realtimeAssistant, backendUser]);
+      expect(history).toMatchObject([backendUser.message]);
+      expect(history.map(getApiHistoryPromptId)).toEqual([
+        'legacy-record:backend-user',
+      ]);
     });
 
     it('does not deep-clone stored messages when rebuilding resume API history', () => {
@@ -3298,7 +3300,11 @@ describe('SessionService', () => {
       const history = historyOf([recordA1, toolResult], '2024-01-01T00:02:00Z');
 
       expect(structuredCloneSpy).not.toHaveBeenCalled();
-      expect(history).toEqual([recordA1.message, toolResult.message]);
+      expect(history).toMatchObject([recordA1.message, toolResult.message]);
+      expect(history.map(getApiHistoryPromptId)).toEqual([
+        'legacy-record:a1',
+        undefined,
+      ]);
       expect(history[1]).not.toBe(toolResult.message);
       expect(history[1].parts).not.toBe(toolResult.message!.parts);
       const response = history[1].parts![0] as {
@@ -3344,10 +3350,15 @@ describe('SessionService', () => {
         '2024-01-01T00:03:00Z',
       );
 
-      expect(history).toEqual([
+      expect(history).toMatchObject([
         recordA1.message,
         assistantWithToolCall.message,
         merged(toolResult, midTurnUserMessage),
+      ]);
+      expect(history.map(getApiHistoryPromptId)).toEqual([
+        'legacy-record:a1',
+        undefined,
+        undefined,
       ]);
     });
 
@@ -3373,11 +3384,17 @@ describe('SessionService', () => {
         '2024-01-02T04:00:00Z',
       );
 
-      expect(history).toEqual([
+      expect(history).toMatchObject([
         userText('summary'),
         modelText('Got it. Thanks for the additional context!'),
         recordB2.message,
         postCompressionRecord.message,
+      ]);
+      expect(history.map(getApiHistoryPromptId)).toEqual([
+        undefined,
+        undefined,
+        undefined,
+        'legacy-record:c2',
       ]);
     });
 

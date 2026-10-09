@@ -51,7 +51,10 @@ import {
   ChatRecordingService,
   type ChatRecord,
 } from './chatRecordingService.js';
-import { buildSessionHistoryFromConversation } from './session-api-history.js';
+import {
+  buildSessionHistoryFromConversation,
+  getApiHistoryPromptId,
+} from './session-api-history.js';
 import { ApprovalMode } from '../config/approval-mode.js';
 import {
   buildApiHistoryFromConversation,
@@ -665,9 +668,13 @@ describe('SessionTranscriptReader', () => {
         { ...output, parentUuid: 'invocation' },
       ]);
       const custom = await service.readRestoreProjection(sessionId, NONE);
-      expect(custom?.runtime.apiHistory).toEqual([
+      expect(custom?.runtime.apiHistory).toMatchObject([
         answer.message,
         user.message,
+      ]);
+      expect(custom?.runtime.apiHistory.map(getApiHistoryPromptId)).toEqual([
+        undefined,
+        'legacy-record:u1',
       ]);
       expect(detectTurnInterruption(custom!.runtime.apiHistory).kind).toBe(
         'interrupted_prompt',
@@ -2282,9 +2289,13 @@ describe('SessionTranscriptReader', () => {
 
     const projection = await coldProjection();
 
-    expect(projection?.runtime.apiHistory).toEqual([
+    expect(projection?.runtime.apiHistory).toMatchObject([
       first.message,
       second.message,
+    ]);
+    expect(projection?.runtime.apiHistory.map(getApiHistoryPromptId)).toEqual([
+      'legacy-record:u1',
+      undefined,
     ]);
     expect(selectedReads).toEqual([
       { offset: 0, length: jsonBytes(first, second) },
