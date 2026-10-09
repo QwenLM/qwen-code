@@ -159,7 +159,7 @@ import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
 import {
   computeApiTruncationIndex,
-  isIdentifiedRetainedTurn,
+  isRetainedUserTurn,
   isRealUserTurn,
 } from './utils/historyMapping.js';
 import { waitForGoalRuntime } from './utils/goal-runtime.js';
@@ -4289,10 +4289,7 @@ export const AppContainer = (props: AppContainerProps) => {
               historyManager.addItem(
                 {
                   type: 'error',
-                  text: isIdentifiedRetainedTurn(
-                    historyManager.history,
-                    userItem.id,
-                  )
+                  text: isRetainedUserTurn(historyManager.history, userItem.id)
                     ? t(
                         'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
                       )

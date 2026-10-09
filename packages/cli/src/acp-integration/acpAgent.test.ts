@@ -2460,7 +2460,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
         beginHistoryMutation: ReturnType<typeof vi.fn>;
-        getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
+        getRewindCutPoint: ReturnType<typeof vi.fn>;
         clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
         getDefaultReasoningConfig: ReturnType<typeof vi.fn>;
@@ -5655,6 +5655,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       }),
       getFileSystemService: vi.fn().mockReturnValue(undefined),
+      getFileHistoryService: vi.fn(),
       getChatRecordingService: vi.fn().mockReturnValue({
         recordSessionModel: vi.fn().mockResolvedValue(true),
         flush: vi.fn().mockResolvedValue(undefined),
@@ -6001,7 +6002,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             .fn()
             .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
           beginHistoryMutation: vi.fn().mockImplementation(() => vi.fn()),
-          getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
+          getRewindCutPoint: vi.fn().mockReturnValue(0),
           clearActiveTodoPlanRevision: vi.fn(),
           clearTodoStopGuardTrust: vi.fn(),
           getDefaultReasoningConfig: vi.fn(() =>
@@ -24993,6 +24994,61 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       SessionEndReason.PromptInputExit,
       expect.any(AbortSignal),
     );
+  });
+
+  it('lists only identity-resolvable snapshots without renumbering their branch positions', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const promptIds = [1, 2, 3].map((turn) => `${sessionId}########${turn}`);
+    const getDiffStats = vi.fn().mockResolvedValue({
+      filesChanged: ['file.ts'],
+      insertions: 2,
+      deletions: 1,
+    });
+    innerConfig.getFileHistoryService = vi.fn().mockReturnValue({
+      getSnapshots: vi.fn().mockReturnValue(
+        promptIds.map((promptId) => ({
+          promptId,
+          timestamp: new Date('2026-10-09T00:00:00.000Z'),
+          trackedFileBackups: {},
+        })),
+      ),
+      getDiffStats,
+    });
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock!.getRewindCutPoint.mockImplementation((promptId: string) =>
+      promptId === promptIds[1] ? 2 : -1,
+    );
+
+    expect(
+      await agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots, {
+        sessionId,
+      }),
+    ).toEqual({
+      snapshots: [
+        {
+          promptId: promptIds[1],
+          turnIndex: 1,
+          timestamp: '2026-10-09T00:00:00.000Z',
+          diffStats: { filesChanged: 1, insertions: 2, deletions: 1 },
+        },
+      ],
+    });
+    expect(getDiffStats).toHaveBeenCalledOnce();
+    expect(getDiffStats).toHaveBeenCalledWith(promptIds[1]);
+    mockConnectionState.resolve();
+    await agentPromise;
   });
 
   it('rewinds while only non-turn background work remains', async () => {

@@ -29,10 +29,12 @@ its model-facing prompt.
   that does not resolve — for example after a retry, which re-sends the prompt
   unmarked — reports that it no longer matches the model history, not that it
   was compressed.
-- Retain the existing positional mapping only for legacy turns without an id.
+- Recover a legacy turn's rewind identity from its source record, or refuse it;
+  do not align independently counted histories.
 
-The existing compression guard continues to reject turns that were absorbed
-by a marker-less compressed prefix.
+An absorbed turn has no matching identity after the compressed prefix and is
+rejected. A uniquely identified retained turn can still resolve without a UI
+compression marker.
 
 ## Identity lifecycle
 
@@ -63,6 +65,42 @@ file itself, so the writer persists the ids in an array parallel to
 A checkpoint written before this change has no such array: its file keys remain
 usable for file-only restore, but conversation rewind fails closed instead of
 applying positional alignment to identified turns.
+
+## Legacy compatibility (#9437)
+
+For an ordinary persisted user record without `promptId`, derive the rewind key
+`legacy-record:<uuid>` from its existing record UUID. Both resume projections
+use the same core routine. The visible item carries this key as `rewindId`,
+separate from `promptId`: a record UUID is not a file-checkpoint identity and
+must never authorize file restore. No transcript schema or new ID counter is
+needed. Persisted prompt IDs remain preferred.
+
+Resolve only a unique key in both retained representations. Missing source
+UUIDs, missing model metadata, and duplicated keys refuse before mutation.
+This also covers raw old compression/checkpoint snapshots that have no identity
+sidecar: do not infer which source record produced an entry from its text or
+position. Records appended after such a snapshot can still resolve. Existing
+compression/checkpoint sidecars preserve recovered keys when newly written.
+
+Hidden notifications, tool results, and synthetic continuations do not acquire
+an ordinary user record's key. Their text cannot move a linked target's cut.
+The compatibility check must include the genuine placeholder-text prompt that
+previously stayed in model history after the visible turn was removed.
+
+ACP selects targets by their snapshot identity, not a second classification of
+model text. Without snapshots, the model's retained turn ordinals cannot safely
+identify the recorder's complete-branch ordinals, so ACP conversation rewind
+refuses rather than guessing. Only the initial ordinary
+prompt send acquires its prompt identity; tool/automatic continuations do not.
+Unavailable or ambiguous associations refuse before changing conversation,
+files, or recording. Snapshot-list eligibility follows the same resolver.
+
+Acceptance requires the same legacy fixture to cut at its source record,
+identified turns to keep resolving, unlinked/ambiguous targets to refuse, and
+resume/compression plus both live Ink and ACP entrances to obey these rules.
+OpenTUI's currently unconnected rewind selector is not wired by this change;
+its dormant positional helper is separate follow-up cleanup, not an authority
+for a live rewind operation.
 
 ## Scope
 
