@@ -1006,7 +1006,9 @@ public class ManagedAgentProperties implements EnvironmentAware {
     /** H5b/H5c: the trusted channel adapter surface and its claim lease. */
     public static class Channels {
         private boolean enabled;
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration claimLease = Duration.ofMinutes(10);
+        @DurationUnit(ChronoUnit.SECONDS)
         private Duration scanDelay = Duration.ofSeconds(30);
 
         public boolean isEnabled() {

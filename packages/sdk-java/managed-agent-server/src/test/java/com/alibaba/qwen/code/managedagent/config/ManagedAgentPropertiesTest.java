@@ -142,10 +142,10 @@ class ManagedAgentPropertiesTest {
         }
         // The walk must not pass vacuously: extracting a group out of
         // the properties class empties it and the millisecond
-        // exceptions would go unchecked. 25 is the current field
+        // exceptions would go unchecked. 27 is the current field
         // inventory — update it in the same change that adds or
         // removes a Duration field.
-        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(25);
+        assertThat(visited).containsAll(MILLIS_BINDINGS).hasSize(27);
     }
 
     @Test
@@ -424,6 +424,143 @@ class ManagedAgentPropertiesTest {
                                 .isEqualTo(TimeUnit.MILLISECONDS);
                     });
         }
+    }
+
+    @Test
+    void theReadmeNamesEveryPlaceholderOnlyCadence() throws Exception {
+        // The README's unit rule names the cadences that live only in
+        // @Scheduled placeholders. A hand-maintained list goes stale the
+        // next time the base adds one — it already falsified the sentence
+        // once — so pin the sentence against a sweep of every
+        // ${qwen.managed-agent.*} schedule placeholder in the module: a
+        // cadence with no typed Duration field belongs in it (the startup
+        // warning cannot see it), and a typed one such as
+        // channels.scan-delay does not (the warning reads the field's
+        // written value, so the sentence would be false for it). The
+        // exact swept set is pinned too: a new placeholder cadence fails
+        // here until the README and this set are updated in the same
+        // change.
+        var swept = new java.util.TreeSet<String>();
+        var placeholder = java.util.regex.Pattern.compile(
+                "\\$\\{(qwen\\.managed-agent\\.[^}:]+)");
+        for (Class<?> owner : moduleClasses()) {
+            for (java.lang.reflect.Method method
+                    : owner.getDeclaredMethods()) {
+                for (Scheduled scheduled
+                        : method.getAnnotationsByType(Scheduled.class)) {
+                    for (String attribute : new String[] {
+                            scheduled.fixedDelayString(),
+                            scheduled.fixedRateString(),
+                            scheduled.initialDelayString(),
+                            scheduled.cron()}) {
+                        var matcher = placeholder.matcher(attribute);
+                        while (matcher.find()) {
+                            swept.add(matcher.group(1).substring(
+                                    "qwen.managed-agent.".length()));
+                        }
+                    }
+                }
+            }
+        }
+        assertThat(swept).containsExactlyInAnyOrder(
+                "artifacts.projection-interval",
+                "channels.scan-delay",
+                "child-relay.scan-delay",
+                "dispatch.scan-delay",
+                "events.replay-floor-interval");
+        var placeholderOnly = new java.util.TreeSet<String>();
+        for (String key : swept) {
+            if (!hasTypedField(key)) {
+                placeholderOnly.add(key);
+            }
+        }
+        assertThat(readmeNamedCadences())
+                .containsExactlyInAnyOrderElementsOf(placeholderOnly);
+    }
+
+    private static List<Class<?>> moduleClasses() throws Exception {
+        // Every class the module compiles, loaded without initialization —
+        // a hand-maintained owner list is how the earlier cadence pins
+        // missed a base-side addition.
+        var root = java.nio.file.Path.of(ManagedAgentProperties.class
+                .getProtectionDomain().getCodeSource().getLocation()
+                .toURI());
+        try (var paths = java.nio.file.Files.walk(root)) {
+            return paths
+                    .filter(path -> path.toString().endsWith(".class"))
+                    .map(root::relativize).map(java.nio.file.Path::toString)
+                    .filter(name -> !name.equals("module-info.class"))
+                    .map(name -> name
+                            .substring(0, name.length() - ".class".length())
+                            .replace(java.io.File.separatorChar, '.'))
+                    .<Class<?>>map(name -> {
+                        try {
+                            return Class.forName(name, false,
+                                    ManagedAgentProperties.class
+                                            .getClassLoader());
+                        } catch (ClassNotFoundException missing) {
+                            throw new IllegalStateException(missing);
+                        }
+                    })
+                    .toList();
+        }
+    }
+
+    private static boolean hasTypedField(String key) {
+        // Walk the properties graph segment by segment: a placeholder key
+        // with a matching field at every hop is a typed setting, however
+        // its cadence is driven.
+        Class<?> current = ManagedAgentProperties.class;
+        for (String segment : key.split("\\.")) {
+            var camel = new StringBuilder(segment);
+            int dash;
+            while ((dash = camel.indexOf("-")) >= 0) {
+                camel.replace(dash, dash + 2, Character.toString(
+                        Character.toUpperCase(camel.charAt(dash + 1))));
+            }
+            java.lang.reflect.Field field = null;
+            for (java.lang.reflect.Field candidate
+                    : current.getDeclaredFields()) {
+                if (candidate.getName().contentEquals(camel)) {
+                    field = candidate;
+                    break;
+                }
+            }
+            if (field == null) {
+                return false;
+            }
+            current = field.getType();
+        }
+        return true;
+    }
+
+    private static java.util.Set<String> readmeNamedCadences()
+            throws java.io.IOException {
+        // Surefire runs from the module directory; an IDE run from the
+        // repository root needs the module path spelled out.
+        var path = java.nio.file.Path.of("README.md");
+        if (!java.nio.file.Files.exists(path)) {
+            path = java.nio.file.Path.of("packages", "sdk-java",
+                    "managed-agent-server", "README.md");
+        }
+        // Whitespace-normalized: the sentence wraps mid-list, so a raw
+        // indexOf would miss a phrase split across lines.
+        var text = java.nio.file.Files.readString(path)
+                .replaceAll("\\s+", " ");
+        int start = text.indexOf("Cadences bound through");
+        int end = text.indexOf("also read", start);
+        assertThat(start).isGreaterThanOrEqualTo(0);
+        assertThat(end).isGreaterThan(start);
+        var named = new java.util.TreeSet<String>();
+        var backtick = java.util.regex.Pattern.compile("`([^`]+)`")
+                .matcher(text.substring(start, end));
+        while (backtick.find()) {
+            // "@Scheduled" carries no dot; the cadence keys all do.
+            if (backtick.group(1).contains(".")) {
+                named.add(backtick.group(1));
+            }
+        }
+        return named;
     }
 
     private static List<Scheduled> schedulesOn(Class<?> owner,
