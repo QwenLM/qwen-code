@@ -2689,7 +2689,7 @@ export function registerHostedHarnessSessionRoutes(
         const tagField = (value: string | null | undefined): string | null =>
           value == null ? null : sanitizeDaemonLogLine(value);
         writeStderrLineSafe(
-          `qwen serve: Hosted Session ${sessionId} load refused (file_history_pending): ${JSON.stringify({ pendingTurn: tagField(fileHistory?.pendingTurn), pendingUndo: fileHistory?.pendingUndo ? { requestId: sanitizeDaemonLogLine(fileHistory.pendingUndo.requestId), promptId: sanitizeDaemonLogLine(fileHistory.pendingUndo.promptId) } : null, unsettled: unsettled ?? null, takeover, ground: settle?.blocker ?? null, groundDetail: settle?.detail ?? null })}`,
+          `qwen serve: Hosted Session ${sessionId} load refused (file_history_pending): ${JSON.stringify({ pendingTurn: tagField(fileHistory?.pendingTurn), pendingUndo: fileHistory?.pendingUndo ? { requestId: sanitizeDaemonLogLine(fileHistory.pendingUndo.requestId), promptId: sanitizeDaemonLogLine(fileHistory.pendingUndo.promptId) } : null, unsettled: tagField(unsettled), takeover, ground: settle?.blocker ?? null, groundDetail: settle?.detail ?? null })}`,
         );
         await managed.close();
         const pendingUndo = fileHistory?.pendingUndo != null;

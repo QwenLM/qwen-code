@@ -10581,6 +10581,57 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   });
 
+  it('bounds a forged line separator in a journal-read unsettled turnId on the gate tag', async () => {
+    await parkToolTurn();
+    const events = LocalManagedSessionAuthority.prototype.eventsInSequenceRange;
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'eventsInSequenceRange',
+    ).mockImplementation(function (
+      this: LocalManagedSessionAuthority,
+      start,
+      end,
+    ) {
+      return events.call(this, start, end).map((event) =>
+        event.kind === 'input.accepted'
+          ? {
+              ...event,
+              payload: {
+                ...event.payload,
+                // assertManagedSessionStableId admits U+2028 (it is not a
+                // control character) and JSON.stringify emits it raw: the
+                // tag must bound the journal-read id itself.
+                turnId: `x\u2028qwen serve: Hosted Session ${SESSION_ID} turn settled`,
+              },
+            }
+          : event,
+      );
+    });
+    const log = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const server = replacementApp();
+    const loaded = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: FILE_PROFILE,
+    });
+    expect(loaded.status).toBe(409);
+    expect(loaded.body.code).toBe('hosted_turn_recovery_required');
+    expect(loaded.body.reason).toBe('file_history_unsettled');
+    const tag = log.mock.calls
+      .map(([line]) => line)
+      .find((line) => line.includes('file_history_pending'));
+    expect(tag).toBeDefined();
+    expect(tag).not.toMatch(
+      /[\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/,
+    );
+    expect(tag).toContain(
+      `"unsettled":"x qwen serve: Hosted Session ${SESSION_ID} turn settled"`,
+    );
+  });
+
   it('replays a takeover load idempotently until its continue is admitted', async () => {
     await parkToolTurn();
     const execute = vi
