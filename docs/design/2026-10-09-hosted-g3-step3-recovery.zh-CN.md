@@ -2,11 +2,11 @@
 
 [English](2026-10-09-hosted-g3-step3-recovery.md) | [简体中文](2026-10-09-hosted-g3-step3-recovery.zh-CN.md)
 
-状态：已在当前工作区实现，2026-10-09；不可变快照 `linux-delivery-gates-2` 的五种限定范围 Linux 打包验收模式全部通过。源码基线为 upstream `main` 的 `669b2f0f91b0c787f7d8a26971c7c34210b935e1`。属于 [#12952][g]，延续已有 G3 原生文件恢复工作。本次不关闭更广的 G 系列或 Q2 fencing 门禁。
+状态：已在当前分支实现，2026-10-09；不可变快照 `linux-rebased-gates-3` 的五种限定范围 Linux 打包验收模式全部通过。rebase 后的源码基线为 upstream `main` 的 `4a3b8f3c084a1aa82af6cd75684f26123cdc64be`；快照包含生产提交 `dca809caf4526ade87b12dc46a0797cf744dc0d6`。属于 [#12952][g]，延续已有 G3 原生文件恢复工作。本次不关闭更广的 G 系列或 Q2 fencing 门禁。
 
 当前实现为不含 Hooks/MCP 的原生文件 profile 生产审批计划（打包门禁覆盖 `hosted-workspace-files/1`），为不含 Hooks 的主模型请求保存精确快照，并实现冷恢复流的有界撤回及原生 Turn 清理债务。主模型冷重发仅在不含 Hooks/MCP 时准入。Shell profile 保留现有执行和清理 owner。运行中的前缀 continuation 继续可用，但尚未完成的前缀 continuation 不保存冷重发快照，恢复时明确拒绝。主模型 attempt 已完成且最终回答已提交时，仍可只补终态而不重发推理。超限快照保留明确不支持的边界。协议生产者和读取者在本次工作区一同实现；下文门禁定义所需的验收证据。
 
-精确请求快照由原生 Turn driver 在首次准入、审批恢复和模型 redrive 路径生产。旧 Runtime-only continuation 路由保留现有 G1 恢复行为，不生产这些快照。渠道中断结算在允许新工作前处理已有的原 G3 清理债务；请求准备失败时，普通 prompt 和 wake 输入均保持未结算，留待恢复。
+精确请求快照由原生 Turn driver 在首次准入、审批恢复和模型 redrive 路径生产。旧 Runtime-only continuation 路由保留现有 G1 恢复行为，不生产这些快照。渠道中断结算对账原 G3 清理债务，并在释放失败时保留仅由清理债务引起的阻塞；请求准备失败时，普通 prompt 和 wake 输入均保持未结算，留待恢复。
 
 ## 1. 问题与已有行为
 
@@ -402,11 +402,13 @@ local JSONL/H2 测试是额外覆盖，不是 MySQL/Linux 物理停止证据。
 
 ### 9.1 已验证的实现证据
 
-不可变的 `linux-delivery-gates-2` 打包产物在各模式的首次运行中通过 Allow、Deny、Cancel、expiry 和模型续写。环境为 Linux aarch64，Node 22.22.1、Java 21.0.12.1、MySQL 8.4.11。真实 Java 控制面、Broker 和 Runtime Worker 保持存活，仅替换 Harness；推理使用受控的本地 OpenAI fixture。
+不可变的 `linux-rebased-gates-3` 打包产物在 rebase 和集成修正后，各模式的首次运行中通过 Allow、Deny、Cancel、expiry 和模型续写。环境为 Linux aarch64，Node 22.22.1、Java 21.0.12.1、MySQL 8.4.11。可移植 Node bundle 和 Java JAR 在 macOS 构建后于 Linux 执行。真实 Java 控制面、Broker 和 Runtime Worker 保持存活，仅替换 Harness；推理使用受控的本地 OpenAI fixture。门禁结束后，两端的 1387 个产物 hash 均保持一致，生产源码未变化。此前的 `linux-delivery-gates-2` 结果保留为前一 main 基线的历史证据。
 
 Allow 保留原 Action、prepare key、request digest 和 Runtime binding，产生一个 dispatch generation 为 1 的 settled execution，并写入预期文件内容。Deny、Cancel、expiry 均无 execution、无文件；expiry 沿用原 deadline。模型续写保留原 execution，重发相同的规范化 provider 请求内容，并撤回先前已公开可见的部分输出。每种模式都确认原 owner 清理，完成后续 Turn，观察到两轮合计恰好两个终态，再完成 close 202 准入并达到 Session closed 状态。
 
-定向验证通过 840 条 core 测试、111 条共享契约测试、650 条 CLI 测试和 189 条相关 Java 测试。build、typecheck、bundle、源码 ESLint 和 Java Checkstyle 均通过。源码 lint 排除生成的 Maven `target` 与测试 `coverage` 产物。较早的广范围 Java 运行暴露三条 fixture/路由登记失败；修复后的相关套件在 189 条测试中通过。修复后未重跑整个广范围 Java 套件。
+定向验证通过 841 条 core 测试和 111 条共享契约测试。扩展后的 CLI 运行通过 779 条，并暴露三条不符合契约的旧审批 fixture 记录；修正 policy、选项标签和资源 kind 后，受影响套件的全部 60 条测试通过。重复的 13 文件运行通过 782 条中的 781 条；未修改的 Hosted 模型集成套件有一次 `ENOTEMPTY` 临时目录清理失败。该套件全部 8 条测试在单独复跑中通过，因此 782 条测试均有分次通过证据；不声称扩展批次全绿。新一轮 Java 验证通过 1522 条 Server 测试、跳过一条，另通过 55 条 SDK 和 159 条 Broker 测试。build、typecheck、bundle、源码 ESLint 和三个 Java 模块的 Checkstyle 均通过。源码 lint 排除生成的 Maven `target` 与测试 `coverage` 产物。此前基线和扩展运行中的失败诊断均保留。
+
+集成回归证明：模型请求准备失败时，普通 prompt 路由和 wake driver 均保留已准入、未结算的输入；渠道中断结算仅在终态与 file-history 退役之后确认原清理 owner。首次释放失败时保留清理 fence，随后 passive resident attachment 释放相同 binding/generation，只新增一次确认，不重复终态。独立 Spring/H2 probe 通过有界撤回与 replay floor 的组合：snapshot 重建期间 reader 保持可用，覆盖范围追平后旧 cursor 再次过期。这项 probe 不属于 MySQL 或进程接管验收。
 
 机器可读报告、manifest 和保留的失败诊断位于 `.qwen/investigations/g3-step3-implementation/`，当前汇总报告为 `packaged-verification.md`。这五种打包门禁不证明上述整个矩阵。首个无工具请求崩溃、两次替换、部分 prepare 崩溃、响应丢失、损坏/外部 ref、快照超限与清理崩溃，仅有定向测试或故障探针覆盖，或仍属于更广的打包验收工作。两侧 owner 重启、真实 provider、真实混版本集群和 Q2 旧控制面 fencing 仍独立处理。
 
