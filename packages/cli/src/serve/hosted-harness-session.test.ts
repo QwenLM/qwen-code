@@ -2924,7 +2924,7 @@ describe('Hosted Harness no-tool session', () => {
   async function prewriteDetachedOutput(
     family: DetachedFamily,
     publication: boolean,
-    withChildAgent = false,
+    childSessionKind?: 'child_agent' | 'workflow',
   ): Promise<void> {
     const key = {
       tenantId: 'tenant',
@@ -3069,10 +3069,10 @@ describe('Hosted Harness no-tool session', () => {
         await monitors.advanceOutput('bg-1', tip);
         await monitors.settleQuiet('bg-1', 'exited');
       }
-      if (withChildAgent) {
-        // A child agent record beside the detached shell one: it owns no
-        // output manifest, so the workspace restore must skip it rather
-        // than refuse the whole Session.
+      if (childSessionKind !== undefined) {
+        // A child Session record (either kind) beside the detached shell
+        // one: it owns no output manifest, so the workspace restore must
+        // skip it rather than refuse the whole Session.
         const inputRef = await resources.publish(
           'managed-input',
           Buffer.from('{"prompt":"audit the diff"}'),
@@ -3087,7 +3087,7 @@ describe('Hosted Harness no-tool session', () => {
           {
             domain: 'child_run',
             record: {
-              kind: 'child_agent',
+              kind: childSessionKind,
               childRunId: 'agent-1',
               ownerScopeId: key.sessionId,
               rootSessionId: key.sessionId,
@@ -3176,22 +3176,25 @@ describe('Hosted Harness no-tool session', () => {
     },
   );
 
-  it('restores a Session whose detached lineage sits beside a child agent record', async () => {
-    domainEnablement.childRun = true;
-    // The child_run domain holds both kinds at H4: the shell lineage must
-    // still verify while the child agent record is skipped, not misparsed.
-    await prewriteDetachedOutput('child_run', false, true);
-    const { server, loaded } = await loadDetachedSession();
-    expect(loaded.status).toBe(200);
-    expect(
-      (
-        await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
-          'X-Qwen-Client-Id',
-          loaded.body.clientId as string,
-        )
-      ).status,
-    ).toBe(204);
-  });
+  it.each(['child_agent', 'workflow'] as const)(
+    'restores a Session whose detached lineage sits beside a %s record',
+    async (childSessionKind) => {
+      domainEnablement.childRun = true;
+      // The child_run domain holds every kind at H4: the shell lineage must
+      // still verify while a child Session record is skipped, not misparsed.
+      await prewriteDetachedOutput('child_run', false, childSessionKind);
+      const { server, loaded } = await loadDetachedSession();
+      expect(loaded.status).toBe(200);
+      expect(
+        (
+          await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
+            'X-Qwen-Client-Id',
+            loaded.body.clientId as string,
+          )
+        ).status,
+      ).toBe(204);
+    },
+  );
 
   it('still refuses the restore when a detached capture loses page content', async () => {
     domainEnablement.childRun = true;
