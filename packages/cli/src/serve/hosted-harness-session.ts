@@ -4277,6 +4277,7 @@ export function registerHostedHarnessSessionRoutes(
             const stopReason = body?.['stopReason'];
             const reason = body?.['reason'];
             const started = body?.['started'];
+            const childSessionId = body?.['childSessionId'];
             const QUOTA = [
               'count_limit',
               'rate_limit',
@@ -4295,6 +4296,11 @@ export function registerHostedHarnessSessionRoutes(
                 reason === null ||
                 reason === undefined ||
                 (typeof reason === 'string' && QUOTA.includes(reason))
+              ) ||
+              !(
+                childSessionId === null ||
+                childSessionId === undefined ||
+                typeof childSessionId === 'string'
               )
             ) {
               return error(res, 400, 'invalid_child_operation');
@@ -4313,6 +4319,7 @@ export function registerHostedHarnessSessionRoutes(
                   | 'budget_exhausted'
                   | 'duration_limit') ?? null,
               started,
+              ...(typeof childSessionId === 'string' ? { childSessionId } : {}),
             });
             break;
           }
@@ -4321,10 +4328,21 @@ export function registerHostedHarnessSessionRoutes(
             break;
           case 'close_scope': {
             const started = body?.['started'];
-            if (typeof started !== 'boolean') {
+            const childSessionId = body?.['childSessionId'];
+            if (
+              typeof started !== 'boolean' ||
+              !(
+                childSessionId === null ||
+                childSessionId === undefined ||
+                typeof childSessionId === 'string'
+              )
+            ) {
               return error(res, 400, 'invalid_child_operation');
             }
-            await children.settleCancelled(childRunId, { started });
+            await children.settleCancelled(childRunId, {
+              started,
+              ...(typeof childSessionId === 'string' ? { childSessionId } : {}),
+            });
             break;
           }
           default:

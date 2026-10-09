@@ -282,9 +282,30 @@ export function childSettleCompletedBody(
   });
 }
 
+/** Whether a settlement's naming of the minted Session is replay-safe:
+ * the same id restates, a different one conflicts, never overwrites. */
+function adoptChildSessionId(
+  previous: ChildAgentRun,
+  childSessionId: string | undefined,
+  verb: string,
+): string | null {
+  if (childSessionId === undefined) return previous.childSessionId;
+  if (
+    previous.childSessionId !== null &&
+    previous.childSessionId !== childSessionId
+  ) {
+    throw new ManagedSessionRecordError(
+      `Child run ${verb} cannot rename the Session it already named.`,
+    );
+  }
+  return childSessionId;
+}
+
 /** A proven failure; a pre-creation failure lands on not_started_proven.
  * `quota_exceeded` must carry its quota reason; the other failures carry
- * none. */
+ * none. A never-started settlement may name the Session the creation
+ * minted — the lineage is what the close cascade and the relay owe their
+ * close admissions to, and an unnamed mint would orphan it. */
 export function childFailBody(
   previous: ChildAgentRun,
   params: {
@@ -294,11 +315,17 @@ export function childFailBody(
     >;
     readonly reason: ChildAgentRun['run']['reason'];
     readonly started: boolean;
+    readonly childSessionId?: string;
   },
 ): ChildAgentRun {
   return Object.freeze({
     ...previous,
     stopReason: params.stopReason,
+    childSessionId: adoptChildSessionId(
+      previous,
+      params.childSessionId,
+      'failure',
+    ),
     run: Object.freeze({
       ...previous.run,
       state: 'failed',
@@ -322,12 +349,17 @@ export function childStopRequestedBody(previous: ChildAgentRun): ChildAgentRun {
  */
 export function childCancelBody(
   previous: ChildAgentRun,
-  params: { readonly started: boolean },
+  params: { readonly started: boolean; readonly childSessionId?: string },
 ): ChildAgentRun {
   return Object.freeze({
     ...previous,
     stopReason: 'stop_requested',
     stopRequested: true,
+    childSessionId: adoptChildSessionId(
+      previous,
+      params.childSessionId,
+      'close',
+    ),
     run: Object.freeze({
       ...previous.run,
       state: 'cancelled',

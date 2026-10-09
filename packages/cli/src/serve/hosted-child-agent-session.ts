@@ -428,6 +428,7 @@ export class HostedChildAgentSession {
       >;
       readonly reason: ChildAgentRun['run']['reason'];
       readonly started: boolean;
+      readonly childSessionId?: string;
     },
   ): Promise<void> {
     return this.revise(childRunId, (previous) =>
@@ -445,7 +446,7 @@ export class HostedChildAgentSession {
   /** `cancelChildRun`/`closeChildScope`: the request was honored. */
   settleCancelled(
     childRunId: string,
-    params: { readonly started: boolean },
+    params: { readonly started: boolean; readonly childSessionId?: string },
   ): Promise<void> {
     return this.revise(childRunId, (previous) =>
       childCancelBody(previous, params),

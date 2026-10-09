@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { ManagedSessionRecordError } from './managed-session-records.js';
 import {
   isChildRunStart,
   isChildRunSuccessor,
@@ -273,6 +274,47 @@ describe('managed child operations (H4b)', () => {
             }),
         ),
       );
+    });
+
+    it('names the minted Session on never-started settlements', () => {
+      const failed = childFailBody(launch(), {
+        stopReason: 'creation_failed',
+        reason: null,
+        started: false,
+        childSessionId: 'session-child',
+      });
+      expect(failed.childSessionId).toBe('session-child');
+      expectValidChain([launch(), failed]);
+      // A replay restating the same Session is the same revision, a
+      // different one conflicts instead of renaming it.
+      const restated = childFailBody(failed, {
+        stopReason: 'creation_failed',
+        reason: null,
+        started: false,
+        childSessionId: 'session-child',
+      });
+      expect(restated).toEqual(failed);
+      expect(() =>
+        childFailBody(failed, {
+          stopReason: 'creation_failed',
+          reason: null,
+          started: false,
+          childSessionId: 'session-other',
+        }),
+      ).toThrow(ManagedSessionRecordError);
+      const cancelled = childCancelBody(launch(), {
+        started: false,
+        childSessionId: 'session-child',
+      });
+      expect(cancelled.childSessionId).toBe('session-child');
+      expect(cancelled.stopReason).toBe('stop_requested');
+      expectValidChain([launch(), cancelled]);
+      expect(() =>
+        childCancelBody(cancelled, {
+          started: false,
+          childSessionId: 'session-other',
+        }),
+      ).toThrow(ManagedSessionRecordError);
     });
 
     it('allows the pre-acceptance unknown delivery step', () => {
