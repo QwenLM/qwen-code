@@ -48,6 +48,8 @@ draining 与事件过期期间都保持钉住。Session 的永久删除会写入
 - 其 Session 存在退役墓碑，`recovery_protected` 为 false，且
   `retired_at + deletion-grace` 已经过去；
 - 该 Session 不存在未到期的 `qwen_output_read_lease`；
+- 没有进行中的 workspace 恢复操作（`CAPTURING` 或 `VERIFYING`）钉住该
+  Session —— 恢复的字节读取不持有读租约，租约检查看不到它们；
 - 不存在以该资源为名的 `qwen_managed_session_resource_ref` 行。
 
 落在谓词之外的行保持钉住并保留全部字节，保守且永久：
@@ -113,9 +115,11 @@ qwen_managed_session_resource_collection
 2. claim 在 tenant 与 Session 锁下（`ToolPublicationRetentionStore.lockSession`）重估
    资格：墓碑行存在且身份一致、journal head 缺失（写者已关闭 —— 发表必需 head，
    且退役后不可再造）或读取为 `state = 'DELETED'`、`recovery_protected` 为 false、
-   grace 已过、且无未到期读租约。blocker 为 `session_not_retired`、
-   `recovery_protected`、`grace_period`、`session_head_live`（存活、非 `DELETED`
-   的 head）与 `reader_active`。每次失败都按与发布回收器相同的退避分类法重排：
+   grace 已过、无未到期读租约，且没有进行中的恢复操作钉住该 Session。blocker
+   为 `session_not_retired`、`recovery_protected`、`grace_period`、
+   `session_head_live`（存活、非 `DELETED` 的 head）、`reader_active` 与
+   `recovery_active`（`CAPTURING` 或 `VERIFYING` 状态的恢复或迁移操作钉住了该
+   Session）。每次失败都按与发布回收器相同的退避分类法重排：
    `recovery_protected` 等 24 小时，`grace_period` 等到
    `retired_at + grace`，其它 blocker 一律 60 秒。
 3. 确认的 claim 持有账本 60 秒。每一页在同一个数据库事务里完成：选取 `cursor` 之后
@@ -208,8 +212,9 @@ head 为 `DELETED` 之后才可能进入 `COLLECTED`，而 `ManagedSessionStore`
    （被回收行的 `SUM(byte_length)` 等于 `collected_bytes`），且 `inline_bytes` 已清
    空。
 2. 每个 blocker 都让所有字节保持不动：无墓碑；`recovery_protected`；grace 未到；
-   存活（非 `DELETED`）的 journal head；存在未到期读租约。每个 blocker 都持久化
-   记录并带正确的下次尝试时间（`24h` / `retired_at + grace` / `60s`）。
+   存活（非 `DELETED`）的 journal head；存在未到期读租约；存在进行中的恢复操作。
+   每个 blocker 都持久化记录并带正确的下次尝试时间（`24h` /
+   `retired_at + grace` / `60s`）。
 3. 逐行排除：`REFERENCED`、kind 不符、`TOOL_PUBLICATION` 存储、存在引用行、超出
    字节/kind 边界的行都不被回收；全部被排除的 Session 仍以
    `collected_bytes = 0` 完成。

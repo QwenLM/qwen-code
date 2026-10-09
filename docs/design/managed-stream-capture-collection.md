@@ -61,6 +61,9 @@ Rows eligible for collection, per row:
 - its Session has a retirement tombstone whose `recovery_protected` is false
   and whose `retired_at + deletion-grace` has elapsed;
 - no unexpired `qwen_output_read_lease` exists for the Session;
+- no in-flight workspace-recovery operation (`CAPTURING` or `VERIFYING`)
+  pins the Session — recovery byte reads take no read lease, so the lease
+  check cannot see them;
 - no `qwen_managed_session_resource_ref` row names the resource.
 
 Rows outside the predicate stay pinned and keep all bytes, conservatively and
@@ -144,10 +147,13 @@ never hold the live-session scheduler.
    (`ToolPublicationRetentionStore.lockSession`): the tombstone row is present
    with matching identity, the journal head is absent (a closed writer —
    publishing requires one and retirement fences its creation) or reads
-   `state = 'DELETED'`, `recovery_protected` is false, grace has elapsed, and
-   no unexpired read lease exists. The blockers are `session_not_retired`,
-   `recovery_protected`, `grace_period`, `session_head_live` (a live,
-   non-`DELETED` head) and `reader_active`. Each failure reschedules with the
+   `state = 'DELETED'`, `recovery_protected` is false, grace has elapsed, no
+   unexpired read lease exists, and no in-flight recovery operation pins the
+   Session. The blockers are `session_not_retired`, `recovery_protected`,
+   `grace_period`, `session_head_live` (a live, non-`DELETED` head),
+   `reader_active` and `recovery_active` (a `CAPTURING` or `VERIFYING`
+   recovery or migration operation pinned the Session). Each failure
+   reschedules with the
    same backoff taxonomy as the publication collector: `recovery_protected`
    waits 24 hours, `grace_period` waits until `retired_at + grace`, and every
    other blocker waits 60 seconds.
@@ -266,9 +272,9 @@ must prove:
    eligible rows collected byte-exact (`SUM(byte_length)` over collected rows
    equals `collected_bytes`) and `inline_bytes` is gone.
 2. Each blocker holds everything: no tombstone; `recovery_protected`; grace
-   not elapsed; a live (non-`DELETED`) journal head; an unexpired read lease.
-   Each blocker persists with the right next-attempt time
-   (`24h` / `retired_at + grace` / `60s`).
+   not elapsed; a live (non-`DELETED`) journal head; an unexpired read lease;
+   an in-flight recovery operation. Each blocker persists with the right
+   next-attempt time (`24h` / `retired_at + grace` / `60s`).
 3. Per-row exclusion: `REFERENCED`, wrong kind, `TOOL_PUBLICATION` storage, a
    present reference row, and rows outside the byte/kind bounds are not
    collected, and an all-excluded Session still completes with

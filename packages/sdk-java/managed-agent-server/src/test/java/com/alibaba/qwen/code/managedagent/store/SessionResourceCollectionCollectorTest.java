@@ -208,6 +208,37 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThat(ledger().get("gc_blocker")).isNull();
     }
 
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"CAPTURING", "VERIFYING"})
+    void inFlightRecoveryHoldsCollectionUntilTheOperationTerminates(String state) {
+        initSession();
+        head(session);
+        publish("segment", CONTENT, new byte[64]);
+        retire();
+        jdbc.update("INSERT INTO managed_workspace_recovery_operation (operation_id, tenant_id, storage_id,"
+                + " mode, request_digest, request_json, registration_json, source_digest, session_count, state,"
+                + " created_at, updated_at) VALUES ('op-recovery', ?, 'storage-1', ?, ?, '{}', '{}', ?, 1, ?,"
+                + " CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))",
+                tenant, "CAPTURING".equals(state) ? "capture" : "verify", "a".repeat(64), "b".repeat(64), state);
+        jdbc.update("INSERT INTO managed_workspace_recovery_session (operation_id, session_id, source_digest,"
+                + " source_json, state) VALUES ('op-recovery', ?, ?, '{}', 'PENDING')", session, "c".repeat(64));
+        var collector = collector(true, Duration.ZERO);
+        assertThat(collector.runOnce()).isFalse();
+        var blocked = ledger();
+        assertThat(blocked.get("gc_blocker")).isEqualTo("recovery_active");
+        long nowMillis = System.currentTimeMillis();
+        assertThat(((Number) blocked.get("gc_next_at")).longValue())
+                .isBetween(nowMillis + 50_000, nowMillis + 70_000);
+        assertThat(rows().getFirst().get("inline_bytes")).isNotNull();
+        jdbc.update("UPDATE managed_workspace_recovery_operation SET state = ? WHERE operation_id = 'op-recovery'",
+                "CAPTURING".equals(state) ? "SEALED" : "VERIFIED");
+        jdbc.update("UPDATE qwen_managed_session_resource_collection SET gc_next_at = 0"
+                + " WHERE session_scope_key = ?", resScope);
+        assertThat(collector.runOnce()).isTrue();
+        assertThat(rows().getFirst().get("state")).isEqualTo("COLLECTED");
+        assertThat(ledger().get("gc_blocker")).isNull();
+    }
+
     @Test
     void completionSweepsExpiredReadLeases() {
         initSession();
@@ -744,6 +775,38 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
                 .put("kind", MANIFEST).put("schemaVersion", 1).put("byteLength", 64)
                 .put("digest", ToolPublicationContract.sha256(new byte[64]));
         assertThatThrownBy(() -> reader.resource(source, ref)).hasMessageContaining("resource_collected");
+    }
+
+    @Test
+    void recoveryReaderIgnoresCollectedMarkersOfOtherResourcesAndOtherSessions() {
+        initSession();
+        publish("lost", MANIFEST, new byte[64], "REFERENCED", "MYSQL_INLINE");
+        reference("lost");
+        jdbc.update("UPDATE qwen_managed_session_resource SET inline_bytes = NULL"
+                + " WHERE session_scope_key = ? AND resource_id = 'lost'", resScope);
+        // Neither marker is evidence for this row: one names another resource of the same
+        // Session, the other names this resource id under another Session's scope.
+        jdbc.update("INSERT INTO qwen_tool_publication_object (scope_key, publication_id, slot_key,"
+                + " resource_id, byte_length, sha256, state, operation_id, created_at)"
+                + " VALUES (?, 'pub-sibling', 'segment:stdout:0', 'sibling', 64, ?, 'COLLECTED',"
+                + " 'op-1', CURRENT_TIMESTAMP(6))",
+                ToolPublicationDataStore.scope(tenant, "workspace-1", session),
+                ToolPublicationContract.sha256(new byte[64]));
+        jdbc.update("INSERT INTO qwen_tool_publication_object (scope_key, publication_id, slot_key,"
+                + " resource_id, byte_length, sha256, state, operation_id, created_at)"
+                + " VALUES (?, 'pub-elsewhere', 'segment:stdout:0', 'lost', 64, ?, 'COLLECTED',"
+                + " 'op-1', CURRENT_TIMESTAMP(6))",
+                ToolPublicationDataStore.scope(tenant, "workspace-1", "another-session"),
+                ToolPublicationContract.sha256(new byte[64]));
+        var reader = new WorkspaceRecoveryReader(jdbc, null);
+        var source = new ObjectMapper().createObjectNode();
+        source.putObject("head").put("tenantId", tenant).put("workspaceId", "workspace-1")
+                .put("sessionId", session).put("journalRevision", 10)
+                .putNull("latest_checkpoint_resource_id");
+        var ref = new ObjectMapper().createObjectNode().put("resourceId", "lost")
+                .put("kind", MANIFEST).put("schemaVersion", 1).put("byteLength", 64)
+                .put("digest", ToolPublicationContract.sha256(new byte[64]));
+        assertThatThrownBy(() -> reader.resource(source, ref)).hasMessageContaining("resource_corrupt");
     }
 
     @Test

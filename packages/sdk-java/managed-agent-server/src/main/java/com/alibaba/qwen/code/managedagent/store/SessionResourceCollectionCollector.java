@@ -32,9 +32,8 @@ public final class SessionResourceCollectionCollector {
             + " OR (kind = 'managed-tool-result-manifest' AND byte_length BETWEEN 1 AND "
             + ManagedSessionStore.toolResultLimit("managed-tool-result-manifest") + "))"
             + " AND object_key IS NULL AND object_version_id IS NULL AND encryption_key_id IS NULL"
-            // The byte_length column is metadata that outlives the bytes: a row another writer
-            // already freed has nothing left to collect and must not be counted a second time.
-            + " AND inline_bytes IS NOT NULL"
+            // No predicate on inline_bytes here: referencing a BLOB column makes InnoDB materialize
+            // every candidate's bytes (up to PAGE_ROWS + 1 rows) just to test them for NULL.
             + " AND resource_id > ? AND NOT EXISTS (SELECT 1 FROM qwen_managed_session_resource_ref r"
             + " WHERE r.session_scope_key = qwen_managed_session_resource.session_scope_key"
             + " AND r.resource_id = qwen_managed_session_resource.resource_id)"
@@ -205,7 +204,17 @@ public final class SessionResourceCollectionCollector {
         long leases = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_read_lease"
                         + " WHERE tenant_key = ? AND session_key = ? AND expires_at > ?", Long.class,
                 ToolPublicationRetentionStore.hash(tenant), ToolPublicationRetentionStore.hash(session), now);
-        return leases == 0 ? null : "reader_active";
+        if (leases > 0) {
+            return "reader_active";
+        }
+        // A recovery capture or verification reads a retired Session's bytes through
+        // WorkspaceRecoveryReader without a read lease, so only a live operation state can
+        // observe that reader; the session rows are never deleted and cannot key the check.
+        long recovering = jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_recovery_session s"
+                        + " JOIN managed_workspace_recovery_operation o ON o.operation_id = s.operation_id"
+                        + " WHERE s.session_id = ? AND o.state IN ('CAPTURING', 'VERIFYING')",
+                Long.class, session);
+        return recovering == 0 ? null : "recovery_active";
     }
 
     private Boolean page(Claim claim) {
@@ -235,28 +244,35 @@ public final class SessionResourceCollectionCollector {
             bytes += length;
             cursor = resource;
         }
+        long freed = 0;
         if (!ids.isEmpty()) {
             var args = new java.util.ArrayList<Object>(ids.size() + 1);
             args.add(claim.scope());
             args.addAll(ids);
+            String in = String.join(", ", java.util.Collections.nCopies(ids.size(), "?"));
+            // byte_length is metadata that outlives the bytes: a row another writer already freed
+            // stays PUBLISHED and uncounted; only rows this statement frees are accounted.
             jdbc.update("UPDATE qwen_managed_session_resource SET state = 'COLLECTED', inline_bytes = NULL"
-                    + " WHERE session_scope_key = ? AND resource_id IN ("
-                    + String.join(", ", java.util.Collections.nCopies(ids.size(), "?")) + ")", args.toArray());
+                    + " WHERE session_scope_key = ? AND inline_bytes IS NOT NULL AND resource_id IN (" + in + ")",
+                    args.toArray());
+            freed = jdbc.queryForObject("SELECT COALESCE(SUM(byte_length), 0) FROM qwen_managed_session_resource"
+                    + " WHERE session_scope_key = ? AND state = 'COLLECTED' AND resource_id IN (" + in + ")",
+                    Long.class, args.toArray());
         }
         if (more) {
             jdbc.update("UPDATE qwen_managed_session_resource_collection SET gc_cursor = ?,"
                     + " collected_bytes = collected_bytes + ?, gc_claim_until = ? WHERE session_scope_key = ?",
-                    cursor, bytes, now + CLAIM_MILLIS, claim.scope());
+                    cursor, freed, now + CLAIM_MILLIS, claim.scope());
         } else {
             jdbc.update("UPDATE qwen_managed_session_resource_collection SET gc_cursor = ?,"
                     + " collected_bytes = collected_bytes + ?, collected_at = ?, gc_owner = NULL,"
                     + " gc_claim_until = 0, gc_next_at = -1, gc_blocker = NULL WHERE session_scope_key = ?",
-                    cursor, bytes, now, claim.scope());
+                    cursor, freed, now, claim.scope());
             jdbc.update("DELETE FROM qwen_output_read_lease WHERE tenant_key = ? AND session_key = ?"
                     + " AND expires_at <= ?", ToolPublicationRetentionStore.hash((String) row.get("tenant_id")),
                     ToolPublicationRetentionStore.hash((String) row.get("session_id")), now);
             LOG.info("Stream capture collection completed scope={} bytes={}", claim.scope(),
-                    ToolPublicationRetentionStore.number(row, "collected_bytes") + bytes);
+                    ToolPublicationRetentionStore.number(row, "collected_bytes") + freed);
         }
         return true;
     }
