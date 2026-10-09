@@ -5404,6 +5404,7 @@ export function createSessionControlPlane(
     onNewSessionAbandoned?: (settlement: Promise<void>) => void,
     selection?: BridgeExecutionSelection,
     startupConfig?: SessionStartupConfig,
+    mcpServers?: BridgeSpawnRequest['mcpServers'],
   ): Promise<BridgeSession> {
     // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -5488,7 +5489,7 @@ export function createSessionControlPlane(
             // for any ACP request, not only prompts.
             const request = telemetry.injectPromptContext({
               cwd: boundWorkspace,
-              mcpServers: [],
+              mcpServers: mcpServers ?? [],
               _meta: {
                 ...sessionSourceRequestMeta(
                   sourceType,
@@ -8864,12 +8865,11 @@ export function createSessionControlPlane(
               const request = telemetry.injectPromptContext({
                 sessionId: req.sessionId,
                 cwd: workspaceKey,
-                // Restore path drops per-request `mcpServers` (matches
-                // `doSpawn`); daemon-wide MCP comes from settings on
-                // the agent side. The SDK's `RestoreSessionRequest`
-                // intentionally has no `mcpServers` field for the
-                // same reason.
-                mcpServers: [],
+                // Daemon-wide MCP comes from settings on the agent
+                // side. Only a daemon-internal caller sets
+                // `req.mcpServers` (the SDK's `RestoreSessionRequest`
+                // intentionally has no such field).
+                mcpServers: req.mcpServers ?? [],
                 _meta: {
                   ...sessionSourceRequestMeta(
                     req.sourceType,
@@ -8913,7 +8913,7 @@ export function createSessionControlPlane(
             const request = telemetry.injectPromptContext({
               sessionId: req.sessionId,
               cwd: workspaceKey,
-              mcpServers: [],
+              mcpServers: req.mcpServers ?? [],
               _meta: {
                 ...sessionSourceRequestMeta(
                   req.sourceType,
@@ -9246,9 +9246,25 @@ export function createSessionControlPlane(
             workspaceAccess: 'metadata-only',
           })),
         );
-        const artifactRestoreFailed = artifactRestoreWarnings.some((warning) =>
+      } else {
+        artifactRestoreWarnings.push(
+          ...(await entry.artifacts.restore(restoredArtifactSnapshot)),
+        );
+      }
+      const legacyOnlyDrop = entry.artifacts.consumeLegacyOnlyRestore();
+      for (const warning of artifactRestoreWarnings) {
+        writeStderrLine(
+          `[artifacts] session=${entry.sessionId} action=restore_warning warning=${JSON.stringify(
+            warning,
+          )}`,
+        );
+      }
+      const artifactRestoreFailed =
+        legacyOnlyDrop ||
+        artifactRestoreWarnings.some((warning) =>
           isArtifactRestoreFailureWarning(warning),
         );
+      if (deferArtifactWorkspace) {
         entry.pendingArtifactRestore = {
           ...(restoredArtifactSnapshot !== undefined
             ? { snapshot: restoredArtifactSnapshot }
@@ -9259,21 +9275,7 @@ export function createSessionControlPlane(
               : [],
           warnings: artifactRestoreWarnings,
         };
-      } else {
-        artifactRestoreWarnings.push(
-          ...(await entry.artifacts.restore(restoredArtifactSnapshot)),
-        );
       }
-      for (const warning of artifactRestoreWarnings) {
-        writeStderrLine(
-          `[artifacts] session=${entry.sessionId} action=restore_warning warning=${JSON.stringify(
-            warning,
-          )}`,
-        );
-      }
-      const artifactRestoreFailed = artifactRestoreWarnings.some((warning) =>
-        isArtifactRestoreFailureWarning(warning),
-      );
       if (replayUpdates.length > 0) {
         await ci.client.seedSessionUpdates(entry, replayUpdates, {
           ingestArtifacts:
@@ -10871,6 +10873,7 @@ export function createSessionControlPlane(
             }
           : undefined,
         startupConfig,
+        req.mcpServers,
       );
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
@@ -15050,6 +15053,55 @@ export function createSessionControlPlane(
       }
     },
 
+    async appendExternalRecord(sessionId, request) {
+      // Same lookup, timeout, transport-closed race and pending-work hold as
+      // `enqueueBackgroundNotification`: the hold keeps a session whose last
+      // client detached (user closed the tab while an agent ran) from being
+      // idle-closed under the write.
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.harness.isDying)
+        throw new SessionNotFoundError(sessionId);
+      entry.pendingAgentNotificationCount++;
+      try {
+        const response = await Promise.race([
+          withTimeout(
+            entry.connection.extMethod(
+              SERVE_CONTROL_EXT_METHODS.sessionExternalRecord,
+              { sessionId, ...request },
+            ),
+            initTimeoutMs,
+            SERVE_CONTROL_EXT_METHODS.sessionExternalRecord,
+          ),
+          getTransportClosedReject(entry),
+        ]);
+        const recordId = response['recordId'];
+        if (response['deferred'] === true) {
+          // The child holds the record until its running turn settles.
+          return {
+            sessionId,
+            recordId: typeof recordId === 'string' ? recordId : '',
+            created: response['created'] === true,
+            deferred: true,
+          };
+        }
+        if (typeof recordId !== 'string' || recordId.length === 0) {
+          throw new Error(
+            `${SERVE_CONTROL_EXT_METHODS.sessionExternalRecord} returned no recordId`,
+          );
+        }
+        return { sessionId, recordId, created: response['created'] === true };
+      } finally {
+        entry.pendingAgentNotificationCount = Math.max(
+          0,
+          entry.pendingAgentNotificationCount - 1,
+        );
+        void maybeCloseIdleSession(entry, 'agent_external_record_settled');
+        drainQuarantinedChannelFor(entry);
+      }
+    },
+
     getMidTurnMessages(sessionId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
@@ -15509,9 +15561,9 @@ export function createSessionControlPlane(
                   preserveLiveEphemeral: true,
                 })
               : [];
-        const artifactRestoreFailed = artifactRestoreWarnings.some(
-          isArtifactRestoreFailureWarning,
-        );
+        const artifactRestoreFailed =
+          entry.artifacts.consumeLegacyOnlyRestore() ||
+          artifactRestoreWarnings.some(isArtifactRestoreFailureWarning);
         const shouldRecordArtifactSnapshot =
           shouldRestoreArtifactSnapshot && !artifactRestoreFailed;
         const artifactSnapshotWarnings = shouldRecordArtifactSnapshot
