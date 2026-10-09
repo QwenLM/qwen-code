@@ -478,8 +478,23 @@ describe('AppContainer State Management', () => {
       false,
     );
     expect(logSpeculationMock).toHaveBeenCalledOnce();
-    const event = logSpeculationMock.mock.calls[0]![1] as { outcome: string };
-    expect(event.outcome).toBe('failed');
+    const event = logSpeculationMock.mock.calls[0]![1] as {
+      outcome: string;
+      turns_used: number;
+      files_written: number;
+      tool_use_count: number;
+      duration_ms: number;
+      boundary_type?: string;
+      had_pipelined_suggestion: boolean;
+    };
+    expect(event).toMatchObject({
+      outcome: 'failed',
+      turns_used: 1,
+      tool_use_count: 1,
+      had_pipelined_suggestion: false,
+    });
+    expect(event.boundary_type).toBeUndefined();
+    expect(event.duration_ms).toBeGreaterThanOrEqual(0);
     expect(debugLoggerMock.error).toHaveBeenCalledWith(
       'Failed to accept speculation, resubmitting normally',
       failure,
