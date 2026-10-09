@@ -2799,97 +2799,107 @@ describe('Hosted Harness no-tool session', () => {
     }
   }, 45_000);
 
-  it('finishes the release after a transient release failure, in the very next pass', async () => {
-    const inputId = await prewriteAutomationParkedWakeSession();
-    const repair = mockRepairBroker();
-    // The first pass commits the cancelled results, and the worker's
-    // release dies on its way: the aftermath is `pending` and the session
-    // is RELEASING. The replacement's adopt then answers 409
-    // runtime_session_not_acquirable — a RELEASING session refuses the
-    // adopt too — and only the explicit release on the second pass
-    // completes the condition; acquire's 409 is no proof by itself.
-    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
-      () => {
-        repair.order.push('acquire');
-        return Promise.reject(
-          new HostedWorkspaceBrokerRejection(
-            409,
-            'runtime_session_not_acquirable',
-          ),
+  it.each([
+    // A cold (replacement) Broker reads the RELEASING row.
+    'runtime_session_not_acquirable',
+    // The live Broker whose worker release failed still holds the
+    // session in process and answers from its ready check.
+    'runtime_session_not_ready',
+  ])(
+    'finishes the release after a transient release failure, in the very next pass (adopt refused %s)',
+    async (refusal) => {
+      const inputId = await prewriteAutomationParkedWakeSession();
+      const repair = mockRepairBroker();
+      // The first pass commits the cancelled results, and the worker's
+      // release dies on its way: the aftermath is `pending` and the session
+      // is RELEASING. The adopt then answers 409 — a RELEASING session
+      // refuses it too — and only the explicit release on the second pass
+      // completes the condition; acquire's 409 is no proof by itself.
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+        () => {
+          repair.order.push('acquire');
+          return Promise.reject(
+            new HostedWorkspaceBrokerRejection(409, refusal),
+          );
+        },
+      );
+      vi.mocked(HostedWorkspaceBroker.prototype.release).mockImplementationOnce(
+        async () => {
+          repair.order.push('release');
+          throw new TypeError('worker release died on its way');
+        },
+      );
+      repair.unlatch();
+      const server = await app(true);
+      const loaded = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store() });
+      expect(loaded.status).toBe(200);
+      const authorize = (request: supertest.Test) =>
+        headers(request).set(
+          'X-Qwen-Client-Id',
+          loaded.body.clientId as string,
         );
-      },
-    );
-    vi.mocked(HostedWorkspaceBroker.prototype.release).mockImplementationOnce(
-      async () => {
-        repair.order.push('release');
-        throw new TypeError('worker release died on its way');
-      },
-    );
-    repair.unlatch();
-    const server = await app(true);
-    const loaded = await headers(
-      supertest(server).post(`/session/${SESSION_ID}/load`),
-    ).send({ managedSessionStore: store() });
-    expect(loaded.status).toBe(200);
-    const authorize = (request: supertest.Test) =>
-      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
-    // The classification's block is the verified starting point: only
-    // after it does the aftermath retry, so the order assertions below
-    // read a settled, complete sequence, never one mid-flight.
-    await vi.waitFor(
-      async () => {
-        const status = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        );
-        expect(status.body.recoveryBlocked).toBe(true);
-      },
-      { timeout: 15_000 },
-    );
-    await vi.waitFor(
-      async () => {
-        const status = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        );
-        expect(status.body.recoveryBlocked).toBe(false);
-      },
-      { timeout: 15_000 },
-    );
-    // Two passes: the 409-refused adopt leaves nothing to stop (no poll),
-    // the release block's own adopt then meets a dying release (pending);
-    // the next pass repeats both adopts and the release completes —
-    // exactly the affirmative release result the consume depends on.
-    expect(repair.order).toEqual([
-      'acquire',
-      'acquire',
-      'release',
-      'acquire',
-      'release',
-    ]);
-    expect(repair.order).not.toContain('status');
-    expect(repair.order).not.toContain('cancel');
-    const key = {
-      tenantId: 'tenant',
-      workspaceId: 'workspace',
-      sessionId: SESSION_ID,
-    };
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      path.join(state.root, `${SESSION_ID}.jsonl`),
-      key,
-    );
-    expect(
-      journal.events.some(
-        (event) =>
-          event.kind === 'turn.settled' && event.payload['turnId'] === inputId,
-      ),
-    ).toBe(true);
-    const refreshed = await authorize(
-      supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
-    ).send({ operationId: randomUUID(), ...fireBody() });
-    expect(refreshed.status).toBe(202);
-    expect(refreshed.body.run.state).toBe('failed');
-    expect(refreshed.body.run.execution).toBe('outcome_unknown');
-    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
-  }, 45_000);
+      // The classification's block is the verified starting point: only
+      // after it does the aftermath retry, so the order assertions below
+      // read a settled, complete sequence, never one mid-flight.
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.recoveryBlocked).toBe(true);
+        },
+        { timeout: 15_000 },
+      );
+      await vi.waitFor(
+        async () => {
+          const status = await authorize(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          );
+          expect(status.body.recoveryBlocked).toBe(false);
+        },
+        { timeout: 15_000 },
+      );
+      // Two passes: the 409-refused adopt leaves nothing to stop (no poll),
+      // the release block's own adopt then meets a dying release (pending);
+      // the next pass repeats both adopts and the release completes —
+      // exactly the affirmative release result the consume depends on.
+      expect(repair.order).toEqual([
+        'acquire',
+        'acquire',
+        'release',
+        'acquire',
+        'release',
+      ]);
+      expect(repair.order).not.toContain('status');
+      expect(repair.order).not.toContain('cancel');
+      const key = {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      };
+      const journal = await LocalJsonlManagedSessionJournalStore.read(
+        path.join(state.root, `${SESSION_ID}.jsonl`),
+        key,
+      );
+      expect(
+        journal.events.some(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === inputId,
+        ),
+      ).toBe(true);
+      const refreshed = await authorize(
+        supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
+      ).send({ operationId: randomUUID(), ...fireBody() });
+      expect(refreshed.status).toBe(202);
+      expect(refreshed.body.run.state).toBe('failed');
+      expect(refreshed.body.run.execution).toBe('outcome_unknown');
+      await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    },
+    45_000,
+  );
 
   it('settles the aftermath over a Broker that reports the wake session released, polling nothing', async () => {
     const inputId = await prewriteAutomationParkedWakeSession();
