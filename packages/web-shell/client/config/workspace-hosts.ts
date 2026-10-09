@@ -8,7 +8,8 @@ import {
 
 export const WorkspaceHostsEnabled = createContext(false);
 const STORAGE_KEY = 'qwen-workspace-hosts';
-const CHANGE_EVENT = 'qwen-workspace-hosts';
+export const WORKSPACE_HOSTS_CHANGE_EVENT = 'qwen-workspace-hosts';
+const CHANGE_EVENT = WORKSPACE_HOSTS_CHANGE_EVENT;
 export interface WorkspaceHost {
   origin: string;
   workspaces: Pick<DaemonWorkspaceCapability, 'id' | 'cwd' | 'displayName'>[];

@@ -463,6 +463,16 @@ interface WebShellSidebarProps {
     sessionId: string,
     workspaceCwd?: string,
   ) => Promise<void> | void;
+  /**
+   * Opens a session listed by a fan-out host group (#13727): the caller
+   * focuses that host in-app and loads the session there. When absent, the
+   * groups fall back to full navigation via `openHostedWorkspace`.
+   */
+  onOpenHostSession?: (
+    origin: string,
+    sessionId: string,
+    workspaceCwd?: string,
+  ) => void;
   onSelectCurrentSession?: () => void;
   onSessionRenameConfirmed?: (
     workspaceCwd: string | undefined,
@@ -1022,6 +1032,7 @@ export function WebShellSidebar({
   onNewSession,
   onNewStandaloneSession,
   onLoadSession,
+  onOpenHostSession,
   onSelectCurrentSession,
   onSessionRenameConfirmed,
   onSessionsDeleted,
@@ -7212,7 +7223,9 @@ export function WebShellSidebar({
                     ))}
                   </div>
                 </div>
-                {!hideProjectHeader && <OtherHostProjects />}
+                {!hideProjectHeader && (
+                  <OtherHostProjects onOpenHostSession={onOpenHostSession} />
+                )}
               </div>
               {!liveView && archivedSection}
             </SidebarSessionSurface>
