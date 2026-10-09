@@ -777,8 +777,10 @@ export class ContentGenerationPipeline {
     /**
      * Reports an end-of-stream flush and returns the response it released, if
      * any. The flush strips through the filter directly, so its verdict has to
-     * be logged here -- `responseId` is absent when the strip consumed the
-     * whole tail, and the event's own field is optional.
+     * be logged here. This route has no converter response to take an id from
+     * -- the flush synthesises its own -- so the event's optional
+     * `response_id` is deliberately left absent rather than borrowed from
+     * another chunk.
      */
     const logFlushedTrailingTag = (
       flushed: ReturnType<typeof flushTrailingThinkingTag>,
