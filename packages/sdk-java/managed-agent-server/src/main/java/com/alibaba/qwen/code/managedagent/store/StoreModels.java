@@ -81,6 +81,14 @@ public final class StoreModels {
             long createdAt, long updatedAt) {
     }
 
+    /**
+     * H4b: a child Session's ancestry (V54). v1 children run at depth 1;
+     * the tree root for a first-level child is the parent Session itself.
+     */
+    public record SessionLineage(String parentSessionId, String rootSessionId,
+            String parentChildRunId, int depth) {
+    }
+
     public enum SessionMutationKind {
         RENAME,
         UNARCHIVE
