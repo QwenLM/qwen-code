@@ -51,7 +51,9 @@ following blank line is complete. Ordinary code fences can commit at internal
 blank lines while preserving code highlighting and continuous line numbers.
 Long responses also avoid splitting a small display-math block when its
 preceding text can be committed first. Oversized blocks still use the existing
-message-size limit.
+message-size limit. When that limit divides a large math block, later code
+blocks retain their fences and continuous line numbers. After a small closed
+math block, available complete source lines are preserved at that limit.
 
 ## Assistant and Tool Images
 

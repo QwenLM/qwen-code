@@ -395,6 +395,20 @@ interface StreamProcessingResult {
   userPromptBlocked: boolean;
 }
 
+interface LlmMessageBuffer {
+  text: string;
+  inMathBlock: boolean;
+  // Only prefixes of a whole-line math delimiter need to survive a raw cut.
+  // null marks an original line whose consumed prefix cannot be a delimiter.
+  linePrefix: string | null;
+}
+
+const emptyLlmMessageBuffer = (): LlmMessageBuffer => ({
+  text: '',
+  inMathBlock: false,
+  linePrefix: '',
+});
+
 const EDIT_TOOL_NAMES = new Set([
   ToolNames.EDIT,
   'replace', // legacy alias, may still arrive from older providers
@@ -1858,13 +1872,13 @@ export const useLlmStream = (
   const handleContentEvent = useCallback(
     (
       eventValue: ContentEvent['value'],
-      currentLlmMessageBuffer: string,
+      currentLlmMessageBuffer: LlmMessageBuffer,
       userMessageTimestamp: number,
       startAsContinuation = false,
-    ): string => {
+    ): LlmMessageBuffer => {
       if (turnCancelledRef.current) {
         // Prevents additional output after a user initiated cancel.
-        return '';
+        return emptyLlmMessageBuffer();
       }
       // Track output chars for real-time token estimation & mark as receiving.
       streamingResponseLengthRef.current += eventValue.length;
@@ -1874,7 +1888,8 @@ export const useLlmStream = (
       // during the pre-cancel flush (their addItem hasn't re-rendered
       // React history by the time AppContainer's guard runs).
       turnSawContentEventRef.current = true;
-      let newLlmMessageBuffer = currentLlmMessageBuffer + eventValue;
+      let newLlmMessageBuffer = currentLlmMessageBuffer.text + eventValue;
+      let mathCarry = currentLlmMessageBuffer;
       const pendingItem = pendingHistoryItemRef.current;
       if (
         (pendingItem?.type === 'gemini' ||
@@ -1882,7 +1897,7 @@ export const useLlmStream = (
         (pendingItem.images?.length || pendingItem.omittedImageCount)
       ) {
         if (newLlmMessageBuffer.trim().length === 0) {
-          return newLlmMessageBuffer;
+          return { ...mathCarry, text: newLlmMessageBuffer };
         }
         stagePendingAssistantItem();
       }
@@ -1891,7 +1906,7 @@ export const useLlmStream = (
         pendingHistoryItemRef.current?.type !== 'gemini_content'
       ) {
         if (newLlmMessageBuffer.trim().length === 0) {
-          return newLlmMessageBuffer;
+          return { ...mathCarry, text: newLlmMessageBuffer };
         }
         if (pendingHistoryItemRef.current) {
           commitItemInOrder(
@@ -1905,6 +1920,7 @@ export const useLlmStream = (
             : { type: 'gemini', text: '', timestamp: Date.now() },
         );
         newLlmMessageBuffer = stripLeadingBlankLines(newLlmMessageBuffer);
+        mathCarry = emptyLlmMessageBuffer();
       }
       // Split large messages for better rendering performance. Ideally,
       // we should maximize the amount of output sent to <Static />.
@@ -1916,27 +1932,31 @@ export const useLlmStream = (
             : startAsContinuation
               ? 'gemini_content'
               : 'gemini';
-      while (newLlmMessageBuffer.length > STREAM_PENDING_ITEM_MAX_CHARS) {
-        const splitPoint = findLastSafeSplitPoint(
-          newLlmMessageBuffer,
-          STREAM_PENDING_ITEM_MAX_CHARS,
-        );
-        let safeSplitPoint =
-          splitPoint > 0 && splitPoint < newLlmMessageBuffer.length
-            ? splitPoint
-            : STREAM_PENDING_ITEM_MAX_CHARS;
-        const blockAt = (target: number) => {
-          let mathStart = -1;
-          let codeFence: string | null = null;
-          let codeStart = -1;
-          for (let offset = 0; offset < target; ) {
-            const end = newLlmMessageBuffer.indexOf('\n', offset);
-            if (end < 0) break;
-            const line = newLlmMessageBuffer
-              .slice(offset, end)
-              .replace(/\r$/, '');
-            // A partly included closing line still belongs to its block.
-            const fence = mathStart < 0 ? CODE_FENCE_RE.exec(line) : null;
+      const blockAt = (target: number) => {
+        let mathStart = mathCarry.inMathBlock ? 0 : -1;
+        let consumedMath = mathCarry.inMathBlock;
+        let linePrefix = mathCarry.linePrefix;
+        let carriedMath = mathCarry.inMathBlock;
+        let codeFence: string | null = null;
+        let codeStart = -1;
+        let firstCodeHandoff = -1;
+        let lastFreeLineEnd = -1;
+        for (let offset = 0; offset < target; ) {
+          const end = newLlmMessageBuffer.indexOf('\n', offset);
+          const prefix = offset === 0 ? mathCarry.linePrefix : '';
+          const line =
+            prefix === null
+              ? null
+              : (
+                  prefix +
+                  newLlmMessageBuffer.slice(offset, end < 0 ? undefined : end)
+                ).replace(/\r$/, '');
+          const wasFree = mathStart < 0 && codeFence === null;
+          if (end >= 0) {
+            // Classification can see an available opener beyond the cut, but
+            // consumed state changes only after its original newline is cut.
+            const fence =
+              mathStart < 0 && line !== null ? CODE_FENCE_RE.exec(line) : null;
             if (codeFence) {
               if (
                 end < target &&
@@ -1948,30 +1968,77 @@ export const useLlmStream = (
                 codeStart = -1;
               }
             } else if (mathStart >= 0) {
-              if (end < target && /^ *\$\$ *$/.test(line)) mathStart = -1;
+              if (end < target && line !== null && /^ *\$\$ *$/.test(line)) {
+                mathStart = -1;
+              }
             } else if (fence) {
               codeFence = fence[1]!;
               codeStart = offset;
-            } else if (/^ *\$\$ *$/.test(line)) {
+              if (carriedMath && offset > 0 && firstCodeHandoff < 0) {
+                firstCodeHandoff = offset;
+              }
+            } else if (line !== null && /^ *\$\$ *$/.test(line)) {
               mathStart = offset;
+              if (offset === 0 && prefix !== '') carriedMath = true;
             }
-            offset = end + 1;
           }
-          return { mathStart, codeStart };
+          if (end < 0 || end >= target) {
+            const partial =
+              prefix === null
+                ? null
+                : prefix + newLlmMessageBuffer.slice(offset, target);
+            linePrefix =
+              partial !== null && /^ *(?:\${1,2} *)?\r?$/.test(partial)
+                ? partial.replace(/ +/g, ' ')
+                : null;
+            break;
+          }
+          consumedMath = mathStart >= 0;
+          linePrefix = '';
+          if (wasFree && mathStart < 0 && codeFence === null) {
+            lastFreeLineEnd = end + 1;
+          }
+          offset = end + 1;
+        }
+        return {
+          mathStart,
+          codeStart,
+          firstCodeHandoff,
+          lastFreeLineEnd,
+          carriedMath,
+          inMathBlock: consumedMath,
+          linePrefix,
         };
+      };
+      while (newLlmMessageBuffer.length > STREAM_PENDING_ITEM_MAX_CHARS) {
+        const splitPoint = findLastSafeSplitPoint(
+          newLlmMessageBuffer,
+          STREAM_PENDING_ITEM_MAX_CHARS,
+        );
+        let safeSplitPoint =
+          splitPoint > 0 && splitPoint < newLlmMessageBuffer.length
+            ? splitPoint
+            : STREAM_PENDING_ITEM_MAX_CHARS;
         let rescueBlock = blockAt(safeSplitPoint);
-        const mathRescue = rescueBlock.mathStart >= 0;
+        const mathRescue =
+          rescueBlock.mathStart >= 0 || rescueBlock.carriedMath;
         if (mathRescue) {
           // A zero-offset opener must still make progress at the hard cap.
-          if (rescueBlock.mathStart === 0) {
+          if (rescueBlock.mathStart === 0 || rescueBlock.carriedMath) {
             rescueBlock = blockAt(STREAM_PENDING_ITEM_MAX_CHARS);
           }
           safeSplitPoint =
-            rescueBlock.mathStart > 0
-              ? rescueBlock.mathStart
-              : rescueBlock.codeStart > 0
-                ? rescueBlock.codeStart
-                : STREAM_PENDING_ITEM_MAX_CHARS;
+            rescueBlock.firstCodeHandoff > 0
+              ? rescueBlock.firstCodeHandoff
+              : rescueBlock.mathStart > 0
+                ? rescueBlock.mathStart
+                : rescueBlock.codeStart > 0
+                  ? rescueBlock.codeStart
+                  : rescueBlock.mathStart < 0 &&
+                      rescueBlock.codeStart < 0 &&
+                      rescueBlock.lastFreeLineEnd > 0
+                    ? rescueBlock.lastFreeLineEnd
+                    : STREAM_PENDING_ITEM_MAX_CHARS;
         }
 
         // This indicates that we need to split up this LLM message.
@@ -1990,6 +2057,15 @@ export const useLlmStream = (
               after: newLlmMessageBuffer.slice(safeSplitPoint),
             }
           : splitFencedMarkdown(newLlmMessageBuffer, safeSplitPoint);
+        const consumed = mathRescue ? blockAt(safeSplitPoint) : rescueBlock;
+        mathCarry =
+          afterText === newLlmMessageBuffer.slice(safeSplitPoint)
+            ? {
+                text: '',
+                inMathBlock: consumed.inMathBlock,
+                linePrefix: consumed.linePrefix,
+              }
+            : emptyLlmMessageBuffer();
         commitItemInOrder(
           {
             type: nextPendingType,
@@ -2065,16 +2141,24 @@ export const useLlmStream = (
         let activeCodeFence: string | null = null;
         let activeCodeFenceStart = -1;
         let activeCodeLanguage: string | null = null;
-        let inMathBlock = false;
+        let inMathBlock = mathCarry.inMathBlock;
+        let carriedMath = inMathBlock;
+        let firstCodeHandoff = -1;
         let allowMathExit = false;
         let capAllowsCodeSplit = false;
         // The last split entry has no terminating newline, even when empty.
         for (let k = 0; k < bufferLines.length - 1; k++) {
           const sourceLine = bufferLines[k]!;
-          const line = sourceLine.replace(/\r$/, '');
+          const line =
+            k === 0 && mathCarry.linePrefix === null
+              ? null
+              : ((k === 0 ? mathCarry.linePrefix! : '') + sourceLine).replace(
+                  /\r$/,
+                  '',
+                );
           offset += sourceLine.length + 1;
           if (activeCodeFence) {
-            const fence = CODE_FENCE_RE.exec(line);
+            const fence = line === null ? null : CODE_FENCE_RE.exec(line);
             if (
               fence &&
               fence[1]!.startsWith(activeCodeFence[0]!) &&
@@ -2083,15 +2167,23 @@ export const useLlmStream = (
               activeCodeFence = null;
             }
           } else if (inMathBlock) {
-            if (/^ *\$\$ *$/.test(line)) inMathBlock = false;
+            if (line !== null && /^ *\$\$ *$/.test(line)) inMathBlock = false;
           } else {
-            const fence = CODE_FENCE_RE.exec(line);
+            const fence = line === null ? null : CODE_FENCE_RE.exec(line);
             if (fence) {
               activeCodeFence = fence[1]!;
               activeCodeFenceStart = offset - sourceLine.length - 1;
               activeCodeLanguage = parseCodeFenceInfo(fence[2]).lang;
-            } else if (/^ *\$\$ *$/.test(line)) {
+              if (
+                carriedMath &&
+                activeCodeFenceStart > 0 &&
+                firstCodeHandoff < 0
+              ) {
+                firstCodeHandoff = activeCodeFenceStart;
+              }
+            } else if (line !== null && /^ *\$\$ *$/.test(line)) {
               inMathBlock = true;
+              if (k === 0 && mathCarry.linePrefix !== '') carriedMath = true;
             }
           }
           if (k + 1 === keptLines || (keptLines === 0 && k === 0)) {
@@ -2101,7 +2193,7 @@ export const useLlmStream = (
             allowMathExit = inMathBlock;
           }
           const allowBlockExit = allowTableExit || allowMathExit;
-          if (!activeCodeFence && !inMathBlock && line.trim() === '') {
+          if (!activeCodeFence && !inMathBlock && line?.trim() === '') {
             if (k <= keptLines) {
               boundaryIndex = offset;
             } else if (boundaryIndex < 0 && allowBlockExit) {
@@ -2111,7 +2203,7 @@ export const useLlmStream = (
           } else if (
             activeCodeFence &&
             activeCodeLanguage?.toLowerCase() !== 'mermaid' &&
-            line.trim() === '' &&
+            line?.trim() === '' &&
             k <= keptLines
           ) {
             fencedBoundaryIndex = offset;
@@ -2120,7 +2212,13 @@ export const useLlmStream = (
           if (k >= keptLines && (boundaryIndex > 0 || !allowBlockExit)) break;
         }
         let target: number;
-        if (boundaryIndex < 0) {
+        const mathHandoff =
+          carriedMath &&
+          firstCodeHandoff > 0 &&
+          (boundaryIndex < 0 || boundaryIndex > firstCodeHandoff);
+        if (mathHandoff) {
+          target = firstCodeHandoff;
+        } else if (boundaryIndex < 0) {
           // No blank-line boundary at/before the kept prefix. A fenced code
           // block taller than the viewport never provides one mid-block, so the
           // whole block would stay pending — frozen on its head — and only land
@@ -2149,7 +2247,7 @@ export const useLlmStream = (
           target = boundaryIndex;
         }
         const splitPoint =
-          boundaryIndex < 0
+          boundaryIndex < 0 && !mathHandoff
             ? findLastSafeSplitPoint(newLlmMessageBuffer, target)
             : target;
         if (splitPoint <= 0 || splitPoint >= newLlmMessageBuffer.length) {
@@ -2158,6 +2256,7 @@ export const useLlmStream = (
         // Legacy helpers can see literal fences in earlier display math.
         if (
           boundaryIndex < 0 &&
+          !mathHandoff &&
           !capAllowsCodeSplit &&
           splitPoint < fencedBoundaryStart
         ) {
@@ -2166,7 +2265,7 @@ export const useLlmStream = (
         // Repair fences when the split lands inside a code block so the tail
         // does not render as prose (see splitFencedMarkdown).
         const { before: beforeText, after: afterText } =
-          boundaryIndex < 0
+          boundaryIndex < 0 && !mathHandoff
             ? splitFencedMarkdown(newLlmMessageBuffer, splitPoint)
             : {
                 before: newLlmMessageBuffer.slice(0, splitPoint),
@@ -2181,6 +2280,7 @@ export const useLlmStream = (
         );
         nextPendingType = 'gemini_content';
         newLlmMessageBuffer = afterText;
+        mathCarry = emptyLlmMessageBuffer();
       }
       // Update the existing message with accumulated content.
       setPendingHistoryItem((item) => {
@@ -2195,7 +2295,7 @@ export const useLlmStream = (
         }
         return base;
       });
-      return newLlmMessageBuffer;
+      return { ...mathCarry, text: newLlmMessageBuffer };
     },
     [
       commitItemInOrder,
@@ -2734,7 +2834,7 @@ export const useLlmStream = (
       trackInteractionOwner = true,
       toolContinuationOwner?: ToolContinuationOwner,
     ): Promise<StreamProcessingResult> => {
-      let llmMessageBuffer = '';
+      let llmMessageBuffer = emptyLlmMessageBuffer();
       let thoughtBuffer = '';
       let scheduledToolContinuation = false;
       let userPromptBlocked = false;
@@ -2823,7 +2923,7 @@ export const useLlmStream = (
                 ...pendingItem,
                 omittedImageCount: (pendingItem.omittedImageCount ?? 0) + 1,
               });
-              llmMessageBuffer = '';
+              llmMessageBuffer = emptyLlmMessageBuffer();
               assistantOutputStarted = true;
               continue;
             }
@@ -2837,7 +2937,7 @@ export const useLlmStream = (
                 setPendingHistoryItem(null);
               }
             }
-            llmMessageBuffer = '';
+            llmMessageBuffer = emptyLlmMessageBuffer();
             if (shouldDisplayImage) {
               setPendingHistoryItem({
                 type: assistantOutputStarted ? 'gemini_content' : 'gemini',
@@ -2996,7 +3096,7 @@ export const useLlmStream = (
             case ServerLlmEventType.ChatCompressed:
               flushBufferedStreamEvents();
               handleChatCompressionEvent(event.value, userMessageTimestamp);
-              llmMessageBuffer = '';
+              llmMessageBuffer = emptyLlmMessageBuffer();
               assistantOutputStarted = false;
               break;
             case ServerLlmEventType.ToolCallConfirmation:
@@ -3013,7 +3113,7 @@ export const useLlmStream = (
                 setPendingHistoryItem(null);
               }
               handleMaxSessionTurnsEvent();
-              llmMessageBuffer = '';
+              llmMessageBuffer = emptyLlmMessageBuffer();
               assistantOutputStarted = false;
               break;
             case ServerLlmEventType.SessionTokenLimitExceeded:
@@ -3026,7 +3126,7 @@ export const useLlmStream = (
                 setPendingHistoryItem(null);
               }
               handleSessionTokenLimitExceededEvent(event.value);
-              llmMessageBuffer = '';
+              llmMessageBuffer = emptyLlmMessageBuffer();
               assistantOutputStarted = false;
               break;
             case ServerLlmEventType.Finished:
@@ -3049,7 +3149,7 @@ export const useLlmStream = (
                 );
                 setPendingHistoryItem(null);
               }
-              llmMessageBuffer = '';
+              llmMessageBuffer = emptyLlmMessageBuffer();
               thoughtBuffer = '';
               assistantOutputStarted = false;
               assistantInlineImageCount = 0;
@@ -3063,7 +3163,7 @@ export const useLlmStream = (
               flushBufferedStreamEvents();
               handleCitationEvent(event.value, userMessageTimestamp);
               if (showCitations(settings)) {
-                llmMessageBuffer = '';
+                llmMessageBuffer = emptyLlmMessageBuffer();
                 assistantOutputStarted = false;
               }
               break;
@@ -3090,7 +3190,7 @@ export const useLlmStream = (
                 commitPendingThought(userMessageTimestamp);
                 thoughtBuffer = '';
                 setThought(null);
-                llmMessageBuffer = '';
+                llmMessageBuffer = emptyLlmMessageBuffer();
                 assistantOutputStarted = false;
                 assistantInlineImageCount = 0;
               } else {
@@ -3123,7 +3223,7 @@ export const useLlmStream = (
               commitPendingThought(userMessageTimestamp);
               thoughtBuffer = '';
               setThought(null);
-              llmMessageBuffer = '';
+              llmMessageBuffer = emptyLlmMessageBuffer();
               assistantOutputStarted = false;
               assistantInlineImageCount = 0;
               toolCallRequests.length = 0;
@@ -3158,7 +3258,7 @@ export const useLlmStream = (
                 } as HistoryItemWithoutId,
                 userMessageTimestamp,
               );
-              llmMessageBuffer = '';
+              llmMessageBuffer = emptyLlmMessageBuffer();
               assistantOutputStarted = false;
               break;
             case ServerLlmEventType.GoalSettlementFailed:
@@ -3174,7 +3274,7 @@ export const useLlmStream = (
                 { type: 'warning', text: event.value },
                 userMessageTimestamp,
               );
-              llmMessageBuffer = '';
+              llmMessageBuffer = emptyLlmMessageBuffer();
               assistantOutputStarted = false;
               break;
             case ServerLlmEventType.UserPromptSubmitBlocked:
@@ -3184,13 +3284,13 @@ export const useLlmStream = (
                 event.value,
                 userMessageTimestamp,
               );
-              llmMessageBuffer = '';
+              llmMessageBuffer = emptyLlmMessageBuffer();
               assistantOutputStarted = false;
               break;
             case ServerLlmEventType.StopHookLoop:
               flushBufferedStreamEvents();
               handleStopHookLoopEvent(event.value, userMessageTimestamp);
-              llmMessageBuffer = '';
+              llmMessageBuffer = emptyLlmMessageBuffer();
               assistantOutputStarted = false;
               break;
             case ServerLlmEventType.GoalState:
@@ -3211,7 +3311,7 @@ export const useLlmStream = (
                   },
                   userMessageTimestamp,
                 );
-                llmMessageBuffer = '';
+                llmMessageBuffer = emptyLlmMessageBuffer();
                 assistantOutputStarted = false;
               }
               break;
