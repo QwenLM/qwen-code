@@ -27,6 +27,11 @@ const cacheProducerWorkflow = readFileSync(
   '.github/workflows/pnpm-store.yml',
   'utf8',
 );
+const mavenRepoProducerWorkflow = readFileSync(
+  '.github/workflows/verify-maven-repo.yml',
+  'utf8',
+);
+const sdkJavaWorkflow = readFileSync('.github/workflows/sdk-java.yml', 'utf8');
 const prSkill = readFileSync(
   '.qwen/skills/triage/references/pr-workflow.md',
   'utf8',
@@ -3097,13 +3102,13 @@ describe('qwen-triage verify hardening', () => {
   it('strips GitHub command files from every node-run verify command', () => {
     // Bound to the commands that run as node before the agent: npm ci and
     // npm run build in the prepare step, the evidence browser download,
-    // and the flake gate's four pre-sample git invocations — the .git
+    // the flake gate's four pre-sample git invocations — the .git
     // sanitize, git reset --hard, git clean -ffd, and the PINNED_OID
-    // rev-parse (git filters run from PR-owned .git metadata). The slice
-    // stops at the agent step, whose own `runuser` launches qwen under
-    // `env -i` and needs no per-variable stripping; the gate's
-    // per-sample invocation is a line-continuation shape this
-    // single-line match does not fold. Covering all seven by
+    // rev-parse (git filters run from PR-owned .git metadata) — and the
+    // Java sibling install. The slice stops at the agent step, whose own
+    // `runuser` launches qwen under `env -i` and needs no per-variable
+    // stripping; the gate's per-sample invocation is a line-continuation
+    // shape this single-line match does not fold. Covering all eight by
     // construction (not enumeration) is what catches a future node-run
     // command added without the strip.
     const prepare = verifyJob.slice(
@@ -3111,7 +3116,7 @@ describe('qwen-triage verify hardening', () => {
       verifyJob.indexOf('Run verification agent'),
     );
     const commands = prepare.match(/runuser -u node -- env[\s\S]*?\n/g) ?? [];
-    expect(commands.length).toBe(7);
+    expect(commands.length).toBe(8);
     expect(step('Run verification agent')).toContain(
       'runuser -u node -- env -i',
     );
@@ -7195,6 +7200,232 @@ describe('qwen-triage pnpm store producer', () => {
       );
       expect(job(jobName)).toContain("image: 'node:22-bookworm'");
     }
+  });
+});
+
+describe('qwen-triage verify Java toolchain', () => {
+  function envValue(text, name) {
+    return text.match(new RegExp(`^\\s+${name}:\\s*'([^']*)'`, 'm'))?.[1] ?? '';
+  }
+
+  function yamlScalar(raw) {
+    if (!raw) return '';
+    if (raw.startsWith("'")) return raw.slice(1, -1).replace(/''/g, "'");
+    return raw.startsWith('"') ? raw.slice(1, -1) : raw;
+  }
+
+  function moduleCoordinates() {
+    return readdirSync('packages/sdk-java', { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join('packages/sdk-java', entry.name, 'pom.xml'))
+      .filter((pom) => existsSync(pom))
+      .map((pom) => {
+        const xml = readFileSync(pom, 'utf8').replace(
+          /<parent>[\s\S]*?<\/parent>/g,
+          '',
+        );
+        return {
+          groupId: xml.match(/<groupId>([^<]+)<\/groupId>/)?.[1],
+          artifactId: xml.match(/<artifactId>([^<]+)<\/artifactId>/)?.[1],
+        };
+      });
+  }
+
+  it('sets java from the full paginated file list, not a pipe', () => {
+    const resolve = stepIn('verify', 'Resolve PR and snapshot metadata');
+    const javaLine = resolve
+      .split('\n')
+      .find((line) => line.includes("grep -qE '^packages/sdk-java/'"));
+    expect(javaLine).toContain("grep -qE '^packages/sdk-java/' <<<");
+    expect(javaLine).not.toContain('|');
+    expect(resolve).toContain('echo "java=true" >> "$GITHUB_OUTPUT"');
+    expect(job('tmux-testing')).not.toContain('Install Java toolchain');
+  });
+
+  it('installs the toolchain as root before checkout and only writes ready after both checksums', () => {
+    const verify = job('verify');
+    const toolchain = stepIn('verify', 'Install Java toolchain');
+    expect(verify.indexOf("'Install Java toolchain'")).toBeLessThan(
+      verify.indexOf("'Checkout PR merge ref'"),
+    );
+    expect(toolchain).toContain(
+      "steps.pr.outputs.decision == 'run' && steps.pr.outputs.java == 'true'",
+    );
+    expect(toolchain).toContain('prefix=/opt/verify-java');
+    const readyAt = toolchain.indexOf('"$prefix/ready"');
+    expect(toolchain.indexOf('sha256sum --check --status')).toBeGreaterThan(-1);
+    expect(toolchain.indexOf('sha256sum --check --status')).toBeLessThan(
+      readyAt,
+    );
+    expect(toolchain.indexOf('sha512sum --check --status')).toBeLessThan(
+      readyAt,
+    );
+    expect(toolchain.indexOf('"$prefix/jdk/bin/java" -version')).toBeLessThan(
+      readyAt,
+    );
+    expect(toolchain.indexOf('"$prefix/maven/bin/mvn" -version')).toBeLessThan(
+      readyAt,
+    );
+    // mvn refuses to start unless JAVA_HOME points at the JDK just unpacked.
+    const javaHomeAt = toolchain.indexOf('JAVA_HOME="$prefix/jdk"');
+    expect(javaHomeAt).toBeGreaterThan(-1);
+    expect(javaHomeAt).toBeLessThan(
+      toolchain.indexOf('"$prefix/maven/bin/mvn" -version'),
+    );
+    expect(
+      mavenRepoProducerWorkflow.indexOf('JAVA_HOME="$prefix/jdk"'),
+    ).toBeLessThan(
+      mavenRepoProducerWorkflow.indexOf('"$prefix/maven/bin/mvn" -version'),
+    );
+    expect(toolchain).toContain('::warning::');
+    expect(toolchain).not.toMatch(/\bexit 1\b/);
+  });
+
+  it('shares the Maven and Temurin pins with the producer and sdk-java.yml', () => {
+    const consumer = stepIn('verify', 'Install Java toolchain');
+    for (const name of ['MAVEN_VERSION', 'MAVEN_SHA512']) {
+      const pin = envValue(consumer, name);
+      expect(pin).toBeTruthy();
+      expect(envValue(mavenRepoProducerWorkflow, name)).toBe(pin);
+      expect(envValue(sdkJavaWorkflow, name)).toBe(pin);
+    }
+    for (const name of ['TEMURIN_VERSION', 'TEMURIN_SHA256', 'TEMURIN_URL']) {
+      const pin = envValue(consumer, name);
+      expect(pin).toBeTruthy();
+      expect(envValue(mavenRepoProducerWorkflow, name)).toBe(pin);
+    }
+  });
+
+  it('restores the Maven repo read-only before PR code runs', () => {
+    const verify = job('verify');
+    const clearAt = verify.indexOf("'Clear stale verify Maven repo'");
+    const restoreAt = verify.indexOf("'Restore verify Maven repo'");
+    const buildAt = verify.indexOf("'Install and build PR app'");
+    expect(clearAt).toBeGreaterThan(-1);
+    expect(clearAt).toBeLessThan(restoreAt);
+    expect(restoreAt).toBeLessThan(buildAt);
+    const restore = stepIn('verify', 'Restore verify Maven repo');
+    expect(restore).toContain('actions/cache/restore@');
+    expect(restore).toContain("id: 'maven-repo'");
+    expect(restore).toContain('continue-on-error: true');
+    expect(restore).not.toMatch(/uses:\s*'actions\/cache@/);
+    expect(verify).not.toContain('actions/cache/save@');
+
+    const yamlScalarOf = (text, field) =>
+      yamlScalar(text.match(new RegExp(`${field}:\\s*('[^']+'|"[^"]+")`))?.[1]);
+    expect(yamlScalarOf(mavenRepoProducerWorkflow, 'path')).toBe(
+      yamlScalarOf(restore, 'path'),
+    );
+    expect(yamlScalarOf(mavenRepoProducerWorkflow, 'key')).toBe(
+      yamlScalarOf(restore, 'key'),
+    );
+    expect(mavenRepoProducerWorkflow).toContain('actions/cache/save@');
+    expect(mavenRepoProducerWorkflow).toContain(
+      "runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']",
+    );
+    expect(mavenRepoProducerWorkflow).toContain("image: 'node:22-bookworm'");
+    expect(mavenRepoProducerWorkflow).toContain(
+      "options: '--init --user node'",
+    );
+    expect(verify).toContain("image: 'node:22-bookworm'");
+    expect(mavenRepoProducerWorkflow).toMatch(/branches:\s*\['main'\]/);
+    expect(mavenRepoProducerWorkflow).toContain('workflow_dispatch:');
+    expect(mavenRepoProducerWorkflow).toContain(
+      '0057852bfaa89a56745cba8c7296529d2fc39830',
+    );
+    expect(restore).toContain('0057852bfaa89a56745cba8c7296529d2fc39830');
+  });
+
+  it('strips exactly the artifact ids published by packages/sdk-java', () => {
+    const coords = moduleCoordinates();
+    expect(coords.length).toBeGreaterThan(0);
+    const strip = mavenRepoProducerWorkflow.slice(
+      mavenRepoProducerWorkflow.indexOf('# verify-maven-repo-strip-begin'),
+      mavenRepoProducerWorkflow.indexOf('# verify-maven-repo-strip-end'),
+    );
+    const listed = strip
+      .match(/STRIP_ARTIFACTS=\(([^)]*)\)/)?.[1]
+      .split(/\s+/)
+      .filter(Boolean);
+    expect(listed?.slice().sort()).toEqual(
+      coords.map((coord) => coord.artifactId).sort(),
+    );
+    for (const coord of coords) {
+      expect(coord.groupId).toBe('com.alibaba');
+    }
+    expect(strip).toContain('${repo}/com/alibaba/${artifact}');
+    const qwencode = mavenRepoProducerWorkflow.indexOf(
+      'packages/sdk-java/qwencode/pom.xml',
+    );
+    const broker = mavenRepoProducerWorkflow.indexOf(
+      'packages/sdk-java/runtime-broker/pom.xml',
+    );
+    const server = mavenRepoProducerWorkflow.indexOf(
+      'packages/sdk-java/managed-agent-server/pom.xml',
+    );
+    const client = mavenRepoProducerWorkflow.indexOf(
+      'packages/sdk-java/client/pom.xml',
+    );
+    expect(qwencode).toBeLessThan(broker);
+    expect(broker).toBeLessThan(server);
+    expect(server).toBeLessThan(client);
+    expect(
+      mavenRepoProducerWorkflow.indexOf('# verify-maven-repo-strip-begin'),
+    ).toBeGreaterThan(client);
+  });
+
+  it('installs sibling modules as node, capped, without failing the job', () => {
+    const verify = job('verify');
+    const modules = stepIn('verify', 'Install Java modules');
+    expect(
+      verify.indexOf("'Flakiness gate: re-run changed test files'"),
+    ).toBeLessThan(verify.indexOf("'Install Java modules'"));
+    expect(verify.indexOf("'Install Java modules'")).toBeLessThan(
+      verify.indexOf("'Install evidence browser'"),
+    );
+    expect(modules).toContain('runuser -u node');
+    expect(modules).toContain('timeout -k 30 300');
+    expect(modules).toContain('-u ACTIONS_RUNTIME_TOKEN');
+    expect(modules).toContain('-u GITHUB_TOKEN');
+    expect(modules).toContain('-Dgpg.skip=true');
+    expect(modules).toContain('-Dspotbugs.skip=true');
+    expect(modules).toContain('java-prepare.log');
+    expect(modules).toContain('steps.maven-repo.outputs.cache-hit');
+    expect(modules).toContain("GITHUB_TOKEN: ''");
+    expect(modules).not.toMatch(/\bexit 1\b/);
+    expect(modules).toContain("steps.prepare.outputs.verdict == ''");
+  });
+
+  it('injects the Java environment only when the ready marker exists', () => {
+    const runStep = stepIn('verify', 'Run verification agent');
+    const initialPath = runStep.indexOf('"PATH=$PATH"');
+    const guard = runStep.indexOf('if [ -f /opt/verify-java/ready ]');
+    const flag = runStep.indexOf('QWEN_VERIFY_JAVA=1');
+    expect(initialPath).toBeGreaterThan(-1);
+    expect(guard).toBeGreaterThan(initialPath);
+    expect(flag).toBeGreaterThan(guard);
+    const block = runStep.slice(guard, flag + 24);
+    expect(block).toContain('then');
+    expect(block).toContain('JAVA_HOME=/opt/verify-java/jdk');
+    expect(block).toContain(
+      'MAVEN_ARGS=-Dmaven.repo.local=${RUNNER_TEMP}/verify-maven-repo',
+    );
+    expect(block).toContain(
+      'PATH=/opt/verify-java/jdk/bin:/opt/verify-java/maven/bin:${PATH}',
+    );
+    expect(stepIn('tmux-testing', 'Run tmux real-user testing')).not.toContain(
+      'QWEN_VERIFY_JAVA',
+    );
+    expect(verifySkill).toContain('QWEN_VERIFY_JAVA=1');
+    expect(verifySkill).toContain('java-prepare.log');
+    expect(verifySkill).toContain('not SNAPSHOT');
+    expect(verifySkill).not.toContain('ships no JDK');
+  });
+
+  it('keeps ten minutes of headroom above the java-inclusive worst case', () => {
+    const verify = job('verify');
+    expect(verify).toContain('210 leaves 10m of headroom');
+    expect(verify.match(/^ {4}timeout-minutes: (\d+)/m)?.[1]).toBe('210');
   });
 });
 
