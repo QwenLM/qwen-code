@@ -839,11 +839,14 @@ class RuntimeBrokerHttpServerTest {
         InMemoryToolExecutionRepository inner = new InMemoryToolExecutionRepository(Clock.systemUTC());
         AtomicBoolean failing = new AtomicBoolean(true);
         AtomicReference<String> failingMethod = new AtomicReference<>("findByIdempotencyKey");
+        List<String> intercepted = java.util.Collections.synchronizedList(
+                new java.util.ArrayList<>());
         ToolExecutionRepository gate = (ToolExecutionRepository) Proxy.newProxyInstance(
                 RuntimeBrokerHttpServerTest.class.getClassLoader(),
                 new Class<?>[] { ToolExecutionRepository.class },
                 (proxy, method, args) -> {
                     if (failing.get() && failingMethod.get().equals(method.getName())) {
+                        intercepted.add(method.getName());
                         throw new IllegalStateException("Runtime Broker database operation failed");
                     }
                     return method.invoke(inner, args);
@@ -862,16 +865,21 @@ class RuntimeBrokerHttpServerTest {
             var errorBody = JSON.parseObject(response.body());
             assertEquals("runtime_broker_store_unavailable", errorBody.getString("code"));
             assertTrue(errorBody.getBooleanValue("retryable"));
+            // The outage wrote nothing: no reservation survives a failed prepare.
+            assertNull(inner.findByIdempotencyKey("key"));
             // The retry is safe: the same idempotency key lands once the store answers again.
             failing.set(false);
             Map<String, Object> retryBody = new HashMap<>(body);
             retryBody.put("requestId", "retry");
             HttpResponse<String> retried = fixture.post("/executions:prepare", retryBody);
             assertEquals(200, retried.statusCode(), retried.body());
-            // The read route maps the same outage class the same way.
+            String executionCallId = JSON.parseObject(retried.body()).getString("executionCallId");
+            ToolExecutionRecord landed = inner.findByIdempotencyKey("key");
+            assertEquals(executionCallId, landed.getExecutionCallId());
+            // Every route that reads the execution store maps the same outage
+            // class the same way: read, start (both variants), and cancel.
             failingMethod.set("findByExecutionCallId");
             failing.set(true);
-            String executionCallId = JSON.parseObject(retried.body()).getString("executionCallId");
             HttpRequest read = HttpRequest.newBuilder(fixture.uri("/executions/" + executionCallId
                             + "?requestId=read&harnessSessionId=harness&runtimeSessionId=runtime"))
                     .header("Authorization", "Bearer secret").GET().build();
@@ -880,6 +888,33 @@ class RuntimeBrokerHttpServerTest {
             var readError = JSON.parseObject(readResponse.body());
             assertEquals("runtime_broker_store_unavailable", readError.getString("code"));
             assertTrue(readError.getBooleanValue("retryable"));
+            for (Map<String, Object> startBody : List.of(
+                    Map.of("protocolVersion", 1, "requestId", "start",
+                            "harnessSessionId", "harness", "runtimeSessionId", "runtime"),
+                    Map.of("protocolVersion", 1, "requestId", "start-payload",
+                            "harnessSessionId", "harness", "runtimeSessionId", "runtime",
+                            "payloadJson", "{\"toolName\":\"write_file\",\"input\":{}}"))) {
+                HttpResponse<String> started = fixture.post(
+                        "/executions/" + executionCallId + ":start", startBody);
+                assertEquals(503, started.statusCode(), started.body());
+                var startError = JSON.parseObject(started.body());
+                assertEquals("runtime_broker_store_unavailable", startError.getString("code"));
+                assertTrue(startError.getBooleanValue("retryable"));
+            }
+            HttpResponse<String> cancelled = fixture.post(
+                    "/executions/" + executionCallId + ":cancel", Map.of(
+                            "protocolVersion", 1, "requestId", "cancel",
+                            "harnessSessionId", "harness", "runtimeSessionId", "runtime"));
+            assertEquals(503, cancelled.statusCode(), cancelled.body());
+            var cancelError = JSON.parseObject(cancelled.body());
+            assertEquals("runtime_broker_store_unavailable", cancelError.getString("code"));
+            assertTrue(cancelError.getBooleanValue("retryable"));
+            // Nothing landed or changed while the store was failing, and the
+            // gate intercepted only the intended call on each route.
+            assertSame(landed, inner.findByExecutionCallId(executionCallId));
+            assertEquals(List.of("findByIdempotencyKey", "findByExecutionCallId",
+                    "findByExecutionCallId", "findByExecutionCallId", "findByExecutionCallId"),
+                    intercepted);
         }
     }
 

@@ -853,7 +853,7 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         String executionId = BrokerValues.requireId(executionCallId,
                 "executionCallId");
-        return safeStage(() -> {
+        return mapFailure(safeStage(() -> {
             OwnedExecution owned = requireOwnership(harnessSessionId,
                     runtimeSessionId, executionId);
             ToolExecutionRecord stored = owned.record();
@@ -978,7 +978,8 @@ public final class RuntimeBrokerService implements AutoCloseable {
                                 });
                     }),
                     harnessSessionId, runtimeSessionId, executionId);
-        });
+        }), "runtime_broker_store_unavailable",
+                "Managed Runtime execution store is unavailable.");
     }
 
     private static boolean isPreparedProviderCancellation(ToolExecutionRecord record) {
