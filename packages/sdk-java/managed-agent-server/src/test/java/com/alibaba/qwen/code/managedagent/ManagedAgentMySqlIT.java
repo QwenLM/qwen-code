@@ -4,8 +4,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.AgentDefinitionRequest;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.service.ManagedAgentDefinitionService;
+import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection.TaskProjection;
@@ -45,10 +49,12 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import java.util.stream.IntStream;
@@ -60,13 +66,20 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ManagedAgentMySqlIT {
+    private static final AgentDefinitionRequest DEFINITION =
+            new AgentDefinitionRequest(Map.of("id", "test-model"),
+                    "Review the change.", List.of(Map.of("name", "read_file")),
+                    null, null, Map.of("mode", "default"), null, null);
+
     @Test
     @Order(1)
     void upgradesAndExercisesStoresOnMySql() throws IOException {
@@ -1263,6 +1276,120 @@ class ManagedAgentMySqlIT {
                                 .contains((String) lookup[0]);
                     });
         }
+    }
+
+    @Test
+    @Order(13)
+    void isolatesDefinitionTenantsByCaseOnMySql() {
+        var source = dataSource();
+        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
+        var store = new ManagedAgentDefinitionStore(new JdbcTemplate(source));
+        var service = new ManagedAgentDefinitionService(store, new RequestDigests(), new ObjectMapper());
+        var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
+        String tenant = "mysql-definition-" + UUID.randomUUID();
+        String agentId = inTransaction(transactions, () -> service.create(tenant, "create", DEFINITION))
+                .definition().id();
+        String other = tenant.toUpperCase(Locale.ROOT);
+
+        assertThat(store.latest(other, agentId)).isEmpty();
+        assertThat(store.find(other, agentId, 1)).isEmpty();
+        assertThatThrownBy(() -> inTransaction(transactions,
+                () -> service.update(other, agentId, "update", DEFINITION)))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.NOT_FOUND);
+                    assertThat(error.getCode()).isEqualTo("agent_not_found");
+                });
+        assertThat(store.latest(tenant, agentId)).isPresent();
+        var otherCreated = inTransaction(transactions, () -> service.create(other, "create", DEFINITION));
+        assertThat(otherCreated.replayed()).isFalse();
+        assertThat(otherCreated.definition().id()).isNotEqualTo(agentId);
+        var replay = inTransaction(transactions, () -> service.create(tenant, "create", DEFINITION));
+        var otherReplay = inTransaction(transactions, () -> service.create(other, "create", DEFINITION));
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.definition().id()).isEqualTo(agentId);
+        assertThat(otherReplay.replayed()).isTrue();
+        assertThat(otherReplay.definition()).isEqualTo(otherCreated.definition());
+    }
+
+    @Test
+    @Order(13)
+    void keepsDefinitionCommandKeysCaseSensitiveOnMySql() {
+        var source = dataSource();
+        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
+        var store = new ManagedAgentDefinitionStore(new JdbcTemplate(source));
+        var service = new ManagedAgentDefinitionService(store, new RequestDigests(), new ObjectMapper());
+        var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
+        String tenant = "mysql-definition-key-" + UUID.randomUUID();
+        var first = inTransaction(transactions, () -> service.create(tenant, "Key", DEFINITION));
+        var second = inTransaction(transactions, () -> service.create(tenant, "key", DEFINITION));
+
+        assertThat(first.replayed()).isFalse();
+        assertThat(second.replayed()).isFalse();
+        assertThat(second.definition().id()).isNotEqualTo(first.definition().id());
+        var replayFirst = inTransaction(transactions, () -> service.create(tenant, "Key", DEFINITION));
+        var replaySecond = inTransaction(transactions, () -> service.create(tenant, "key", DEFINITION));
+        assertThat(replayFirst.replayed()).isTrue();
+        assertThat(replayFirst.definition()).isEqualTo(first.definition());
+        assertThat(replaySecond.replayed()).isTrue();
+        assertThat(replaySecond.definition()).isEqualTo(second.definition());
+    }
+
+    @Test
+    @Order(13)
+    void reportsDefinitionRevisionConflictsAndLeavesTheKeyRetryableOnMySql() {
+        var source = dataSource();
+        Flyway.configure().dataSource(source).locations("classpath:db/migration").load().migrate();
+        var jdbc = new JdbcTemplate(source);
+        var store = new ManagedAgentDefinitionStore(jdbc);
+        var service = new ManagedAgentDefinitionService(store, new RequestDigests(), new ObjectMapper());
+        var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
+        String tenant = "mysql-definition-race-" + UUID.randomUUID();
+        String agentId = inTransaction(transactions, () -> service.create(tenant, "create", DEFINITION))
+                .definition().id();
+        var winnerRequest = new AgentDefinitionRequest(DEFINITION.model(), "Winner",
+                DEFINITION.tools(), null, null, DEFINITION.permissionPolicy(), null, null);
+        var loserRequest = new AgentDefinitionRequest(DEFINITION.model(), "Loser",
+                DEFINITION.tools(), null, null, DEFINITION.permissionPolicy(), null, null);
+        var winnerSource = dataSource();
+        var winnerService = new ManagedAgentDefinitionService(
+                new ManagedAgentDefinitionStore(new JdbcTemplate(winnerSource)),
+                new RequestDigests(), new ObjectMapper());
+        var winnerTransactions = new TransactionTemplate(new DataSourceTransactionManager(winnerSource));
+        var raced = new AtomicBoolean();
+        var racingJdbc = new JdbcTemplate(source) {
+            @Override
+            public <T> List<T> query(String sql, RowMapper<T> rowMapper, Object... args) {
+                List<T> result = super.query(sql, rowMapper, args);
+                if (sql.contains("ORDER BY revision DESC LIMIT 1") && raced.compareAndSet(false, true)) {
+                    // A separate connection commits after this transaction read revision 1.
+                    inTransaction(winnerTransactions,
+                            () -> winnerService.update(tenant, agentId, "winner", winnerRequest));
+                }
+                return result;
+            }
+        };
+        var racingService = new ManagedAgentDefinitionService(new ManagedAgentDefinitionStore(racingJdbc),
+                new RequestDigests(), new ObjectMapper());
+
+        assertThatThrownBy(() -> inTransaction(transactions,
+                () -> racingService.update(tenant, agentId, "loser", loserRequest)))
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                    assertThat(error.getCode()).isEqualTo("agent_revision_conflict");
+                });
+        assertThat(raced).isTrue();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_definition"
+                + " WHERE tenant_id = ? AND agent_id = ?", Integer.class, tenant, agentId)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_definition_command"
+                + " WHERE tenant_id = ? AND idempotency_key = 'loser'", Integer.class, tenant)).isZero();
+
+        var retry = inTransaction(transactions,
+                () -> service.update(tenant, agentId, "loser", loserRequest));
+        assertThat(retry.replayed()).isFalse();
+        assertThat(retry.definition().revision()).isEqualTo("3");
+        assertThat(inTransaction(transactions,
+                () -> service.update(tenant, agentId, "loser", loserRequest)).replayed()).isTrue();
+        assertThat(store.latest(tenant, agentId).orElseThrow().revision()).isEqualTo(3);
     }
 
     private static Process startWorkspaceProcess(String action,

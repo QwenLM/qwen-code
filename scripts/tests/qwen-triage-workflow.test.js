@@ -4843,6 +4843,186 @@ describe('qwen-triage verify hardening round 2', () => {
       'redact the recorded copy, not the request under test',
     );
 
+    // #13505 R3: a bot review with 4 Criticals landed on the previous head
+    // during the round and the report went out as ready to merge, unread;
+    // the comment was revised in place. The bot also rewrites its stage
+    // comments in place (#13536), so only `updated_at` shows the edit, and
+    // GitHub rewrote NUL/SOH escape text into caret forms inside code
+    // spans and fences (#12773 R1, #13505 R1), visible only on read-back.
+    const beforeScope = flat.slice(0, flat.indexOf('## Scope selection'));
+    expect(beforeScope).toContain(
+      'Guard the post against what landed during the round',
+    );
+    expect(flat).toContain(
+      'including a review whose `commit_id` is an older head',
+    );
+    expect(flat).toContain('only `updated_at` moves');
+    expect(flat).toContain('Keep the guard and the post in separate commands');
+    expect(flat).toContain(
+      'read the body back and compare it with the local file byte for byte',
+    );
+
+    // #13163 R7: a merge carried two review fixes in 507 hand-written lines
+    // that only `git show --remerge-diff` shows. #12627: a fix commit
+    // turned a transient 429 into a permanent RECOVERY_BLOCKED, so a
+    // production change re-runs every scenario. #13335: Java an automated
+    // round wrote without a JDK misbehaved on its first real boot.
+    expect(flat).toContain('Classify what changed before scoping a follow-up');
+    expect(flat).toContain('git merge-tree --write-tree');
+    expect(flat).toContain('git show --remerge-diff');
+    expect(flat).toContain(
+      'Re-run the whole scenario matrix, not only the scenarios that failed last round',
+    );
+    expect(flat).toContain('showing the comparator can report a difference');
+    expect(flat).toContain('Rebuild and run them before crediting them');
+
+    // #13550 R10: on the merge, `main`'s dropped columns made every child
+    // creation fail on `bad SQL grammar`. #13247 R3: the PR's Flyway check
+    // finished at 13:20 UTC and another PR merged its own V36 at 13:57.
+    expect(flat).toContain('always add that trial merge as a third arm');
+    expect(flat).toContain("git diff <merge-base> origin/main -- '*.sql'");
+    expect(flat).toContain(
+      'own green check is only as fresh as the `main` it ran against',
+    );
+    expect(flat).toContain('Trial-merge in-flight PRs');
+    // The pointer must resolve, and the script refuses a bare invocation,
+    // so the module list it names must exist where the skill says.
+    expect(existsSync('scripts/check-flyway-migrations.js')).toBe(true);
+    expect(flat).toContain('the module list `sdk-java.yml` passes it');
+    expect(readFileSync('.github/workflows/sdk-java.yml', 'utf8')).toContain(
+      'node scripts/check-flyway-migrations.js packages/sdk-java/',
+    );
+
+    // #13352 R5: a `chmod 555` test was red on the clean tree as root and
+    // showed as a killer of every mutant. #12924: refusing runs whose
+    // marker was missing from the artifact caught two verifier mistakes.
+    // #13352 R4: ten isolated runs separated a real kill from a flake by
+    // assertion message. #12868 R5: per-condition mutants of an ID rule
+    // survived 6 of 7. #12943 R2: 16/16 killed, 13/16 by PR CI's selection.
+    // #12848 R1→R3: a survivor written off as covered by other clauses
+    // blocked Shell turns after any reload.
+    expect(flat).toContain(
+      'Make the mutation runner prove itself before any row counts',
+    );
+    expect(flat).toContain(
+      'through the exact runner, environment (`PATH`), user and test selection',
+    );
+    expect(flat).toContain('require exactly one match');
+    expect(flat).toContain('side-effecting marker');
+    expect(flat).toContain(
+      'removes strictly less than another is killed while the superset survives',
+    );
+    expect(flat).toContain('never by one isolated rerun');
+    expect(flat).toContain('one condition at a time');
+    expect(flat).toContain(
+      "count a kill for CI only if the killing test runs in the PR's CI selection",
+    );
+    expect(flat).toContain(
+      'before calling a survivor on a guard, fence or ownership check redundant',
+    );
+
+    // #13174 R9: a cancel fix held for turn 1 and wedged later turns.
+    // #13598 R2: round-1 prompts never reached a tool. #13572 R5: the
+    // defect appeared only with approvals on. The loop-guard count is
+    // read from core, so the skill cannot drift from the real threshold.
+    expect(flat).toContain(
+      'Parameterise scenarios along the axes author tests collapse',
+    );
+    expect(flat).toContain('approval mode (default versus auto-approve)');
+    expect(flat).toContain(
+      'five consecutive identical calls trip the core loop guard',
+    );
+    const loopSource = readFileSync(
+      'packages/core/src/services/loopDetectionService.ts',
+      'utf8',
+    );
+    expect(loopSource).toMatch(/const TOOL_CALL_LOOP_THRESHOLD = 5;/);
+
+    // #13354 R1: a PR Harness against a pre-PR server blocked every hosted
+    // turn. #12855 R2: after rollback and re-upgrade the Java row lagged
+    // the authority silently.
+    expect(flat).toContain('mixed-version matrix');
+    expect(flat).toContain(
+      'old-reads-new and new-talks-to-old in both directions, both deploy orders',
+    );
+    expect(flat).toContain(
+      'rollback followed by re-upgrade on the same database',
+    );
+
+    // #13572 R5: an unauthenticated readiness check turned a timeout into
+    // a "~40 s restart". #12868 R7: a probe without a limit waited 4 min
+    // 26 s. #13572 R4 / #12955: taps that buffered or swallowed aborts.
+    expect(flat).toContain(
+      'Harness checks fail closed; verdicts come from the backend',
+    );
+    expect(flat).toContain('Assert input shape before comparing');
+    expect(flat).toContain('Print the exit status next to every count');
+    expect(flat).toContain('never from page text that may echo the prompt');
+    expect(flat).toContain('record a timeout as "no answer within N s"');
+    expect(flat).toContain(
+      'Taps and proxies stream SSE and propagate upstream aborts',
+    );
+
+    // #13163 R5: a wedged turn's storage voided two runs. #13037 R3: runs
+    // overlapping a revocation probe were repeated. #13174 R6: probes that
+    // exited before `finally` leaked 100 + 12 processes. #13166 R5: a
+    // mutant regex ignored SIGTERM. #13114: bash ran text appended to a
+    // running runner.
+    expect(flat).toContain('### Rig hygiene (local rounds)');
+    expect(flat).toContain(
+      'fresh database, storage and workspace per scenario and per arm',
+    );
+    expect(flat).toContain('orphaned (ppid 1) processes');
+    expect(flat).toContain('`process.exit()` skips `finally`');
+    expect(flat).toContain('with `node --check`, never `import()`');
+    expect(flat).toContain('Do not edit a shell runner while it executes');
+    expect(flat).toContain('before a wait loop greps it');
+
+    // #13127 / #13218 R3: two posted figures needed correction commits.
+    // #13401 R3: a wrong claim reached a squash message that cannot be
+    // edited, so self-corrections lead the report.
+    const hardRules = flat.slice(flat.indexOf('## Hard rules'));
+    expect(hardRules).toContain('Keep a results ledger');
+    expect(hardRules).toContain('is reported as "not run"');
+    expect(hardRules).toContain(
+      'Generate every number in prose and figures from those files, never by hand',
+    );
+    const reportStructure = flat.slice(
+      flat.indexOf('### report.md structure'),
+      flat.indexOf('## Hard rules'),
+    );
+    expect(reportStructure).toContain(
+      'state it at the top, right after the Chinese summary',
+    );
+    expect(reportStructure).toContain(
+      'measured, inferred from code, or not run',
+    );
+    expect(reportStructure).toContain('label which SHA each result came from');
+    expect(reportStructure).toContain(
+      'matches the expectation, not by literal pass or fail',
+    );
+
+    // #12918: a deterministic unit failure the PR introduced was red in CI.
+    // #12250 R2: a "random flake" came from `main`. #12733, #12775,
+    // #12797, #12754, #13498: CI ran less than it appeared to.
+    expect(beforeScope).toContain('Local rounds start from CI');
+    expect(flat).toContain(
+      'pull the failing test names from every red job and reproduce them on both arms',
+    );
+    expect(flat).toContain("the same job on `main`'s latest push run");
+    expect(flat).toContain('a `-t` filter that matches zero tests and exits 0');
+    expect(flat).toContain(
+      'whether the job checked out the branch or the merge ref',
+    );
+
+    // #12754: the sandbox lane had no JDK and left roughly 900 Java lines
+    // unexecuted.
+    expect(flat).toContain('Java-centred PRs');
+    expect(flat).toContain('Measure `command -v java` first');
+    expect(flat).toContain(
+      'the verdict is `inconclusive`, never `merge-ready`',
+    );
+
     // The Android recipe lives in a reference file the restored .qwen tree
     // carries, so the pointer must resolve.
     expect(flat).toContain('references/android.md');
