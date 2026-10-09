@@ -610,6 +610,7 @@ describe('Session', () => {
     get: ReturnType<typeof vi.fn>;
   };
   let mockToolRegistry: {
+    getAllToolNames: ReturnType<typeof vi.fn>;
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
     isDeferredAndHidden: ReturnType<typeof vi.fn>;
@@ -978,6 +979,7 @@ describe('Session', () => {
     };
 
     mockToolRegistry = {
+      getAllToolNames: vi.fn().mockReturnValue([]),
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
       isDeferredAndHidden: vi.fn().mockReturnValue(false),
@@ -19665,14 +19667,15 @@ describe('Session', () => {
 
       it('stops an ACP prompt after repeated invalid tool parameters with fresh ids', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        // PreToolUse now runs before validation, so only Stop blocks.
         const messageBus = {
-          request: vi.fn().mockResolvedValue({
+          request: vi.fn().mockImplementation(async (request) => ({
             success: true,
-            output: {
-              decision: 'block',
-              reason: 'Continue after Stop hook',
-            },
-          }),
+            output:
+              request.eventName === 'Stop'
+                ? { decision: 'block', reason: 'Continue after Stop hook' }
+                : {},
+          })),
         };
         mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
         mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
@@ -36080,7 +36083,10 @@ describe('Session', () => {
       const tool = {
         name: 'read_file',
         kind: core.Kind.Read,
-        build: vi.fn().mockReturnValue(invocation),
+        build: vi.fn((params: Record<string, unknown>) => ({
+          ...invocation,
+          params,
+        })),
       };
 
       mockToolRegistry.getTool.mockReturnValue(tool);
@@ -36120,7 +36126,9 @@ describe('Session', () => {
       expect(onConfirmSpy).toHaveBeenCalledWith(
         core.ToolConfirmationOutcome.ProceedOnce,
       );
-      expect(invocation.params).toEqual({ path: '/tmp/updated.txt' });
+      // Rebuilt from the replacement rather than patched in place.
+      expect(tool.build).toHaveBeenCalledWith({ path: '/tmp/updated.txt' });
+      expect(invocation.params).toEqual({ path: '/tmp/original.txt' });
       expect(executeSpy).toHaveBeenCalled();
       expect(addToolArgumentsAttributesSpy).toHaveBeenCalledWith(
         mockConfig,
@@ -36452,17 +36460,16 @@ describe('Session', () => {
       },
     );
 
-    it('rechecks a revision-bound plan exit after pre-tool hooks', async () => {
+    it('rechecks a revision-bound plan exit after the invocation guard', async () => {
       enableSessionWorkflowRevisionContext();
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
-      let resolvePreToolUse!: (result: { shouldProceed: boolean }) => void;
-      const preToolUseSpy = vi
-        .spyOn(core, 'firePreToolUseHook')
-        .mockReturnValueOnce(
-          new Promise((resolve) => {
-            resolvePreToolUse = resolve;
-          }),
-        );
+      let resolveGuard!: (decision: { allowed: boolean }) => void;
+      const guard = vi.fn().mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveGuard = resolve;
+        }),
+      );
+      mockConfig.getToolInvocationGuard = vi.fn().mockReturnValue(guard);
       await session.sendUpdate({
         sessionUpdate: 'plan',
         entries: [
@@ -36480,15 +36487,11 @@ describe('Session', () => {
         },
       });
 
-      try {
-        const prompt = runExitPlanModeApprovalPrompt();
-        await vi.waitFor(() => expect(preToolUseSpy).toHaveBeenCalledOnce());
-        session.clearActiveTodoPlanRevision();
-        resolvePreToolUse({ shouldProceed: true });
-        await prompt;
-      } finally {
-        preToolUseSpy.mockRestore();
-      }
+      const prompt = runExitPlanModeApprovalPrompt();
+      await vi.waitFor(() => expect(guard).toHaveBeenCalledOnce());
+      session.clearActiveTodoPlanRevision();
+      resolveGuard({ allowed: true });
+      await prompt;
 
       expect(
         vi
@@ -38489,6 +38492,407 @@ describe('Session', () => {
             }),
             expect.anything(),
           );
+        });
+
+        describe('updatedInput', () => {
+          const ok = { llmContent: 'ok', returnDisplay: 'ok' };
+
+          /** A write tool whose invocations carry their own params and spies. */
+          function writeTool(
+            extra: (params: Record<string, unknown>) => object = () => ({}),
+          ) {
+            const executed: unknown[] = [];
+            // Inputs whose confirmation callback ran, with its outcome.
+            const confirmed: unknown[][] = [];
+            const tool = {
+              name: 'write_file',
+              kind: core.Kind.Edit,
+              build: vi.fn((params: Record<string, unknown>) => {
+                const onConfirm = vi.fn(async (outcome: unknown) => {
+                  confirmed.push([params['path'], outcome]);
+                });
+                return {
+                  params,
+                  getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+                  getConfirmationDetails: vi.fn().mockResolvedValue({
+                    type: 'info',
+                    title: 'Write',
+                    prompt: `write ${params['path']}`,
+                    onConfirm,
+                  }),
+                  getDescription: vi
+                    .fn()
+                    .mockReturnValue(`write ${params['path']}`),
+                  toolLocations: vi
+                    .fn()
+                    .mockReturnValue([{ path: params['path'] }]),
+                  execute: vi.fn(async () => {
+                    executed.push(params['path']);
+                    return ok;
+                  }),
+                  ...extra(params),
+                };
+              }),
+            };
+            mockToolRegistry.getTool.mockReturnValue(tool);
+            return { tool, executed, confirmed };
+          }
+
+          async function promptWith(
+            args: Record<string, unknown>,
+            approvalMode = ApprovalMode.DEFAULT,
+          ) {
+            mockConfig.getApprovalMode = vi.fn().mockReturnValue(approvalMode);
+            mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+            mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+            mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+              createStreamWithChunks([
+                {
+                  type: core.StreamEventType.CHUNK,
+                  value: {
+                    functionCalls: [{ id: 'call-r', name: 'write_file', args }],
+                  },
+                },
+              ]),
+            );
+            await session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'write' }],
+            });
+          }
+
+          const recordedError = (text: string) =>
+            expect(
+              mockChatRecordingService.recordToolResult,
+            ).toHaveBeenCalledWith(
+              expect.arrayContaining([
+                expect.objectContaining({
+                  functionResponse: expect.objectContaining({
+                    response: { error: expect.stringContaining(text) },
+                  }),
+                }),
+              ]),
+              expect.objectContaining({ status: 'error' }),
+            );
+
+          it('builds, confirms and runs the replacement once', async () => {
+            const pre = vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
+              shouldProceed: true,
+              updatedInput: { path: '/tmp/b.txt' },
+            });
+            const post = vi
+              .spyOn(core, 'firePostToolUseHook')
+              .mockResolvedValue({ shouldStop: false });
+            mockClient.requestPermission = vi.fn().mockResolvedValue({
+              outcome: {
+                outcome: 'selected',
+                optionId: core.ToolConfirmationOutcome.ProceedOnce,
+              },
+            });
+            const { tool, executed } = writeTool();
+            const args = { path: '/tmp/a.txt' };
+            await promptWith(args);
+
+            expect(pre).toHaveBeenCalledOnce();
+            expect(pre.mock.calls[0][2]).toEqual({ path: '/tmp/a.txt' });
+            expect(pre.mock.invocationCallOrder[0]).toBeLessThan(
+              tool.build.mock.invocationCallOrder[0],
+            );
+            expect(tool.build.mock.calls[0][0]).toEqual({ path: '/tmp/b.txt' });
+            expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+            expect(
+              vi.mocked(mockClient.requestPermission).mock.calls[0][0].toolCall
+                .rawInput,
+            ).toEqual({ path: '/tmp/b.txt' });
+            expect(executed).toEqual(['/tmp/b.txt']);
+            expect(post.mock.calls[0][2]).toEqual({ path: '/tmp/b.txt' });
+            expect(args).toEqual({ path: '/tmp/a.txt' });
+          });
+
+          describe('from a PermissionRequest hook', () => {
+            beforeEach(() => {
+              vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
+                shouldProceed: true,
+              });
+              vi.spyOn(core, 'firePermissionRequestHook').mockResolvedValue({
+                hasDecision: true,
+                shouldAllow: true,
+                updatedInput: { path: '/tmp/c.txt' },
+              });
+            });
+
+            it('runs a valid replacement with its own confirmation', async () => {
+              const { tool, executed, confirmed } = writeTool();
+              await promptWith({ path: '/tmp/a.txt' });
+
+              expect(tool.build).toHaveBeenCalledWith({ path: '/tmp/c.txt' });
+              expect(confirmed).toEqual([
+                ['/tmp/c.txt', core.ToolConfirmationOutcome.ProceedOnce],
+              ]);
+              expect(executed).toEqual(['/tmp/c.txt']);
+              expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
+              expect(mockClient.requestPermission).not.toHaveBeenCalled();
+            });
+
+            it('denies a replacement that a permission rule denies', async () => {
+              mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+                isToolEnabled: vi.fn().mockResolvedValue(true),
+                hasRelevantRules: () => true,
+                hasMatchingAskRule: () => false,
+                evaluate: async (ctx: { filePath?: string }) =>
+                  ctx.filePath === '/tmp/c.txt' ? 'deny' : 'default',
+                findMatchingDenyRule: () => 'Write(/tmp/c.txt)',
+              });
+              const { executed, confirmed } = writeTool();
+              await promptWith({ path: '/tmp/a.txt' });
+
+              expect(executed).toEqual([]);
+              expect(confirmed).toEqual([]);
+              expect(mockClient.requestPermission).not.toHaveBeenCalled();
+              recordedError('Write(/tmp/c.txt)');
+            });
+
+            it('rejects a replacement that needs a user decision', async () => {
+              const { executed, confirmed } = writeTool((params) => ({
+                requiresUserInteraction: () => params['path'] === '/tmp/c.txt',
+              }));
+              await promptWith({ path: '/tmp/a.txt' });
+
+              expect(executed).toEqual([]);
+              expect(confirmed).toEqual([]);
+              recordedError('needs a user decision');
+            });
+
+            it.each([
+              ['blocked', { shouldBlock: true, unavailable: false }, []],
+              [
+                'approved',
+                { shouldBlock: false, unavailable: false },
+                ['/tmp/c.txt'],
+              ],
+              [
+                'unavailable',
+                { shouldBlock: true, unavailable: true },
+                ['/tmp/c.txt'],
+              ],
+            ])(
+              'classifies a replacement in AUTO mode (%s) before its one-time allow',
+              async (_label, verdict, expectedExecuted) => {
+                let denialState: core.AutoModeDenialState = {
+                  consecutiveBlock: 0,
+                  consecutiveUnavailable: 0,
+                  totalBlock: 0,
+                  totalUnavailable: 0,
+                };
+                mockConfig.getCwd = vi.fn().mockReturnValue('/repo');
+                mockConfig.getAutoModeSettings = vi.fn().mockReturnValue({});
+                mockConfig.getAutoModeDenialState = vi.fn(() => denialState);
+                mockConfig.setAutoModeDenialState = vi.fn((next) => {
+                  denialState = next;
+                });
+                mockConfig.getLlmClient = vi.fn().mockReturnValue({
+                  ...mockLlmClient,
+                  getHistoryTail: () => [],
+                });
+                const decision = (value: {
+                  shouldBlock: boolean;
+                  unavailable: boolean;
+                }) => ({
+                  via: 'classifier' as const,
+                  reason: 'test decision',
+                  stage: 'fast' as const,
+                  durationMs: 1,
+                  ...value,
+                });
+                const classify = vi
+                  .spyOn(core, 'evaluateAutoMode')
+                  .mockResolvedValueOnce(
+                    decision({ shouldBlock: true, unavailable: true }),
+                  )
+                  .mockResolvedValueOnce(decision(verdict));
+                const { executed } = writeTool();
+                await promptWith({ path: '/tmp/a.txt' }, ApprovalMode.AUTO);
+
+                expect(
+                  classify.mock.calls.map(([input]) => input.toolParams),
+                ).toEqual([{ path: '/tmp/a.txt' }, { path: '/tmp/c.txt' }]);
+                expect(mockClient.requestPermission).not.toHaveBeenCalled();
+                expect(core.firePermissionRequestHook).toHaveBeenCalledOnce();
+                expect(core.firePreToolUseHook).toHaveBeenCalledOnce();
+                expect(executed).toEqual(expectedExecuted);
+                if (expectedExecuted.length === 0) {
+                  recordedError('test decision');
+                }
+              },
+            );
+
+            it("resets AUTO recovery from the replacement's fallback once it is approved", async () => {
+              let denialState: core.AutoModeDenialState = {
+                consecutiveBlock: 0,
+                consecutiveUnavailable: 1,
+                totalBlock: 0,
+                totalUnavailable: 1,
+              };
+              mockConfig.getCwd = vi.fn().mockReturnValue('/repo');
+              mockConfig.getAutoModeSettings = vi.fn().mockReturnValue({});
+              mockConfig.getAutoModeDenialState = vi.fn(() => denialState);
+              mockConfig.setAutoModeDenialState = vi.fn((next) => {
+                denialState = next;
+              });
+              mockConfig.getLlmClient = vi.fn().mockReturnValue({
+                ...mockLlmClient,
+                getHistoryTail: () => [],
+              });
+              vi.spyOn(core, 'evaluateAutoMode')
+                // The original input needs an ask-rule confirmation...
+                .mockResolvedValueOnce({ via: 'fallback', reason: 'ask_rule' })
+                // ...while the replacement meets an unavailable classifier.
+                .mockResolvedValueOnce({
+                  via: 'classifier',
+                  shouldBlock: true,
+                  unavailable: true,
+                  reason: 'classifier timeout',
+                  stage: 'fast',
+                  durationMs: 1,
+                });
+              const { executed } = writeTool();
+              await promptWith({ path: '/tmp/a.txt' }, ApprovalMode.AUTO);
+
+              expect(executed).toEqual(['/tmp/c.txt']);
+              expect(denialState.consecutiveUnavailable).toBe(0);
+            });
+
+            it.each([null, false, 0, ''])(
+              'rejects an invalid replacement %j without running any input',
+              async (updatedInput) => {
+                vi.mocked(core.firePermissionRequestHook).mockRestore();
+                mockConfig.getMessageBus = vi.fn().mockReturnValue({
+                  request: vi.fn(async (request: { eventName: string }) => ({
+                    success: true,
+                    output:
+                      request.eventName === 'PermissionRequest'
+                        ? {
+                            hookSpecificOutput: {
+                              decision: { behavior: 'allow', updatedInput },
+                            },
+                          }
+                        : {},
+                  })),
+                });
+                const { executed, confirmed } = writeTool();
+                mockConfig.getApprovalMode = vi
+                  .fn()
+                  .mockReturnValue(ApprovalMode.DEFAULT);
+                mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+                mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+                  createStreamWithChunks([
+                    {
+                      type: core.StreamEventType.CHUNK,
+                      value: {
+                        functionCalls: [
+                          {
+                            id: 'call-r',
+                            name: 'write_file',
+                            args: { path: '/tmp/a.txt' },
+                          },
+                        ],
+                      },
+                    },
+                  ]),
+                );
+                await session.prompt({
+                  sessionId: 'test-session-id',
+                  prompt: [{ type: 'text', text: 'write' }],
+                });
+
+                expect(executed).toEqual([]);
+                expect(confirmed).toEqual([]);
+                recordedError('invalid updatedInput');
+              },
+            );
+
+            it('rejects a replacement that fails validation', async () => {
+              const { tool, executed } = writeTool();
+              const build = tool.build.getMockImplementation()!;
+              tool.build.mockImplementation((params) => {
+                if (params['path'] === '/tmp/c.txt') {
+                  throw new Error('invalid replacement');
+                }
+                return build(params);
+              });
+              await promptWith({ path: '/tmp/a.txt' });
+
+              expect(executed).toEqual([]);
+              recordedError('invalid replacement');
+            });
+
+            describe('releases both invocations', () => {
+              function releasingWriteTool(
+                extra: (params: Record<string, unknown>) => object = () => ({}),
+              ) {
+                const released: unknown[] = [];
+                const spies = writeTool((params) => ({
+                  release: vi.fn(async () => {
+                    released.push(params['path']);
+                  }),
+                  ...extra(params),
+                }));
+                return { ...spies, released };
+              }
+
+              it('when the replacement runs', async () => {
+                const { executed, released } = releasingWriteTool();
+                await promptWith({ path: '/tmp/a.txt' });
+
+                expect(executed).toEqual(['/tmp/c.txt']);
+                await vi.waitFor(() =>
+                  expect(released.sort()).toEqual(['/tmp/a.txt', '/tmp/c.txt']),
+                );
+              });
+
+              it('when a permission rule denies the replacement', async () => {
+                mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+                  isToolEnabled: vi.fn().mockResolvedValue(true),
+                  hasRelevantRules: () => true,
+                  hasMatchingAskRule: () => false,
+                  evaluate: async (ctx: { filePath?: string }) =>
+                    ctx.filePath === '/tmp/c.txt' ? 'deny' : 'default',
+                  findMatchingDenyRule: () => 'Write(/tmp/c.txt)',
+                });
+                const { executed, released } = releasingWriteTool();
+                await promptWith({ path: '/tmp/a.txt' });
+
+                expect(executed).toEqual([]);
+                recordedError('Write(/tmp/c.txt)');
+                await vi.waitFor(() =>
+                  expect(released.sort()).toEqual(['/tmp/a.txt', '/tmp/c.txt']),
+                );
+              });
+
+              it('when the call is cancelled while checking the replacement', async () => {
+                const { executed, released } = releasingWriteTool((params) => ({
+                  getDefaultPermission: vi.fn(async () => {
+                    if (params['path'] === '/tmp/c.txt') {
+                      await session.cancelPendingPrompt();
+                    }
+                    return 'ask';
+                  }),
+                }));
+                await promptWith({ path: '/tmp/a.txt' });
+
+                expect(executed).toEqual([]);
+                expect(
+                  mockChatRecordingService.recordToolResult,
+                ).toHaveBeenCalledWith(
+                  expect.anything(),
+                  expect.objectContaining({ status: 'cancelled' }),
+                );
+                await vi.waitFor(() =>
+                  expect(released.sort()).toEqual(['/tmp/a.txt', '/tmp/c.txt']),
+                );
+              });
+            });
+          });
         });
 
         it('blocks tool execution when PreToolUse hook returns blocking decision', async () => {
@@ -43303,6 +43707,70 @@ describe('Session', () => {
         },
       );
 
+      it('serializes nested shell calls once a skill registers a PreToolUse hook', async () => {
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+        let registered = false;
+        mockConfig.hasHooksForEvent = vi.fn(
+          (event) => event === 'PreToolUse' && registered,
+        );
+        vi.spyOn(core, 'firePreToolUseHook').mockImplementation(async () =>
+          registered
+            ? {
+                shouldProceed: true,
+                updatedInput: { command: 'touch changed.txt' },
+              }
+            : { shouldProceed: true },
+        );
+        vi.spyOn(core, 'firePostToolUseHook').mockResolvedValue({
+          shouldStop: false,
+        });
+        const skillRelease = deferred();
+        const shellRelease = deferred();
+        const events: string[] = [];
+        const skill = nestedTool(
+          core.ToolNames.SKILL,
+          core.Kind.Read,
+          async () => {
+            events.push('skill');
+            await skillRelease.promise;
+            registered = true;
+            return output('registered');
+          },
+        );
+        const shell = nestedTool(
+          core.ToolNames.SHELL,
+          core.Kind.Execute,
+          async (_signal, args) => {
+            events.push(String(args['command']));
+            if (events.length === 2) await shellRelease.promise;
+            return output('done');
+          },
+        );
+        const running = runCode([skill, shell], (runtime, signal) =>
+          Promise.allSettled([
+            runtime.dispatch(skill.name, {}, signal),
+            runtime.dispatch(shell.name, { command: 'git status' }, signal),
+            runtime.dispatch(shell.name, { command: 'git status' }, signal),
+          ]),
+        );
+        await vi.waitFor(() => expect(events).toEqual(['skill']));
+        skillRelease.resolve();
+        await vi.waitFor(() =>
+          expect(events).toEqual(['skill', 'touch changed.txt']),
+        );
+        // The second shell call waits for the first.
+        await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        expect(events).toEqual(['skill', 'touch changed.txt']);
+        shellRelease.resolve();
+        await running;
+        expect(events).toEqual([
+          'skill',
+          'touch changed.txt',
+          'touch changed.txt',
+        ]);
+      });
+
       it('waits for skill hook registration before admitting shell calls whose hooks rewrite their arguments', async () => {
         mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
         mockConfig.getMessageBus = vi.fn().mockReturnValue({});
@@ -43650,6 +44118,42 @@ describe('Session', () => {
       for (const build of builds) {
         expect(build).not.toHaveBeenCalled();
       }
+    });
+
+    it('applies the standalone working directory gate to a PreToolUse replacement', async () => {
+      recreateStandaloneSession();
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({});
+      vi.spyOn(core, 'firePreToolUseHook').mockResolvedValue({
+        shouldProceed: true,
+        updatedInput: { subagent_type: 'explore', working_dir: '/tmp/other' },
+      });
+      const build = vi.fn();
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.AGENT,
+        kind: core.Kind.Think,
+        displayName: 'Agent',
+        description: 'Agent',
+        build,
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-agent-rewrite', [
+        {
+          id: 'agent_rewrite',
+          name: core.ToolNames.AGENT,
+          args: { subagent_type: 'explore' },
+        },
+      ]);
+
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error:
+          'Standalone sessions cannot change or override their working directory.',
+      });
+      expect(build).not.toHaveBeenCalled();
     });
 
     it('allows a standalone fork Agent without a cwd override', async () => {
@@ -46278,7 +46782,12 @@ describe('Session', () => {
         'info',
       );
       tool.kind = core.Kind.Read;
-      tool.build().params = { file_path: originalPath };
+      // A replacement input is rebuilt, so each build carries its own params.
+      const invocation = tool.build();
+      tool.build.mockImplementation((params: Record<string, unknown>) => ({
+        ...invocation,
+        params,
+      }));
       mockToolRegistry.getTool.mockReturnValue(tool);
 
       try {

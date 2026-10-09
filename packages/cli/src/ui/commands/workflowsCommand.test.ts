@@ -11,7 +11,12 @@ import path from 'node:path';
 import { workflowsCommand, snapshotToTask } from './workflowsCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import type { WorkflowTask, WorkflowSnapshot } from '@qwen-code/qwen-code-core';
+import type {
+  WorkflowDispatchTrace,
+  WorkflowTask,
+  WorkflowSnapshot,
+} from '@qwen-code/qwen-code-core';
+import { buildWorkflowResultPreview } from '@qwen-code/qwen-code-core/agents/workflow-result-preview.js';
 
 function entry(overrides: Partial<WorkflowTask> = {}): WorkflowTask {
   return {
@@ -43,6 +48,32 @@ function entry(overrides: Partial<WorkflowTask> = {}): WorkflowTask {
     script: '',
     ...overrides,
   };
+}
+
+function dispatch(
+  id: string,
+  status: WorkflowDispatchTrace['status'],
+  error?: string,
+): WorkflowDispatchTrace {
+  return {
+    id,
+    phaseVisitId: null,
+    label: id,
+    prompt: 'p',
+    status,
+    dependsOn: [],
+    queuedAt: 1,
+    ...(error ? { error } : {}),
+  };
+}
+
+async function content(
+  ctx: CommandContext,
+  args: string,
+): Promise<{ messageType: string; content: string }> {
+  const result = await workflowsCommand.action!(ctx, args);
+  if (!result || result.type !== 'message') throw new Error('no result');
+  return result;
 }
 
 describe('workflowsCommand', () => {
@@ -407,6 +438,161 @@ describe('workflowsCommand', () => {
     });
   });
 
+  describe('detail view: results and failures', () => {
+    function live(overrides: Partial<WorkflowTask>) {
+      const target = entry({ runId: 'wf_live', ...overrides });
+      getMock.mockImplementation((id) =>
+        id === 'wf_live' ? target : undefined,
+      );
+      return target;
+    }
+
+    it('shows a completed result, failed agents, and reported failures apart', async () => {
+      const target = live({
+        status: 'completed',
+        result: {
+          marker: 'RESULT_MARKER',
+          failed: ['REPORTED'],
+          errors: [new Error('SCRIPT_ERR')],
+        },
+        dispatches: [
+          dispatch('ok', 'completed'),
+          dispatch('hit', 'cached'),
+          dispatch('stopped', 'cancelled', 'cancelled error'),
+          dispatch('lost-1', 'failed', 'HTTP 400'),
+          dispatch('lost-2', 'failed'),
+        ],
+      });
+      const result = await content(context, 'wf_live');
+
+      // A completed run that reports failures is still a completed run, and
+      // asking about it is a successful query.
+      expect(result.messageType).toBe('info');
+      expect(result.content).toContain('status      : completed');
+      expect(result.content).toContain(
+        [
+          '  Failed agents (2)',
+          '    [lost-1] HTTP 400',
+          '    [lost-2] dispatch failed',
+          '',
+          '  Reported failures',
+          '    Reported failed: ["REPORTED"]',
+          '    Reported errors: ["Error: SCRIPT_ERR"]',
+          '',
+          '  Result',
+          '    {',
+          '      "marker": "RESULT_MARKER",',
+        ].join('\n'),
+      );
+      expect(result.content).not.toContain('cancelled error');
+      expect(result.content).not.toContain('snapshotFile');
+      expect(target.result).toEqual(
+        expect.objectContaining({ marker: 'RESULT_MARKER' }),
+      );
+      expect(target.status).toBe('completed');
+    });
+
+    it('names how many failed agents were left out past the cap', async () => {
+      live({
+        status: 'completed',
+        dispatches: Array.from({ length: 12 }, (_, i) =>
+          dispatch(`lost-${i}`, 'failed', `E${i}`),
+        ),
+      });
+      const result = await content(context, 'wf_live');
+      expect(result.content).toContain('  Failed agents (12)');
+      expect(result.content).toContain('    [lost-9] E9');
+      expect(result.content).not.toContain('[lost-10]');
+      expect(result.content).toContain('    … and 2 more failures omitted');
+    });
+
+    it.each([
+      [undefined, '(workflow returned no value)'],
+      [null, 'null'],
+      [false, 'false'],
+      [0, '0'],
+      ['', '""'],
+    ])('keeps a %j result distinct', async (value, text) => {
+      live({ status: 'completed', result: value });
+      const result = await content(context, 'wf_live');
+      expect(result.content.endsWith(`  Result\n    ${text}`)).toBe(true);
+    });
+
+    it.each(['running', 'pausing', 'paused'] as const)(
+      'shows no result while the run is %s',
+      async (status) => {
+        live({ status, result: 'not yet' });
+        const result = await content(context, 'wf_live');
+        expect(result.content).not.toContain('Result');
+        expect(result.content).not.toContain('not yet');
+      },
+    );
+
+    it.each(['failed', 'cancelled'] as const)(
+      'keeps a %s run without a result, as a successful query',
+      async (status) => {
+        live({ status, error: 'RUN_ERR' });
+        const result = await content(context, 'wf_live');
+        expect(result.messageType).toBe('info');
+        expect(result.content).toContain(`status      : ${status}`);
+        expect(result.content).toContain('error       : RUN_ERR');
+        expect(result.content).not.toContain('Result');
+      },
+    );
+
+    it('cleans and bounds the run error', async () => {
+      live({
+        status: 'failed',
+        error: `\x1b[31mRED\x1b[0m\u202e\tline1\nline2${'e'.repeat(5000)}`,
+      });
+      const result = await content(context, 'wf_live');
+      const error = result.content.slice(result.content.indexOf('error'));
+      expect(error).toContain('error       : RED  line1\n    line2');
+      expect(error).not.toContain('\x1b');
+      expect(error).not.toContain('\u202e');
+      expect(error).toContain('… (truncated)');
+      expect(error.length).toBeLessThan(4_200);
+    });
+
+    it('strips bidi controls from failed agent labels', async () => {
+      live({
+        status: 'failed',
+        dispatches: [dispatch('build\u202ekcab\u2066', 'failed', 'HTTP 400')],
+      });
+      const result = await content(context, 'wf_live');
+      expect(result.content).toContain('    [buildkcab] HTTP 400');
+      expect(result.content).not.toMatch(/[\u202a-\u202e\u2066-\u2069]/);
+    });
+
+    it('bounds a long result and says the preview was truncated', async () => {
+      live({ status: 'completed', result: 'x'.repeat(30_000) });
+      const result = await content(context, 'wf_live');
+      expect(result.content).toContain('x… (truncated)');
+      expect(result.content).toContain(
+        '    (preview truncated to 25000 characters)',
+      );
+    });
+
+    it('renders the same detail in every execution mode', async () => {
+      live({
+        status: 'completed',
+        result: { failed: ['F'] },
+        dispatches: [dispatch('lost', 'failed', 'E')],
+        endTime: 1_700_000_005_000,
+      });
+      const outputs = [];
+      for (const executionMode of [
+        'interactive',
+        'non_interactive',
+        'acp',
+      ] as const) {
+        outputs.push(await content({ ...context, executionMode }, 'wf_live'));
+      }
+      expect(outputs[1]).toEqual(outputs[0]);
+      expect(outputs[2]).toEqual(outputs[0]);
+    });
+  });
+
   it('argument is trimmed before lookup', async () => {
     const target = entry({ runId: 'wf_t' });
     getMock.mockImplementation((id) => (id === 'wf_t' ? target : undefined));
@@ -559,7 +745,11 @@ describe('workflowsCommand', () => {
         services: {
           config: {
             getWorkflowRunRegistry: () => ({ list: listMock, get: getMock }),
-            storage: { getWorkflowRunsDir: () => dir },
+            storage: {
+              getWorkflowRunsDir: () => dir,
+              getWorkflowRunSnapshotPath: (runId: string) =>
+                path.join(dir, `${runId}.json`),
+            },
           },
         },
         executionMode: mode,
@@ -660,6 +850,196 @@ describe('workflowsCommand', () => {
         content:
           'Workflow wf_old is completed and cannot be paused or resumed.',
       });
+    });
+
+    it('shows the stored preview and the confirmed snapshot file after a restart', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([
+        {
+          runId: 'wf_0a',
+          // What plain JSON kept of the result; the preview kept more.
+          result: { errors: [{}] },
+          resultPreview: buildWorkflowResultPreview({
+            errors: [new Error('KEPT')],
+          }),
+          dispatches: [dispatch('lost', 'failed', 'HTTP 400')],
+        },
+      ]);
+      const result = await content(ctx, 'wf_0a');
+      expect(result.content).toMatch(/snapshotFile: .*wf_0a\.json/);
+      expect(result.content).toContain('    [lost] HTTP 400');
+      expect(result.content).toContain('    Reported errors: ["Error: KEPT"]');
+      expect(result.content).toContain('"Error: KEPT"');
+      expect(result.content).not.toContain('older snapshot');
+    });
+
+    it('tells an undefined result from one an older snapshot never recorded', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([
+        {
+          runId: 'wf_0b',
+          resultPreview: buildWorkflowResultPreview(undefined),
+        },
+        { runId: 'wf_0c' },
+      ]);
+      expect((await content(ctx, 'wf_0b')).content).toContain(
+        '  Result\n    (workflow returned no value)',
+      );
+      const legacy = (await content(ctx, 'wf_0c')).content;
+      expect(legacy).toContain(
+        '  Result\n    (this snapshot did not record a result)',
+      );
+      expect(legacy).toContain('older snapshot');
+      expect(legacy).not.toContain('returned no value');
+    });
+
+    it('renders what an older snapshot kept, and says it may be incomplete', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([
+        { runId: 'wf_0d', result: { err: {}, failed: ['F'] } },
+      ]);
+      const result = (await content(ctx, 'wf_0d')).content;
+      expect(result).toContain('    Reported failed: ["F"]');
+      expect(result).toContain('"err": {}');
+      expect(result).toContain(
+        '(older snapshot: result details such as Error, Map, and Set values may be incomplete)',
+      );
+      // No dispatch record is not the same as no failures.
+      expect(result).toContain(
+        '  Failed agents: not recorded in this snapshot',
+      );
+    });
+
+    it('leaves out reported failures plain JSON emptied in an older snapshot', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([
+        {
+          runId: 'wf_12',
+          // Stored from { errors: [Error], failed: [Map, Set] }; a literal
+          // '{}' string is data and stays.
+          result: { errors: [{}], failed: [{}, {}], error: '{}' },
+        },
+      ]);
+      const result = (await content(ctx, 'wf_12')).content;
+      expect(result).not.toContain('Reported errors');
+      expect(result).not.toContain('Reported failed');
+      expect(result).toContain('  Reported failures\n    Reported error: {}');
+      expect(result).toContain('older snapshot');
+    });
+
+    it.each([
+      ['a string', 'verbatim', '    verbatim'],
+      ['a number', 42, '    42'],
+    ])(
+      'does not call %s an older snapshot kept incomplete',
+      async (_kind, stored, shown) => {
+        getMock.mockReturnValue(undefined);
+        const ctx = await ctxWithSnapshots([
+          { runId: 'wf_13', result: stored },
+        ]);
+        const result = (await content(ctx, 'wf_13')).content;
+        expect(result).toContain(`  Result\n${shown}`);
+        expect(result).not.toContain('older snapshot');
+      },
+    );
+
+    it('still notes the placeholder an older snapshot stored for an unserializable result', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([
+        { runId: 'wf_14', result: '(non-JSON-serializable bigint)' },
+      ]);
+      expect((await content(ctx, 'wf_14')).content).toContain('older snapshot');
+    });
+
+    it('cleans a hand-edited preview before showing it', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([
+        {
+          runId: 'wf_0e',
+          resultPreview: {
+            text: '\x1b[31mRED\x1b[0m\u202e\nnext',
+            truncated: false,
+            reportedFailures: ['Reported failed: \x1b[2Jboom'],
+          },
+        },
+      ]);
+      const result = (await content(ctx, 'wf_0e')).content;
+      expect(result).toContain('    RED\n    next');
+      expect(result).toContain('    Reported failed: boom');
+      expect(result).not.toContain('\x1b');
+      expect(result).not.toContain('\u202e');
+      // Removing controls shortened the text; nothing was truncated.
+      expect(result).not.toContain('preview truncated');
+    });
+
+    it('keeps the truncation notice a stored preview recorded', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([
+        {
+          runId: 'wf_11',
+          resultPreview: {
+            text: 'short\u2026 (truncated)',
+            truncated: true,
+            reportedFailures: [],
+          },
+        },
+      ]);
+      expect((await content(ctx, 'wf_11')).content).toContain(
+        '    (preview truncated to 25000 characters)',
+      );
+    });
+
+    it('bounds a stored preview that cleaning widened, and says so', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([
+        {
+          runId: 'wf_15',
+          resultPreview: {
+            text: '\t'.repeat(25_000),
+            truncated: false,
+            reportedFailures: [],
+          },
+        },
+      ]);
+      const result = (await content(ctx, 'wf_15')).content;
+      expect(result).toContain(' … (truncated)');
+      expect(result).toContain('    (preview truncated to 25000 characters)');
+    });
+
+    it('prefers the live entry over a same-runId snapshot', async () => {
+      getMock.mockImplementation((id) =>
+        id === 'wf_0f'
+          ? entry({ runId: 'wf_0f', status: 'running' })
+          : undefined,
+      );
+      const ctx = await ctxWithSnapshots([
+        {
+          runId: 'wf_0f',
+          result: 'OLD',
+          resultPreview: buildWorkflowResultPreview('OLD'),
+        },
+      ]);
+      const result = (await content(ctx, 'wf_0f')).content;
+      expect(result).toContain('status      : running');
+      expect(result).not.toContain('OLD');
+      expect(result).not.toContain('snapshotFile');
+    });
+
+    it('omits the snapshot file when it cannot be confirmed', async () => {
+      getMock.mockReturnValue(undefined);
+      const ctx = await ctxWithSnapshots([{ runId: 'not_a_run' }]);
+      const dir = tmpDirs.at(-1)!;
+      // Listed under another file name than the run's own.
+      await fs.writeFile(
+        path.join(dir, 'copy.json'),
+        JSON.stringify(snapshot({ runId: 'wf_10' })),
+      );
+      expect((await content(ctx, 'not_a_run')).content).not.toContain(
+        'snapshotFile',
+      );
+      expect((await content(ctx, 'wf_10')).content).not.toContain(
+        'snapshotFile',
+      );
     });
 
     it('p still reports unknown for a runId absent from registry and snapshots', async () => {
