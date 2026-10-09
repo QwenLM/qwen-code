@@ -1835,6 +1835,16 @@ describe('relativizeGlobText', () => {
       'Found 3 file(s) matching "etc*/host*" within /\n---\netc/hosts\netc/hostname';
     expect(relativizeGlobText(text, '/')).toBe(text);
   });
+
+  it('does not mangle path components containing literal backslashes (#13524)', () => {
+    const text = '/srv/api/weird\\/srv/api';
+    expect(relativizeGlobText(text, '/srv/api')).toBe('weird\\/srv/api');
+  });
+
+  it('preserves path when root string is preceded by backslash and followed by slash (#13524)', () => {
+    const text = '/srv/api/weird\\/srv/api/x.ts';
+    expect(relativizeGlobText(text, '/srv/api')).toBe('weird\\/srv/api/x.ts');
+  });
 });
 
 describe('readWorkspaceContext', () => {
