@@ -131,6 +131,20 @@ public enum SurfaceRegistry {
     PUBLIC_WORKSPACE_GET(Method.GET, "/v1/agents/workspaces/{workspaceId}",
             Surface.PUBLIC, RuleClass.WORKSPACE_DISCOVERY,
             EnumSet.of(Capability.WORKSPACE_GET)),
+    // ManagedChannelController: tenant-scoped channel resources (H5c), read
+    // over the registered connections and filtered below the Workspace read
+    // grant inside the service.
+    PUBLIC_CHANNEL_LIST(Method.GET, "/v1/agent-channels",
+            Surface.PUBLIC, RuleClass.TENANT_SCOPED,
+            EnumSet.of(Capability.CHANNEL_LIST)),
+    PUBLIC_CHANNEL_DELIVERY_LIST(Method.GET,
+            "/v1/agent-channels/{channelId}/deliveries",
+            Surface.PUBLIC, RuleClass.TENANT_SCOPED,
+            EnumSet.of(Capability.CHANNEL_DELIVERY_LIST)),
+    PUBLIC_CHANNEL_DELIVERY_GET(Method.GET,
+            "/v1/agent-channels/{channelId}/deliveries/{deliveryId}",
+            Surface.PUBLIC, RuleClass.TENANT_SCOPED,
+            EnumSet.of(Capability.CHANNEL_DELIVERY_GET)),
     // AgentDefinitionController: tenant-scoped agent definition routes.
     PUBLIC_AGENT_DEFINITION_CREATE(Method.POST, "/v1/agents",
             Surface.PUBLIC, RuleClass.TENANT_SCOPED,
@@ -228,6 +242,16 @@ public enum SurfaceRegistry {
             Surface.WEBSHELL, RuleClass.WORKSPACE_DISCOVERY,
             EnumSet.of(Capability.WORKSPACE_GET)),
     // ManagedSessionStoreController: internal writer routes.
+    INTERNAL_EXECUTION_AUTHORIZE(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}"
+                    + "/execution:authorize",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_EXECUTION_AUTHORIZE)),
+    INTERNAL_LIFECYCLE_AUTHORIZE(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}"
+                    + "/lifecycle:authorize",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_LIFECYCLE_AUTHORIZE)),
     INTERNAL_WRITER_ACQUIRE(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
                     + "/writers:acquire",
@@ -448,9 +472,14 @@ public enum SurfaceRegistry {
         ARTIFACT_CONTENT,
         WORKSPACE_LIST,
         WORKSPACE_GET,
+        CHANNEL_LIST,
+        CHANNEL_DELIVERY_LIST,
+        CHANNEL_DELIVERY_GET,
         AGENT_DEFINITION_CREATE,
         AGENT_DEFINITION_GET,
         AGENT_DEFINITION_UPDATE,
+        STORE_EXECUTION_AUTHORIZE,
+        STORE_LIFECYCLE_AUTHORIZE,
         STORE_WRITER_ACQUIRE,
         STORE_WRITER_RENEW,
         STORE_WRITER_SEAL,

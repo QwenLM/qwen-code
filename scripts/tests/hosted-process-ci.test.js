@@ -156,6 +156,22 @@ describe('Hosted real-process gates', () => {
     expect(run.run).toContain('clean verify checkstyle:check');
     expect(run.run).not.toContain('skip');
     expect(run['continue-on-error']).toBeUndefined();
+    // The relay-header filter otherwise surfaces only as an intermittent
+    // socket-reuse failure in the Maven gate below, so the direct check must
+    // keep running first.
+    const relay = job.steps.findIndex(
+      (step) => step.name === 'Check Hosted proxy header relay',
+    );
+    expect(relay).toBeGreaterThan(-1);
+    expect(job.steps[relay].run).toBe(
+      'cd integration-tests\n' +
+        'npx vitest run helpers/hosted-relay-headers.test.ts',
+    );
+    expect(job.steps[relay]['continue-on-error']).toBeUndefined();
+    expect(job.steps[relay].if).toBeUndefined();
+    expect(job.steps[relay].shell).toBeUndefined();
+    expect(job.steps[relay]['working-directory']).toBeUndefined();
+    expect(relay).toBeLessThan(job.steps.indexOf(run));
     const pom = read('packages/sdk-java/managed-agent-server/pom.xml').replace(
       /<!--[\s\S]*?-->/g,
       '',
@@ -236,10 +252,11 @@ describe('Hosted real-process gates', () => {
       (total, step) => total + (step['timeout-minutes'] ?? 0),
       0,
     );
-    // Step ceilings today (25 + 8x10 + 12); the uncapped setup steps need
+    // Step ceilings today (25 + 9x10 + 20); the uncapped setup steps need
     // their own allowance, which is exactly what the job comment claims.
-    expect(summed).toBe(117);
+    expect(summed).toBe(135);
     expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 10);
+    expect(job['timeout-minutes']).toBe(148);
   });
 
   it.each([
@@ -280,7 +297,6 @@ describe('Hosted real-process gates', () => {
     ],
   ])('pins the %s arm into the Hosted MySQL job', (stepName, script, flags) => {
     const job = java.jobs['hosted-harness-mysql'];
-    expect(job['timeout-minutes']).toBe(130);
     const install = job.steps.find(
       (step) => step.name === 'Install MySQL binaries for the failover E2E',
     );
@@ -321,21 +337,32 @@ describe('Hosted real-process gates', () => {
     }
   });
 
-  it('keeps the Hosted verify step ceiling above its failsafe fork timeout', () => {
-    const run = java.jobs['hosted-harness-mysql'].steps.find(
-      (step) => step.name === 'Verify Hosted Java, Spring and MySQL processes',
-    );
-    const forkSeconds = Number(
-      read('packages/sdk-java/managed-agent-server/pom.xml')
-        .split('<id>hosted-harness-mysql</id>')[1]
-        .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
-    );
-    // A step killed before its fork leaves no per-test failure lines, so the
-    // main-CI failure analyzer can only file an undiagnosable per-commit
-    // issue (#13503). The ceiling must cover the fork plus the wrapped
-    // compile/surefire/spotbugs/checkstyle work.
-    expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
-      forkSeconds + 300,
-    );
-  });
+  it.each([
+    ['Verify Hosted Java, Spring and MySQL processes', 'hosted-harness-mysql'],
+    ['Verify O4 filesystem process and capacity gates', 'o4-mysql-gates'],
+  ])(
+    'keeps the %s step ceiling above its failsafe fork timeout',
+    (stepName, profile) => {
+      const run = java.jobs['hosted-harness-mysql'].steps.find(
+        (step) => step.name === stepName,
+      );
+      // Tie the asserted ceiling to the profile the step actually runs: a
+      // re-pointed -P flag must not leave the row reading the old profile.
+      expect(run.run).toContain(`-P${profile}`);
+      const forkSeconds = Number(
+        read('packages/sdk-java/managed-agent-server/pom.xml')
+          .split(`<id>${profile}</id>`)[1]
+          .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
+      );
+      // A step killed before its fork leaves no per-test failure lines, so
+      // the main-CI failure analyzer can only file an undiagnosable
+      // per-commit issue (#13503 for the Hosted verify step, #13684 for the
+      // O4 gates). The ceiling must cover the fork plus the wrapped
+      // compile/surefire/spotbugs/checkstyle work — 600 s is the wrap both
+      // steps actually carry, so a step trim or fork bump reddens this row.
+      expect(run['timeout-minutes'] * 60).toBeGreaterThanOrEqual(
+        forkSeconds + 600,
+      );
+    },
+  );
 });

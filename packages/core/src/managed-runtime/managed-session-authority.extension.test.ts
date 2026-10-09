@@ -1164,6 +1164,8 @@ describe('managed session authority Stage H records', () => {
     const harness = await createHarness();
     const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
+      // This suite's registry keeps only the monitor_run body, so the
+      // schedule body H6a registered is out of scope here.
       await expect(
         authority.commitExtensionRecord(
           command('schedule-1'),

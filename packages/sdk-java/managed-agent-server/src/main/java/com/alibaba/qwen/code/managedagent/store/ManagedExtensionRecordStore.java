@@ -307,6 +307,169 @@ public class ManagedExtensionRecordStore {
         return new ApplyResult(receipts, lastActivation);
     }
 
+    /** A never-started verdict and the creation mint share one seam:
+     * this lock is the same row the creation fence reads FOR UPDATE, so
+     * the mint's lineage write and the verdict's name serialize against
+     * each other. The verdict must name exactly the Session the lineage
+     * proves minted — unnamed orphans the mint, mismatched forges one —
+     * and null exactly when no lineage exists. Package-visible for its
+     * H2 decision-table pin; the row lock it rides only binds inside
+     * the commit transaction that calls it. */
+    void reconcileNeverStartedVerdict(String tenantId, String sessionId,
+            String domain, String recordId, JsonNode record) {
+        jdbc.query("SELECT record_key FROM"
+                        + " qwen_managed_session_extension_record"
+                        + " WHERE session_scope_key = ?"
+                        + " AND record_key = ? FOR UPDATE",
+                (result, rowNum) -> result.getString(1),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedExtensionProjection.recordKey(sessionId, domain,
+                        recordId));
+        // The lineage read must be a locking read on purpose: under
+        // REPEATABLE READ the transaction's snapshot was established by
+        // the ordinary reads ahead of this gate, so a plain SELECT would
+        // miss a mint committed after that snapshot even while the row
+        // lock above serializes against the mint's own fence. A locking
+        // read always sees the latest committed data on both InnoDB
+        // isolation defaults — and takes the same extension-then-session
+        // lock order the mint uses, so the seam never cycles.
+        List<String> lineage = jdbc.query(
+                "SELECT session_id FROM managed_agent_session"
+                        + " WHERE tenant_id = ? AND parent_session_id = ?"
+                        + " AND parent_child_run_id = ? FOR UPDATE",
+                (result, rowNum) -> result.getString(1), tenantId,
+                sessionId, recordId);
+        JsonNode named = record.get("childSessionId");
+        String namedId = named == null || named.isNull() ? null
+                : named.textValue();
+        boolean lawfullyNamed = lineage.isEmpty() ? namedId == null
+                : lineage.size() == 1 && lineage.getFirst().equals(namedId);
+        if (!lawfullyNamed) {
+            // Its own refusal code, not the generic record rejection:
+            // the Hosted writer must classify this as a rollbackable
+            // non-commit (an authority kept alive for the corrected
+            // retry), never as a write failure that latches the parent's
+            // Session log shut behind it.
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "child_run_lineage_minted",
+                    "Child run " + recordId + "'s never-started verdict does"
+                            + " not name the Session its creation minted.");
+        }
+    }
+
+    boolean hasNewLifecycleDispatch(String tenantId, String sessionId, byte[] bytes,
+            Function<String, StoredResource> resources) {
+        boolean dispatch = false;
+        var revisions = new java.util.HashMap<String, JsonNode>();
+        for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
+            JsonNode parsed = parse(line);
+            if (parsed == null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
+                        "Record line is not a JSON object the Session authority can read.");
+            }
+            JsonNode event = parsed.path("managedSession");
+            JsonNode payload = event.path("payload");
+            if ("input.accepted".equals(event.path("kind").asText())
+                    || "tool.intent".equals(event.path("kind").asText())) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+            }
+            if ("model.attempt".equals(event.path("kind").asText())
+                    && "started".equals(payload.path("state").asText())) {
+                dispatch = true;
+            }
+            if (!"domain.committed".equals(event.path("kind").asText())) {
+                continue;
+            }
+            String domain = payload.path("domain").asText();
+            // A lifecycle-claimed owner also owes its own child-cleanup
+            // records (dispatch, attach, cancel, close_scope): they are
+            // lifecycle work, never new ordinary work — but they never
+            // enter the hook dispatch analysis or its network re-verify.
+            boolean hookDomain = "hook_execution".equals(domain)
+                    || "hook_registration".equals(domain);
+            if (!hookDomain
+                    && !"child_run".equals(domain)
+                    && !"child_acceptance".equals(domain)) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+            }
+            if (hookDomain) {
+                JsonNode next = readBody(resources.apply(
+                        payload.path("recordRef").path("resourceId").asText()));
+                JsonNode previous = previousLifecycleRecord(tenantId,
+                        sessionId, domain, next, revisions);
+                if (requiresLifecycleDispatch(previous, next)) {
+                    dispatch = true;
+                }
+            }
+        }
+        return dispatch;
+    }
+
+    void requireLifecycleSettlement(String tenantId, String sessionId, byte[] bytes,
+            Function<String, StoredResource> resources) {
+        var revisions = new java.util.HashMap<String, JsonNode>();
+        for (String line : new String(bytes, StandardCharsets.UTF_8).split("\n")) {
+            JsonNode parsed = parse(line);
+            if (parsed == null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST,
+                        ManagedSessionStoreModels.ERROR_INVALID_REQUEST,
+                        "Record line is not a JSON object the Session authority can read.");
+            }
+            JsonNode event = parsed.path("managedSession");
+            String kind = event.path("kind").asText();
+            JsonNode payload = event.path("payload");
+            if ("input.accepted".equals(kind) || "tool.intent".equals(kind)
+                    || "model.attempt".equals(kind) && "started".equals(payload.path("state").asText())) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+            }
+            if (!"domain.committed".equals(kind)) {
+                continue;
+            }
+            String domain = payload.path("domain").asText();
+            if (!List.of("hook_execution", "hook_registration").contains(domain)) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+            }
+            JsonNode next = readBody(resources.apply(payload.path("recordRef").path("resourceId").asText()));
+            JsonNode previous = previousLifecycleRecord(tenantId, sessionId, domain, next, revisions);
+            if (previous == null || requiresLifecycleDispatch(previous, next)) {
+                throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+            }
+        }
+    }
+
+    private JsonNode previousLifecycleRecord(String tenantId, String sessionId, String domain, JsonNode next,
+            java.util.Map<String, JsonNode> revisions) {
+        String id = next.path("hook_execution".equals(domain) ? "hookExecutionId" : "registrationId").asText();
+        String key = domain + ":" + id;
+        JsonNode previous = revisions.get(key);
+        if (previous == null) {
+            previous = jdbc.queryForList("SELECT record_resource_id FROM qwen_managed_session_extension_record"
+                + " WHERE session_scope_key = ? AND record_key = ? AND tenant_id = ? AND session_id = ? AND domain = ? AND record_id = ?",
+                String.class, ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedExtensionProjection.recordKey(sessionId, domain, id), tenantId, sessionId, domain, id).stream().map(resource -> {
+                    JsonNode record = readBody(readResource(tenantId, sessionId, resource));
+                    ManagedExtensionProjection.RECORD_BODIES.get(domain).require().accept(record);
+                    return record;
+                }).findFirst().orElse(null);
+        }
+        revisions.put(key, next);
+        return previous;
+    }
+
+    private boolean requiresLifecycleDispatch(JsonNode previous, JsonNode next) {
+        if (previous == null) {
+            return "dispatch_started".equals(next.path("run").path("execution").asText());
+        }
+        JsonNode before = previous.path("run");
+        JsonNode after = next.path("run");
+        String execution = before.path("execution").asText();
+        if (!List.of("", "intent").contains(execution) && !before.path("runtime").equals(after.path("runtime"))) {
+            throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_admission_closed");
+        }
+        return "intent".equals(execution) && !List.of("intent", "not_started_proven").contains(after.path("execution").asText());
+    }
+
     public TaskPage listTasks(String tenantId, String sessionId,
             Long beforeCreatedAt, String beforeTaskId, int limit) {
         List<Object> arguments = new ArrayList<>();
@@ -494,12 +657,20 @@ public class ManagedExtensionRecordStore {
                     requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
                 }
             }
-            require(!"child_agent".equals(record.get("kind").textValue())
+            require("shell".equals(record.get("kind").textValue())
                     || record.get("depth").longValue() != 1
                     || record.get("rootSessionId").textValue()
                             .equals(sessionId),
                     "Child run rootSessionId must be this Session for a"
                             + " first-level child.");
+            JsonNode stopReasonNode = record.get("stopReason");
+            JsonNode executionNode = record.get("run").get("execution");
+            if (stopReasonNode != null && !stopReasonNode.isNull()
+                    && executionNode != null && "not_started_proven"
+                            .equals(executionNode.textValue())) {
+                reconcileNeverStartedVerdict(tenantId, sessionId, domain,
+                        body.recordId().apply(record), record);
+            }
         }
         if (domain.equals("child_acceptance")) {
             for (String field : List.of("contentRef", "terminalReceiptRef")) {
@@ -515,6 +686,24 @@ public class ManagedExtensionRecordStore {
                 JsonNode ref = record.get(field);
                 if (ref != null && !ref.isNull()) {
                     requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+                }
+            }
+        }
+        if (domain.equals("channel_route")) {
+            JsonNode ref = record.get("policyRef");
+            requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+        }
+        if (domain.equals("channel_delivery")) {
+            JsonNode ref = record.get("contentRef");
+            requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
+            for (JsonNode segment : record.get("segments")) {
+                JsonNode segmentRef = segment.get("contentRef");
+                requireReference(resources.apply(segmentRef.get("resourceId").textValue()),
+                        segmentRef);
+                JsonNode proofRef = segment.get("receipt").get("proofRef");
+                if (proofRef != null && !proofRef.isNull()) {
+                    requireReference(resources.apply(proofRef.get("resourceId").textValue()),
+                            proofRef);
                 }
             }
         }
@@ -581,10 +770,10 @@ public class ManagedExtensionRecordStore {
                     (result, row) -> result.getString("record_resource_id"),
                     scopeKey, childRunKey).stream().findFirst().orElse(null);
             require(childRunResource != null,
-                    "Child acceptance must name a child agent run of this Session.");
+                    "Child acceptance must name a child Session run of this Session.");
             JsonNode child = readBody(resources.apply(childRunResource));
-            require("child_agent".equals(child.get("kind").textValue()),
-                    "Child acceptance must name a child agent run of this Session.");
+            require(!"shell".equals(child.get("kind").textValue()),
+                    "Child acceptance must name a child Session run of this Session.");
             require("settled".equals(child.get("run").get("state").textValue())
                     && "completed".equals(child.get("stopReason").textValue()),
                     "Child acceptance must name a run that ended with its"
@@ -612,6 +801,37 @@ public class ManagedExtensionRecordStore {
                                     .get("digest").textValue()),
                     "Child acceptance must bind the result and receipt its"
                             + " child run committed.");
+        }
+        if (domain.equals("child_run") && !"shell".equals(
+                record.get("kind").textValue())) {
+            // H4b decision 7 (the reverse of the acceptance's check): the
+            // acceptance record is authoritative — the run's delivery may
+            // reach accepted/consumed only after its acceptance chain
+            // exists, and may never retract to unknown/rejected once it
+            // does.
+            String delivery = record.get("run").get("delivery").get("state")
+                    .textValue();
+            String acceptanceKey = ManagedExtensionProjection.recordKey(
+                    sessionId, "child_acceptance",
+                    record.get("childRunId").textValue());
+            boolean acceptanceExists = !jdbc
+                    .query("SELECT record_resource_id FROM"
+                                    + " qwen_managed_session_extension_record"
+                                    + " WHERE session_scope_key = ? AND record_key = ?",
+                            (result, row) -> result.getString(
+                                    "record_resource_id"),
+                            scopeKey, acceptanceKey)
+                    .isEmpty();
+            require(
+                    !(delivery.equals("accepted") || delivery.equals("consumed"))
+                            || acceptanceExists,
+                    "Child run delivery reaches accepted or consumed only with"
+                            + " its acceptance record.");
+            require(
+                    !(delivery.equals("unknown") || delivery.equals("rejected"))
+                            || !acceptanceExists,
+                    "Child run delivery cannot go unknown or rejected after its"
+                            + " acceptance record.");
         }
         StoredRow previous = jdbc.query("SELECT * FROM"
                         + " qwen_managed_session_extension_record WHERE"
@@ -672,6 +892,28 @@ public class ManagedExtensionRecordStore {
                                 .allMatch(key -> ManagedMcpRecords.same(config.get(key), record.get(key)))
                         && ManagedMcpRecords.same(config.get("run").get("definition"), record.get("run").get("definition")),
                         "MCP operation must bind to its active committed configuration.");
+            }
+            if (domain.equals("channel_delivery")) {
+                // H5c: a delivery goes out through a committed, live route
+                // at the revision it was planned against.
+                String routeKey = ManagedExtensionProjection.recordKey(sessionId,
+                        "channel_route", record.get("routeId").textValue());
+                String routeResource = jdbc.query("SELECT record_resource_id FROM"
+                                + " qwen_managed_session_extension_record WHERE"
+                                + " session_scope_key = ? AND record_key = ?",
+                        (result, row) -> result.getString("record_resource_id"),
+                        scopeKey, routeKey).stream().findFirst().orElse(null);
+                require(routeResource != null,
+                        "Channel delivery must bind to its committed route at the"
+                                + " pinned revision.");
+                JsonNode route = readBody(resources.apply(routeResource));
+                String routeState = route.get("run").get("state").textValue();
+                require(ManagedMcpRecords.same(route.get("routeRevision"),
+                        record.get("routeRevision"))
+                        && !List.of("settled", "failed", "cancelled")
+                                .contains(routeState),
+                        "Channel delivery must bind to its committed route at the"
+                                + " pinned revision.");
             }
             require(body.isStart().test(record), "The first revision of "
                     + domain + " record " + recordId + " must open its run.");

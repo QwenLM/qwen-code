@@ -1617,6 +1617,11 @@ class DurableRuntimeRecoveryTest {
     private static final class GatedSessionRepository
             implements RuntimeSessionRepository {
         @Override
+        public RuntimeSessionRecord findHistorical(String tenant, String harness, String runtime) {
+            return delegate.findHistorical(tenant, harness, runtime);
+        }
+
+        @Override
         public java.util.List<RuntimeSessionRecord> findByBinding(String id, long generation, String after, int limit) {
             return delegate.findByBinding(id, generation, after, limit);
         }

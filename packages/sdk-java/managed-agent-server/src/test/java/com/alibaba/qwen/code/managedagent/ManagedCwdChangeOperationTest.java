@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.service.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.service.SessionLifecycleCoordinator;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore.CwdChangeOutcome;
+import com.alibaba.qwen.code.managedagent.store.ChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
@@ -17,7 +18,12 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -40,6 +46,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -103,11 +111,137 @@ class ManagedCwdChangeOperationTest {
         assertThat(settle(fixture,
                 sessionId, claimed.operationId(), "owner",
                 claimed.claimGeneration()).completed()).isTrue();
+        fixture.insertRuntimeOwner(TENANT, sessionId,
+                RuntimeSessionRecord.State.READY);
         OperationAdmission replay = begin(fixture, sessionId, "key-1",
                 "digest-1", "services/b", 1);
         assertThat(replay.replayed()).isTrue();
         assertThat(replay.operation().state()).isEqualTo("COMPLETED");
         assertThat(replay.operation().resultContextRevision()).isEqualTo(2);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = RuntimeSessionRecord.State.class,
+            names = {"ACQUIRING", "READY", "RELEASING", "FAILED"})
+    void retainedRuntimeContextRefusesAdmissionWithoutAnActiveTurn(
+            RuntimeSessionRecord.State state) {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        fixture.insertRuntimeOwner(TENANT, sessionId, state);
+        assertThatThrownBy(() -> fixture.tx(() -> begin(fixture, sessionId,
+                "key", "digest", "services/b", 1)))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertRefusal(error, HttpStatus.CONFLICT,
+                                "session_context_busy"));
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM"
+                + " managed_agent_operation WHERE tenant_id = ? AND"
+                + " session_id = ?", Integer.class, TENANT, sessionId)).isZero();
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getContextRevision()).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = RuntimeSessionRecord.State.class,
+            names = {"ACQUIRING", "READY", "RELEASING", "FAILED"})
+    void runtimeContextAcquiredAfterAdmissionRefusesCommit(
+            RuntimeSessionRecord.State state) {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        OperationRecord operation = fixture.tx(() -> begin(fixture,
+                sessionId, "key", "digest", "services/b", 1)).operation();
+        OperationRecord claimed = claim(fixture, sessionId,
+                operation.operationId(), "owner");
+        fixture.insertRuntimeOwner(TENANT, sessionId, state);
+        CwdChangeOutcome outcome = settle(fixture, sessionId,
+                operation.operationId(), "owner", claimed.claimGeneration());
+        assertThat(outcome.completed()).isFalse();
+        assertThat(outcome.failureCode()).isEqualTo("session_context_busy");
+        assertFailed(fixture, sessionId, operation.operationId(),
+                "session_context_busy");
+        ContextBinding binding = fixture.store.requireSession(TENANT,
+                sessionId).workspace();
+        assertThat(binding.getCwdRelative()).isEqualTo("services/api");
+        assertThat(binding.getContextRevision()).isEqualTo(1);
+        assertThat(fixture.events(sessionId).stream().map(fixture::event)
+                .filter(event -> "session.context.changed"
+                        .equals(event.path("type").asText())).count()).isZero();
+    }
+
+    @Test
+    void confirmedReleaseAndOtherHarnessOwnersPermitTheDirectoryChange() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        fixture.insertRuntimeOwner(TENANT, sessionId,
+                RuntimeSessionRecord.State.RELEASED);
+        fixture.insertRuntimeOwner("another-tenant", sessionId,
+                RuntimeSessionRecord.State.READY);
+        fixture.insertRuntimeOwner(TENANT, "another-harness",
+                RuntimeSessionRecord.State.READY);
+        OperationRecord operation = fixture.tx(() -> begin(fixture,
+                sessionId, "key", "digest", "services/b", 1)).operation();
+        OperationRecord claimed = claim(fixture, sessionId,
+                operation.operationId(), "owner");
+        assertThat(settle(fixture, sessionId, operation.operationId(),
+                "owner", claimed.claimGeneration()).completed()).isTrue();
+        ContextBinding binding = fixture.store.requireSession(TENANT,
+                sessionId).workspace();
+        assertThat(binding.getCwdRelative()).isEqualTo("services/b");
+        assertThat(binding.getContextRevision()).isEqualTo(2);
+    }
+
+    @Test
+    void migrationFenceRefusesFreshCwdChangesButPreservesReceiptsAndOtherStorage() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        String other = fixture.createBoundSession(TENANT, "ws-other");
+        fixture.jdbc.update("UPDATE managed_workspace_registry SET storage_id = 'other-storage'"
+                + " WHERE workspace_id = 'ws-other'");
+        fixture.jdbc.update("UPDATE managed_agent_session SET workspace_storage_id = 'other-storage'"
+                + " WHERE session_id = ?", other);
+        OperationAdmission first = begin(fixture, sessionId, "old", "digest", "services/b", 1);
+        OperationRecord claimed = claim(fixture, sessionId, first.operation().operationId(), "owner");
+        assertThat(settle(fixture, sessionId, claimed.operationId(), "owner", claimed.claimGeneration()).completed()).isTrue();
+        var binding = fixture.store.findSession(TENANT, sessionId).orElseThrow().workspace();
+        installMigrationFence(fixture);
+        OperationAdmission replay = begin(fixture, sessionId, "old", "digest", "services/b", 1);
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.operation().operationId()).isEqualTo(first.operation().operationId());
+        assertThatThrownBy(() -> begin(fixture, sessionId, "fresh", "digest", "services/c", 2))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getStatusCode()).isEqualTo(409);
+                    assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                    assertThat(error.isRetryable()).isFalse();
+                });
+        assertThat(fixture.store.findSession(TENANT, sessionId).orElseThrow().workspace()).isEqualTo(binding);
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_operation WHERE session_id = ?",
+                Integer.class, sessionId)).isEqualTo(1);
+        OperationRecord otherClaim = claim(fixture, other,
+                begin(fixture, other, "fresh", "digest", "services/b", 1).operation().operationId(), "other-owner");
+        assertThat(settle(fixture, other, otherClaim.operationId(), "other-owner", otherClaim.claimGeneration()).completed()).isTrue();
+    }
+
+    @Test
+    void fenceInstalledAfterProbeFailsSettlementWithoutChangingTheBinding() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        var binding = fixture.store.findSession(TENANT, sessionId).orElseThrow().workspace();
+        OperationRecord claimed = claim(fixture, sessionId,
+                begin(fixture, sessionId, "key", "digest", "services/b", 1).operation().operationId(), "owner");
+        installMigrationFence(fixture);
+        CwdChangeOutcome outcome = settle(fixture, sessionId, claimed.operationId(), "owner", claimed.claimGeneration());
+        assertThat(outcome.completed()).isFalse();
+        assertThat(outcome.failureCode()).isEqualTo("workspace_unavailable");
+        assertFailed(fixture, sessionId, claimed.operationId(), "workspace_unavailable");
+        assertThat(fixture.store.findOperation(TENANT, sessionId, claimed.operationId()).orElseThrow().leaseOwner()).isNull();
+        assertThat(fixture.store.findSession(TENANT, sessionId).orElseThrow().workspace()).isEqualTo(binding);
+        assertThat(fixture.events(sessionId).stream().map(fixture::event)
+                .filter(event -> "session.context.changed".equals(event.path("type").asText()))).isEmpty();
+    }
+
+    private void installMigrationFence(Fixture fixture) {
+        fixture.jdbc.update("INSERT INTO qwen_runtime_storage_fence VALUES (?, ?, ?, ?, ?)",
+                JdbcRuntimeBindingRepository.storageFenceKey(TENANT), JdbcRuntimeBindingRepository.storageFenceKey(STORAGE),
+                TENANT, STORAGE, UUID.randomUUID().toString());
     }
 
     @Test
@@ -176,14 +310,14 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
-        fixture.grant(TENANT, WS, "colleague", true, true);
+        fixture.grant(TENANT, WS, "colleague", "OPERATOR");
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
                 "a", 1, "colleague", "digest-colleague"))
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.FORBIDDEN,
                                 "session_operation_forbidden"));
         fixture.jdbc.update("UPDATE managed_workspace_access SET"
-                        + " can_create = FALSE WHERE tenant_id = ? AND"
+                        + " role = 'READER' WHERE tenant_id = ? AND"
                         + " workspace_id = ?", TENANT, WS);
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
                 "a", 1))
@@ -202,8 +336,8 @@ class ManagedCwdChangeOperationTest {
         OperationAdmission admitted = begin(fixture, sessionId, "key",
                 "digest", "services/b", 1);
         assertThat(admitted.replayed()).isFalse();
-        fixture.jdbc.update("UPDATE managed_workspace_access SET"
-                + " can_read = FALSE WHERE tenant_id = ? AND"
+        fixture.jdbc.update("DELETE FROM managed_workspace_access"
+                + " WHERE tenant_id = ? AND"
                 + " workspace_id = ? AND actor_id = ?", TENANT, WS,
                 ACTOR.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
@@ -441,7 +575,7 @@ class ManagedCwdChangeOperationTest {
         OperationRecord revokedClaim = claim(fixture, revokedId, revokedOp,
                 "owner");
         fixture.jdbc.update("UPDATE managed_workspace_access SET"
-                        + " can_create = FALSE WHERE tenant_id = ? AND"
+                        + " role = 'READER' WHERE tenant_id = ? AND"
                         + " workspace_id = ?", TENANT, WS);
         assertThat(settle(fixture,
                 revokedId, revokedOp, "owner",
@@ -541,7 +675,7 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
-        fixture.grant(TENANT, WS, "colleague", true, true);
+        fixture.grant(TENANT, WS, "colleague", "OPERATOR");
         assertThatThrownBy(() -> begin(fixture, archivedId, "key",
                 "digest", "a", 1, "colleague", "digest-colleague"))
                 .isInstanceOfSatisfying(ApiException.class,
@@ -1326,7 +1460,7 @@ class ManagedCwdChangeOperationTest {
                                 + " DUPLICATE KEY UPDATE workspace_id ="
                                 + " workspace_id", tenant, workspaceId,
                                 STORAGE, workspaceId);
-                        grant(tenant, workspaceId, ACTOR, true, true);
+                        grant(tenant, workspaceId, ACTOR, "OPERATOR");
                         return store.insertWorkspaceSessionCommand(tenant,
                                 ACTOR, "create-" + UUID.randomUUID(),
                                 "create-digest", "qwen-code", null, null,
@@ -1337,13 +1471,13 @@ class ManagedCwdChangeOperationTest {
         }
 
         void grant(String tenant, String workspaceId, String actor,
-                boolean read, boolean create) {
+                String role) {
             jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                            + " workspace_id, actor_id, can_read,"
-                            + " can_create) VALUES (?, ?, ?, ?, ?)"
+                            + " workspace_id, actor_id, role)"
+                            + " VALUES (?, ?, ?, ?)"
                             + " ON DUPLICATE KEY UPDATE actor_id = actor_id",
                     tenant, workspaceId, actor.getBytes(java.nio.charset
-                            .StandardCharsets.UTF_8), read, create);
+                            .StandardCharsets.UTF_8), role);
         }
 
         void insertAction(String sessionId, String actionId,
@@ -1363,6 +1497,22 @@ class ManagedCwdChangeOperationTest {
                             + " updated_at) VALUES (?, ?, ?, ?, '[]',"
                             + " 'digest', ?, 0, 0)", TENANT, sessionId,
                     turnId, UUID.randomUUID().toString(), status);
+        }
+
+        void insertRuntimeOwner(String tenant, String sessionId,
+                RuntimeSessionRecord.State state) {
+            RuntimeScope scope = new RuntimeScope(tenant, WS, "1",
+                    "/workspace", "workspace-files", "session");
+            RuntimeSession session = new RuntimeSession(sessionId,
+                    UUID.randomUUID().toString(), "bootstrap", scope);
+            var repository = new JdbcRuntimeSessionRepository(jdbc.getDataSource());
+            RuntimeSessionRecord created = repository.findOrCreate(
+                    new RuntimeSessionRecord(session, "binding", 1,
+                            RuntimeSessionRecord.State.ACQUIRING, 0, clock.instant()));
+            if (state != RuntimeSessionRecord.State.ACQUIRING) {
+                assertThat(repository.compareAndSet(created,
+                        created.withState(state, clock.instant()))).isNotNull();
+            }
         }
 
         List<Map<String, Object>> events(String sessionId) {
@@ -1388,7 +1538,15 @@ class ManagedCwdChangeOperationTest {
 
         SessionLifecycleCoordinator coordinator(RuntimeWarmer warmer) {
             return new SessionLifecycleCoordinator(store, null, null,
-                    warmer, new AbstractExecutorService() {
+                    warmer, new ChildResultRelayStore(jdbc),
+                    new ObjectMapper(),
+                    new com.alibaba.qwen.code.managedagent.service.ChildLifecycleAdmissions(
+                            store,
+                            new com.alibaba.qwen.code.managedagent.service.RequestDigests(),
+                            warmer),
+                    org.mockito.Mockito.mock(
+                            org.springframework.beans.factory.ObjectProvider.class),
+                    new AbstractExecutorService() {
                         @Override
                         public void shutdown() {
                         }

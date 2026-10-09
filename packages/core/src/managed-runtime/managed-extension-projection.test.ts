@@ -50,6 +50,8 @@ interface FixtureSuite {
     string,
     string | null | Record<string, string | null>
   >;
+  /** The bodies H6 added to the projection contract after H4. */
+  readonly additionalRecordBodies: Record<string, string | null>;
   readonly taskStates: readonly string[];
   readonly pendingDeliveryStates: readonly string[];
   readonly runtimeStates: readonly string[];
@@ -119,6 +121,7 @@ describe('managed-extension-projection/1 fixtures', () => {
               ? {
                   shell: body?.taskKindOf({ kind: 'shell' }),
                   child_agent: body?.taskKindOf({ kind: 'child_agent' }),
+                  workflow: body?.taskKindOf({ kind: 'workflow' }),
                 }
               : body?.taskKindOf({
                   configurationId: 'probe',
@@ -129,7 +132,10 @@ describe('managed-extension-projection/1 fixtures', () => {
           ],
         ),
       ),
-    ).toEqual(fixtures.recordBodies);
+    ).toEqual({
+      ...fixtures.recordBodies,
+      ...fixtures.additionalRecordBodies,
+    });
     expect([...MANAGED_TASK_STATES]).toEqual(fixtures.taskStates);
     expect([...MANAGED_TASK_RUNTIME_STATES].sort()).toEqual(
       fixtures.runtimeStates,
