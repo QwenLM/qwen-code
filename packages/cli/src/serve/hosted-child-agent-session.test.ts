@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import { LocalManagedSessionAuthority } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
@@ -21,7 +21,29 @@ import {
 
 // The H4b gates are real: the kind gate admits `child_agent` and
 // `child_acceptance` sits in the plain enabled list, so this suite drives
-// the hosted orchestrator with no enablement mock.
+// the hosted orchestrator with no enablement mock. One H4c case plants a
+// `workflow` record ahead of that kind's enablement; the flag lifts the
+// kind gate for that planting only.
+const enablement = vi.hoisted(() => ({ workflowKind: false }));
+
+vi.mock(
+  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
+      >();
+    return {
+      ...actual,
+      assertManagedSessionChildRunKindEnabled: (kind: string) => {
+        if (kind !== 'workflow' || !enablement.workflowKind) {
+          actual.assertManagedSessionChildRunKindEnabled(kind);
+        }
+      },
+    };
+  },
+);
+
 const sessionId = '550e8400-e29b-41d4-a716-446655440000';
 const sessionKey = {
   tenantId: 'tenant-1',
@@ -42,6 +64,7 @@ const BINDING = { runtimeBindingId: 'binding-1', generation: '1' };
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
+  enablement.workflowKind = false;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -509,6 +532,49 @@ describe('hosted child agent session (H4b)', () => {
       expect(
         children.activeChildRunsOf('scope-main').map((run) => run.childRunId),
       ).toEqual(['run-2']);
+    });
+  });
+
+  // H4c: the quotas count child Sessions, so a workflow child spends the
+  // same concurrency and launch budget a child agent does, while the
+  // child agent funnel itself never reads it as one of its own.
+  it('counts a workflow child against the scope quotas', async () => {
+    enablement.workflowKind = true;
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      const children = new HostedChildAgentSession(
+        { authority, resources: harness.store },
+        sessionKey,
+      );
+      const { inputRef } = await children.admit(launchParams());
+      await authority.commitExtensionRecord(
+        {
+          operation: 'commitChildRunRecord',
+          commandId: 'workflow-1:1',
+          sessionKey,
+          contentDigest: 'd'.repeat(64),
+        },
+        {
+          domain: 'child_run',
+          record: {
+            ...children.record('run-1')!,
+            kind: 'workflow',
+            childRunId: 'workflow-1',
+            inputRef,
+          },
+        },
+        { class: 'trusted_entry' },
+      );
+      expect(
+        children
+          .launchedChildRunsOf('scope-main')
+          .map((run) => [run.kind, run.childRunId]),
+      ).toEqual([
+        ['child_agent', 'run-1'],
+        ['workflow', 'workflow-1'],
+      ]);
+      expect(children.activeChildRunsOf('scope-main')).toHaveLength(2);
+      expect(children.record('workflow-1')).toBeUndefined();
     });
   });
 

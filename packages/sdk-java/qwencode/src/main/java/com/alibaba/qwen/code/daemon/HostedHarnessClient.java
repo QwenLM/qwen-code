@@ -358,6 +358,43 @@ public final class HostedHarnessClient implements AutoCloseable {
         }
     }
 
+    /**
+     * H5b/H5c: one channel operation onto the Session's journal (the control
+     * plane's verbs). The Hosted side commits through its funnel and answers
+     * 202 with the settled result; a non-2xx answer surfaces as a
+     * {@link DaemonHttpException} the caller translates, and anything
+     * ambiguous is an unknown outcome to retry, never to guess at.
+     */
+    public Map<String, Object> runChannelOperation(HarnessSessionRef session,
+            Map<String, Object> body) {
+        HarnessSessionRef ref = requireSessionRef(session);
+        String operation = "POST /session/:id/channels/operations";
+        HttpSupport.Response response = sendMutation(
+                sessionPath(ref.getHarnessSessionId())
+                        + "/channels/operations",
+                body, ref.getHarnessClientId(), operation);
+        DaemonClient.requireStatus(response, 202, operation);
+        try {
+            Map<String, Object> json = JsonSupport.parseObject(
+                    response.getBody(), "channel operation response");
+            String state = JsonSupport.requiredString(json, "state",
+                    "channel operation");
+            if (!"settled".equals(state)) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness did not settle the channel operation");
+            }
+            String operationId = JsonSupport.requiredString(json,
+                    "operationId", "channel operation");
+            if (!operationId.equals(body.get("operationId"))) {
+                throw new DaemonProtocolException(
+                        "Hosted Harness settled a different channel operation");
+            }
+            return json;
+        } catch (DaemonProtocolException e) {
+            throw new MutationOutcomeUnknownException(operation, e);
+        }
+    }
+
     public PromptReceipt cancelManagedRuntime(CancelManagedRuntime request) {
         if (request == null) {
             throw new IllegalArgumentException("request must not be null");
