@@ -85,7 +85,10 @@ vi.mock('./theme.js', () => ({
 import { AgentStatus, type Config } from '@qwen-code/qwen-code-core';
 import { clipToRows } from './dialogs-core.js';
 import { OpenTuiArenaDialog } from './dialogs-arena.js';
-import { sanitizeTerminalLine } from '../utils/textUtils.js';
+import {
+  sanitizeTerminalLine,
+  getCachedStringWidth,
+} from '../utils/textUtils.js';
 
 function baseKeyEvent(overrides: Record<string, unknown> = {}) {
   return {
@@ -856,5 +859,33 @@ describe('OpenTuiArenaDialog select pane charging', () => {
     await press('d');
     await press('d');
     expect(screen.queryByText(/Detailed Diff/)).toBeNull();
+  });
+
+  it('keeps the select prompt inside the row the chrome count pays for', () => {
+    // The prompt is thirty-three columns and the frame's content is thirty at
+    // width 40, so an unclipped prompt wrapped onto a second row the flat
+    // twelve-row charge never paid for: the real chrome is thirteen, the
+    // budget still leaves the one agent row it charged for, and the
+    // unshrinkable frame paints fifteen rows into a fourteen-row region —
+    // losing its bottom border and pushing the hint row past the region. The
+    // task line above it and the frame's own hint already clip for exactly
+    // this reason.
+    mocks.state.width = 40;
+    render(
+      <OpenTuiArenaDialog
+        mode="select"
+        config={wrappedTitleConfig}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={14}
+      />,
+    );
+
+    const prompt = screen.getByText(/^Select a winner/);
+    expect(prompt.textContent).not.toBe('Select a winner to apply changes:');
+    expect(getCachedStringWidth(prompt.textContent ?? '')).toBeLessThanOrEqual(
+      30,
+    );
+    expect(screen.getByText('qwen3-coder-plus')).toBeTruthy();
   });
 });

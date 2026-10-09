@@ -84,6 +84,7 @@ const ARENA_MORE_MODELS_GUIDE =
 const STATUS_REFRESH_INTERVAL_MS = 2000;
 const IN_PROCESS_REFRESH_INTERVAL_MS = 1000;
 const MAX_MODEL_NAME_LENGTH = 35;
+const ARENA_SELECT_WINNER = 'Select a winner to apply changes:';
 const MAX_TASK_DISPLAY_LENGTH = 60;
 const DETAILED_DIFF_MAX_LINES = 180;
 
@@ -939,7 +940,9 @@ function ArenaSelect({
 
   // Each agent row paints two physical rows (label, then stats), and the
   // frame, the task line, the "Select a winner" line and the list's margin
-  // come off the region first (7 + 2 + 2 + 1). The window follows the
+  // come off the region first (7 + 2 + 2 + 1); the task and the prompt are
+  // each charged one row, so each clips to frameContentWidth rather than
+  // wrapping onto a row the count never paid for. The window follows the
   // cursor; at a zero-row window the cursor keys, Enter and the preview
   // panes — everything that addresses a row — refuse, while x and Esc stay
   // live (they address the session, not a row).
@@ -1078,7 +1081,12 @@ function ArenaSelect({
         <text fg={C.text}>{`"${task}"`}</text>
       </box>
       <box marginTop={1}>
-        <text fg={C.dim}>{'Select a winner to apply changes:'}</text>
+        <text fg={C.dim}>
+          {/* Charged one row, so at thirty-three columns it clips to the
+              frame's content width like the hint does, instead of wrapping
+              onto a row the chrome count never paid for. */}
+          {clipToWidth(ARENA_SELECT_WINNER, frameContentWidth)}
+        </text>
       </box>
       <box marginTop={1} flexDirection="column">
         {rows
