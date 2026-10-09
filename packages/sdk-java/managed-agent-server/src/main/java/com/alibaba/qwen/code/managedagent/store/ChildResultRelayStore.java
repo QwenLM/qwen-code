@@ -55,8 +55,10 @@ public class ChildResultRelayStore {
         }
     }
 
-    // delivery_state is null on the shell kind, so a child_run row with a
-    // pending delivery is always a child_agent row; the ledger join
+    // delivery_state is null on the shell kind, and the relay drives only
+    // the child_agent kind: a workflow child's execution belongs to the
+    // workflow runtime, which does not exist yet (H4c registers the kind
+    // disabled), so its rows never reach this page; the ledger join
     // drops every row whose classification is terminal (delivered,
     // orphaned or given up), because the bounded discovery set is for
     // work still owed — accumulated terminal rows would otherwise starve
@@ -92,6 +94,7 @@ public class ChildResultRelayStore {
                     + " ON l.parent_session_id = r.session_id"
                     + " AND l.child_run_id = r.record_id"
                     + " WHERE r.domain = 'child_run'"
+                    + " AND r.task_kind = 'child_agent'"
                     + " AND ((r.delivery_state IN ('planned', 'accepting',"
                     + " 'unknown') AND (l.state IS NULL OR l.state NOT IN"
                     + " ('done', 'orphaned', 'unknown')))"
@@ -203,7 +206,9 @@ public class ChildResultRelayStore {
     /**
      * The non-terminal child-agent runs of one Session, for the close
      * cascade: task projections say what is still alive; the bodies name
-     * the child Sessions (null when creation never attached).
+     * the child Sessions (null when creation never attached). Like the
+     * relay's discovery page, the cascade acts on the child_agent kind
+     * only until the workflow runtime exists.
      */
     public List<LiveScope> findLiveScopes(String tenantId,
             String parentSessionId) {
@@ -212,6 +217,7 @@ public class ChildResultRelayStore {
                         + " FROM qwen_managed_session_extension_record"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND domain = 'child_run' AND delivery_state IS NOT NULL"
+                        + " AND task_kind = 'child_agent'"
                         + " AND task_state NOT IN ('completed', 'failed',"
                         + " 'cancelled')"
                         + " ORDER BY created_at, record_id",
