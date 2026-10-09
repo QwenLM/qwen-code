@@ -556,6 +556,20 @@ class ChildResultRelayStoreTest {
         ChildResultRelayStore.TurnLine turn = relayStore.latestTurn(TENANT,
                 session);
         assertThat(turn.status()).isEqualTo("COMPLETED");
+        assertThat(turn.submissionAttempted()).isTrue();
+        assertThat(turn.harnessEventEpoch()).isNull();
+        assertThat(turn.dispatched()).isTrue();
+        // A Turn whose admission never landed is a pre-admission failure,
+        // never dispatch proof (R23's cascade producer).
+        jdbc.update("INSERT INTO managed_agent_turn (tenant_id, session_id,"
+                        + " turn_id, prompt_id, input_json, payload_digest,"
+                        + " status, submission_attempted, created_at,"
+                        + " updated_at, completed_at, version)"
+                        + " VALUES (?, ?, 'turn-pre', 'prompt-2', '[]', 'd',"
+                        + " 'FAILED', FALSE, 3, 4, 4, 1)",
+                TENANT, session);
+        assertThat(relayStore.latestTurn(TENANT, session).dispatched())
+                .isFalse();
         jdbc.update("INSERT INTO managed_agent_item (tenant_id, session_id,"
                         + " item_id, turn_id, item_type, item_role,"
                         + " item_status, attributes_json, first_sequence,"

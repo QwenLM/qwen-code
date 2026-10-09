@@ -608,6 +608,48 @@ class SessionLifecycleCoordinatorTest {
         }
     }
 
+    // R23: a Turn failed before warm-up or submission is a pre-admission
+    // failure — no dispatch ever happened, so no binding is owed. The
+    // named never-started settle must not hunt one.
+    @Test
+    void aPreAdmissionFailureSettlesTheNamedNeverStartedChild() {
+        World world = closingWorld("preadmit-");
+        liveScope(world, "{\"inputRef\":{\"resourceId\":\"res-input\"}}");
+        world.jdbc.update("INSERT INTO managed_agent_turn (tenant_id,"
+                        + " session_id, turn_id, prompt_id, input_json,"
+                        + " payload_digest, status, submission_attempted,"
+                        + " created_at, updated_at, completed_at, version)"
+                        + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
+                        + " 'd', 'FAILED', FALSE, 1, 2, 2, 1)",
+                world.child);
+        var harness = new CascadingHarness(true, false);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(world.store,
+                    new ManagedSessionStore(world.jdbc), harness,
+                    warmer(true, false), world.relayStore, new ObjectMapper(),
+                    admissions(world.store, warmer(true, false)),
+                    brokerProvider(null), executor, Clock.systemUTC(),
+                    world.properties);
+            try {
+                redispatchUntil(coordinator, world, "COMPLETED");
+                assertThat(world.store.requireSession("tenant", world.child)
+                        .status()).isEqualTo("CLOSED");
+                Map<String, Object> closeScope = harness.operations.stream()
+                        .filter(op -> "close_scope".equals(op.get("kind")))
+                        .findFirst().orElseThrow();
+                assertThat(closeScope).containsEntry("started", false)
+                        .containsEntry("childSessionId", world.child);
+                // No repair chain is ever attempted for a binding that
+                // never existed.
+                assertThat(harness.operations)
+                        .extracting(op -> op.get("kind"))
+                        .doesNotContain("dispatch_started");
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
     // R22's false-verdict repro in isolation: lineage alone names the
     // child, the binding has retired, and the child's own durable Turn
     // completed. The settling revision must read started: true — the

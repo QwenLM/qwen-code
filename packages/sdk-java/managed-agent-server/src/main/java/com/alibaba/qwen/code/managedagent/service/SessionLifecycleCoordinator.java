@@ -458,22 +458,26 @@ public class SessionLifecycleCoordinator {
                 // memory: a creation key is an attempt id, not a start,
                 // and a READY binding's absence says nothing — a retired
                 // (RELEASED/LOST) binding still proves the dispatch it
-                // once was, and the child Session's own durable Turn is
-                // proof all by itself. A start is proven by the body's
-                // committed dispatch facts, by a binding row in ANY
-                // state, or by that Turn; with none of the three the
-                // never-started pairing is the honest one. The SDK's
-                // refusal and transport-ambiguous throws are plain
-                // RuntimeExceptions (DaemonHttpException,
+                // once was, and the child Session's own dispatched Turn
+                // is proof all by itself (the G3 pair: a submission mark
+                // or a harness epoch — a Turn whose admission never
+                // landed is a pre-admission failure and proves nothing).
+                // A start is proven by the body's committed dispatch
+                // facts, by a binding row in ANY state, or by that Turn;
+                // with none of the three the never-started pairing is
+                // the honest one. The SDK's refusal and transport-
+                // ambiguous throws are plain RuntimeExceptions
+                // (DaemonHttpException,
                 // MutationOutcomeUnknownException): a journal-side
                 // failure owes its revision, but must never skip the
                 // child's own physical close behind it.
                 RuntimeBindingRecord binding = findBinding(tenantId,
                         childSessionId);
+                ChildResultRelayStore.TurnLine childTurn = childScopes
+                        .latestTurn(tenantId, childSessionId);
                 if (body.runtimeBindingId() == null
                         && body.dispatchId() == null && binding == null
-                        && childScopes.latestTurn(tenantId, childSessionId)
-                                == null) {
+                        && (childTurn == null || !childTurn.dispatched())) {
                     // Nothing to replay and nothing that ever ran: the
                     // only honest read of the create→attach window is
                     // that the creation never attached. The run settles

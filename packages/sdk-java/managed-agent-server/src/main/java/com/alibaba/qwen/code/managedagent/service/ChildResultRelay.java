@@ -643,16 +643,22 @@ public class ChildResultRelay {
             return false;
         }
         if ("intent".equals(execution)) {
-            if (child != null && relayStore.latestTurn(row.tenantId(), child)
-                    != null) {
-                // The child provably ran while the record never attached:
-                // the chain replays dispatch first (intent allows exactly
-                // that successor), then the attach — only from the
-                // physical binding the child warms with, or it owes the
-                // bounded wait, never on a bogus verdict.
+            ChildResultRelayStore.TurnLine childTurn = child == null ? null
+                    : relayStore.latestTurn(row.tenantId(), child);
+            if (childTurn != null && childTurn.dispatched()) {
+                // The child provably dispatched while the record never
+                // attached: the chain replays dispatch first (intent
+                // allows exactly that successor), then the attach — from
+                // the historical binding row that proves that dispatch
+                // (any state: a retired row still names the identity the
+                // dispatch committed; warmth is never required to rebuild
+                // a record). A Turn whose admission never landed proves
+                // nothing, so a pre-admission failure keeps the honest
+                // never-started pairing instead of hunting a binding that
+                // never existed.
                 RuntimeBindingRecord binding = broker
-                        .findLatestBindingByHarnessSession(row.tenantId(),
-                                child);
+                        .findLatestBindingByHarnessSessionAnyState(
+                                row.tenantId(), child);
                 if (binding == null) {
                     throw new RelayRetry("child physically ran, yet its"
                             + " binding's own dispatch is not an honest chain");

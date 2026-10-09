@@ -325,10 +325,18 @@ public class ManagedExtensionRecordStore {
                 ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
                 ManagedExtensionProjection.recordKey(sessionId, domain,
                         recordId));
+        // The lineage read must be a locking read on purpose: under
+        // REPEATABLE READ the transaction's snapshot was established by
+        // the ordinary reads ahead of this gate, so a plain SELECT would
+        // miss a mint committed after that snapshot even while the row
+        // lock above serializes against the mint's own fence. A locking
+        // read always sees the latest committed data on both InnoDB
+        // isolation defaults — and takes the same extension-then-session
+        // lock order the mint uses, so the seam never cycles.
         List<String> lineage = jdbc.query(
                 "SELECT session_id FROM managed_agent_session"
                         + " WHERE tenant_id = ? AND parent_session_id = ?"
-                        + " AND parent_child_run_id = ?",
+                        + " AND parent_child_run_id = ? FOR UPDATE",
                 (result, rowNum) -> result.getString(1), tenantId,
                 sessionId, recordId);
         JsonNode named = record.get("childSessionId");

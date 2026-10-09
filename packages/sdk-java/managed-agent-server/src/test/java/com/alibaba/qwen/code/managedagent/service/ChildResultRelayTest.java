@@ -215,7 +215,8 @@ class ChildResultRelayTest {
         relay.scan();
         relay.scan();
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
-                new TurnLine("turn-1", "COMPLETED", now + 1L, null));
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
         when(store.terminalResultText(TENANT, CHILD, "turn-1"))
                 .thenReturn("审阅通过");
         relay.scan();
@@ -249,7 +250,8 @@ class ChildResultRelayTest {
                 .containsExactly("dispatch_started", "attach");
 
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
-                new TurnLine("turn-1", "COMPLETED", now + 1L, null));
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
         when(store.terminalResultText(TENANT, CHILD, "turn-1"))
                 .thenReturn("审阅通过");
         relay.scan();
@@ -307,7 +309,8 @@ class ChildResultRelayTest {
         // with the reply: the row stays watching instead.
         when(store.hasAcceptance(TENANT, PARENT, RUN)).thenReturn(true);
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
-                new TurnLine("turn-1", "COMPLETED", now + 1L, null));
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
         when(store.terminalResultText(TENANT, CHILD, "turn-1"))
                 .thenReturn("审阅通过");
         // First scan: no early-out; the same idempotent walk re-plays the
@@ -327,7 +330,8 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
-                new TurnLine("turn-1", "RUNNING", now + 1L, null));
+                new TurnLine("turn-1", "RUNNING", now + 1L, null, true,
+                        null));
         relay.scan();
         // A running Turn is a wait, not a failure: no attempt, no error,
         // no harness call.
@@ -345,7 +349,8 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
-                new TurnLine("turn-1", "FAILED", now + 1L, "model"));
+                new TurnLine("turn-1", "FAILED", now + 1L, "model", true,
+                        null));
         relay.scan();
         assertThat(row.get().state()).isEqualTo("done");
         assertThat(harness.operations)
@@ -369,7 +374,8 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
-                new TurnLine("turn-1", "FAILED", now + 1L, "model"));
+                new TurnLine("turn-1", "FAILED", now + 1L, "model", true,
+                        null));
         relay.scan();
         assertThat(row.get().state()).isEqualTo("close_debt");
         assertThat(row.get().childSessionId()).isEqualTo(CHILD);
@@ -423,11 +429,11 @@ class ChildResultRelayTest {
         when(store.executionState(TENANT, PARENT, RUN)).thenReturn(
                 "intent");
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
-                new TurnLine("turn-1", "RUNNING", null, null));
+                new TurnLine("turn-1", "RUNNING", null, null, true, null));
         RuntimeBindingRecord binding = mock(RuntimeBindingRecord.class);
         when(binding.getBindingId()).thenReturn("binding-1");
         when(binding.getGeneration()).thenReturn(7L);
-        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+        when(broker.findLatestBindingByHarnessSessionAnyState(TENANT, CHILD))
                 .thenReturn(binding);
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
                 "creating", "owner", now + 30_000, 63, 0, null, now, now));
@@ -701,11 +707,11 @@ class ChildResultRelayTest {
         when(store.executionState(TENANT, PARENT, RUN)).thenReturn(
                 "intent");
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
-                new TurnLine("turn-1", "RUNNING", null, null));
+                new TurnLine("turn-1", "RUNNING", null, null, true, null));
         RuntimeBindingRecord binding = mock(RuntimeBindingRecord.class);
         when(binding.getBindingId()).thenReturn("binding-1");
         when(binding.getGeneration()).thenReturn(7L);
-        when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
+        when(broker.findLatestBindingByHarnessSessionAnyState(TENANT, CHILD))
                 .thenReturn(binding);
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", null,
                 "creating", "owner", now + 30_000, 63, 0, null, now, now));
@@ -790,7 +796,8 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
-                new TurnLine("turn-1", "FAILED", now + 1L, "model"));
+                new TurnLine("turn-1", "FAILED", now + 1L, "model", true,
+                        null));
         Mockito.doThrow(new IllegalStateException("admission refused"))
                 .when(childCloses).admitChildClose(TENANT, PARENT, CHILD,
                         RUN);
@@ -827,7 +834,8 @@ class ChildResultRelayTest {
         row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
                 "watching", "owner", now + 30_000, 0, 0, null, now, now));
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
-                new TurnLine("turn-1", "COMPLETED", now + 1L, null));
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
         when(store.terminalResultText(TENANT, CHILD, "turn-1"))
                 .thenReturn("x".repeat(64 * 1024 + 1));
         relay.scan();
@@ -929,6 +937,63 @@ class ChildResultRelayTest {
                 .containsEntry("started", false);
     }
 
+    // R23: the binding retired before the parent's dispatch/attach
+    // recovered — terminal reconciliation needs the historical identity,
+    // not warmth: the READY read answers nothing here, and the retired
+    // row drives the same dispatch/attach replay.
+    @Test
+    void aGiveUpReplaysTheRepairChainFromARetiredBinding() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 63, 0, null, now, now));
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn(
+                "intent");
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "COMPLETED", now + 1L, null, true,
+                        null));
+        RuntimeBindingRecord retired = mock(RuntimeBindingRecord.class);
+        when(retired.getBindingId()).thenReturn("binding-1");
+        when(retired.getGeneration()).thenReturn(7L);
+        when(broker.findLatestBindingByHarnessSessionAnyState(TENANT, CHILD))
+                .thenReturn(retired);
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("dispatch_started", "attach", "fail");
+        assertThat(harness.operations.get(0))
+                .containsEntry("runtimeBindingId", "binding-1")
+                .containsEntry("generation", "7");
+        assertThat(harness.operations.get(2))
+                .containsEntry("stopReason", "child_failed")
+                .containsEntry("started", true)
+                .containsEntry("childSessionId", CHILD);
+    }
+
+    // R23: a Turn whose admission never landed is a pre-admission
+    // failure — it proves no dispatch, so the never-started pairing
+    // settles named instead of hunting a binding that never existed.
+    @Test
+    void aPreAdmissionFailedTurnNeverCountsAsDispatch() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 63, 0, null, now, now));
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn(
+                "intent");
+        when(store.latestTurn(TENANT, CHILD)).thenReturn(
+                new TurnLine("turn-1", "FAILED", now + 1L,
+                        "workspace_unavailable", false, null));
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
+        assertThat(harness.operations.get(0))
+                .containsEntry("stopReason", "creation_failed")
+                .containsEntry("started", false)
+                .containsEntry("childSessionId", CHILD);
+    }
+
     // Same window as the lineage-driven `R` case, but the settled
     // shape: intent + a child Turn proves the child ran while the
     // binding never existed physically imaginable dispatch chain — the
@@ -941,7 +1006,7 @@ class ChildResultRelayTest {
         when(store.executionState(TENANT, PARENT, RUN)).thenReturn(
                 "intent");
         when(store.latestTurn(TENANT, CHILD)).thenReturn(
-                new TurnLine("turn-1", "RUNNING", null, null));
+                new TurnLine("turn-1", "RUNNING", null, null, true, null));
         when(broker.findLatestBindingByHarnessSession(TENANT, CHILD))
                 .thenReturn(null);
         relay.scan();

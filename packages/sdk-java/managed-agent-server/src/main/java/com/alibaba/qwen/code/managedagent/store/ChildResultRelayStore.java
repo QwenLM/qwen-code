@@ -31,9 +31,18 @@ public class ChildResultRelayStore {
             long updatedAt) {
     }
 
-    /** The child Session's latest Turn line, as the relay reads it. */
+    /** The child Session's latest Turn line, as the relay reads it —
+     * with the G3 dispatch pair on board: a Turn whose admission never
+     * landed (no submission mark, no harness epoch) is a pre-admission
+     * failure, never proof that a Runtime binding ever existed. */
     public record TurnLine(String turnId, String status, Long completedAt,
-            String errorCode) {
+            String errorCode, boolean submissionAttempted,
+            String harnessEventEpoch) {
+        /** Whether this Turn proves a dispatch went out — the same pair
+         * the G3 submission machinery guards with. */
+        public boolean dispatched() {
+            return submissionAttempted || harnessEventEpoch != null;
+        }
     }
 
     // delivery_state is null on the shell kind, so a child_run row with a
@@ -226,14 +235,17 @@ public class ChildResultRelayStore {
     /** The child Session's newest Turn, or null while none exists. */
     public TurnLine latestTurn(String tenantId, String sessionId) {
         List<TurnLine> rows = jdbc.query(
-                "SELECT turn_id, status, completed_at, error_code"
+                "SELECT turn_id, status, completed_at, error_code,"
+                        + " submission_attempted, harness_event_epoch"
                         + " FROM managed_agent_turn"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " ORDER BY created_at DESC, turn_id DESC LIMIT 1",
                 (result, row) -> new TurnLine(result.getString("turn_id"),
                         result.getString("status"),
                         (Long) result.getObject("completed_at"),
-                        result.getString("error_code")),
+                        result.getString("error_code"),
+                        result.getBoolean("submission_attempted"),
+                        result.getString("harness_event_epoch")),
                 tenantId, sessionId);
         return rows.isEmpty() ? null : rows.getFirst();
     }

@@ -126,6 +126,12 @@ H4b 交付该流水线的 child-agent 部分:
 3. **give-up 的启动证据读记录体,不读 `runtime_state` 投影。** 投影列存的是 Runtime 状态(`unbound`、`provisioning`、`ready`),与 execution 枚举的比较永不命中,链条于是无限重发被拒的 started 配对(R22 的 give-up 楔死)。`executionState` 现经 inline resource 读已提交记录体;记录体不可读时欠有界重试而非猜断;记录自带的 `not_started_proven` 直接配对未启动判决。
 4. **级联的 started 判定绑定任意态证据。** 启动由以下三者之一证明:记录体已提交的 dispatch 事实、任意态的 binding 行(`findLatestBindingByHarnessSessionAnyState`——已退役的 RELEASED/LOST 行仍证明它曾经的 dispatch 并给出修复所需的身份;用于回暖的修复读取保持仅 READY),或 child Session 自己的持久 Turn。creation key 只是尝试 id,永远不是启动。三者皆无时,以 `started: false` 结算未启动配对——lineage 铸过 Session 时指名;三者有一时,修复用该证据重建 dispatch+attach,结算以 `started: true` 提交。
 
+## 修订(2026-10-09,R23 评审轮)
+
+1. **闸的 lineage 读取必须是锁定读。** REPEATABLE READ 下,提交事务的快照早在判决行锁之前就被普通读取建立,普通 lineage SELECT 会错过快照之后才提交的铸造——即使行锁已与铸造栅栏序列化——R23 在 MySQL 8.0.46 上精确复现(READ COMMITTED 与 H2 双控件都拒绝并恢复,只有生产拓扑显形)。lineage 读取改为 `FOR UPDATE`:在 InnoDB 两种默认隔离级下都读最新已提交数据,且遵循与铸造一致的 extension-then-session 锁序。双活连接的 MariaDB REPEATABLE READ IT 双向见证(普通读漏读→红;锁定读拒绝→绿)。
+2. **give-up 用历史 binding 证据重放修复链。** 终态调合只需要 dispatch 身份,不需要回暖,因此 `reconcileAttach` 的物理 child 修复也改读 `findLatestBindingByHarnessSessionAnyState`——已 RELEASED 的行仍指名那次 dispatch 提交了什么;记录在恢复前 binding 已退役的已执行 child,现在可结算,不再把预算楔死在一个永不会回来的 READY 答案上。
+3. **Turn 只经 G3 派发对证明启动。** `TurnLine` 携带 `submission_attempted` 与 `harness_event_epoch`,relay 的物理运行探针与级联的 started 判定都改读 `dispatched()`(有其一即为真)。在暖机、create/load 或提交之前就被协调器失败的 Turn 是 pre-admission 失败,什么都不证明——它结算指名的 never-started 配对,而不是去猎杀一个从未存在的 binding(R23 把父级留在 CLOSING 的正是这个楔子)。
+
 ## 后续工作
 
 | 切片   | 范围                                                                                                                  |
