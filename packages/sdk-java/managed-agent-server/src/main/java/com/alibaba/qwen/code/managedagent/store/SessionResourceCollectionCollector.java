@@ -87,6 +87,11 @@ public final class SessionResourceCollectionCollector {
         if (claim == null) {
             return false;
         }
+        return collect(claim);
+    }
+
+    // Package-private so a test can interleave a recovery registration in the claim→page gap.
+    boolean collect(Claim claim) {
         try {
             boolean confirmed = Boolean.TRUE.equals(transactions.execute(status -> page(claim)));
             if (!confirmed) {
@@ -122,7 +127,7 @@ public final class SessionResourceCollectionCollector {
         }
     }
 
-    private Claim claim() {
+    Claim claim() {
         long time = ToolPublicationRetentionStore.now(jdbc);
         // Completed ledgers sit at gc_next_at = -1 forever; the >= 0 predicate keeps this
         // per-second scan proportional to unfinished work instead of total ledger history.
@@ -135,7 +140,7 @@ public final class SessionResourceCollectionCollector {
             Claim claim = transactions.execute(status -> {
                 String tenant = (String) candidate.get("tenant_id");
                 String session = (String) candidate.get("session_id");
-                ToolPublicationRetentionStore.lockSession(jdbc, tenant, session);
+                var head = ToolPublicationRetentionStore.lockSessionHead(jdbc, tenant, session);
                 var row = jdbc.queryForMap("SELECT * FROM qwen_managed_session_resource_collection"
                         + " WHERE session_scope_key = ? FOR UPDATE", candidate.get("session_scope_key"));
                 long now = ToolPublicationRetentionStore.now(jdbc);
@@ -147,7 +152,7 @@ public final class SessionResourceCollectionCollector {
                         && ToolPublicationRetentionStore.number(row, "gc_claim_until") > now) {
                     return null;
                 }
-                String blocker = blocker(tenant, session, now);
+                String blocker = blocker(tenant, session, now, head);
                 if (blocker != null) {
                     long next = now + CLAIM_MILLIS;
                     if ("recovery_protected".equals(blocker)) {
@@ -171,7 +176,7 @@ public final class SessionResourceCollectionCollector {
                 jdbc.update("UPDATE qwen_managed_session_resource_collection SET gc_generation = ?, gc_owner = ?,"
                         + " gc_claim_until = ?, gc_blocker = NULL WHERE session_scope_key = ?",
                         generation, owner, now + CLAIM_MILLIS, row.get("session_scope_key"));
-                return new Claim((String) row.get("session_scope_key"), generation,
+                return new Claim((String) row.get("session_scope_key"), tenant, session, generation,
                         (String) row.get("gc_cursor"));
             });
             if (claim != null) {
@@ -181,7 +186,7 @@ public final class SessionResourceCollectionCollector {
         return null;
     }
 
-    private String blocker(String tenant, String session, long now) {
+    private String blocker(String tenant, String session, long now, java.util.Map<String, Object> head) {
         var roots = jdbc.queryForList("SELECT retired_at, recovery_protected FROM qwen_output_session_retirement"
                 + " WHERE tenant_key = ? AND session_key = ?",
                 ToolPublicationRetentionStore.hash(tenant), ToolPublicationRetentionStore.hash(session));
@@ -195,10 +200,8 @@ public final class SessionResourceCollectionCollector {
                 > now - properties.getToolPublication().getDeletionGrace().toMillis()) {
             return "grace_period";
         }
-        var heads = jdbc.queryForList("SELECT state FROM qwen_managed_session_journal_head"
-                + " WHERE tenant_id = ? AND session_id = ?", tenant, session);
         // A missing head is a closed writer: publishing requires one, and retirement fences creation.
-        if (!heads.isEmpty() && !"DELETED".equals(heads.getFirst().get("state"))) {
+        if (head != null && !"DELETED".equals(head.get("state"))) {
             return "session_head_live";
         }
         long leases = jdbc.queryForObject("SELECT COUNT(*) FROM qwen_output_read_lease"
@@ -210,14 +213,20 @@ public final class SessionResourceCollectionCollector {
         // A recovery capture or verification reads a retired Session's bytes through
         // WorkspaceRecoveryReader without a read lease, so only a live operation state can
         // observe that reader; the session rows are never deleted and cannot key the check.
-        long recovering = jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_recovery_session s"
+        return recoveryInFlight(session, false) ? "recovery_active" : null;
+    }
+
+    private boolean recoveryInFlight(String session, boolean locking) {
+        return !jdbc.queryForList("SELECT s.operation_id FROM managed_workspace_recovery_session s"
                         + " JOIN managed_workspace_recovery_operation o ON o.operation_id = s.operation_id"
-                        + " WHERE s.session_id = ? AND o.state IN ('CAPTURING', 'VERIFYING')",
-                Long.class, session);
-        return recovering == 0 ? null : "recovery_active";
+                        + " WHERE s.session_id = ? AND o.state IN ('CAPTURING', 'VERIFYING') LIMIT 1"
+                        + (locking ? " FOR UPDATE" : ""),
+                String.class, session).isEmpty();
     }
 
     private Boolean page(Claim claim) {
+        // Session locks precede the ledger row lock, matching claim()'s order.
+        ToolPublicationRetentionStore.lockSession(jdbc, claim.tenant(), claim.session());
         var row = jdbc.queryForMap("SELECT * FROM qwen_managed_session_resource_collection"
                 + " WHERE session_scope_key = ? FOR UPDATE", claim.scope());
         long now = ToolPublicationRetentionStore.now(jdbc);
@@ -225,6 +234,12 @@ public final class SessionResourceCollectionCollector {
                 || ToolPublicationRetentionStore.number(row, "gc_generation") != claim.generation()
                 || ToolPublicationRetentionStore.number(row, "gc_claim_until") <= now
                 || !claim.cursor().equals(row.get("gc_cursor"))) {
+            return false;
+        }
+        // blocker() ran in claim()'s already-committed transaction; a recovery registered in the
+        // claim→page gap is invisible to a plain re-read under REPEATABLE READ, so re-check with a
+        // locking read before dropping bytes that have no other copy.
+        if (recoveryInFlight(claim.session(), true)) {
             return false;
         }
         var rows = jdbc.queryForList(ELIGIBLE, claim.scope(), claim.cursor());
@@ -284,5 +299,5 @@ public final class SessionResourceCollectionCollector {
                 ToolPublicationRetentionStore.now(jdbc) + CLAIM_MILLIS, claim.scope(), owner, claim.generation());
     }
 
-    private record Claim(String scope, long generation, String cursor) {}
+    record Claim(String scope, String tenant, String session, long generation, String cursor) {}
 }

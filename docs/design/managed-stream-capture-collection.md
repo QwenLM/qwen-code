@@ -29,7 +29,7 @@ background captures alike). The Session-rooted retirement tombstone
 when a Session is permanently deleted; what is missing is the collection pass
 that frees these rows' bytes under the same policy. This is #13534 P1.
 
-Baseline: `main` = `2e962b6121`. The V30/V34 lifecycle (`PINNED → RETIRING →
+Baseline: `main` = `4a3b8f3c08`. The V30/V34 lifecycle (`PINNED → RETIRING →
 DELETING → COLLECTED`), the candidate predicate in
 `ToolPublicationRetentionStore.candidate`, and the `ToolPublicationCollector`
 claim/page/confirm shape stay unchanged.
@@ -104,7 +104,7 @@ not added: `retention_until` stays unused.
 ## Collection and accounting
 
 One new table records one collection ledger per Session scope
-(migration V53):
+(migration V56):
 
 ```
 qwen_managed_session_resource_collection
@@ -124,11 +124,16 @@ qwen_managed_session_resource_collection
 
 Completed rows leave `gc_next_at = -1`, outside the claim scan's
 `gc_next_at >= 0` range, so the per-tick scan stays proportional to unfinished
-work although ledger rows are kept forever. V53 also adds
+work although ledger rows are kept forever. V56 also adds
 `idx_output_session_retirement_due (retired_at)` so the due-candidate scan
 (`r.retired_at <= now - grace`) is index-served: tombstones are never deleted,
 and an unindexed scan would otherwise cost O(retired Sessions) on every
-60-second cadence pass forever.
+60-second cadence pass forever. It also adds
+`idx_workspace_recovery_session_session (session_id, operation_id)` on
+`managed_workspace_recovery_session`: the page-time recovery re-check below
+probes that table by `session_id` with a locking read, and its only key is
+`(operation_id, session_id)`, so an unindexed probe would next-key-lock the
+whole table behind every 1 Hz page.
 
 The collector mirrors `ToolPublicationCollector`: one bounded pass per tick on
 the existing single-thread `managedToolOutputScheduler`, so blob-heavy UPDATEs
@@ -157,11 +162,23 @@ never hold the live-session scheduler.
    same backoff taxonomy as the publication collector: `recovery_protected`
    waits 24 hours, `grace_period` waits until `retired_at + grace`, and every
    other blocker waits 60 seconds.
-3. A confirmed claim holds the ledger for 60 seconds. Each page runs in one
-   database transaction: it selects up to 100 eligible rows after `cursor`,
-   stops early if their byte total exceeds 32 MiB, flips those rows to
-   `COLLECTED` with `inline_bytes = NULL`, adds their `byte_length` sum to
-   `collected_bytes`, and advances `cursor` to the last collected resource_id.
+3. A confirmed claim holds the ledger for 60 seconds. Each page runs in its
+   own new transaction: claim's locks and blocker evaluation committed with
+   claim's transaction, so the page first re-takes the tenant and Session
+   locks in claim's order and re-evaluates the recovery pin — the one blocker
+   that can be born inside the claim→page gap — with a locking read, because a
+   plain re-read under REPEATABLE READ stays pinned to the page transaction's
+   snapshot and cannot see a registration that committed in the gap. A page
+   that now meets a live recovery defers exactly like a claim-time blocker.
+   Only then does the page select up to 100 eligible rows after `cursor`,
+   stop early if their byte total exceeds 32 MiB, flip those rows to
+   `COLLECTED` with `inline_bytes = NULL`, add their `byte_length` sum to
+   `collected_bytes`, and advance `cursor` to the last collected resource_id.
+   The byte-presence clause of the eligibility predicate lives on the
+   byte-drop UPDATE, not on the page SELECT: naming the BLOB column in the
+   SELECT would make InnoDB materialize every candidate's bytes (up to 101
+   MEDIUMBLOB rows) just to test them for NULL on the shared single-threaded
+   scheduler, while the UPDATE side resolves through the resource primary key.
    The byte budget matters: content rows can reach 1 MiB and MEDIUMBLOB
    updates are not free. All effects are in one transaction; a crash never
    leaves rows half-collected, and there is no out-of-transaction step because
@@ -210,7 +227,11 @@ outcome surfaces are therefore:
   `resource_collected`, not `resource_layout_unsupported` or
   `resource_corrupt`, when a bundle read physically reaches a collected byte
   copy. This is the one surface that can meet a legitimately collected row,
-  and it now names the outcome accurately.
+  and it now names the outcome accurately. The code is terminal: like
+  `source_drift` it invalidates the capture operation and, through
+  `WorkspaceMigrationStore.failed`, the migration — the bytes have no other
+  copy, so no retry can succeed, and an invalidated operation stops pinning
+  the other retired Sessions of its registration cut.
 - `WorkspaceCsiCheckpointSnapshotStore` selects only `state = 'REFERENCED'`
   rows and is therefore unaffected; a CSI snapshot never contains PUBLISHED
   rows and the no-reference predicate above keeps that invariant.
@@ -237,24 +258,24 @@ Rollout notes:
   gains one paragraph: enabling GC now also frees stream-capture bytes; its
   deployment gates (upgrade of Java writers first, isolated OSS, database
   gates) already apply.
-- Older broker versions without V53 never start the pass. The first upgraded
+- Older broker versions without V56 never start the pass. The first upgraded
   broker starts collecting as soon as `gc-enabled` is already true, since
   there is no version handshake; pre-upgrade brokers misname legitimately
   collected rows as `resource_layout_unsupported` or `resource_corrupt`, so a
   fleet that may roll workloads during the upgrade keeps the flag off until
-  every broker runs V53
+  every broker runs V56
   — the same every-writer-first order the O4 rollout already requires.
 
 ## Affected layers and delivery
 
-| Layer                                                     | Change                                                                                                              |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Migration V53                                             | New `qwen_managed_session_resource_collection` ledger table; `retired_at` index on `qwen_output_session_retirement` |
-| `store/SessionResourceCollectionCollector.java` (new)     | Tick, candidate scan, claim, paging, byte accounting                                                                |
-| `store/WorkspaceRecoveryReader.java`                      | `resource_collected` named check                                                                                    |
-| `config/ToolPublicationConfiguration.java`                | Collector bean on the existing scheduler                                                                            |
-| `store/SessionResourceCollectionCollectorTest.java` (new) | Predicate, blockers, paging, fencing, byte-exact accounting, retirement-fenced outcomes                             |
-| `packages/sdk-java/managed-agent-server/README.md`        | Operations paragraph                                                                                                |
+| Layer                                                     | Change                                                                                                                                                                                          |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Migration V56                                             | New `qwen_managed_session_resource_collection` ledger table; `retired_at` index on `qwen_output_session_retirement`; `(session_id, operation_id)` index on `managed_workspace_recovery_session` |
+| `store/SessionResourceCollectionCollector.java` (new)     | Tick, candidate scan, claim, paging, byte accounting                                                                                                                                            |
+| `store/WorkspaceRecoveryReader.java`                      | `resource_collected` named check                                                                                                                                                                |
+| `config/ToolPublicationConfiguration.java`                | Collector bean on the existing scheduler                                                                                                                                                        |
+| `store/SessionResourceCollectionCollectorTest.java` (new) | Predicate, blockers, paging, fencing, byte-exact accounting, retirement-fenced outcomes                                                                                                         |
+| `packages/sdk-java/managed-agent-server/README.md`        | Operations paragraph                                                                                                                                                                            |
 
 Out of this change: `ToolPublicationRetentionStore`,
 `ToolPublicationCollector`, and every TS package are untouched except for

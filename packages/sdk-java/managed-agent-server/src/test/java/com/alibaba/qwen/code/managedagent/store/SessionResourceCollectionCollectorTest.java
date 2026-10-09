@@ -240,6 +240,78 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     }
 
     @Test
+    void recoveryRegisteringInTheClaimPageGapDefersCollection() {
+        initSession();
+        head(session);
+        publish("segment", CONTENT, new byte[64]);
+        retire();
+        // The ledger directly, so the test drives the claim and the page as separate steps.
+        jdbc.update("INSERT INTO qwen_managed_session_resource_collection (session_scope_key, tenant_key,"
+                + " session_key, tenant_id, session_id, created_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP(6))",
+                resScope, ToolPublicationRetentionStore.hash(tenant), ToolPublicationRetentionStore.hash(session),
+                tenant, session);
+        var collector = collector(true, Duration.ZERO);
+        var claim = collector.claim();
+        assertThat(claim).isNotNull();
+        // The registration commits after claim()'s transaction and before page().
+        jdbc.update("INSERT INTO managed_workspace_recovery_operation (operation_id, tenant_id, storage_id,"
+                + " mode, request_digest, request_json, registration_json, source_digest, session_count, state,"
+                + " created_at, updated_at) VALUES ('op-late', ?, 'storage-1', 'capture', ?, '{}', '{}', ?, 1,"
+                + " 'CAPTURING', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6))", tenant, "a".repeat(64), "b".repeat(64));
+        jdbc.update("INSERT INTO managed_workspace_recovery_session (operation_id, session_id, source_digest,"
+                + " source_json, state) VALUES ('op-late', ?, ?, '{}', 'PENDING')", session, "c".repeat(64));
+        assertThat(collector.collect(claim)).isFalse();
+        assertThat(rows().getFirst().get("state")).isEqualTo("PUBLISHED");
+        assertThat(rows().getFirst().get("inline_bytes")).isNotNull();
+        var deferred = ledger();
+        assertThat(deferred.get("collected_at")).isNull();
+        assertThat(deferred.get("gc_blocker")).isEqualTo("collection_retry");
+        jdbc.update("UPDATE managed_workspace_recovery_operation SET state = 'SEALED' WHERE operation_id = 'op-late'");
+        jdbc.update("UPDATE qwen_managed_session_resource_collection SET gc_next_at = 0"
+                + " WHERE session_scope_key = ?", resScope);
+        assertThat(collector.runOnce()).isTrue();
+        assertThat(rows().getFirst().get("state")).isEqualTo("COLLECTED");
+    }
+
+    @Test
+    void scheduledTickAbsorbsATransientFailureIntoAWarnAndTheRetryBlocker() {
+        initSession();
+        head(session);
+        publish("segment", CONTENT, new byte[64]);
+        retire();
+        var failing = new JdbcTemplate(jdbc.getDataSource()) {
+            @Override public int update(String sql, Object... args) {
+                if (sql.startsWith("UPDATE qwen_managed_session_resource SET state = 'COLLECTED'")) {
+                    throw new org.springframework.dao.DataAccessResourceFailureException("injected page failure");
+                }
+                return super.update(sql, args);
+            }
+        };
+        var props = new ManagedAgentProperties();
+        props.getToolPublication().setGcEnabled(true);
+        props.getToolPublication().setDeletionGrace(Duration.ZERO);
+        var collector = new SessionResourceCollectionCollector(failing, manager, props);
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                .getLogger(SessionResourceCollectionCollector.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            collector.tick();
+            assertThat(appender.list).singleElement().satisfies(event -> {
+                assertThat(event.getLevel()).isEqualTo(ch.qos.logback.classic.Level.WARN);
+                assertThat(event.getThrowableProxy()).isNotNull();
+            });
+            var ledger = ledger();
+            assertThat(ledger.get("gc_blocker")).isEqualTo("collection_retry");
+            assertThat(rows().getFirst().get("state")).isEqualTo("PUBLISHED");
+        } finally {
+            logger.detachAppender(appender);
+            appender.stop();
+        }
+    }
+
+    @Test
     void completionSweepsExpiredReadLeases() {
         initSession();
         head(session);
@@ -692,6 +764,31 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
     }
 
     @Test
+    void pageQueryNeverMaterializesInlineBytesWhileTheByteDropPredicatesOnThem() {
+        initSession();
+        head(session);
+        publish("segment", CONTENT, new byte[64]);
+        retire();
+        var recording = new SqlRecordingDataSource(jdbc.getDataSource());
+        var props = new ManagedAgentProperties();
+        props.getToolPublication().setGcEnabled(true);
+        props.getToolPublication().setDeletionGrace(Duration.ZERO);
+        var collector = new SessionResourceCollectionCollector(new JdbcTemplate(recording),
+                new org.springframework.jdbc.datasource.DataSourceTransactionManager(recording), props);
+        assertThat(collector.runOnce()).isTrue();
+        // Referencing the BLOB in the page SELECT makes InnoDB materialize up to PAGE_ROWS + 1
+        // MEDIUMBLOBs per scan just to NULL-test them; the byte drop stays a primary-key lookup.
+        assertThat(recording.statements)
+                .filteredOn(sql -> sql.startsWith("SELECT resource_id, byte_length FROM qwen_managed_session_resource"))
+                .isNotEmpty()
+                .allSatisfy(sql -> assertThat(sql).doesNotContain("inline_bytes"));
+        assertThat(recording.statements)
+                .filteredOn(sql -> sql.startsWith("UPDATE qwen_managed_session_resource SET state = 'COLLECTED'"))
+                .isNotEmpty()
+                .allSatisfy(sql -> assertThat(sql).contains("inline_bytes IS NOT NULL"));
+    }
+
+    @Test
     void blockerTransitionLogsOncePerChange() {
         initSession();
         head(session);
@@ -741,6 +838,40 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
             assertThat(row.get("state")).isEqualTo("COLLECTED");
             assertThat(row.get("inline_bytes")).isNull();
         });
+    }
+
+    /** Records the SQL of every prepared statement the code under it creates. */
+    private static final class SqlRecordingDataSource
+            extends org.springframework.jdbc.datasource.AbstractDataSource {
+        private final javax.sql.DataSource delegate;
+        final List<String> statements = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        SqlRecordingDataSource(javax.sql.DataSource delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public java.sql.Connection getConnection() throws java.sql.SQLException {
+            var connection = delegate.getConnection();
+            return (java.sql.Connection) java.lang.reflect.Proxy.newProxyInstance(
+                    SessionResourceCollectionCollectorTest.class.getClassLoader(),
+                    new Class<?>[] {java.sql.Connection.class}, (proxy, method, args) -> {
+                        if ("prepareStatement".equals(method.getName()) && args != null
+                                && args.length > 0 && args[0] instanceof String sql) {
+                            statements.add(sql);
+                        }
+                        try {
+                            return method.invoke(connection, args);
+                        } catch (java.lang.reflect.InvocationTargetException error) {
+                            throw error.getCause();
+                        }
+                    });
+        }
+
+        @Override
+        public java.sql.Connection getConnection(String username, String password) throws java.sql.SQLException {
+            return getConnection();
+        }
     }
 
     private void publishThroughStore(ManagedSessionStore sessions, long generation, String resourceId,

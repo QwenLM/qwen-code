@@ -21,3 +21,9 @@ CREATE UNIQUE INDEX uq_session_resource_collection_root
 CREATE INDEX idx_session_resource_collection_due
     ON qwen_managed_session_resource_collection (gc_next_at);
 CREATE INDEX idx_output_session_retirement_due ON qwen_output_session_retirement (retired_at);
+
+-- The collector's page-time recovery re-check probes WHERE session_id = ? with a
+-- locking read; the table's only key is (operation_id, session_id), so without
+-- this index that probe next-key locks the whole table behind every 1 Hz page.
+CREATE INDEX idx_workspace_recovery_session_session
+    ON managed_workspace_recovery_session (session_id, operation_id);

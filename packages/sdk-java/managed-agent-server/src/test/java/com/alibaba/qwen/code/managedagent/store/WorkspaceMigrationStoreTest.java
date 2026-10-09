@@ -193,6 +193,15 @@ class WorkspaceMigrationStoreTest {
         }
     }
 
+    @Test
+    void collectedSourceBytesInvalidateTheMigration() {
+        var operation = store(true);
+        assertThat(operation.inspect().path("state").asText()).isEqualTo("RETIRING");
+        operation.failed("resource_collected");
+        assertThat(operation.inspect().path("state").asText()).isEqualTo("INVALIDATED");
+        assertThat(operation.inspect().path("lastErrorCode").asText()).isEqualTo("resource_collected");
+    }
+
     @ParameterizedTest
     @CsvSource({"false,recovery_read_failed", "true,recovery_read_failed",
             "false,migration_not_writable", "true,migration_not_writable"})

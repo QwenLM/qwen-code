@@ -114,6 +114,64 @@ class WorkspaceRecoveryStoreTest {
         assertThat(capture.inspect().path("state").asText()).isEqualTo("INVALIDATED");
     }
 
+    @Test
+    void collectedResourceInvalidatesTheCapture() {
+        String session = session("workspace-a");
+        head(session);
+        byte[] bytes = "{\"proof\":true}".getBytes(StandardCharsets.UTF_8);
+        String digest = WorkspaceRecoveryStore.hash(bytes);
+        // The shape the stream-capture collector leaves: identity kept, state COLLECTED, bytes NULL.
+        jdbc.update("INSERT INTO qwen_managed_session_resource (session_scope_key, tenant_id, workspace_id, session_id,"
+                + " resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id,"
+                + " state, created_at) VALUES (?, 'tenant', 'private-key', ?, 'resource', 'managed-definition', 1, ?, ?,"
+                + " 'MYSQL_INLINE', NULL, 'command', 'COLLECTED', CURRENT_TIMESTAMP(6))",
+                ManagedSessionStore.sessionScopeKey("tenant", session), session, bytes.length, digest);
+        var capture = capture();
+        ObjectNode params = object().put("sessionId", session);
+        params.set("ref", object().put("resourceId", "resource").put("kind", "managed-definition")
+                .put("schemaVersion", 1).put("byteLength", bytes.length).put("digest", digest));
+        assertThatThrownBy(() -> capture.call("resource", params)).hasMessageContaining("resource_collected");
+        assertThat(capture.inspect().path("state").asText()).isEqualTo("INVALIDATED");
+        assertThat(capture.inspect().path("lastErrorCode").asText()).isEqualTo("resource_collected");
+    }
+
+    @Test
+    void registrationRetriesATransientLockWait() {
+        String session = session("workspace-a");
+        head(session);
+        var contended = new JdbcTemplate(jdbc.getDataSource()) {
+            private boolean tripped;
+            @Override public int update(String sql, Object... args) {
+                if (!tripped && sql.startsWith("INSERT INTO managed_workspace_recovery_operation")) {
+                    tripped = true;
+                    throw new org.springframework.dao.CannotAcquireLockException("injected lock wait");
+                }
+                return super.update(sql, args);
+            }
+        };
+        var store = new WorkspaceRecoveryStore(contended, manager, guard, null, "capture",
+                request.toString().getBytes(StandardCharsets.UTF_8));
+        assertThat(store.inspect().path("state").asText()).isEqualTo("CAPTURING");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_recovery_session WHERE session_id = ?",
+                Long.class, session)).isOne();
+    }
+
+    @Test
+    void registrationExhaustsItsRetriesOnPersistentLockWaits() {
+        var contended = new JdbcTemplate(jdbc.getDataSource()) {
+            @Override public int update(String sql, Object... args) {
+                if (sql.startsWith("INSERT INTO managed_workspace_recovery_operation")) {
+                    throw new org.springframework.dao.CannotAcquireLockException("injected lock wait");
+                }
+                return super.update(sql, args);
+            }
+        };
+        assertThatThrownBy(() -> new WorkspaceRecoveryStore(contended, manager, guard, null, "capture",
+                request.toString().getBytes(StandardCharsets.UTF_8)))
+                .isInstanceOf(org.springframework.dao.CannotAcquireLockException.class);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_recovery_operation", Long.class)).isZero();
+    }
+
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.ValueSource(strings = {"owner", "generation", "protected", "operation", "public", "head"})
     void refusesInconsistentRetirementEvidence(String damage) {

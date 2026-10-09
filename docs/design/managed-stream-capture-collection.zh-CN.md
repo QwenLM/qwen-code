@@ -22,7 +22,7 @@ MySQL 里。Session 级退役墓碑（`qwen_output_session_retirement`，V30）�
 Session 被永久删除时证明写入者已关闭；缺的是在同一策略下释放这些行字节的回收通道。
 这就是 #13534 的 P1。
 
-基线：`main` = `2e962b6121`。V30/V34 的生命周期（`PINNED → RETIRING → DELETING →
+基线：`main` = `4a3b8f3c08`。V30/V34 的生命周期（`PINNED → RETIRING → DELETING →
 COLLECTED`）、`ToolPublicationRetentionStore.candidate` 中的候选谓词、以及
 `ToolPublicationCollector` 的 claim/分页/确认形状全部保持不变。
 
@@ -79,7 +79,7 @@ Session 删除之外的场景）：`retention_until` 继续闲置。
 
 ## 回收与记账
 
-一张新表按 Session scope 记录一份回收账本（迁移 V53）：
+一张新表按 Session scope 记录一份回收账本（迁移 V56）：
 
 ```
 qwen_managed_session_resource_collection
@@ -99,9 +99,14 @@ qwen_managed_session_resource_collection
 
 已完成的行以 `gc_next_at = -1` 落在 claim 扫描的 `gc_next_at >= 0` 区间之
 外，因此即使账本行永久保留，每 tick 扫描的开销也只与未完成工作量成正
-比。V53 同时新增 `idx_output_session_retirement_due (retired_at)`，使到
+比。V56 同时新增 `idx_output_session_retirement_due (retired_at)`，使到
 期候选扫描（`r.retired_at <= now - grace`）走索引：墓碑永不删除，没有
-索引时每个 60 秒节律周期的扫描代价将永久为 O（已退役 Session 数）。
+索引时每个 60 秒节律周期的扫描代价将永久为 O（已退役 Session 数）。同
+一次迁移还在 `managed_workspace_recovery_session` 上新增
+`idx_workspace_recovery_session_session (session_id, operation_id)`：下
+文分页时的恢复重查以 `session_id` 做加锁读探测，而该表唯一的键是
+`(operation_id, session_id)`，没有索引时该探测会在每个 1 Hz 分页之后
+对整表做 next-key 锁定。
 
 回收器镜像 `ToolPublicationCollector`：在既有的单线程 `managedToolOutputScheduler`
 上每 tick 一次有界回收，使大 blob UPDATE 永远不占用在线会话调度器。
@@ -122,13 +127,20 @@ qwen_managed_session_resource_collection
    Session）。每次失败都按与发布回收器相同的退避分类法重排：
    `recovery_protected` 等 24 小时，`grace_period` 等到
    `retired_at + grace`，其它 blocker 一律 60 秒。
-3. 确认的 claim 持有账本 60 秒。每一页在同一个数据库事务里完成：选取 `cursor` 之后
-   至多 100 行合格行，若其字节总量超过 32 MiB 则提前结束本页；把这些行翻转为
-   `COLLECTED` 且 `inline_bytes = NULL`，把它们的 `byte_length` 总和累加进
-   `collected_bytes`，并把 `cursor` 推进到最后回收的 resource_id。字节预算是有意义
-   的：content 行可达 1 MiB，MEDIUMBLOB 更新不是零成本。全部效果落在同一事务内；
-   崩溃绝不会留下半回收的行；因为这些行没有任何对象存储写入或删除，所以也不存在
-   事务外步骤。
+3. 确认的 claim 持有账本 60 秒。每一页在一个属于自己的新事务里完成：claim 的锁
+   与 blocker 评估已随 claim 事务提交，因此分页首先按 claim 的顺序重新获取 tenant
+   与 Session 锁，并以加锁读重新评估恢复钉住 —— 唯一可能在 claim→page 间隙内新生
+   的 blocker —— 因为在 REPEATABLE READ 下普通重读被钉在分页事务的快照上，看不到
+   在间隙里提交的注册。在分页时遇到存活恢复操作的分页会像 claim 期 blocker 一样推
+   迟。此后才选取 `cursor` 之后至多 100 行合格行，若其字节总量超过 32 MiB 则提前结
+   束本页；把这些行翻转为 `COLLECTED` 且 `inline_bytes = NULL`，把它们的
+   `byte_length` 总和累加进 `collected_bytes`，并把 `cursor` 推进到最后回收的
+   resource_id。合格谓词中的字节存在性子句落在清空字节的 UPDATE 上而不是分页
+   SELECT 上：在 SELECT 里引用 BLOB 列会让 InnoDB 仅为判断 NULL 就物化每个候选的
+   字节（至多 101 行 MEDIUMBLOB），而这发生在共享的单线程调度器上；UPDATE 一侧则
+   经由资源主键定位。字节预算是有意义的：content 行可达 1 MiB，MEDIUMBLOB 更新不
+   是零成本。全部效果落在同一事务内；崩溃绝不会留下半回收的行；因为这些行没有任
+   何对象存储写入或删除，所以也不存在事务外步骤。
 4. 找不到 `cursor` 之后更多合格行的那一页关闭 claim：设置 `collected_at`，清空
    `owner`/`claim_until`，把 `collected_bytes` 作为永久记账留下。账本行永久保留，与
    被回收发布物的目录行一致。从未跑过流式捕获的 Session，合格行之和合法地为零。
@@ -162,7 +174,10 @@ head 为 `DELETED` 之后才可能进入 `COLLECTED`，而 `ManagedSessionStore`
 - `WorkspaceRecoveryReader.resource` 在 bundle 读物理触达一份已回收字节时，
   以新增的命名检查 `resource_collected` 失败，而不是
   `resource_layout_unsupported` 或 `resource_corrupt`。这是唯一可能真实碰到
-  已回收行的表面，现在它给出了准确的命名结果。
+  已回收行的表面，现在它给出了准确的命名结果。该错误码是终态的：与
+  `source_drift` 一样，它作废（invalidate）恢复操作，并经
+  `WorkspaceMigrationStore.failed` 作废所属迁移 —— 字节没有第二份拷贝，任何
+  重试都不会成功，而已作废的操作也不再钉住其注册切面内的其它已退役 Session。
 - `WorkspaceCsiCheckpointSnapshotStore` 只选取 `state = 'REFERENCED'` 的行，因此不
   受影响；CSI 快照从不包含 PUBLISHED 行，上述无引用谓词保持着这个不变量。
 
@@ -183,22 +198,22 @@ head 为 `DELETED` 之后才可能进入 `COLLECTED`，而 `ManagedSessionStore`
 - 运维文档（`managed-tool-output-retention-operations.md`）补一段：开启 GC 现在同时
   会释放流式捕获字节；其部署门禁（先升级 Java 写者、隔离 OSS、数据库门禁）照旧适
   用。
-- 没有 V53 的旧版 broker 不会启动本通道。由于没有版本握手，第一台升级的 broker 在
-  `gc-enabled` 已为 true 时立刻开始回收；低于 V53 的 broker 会把合法回收的行误报
+- 没有 V56 的旧版 broker 不会启动本通道。由于没有版本握手，第一台升级的 broker 在
+  `gc-enabled` 已为 true 时立刻开始回收；低于 V56 的 broker 会把合法回收的行误报
   为 `resource_layout_unsupported` 或 `resource_corrupt`，因此升级期间仍可能回滚
-  工作负载的集群应保持该开关关闭，直到全部 broker 跑上 V53 —— 与 O4 发布已要求
+  工作负载的集群应保持该开关关闭，直到全部 broker 跑上 V56 —— 与 O4 发布已要求
   的「先升级全部写者」顺序一致。
 
 ## 影响面与交付
 
-| 层                                                        | 变化                                                                                                          |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| 迁移 V53                                                  | 新增 `qwen_managed_session_resource_collection` 账本表；`qwen_output_session_retirement` 的 `retired_at` 索引 |
-| `store/SessionResourceCollectionCollector.java`（新）     | tick、候选扫描、claim、分页、字节记账                                                                         |
-| `store/WorkspaceRecoveryReader.java`                      | `resource_collected` 命名检查                                                                                 |
-| `config/ToolPublicationConfiguration.java`                | 复用现有调度器的回收器 bean                                                                                   |
-| `store/SessionResourceCollectionCollectorTest.java`（新） | 谓词、blocker、分页、防护、字节精确记账、退役围栏后的结果                                                     |
-| `packages/sdk-java/managed-agent-server/README.md`        | 运维一段                                                                                                      |
+| 层                                                        | 变化                                                                                                                                                                                     |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 迁移 V56                                                  | 新增 `qwen_managed_session_resource_collection` 账本表；`qwen_output_session_retirement` 的 `retired_at` 索引；`managed_workspace_recovery_session` 的 `(session_id, operation_id)` 索引 |
+| `store/SessionResourceCollectionCollector.java`（新）     | tick、候选扫描、claim、分页、字节记账                                                                                                                                                    |
+| `store/WorkspaceRecoveryReader.java`                      | `resource_collected` 命名检查                                                                                                                                                            |
+| `config/ToolPublicationConfiguration.java`                | 复用现有调度器的回收器 bean                                                                                                                                                              |
+| `store/SessionResourceCollectionCollectorTest.java`（新） | 谓词、blocker、分页、防护、字节精确记账、退役围栏后的结果                                                                                                                                |
+| `packages/sdk-java/managed-agent-server/README.md`        | 运维一段                                                                                                                                                                                 |
 
 不在本变化内：`ToolPublicationRetentionStore`、`ToolPublicationCollector`、以及除文
 档链接外的所有 TS 包均不改动。刻意不把发布回收器与本回收器合并出一个公共骨架：
