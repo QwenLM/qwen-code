@@ -397,10 +397,13 @@ class ManagedAgentApiContractTest {
 
     @Test
     void theCreatorOnlyResponderContractNamesTheOwnerlessFallThrough() {
-        // ManagedActionStore.requireOwner admits any tenant caller on a
-        // Session with neither a recorded creator nor a create command.
-        // Enumerate the responder operations structurally so a reworded or
-        // newly added responder cannot escape the qualification.
+        // ManagedActionStore.admit answers through the create-command
+        // actor recorded for a bound Session without an owner record, or
+        // through the Workspace role arm, and admits a tenant caller on an
+        // unbound Session with neither. The contract phrasing keeps both
+        // halves: enumerate the responder operations structurally so a
+        // reworded or newly added responder cannot escape the
+        // qualification.
         Set<String> responderPaths = Set.of(
                 "/v1/agents/sessions/{sessionId}/actions/{actionId}/responses",
                 "/api/agent/web-shell/v1/actions/respond");
@@ -416,7 +419,10 @@ class ManagedAgentApiContractTest {
                 assertThat(description + "\n" + forbidden)
                         .as(operation.operationId())
                         .contains("no recorded creator and no recorded"
-                                + " create command");
+                                + " create command")
+                        .contains("answers through the create-command"
+                                + " actor recorded for it, or through the"
+                                + " Workspace role arm");
             }
             // action_forbidden is documented only where requireOwner can
             // fire, and a 403 sibling description overrides the shared
@@ -1600,6 +1606,9 @@ class ManagedAgentApiContractTest {
                 .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "agent create"),
                 body);
         String changed = body.replace("Review code.", "Review code carefully.");
+        exchange(drift, "updateAgent", 400, post("/v1/agents/{id}", agentId)
+                .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "agent update"),
+                changed);
         JsonNode updated = json(exchange(drift, "updateAgent", 202,
                 post("/v1/agents/{id}", agentId).header(TENANT, tenant)
                         .header(IDEMPOTENCY_KEY, "agent-update"), changed));
