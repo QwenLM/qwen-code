@@ -6493,11 +6493,59 @@ describe('Session', () => {
       },
     );
 
+    it.each(['retry', 'continue'] as const)(
+      'preserves the stripped prompt identity when resending through %s',
+      async (mode) => {
+        const promptId = 'test-session-id########7';
+        const orphan: Content = {
+          role: 'user',
+          parts: [{ text: 'unanswered' }],
+        };
+        markApiHistoryPrompt(orphan, promptId);
+        vi.mocked(mockChat.getHistory).mockReturnValue([orphan]);
+        vi.mocked(mockChat.stripOrphanedUserEntriesFromHistory).mockReturnValue(
+          [orphan],
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt:
+            mode === 'retry' ? [{ type: 'text', text: 'unanswered' }] : [],
+          _meta: {
+            [mode === 'retry'
+              ? 'qwen.daemon.retry'
+              : 'qwen.daemon.continueLastTurn']: true,
+          },
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+          currentModel,
+          expect.any(Object),
+          expect.any(String),
+          undefined,
+          { promptId },
+        );
+        expect(
+          mockChatRecordingService.recordUserMessage,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
     it('preserves the orphaned turn when a continuation send fails (no data loss)', async () => {
       // An interrupted prompt: an orphaned user turn the model never answered.
-      mockChat.getHistory = vi
-        .fn()
-        .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+      const promptId = 'test-session-id########7';
+      const orphan: Content = {
+        role: 'user',
+        parts: [{ text: 'unanswered' }],
+      };
+      markApiHistoryPrompt(orphan, promptId);
+      vi.mocked(mockChat.getHistory).mockReturnValue([orphan]);
+      vi.mocked(mockChat.stripOrphanedUserEntriesFromHistory).mockReturnValue([
+        orphan,
+      ]);
       // Force the continuation send to fail NON-cancelled (session token limit)
       // so it hits the `!responseStream` branch — the data-loss window.
       mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
@@ -6526,6 +6574,9 @@ describe('Session', () => {
           ]),
         }),
       );
+      expect(
+        getApiHistoryPromptId(vi.mocked(mockChat.addHistory).mock.calls[0]![0]),
+      ).toBe(promptId);
     });
 
     it('restores the orphaned turn when a continuation send throws (no data loss)', async () => {

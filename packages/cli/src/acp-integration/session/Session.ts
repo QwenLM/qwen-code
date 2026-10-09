@@ -6333,7 +6333,12 @@ export class Session implements SessionContext {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
-              this.config.getLlmClient()!.stripOrphanedUserEntriesFromHistory();
+              strippedOrphanEntries =
+                this.config
+                  .getLlmClient()!
+                  .stripOrphanedUserEntriesFromHistory() ?? null;
+              orphanPushCountSnapshot =
+                this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
             } else if (!isSlashInput || slashCommandName !== 'advisor') {
               // record user message for session management. Only `/advisor`
               // defers its record to after command resolution below — a
@@ -6554,6 +6559,14 @@ export class Session implements SessionContext {
               !isContinue &&
               !isRestoreAskUserQuestion &&
               !isRuntimeContinuation;
+            const strippedPromptIds = (strippedOrphanEntries ?? [])
+              .map(getApiHistoryPromptId)
+              .filter((id) => id !== undefined);
+            const historyPromptId = isFreshUserTurn
+              ? promptId
+              : strippedPromptIds.length === 1
+                ? strippedPromptIds[0]
+                : undefined;
             // Channel markers cover both automated and human messages. Keep
             // that class excluded until its producers distinguish them; see
             // docs/design/daemon-user-prompt-submit-provenance.md.
@@ -6795,6 +6808,9 @@ export class Session implements SessionContext {
             }
 
             let nextMessage: Content | null = { role: 'user', parts };
+            if (!isFreshUserTurn) {
+              markApiHistoryPrompt(nextMessage, historyPromptId);
+            }
             let turnCount = 0;
             let restorePostAnswerNoticesAttached = false;
             const toolLoopState = createDaemonToolLoopState(
@@ -6989,10 +7005,7 @@ export class Session implements SessionContext {
                         modelOverride: fullTurnModelOverride,
                         consumeInitialMemory:
                           isFreshUserTurn && turnCount === 1,
-                        promptId:
-                          isFreshUserTurn && turnCount === 1
-                            ? promptId
-                            : undefined,
+                        promptId: turnCount === 1 ? historyPromptId : undefined,
                       },
                     );
                   if (!sendResult.responseStream) {
