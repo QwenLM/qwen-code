@@ -42,7 +42,8 @@ import org.springframework.test.web.servlet.MockMvc;
         "spring.datasource.driver-class-name=org.h2.Driver",
         "spring.datasource.username=sa",
         "spring.datasource.password=",
-        "qwen.managed-agent.harness.enabled=false"
+        "qwen.managed-agent.harness.enabled=false",
+        "qwen.managed-agent.definition-models=configured"
 })
 @AutoConfigureMockMvc
 class ManagedAgentDefinitionAdmissionTest {
@@ -192,8 +193,8 @@ class ManagedAgentDefinitionAdmissionTest {
                                 + "\"tools\":[],\"permission_policy\":{}}",
                         "model"),
                 org.junit.jupiter.params.provider.Arguments.of(
-                        "{\"model\":{},\"instructions\":\"Review.\","
-                                + "\"tools\":[],\"permission_policy\":{}}",
+                        "{\"model\":{},\"instructions\":\"" + "界".repeat(21846)
+                                + "\",\"tools\":[],\"permission_policy\":{}}",
                         "instructions"),
                 org.junit.jupiter.params.provider.Arguments.of(
                         "{\"model\":{},\"instructions\":\"\",\"tools\":[],"
@@ -306,6 +307,41 @@ class ManagedAgentDefinitionAdmissionTest {
                         .value("unsupported_feature"));
     }
 
+    @Test
+    void admitsModelInstructionsAndPublishesADigestAddressedResource() throws Exception {
+        String tenant = tenant();
+        JsonNode definition = define(tenant, "create", """
+                {"model":{"id":"configured"},"instructions":"Review in Chinese.",
+                 "tools":[],"permission_policy":{"approval_mode":"default"}}
+                """);
+        JsonNode receipt = mapper.readTree(mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "definition-model")
+                        .principal(actor(tenant, "actor"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"agent_id\":\"" + definition.get("id").asText()
+                                + "\",\"input\":[]}"))
+                .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString());
+        var session = store.requireSession(tenant, receipt.get("id").asText());
+        var definitions = new com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore(jdbc);
+        assertThat(definitions.pinnedContent(session).get("instructions"))
+                .isEqualTo("Review in Chinese.");
+        var resources = new com.alibaba.qwen.code.managedagent.store.ManagedSessionStore(jdbc);
+        var first = resources.publishAgentInstructions(tenant, "workspace", session.sessionId(),
+                "Review in Chinese.");
+        assertThat(resources.publishAgentInstructions(tenant, "workspace", session.sessionId(),
+                "Review in Chinese.")).isEqualTo(first);
+        assertThat(first.resourceId()).isEqualTo("agent-instructions-" + first.digest());
+        assertThat(jdbc.queryForObject("SELECT inline_bytes FROM qwen_managed_session_resource"
+                        + " WHERE tenant_id = ? AND session_id = ? AND resource_id = ?",
+                byte[].class, tenant, session.sessionId(), first.resourceId()))
+                .isEqualTo("Review in Chinese.".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("UPDATE managed_agent_session SET agent_definition_digest = ?"
+                        + " WHERE tenant_id = ? AND session_id = ?", "0".repeat(64), tenant, session.sessionId());
+        assertThatThrownBy(() -> definitions.pinnedContent(store.requireSession(tenant, session.sessionId())))
+                .isInstanceOf(ApiException.class);
+    }
+
     private JsonNode define(String tenant, String key, String definition)
             throws Exception {
         return define(tenant, key, null, definition);
@@ -356,10 +392,11 @@ class ManagedAgentDefinitionAdmissionTest {
     private void grant(String tenant, String workspaceId, String actorId,
             boolean canCreate) {
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, ?, ?, TRUE, ?)",
+                        + " workspace_id, actor_id, role)"
+                        + " VALUES (?, ?, ?, ?)",
                 tenant, workspaceId,
-                actorId.getBytes(StandardCharsets.UTF_8), canCreate);
+                actorId.getBytes(StandardCharsets.UTF_8),
+                canCreate ? "OPERATOR" : "READER");
     }
 
     private static String tenant() {

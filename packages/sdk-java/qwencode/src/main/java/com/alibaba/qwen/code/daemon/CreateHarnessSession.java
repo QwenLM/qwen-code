@@ -10,6 +10,7 @@ public final class CreateHarnessSession {
     private final ManagedSessionStoreConnection managedSessionStore;
     private final String toolProfile;
     private final Long approvalTimeoutMs;
+    private final Map<String, Object> agentDefinition;
 
     private CreateHarnessSession(Builder builder) {
         this.harnessSessionId = HostedHarnessClient.requireUuid(
@@ -18,6 +19,7 @@ public final class CreateHarnessSession {
         this.managedSessionStore = builder.managedSessionStore;
         this.toolProfile = builder.toolProfile;
         this.approvalTimeoutMs = builder.approvalTimeoutMs;
+        this.agentDefinition = builder.agentDefinition;
     }
 
     public static Builder builder() {
@@ -44,6 +46,9 @@ public final class CreateHarnessSession {
         if (approvalTimeoutMs != null) {
             result.put("approvalTimeoutMs", approvalTimeoutMs);
         }
+        if (agentDefinition != null) {
+            result.put("agentDefinition", agentDefinition);
+        }
         return result;
     }
 
@@ -53,6 +58,12 @@ public final class CreateHarnessSession {
         private ManagedSessionStoreConnection managedSessionStore;
         private String toolProfile;
         private Long approvalTimeoutMs;
+        private Map<String, Object> agentDefinition;
+
+        public Builder agentDefinition(Map<String, Object> value) {
+            this.agentDefinition = Map.copyOf(value);
+            return this;
+        }
 
         public Builder approvalTimeoutMs(long value) {
             if (value < 1000 || value > 86400000) {

@@ -90,7 +90,7 @@ class AgentDefinitionCompilerTest {
     @org.junit.jupiter.params.ParameterizedTest
     @org.junit.jupiter.params.provider.CsvSource("""
             '{"model":{"id":"qwen3"},"instructions":"","tools":[],"permission_policy":{}}', model
-            '{"model":{},"instructions":"Review.","tools":[],"permission_policy":{}}', instructions
+            '{"model":{},"instructions":7,"tools":[],"permission_policy":{}}', instructions
             '{"model":{},"instructions":"","tools":[],"permission_policy":{"plan":true}}', permission_policy
             '{"model":{},"instructions":"","tools":[],"permission_policy":{"approval_timeout_ms":5000}}', permission_policy
             '{"model":{},"instructions":"","tools":[],"permission_policy":{"approval_mode":"plan"}}', permission_policy
@@ -147,4 +147,24 @@ class AgentDefinitionCompilerTest {
         assertThat(AgentDefinitionCompiler.compile(json, false, "yolo",
                 FILES_ONLY).approvalMode()).isEqualTo("yolo");
     }
+    @Test
+    void acceptsAnAllowlistedModelAndBoundedUtf8Instructions() {
+        String accepted = "{\"model\":{\"id\":\"configured\"},"
+                + "\"instructions\":\"" + "界".repeat(21845) + "\","
+                + "\"tools\":[],\"permission_policy\":{}}";
+        assertThat(AgentDefinitionCompiler.compile(accepted, false, "yolo",
+                FILES_ONLY, List.of("configured")).toolProfile()).isNull();
+        assertThatThrownBy(() -> AgentDefinitionCompiler.compile(
+                accepted.replace("界\"", "界界\""), false, "yolo",
+                FILES_ONLY, List.of("configured")))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getDetails().get("field"))
+                                .isEqualTo("instructions"));
+        assertThatThrownBy(() -> AgentDefinitionCompiler.compile(accepted,
+                false, "yolo", FILES_ONLY, List.of()))
+                .isInstanceOfSatisfying(ApiException.class, error ->
+                        assertThat(error.getDetails().get("field"))
+                                .isEqualTo("model"));
+    }
+
 }

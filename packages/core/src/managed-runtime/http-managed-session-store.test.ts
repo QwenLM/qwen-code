@@ -121,6 +121,71 @@ describe('HTTP Managed Session store', () => {
     };
   }
 
+  it('includes digest-addressed instructions in the definition transaction closure', async () => {
+    const server = new FakeManagedSessionStore();
+    const runtimeBaseDir = await mkdtemp(
+      path.join(tmpdir(), 'definition-closure-'),
+    );
+    temporaryDirectories.push(runtimeBaseDir);
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: server.fetch,
+    });
+    const instructionsRef = await stores.resourceStore.publish(
+      'managed-agent-instructions',
+      Buffer.from('Definition instructions'),
+    );
+    const definitionRef = await stores.resourceStore.publish(
+      'managed-definition',
+      Buffer.from(
+        JSON.stringify({
+          engine: 'managed',
+          agentDefinition: {
+            agentId: `agent_${'a'.repeat(32)}`,
+            revision: '1',
+            digest: 'b'.repeat(64),
+            instructionsRef,
+          },
+        }),
+      ),
+    );
+    const rootSnapshotRef = await stores.resourceStore.publish(
+      'managed-root',
+      Buffer.from('{}'),
+    );
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId: SESSION_KEY.sessionId,
+      transcriptPath: path.join(runtimeBaseDir, 'session.jsonl'),
+      sessionKey: SESSION_KEY,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'harness-a',
+      activationLeaseDurationMs: 60000,
+      journalStore: stores.journalStore,
+      resourceStore: stores.resourceStore,
+      create: { definitionRef, rootSnapshotRef, createdBy: 'test' },
+    });
+    expect(await stores.resourceStore.read(instructionsRef)).toEqual(
+      Buffer.from('Definition instructions'),
+    );
+    await session.close();
+    const restored = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-b',
+      writerToken: TOKEN_B,
+      fetchFn: server.fetch,
+    });
+    await restored.journalStore.open({ sessionKey: SESSION_KEY });
+    expect(await restored.resourceStore.read(instructionsRef)).toEqual(
+      Buffer.from('Definition instructions'),
+    );
+  });
+
   afterEach(async () => {
     vi.restoreAllMocks();
     await Promise.all(

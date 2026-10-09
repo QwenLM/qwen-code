@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.store;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import org.springframework.http.HttpStatus;
@@ -10,7 +11,7 @@ import org.springframework.http.HttpStatus;
 /**
  * Compiles a stored AgentDefinition revision into the fields that take
  * effect at Session admission (D8c-1): the approval mode and the tool
- * profile a Session pins. Content that cannot take effect yet refuses
+ * profile a Session pins. Content that cannot take effect refuses
  * admission with {@code 409 agent_definition_unsupported} naming the field,
  * instead of being dropped.
  */
@@ -30,6 +31,13 @@ final class AgentDefinitionCompiler {
 
     static Compiled compile(String definitionJson, boolean workspaceBound,
             String deploymentApprovalMode, List<String> toolProfiles) {
+        return compile(definitionJson, workspaceBound,
+                deploymentApprovalMode, toolProfiles, List.of());
+    }
+
+    static Compiled compile(String definitionJson, boolean workspaceBound,
+            String deploymentApprovalMode, List<String> toolProfiles,
+            List<String> models) {
         Map<String, Object> definition;
         try {
             definition = JSON.readValue(definitionJson, CONTENT);
@@ -38,11 +46,18 @@ final class AgentDefinitionCompiler {
                     "A stored agent definition is not valid JSON", error);
         }
         Object model = definition.get("model");
-        if (model instanceof Map<?, ?> map ? !map.isEmpty() : model != null) {
+        if (model instanceof Map<?, ?> map) {
+            if (!map.isEmpty() && !(map.size() == 1
+                    && map.get("id") instanceof String id
+                    && !id.isBlank() && models.contains(id))) {
+                throw unsupported("model");
+            }
+        } else if (model != null) {
             throw unsupported("model");
         }
         Object instructions = definition.get("instructions");
-        if (instructions != null && !"".equals(instructions)) {
+        if (instructions != null && (!(instructions instanceof String text)
+                || text.getBytes(StandardCharsets.UTF_8).length > 64 * 1024)) {
             throw unsupported("instructions");
         }
         String approvalMode = deploymentApprovalMode;

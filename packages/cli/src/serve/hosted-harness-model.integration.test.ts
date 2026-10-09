@@ -16,6 +16,7 @@ import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 let root: string;
 let server: Server;
 let requests: Array<{
+  model?: string;
   messages: Array<{ role: string; content: unknown }>;
   tools?: unknown[];
 }>;
@@ -63,6 +64,11 @@ beforeEach(async () => {
       telemetry: { enabled: false },
       modelProviders: {
         openai: [
+          {
+            id: 'definition-model',
+            envKey: 'OPENAI_API_KEY',
+            baseUrl: `http://127.0.0.1:${address.port}/v1`,
+          },
           {
             id: 'pr12713-fixture',
             envKey: 'OPENAI_API_KEY',
@@ -181,3 +187,30 @@ it.each([
     }
   },
 );
+
+it('sends the selected model and preserves core, agent and project instruction order on the wire', async () => {
+  await runHostedHarnessTextTurn({
+    sessionId: randomUUID(),
+    cwd: root,
+    history: [],
+    prompt: 'hello',
+    promptId: randomUUID(),
+    signal: new AbortController().signal,
+    agentDefinition: {
+      agentId: `agent_${'a'.repeat(32)}`,
+      revision: '1',
+      digest: 'b'.repeat(64),
+      model: { id: 'definition-model' },
+    },
+    agentInstructions: 'D8_AGENT_INSTRUCTION',
+    workspaceContext: { read: () => 'D8_PROJECT_CONTEXT' },
+  });
+  expect(requests).toHaveLength(1);
+  expect(requests[0]?.model).toBe('definition-model');
+  const system = JSON.stringify(
+    requests[0]?.messages.find((m) => m.role === 'system')?.content,
+  );
+  const agent = system.indexOf('D8_AGENT_INSTRUCTION');
+  expect(agent).toBeGreaterThan(100);
+  expect(system.indexOf('D8_PROJECT_CONTEXT')).toBeGreaterThan(agent);
+});

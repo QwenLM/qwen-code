@@ -20,6 +20,9 @@ import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
+import com.alibaba.qwen.code.managedagent.store.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.store.ManagedSessionStore;
+import java.util.LinkedHashMap;
 import java.net.URI;
 import java.time.Duration;
 import java.util.List;
@@ -39,6 +42,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private final WorkspaceExecutionStore workspaceExecution;
     private final DaemonApprovalMode approvalMode;
     private final ManagedActionStore actions;
+    private final ManagedAgentDefinitionStore definitions;
+    private final ManagedSessionStore resources;
     private final WriterCredentialPolicy credentials;
     private volatile HostedHarnessClient client;
     private final ReentrantLock clientLock = new ReentrantLock();
@@ -66,6 +71,15 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             AgentStateStore sessions,
             WorkspaceExecutionStore workspaceExecution,
             ManagedActionStore actions) {
+        this(properties, sessions, workspaceExecution, actions, null, null);
+    }
+
+    public QwenHostedHarnessConnector(ManagedAgentProperties properties,
+            AgentStateStore sessions, WorkspaceExecutionStore workspaceExecution,
+            ManagedActionStore actions, ManagedAgentDefinitionStore definitions,
+            ManagedSessionStore resources) {
+        this.definitions = definitions;
+        this.resources = resources;
         this.properties = properties.getHarness();
         this.sessionStore = properties.getSessionStore();
         this.workspaceId = sessionStore.getWorkspaceId();
@@ -154,7 +168,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         HarnessSessionRef ref = attachments.get(key);
         if (ref == null) {
             ref = client().loadSession(new LoadHarnessSession(session.sessionId(), managedSessionStore(session),
-                    false, toolProfile(session), false).forLifecycle(operation.operationId(), operation.claimGeneration()));
+                    false, toolProfile(session), false)
+                    .withAgentDefinition(agentDefinition(session, false)).forLifecycle(operation.operationId(), operation.claimGeneration()));
             attachments.put(key, ref);
         }
         var authority = Map.<String, Object>of("operationId", operation.operationId(), "claimGeneration", operation.claimGeneration());
@@ -550,6 +565,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                             .harnessSessionId(session.sessionId())
                             .approvalMode(
                                     session.workspace() == null
+                                            && session.agentDefinitionDigest() == null
                                             ? approvalMode
                                             : parseApprovalMode(
                                                     actions.approvalMode(
@@ -561,6 +577,10 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     session);
             if (store != null) {
                 builder.managedSessionStore(store);
+            }
+            Map<String, Object> definition = agentDefinition(session, true);
+            if (definition != null) {
+                builder.agentDefinition(definition);
             }
             return client().createSession(builder.build());
         } catch (DaemonHttpException error) {
@@ -592,7 +612,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         ManagedSessionStoreConnection store = managedSessionStore(session);
         return client().loadSession(new LoadHarnessSession(session.sessionId(), store,
                 passiveManagedRuntimeRecovery, profile,
-                driveRuntimeRecovery, cancellationTakeover));
+                driveRuntimeRecovery, cancellationTakeover)
+                .withAgentDefinition(agentDefinition(session, false)));
     }
 
     @Override
@@ -726,6 +747,39 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             throw new IllegalStateException("Hosted Workspace Session tool profile is missing");
         }
         return session.toolProfile();
+    }
+
+    private Map<String, Object> agentDefinition(SessionRecord session,
+            boolean create) {
+        if (session.agentDefinitionDigest() == null) {
+            return null;
+        }
+        Map<String, Object> pin = new LinkedHashMap<>();
+        pin.put("agentId", session.agentId());
+        pin.put("revision", session.agentRevision());
+        pin.put("digest", session.agentDefinitionDigest());
+        if (!create) {
+            return pin;
+        }
+        if (definitions == null || resources == null || !sessionStore.isEnabled()) {
+            throw new IllegalStateException("Agent definitions require the Managed Session Store");
+        }
+        Map<String, Object> content = definitions.pinnedContent(session);
+        Object model = content.get("model");
+        if (model instanceof Map<?, ?> map && !map.isEmpty()) {
+            pin.put("model", model);
+        }
+        Object instructions = content.get("instructions");
+        if (instructions instanceof String text && !text.isEmpty()) {
+            String workspace = session.workspace() == null ? workspaceId
+                    : session.workspace().getWorkspaceId();
+            var ref = resources.publishAgentInstructions(session.tenantId(),
+                    workspace, session.sessionId(), text);
+            pin.put("instructionsRef", Map.of("resourceId", ref.resourceId(),
+                    "kind", ref.kind(), "schemaVersion", ref.schemaVersion(),
+                    "byteLength", ref.byteLength(), "digest", ref.digest()));
+        }
+        return pin;
     }
 
     private ManagedSessionStoreConnection managedSessionStore(

@@ -2,7 +2,7 @@
 
 [English](2026-10-07-managed-agent-definition-execution.md) | [简体中文](2026-10-07-managed-agent-definition-execution.zh-CN.md)
 
-Status: proposal; the decisions in section 7 await review
+Status: D8b, D8c-1 and D8c-2 implemented in #13530; reviewer decisions in section 7 remain pending
 Date: 2026-10-07
 Issue: [#12867](https://github.com/QwenLM/qwen-code/issues/12867), part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 Builds on: [AgentDefinition revisions (D8a)](2026-10-01-managed-agent-definitions.md)
@@ -240,7 +240,7 @@ agent_definition_unsupported`, and describe `agent_revision` as "omitted
 
 ## 6. Delivery
 
-Two PRs:
+The original plan splits delivery into two slices. Both slices are now implemented in #13530:
 
 1. **PR A, D8b and D8c-1 (Java only):** pinning, compilation of the approval
    mode and tool profile, the refusal rules, the new column (the next free
@@ -333,3 +333,11 @@ Each item is a recommendation, followed by who should confirm it.
   drops), and the error names the field.
 
 [upstream]: https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-java-hosted-runtime.md
+
+## 10. D8c-2 implementation details
+
+The model allowlist defaults to empty. Set `QWEN_MANAGED_AGENT_DEFINITION_MODELS` to comma-separated model IDs also present in the Harness deployment's `modelProviders`. The Harness requires exactly one configured route for an ID, excludes runtime-only models and resolves credentials from deployment configuration; a missing, ambiguous or unauthenticated route ends the Turn with `model_unavailable` before inference. No credentials or provider overrides are accepted in definitions.
+
+Java publishes non-empty instructions as raw UTF-8 `managed-agent-instructions` resources in the Session Store, addressed by their SHA-256 digest. The reference joins the immutable `managed-definition` resource's transaction closure and W1 recovery closure. Create, cold load and each Turn verify its bytes; load accepts only the pinned agent ID, revision and digest and refuses missing or changed identity with `409 hosted_agent_definition_conflict`, including resident recovery and lifecycle loads. Agent instructions precede project context and survive context refreshes.
+
+The database migration is V54 because main uses V53 for Workspace roles. Conflict resolution keeps main's creator/owner actor identity together with the pinned definition identity. `QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` remains `hosted-workspace-files/1` by default; add `files/2` only after draining old workers and upgrading all provisioners as required by #13166.

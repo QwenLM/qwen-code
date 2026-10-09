@@ -1,6 +1,11 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.api.ApiException;
+import com.alibaba.qwen.code.managedagent.service.RequestDigests;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.Map;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.dao.DuplicateKeyException;
@@ -96,6 +101,27 @@ public class ManagedAgentDefinitionStore {
             }
         }
         return record(tenantId, idempotencyKey, requestDigest, result, now);
+    }
+
+    public Map<String, Object> pinnedContent(SessionRecord session) {
+        DefinitionRevision revision = find(session.tenantId(),
+                session.agentId(), Long.parseLong(session.agentRevision()))
+                .orElseThrow(ManagedAgentDefinitionStore::notFound);
+        Map<String, Object> content;
+        try {
+            content = new ObjectMapper().readValue(revision.definitionJson(),
+                    new TypeReference<Map<String, Object>>() { });
+        } catch (Exception error) {
+            throw new IllegalStateException("Invalid pinned definition", error);
+        }
+        if (!revision.digest().equals(session.agentDefinitionDigest())
+                || !new RequestDigests().digest(content)
+                        .equals("sha256:" + session.agentDefinitionDigest())) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "hosted_agent_definition_conflict",
+                    "The pinned agent definition digest does not match.");
+        }
+        return content;
     }
 
     public Optional<DefinitionRevision> latest(String tenantId,

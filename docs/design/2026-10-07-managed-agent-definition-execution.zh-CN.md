@@ -2,7 +2,7 @@
 
 [English](2026-10-07-managed-agent-definition-execution.md) | [简体中文](2026-10-07-managed-agent-definition-execution.zh-CN.md)
 
-状态：方案；第 7 节的决策待评审
+状态：D8b、D8c-1 与 D8c-2 已在 #13530 实现；第 7 节决策仍待 reviewer 确认
 日期：2026-10-07
 Issue：[#12867](https://github.com/QwenLM/qwen-code/issues/12867)，属于 [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 基于：[AgentDefinition revision（D8a）](2026-10-01-managed-agent-definitions.zh-CN.md)
@@ -201,7 +201,7 @@ instructionsRef?}`。
 
 ## 6. 交付
 
-两个 PR：
+原计划分为两个交付切片。目前两个切片已在 #13530 实现：
 
 1. **PR A，D8b 与 D8c-1（只改 Java）：** 固定版本、编译审批模式与工具 profile、
    拒绝规则、新增列（取合入时 `main` 上下一个空闲的 Flyway 版本号）以及契约
@@ -276,3 +276,11 @@ D8b 不单独发布。固定一个字段都不生效的定义，就是静默丢�
   这是有意为之（不静默丢弃），错误会指出字段。
 
 [upstream]: https://github.com/doudouOUC/code_agent/blob/689121646cc25ca08a34508a5f5555ae15308833/qwen-code/feature/managed-agents/managed-agent-java-hosted-runtime.md
+
+## 10. D8c-2 实现细节
+
+模型白名单默认空。将 `QWEN_MANAGED_AGENT_DEFINITION_MODELS` 设为逗号分隔的模型 ID，同时确保这些 ID 存在于 Harness 部署的 `modelProviders`。Harness 要求每个 ID 仅匹配一条已配置路由，排除只在运行期出现的模型，并从部署配置解析凭据；缺失、歧义或凭据不可用的路由在推理前以 `model_unavailable` 结束 Turn。定义不接受凭据或 provider 覆盖。
+
+Java 将非空 instructions 作为原始 UTF-8 的 `managed-agent-instructions` 资源发布到 Session Store，以 SHA-256 摘要寻址。引用进入不可变 `managed-definition` 资源的事务闭包与 W1 恢复闭包。创建、冷加载及每个 Turn 都核验资源字节；load 仅接受固定的 agent ID、revision 和 digest，身份缺失或变化返回 `409 hosted_agent_definition_conflict`，驻留会话的恢复和生命周期加载同样检查。Agent instructions 位于项目上下文之前，刷新上下文时仍然保留。
+
+数据库迁移采用 V54，因为 main 已用 V53 增加 Workspace 角色。冲突处理同时保留主干的 creator/owner actor 身份与固定的定义身份。`QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES` 默认仍为 `hosted-workspace-files/1`；仅在按 #13166 排空旧 worker 并升级所有 provisioner 后，才加入 `files/2`。

@@ -373,8 +373,8 @@ class ManagedActionsTest {
                 + " display_name, config_ref, policy_ref, state) VALUES (?, 'workspace', 1, ?, 'workspace', ?, ?, 'ACTIVE')",
                 tenant, storage, WorkspaceExecutionProfile.CONFIG_REF,
                 WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                + " VALUES (?, 'workspace', ?, TRUE, TRUE)", tenant, "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "owner".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         jdbc.update("UPDATE managed_agent_session SET workspace_storage_id = ?, workspace_id = 'workspace',"
                 + " workspace_generation = 1, cwd_relative = '.', context_config_ref = ?, context_revision = 1,"
                 + " workspace_config_ref = ?, workspace_policy_ref = ? WHERE tenant_id = ? AND session_id = ?",

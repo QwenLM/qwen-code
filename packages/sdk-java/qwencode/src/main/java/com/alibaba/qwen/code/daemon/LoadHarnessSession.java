@@ -12,6 +12,12 @@ public final class LoadHarnessSession {
     private final boolean driveRuntimeRecovery;
     private final boolean cancellationTakeover;
     private Map<String, Object> lifecycleAuthority;
+    private Map<String, Object> agentDefinition;
+
+    public LoadHarnessSession withAgentDefinition(Map<String, Object> value) {
+        this.agentDefinition = value == null ? null : Map.copyOf(value);
+        return this;
+    }
 
     public LoadHarnessSession forLifecycle(String operationId, long claimGeneration) {
         if (operationId == null || !operationId.matches("[A-Za-z0-9._:-]{1,128}") || claimGeneration < 1) {
@@ -19,6 +25,7 @@ public final class LoadHarnessSession {
         }
         LoadHarnessSession copy = new LoadHarnessSession(harnessSessionId, managedSessionStore,
                 passiveManagedRuntimeRecovery, toolProfile, driveRuntimeRecovery, cancellationTakeover);
+        copy.agentDefinition = agentDefinition;
         copy.lifecycleAuthority = Map.of("operationId", operationId, "claimGeneration", claimGeneration);
         return copy;
     }
@@ -99,6 +106,9 @@ public final class LoadHarnessSession {
         }
         if (cancellationTakeover) {
             result.put("cancellationTakeover", true);
+        }
+        if (agentDefinition != null) {
+            result.put("agentDefinition", agentDefinition);
         }
         return result;
     }

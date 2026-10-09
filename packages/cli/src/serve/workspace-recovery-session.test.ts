@@ -940,6 +940,40 @@ describe('migration profile evidence', () => {
 });
 
 describe('verifyRecoverySession', () => {
+  it('captures raw pinned agent instructions and refuses changed bytes', async () => {
+    const bytes = Buffer.from('Keep the agent instructions. 保留指令。');
+    const instructionsRef: ManagedSessionDurableRef = {
+      resourceId: 'agent-instructions',
+      kind: 'managed-agent-instructions',
+      schemaVersion: 1,
+      byteLength: bytes.length,
+      digest: hash(bytes),
+    };
+    const definition = {
+      toolProfile: 'hosted-workspace-files/1',
+      agentDefinition: {
+        agentId: `agent_${'a'.repeat(32)}`,
+        revision: '1',
+        digest: 'b'.repeat(64),
+        instructionsRef,
+      },
+    };
+    const f = fixture(definition);
+    f.resources.set(instructionsRef.resourceId, bytes);
+    await expect(verifyRecoverySession(f.source, f.io)).resolves.toEqual({
+      fileHistory: 'not_captured',
+    });
+    expect(f.complete.has(instructionsRef.resourceId)).toBe(true);
+    const corrupt = fixture(definition);
+    corrupt.resources.set(
+      instructionsRef.resourceId,
+      Buffer.alloc(bytes.length),
+    );
+    await expect(
+      verifyRecoverySession(corrupt.source, corrupt.io),
+    ).rejects.toThrow('resource bytes conflict');
+  });
+
   it.each([
     {},
     { undoReceipts: undefined },

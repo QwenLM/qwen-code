@@ -13077,3 +13077,70 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   });
 });
+
+it('pins stored definitions across resident and cold loads and delivers instructions to the Turn', async () => {
+  const server = await app();
+  const resources = LocalManagedSessionResourceStore.create({
+    runtimeBaseDir: state.root,
+    sessionKey: {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    },
+  });
+  const instructionsRef = await resources.publish(
+    'managed-agent-instructions',
+    Buffer.from('D8_PINNED_INSTRUCTIONS'),
+  );
+  const identity = {
+    agentId: `agent_${'a'.repeat(32)}`,
+    revision: '1',
+    digest: 'b'.repeat(64),
+  };
+  const definition = {
+    ...identity,
+    model: { id: 'configured' },
+    instructionsRef,
+  };
+  const created = await headers(supertest(server).post('/session')).send({
+    sessionId: SESSION_ID,
+    sessionScope: 'thread',
+    managedSessionStore: store(),
+    agentDefinition: definition,
+  });
+  expect(created.status).toBe(200);
+  const load = (agentDefinition?: typeof identity) =>
+    headers(supertest(server).post(`/session/${SESSION_ID}/load`)).send({
+      managedSessionStore: store(),
+      agentDefinition,
+      driveRuntimeRecovery: true,
+    });
+  expect((await load()).body.error).toBe('hosted_agent_definition_conflict');
+  expect((await load({ ...identity, digest: 'c'.repeat(64) })).body.error).toBe(
+    'hosted_agent_definition_conflict',
+  );
+  expect((await load(identity)).status).toBe(200);
+  await headers(supertest(server).delete(`/session/${SESSION_ID}`)).expect(204);
+  const loaded = await load(identity);
+  expect(loaded.status).toBe(200);
+  const prompt = [{ type: 'text', text: 'hello' }];
+  await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+    .set('X-Qwen-Client-Id', loaded.body.clientId)
+    .send({
+      prompt,
+      promptId: PROMPT_ID,
+      payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+    })
+    .expect(202);
+  await vi.waitFor(() => expect(state.model).toHaveBeenCalled());
+  expect(state.model.mock.calls.at(-1)?.[0]).toMatchObject({
+    agentDefinition: definition,
+    agentInstructions: 'D8_PINNED_INSTRUCTIONS',
+  });
+  await vi.waitFor(async () => {
+    const response = await headers(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+    expect(response.status).toBe(204);
+  });
+});

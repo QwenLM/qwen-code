@@ -100,6 +100,10 @@ import {
 import { formatDateTime } from '../../utils/formatDateTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { useWorkspaceRemoval } from '../workspaces/useWorkspaceRemoval';
+import {
+  OtherHostProjects,
+  WorkspaceHostHeading,
+} from '../workspaces/WorkspaceHostProjects';
 import { WorkspaceRemovalDialog } from '../workspaces/WorkspaceRemovalDialog';
 import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
 import { WorkspaceMenu, type WorkspaceMenuActions } from './WorkspaceMenu';
@@ -6784,6 +6788,7 @@ export function WebShellSidebar({
                 </div>
               )}
               <div hidden={liveView || !projectsExpanded}>
+                {!hideProjectHeader && <WorkspaceHostHeading />}
                 <div className={styles.workspacePicker}>
                   <div className={styles.workspaceList}>
                     {standaloneSessionsVisible &&
@@ -7207,6 +7212,7 @@ export function WebShellSidebar({
                     ))}
                   </div>
                 </div>
+                {!hideProjectHeader && <OtherHostProjects />}
               </div>
               {!liveView && archivedSection}
             </SidebarSessionSurface>
