@@ -2476,6 +2476,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         cancelMcpAppCalls: ReturnType<typeof vi.fn>;
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
         enqueueBackgroundNotification: ReturnType<typeof vi.fn>;
+        appendExternalRecord: ReturnType<typeof vi.fn>;
         enableLiveScreenContext: ReturnType<typeof vi.fn>;
         buildAvailableCommandsSnapshot: ReturnType<typeof vi.fn>;
         installManagedConversationActivation: ReturnType<typeof vi.fn>;
@@ -5968,6 +5969,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           enqueueBackgroundNotification: vi
             .fn()
             .mockResolvedValue({ accepted: true }),
+          appendExternalRecord: vi
+            .fn()
+            .mockResolvedValue({ recordId: 'record-1', created: true }),
           enableLiveScreenContext: vi.fn().mockResolvedValue(undefined),
           buildAvailableCommandsSnapshot: vi.fn(() =>
             buildAvailableCommandsSnapshot(createdConfig),
@@ -9946,6 +9950,82 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(
       lastSessionMock?.enqueueBackgroundNotification,
     ).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('lets the trusted daemon bridge write a session agent record', async () => {
+    const sessionId = 'session-A';
+    await setupSessionMocks(sessionId);
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+      { privateParentCapability: 'expected-capability' },
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    await agent.initialize({
+      clientCapabilities: {},
+      _meta: {
+        'qwen-code/private-parent-capability': 'expected-capability',
+      },
+    });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    const request = {
+      kind: 'agent_message',
+      recordKey: 'run-1:result',
+      modelText: '<agent_message from="claude-B">done</agent_message>',
+      payload: {
+        displayText: 'done',
+        author: { agentId: 'agent-1', name: 'claude-B' },
+        runId: 'run-1',
+        status: 'completed',
+      },
+    };
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionExternalRecord, {
+        sessionId,
+        ...request,
+      }),
+    ).resolves.toEqual({ sessionId, recordId: 'record-1', created: true });
+    expect(lastSessionMock!.appendExternalRecord).toHaveBeenCalledWith(request);
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionExternalRecord, {
+        sessionId,
+        ...request,
+        payload: { ...request.payload, status: 'running' },
+      }),
+    ).rejects.toThrowError(/Invalid agent_message payload.status/);
+    expect(lastSessionMock!.appendExternalRecord).toHaveBeenCalledTimes(1);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects session agent records from an untrusted ACP client', async () => {
+    const sessionId = 'session-A';
+    await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.initialize({ clientCapabilities: {} });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionExternalRecord, {
+        sessionId,
+        kind: 'agent_mention',
+        recordKey: 'forged',
+        modelText: '<agent_mention>forged</agent_mention>',
+        payload: { displayText: 'forged', mentionedAgentIds: [] },
+      }),
+    ).rejects.toThrowError(/trusted private ACP parent/);
+    expect(lastSessionMock?.appendExternalRecord).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

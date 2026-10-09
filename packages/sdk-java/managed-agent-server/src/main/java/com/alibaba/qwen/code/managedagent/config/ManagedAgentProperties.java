@@ -20,6 +20,7 @@ public class ManagedAgentProperties {
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
     private final Auth auth = new Auth();
     private final InternalServer internalServer = new InternalServer();
+    private final Channels channels = new Channels();
     private String agentRevision = "1";
     private String trustedActorHeader = "";
 
@@ -33,6 +34,10 @@ public class ManagedAgentProperties {
 
     public InternalServer getInternalServer() {
         return internalServer;
+    }
+
+    public Channels getChannels() {
+        return channels;
     }
 
     public SessionStore getSessionStore() {
@@ -493,6 +498,7 @@ public class ManagedAgentProperties {
         private Duration batchInterval = Duration.ofMillis(75);
         private int batchMaxEvents = 64;
         private int batchMaxBytes = 65536;
+        private boolean replayFloorEnabled;
 
         public Duration getPollInterval() {
             return pollInterval;
@@ -553,6 +559,19 @@ public class ManagedAgentProperties {
 
         public void setBatchMaxBytes(int batchMaxBytes) {
             this.batchMaxBytes = batchMaxBytes;
+        }
+
+        /**
+         * Whether the scheduled pass raises each Session's replay floor as
+         * far as its Snapshot proves safe. Disabled by default; events are
+         * never deleted here either way.
+         */
+        public boolean isReplayFloorEnabled() {
+            return replayFloorEnabled;
+        }
+
+        public void setReplayFloorEnabled(boolean replayFloorEnabled) {
+            this.replayFloorEnabled = replayFloorEnabled;
         }
     }
 
@@ -900,6 +919,37 @@ public class ManagedAgentProperties {
 
         public void setEnvironment(Map<String, String> environment) {
             this.environment = environment;
+        }
+    }
+
+    /** H5b/H5c: the trusted channel adapter surface and its claim lease. */
+    public static class Channels {
+        private boolean enabled;
+        private Duration claimLease = Duration.ofMinutes(10);
+        private Duration scanDelay = Duration.ofSeconds(30);
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public Duration getClaimLease() {
+            return claimLease;
+        }
+
+        public void setClaimLease(Duration claimLease) {
+            this.claimLease = claimLease;
+        }
+
+        public Duration getScanDelay() {
+            return scanDelay;
+        }
+
+        public void setScanDelay(Duration scanDelay) {
+            this.scanDelay = scanDelay;
         }
     }
 }

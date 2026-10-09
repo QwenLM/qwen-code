@@ -70,10 +70,11 @@ class ManagedChildRunRecordContractTest {
                     () -> "case " + id + " names an unknown template");
             JsonNode record = merge(base, fixture.get("patch"));
             // The kind the merged record carries decides the task kind, so
-            // each valid case pins its own mapping.
+            // each valid case pins its own mapping: a Shell projects
+            // background_shell, a child Session kind its own name.
             if (fixture.get("valid").booleanValue()) {
-                assertEquals("shell".equals(record.get("kind").textValue())
-                        ? "background_shell" : "child_agent",
+                String kind = record.get("kind").textValue();
+                assertEquals("shell".equals(kind) ? "background_shell" : kind,
                         body.taskKindOf().apply(record), id);
             }
             if (fixture.get("valid").booleanValue()) {
