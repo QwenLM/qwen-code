@@ -34,7 +34,7 @@ Managed-server 使用独立单线程 scheduler，只有 Broker 和 retention 同
 
 开启清理后，历史 receipt 与幂等保证具有有限保留期。删除后沿用缺失记录行为；调用方不得复用过期 runtime-session ID 或 idempotency key。本次不增加永久 execution 墓碑。
 
-在已有 V55 channel migration 后部署 V56，并保持清理关闭；验证从 V55 升级后既有终态 receipt 保留。全部实例使用新的 publication 锁协议后才开启。观察扫描、删除、跳过数、耗时和失败次数。回退到旧 writer 前先关闭清理。关闭只停止后续删除，不能恢复已删除数据。
+在已有 V56 actor migration 后部署 V57，并保持清理关闭；验证从 V56 升级后既有终态 receipt 保留。全部实例使用新的 publication 锁协议后才开启。观察扫描、删除、跳过数、耗时和失败次数。回退到旧 writer 前先关闭清理。关闭只停止后续删除，不能恢复已删除数据。
 
 ## 验证与验收
 

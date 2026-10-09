@@ -153,7 +153,8 @@ public class WorkspaceExecutionStore {
                 + " JOIN managed_workspace_create_command c ON c.tenant_id = s.tenant_id"
                 + " AND c.session_id = s.session_id"
                 + " JOIN managed_workspace_access a ON a.tenant_id = r.tenant_id"
-                + " AND a.workspace_id = r.workspace_id AND a.actor_id = c.actor_id")
+                + " AND a.workspace_id = r.workspace_id AND a.actor_id = c.actor_id"
+                + " AND a.role IN ('READER', 'OPERATOR', 'OWNER')")
                 + " WHERE s.tenant_id = ? AND s.session_id = ?",
                 (row, index) -> {
                     boolean structural = session.tenantId().equals(row.getString("tenant_id"))
