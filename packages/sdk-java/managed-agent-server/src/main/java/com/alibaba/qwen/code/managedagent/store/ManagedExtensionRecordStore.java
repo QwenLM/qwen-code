@@ -917,7 +917,8 @@ public class ManagedExtensionRecordStore {
                         + " at the current revision.";
                 require(scheduleResource != null, binding);
                 JsonNode schedule = readBody(resources.apply(scheduleResource));
-                require(!List.of("settled", "failed", "cancelled").contains(
+                require(!ManagedExtensionRecords
+                                .isTerminalRunState(
                                 schedule.get("run").get("state").textValue())
                         && schedule.get("definitionRevision").decimalValue().compareTo(
                                 record.get("definitionRevision").decimalValue()) == 0

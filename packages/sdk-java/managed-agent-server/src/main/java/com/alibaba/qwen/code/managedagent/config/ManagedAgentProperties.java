@@ -102,6 +102,26 @@ public class ManagedAgentProperties {
                             + " a supported Harness, Session Store and Session-isolated"
                             + " local-process Broker with Workspace mounts");
         }
+        if (automation.isEnabled()) {
+            // A non-positive value fails at tick time, nearly silently:
+            // 0 slots per tick stops every scheduled fire behind one
+            // warn line, and 0 concurrency refuses every allow slot.
+            if (automation.getMaxSlotsPerTick() < 1) {
+                throw new IllegalStateException(
+                        "Automation max-slots-per-tick must be a positive count.");
+            }
+            if (automation.getConcurrency() < 1) {
+                throw new IllegalStateException(
+                        "Automation concurrency must be a positive count.");
+            }
+            if (!(automation.getScanDelay().toMillis() > 0)
+                    || !(automation.getLease().toMillis() > 0)
+                    || !(automation.getLateTolerance().toMillis() > 0)
+                    || !(automation.getLookback().toMillis() > 0)) {
+                throw new IllegalStateException(
+                        "Automation scan-delay, lease, late-tolerance and lookback must be positive durations.");
+            }
+        }
     }
 
     public static class Harness {

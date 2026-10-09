@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.Occurrence
 import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.OccurrenceView;
 import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.ScheduleRow;
 import com.alibaba.qwen.code.managedagent.store.AutomationLedgerStore.StaleMirror;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionRecords;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.ZoneId;
@@ -56,6 +57,10 @@ public class AutomationScanner {
     public static final String REASON_REVISION_STALE = "revision_stale";
     public static final String REASON_DEFINITION_RETIRED = "definition_retired";
     public static final String REASON_ANSWER_UNOBTAINABLE = "answer_unobtainable";
+    /** The fire route's refusal codes a retry can never change (R3-11). */
+    private static final Set<String> DEFINITIVE_REFUSALS = Set.of(
+            "invalid_automation_operation", "automation_mode_disabled",
+            "automation_count_limit", "automation_operation_conflict");
 
     private final AutomationLedgerStore store;
     private final HarnessConnector harness;
@@ -181,8 +186,8 @@ public class AutomationScanner {
             String sessionId, String actorId, long recordRevision,
             JsonNode record) {
         String runState = record.required("run").required("state").asText();
-        boolean terminal = List.of("settled", "failed", "cancelled")
-                .contains(runState);
+        boolean terminal = ManagedExtensionRecords
+                .isTerminalRunState(runState);
         JsonNode limit = record.required("catchUpLimit");
         return new ScheduleRow(tenantId, record.required("scheduleId").asText(),
                 sessionId, workspaceId, actorId, recordRevision,
@@ -547,14 +552,16 @@ public class AutomationScanner {
                 store.retire(row.tenantId(), row.scheduleId(), now);
                 return false;
             }
-            if (error.getStatusCode() >= 400 && error.getStatusCode() < 500) {
-                // A definitive refusal (mode gate closed, conflict, a body
-                // the route rejects): settle the decision instead of
-                // re-driving it into `unknown` — the answer was obtained.
+            if (error.getStatusCode() >= 400 && error.getStatusCode() < 500
+                    && DEFINITIVE_REFUSALS.contains(code)) {
+                // Only the route's definitive automation refusals settle a
+                // slot forever: every other 4xx — a transient session-state
+                // one like hosted_session_blocked most of all — defers and
+                // re-drives under the bounded backoff, visible at
+                // MAX_FIRE_ATTEMPTS rather than skipped forever.
                 store.settleOccurrence(row.tenantId(), row.scheduleId(),
                         occurrence.occurrenceKey(),
-                        AutomationLedgerStore.OUTCOME_SKIPPED,
-                        code == null ? "automation_refused" : code, owner,
+                        AutomationLedgerStore.OUTCOME_SKIPPED, code, owner,
                         fence, now);
                 return false;
             }

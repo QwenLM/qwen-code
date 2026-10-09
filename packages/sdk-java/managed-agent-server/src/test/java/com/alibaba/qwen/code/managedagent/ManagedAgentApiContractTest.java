@@ -307,6 +307,39 @@ class ManagedAgentApiContractTest {
     }
 
     @Test
+    void publicAutomationRunStateValidatesAsLegallyNull() throws Exception {
+        ObjectNode run = (ObjectNode) json("""
+                {"id":"arun_x","object":"automation_run",
+                 "automation_id":"asch_0123456789abcdef0123456789abcdef",
+                 "session_id":"session-00000000000000000000000000000001",
+                 "occurrence_key":"manual:k","trigger":"manual",
+                 "outcome":"firing","reason":null,"definition_revision":1,
+                 "state":null,"created_at":1,"updated_at":1}""");
+        assertThat(CONTRACT.validate("/components/schemas/PublicAutomationRun", run))
+                .isEmpty();
+        run.put("state", "running");
+        assertThat(CONTRACT.validate("/components/schemas/PublicAutomationRun", run))
+                .isEmpty();
+        run.put("state", "bogus");
+        assertThat(CONTRACT.validate("/components/schemas/PublicAutomationRun", run))
+                .isNotEmpty();
+    }
+
+    @Test
+    void theCreateRequestRequiresACatchUpLimitOnlyWhenBounded() throws Exception {
+        ObjectNode create = (ObjectNode) json("""
+                {"session_id":"s","goal":"g","cron":"0 2 * * *",
+                 "timezone":"UTC","prompt":"p","catch_up":"bounded"}""");
+        assertThat(CONTRACT.validate(
+                "/components/schemas/AutomationDefinitionCreateRequest",
+                create)).isNotEmpty();
+        create.put("catch_up_limit", 3);
+        assertThat(CONTRACT.validate(
+                "/components/schemas/AutomationDefinitionCreateRequest",
+                create)).isEmpty();
+    }
+
+    @Test
     void tenantFilteredRoutesDeclareAndReturnTheActorScopeRefusal() throws Exception {
         Map<String, String> drift = new TreeMap<>();
         for (Operation operation : CONTRACT.operations()) {

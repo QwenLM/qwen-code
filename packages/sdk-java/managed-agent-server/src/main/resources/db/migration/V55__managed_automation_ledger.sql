@@ -92,3 +92,9 @@ CREATE TABLE qwen_managed_automation_command (
     created_at BIGINT NOT NULL,
     PRIMARY KEY (tenant_id, idempotency_key)
 ) DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+
+-- The mirror-refresh sweep reads the record table by (domain, created_at,
+-- record_id): without the covering index each tick filesorts the whole
+-- journal mirror just to find the records whose mirror lags.
+CREATE INDEX idx_session_extension_record_domain_created
+    ON qwen_managed_session_extension_record (domain, created_at, record_id);

@@ -497,8 +497,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 // a Turn uses (HarnessCoordinator.runClaimed).
                 recoverManagedRuntime(tenantId, sessionId, false);
             }
-            return client().runAutomationOperation(
-                    attachment(tenantId, sessionId, true), body);
+            // Resolve the attachment BEFORE fetching the client: the
+            // resolution may block on a create/load round trip, and an
+            // adoption closing the captured client during that window
+            // would strand this call on a dead instance instead of the
+            // rebuilt one (the ordering doContinueManagedRuntime follows).
+            HarnessSessionRef ref = attachment(tenantId, sessionId, true);
+            return client().runAutomationOperation(ref, body);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -509,8 +514,10 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     public void runChildOperation(String tenantId, String sessionId,
             Map<String, Object> body) {
         try {
-            client().runChildOperation(attachment(tenantId, sessionId, true),
-                    body);
+            // Same ordering as the automation relay: the attachment
+            // resolves first, the client reads after it.
+            HarnessSessionRef ref = attachment(tenantId, sessionId, true);
+            client().runChildOperation(ref, body);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;

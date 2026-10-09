@@ -281,10 +281,14 @@ public final class AutomationHarnessFake {
                 .toList();
     }
 
+    /** The definition's field set, shared by apply, replayCheck and digest. */
+    private static final List<String> DEFINITION_FIELDS = List.of("goal",
+            "cron", "timezone", "sessionMode", "overlap", "catchUp",
+            "catchUpLimit", "enabled", "prompt");
+
     private static void apply(Map<String, Object> schedule,
             Map<?, ?> definition) {
-        for (String field : List.of("goal", "cron", "timezone", "sessionMode",
-                "overlap", "catchUp", "catchUpLimit", "enabled", "prompt")) {
+        for (String field : DEFINITION_FIELDS) {
             if (definition.containsKey(field)) {
                 Object value = definition.get(field);
                 schedule.put(field, value instanceof Integer integer
@@ -307,8 +311,7 @@ public final class AutomationHarnessFake {
         if (definition == null) {
             return;
         }
-        for (String field : List.of("goal", "cron", "timezone", "sessionMode",
-                "overlap", "catchUp", "catchUpLimit", "enabled", "prompt")) {
+        for (String field : DEFINITION_FIELDS) {
             if (definition.containsKey(field)) {
                 Object value = definition.get(field);
                 Object committed = prior.get(field);
@@ -323,8 +326,7 @@ public final class AutomationHarnessFake {
 
     private static String digest(Map<String, Object> schedule) {
         StringBuilder content = new StringBuilder();
-        for (String field : List.of("goal", "cron", "timezone", "prompt",
-                "sessionMode", "overlap", "catchUp", "catchUpLimit", "enabled")) {
+        for (String field : DEFINITION_FIELDS) {
             content.append(field).append('=').append(schedule.get(field))
                     .append('\n');
         }

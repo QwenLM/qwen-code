@@ -125,23 +125,24 @@ public class ManagedAutomationService {
         SessionRecord session = requireCreatorSession(tenantId, actorId,
                 request.sessionId());
         requireEnabled();
-        if (ledger.countLive(tenantId, session.sessionId())
-                >= MAX_DEFINITIONS) {
+        // The definition id is derived from the key: a retry of THIS
+        // key's own landed definition re-drives rather than growing the
+        // count, so the capacity this operation itself consumed can never
+        // refuse its own recovery. The identity is tenant-scoped while a
+        // journal is Session-scoped, so the lost row case is checked
+        // against the durable mirror first: the key having landed on
+        // another Session is a conflict, never a relay that would mint a
+        // second definition the mirror then shadows.
+        String scheduleId = scheduleIdFor(tenantId, idempotencyKey);
+        Optional<ScheduleRow> landed = ledger.findSchedule(tenantId,
+                scheduleId);
+        if (landed.isEmpty()
+                && ledger.countLive(tenantId, session.sessionId())
+                        >= MAX_DEFINITIONS) {
             throw new ApiException(HttpStatus.CONFLICT,
                     "automation_count_limit", "A Session holds at most "
                     + MAX_DEFINITIONS + " live automation definitions.");
         }
-        // The definition id is derived from the key, so a retry after a
-        // crash between the Harness answer and the command row meets the
-        // same definition (the funnel answers unchanged content as a
-        // replay) instead of minting a second one. The identity is
-        // tenant-scoped while a journal is Session-scoped, so the lost
-        // row case is checked against the durable mirror first: the key
-        // having landed on another Session is a conflict, never a relay
-        // that would mint a second definition the mirror then shadows.
-        String scheduleId = scheduleIdFor(tenantId, idempotencyKey);
-        Optional<ScheduleRow> landed = ledger.findSchedule(tenantId,
-                scheduleId);
         if (landed.isPresent()
                 && !landed.get().sessionId().equals(request.sessionId())) {
             throw new ApiException(HttpStatus.CONFLICT,
@@ -235,8 +236,22 @@ public class ManagedAutomationService {
             return replay.get();
         }
         ScheduleRow row = requireReadable(tenantId, actorId, automationId);
-        SessionRecord session = requireCreatorSession(tenantId, actorId,
-                row.sessionId());
+        SessionRecord session;
+        try {
+            session = requireCreatorSession(tenantId, actorId,
+                    row.sessionId());
+        } catch (ApiException error) {
+            // Design decision 9: the Harness commits the terminal
+            // revision while its Session is reachable. A definition
+            // whose Session is not ACTIVE (closed, archived) can never
+            // be relayed to again, so the local retire stands as the
+            // fallback — otherwise nothing could ever retire it and
+            // every due slot would write a skipped occurrence forever.
+            if (!"session_not_active".equals(error.getCode())) {
+                throw error;
+            }
+            session = null;
+        }
         requireEnabled();
         // The same pre-relay claim create uses: a late or re-driven
         // request meets the binding, and only the owner settles it.
@@ -257,6 +272,17 @@ public class ManagedAutomationService {
             remember(tenantId, actorId, idempotencyKey, requestDigest,
                     automationId, already);
             return new Result<>(already, true);
+        }
+        if (session == null) {
+            // The local retire: the same terminal mirror, so no due slot
+            // of this definition is decided again; a reconcile that
+            // reaches the Session later finishes the journal side.
+            ledger.retire(tenantId, automationId, clock.get());
+            PublicAutomation retired = publicAutomation(ledger
+                    .findSchedule(tenantId, automationId).orElseThrow());
+            remember(tenantId, actorId, idempotencyKey, requestDigest,
+                    automationId, retired);
+            return new Result<>(retired, false);
         }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("operationId", operationIdFor(tenantId, idempotencyKey));

@@ -143,6 +143,12 @@ public final class ManagedExtensionRecords {
     /** Run states after which no observation, output or run change may land. */
     static final List<String> TERMINAL = List.of("settled", "failed",
             "cancelled");
+
+    /** The terminal run states, as every binding and mirror rule names them. */
+    public static boolean isTerminalRunState(String state) {
+        return TERMINAL.contains(state);
+    }
+
     private static final Set<String> GRANT_KEYS = Set.of("sessionKey",
             "operationId", "domain", "operationRevision", "ownerId",
             "workspaceGeneration", "resourceScope", "leaseDurationMs",

@@ -306,6 +306,27 @@ class AutomationScannerTest {
     }
 
     @Test
+    void aClosedSessionStillRetiresItsDefinitionLocally() {
+        PublicAutomation automation = define("* * * * *", "allow", "none",
+                null, true);
+        jdbc.update("UPDATE managed_agent_session SET status = 'CLOSED'"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
+        var retired = service.retire(tenant, ACTOR, automation.id(), "retire-local");
+        assertThat(retired.body().state()).isEqualTo("retired");
+        assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()
+                .state()).isEqualTo(AutomationLedgerStore.STATE_RETIRED);
+        // No slot of it is decided again: the retire is visible, not an
+        // endless skipped(session_not_active) column.
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        assertThat(ledger.listOccurrences(tenant, automation.id(), null, 10)
+                .rows()).isEmpty();
+        // The same key replays the local retire.
+        assertThat(service.retire(tenant, ACTOR, automation.id(),
+                "retire-local").replayed()).isTrue();
+    }
+
+    @Test
     void neverFiresTheSlotsOfADisabledSpan() {
         PublicAutomation automation = define("* * * * *", "skip", "none", null,
                 false);
@@ -456,6 +477,34 @@ class AutomationScannerTest {
                 .containsExactly(created.id());
         assertThat(fake.operations).filteredOn(operation ->
                 "define_schedule".equals(operation.get("kind"))).hasSize(2);
+    }
+
+    @Test
+    void aCapFullSessionStillRedrivesItsOwnLandedCreate() {
+        AutomationDefinitionRequest request = new AutomationDefinitionRequest(
+                sessionId, "Goal", "0 2 * * *", "UTC", "Run it.", null, null,
+                null, null, null);
+        for (int index = 0; index < 31; index += 1) {
+            service.create(tenant, ACTOR, "fill-" + index, request);
+        }
+        PublicAutomation last = service.create(tenant, ACTOR, "cap-key",
+                request).body();
+        assertThat(ledger.countLive(tenant, sessionId)).isEqualTo(32);
+        // The crash window the finding names: the Harness committed the
+        // definition and the ledger mirrored it, but the answer — and so
+        // the command row's settle — was lost.
+        jdbc.update("UPDATE qwen_managed_automation_command SET"
+                + " result_json = '' WHERE tenant_id = ? AND"
+                + " idempotency_key = ?", tenant, "cap-key");
+        var retried = service.create(tenant, ACTOR, "cap-key", request);
+        assertThat(retried.replayed()).isTrue();
+        assertThat(retried.body().id()).isEqualTo(last.id());
+        // The retry settled the row rather than dying at the count it had
+        // already paid: the next replay now answers from it.
+        var remembered = service.create(tenant, ACTOR, "cap-key", request);
+        assertThat(remembered.replayed()).isTrue();
+        assertThat(remembered.body().id()).isEqualTo(last.id());
+        assertThat(ledger.countLive(tenant, sessionId)).isEqualTo(32);
     }
 
     @Test
@@ -1189,7 +1238,7 @@ class AutomationScannerTest {
     }
 
     @Test
-    void aRecoveryBlockedSessionAnswers409AndItsSlotIsSkipped() {
+    void aRecoveryBlockedSessionDefersAndItsSlotRetries() {
         PublicAutomation automation = define("* * * * *", "allow", "none",
                 null, true);
         fake.failNextFire = AutomationHarnessFake.refusal(409,
@@ -1199,14 +1248,25 @@ class AutomationScannerTest {
         AutomationLedgerStore.OccurrenceRow row = ledger.findOccurrence(
                 tenant, automation.id(), "schedule:2026-06-01T10:01:00Z")
                 .orElseThrow();
+        // A transient session-state refusal is a defer, never a skip:
+        // the claim stays firing with its backoff visible.
         assertThat(row.outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
-        assertThat(row.reason()).isEqualTo("hosted_session_blocked");
-        assertThat(row.attempts()).isZero();
-        // The refusal parks no zombie: after recovery the next slot fires.
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRING);
+        assertThat(row.attempts()).isEqualTo(1);
+        assertThat(row.nextRetryAt()).isGreaterThan(T0 + MINUTE + 1_000);
+        assertThat(row.lastError()).contains("hosted_session_blocked");
+        // The recovery clears, and the retried slot fires instead of
+        // having been recorded skipped forever.
+        fake.failNextFire = null;
+        clock.set(T0 + MINUTE + 3_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(ledger.findOccurrence(tenant, automation.id(),
+                "schedule:2026-06-01T10:01:00Z").orElseThrow().outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
         clock.set(T0 + 2 * MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(1);
         assertThat(fake.firedOccurrences()).containsExactly(
+                "schedule:2026-06-01T10:01:00Z",
                 "schedule:2026-06-01T10:01:00Z",
                 "schedule:2026-06-01T10:02:00Z");
     }

@@ -3,9 +3,13 @@ package com.alibaba.qwen.code.managedagent.store;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
@@ -135,16 +139,24 @@ public class AutomationLedgerStore {
                     result.getString("last_error"),
                     result.getLong("created_at"), result.getLong("updated_at"));
 
-    private static final RowMapper<OccurrenceView> OCCURRENCE_VIEW =
-            (result, row) -> new OccurrenceView(OCCURRENCE.mapRow(result, row),
-                    result.getString("task_state"));
-
-    private static final String OCCURRENCE_WITH_RUN = "SELECT o.*,"
-            + " r.task_state FROM qwen_managed_automation_occurrence o"
-            + " LEFT JOIN qwen_managed_session_extension_record r"
-            + " ON r.tenant_id = o.tenant_id AND r.session_id = o.session_id"
-            + " AND r.domain = 'automation_run' AND r.record_id = o.run_id"
+    private static final String OCCURRENCE_SELECT = "SELECT o.* FROM"
+            + " qwen_managed_automation_occurrence o"
             + " WHERE o.tenant_id = ? AND o.schedule_id = ?";
+
+    /** The mirror's terminal task states, as the projection maps them. */
+    private static final Set<String> TERMINAL_MIRROR_STATES = Set.of(
+            "completed", "failed", "cancelled");
+
+    private record RunIdentity(String sessionId, String runId) { }
+
+    private record OccurrenceOutcome(String outcome, String sessionId,
+            String runId) { }
+
+    private static final String OCCURRENCE_OUTCOME_SELECT = "SELECT"
+            + " o.outcome, o.session_id, o.run_id FROM"
+            + " qwen_managed_automation_occurrence o"
+            + " WHERE o.tenant_id = ? AND o.schedule_id = ?"
+            + " AND o.outcome IN (?, ?)";
 
     private final JdbcTemplate jdbc;
 
@@ -164,6 +176,46 @@ public class AutomationLedgerStore {
 
     public static String automationInputId(String runId) {
         return runId + ":input";
+    }
+
+    /** Each run's mirror task_state by its exact projection PK, in one
+     * batch keyed to the pair every index on the mirror table leads with. */
+    private Map<String, String> readTaskStates(String tenantId,
+            List<RunIdentity> identities) {
+        if (identities.isEmpty()) {
+            return Map.of();
+        }
+        StringBuilder sql = new StringBuilder(
+                "SELECT session_scope_key, record_key, task_state FROM"
+                        + " qwen_managed_session_extension_record WHERE ");
+        List<Object> args = new ArrayList<>(identities.size() * 2);
+        Map<String, String> byRecordKey = new HashMap<>();
+        Map<String, String> runByRecordKey = new HashMap<>();
+        for (int index = 0; index < identities.size(); index += 1) {
+            if (index > 0) {
+                sql.append(" OR ");
+            }
+            sql.append("(session_scope_key = ? AND record_key = ?)");
+            String recordKey = ManagedExtensionProjection.recordKey(
+                    identities.get(index).sessionId(), "automation_run",
+                    identities.get(index).runId());
+            args.add(ManagedSessionStore.sessionScopeKey(tenantId,
+                    identities.get(index).sessionId()));
+            args.add(recordKey);
+            runByRecordKey.put(recordKey, identities.get(index).runId());
+        }
+        for (String[] pair : jdbc.query(sql.toString(),
+                (result, row) -> new String[] {
+                        result.getString("record_key"),
+                        result.getString("task_state") },
+                args.toArray())) {
+            byRecordKey.put(pair[0], pair[1]);
+        }
+        Map<String, String> byRunId = new HashMap<>();
+        for (Map.Entry<String, String> entry : byRecordKey.entrySet()) {
+            byRunId.put(runByRecordKey.get(entry.getKey()), entry.getValue());
+        }
+        return byRunId;
     }
 
     public static String sha256(String value) {
@@ -496,22 +548,38 @@ public class AutomationLedgerStore {
      * The definition's occurrences whose run is not terminal: firing rows,
      * and fired rows whose run record is still pending or running (a fired
      * row with no visible record counts, so a lag never admits an overlap).
+     * The mirror fact arrives through exact point lookups of each run's
+     * (session_scope_key, record_key): the extension-record table's own
+     * indexes all lead with that pair, and a raw-column join rescans the
+     * whole journal mirror per call (Q3-45).
      */
     public int countActive(String tenantId, String scheduleId) {
-        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM"
-                        + " qwen_managed_automation_occurrence o"
-                        + " LEFT JOIN qwen_managed_session_extension_record r"
-                        + " ON r.tenant_id = o.tenant_id"
-                        + " AND r.session_id = o.session_id"
-                        + " AND r.domain = 'automation_run'"
-                        + " AND r.record_id = o.run_id"
-                        + " WHERE o.tenant_id = ? AND o.schedule_id = ?"
-                        + " AND (o.outcome = ? OR (o.outcome = ?"
-                        + " AND (r.task_state IS NULL OR r.task_state NOT IN"
-                        + " ('completed', 'failed', 'cancelled'))))",
-                Integer.class, tenantId, scheduleId, OUTCOME_FIRING,
-                OUTCOME_FIRED);
-        return count == null ? 0 : count;
+        List<OccurrenceOutcome> outcomes = jdbc.query(
+                OCCURRENCE_OUTCOME_SELECT,
+                (result, row) -> new OccurrenceOutcome(
+                        result.getString("outcome"),
+                        result.getString("session_id"),
+                        result.getString("run_id")),
+                tenantId, scheduleId, OUTCOME_FIRING, OUTCOME_FIRED);
+        int firing = 0;
+        List<RunIdentity> identities = new ArrayList<>();
+        for (OccurrenceOutcome outcome : outcomes) {
+            if (OUTCOME_FIRING.equals(outcome.outcome())) {
+                firing += 1;
+            } else {
+                identities.add(new RunIdentity(outcome.sessionId(),
+                        outcome.runId()));
+            }
+        }
+        Map<String, String> states = readTaskStates(tenantId, identities);
+        int count = firing;
+        for (RunIdentity identity : identities) {
+            String state = states.get(identity.runId());
+            if (state == null || !TERMINAL_MIRROR_STATES.contains(state)) {
+                count += 1;
+            }
+        }
+        return count;
     }
 
     /**
@@ -519,16 +587,44 @@ public class AutomationLedgerStore {
      * the same set {@link #countActive} counts behind {@code firing}
      * claims, named with their run ids so the scanner can ask the Harness
      * to reconcile the ones its wake turn died on (oldest first, bounded,
-     * so one decision's reconcile fan-out stays small).
+     * so one decision's reconcile fan-out stays small). The fired history
+     * walks oldest-first in pages, each page's mirror states a batch of
+     * exact PK point lookups instead of one full-table rescan (Q3-45).
      */
     public List<OccurrenceView> findBlockingRuns(String tenantId,
             String scheduleId, int limit) {
-        return jdbc.query(OCCURRENCE_WITH_RUN
-                        + " AND o.outcome = ? AND (r.task_state IS NULL"
-                        + " OR r.task_state NOT IN"
-                        + " ('completed', 'failed', 'cancelled'))"
-                        + " ORDER BY o.created_at, o.occurrence_key LIMIT ?",
-                OCCURRENCE_VIEW, tenantId, scheduleId, OUTCOME_FIRED, limit);
+        List<OccurrenceView> blocking = new ArrayList<>();
+        int offset = 0;
+        while (blocking.size() < limit) {
+            List<OccurrenceRow> page = jdbc.query(OCCURRENCE_SELECT
+                            + " AND o.outcome = ?"
+                            + " ORDER BY o.created_at, o.occurrence_key"
+                            + " LIMIT ? OFFSET ?",
+                    OCCURRENCE, tenantId, scheduleId, OUTCOME_FIRED, 256,
+                    offset);
+            if (page.isEmpty()) {
+                return blocking;
+            }
+            Map<String, String> states = readTaskStates(tenantId,
+                    page.stream()
+                            .map(row -> new RunIdentity(row.sessionId(),
+                                    row.runId()))
+                            .toList());
+            for (OccurrenceRow row : page) {
+                String state = states.get(row.runId());
+                if (state == null || !TERMINAL_MIRROR_STATES.contains(state)) {
+                    blocking.add(new OccurrenceView(row, state));
+                    if (blocking.size() == limit) {
+                        return blocking;
+                    }
+                }
+            }
+            if (page.size() < 256) {
+                return blocking;
+            }
+            offset += page.size();
+        }
+        return blocking;
     }
 
     /** Whether a public Turn of the Session has not ended yet. */
@@ -543,25 +639,36 @@ public class AutomationLedgerStore {
     /** One occurrence with its run's task state, when one committed. */
     public Optional<OccurrenceView> findOccurrenceView(String tenantId,
             String scheduleId, String occurrenceKey) {
-        return jdbc.query(OCCURRENCE_WITH_RUN + " AND o.occurrence_key = ?",
-                OCCURRENCE_VIEW, tenantId, scheduleId, occurrenceKey).stream()
-                .findFirst();
+        return jdbc.query(OCCURRENCE_SELECT + " AND o.occurrence_key = ?",
+                OCCURRENCE, tenantId, scheduleId, occurrenceKey).stream()
+                .findFirst()
+                .map(row -> new OccurrenceView(row,
+                        readTaskStates(tenantId,
+                                List.of(new RunIdentity(row.sessionId(),
+                                        row.runId())))
+                                .get(row.runId())));
     }
 
     public OccurrencePage listOccurrences(String tenantId, String scheduleId,
             OccurrenceCursor cursor, int limit) {
-        List<OccurrenceView> rows = cursor == null
-                ? jdbc.query(OCCURRENCE_WITH_RUN + " ORDER BY o.created_at DESC,"
-                        + " o.occurrence_key DESC LIMIT ?", OCCURRENCE_VIEW,
+        List<OccurrenceRow> rows = cursor == null
+                ? jdbc.query(OCCURRENCE_SELECT + " ORDER BY o.created_at DESC,"
+                        + " o.occurrence_key DESC LIMIT ?", OCCURRENCE,
                         tenantId, scheduleId, limit + 1)
-                : jdbc.query(OCCURRENCE_WITH_RUN + " AND (o.created_at < ? OR"
+                : jdbc.query(OCCURRENCE_SELECT + " AND (o.created_at < ? OR"
                         + " (o.created_at = ? AND o.occurrence_key < ?))"
                         + " ORDER BY o.created_at DESC, o.occurrence_key DESC"
-                        + " LIMIT ?", OCCURRENCE_VIEW, tenantId, scheduleId,
+                        + " LIMIT ?", OCCURRENCE, tenantId, scheduleId,
                         cursor.createdAt(), cursor.createdAt(),
                         cursor.occurrenceKey(), limit + 1);
-        boolean hasMore = rows.size() > limit;
-        return new OccurrencePage(hasMore ? rows.subList(0, limit) : rows,
+        Map<String, String> states = readTaskStates(tenantId, rows.stream()
+                .map(row -> new RunIdentity(row.sessionId(), row.runId()))
+                .toList());
+        List<OccurrenceView> views = rows.stream()
+                .map(row -> new OccurrenceView(row, states.get(row.runId())))
+                .toList();
+        boolean hasMore = views.size() > limit;
+        return new OccurrencePage(hasMore ? views.subList(0, limit) : views,
                 hasMore);
     }
 
