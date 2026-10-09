@@ -4,7 +4,7 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
-import { Folder, Server } from 'lucide-react';
+import { Folder, PinIcon, Server } from 'lucide-react';
 import { useDaemonTargetOptional } from '../../config/daemon-target';
 import { WorkspaceMenu } from '../sidebar/WorkspaceMenu';
 import { useWorkspaceRemoval } from './useWorkspaceRemoval';
@@ -388,6 +388,15 @@ function FanoutSessionRow({
       }}
       onMouseEnter={(event) => measureSessionTitleScroll(event.currentTarget)}
     >
+      {session.isPinned && (
+        <PinIcon
+          size={12}
+          strokeWidth={2}
+          className="shrink-0 text-primary"
+          aria-hidden="true"
+          data-testid="fanout-pinned-session"
+        />
+      )}
       <span className={sidebarStyles.sessionText} data-web-shell-session-title>
         <span className={sidebarStyles.sessionTextInner}>{label}</span>
       </span>

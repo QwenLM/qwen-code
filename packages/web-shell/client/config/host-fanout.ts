@@ -228,11 +228,21 @@ export function useHostCapabilities(origin: string): HostCapabilitiesState & {
       try {
         const capabilities = await getHostClient(origin).capabilities();
         if (cancelled) return;
-        setState((previous) => ({
-          workspaces: capabilities.workspaces,
-          status: 'online',
-          generation: previous.generation + 1,
-        }));
+        setState((previous) => {
+          // Generation feeds WorkspaceSection's reloadToken: bumping it on
+          // every poll re-runs the whole session catalog and visibly
+          // flickers the sidebar every 30 s. Only a really different
+          // snapshot may advance it.
+          const changed =
+            previous.workspaces === undefined ||
+            workspacesSignature(previous.workspaces) !==
+              workspacesSignature(capabilities.workspaces);
+          return {
+            workspaces: capabilities.workspaces,
+            status: 'online',
+            generation: changed ? previous.generation + 1 : previous.generation,
+          };
+        });
       } catch (error) {
         if (cancelled) return;
         setState((previous) => ({
@@ -250,4 +260,23 @@ export function useHostCapabilities(origin: string): HostCapabilitiesState & {
     };
   }, [origin, round]);
   return { ...state, refresh: () => setRound((value) => value + 1) };
+}
+
+/** Content address for a workspaces snapshot: id + identity fields. */
+function workspacesSignature(
+  workspaces: DaemonCapabilities['workspaces'],
+): string {
+  return (workspaces ?? [])
+    .map((workspace) =>
+      [
+        workspace.id,
+        workspace.cwd,
+        workspace.displayName ?? '',
+        workspace.trusted ? '1' : '0',
+        workspace.primary ? '1' : '0',
+        workspace.kind ?? '',
+        workspace.removable ? '1' : '0',
+      ].join(''),
+    )
+    .join('');
 }
