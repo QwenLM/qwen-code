@@ -10,6 +10,11 @@ import {
   TRAJECTORY_FILTER_MESSAGES_ZH,
 } from './trajectory/filter-messages.js';
 
+import {
+  TRAJECTORY_WINDOW_MESSAGES_EN,
+  TRAJECTORY_WINDOW_MESSAGES_ZH,
+} from './trajectory/window-messages.js';
+
 import { LIVE_MESSAGES_EN, LIVE_MESSAGES_ZH } from './live/messages.js';
 import {
   COLLAB_MESSAGES_EN,
@@ -4295,6 +4300,7 @@ const EN: Messages = {
   ...COLLAB_MESSAGES_EN,
   ...SETTINGS_MESSAGES_EN,
   ...TRAJECTORY_FILTER_MESSAGES_EN,
+  ...TRAJECTORY_WINDOW_MESSAGES_EN,
 };
 
 const ZH: Messages = {
@@ -8310,6 +8316,7 @@ const ZH: Messages = {
   ...COLLAB_MESSAGES_ZH,
   ...SETTINGS_MESSAGES_ZH,
   ...TRAJECTORY_FILTER_MESSAGES_ZH,
+  ...TRAJECTORY_WINDOW_MESSAGES_ZH,
 };
 
 const MESSAGES: Record<WebShellLanguage, Messages> = {
