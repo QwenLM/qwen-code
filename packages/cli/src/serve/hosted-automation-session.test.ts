@@ -8,7 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   ChatRecord,
   TurnResultRecordPayload,
@@ -282,6 +282,7 @@ describe('hosted automation definitions', () => {
   it('refuses what the contract and the gates refuse, and the quota', async () => {
     const harness = await createHarness();
     await withSession(harness, async (automations) => {
+      const publish = vi.spyOn(harness.store, 'publish');
       await expect(
         automations.define({
           scheduleId: SCHEDULE_ID,
@@ -289,6 +290,14 @@ describe('hosted automation definitions', () => {
           definition: { ...definition, sessionMode: 'per_run' },
         }),
       ).rejects.toThrow(/schedule session mode per_run is not enabled/);
+      // A define the mode gate refuses publishes nothing — no orphan
+      // prompt body outlives it.
+      expect(
+        publish.mock.calls.filter(
+          ([kind]) => kind === 'managed-automation-prompt',
+        ),
+      ).toHaveLength(0);
+      publish.mockRestore();
       await expect(
         automations.define({
           scheduleId: SCHEDULE_ID,

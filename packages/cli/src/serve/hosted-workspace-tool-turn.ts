@@ -1725,7 +1725,10 @@ export class HostedWorkspaceToolTurn {
               },
             },
             request.call.callId,
-            this.promptId,
+            // The guard compares the register's reference identity, which
+            // is the Runtime identity above; the raw logical promptId only
+            // equals it for ids the mapping carries through unchanged.
+            this.broker.runtimeSessionId,
           );
         }
       }

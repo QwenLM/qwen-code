@@ -93,6 +93,7 @@ import {
 } from './hosted-automation-session.js';
 import {
   AUTOMATION_INPUT_SOURCE,
+  MANAGED_AUTOMATION_LIMITS,
   automationRunId,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-operations.js';
 import type {
@@ -449,16 +450,19 @@ function unansweredPrompts(session: HostedSession): Set<string> {
   return prompts;
 }
 
+/** Which input sources ride the wake pump — the one predicate the probe,
+ * the park guard, the pump's pick and the monitor-input classifier share. */
+function isWakeInputSource(source: string): boolean {
+  return source === 'monitor' || source === AUTOMATION_INPUT_SOURCE;
+}
+
 /** The oldest pending wake input (monitor or automation), as the pump's
  * own read order sees it. */
 function firstPendingWakeInput(session: HostedSession) {
   const authority = session.managed.authority;
   return pendingSessionInputs(
     authority.eventsInSequenceRange(1, authority.committedSequence),
-  ).find(
-    (input) =>
-      input.source === 'monitor' || input.source === AUTOMATION_INPUT_SOURCE,
-  );
+  ).find((input) => isWakeInputSource(input.source));
 }
 
 /**
@@ -475,16 +479,26 @@ async function hasPendingWakePark(session: HostedSession): Promise<boolean> {
     pendingSessionInputs(
       authority.eventsInSequenceRange(1, authority.committedSequence),
     )
-      .filter(
-        (input) =>
-          input.source === 'monitor' ||
-          input.source === AUTOMATION_INPUT_SOURCE,
-      )
+      .filter((input) => isWakeInputSource(input.source))
       .map((input) => input.turnId),
   );
   if (pending.size === 0) return false;
   const authorization = await authority.harnessRunAuthorization();
-  if (authorization.status !== 'runnable') return false;
+  if (authorization.status !== 'runnable') {
+    // A durable blocked verdict is no park to this probe; an erased one
+    // (a store fault read as `missing_state` with its message) read the
+    // checkpoint NOT AT ALL — keep the retriable refusal instead of
+    // answering "no park" over state nobody read.
+    if (
+      authorization.status === 'blocked' &&
+      !isDurableBlockedVerdict(authorization)
+    ) {
+      throw new ManagedSessionRecordError(
+        `wake park probe read no durable checkpoint verdict: ${authorization.reason}${authorization.message === undefined ? '' : ` (${authorization.message})`}`,
+      );
+    }
+    return false;
+  }
   const parked = authorization.checkpoint.identity.turnId;
   if (parked === null || !pending.has(parked)) {
     return false;
@@ -528,6 +542,18 @@ export async function settleCrashedWakeTurnAftermath(params: {
     if (brokerOptions !== undefined) {
       const authorization =
         await session.managed.authority.harnessRunAuthorization();
+      // An erased verdict read the checkpoint NOT AT ALL: settling this
+      // crash over it would skip the stop/release but still consume the
+      // input, closing every retry channel the park has. Fail closed —
+      // the caller's catch keeps the block and the input pending.
+      if (
+        authorization.status === 'blocked' &&
+        !isDurableBlockedVerdict(authorization)
+      ) {
+        throw new ManagedSessionRecordError(
+          `wake crash aftermath read no durable checkpoint verdict: ${authorization.reason}${authorization.message === undefined ? '' : ` (${authorization.message})`}`,
+        );
+      }
       if (
         authorization.status === 'runnable' &&
         authorization.checkpoint.identity.turnId === turnId
@@ -692,8 +718,7 @@ export async function settleCrashedWakeTurnAftermath(params: {
 function isMonitorInput(event: ManagedSessionEvent): boolean {
   return (
     event.kind === 'input.accepted' &&
-    (event.payload['source'] === 'monitor' ||
-      event.payload['source'] === AUTOMATION_INPUT_SOURCE)
+    isWakeInputSource(event.payload['source'] as string)
   );
 }
 
@@ -2904,11 +2929,7 @@ export function registerHostedHarnessSessionRoutes(
             const authority = session.managed.authority;
             const first = pendingSessionInputs(
               authority.eventsInSequenceRange(1, authority.committedSequence),
-            ).find(
-              (input) =>
-                input.source === 'monitor' ||
-                input.source === AUTOMATION_INPUT_SOURCE,
-            );
+            ).find((input) => isWakeInputSource(input.source));
             if (first === undefined) return undefined;
             const ref = assertManagedSessionDurableRef(
               first.contentRef,
@@ -3804,14 +3825,15 @@ export function registerHostedHarnessSessionRoutes(
     // A wake turn a crash left parked at await_runtime — not yet settled
     // by the pump behind this load — kills an admitted prompt at "not a
     // model-start phase", post-admission, where the coordinator cannot
-    // retry it. Refuse here, pre-admission and with the same retriable
-    // code the blocked arm answers: the Turn's retry budget outlasts the
-    // pump's recovery cycle (~its retry cadence). Queued wake inputs
+    // retry it. Refuse here, pre-admission with the transient-window code:
+    // it clears under the pump's own recovery cycle, so the coordinator
+    // retries it past the pre-admission budget while the durable
+    // `hosted_turn_recovery_required` still meets it. Queued wake inputs
     // never match the checkpoint's turnId, so queuing is untouched.
     if (brokerOptions !== undefined) {
       try {
         if (await hasPendingWakePark(session)) {
-          return error(res, 409, 'hosted_turn_recovery_required');
+          return error(res, 409, 'hosted_turn_recovery_in_progress');
         }
       } catch (cause) {
         // The probe could not prove the checkpoint free: refuse retriably
@@ -3819,7 +3841,7 @@ export function registerHostedHarnessSessionRoutes(
         writeStderrLineSafe(
           `qwen serve: Hosted prompt of session ${req.params['id']} could not probe a wake park: ${String(cause)}`,
         );
-        return error(res, 409, 'hosted_turn_recovery_required');
+        return error(res, 409, 'hosted_turn_recovery_in_progress');
       }
     }
     // The probe returned to the event loop: the wake pump may have
@@ -5429,7 +5451,8 @@ export function registerHostedHarnessSessionRoutes(
             occurrenceKey.length > 512 ||
             !isAutomationTrigger(trigger) ||
             !Number.isSafeInteger(firedAt) ||
-            (firedAt as number) < 0
+            (firedAt as number) < 0 ||
+            (firedAt as number) > MANAGED_AUTOMATION_LIMITS.maxFiredAtMs
           ) {
             return error(res, 400, 'invalid_automation_operation');
           }
@@ -5437,13 +5460,9 @@ export function registerHostedHarnessSessionRoutes(
           // refuse anything that would commit a new fact into it. The one
           // answer that carries none is the replay of a dispatched run.
           if (session.blocked) {
-            const committed = automations
-              .runs()
-              .find(
-                (each) =>
-                  each.automationRunId ===
-                  automationRunId(scheduleId, occurrenceKey as string),
-              );
+            const committed = automations.run(
+              automationRunId(scheduleId, occurrenceKey as string),
+            );
             if (
               committed === undefined ||
               committed.run.execution === 'intent'
@@ -5514,13 +5533,9 @@ export function registerHostedHarnessSessionRoutes(
               session.active = undefined;
             }
           }
-          const reconciled = automations
-            .runs()
-            .find(
-              (each) =>
-                each.automationRunId ===
-                automationRunId(scheduleId, occurrenceKey as string),
-            );
+          const reconciled = automations.run(
+            automationRunId(scheduleId, occurrenceKey as string),
+          );
           result = {
             run: reconciled === undefined ? null : runSummary(reconciled),
             repaired,

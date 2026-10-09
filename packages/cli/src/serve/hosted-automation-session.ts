@@ -46,6 +46,7 @@ import type {
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-authority.js';
 import {
   MANAGED_SESSION_LIMITS,
+  assertManagedSessionScheduleSessionModeEnabled,
   parseManagedSessionRecordJson,
   type ManagedSessionDomain,
   type ManagedSessionDurableRef,
@@ -179,7 +180,7 @@ export class AutomationNotFoundError extends Error {
 export class AutomationQuotaError extends Error {
   constructor(limit: number) {
     super(
-      `A Session holds at most ${limit} live automation definitions (count_limit).`,
+      `A Session holds at most ${limit} live automation definitions (automation_count_limit).`,
     );
   }
 }
@@ -293,6 +294,10 @@ export class HostedAutomationSession {
         params.definition,
         defaults,
       );
+      // A definition the authority's mode gate would refuse publishes
+      // nothing: the pre-flight throws the same error before the prompt
+      // resource, so a refused define leaves no orphan body behind.
+      assertManagedSessionScheduleSessionModeEnabled(definition.sessionMode);
       const definitionDigest = automationDefinitionDigest(definition);
       if (
         existing !== undefined &&
