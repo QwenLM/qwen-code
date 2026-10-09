@@ -2793,13 +2793,15 @@ describe('Hosted Harness no-tool session', () => {
     }
   }, 45_000);
 
-  it('settles a wake park the Broker reports already released, stopping nothing twice', async () => {
+  it('finishes the release after a transient release failure, in the very next pass', async () => {
     const inputId = await prewriteAutomationParkedWakeSession();
     const repair = mockRepairBroker();
-    // The cold Broker proves the session is already released: an adopt
-    // attempt then answers 409 runtime_session_not_acquirable — the
-    // already-released answer — so nothing remains to stop and the
-    // aftermath must still reach its consume.
+    // The first pass commits the cancelled results, and the worker's
+    // release dies on its way: the aftermath is `pending` and the session
+    // is RELEASING. The replacement's adopt then answers 409
+    // runtime_session_not_acquirable — a RELEASING session refuses the
+    // adopt too — and only the explicit release on the second pass
+    // completes the condition; acquire's 409 is no proof by itself.
     vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
       () => {
         repair.order.push('acquire');
@@ -2811,6 +2813,12 @@ describe('Hosted Harness no-tool session', () => {
         );
       },
     );
+    vi.mocked(HostedWorkspaceBroker.prototype.release).mockImplementationOnce(
+      async () => {
+        repair.order.push('release');
+        throw new TypeError('worker release died on its way');
+      },
+    );
     repair.unlatch();
     const server = await app(true);
     const loaded = await headers(
@@ -2819,9 +2827,15 @@ describe('Hosted Harness no-tool session', () => {
     expect(loaded.status).toBe(200);
     const authorize = (request: supertest.Test) =>
       headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    // The classification's block is the verified starting point: only
+    // after it does the aftermath retry, so the order assertions below
+    // read a settled, complete sequence, never one mid-flight.
     await vi.waitFor(
-      () => {
-        expect(repair.order).toEqual(['acquire', 'status', 'acquire']);
+      async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.recoveryBlocked).toBe(true);
       },
       { timeout: 15_000 },
     );
@@ -2834,12 +2848,19 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 15_000 },
     );
-    // An adopt was attempted in both passes, one harmless status poll
-    // answered "settled" (nothing here), and neither cancel nor release
-    // ever ran against the released identity — nothing was stopped twice.
-    expect(repair.order).toEqual(['acquire', 'status', 'acquire']);
+    // Two passes: adopt, one harmless status poll, adopt, a dying release
+    // (pending), then adopt, one harmless status poll, adopt, the
+    // completing release — exactly the affirmative release result the
+    // consume depends on.
+    expect(repair.order).toEqual([
+      'acquire',
+      'status',
+      'acquire',
+      'release',
+      'acquire',
+      'release',
+    ]);
     expect(repair.order).not.toContain('cancel');
-    expect(repair.order).not.toContain('release');
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
@@ -3347,9 +3368,9 @@ describe('Hosted Harness no-tool session', () => {
       timeout: 15_000,
     });
     // The discriminating point of the Tool v3 identity wall: binding
-    // reference must mirror what the Broker recorded (the mapped wake
-    // identity), never the raw logical prompt id whose `/grants`
-    // admission the real store refuses. The logical turn id keeps its own.
+    // reference names the Broker's mapped execution session AND the
+    // checkpoint's logical prompt id — one pair, two axes; each answers
+    // the compare that owns it, and neither sits in the other's seat.
     const runId = automationRunId(AUTOMATION_ID, AUTOMATION_SLOT);
     const mapped = `wake-${createHash('sha256').update(`${runId}:input`).digest('hex')}`;
     const references = grants
@@ -3360,9 +3381,9 @@ describe('Hosted Harness no-tool session', () => {
     expect(references.length).toBeGreaterThan(0);
     for (const reference of references) {
       expect(reference['sessionId']).toBe(mapped);
-      expect(reference['promptId']).toBe(mapped);
+      expect(reference['promptId']).toBe(`${runId}:input`);
       expect(reference['sessionId']).not.toBe(`${runId}:input`);
-      expect(reference['promptId']).not.toBe(`${runId}:input`);
+      expect(reference['promptId']).not.toBe(mapped);
     }
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   }, 45_000);

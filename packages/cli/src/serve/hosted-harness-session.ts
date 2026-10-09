@@ -648,8 +648,11 @@ export async function settleCrashedWakeTurnAftermath(params: {
         }
         // Release on every pass: the journal cannot say whether an
         // earlier pass's release landed after the checkpoint moved on.
-        // A released identity refuses the adoption a cold Broker needs —
-        // which is exactly the durable answer, so nothing remains to ask.
+        // `runtime_session_not_acquirable` on the adopt is NOT proof of
+        // one — a session mid-release (RELEASING) refuses the adopt too,
+        // and only the explicit release below is what completes it; an
+        // already-released session answers that same release idempotently
+        // as the released kind.
         if (runtimeItems.length > 0) {
           try {
             broker ??= await originalRuntimeBroker(
@@ -658,7 +661,6 @@ export async function settleCrashedWakeTurnAftermath(params: {
               items,
               brokerOptions,
             );
-            let adoptable = true;
             try {
               await broker.acquire();
             } catch (cause) {
@@ -671,9 +673,8 @@ export async function settleCrashedWakeTurnAftermath(params: {
               ) {
                 throw cause;
               }
-              adoptable = false;
             }
-            if (adoptable) await broker.release();
+            await broker.release();
           } catch (cause) {
             if (!(cause instanceof RecoveryDeclined)) throw cause;
             writeStderrLineSafe(

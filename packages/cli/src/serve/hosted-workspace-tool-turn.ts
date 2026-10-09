@@ -1914,13 +1914,13 @@ export class HostedWorkspaceToolTurn {
           this.publisher!.register(
             {
               reference: {
-                // The Runtime identity, not the logical turn id: the
-                // Broker recorded this execution under its mapped
-                // session (a wake turn's arun_…:input id maps to
-                // wake-<sha256>), and the v3 reserve/publisher compare
-                // their stored execution against exactly those fields.
+                // One pair, two axes: the mapped Broker Runtime Session
+                // on the execution axis (a wake turn's arun_…:input maps
+                // to wake-<sha256>), the logical prompt id on the
+                // checkpoint axis — the execution's own (runtimeSessionId,
+                // turnId) is exactly that pair.
                 sessionId: this.broker.runtimeSessionId,
-                promptId: this.broker.runtimeSessionId,
+                promptId: this.promptId,
                 callId: request.runtimeCallId,
                 argsDigest: request.inputDigest!,
               },
@@ -1982,12 +1982,11 @@ export class HostedWorkspaceToolTurn {
             modelCallId: saved.modelCallId,
             runtimeBindingId: saved.runtimeBindingId,
             reference: {
-              // The Runtime identity, not the logical turn id: the
-              // Broker stored this execution under its mapped session
-              // (the wake-turn id maps to wake-<sha256>), and the v3
-              // reserve's execution compare refuses anything else.
+              // One pair, two axes, as at the publisher: the mapped
+              // Broker Runtime Session against the execution, the logical
+              // prompt id against the checkpoint's identity.
               sessionId: this.broker.runtimeSessionId,
-              promptId: this.broker.runtimeSessionId,
+              promptId: this.promptId,
               callId: saved.runtimeCallId,
               argsDigest: saved.argsDigest,
             },

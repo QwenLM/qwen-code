@@ -309,7 +309,7 @@ class ManagedAgentApiContractTest {
     @Test
     void publicAutomationRunStateValidatesAsLegallyNull() throws Exception {
         ObjectNode run = (ObjectNode) json("""
-                {"id":"arun_x","object":"automation_run",
+                {"id":"arun_x","object":"agent.automation.run",
                  "automation_id":"asch_0123456789abcdef0123456789abcdef",
                  "session_id":"session-00000000000000000000000000000001",
                  "occurrence_key":"manual:k","trigger":"manual",

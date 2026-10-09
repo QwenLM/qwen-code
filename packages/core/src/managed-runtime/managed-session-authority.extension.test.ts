@@ -1129,28 +1129,32 @@ describe('managed session authority Stage H records', () => {
   it('refuses a record of a disabled domain on the generic paths', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
-      // child_acceptance is registered with a body and still disabled (H4b
-      // enables it); schedule was the probe until H6b enabled it.
+      // team_state is in the domain vocabulary but neither in the plain
+      // enabled list nor in the extension-record body index: child_run
+      // is per-kind exempt here, and every H-family body takes the
+      // extension-funnel refusal before the enablement one this test
+      // names. schedule was the probe until H6b, then child_acceptance,
+      // then monitor_run served similarly.
       const recordRef = await harness.store.publish(
-        'managed-child_acceptance',
+        'managed-team_state',
         Buffer.from('{}', 'utf8'),
       );
       const sequence = authority.committedSequence;
       await expect(
         authority.appendExecution(
-          command('raw-child-acceptance'),
+          command('raw-team-state'),
           [
             {
               v: 1,
               sequence: sequence + 1,
-              eventId: 'child_acceptance-1',
+              eventId: 'team_state-1',
               sessionKey,
               kind: 'domain.committed',
               occurredAt: harness.now,
               payload: {
-                domain: 'child_acceptance',
+                domain: 'team_state',
                 version: 1,
-                operationId: 'raw-child-acceptance',
+                operationId: 'raw-team-state',
                 recordRef,
               },
             },
