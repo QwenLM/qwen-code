@@ -12,7 +12,7 @@ import java.util.Set;
  * handler set is kept in exact bijection with these constants by
  * {@code SurfaceRegistryGateTest}, and today's per-route admission is pinned
  * by {@code SurfaceAdmissionAcceptanceTest}; rule flips towards the actor
- * roles land with contract v1.34 in slice C and change this file with them.
+ * roles land with contract v1.36 in slice C and change this file with them.
  *
  * <p>Rule classes name today's admission as implemented, after the design's
  * D5 vocabulary. Where a route's behaviour splits by Session kind (bound vs
@@ -131,6 +131,20 @@ public enum SurfaceRegistry {
     PUBLIC_WORKSPACE_GET(Method.GET, "/v1/agents/workspaces/{workspaceId}",
             Surface.PUBLIC, RuleClass.WORKSPACE_DISCOVERY,
             EnumSet.of(Capability.WORKSPACE_GET)),
+    // ManagedChannelController: tenant-scoped channel resources (H5c), read
+    // over the registered connections and filtered below the Workspace read
+    // grant inside the service.
+    PUBLIC_CHANNEL_LIST(Method.GET, "/v1/agent-channels",
+            Surface.PUBLIC, RuleClass.TENANT_SCOPED,
+            EnumSet.of(Capability.CHANNEL_LIST)),
+    PUBLIC_CHANNEL_DELIVERY_LIST(Method.GET,
+            "/v1/agent-channels/{channelId}/deliveries",
+            Surface.PUBLIC, RuleClass.TENANT_SCOPED,
+            EnumSet.of(Capability.CHANNEL_DELIVERY_LIST)),
+    PUBLIC_CHANNEL_DELIVERY_GET(Method.GET,
+            "/v1/agent-channels/{channelId}/deliveries/{deliveryId}",
+            Surface.PUBLIC, RuleClass.TENANT_SCOPED,
+            EnumSet.of(Capability.CHANNEL_DELIVERY_GET)),
     // AgentDefinitionController: tenant-scoped agent definition routes.
     PUBLIC_AGENT_DEFINITION_CREATE(Method.POST, "/v1/agents",
             Surface.PUBLIC, RuleClass.TENANT_SCOPED,
@@ -463,6 +477,9 @@ public enum SurfaceRegistry {
         ARTIFACT_CONTENT,
         WORKSPACE_LIST,
         WORKSPACE_GET,
+        CHANNEL_LIST,
+        CHANNEL_DELIVERY_LIST,
+        CHANNEL_DELIVERY_GET,
         AGENT_DEFINITION_CREATE,
         AGENT_DEFINITION_GET,
         AGENT_DEFINITION_UPDATE,

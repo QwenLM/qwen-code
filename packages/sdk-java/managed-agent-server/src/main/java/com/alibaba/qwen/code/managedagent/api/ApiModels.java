@@ -332,6 +332,42 @@ public final class ApiModels {
             WebShellSessionCapabilities capabilities) {
     }
 
+    /** H5c: one route binding of a channel connection (PublicChannelRoute). */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicChannelRoute(
+            @JsonProperty("platform_event_id") String platformEventId,
+            @JsonProperty("account_generation") long accountGeneration,
+            @JsonProperty("semantic_revision") long semanticRevision,
+            @JsonProperty("sender_id") String senderId,
+            @JsonProperty("chat_id") String chatId,
+            @JsonProperty("thread_id") String threadId,
+            @JsonProperty("session_id") String sessionId,
+            String state,
+            @JsonProperty("input_id") String inputId,
+            @JsonProperty("staged_attachment_refs")
+                    List<String> stagedAttachmentRefs,
+            @JsonProperty("created_at") long createdAt) {
+    }
+
+    /** H5c: one channel connection with its newest route bindings. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicChannel(String id, String object, String platform,
+            @JsonProperty("account_generation") long accountGeneration,
+            String state, List<PublicChannelRoute> routes,
+            @JsonProperty("created_at") long createdAt) {
+    }
+
+    /** H5c: one outbound delivery of a channel. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicChannelDelivery(String id, String object,
+            @JsonProperty("channel_id") String channelId,
+            @JsonProperty("segment_id") String segmentId,
+            int ordinal, String state,
+            @JsonProperty("provider_receipt") String providerReceipt,
+            @JsonProperty("created_at") long createdAt,
+            @JsonProperty("updated_at") long updatedAt) {
+    }
+
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record PublicTask(String id, String object,
             @JsonProperty("session_id") String sessionId, String kind,

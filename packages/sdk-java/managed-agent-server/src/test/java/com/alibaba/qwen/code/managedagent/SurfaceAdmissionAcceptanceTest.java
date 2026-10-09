@@ -72,7 +72,7 @@ import org.springframework.transaction.PlatformTransactionManager;
  * families and by the recorded owner on lifecycle. Twin public/WebShell
  * routes of one capability sit in the same rule class, so the shared
  * expectation table makes twin drift fail. The refusal expectations pinned
- * here are the post-v1.34 matrix.
+ * here are the post-v1.36 matrix.
  *
  * <p>The internal probes run two different credentials: the Session-store
  * routes carry the broker-issued writer HMAC (a wrong token is refused at
@@ -1183,6 +1183,8 @@ class SurfaceAdmissionAcceptanceTest {
                 : pendingAction);
         variables.put("workspaceId", "ws");
         variables.put("agentId", "agent-missing");
+        variables.put("channelId", "channel-missing");
+        variables.put("deliveryId", "delivery-missing");
         variables.put("itemId", artifactItemId);
         variables.put("artifactId", artifactId);
         variables.put("resourceId", "resource-0000000000000000");

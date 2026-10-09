@@ -243,7 +243,7 @@ one capability, e.g. `TURN_SUBMIT`), and rule class (`legacy_create`,
 issue R2 enumeration: per route it states which actor may read, mutate,
 cancel, answer or delete. It is versioned exactly as the surface is versioned
 — registry changes ride the contract version they implement (the R1 flip is
-v1.34), so `git blame` of the registry is the authoritative per-route history.
+v1.36), so `git blame` of the registry is the authoritative per-route history.
 
 ### D6 — the build gate
 
@@ -290,7 +290,7 @@ file-scope disjointness, not topic:
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | **A — registry + gate (R2 first)** | `SurfaceRegistry` over today's rules, correspondence gate, acceptance probes, parity assertions, bilingual route matrix in this doc                                                                                                                 | new files only: `api/SurfaceRegistry.java`, two test classes; no production edits              |
 | **B — role storage (R1 storage)**  | V53 migration + backfill, `WorkspaceAccess` rename, registry store reads re-derivd from `role`, `owner_actor_key` column + write at creation, fixture INSERT updates (~24 sites), migration-shape tests                                             | `store/**`, `runtime-broker` enum, `db/migration`, test fixtures; no admission-decision change |
-| **C — enforcement (R1)**           | the three creator helpers re-pointed at role/owner, refusal-code normalisation, Action respond opens to OPERATOR, WebShell capabilities by role, registry rule flips, probe expectation flips, contract v1.34 + OpenAPI text, contract-test updates | `service/**`, `store/**` checks, controllers, contract, A's enum + tests                       |
+| **C — enforcement (R1)**           | the three creator helpers re-pointed at role/owner, refusal-code normalisation, Action respond opens to OPERATOR, WebShell capabilities by role, registry rule flips, probe expectation flips, contract v1.36 + OpenAPI text, contract-test updates | `service/**`, `store/**` checks, controllers, contract, A's enum + tests                       |
 
 A ∥ B is safe: disjoint files (A adds; B edits store-side). C is serial after
 both merge because it rewrites both A's registry entries and B's helpers —
@@ -303,7 +303,7 @@ tracked as #13617 and #13618 respectively); A and B reference it.
 - V53 follows the established single-version doctrine (stop old servers
   before the migration; no `outOfOrder`). `scripts/check-flyway-migrations.js` already
   gates numbering across both migration locations.
-- Contract v1.34 records: the role vocabulary, OPERATOR admission for the
+- Contract v1.36 records: the role vocabulary, OPERATOR admission for the
   submitter and Action families, owner-based lifecycle, the submitter-family
   refusal change 409 `workspace_unavailable` → 403
   `session_operation_forbidden`, and role-based capability advertisement.
@@ -391,7 +391,7 @@ Same as the issue's, plus the explicit deferrals named there:
       respond key on it after this PR, while submit/cancel/rename/cwd and
       execution stay on the create-command actor until #13617 decides the
       transfer's re-keying (R1's blocked behaviour #2, storage half).
-- [ ] Contract v1.34 documents the roles, the refusal normalisation and the
+- [ ] Contract v1.36 documents the roles, the refusal normalisation and the
       capability-advertisement rule; the OpenAPI changelog names them.
 - [ ] Full managed-agent-server suite green on H2; `mysql-integration`
       profile green where the runner offers MySQL.
@@ -420,7 +420,7 @@ two authorization routes; the gate derives everything from scanning, so the
 count is information, not an asserted constant.)
 
 Rule classes name the implemented admission. After slice C (contract
-v1.34): `WORKSPACE_CREATE` (2), `READER` (24), `READER_ACTOR` (6),
+v1.36): `WORKSPACE_CREATE` (2), `READER` (24), `READER_ACTOR` (6),
 `READER_ACTOR_POLICY` (1), `OPERATOR` — the submitter family plus cwd
 change and Action respond — (8), `OWNER` — the lifecycle family alone —
 (8), `WORKSPACE_DISCOVERY` (4), `TENANT_SCOPED` (3), `INTERNAL_WRITER`
