@@ -182,9 +182,9 @@ describe('managed-agent-server e2e runner', () => {
     ).toHaveLength(2);
     expect(
       source.match(
-        /\.\.\.\(runtimeTakeover\s*\?\s*\{\s*QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:\s*'true'/g,
+        /\.\.\.\(runtimeTakeover\s*\?\s*\{\s*QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS:\s*process\.platform === 'linux' \? 'true' : 'false'/g,
       ),
-      'both durable local process branches must follow runtimeTakeover',
+      'both durable local process branches must follow runtimeTakeover, Linux-gated',
     ).toHaveLength(2);
   });
 
