@@ -260,17 +260,6 @@ export class HostedShellPublisher {
     });
   }
 
-  /**
-   * A background or Monitor capture that has not finalized still owns its
-   * process: the Runtime Session carrying it must not be released, because
-   * the release sweep is close semantics and would stop the run mid-flight.
-   */
-  hasUnfinishedBackground(): boolean {
-    for (const entry of this.captures.values())
-      if (entry.background && entry.envelope === undefined) return true;
-    return false;
-  }
-
   private async handle(candidate: unknown): Promise<unknown> {
     const body = publisherObject(candidate);
     if (body['operation'] === 'prepare') {

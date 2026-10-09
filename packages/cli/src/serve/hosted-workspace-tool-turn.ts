@@ -3570,23 +3570,12 @@ export class HostedWorkspaceToolTurn {
       if (this.hookStopReason)
         await this.harness.settleHookStoppedRuntimeContinuation();
       else await this.harness.settleConsumedRuntimeContinuation();
-      // H3: release is close semantics — its sweep stops any background run
-      // the Session still hosts. A turn that leaves one live holds the
-      // Runtime instead; the Session's ordered close drains it.
-      if (!this.mcp && !this.hooks && !this.hasLiveBackgroundWork())
-        await this.broker.release();
+      if (!this.mcp && !this.hooks) await this.broker.release();
       this.acquired = false;
     } catch (cause) {
       this.uncertain = true;
       throw new HostedToolRecoveryRequiredError(cause);
     }
-  }
-
-  private hasLiveBackgroundWork(): boolean {
-    return (
-      (this.shell?.publisher?.hasUnfinishedBackground?.() ?? false) ||
-      (this.backgroundLane?.publisher?.hasUnfinishedBackground?.() ?? false)
-    );
   }
 
   // The publisher lives on the Session across turns, so a turn's close
