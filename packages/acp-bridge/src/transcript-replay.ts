@@ -556,6 +556,7 @@ export function createTranscriptUsageUpdate(
  * worse than one that shows none.
  */
 export interface TranscriptTimingMeta {
+  readonly executionId?: string;
   readonly kind: 'request' | 'tool';
   /**
    * Epoch ms. A request is logged when its stream ends, so its start time is
@@ -717,6 +718,9 @@ function parseTelemetryTiming(
   return {
     kind: 'request',
     ...shared,
+    ...(nonEmptyString(uiEvent['execution_id']) !== undefined
+      ? { executionId: nonEmptyString(uiEvent['execution_id']) }
+      : {}),
     ...(endMs !== undefined ? { startedAt: endMs - durationMs } : {}),
     status: eventName === EVENT_API_RESPONSE ? 'ok' : 'error',
     ...(ttftMs !== undefined && ttftMs >= 0 && ttftMs <= durationMs
