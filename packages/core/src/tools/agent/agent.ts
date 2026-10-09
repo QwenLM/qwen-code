@@ -71,6 +71,7 @@ import {
   writeWorktreeSessionMarker,
 } from '../../services/gitWorktreeService.js';
 import { resolveExternalWorktreeDir } from '../../agents/worktree-pin.js';
+import { truncateWorkflowText } from '../../agents/workflow-result-format.js';
 import { getStartupContextLength } from '../../core/environmentContext.js';
 import {
   childLaunchDepth,
@@ -1449,11 +1450,21 @@ function composeIncompleteResult(
   suffix: string,
   transcriptPath: string,
 ): string {
-  if (!text) return reason + suffix;
   const prefix = `${reason}\n\n${header}\n\n`;
-  const room = AGENT_TOOL_MAX_OUTPUT_CHARS - prefix.length - suffix.length;
-  if (text.length <= room) return prefix + text + suffix;
   const marker = `${EARLIER_OUTPUT_OMITTED}The full output is in ${transcriptPath}. Read it with the ${ToolNames.READ_FILE} tool.\n`;
+  // `suffix` is producer-sized, not bounded: `formatExecutionCleanupFailure`
+  // interpolates the child-process message verbatim. Left unbounded it pushes
+  // the composition past the tool budget while the `outputBudgetApplied` mark
+  // stands the generic persistence gate down, and the tail-keeping per-tool
+  // pass then deletes the head — which is the reason line, the whole payload
+  // of #13597. Bound it here, leaving the reason and the marker intact.
+  const safeSuffix = truncateWorkflowText(
+    suffix,
+    AGENT_TOOL_MAX_OUTPUT_CHARS - prefix.length - marker.length,
+  );
+  if (!text) return reason + safeSuffix;
+  const room = AGENT_TOOL_MAX_OUTPUT_CHARS - prefix.length - safeSuffix.length;
+  if (text.length <= room) return prefix + text + safeSuffix;
   // The cut index is a length, not a content boundary, and the tail is the one
   // field this helper exists to hand over intact: snap it off a high surrogate
   // rather than starting it with an unpaired one.
@@ -1461,7 +1472,7 @@ function composeIncompleteResult(
   const before = text.charCodeAt(start - 1);
   const safeStart =
     start > 0 && before >= 0xd800 && before <= 0xdbff ? start + 1 : start;
-  return prefix + marker + text.slice(safeStart) + suffix;
+  return prefix + marker + text.slice(safeStart) + safeSuffix;
 }
 
 /**

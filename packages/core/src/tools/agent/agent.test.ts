@@ -675,6 +675,28 @@ describe('AgentTool', () => {
       expect(childConfig().getExecutionEnvironment?.()).toBeUndefined();
     });
 
+    it('bounds the composition when a cleanup failure reports a long message', async () => {
+      // `formatExecutionCleanupFailure` interpolates the child-process message
+      // verbatim into `suffix`, which is the one operand the composition does
+      // not otherwise size. Unbounded it pushes the body past the tool budget
+      // while the `outputBudgetApplied` mark stands the persistence gate down,
+      // and the tail-keeping per-tool pass then deletes the reason line at the
+      // head — the whole payload of #13597.
+      vi.mocked(environment.dispose).mockRejectedValue(
+        new ExecutionCleanupError(`cleanup failed: ${'e'.repeat(40_000)}`),
+      );
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('');
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.ERROR,
+      );
+      vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
+      const text = textOf(await run());
+      expect(text.length).toBeLessThanOrEqual(agentTool.maxOutputChars);
+      expect(
+        text.startsWith('Subagent did not complete (terminate mode: ERROR).'),
+      ).toBe(true);
+    });
+
     it.each([undefined, 'local', 'container'])(
       'honors the loaded definition independently of model selector %s',
       async (selector) => {
@@ -5779,26 +5801,25 @@ describe('AgentTool', () => {
       },
     );
 
-    it.each([20_000, 19_999])(
-      'foreground TIMEOUT snaps the preserved tail off a split astral character (%i)',
-      async (emojiCount) => {
-        // The tail starts at a length-derived index, so an astral character can
-        // straddle it and leave an unpaired surrogate as the first code unit of
-        // the text this composition exists to hand over. Both parities are
-        // pinned: the parity of the cut index decides whether a given run
-        // straddles it.
-        loadForeground();
-        vi.mocked(mockAgent.getFinalText).mockReturnValue(
-          '\u{1f600}'.repeat(emojiCount),
-        );
-        vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
-          AgentTerminateMode.TIMEOUT,
-        );
-        vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
-        const text = textOf(await invoke(fg()).execute());
-        expect(text).toBe(text.replace(/\p{Surrogate}/gu, ''));
-      },
-    );
+    it('foreground TIMEOUT snaps the preserved tail off a split astral character', async () => {
+      // The tail starts at a length-derived index, so an astral character can
+      // straddle it and leave an unpaired surrogate as the first code unit of
+      // the text this composition exists to hand over. This cut index is odd,
+      // so it lands between the two halves of a pair and it is the `safeStart`
+      // adjustment that has to move it; deleting that adjustment reddens this
+      // case. There is no second parity to pin: an even index starts on a fresh
+      // pair, where the adjustment is a no-op and no lone surrogate can appear.
+      loadForeground();
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        '\u{1f600}'.repeat(20_000),
+      );
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.TIMEOUT,
+      );
+      vi.mocked(mockAgent.getLastError).mockReturnValue(undefined);
+      const text = textOf(await invoke(fg()).execute());
+      expect(text).toBe(text.replace(/\p{Surrogate}/gu, ''));
+    });
 
     it('foreground TIMEOUT reserves room for a non-empty suffix in the budget', async () => {
       // The case above runs without an executor and without worktree isolation,
