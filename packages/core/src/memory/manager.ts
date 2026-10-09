@@ -38,6 +38,7 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import type { ExperienceSignals } from './experience-signals.js';
 import { Storage } from '../config/storage.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -175,6 +176,7 @@ export interface ScheduleSkillReviewParams {
   sessionId: string;
   history: Content[];
   toolCallCount: number;
+  experienceSignals: ExperienceSignals;
   skillsModified: boolean;
   now?: Date;
   config?: Config;
@@ -290,6 +292,7 @@ export const DREAM_TASK_TYPE = 'managed-auto-memory-dream' as const;
 export const USER_DREAM_TASK_TYPE = 'managed-user-auto-memory-dream' as const;
 export const SKILL_REVIEW_TASK_TYPE = 'managed-skill-extractor' as const;
 export const AUTO_SKILL_THRESHOLD = 20;
+export const AUTO_SKILL_EXPERIENCE_FLOOR = 5;
 
 export const DEFAULT_AUTO_DREAM_MIN_HOURS = 24;
 export const DEFAULT_AUTO_DREAM_MIN_SESSIONS = 5;
@@ -1372,7 +1375,15 @@ export class MemoryManager {
     }
 
     const threshold = params.threshold ?? AUTO_SKILL_THRESHOLD;
-    if (params.toolCallCount < threshold) {
+    const { retryArc, userSteer, hasSubstantiveWork } =
+      params.experienceSignals;
+    if (
+      !(
+        (retryArc || userSteer) &&
+        params.toolCallCount >= AUTO_SKILL_EXPERIENCE_FLOOR
+      ) &&
+      !(hasSubstantiveWork && params.toolCallCount >= threshold)
+    ) {
       return { status: 'skipped', skippedReason: 'below_threshold' };
     }
 

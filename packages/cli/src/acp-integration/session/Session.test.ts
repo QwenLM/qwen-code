@@ -62,6 +62,7 @@ import {
   getApiHistoryPromptId,
   markApiHistoryPrompt,
 } from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import { userContentPushSnapshotKey } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
 import { ExitPlanModeTool } from '@qwen-code/qwen-code-core/tools/exitPlanMode.js';
 import {
@@ -634,6 +635,7 @@ describe('Session', () => {
     finishManagedAutoMemoryRecall: ReturnType<typeof vi.fn>;
     captureCacheSafeParams: ReturnType<typeof vi.fn>;
     recordCompletedToolCall: ReturnType<typeof vi.fn>;
+    acceptCompletedToolResults: ReturnType<typeof vi.fn>;
     resetManagedAutoMemoryAfterCompression: ReturnType<typeof vi.fn>;
   };
   let mockMemoryManager: {
@@ -904,6 +906,7 @@ describe('Session', () => {
       finishManagedAutoMemoryRecall: vi.fn(),
       captureCacheSafeParams: vi.fn(),
       recordCompletedToolCall: vi.fn(),
+      acceptCompletedToolResults: vi.fn(),
       resetManagedAutoMemoryAfterCompression: vi.fn(),
     };
     mockMemoryManager = {
@@ -4395,11 +4398,47 @@ describe('Session', () => {
       expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
         'read_file',
         { path: '/tmp/test.txt' },
+        expect.objectContaining({
+          executionStatus: 'success',
+          error: undefined,
+        }),
       );
       expect(
         mockMemoryManager.resetExhaustedBodyRefsForCurrentTurn,
       ).toHaveBeenCalledOnce();
     });
+
+    it.each(['accepted', 'concurrent-only', 'failed-after-push'] as const)(
+      'forwards only request-owned accepted ACP results (%s)',
+      async (mode) => {
+        let pushCount = 0;
+        Object.assign(mockChat, { getUserContentPushCount: () => pushCount });
+        mockChat.sendMessageStream = vi.fn(async (_model, request) => {
+          const message = (request as { message: Part[] }).message;
+          if (mode !== 'concurrent-only') {
+            Object.defineProperty(message, userContentPushSnapshotKey, {
+              value: pushCount,
+            });
+          }
+          pushCount += 1;
+          if (mode === 'failed-after-push')
+            throw new Error('fixture provider failed');
+          return createEmptyStream();
+        });
+        await session
+          .prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'ACP acceptance fixture' }],
+          })
+          .catch((error: Error) => {
+            expect(mode).toBe('failed-after-push');
+            expect(error.message).toContain('fixture provider failed');
+          });
+        expect(mockLlmClient.acceptCompletedToolResults).toHaveBeenCalledTimes(
+          mode === 'concurrent-only' ? 0 : 1,
+        );
+      },
+    );
 
     it('does not run managed memory for retries or failed turns', async () => {
       mockChat.sendMessageStream = vi
@@ -20803,6 +20842,15 @@ describe('Session', () => {
           expect(mockLlmClient.recordCompletedToolCall).toHaveBeenCalledWith(
             target.name,
             { title: 'Cache-safe tools' },
+            expect.objectContaining({
+              callId: 'bridge-call',
+              executionStatus:
+                outcome === 'build error'
+                  ? 'not_started'
+                  : outcome === 'success'
+                    ? 'success'
+                    : 'error',
+            }),
           );
         },
       );
