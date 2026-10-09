@@ -12743,6 +12743,158 @@ describe('useLlmStream', () => {
 
     it.each(
       boundaryModes.flatMap((mode) =>
+        ['\n', '\r\n'].flatMap((newline) =>
+          [
+            'long prefix',
+            'code literals',
+            'zero opener',
+            'second opener across cap',
+            'second closer across cap',
+            'literal fence in earlier math',
+            'code after earlier math',
+            'oversized leading math',
+            'oversized math after prefix',
+          ].map((fixture) => ({ ...mode, newline, fixture })),
+        ),
+      ),
+    )(
+      'keeps character rescue progressing through $fixture in $name ($newline)',
+      async ({ start, end, newline, fixture }) => {
+        const cap = 16_384;
+        const math = ['$$', 'a+b', '', 'c+d', '$$', ''].join(newline);
+        const shortMath = ['$$', 'x', '', 'y', '$$', ''].join(newline);
+        const literalMath = ['$$', '````ts', '', 'x', '$$', ''].join(newline);
+        const table = makeBoundaryTable(42).replaceAll('\n', newline);
+        const tail = `${'B'.repeat(200)}${newline}${newline}${table}${newline}${newline}Done.`;
+        let prefix = `${'A'.repeat(newline === '\n' ? 16360 : 16372)}${newline}`;
+        let block = math;
+        let oversized = false;
+        if (fixture === 'code literals') {
+          const code = ['````ts', '$$', '~~~', '```', '````', ''].join(newline);
+          prefix = code + prefix.slice(code.length);
+        } else if (fixture === 'zero opener') {
+          prefix = '';
+          block = math + 'A'.repeat(cap + 300);
+        } else if (fixture.startsWith('second')) {
+          const secondStart =
+            fixture === 'second opener across cap'
+              ? cap - 1
+              : cap - (newline === '\n' ? 13 : 17);
+          prefix =
+            shortMath +
+            'A'.repeat(secondStart - shortMath.length - newline.length) +
+            newline;
+        } else if (fixture === 'literal fence in earlier math') {
+          prefix =
+            literalMath +
+            'A'.repeat(cap - 1 - literalMath.length - newline.length) +
+            newline;
+        } else if (fixture === 'code after earlier math') {
+          prefix =
+            literalMath +
+            'A'.repeat(16000 - literalMath.length - newline.length) +
+            newline;
+          block =
+            [
+              '```py',
+              ...Array.from({ length: 240 }, () => 'x=1'),
+              '```',
+              '',
+            ].join(newline) + newline;
+        } else if (fixture.startsWith('oversized')) {
+          oversized = true;
+          prefix = fixture.endsWith('after prefix') ? `intro${newline}` : '';
+          block = ['$$', 'A'.repeat(cap * 2 + 300), '$$', ''].join(newline);
+        }
+        const content = prefix + block + tail;
+        const continuation = `${newline}More prose.`;
+        const mode: { current: 'raw' | 'render' } = { current: start };
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          mode,
+        );
+        const stream = await streamStages(result, ['', content, continuation]);
+        const sourceFrom = (parts: string[]) => {
+          let source = '';
+          for (const text of parts) {
+            const reopening = /^```py qwen-code:start-line=(\d+)\n/.exec(text);
+            if (reopening) {
+              expect(Number(reopening[1])).toBeGreaterThan(1);
+              expect(source.endsWith('```\n')).toBe(true);
+              source = source.slice(0, -4) + text.slice(reopening[0].length);
+            } else {
+              source += text;
+            }
+          }
+          return source;
+        };
+        try {
+          mode.current = end;
+          await stream.advance();
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          const committed = llmContentItems().map((item) => item.text);
+          const pending = result.current.pendingHistoryItems[0]?.text ?? '';
+          expect(committed.length).toBeGreaterThanOrEqual(oversized ? 2 : 3);
+          expect(committed.every((text) => text.length > 0)).toBe(true);
+          if (!oversized) {
+            expect(
+              committed.some((text) => text === `${table}${newline}${newline}`),
+            ).toBe(true);
+            expect(pending).toBe('Done.');
+            expect(committed[0]).toBe(
+              prefix || (newline === '\r\n' ? math : content.slice(0, cap)),
+            );
+            if (fixture === 'long prefix' || fixture === 'code literals') {
+              expect(committed).toEqual([
+                prefix,
+                `${math}${'B'.repeat(200)}${newline}${newline}`,
+                `${table}${newline}${newline}`,
+              ]);
+            }
+            if (fixture === 'code after earlier math') {
+              expect(committed[1]!.startsWith('```py')).toBe(true);
+              expect(committed[1]!.endsWith('```\n')).toBe(true);
+              expect(
+                committed[2]!.startsWith('```py qwen-code:start-line=19\n'),
+              ).toBe(true);
+            }
+          } else {
+            expect(committed[0]).toBe(prefix || content.slice(0, cap));
+            expect(
+              committed
+                .slice(prefix ? 1 : 0, 2)
+                .every((text) => text.length === cap),
+            ).toBe(true);
+          }
+          expect(sourceFrom([...committed, pending])).toBe(content);
+          await stream.advance();
+          expect(
+            sourceFrom([
+              ...llmContentItems().map((item) => item.text),
+              result.current.pendingHistoryItems[0]?.text ?? '',
+            ]),
+          ).toBe(content + continuation);
+          await stream.advance();
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+          expect(result.current.pendingHistoryItems).toEqual([]);
+          expect(sourceFrom(llmContentItems().map((item) => item.text))).toBe(
+            content + continuation,
+          );
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
+    it.each(
+      boundaryModes.flatMap((mode) =>
         ['\n', '\r\n'].map((newline) => ({ ...mode, newline })),
       ),
     )(

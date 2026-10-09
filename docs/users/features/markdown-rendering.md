@@ -49,6 +49,9 @@ complete table remains available when the response is committed.
 A completed display-math block can move into scrollback as a whole once its
 following blank line is complete. Ordinary code fences can commit at internal
 blank lines while preserving code highlighting and continuous line numbers.
+Long responses also avoid splitting a small display-math block when its
+preceding text can be committed first. Oversized blocks still use the existing
+message-size limit.
 
 ## Assistant and Tool Images
 

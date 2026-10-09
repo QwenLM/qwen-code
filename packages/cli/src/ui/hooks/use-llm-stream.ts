@@ -1921,10 +1921,58 @@ export const useLlmStream = (
           newLlmMessageBuffer,
           STREAM_PENDING_ITEM_MAX_CHARS,
         );
-        const safeSplitPoint =
+        let safeSplitPoint =
           splitPoint > 0 && splitPoint < newLlmMessageBuffer.length
             ? splitPoint
             : STREAM_PENDING_ITEM_MAX_CHARS;
+        const blockAt = (target: number) => {
+          let mathStart = -1;
+          let codeFence: string | null = null;
+          let codeStart = -1;
+          for (let offset = 0; offset < target; ) {
+            const end = newLlmMessageBuffer.indexOf('\n', offset);
+            if (end < 0) break;
+            const line = newLlmMessageBuffer
+              .slice(offset, end)
+              .replace(/\r$/, '');
+            // A partly included closing line still belongs to its block.
+            const fence = mathStart < 0 ? CODE_FENCE_RE.exec(line) : null;
+            if (codeFence) {
+              if (
+                end < target &&
+                fence &&
+                fence[1]!.startsWith(codeFence[0]!) &&
+                fence[1]!.length >= codeFence.length
+              ) {
+                codeFence = null;
+                codeStart = -1;
+              }
+            } else if (mathStart >= 0) {
+              if (end < target && /^ *\$\$ *$/.test(line)) mathStart = -1;
+            } else if (fence) {
+              codeFence = fence[1]!;
+              codeStart = offset;
+            } else if (/^ *\$\$ *$/.test(line)) {
+              mathStart = offset;
+            }
+            offset = end + 1;
+          }
+          return { mathStart, codeStart };
+        };
+        let rescueBlock = blockAt(safeSplitPoint);
+        const mathRescue = rescueBlock.mathStart >= 0;
+        if (mathRescue) {
+          // A zero-offset opener must still make progress at the hard cap.
+          if (rescueBlock.mathStart === 0) {
+            rescueBlock = blockAt(STREAM_PENDING_ITEM_MAX_CHARS);
+          }
+          safeSplitPoint =
+            rescueBlock.mathStart > 0
+              ? rescueBlock.mathStart
+              : rescueBlock.codeStart > 0
+                ? rescueBlock.codeStart
+                : STREAM_PENDING_ITEM_MAX_CHARS;
+        }
 
         // This indicates that we need to split up this LLM message.
         // Splitting a message is primarily a performance consideration. There is a
@@ -1936,10 +1984,12 @@ export const useLlmStream = (
         // broken up so that there are more "statically" rendered.
         // Repair fences when the split lands inside a code block so the tail
         // does not render as prose (see splitFencedMarkdown).
-        const { before: beforeText, after: afterText } = splitFencedMarkdown(
-          newLlmMessageBuffer,
-          safeSplitPoint,
-        );
+        const { before: beforeText, after: afterText } = mathRescue
+          ? {
+              before: newLlmMessageBuffer.slice(0, safeSplitPoint),
+              after: newLlmMessageBuffer.slice(safeSplitPoint),
+            }
+          : splitFencedMarkdown(newLlmMessageBuffer, safeSplitPoint);
         commitItemInOrder(
           {
             type: nextPendingType,
