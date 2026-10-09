@@ -671,6 +671,7 @@ export class MemoryManager {
   private readonly extractCadence = new Map<
     string,
     {
+      projectRoot: string;
       armed: boolean;
       skips: number;
       lastExtractedLength: number;
@@ -1311,6 +1312,11 @@ export class MemoryManager {
     const budget = getExtractNoopSkipTurns();
     const state = this.extractCadence.get(params.sessionId);
     if (budget === 0 || !state?.armed || state.skips >= budget) return false;
+    // `/cd` and the daemon's `session/cd` relocate the project root without a
+    // session switch, so no discard fires and this entry outlives the project
+    // that earned it. An arm measured against one project's memory says
+    // nothing about the next one's, so it must not suppress a turn there.
+    if (state.projectRoot !== params.projectRoot) return false;
     if (params.belowCompactionWarn !== true) return false;
     const pendingEntries = params.history.length - state.lastExtractedLength;
     if (
@@ -1362,6 +1368,7 @@ export class MemoryManager {
       previous !== undefined &&
       previous.history.length > params.history.length;
     this.extractCadence.set(params.sessionId, {
+      projectRoot: params.projectRoot,
       armed:
         result.extractorEngaged === true && result.touchedTopics.length === 0,
       skips: carry ? (carried?.skips ?? 0) : 0,

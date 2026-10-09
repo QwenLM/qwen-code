@@ -2168,6 +2168,29 @@ describe('MemoryManager', () => {
       expect((await turn(mgr, 2, 'b')).skippedReason).toBeUndefined();
     });
 
+    it('does not carry an armed skip into a relocated project root', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      const relocated = path.join(tmp.tempDir, 'relocated');
+      await fs.mkdir(relocated, { recursive: true });
+      // Turn 1 arms in the original root; turn 2 skips there and parks its
+      // snapshot. `/cd` then relocates the root without a session switch, so
+      // no discard fires: the arm was earned against the old project's memory
+      // and must not suppress a turn in the new one.
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+      vi.mocked(runAutoMemoryExtract).mockClear();
+      const moved = await mgr.scheduleExtract({
+        ...extractParams(relocated, 'sess', turns(6)),
+        belowCompactionWarn: true,
+      });
+      expect(moved.skippedReason).toBeUndefined();
+      expect(runAutoMemoryExtract).toHaveBeenCalledOnce();
+      expect(vi.mocked(runAutoMemoryExtract).mock.calls[0][0].projectRoot).toBe(
+        relocated,
+      );
+    });
+
     it('drops the skip state of both sessions a switch touches', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
       const mgr = new MemoryManager();
