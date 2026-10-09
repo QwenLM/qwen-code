@@ -353,7 +353,11 @@ export class ManagedEmailAdapter {
           }).catch(() => {});
       }
     } finally {
-      await this.release();
+      // Ownership is never the run loop's to hand back: disconnect()
+      // completes the remote close while this process still holds it, and
+      // releases only after — otherwise a replacement can register while
+      // the old owner's unfenced disconnect is still on the wire (R10).
+      this.stop();
     }
   }
 

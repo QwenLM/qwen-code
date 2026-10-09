@@ -179,6 +179,7 @@ function append(source: Buffer): number {
 function make(
   extra: Record<string, unknown> = {},
   depsExtra: Record<string, unknown> = {},
+  options: { pollLoop?: boolean } = {},
 ): ManagedEmailAdapter {
   const adapter = new ManagedEmailAdapter({
     name: 'mail',
@@ -198,7 +199,7 @@ function make(
       ...extra,
     },
     controlPlane: plane,
-    pollLoop: false,
+    pollLoop: options.pollLoop ?? false,
     deps: {
       createImap: async () => new FakeImap(box) as unknown as ImapFlow,
       createSmtp: async () =>
@@ -847,6 +848,20 @@ describe('managed email outbound', () => {
     // Releasing the lock first would let a replacement register and have
     // its fresh registration revoked by our unfenced disconnect (R8 P1).
     const adapter = make();
+    await adapter.connect();
+    const original = FakeControlPlane.prototype.disconnect;
+    plane.disconnect = async () => {
+      lifecycle.push('remote');
+      return original.call(plane);
+    };
+    await adapter.disconnect();
+    expect(lifecycle).toEqual(['remote', 'lock']);
+  });
+
+  it('completes the remote disconnect with ownership through the production run-loop teardown', async () => {
+    // The production shape (pollLoop: true): the run loop's own teardown
+    // must not free the mailbox before the remote close, either (R10).
+    const adapter = make({}, {}, { pollLoop: true });
     await adapter.connect();
     const original = FakeControlPlane.prototype.disconnect;
     plane.disconnect = async () => {
