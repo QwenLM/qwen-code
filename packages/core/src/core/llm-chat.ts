@@ -3163,14 +3163,19 @@ export class LlmChat {
             `Tool response send guard reduced an unfinalized batch to ${toolOutputBudget} characters.`,
           );
           userContent = { ...userContent, parts: guarded.responseParts };
-          // The cut is what goes into durable history, so anything asserting
-          // those results are still resident has to be told — the same
-          // invalidation `tryCompress` does for the same reason.
-          this.config.getFileReadCache().clear();
-          clearLoadedSkillTracking(
-            this.config.getToolRegistry(),
-            'send-boundary tool-output shrink',
-          );
+          // The cut is what goes into history, so anything asserting those
+          // results are still resident has to be told — the same invalidation
+          // `tryCompress` does for the same reason. A forked chat shares the
+          // parent's cache and skill tracking while holding only a copy of a
+          // history slice, so it must not clear either; every other clear in
+          // this file carries the same guard (see `isForkedChat`).
+          if (!this.isForkedChat) {
+            this.config.getFileReadCache().clear();
+            clearLoadedSkillTracking(
+              this.config.getToolRegistry(),
+              'send-boundary tool-output shrink',
+            );
+          }
         }
       }
 
