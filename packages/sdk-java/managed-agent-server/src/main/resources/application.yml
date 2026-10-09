@@ -71,6 +71,10 @@ qwen:
       turn-deadline: '${QWEN_MANAGED_AGENT_HARNESS_TURN_DEADLINE:30m}'
     artifacts:
       read-revalidation-interval: '5s'
+    channels:
+      enabled: '${QWEN_MANAGED_AGENT_CHANNELS_ENABLED:false}'
+      claim-lease: '${QWEN_MANAGED_AGENT_CHANNELS_CLAIM_LEASE:10m}'
+      scan-delay: '30s'
     dispatch:
       scan-delay: '1s'
       lease-duration: '60s'

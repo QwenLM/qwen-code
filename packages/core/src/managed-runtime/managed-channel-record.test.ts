@@ -7,7 +7,10 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { MANAGED_EXTENSION_RECORD_BODIES } from './managed-extension-projection.js';
-import { MANAGED_SESSION_ENABLED_DOMAINS } from './managed-session-records.js';
+import {
+  MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS,
+  MANAGED_SESSION_ENABLED_DOMAINS,
+} from './managed-session-records.js';
 
 type Domain = 'channel_route' | 'channel_delivery';
 interface Fixture {
@@ -56,13 +59,16 @@ function merge(
 }
 
 describe('managed-channel-record/1 shared contract', () => {
-  it('registers both bodies without enabling their domains or projecting tasks', () => {
+  it('registers both bodies as enabled, adapter-scoped domains that project no tasks', () => {
+    // H5b/H5c: both domains are submittable, and the route policy's adapter
+    // is the gate — only the email reference adapter is admitted.
     for (const domain of ['channel_route', 'channel_delivery'] as const) {
-      expect(MANAGED_SESSION_ENABLED_DOMAINS).not.toContain(domain);
+      expect(MANAGED_SESSION_ENABLED_DOMAINS).toContain(domain);
       expect(
         MANAGED_EXTENSION_RECORD_BODIES[domain]!.taskKindOf({}),
       ).toBeNull();
     }
+    expect(MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS).toEqual(['email']);
   });
 
   it.each(fixtures.cases)('$id', (fixture) => {

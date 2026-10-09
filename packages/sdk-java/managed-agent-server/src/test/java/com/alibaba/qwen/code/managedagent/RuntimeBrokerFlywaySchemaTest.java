@@ -73,7 +73,7 @@ class RuntimeBrokerFlywaySchemaTest {
 
     @Test
     void retentionIndexesPreserveExistingTerminalReceiptsOnUpgrade() throws Exception {
-        DataSource source = migrate(dataSource(), MigrationVersion.fromVersion("54"));
+        DataSource source = migrate(dataSource(), MigrationVersion.fromVersion("55"));
         JdbcRepositoryContract.writeLegacyRows(source, "retention-upgrade");
         migrate(source, MigrationVersion.LATEST);
         var execution = new JdbcToolExecutionRepository(source)
