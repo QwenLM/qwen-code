@@ -34,7 +34,7 @@ public class ReplayFloorAdvancer {
         this.properties = properties;
     }
 
-    @Scheduled(fixedDelayString =
+    @Scheduled(scheduler = "replayFloorScheduler", fixedDelayString =
             "${qwen.managed-agent.events.replay-floor-interval:60s}")
     public void advance() {
         if (!properties.getEvents().isReplayFloorEnabled()) {
