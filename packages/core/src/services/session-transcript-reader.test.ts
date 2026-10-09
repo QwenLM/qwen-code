@@ -1202,6 +1202,7 @@ describe('SessionTranscriptReader', () => {
     expect(runtime?.recording.turnParentUuids).toEqual(
       turnState.turnParentUuids,
     );
+    expect(runtime?.recording.turnPromptIds).toEqual([`${sessionId}########3`]);
     expect(runtime?.initialTurn).toBe(turnState.initialTurn);
     expect(runtime?.backgroundNotificationTaskIds).toEqual(
       turnState.backgroundNotificationTaskIds,

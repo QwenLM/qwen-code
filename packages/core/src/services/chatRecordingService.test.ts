@@ -1320,6 +1320,40 @@ describe('ChatRecordingService', () => {
   });
 
   describe('rewindRecording', () => {
+    it.each(['live', 'full restore', 'selective restore'])(
+      'resolves prompt boundaries through %s without counting automatic records',
+      async (mode) => {
+        if (mode === 'live') {
+          user('A', undefined, undefined, 'p1');
+          svc.recordGoalRuntimeMessage('automatic', goalPermit('automatic'));
+          user('B', undefined, undefined, 'p2');
+        } else if (mode === 'full restore') {
+          svc.rebuildTurnBoundaries(
+            resumedChain(
+              null,
+              ['a', 'user', 'A', { promptId: 'p1' }],
+              ['auto', 'user', 'automatic', { subtype: 'goal_runtime' }],
+              ['b', 'user', 'B', { promptId: 'p2' }],
+            ),
+          );
+        } else {
+          svc = new ChatRecordingService(mockConfig, undefined, false, {
+            lastCompletedUuid: 'b',
+            turnParentUuids: [null, 'auto'],
+            turnPromptIds: ['p1', 'p2'],
+          });
+        }
+        expect(svc.getRewindTurnIndex('p2')).toBe(1);
+        expect(svc.getRewindTurnIndex('missing')).toBe(-1);
+        svc.rewindRecording(1, { truncatedCount: 1 });
+        expect(svc.getRewindTurnIndex('p2')).toBe(-1);
+        expect(svc.getRewindTurnIndex('p1')).toBe(0);
+        user('duplicate', undefined, undefined, 'p1');
+        expect(svc.getRewindTurnIndex('p1')).toBe(-1);
+        await svc.flush();
+      },
+    );
+
     const displayed = (text: string) =>
       user(`hidden ${text}`, undefined, { displayText: text, hookContext: '' });
 

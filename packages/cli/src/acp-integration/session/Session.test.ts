@@ -543,6 +543,7 @@ describe('Session', () => {
     findExternalAgentRecord: ReturnType<typeof vi.fn>;
     recordRealtimeConversation: ReturnType<typeof vi.fn>;
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
+    getRewindTurnIndex: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
     getBranchCheckpointCursor: ReturnType<typeof vi.fn>;
@@ -937,6 +938,9 @@ describe('Session', () => {
       findExternalAgentRecord: vi.fn().mockResolvedValue(undefined),
       recordRealtimeConversation: vi.fn().mockResolvedValue(undefined),
       recordFileHistorySnapshot: vi.fn(),
+      getRewindTurnIndex: vi.fn((promptId: string) =>
+        ['p1', 'p2', 'p3'].indexOf(promptId),
+      ),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
       getBranchCheckpointCursor: vi.fn().mockReturnValue({
@@ -8373,6 +8377,34 @@ describe('Session', () => {
   });
 
   describe('rewindToTurn', () => {
+    it('uses the recorded boundary rather than an extra retry snapshot index', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'retry A' }] },
+        { role: 'model', parts: [{ text: 'A reply' }] },
+        { role: 'user', parts: [{ text: 'B' }] },
+      ];
+      markApiHistoryPrompt(history[2]!, 'p2');
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
+        ['p1', 'retry-A', 'p2'].map((promptId) => ({
+          promptId,
+          timestamp: new Date('2026-10-09T00:00:00.000Z'),
+          trackedFileBackups: {},
+        })),
+      );
+
+      expect(session.rewindToTurn(2, { rewindFiles: false })).toEqual({
+        targetTurnIndex: 2,
+        apiTruncateIndex: 2,
+      });
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
+        1,
+        { truncatedCount: 1 },
+        expect.any(Array),
+        { mode: ApprovalMode.DEFAULT },
+      );
+    });
+
     function identifyPrompts(history: Content[], indexes: number[]) {
       indexes.forEach((index, ordinal) =>
         markApiHistoryPrompt(history[index]!, `p${ordinal + 1}`),
@@ -8892,12 +8924,16 @@ describe('Session', () => {
       'duplicate snapshot id',
       'legacy snapshot',
       'no snapshots',
+      'unlinked recording',
     ])('refuses %s without changing model, snapshots, or recording', (kind) => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'reply' }] },
       ];
       if (kind !== 'unmarked') markApiHistoryPrompt(history[0]!, 'p1');
+      if (kind === 'unlinked recording') {
+        mockChatRecordingService.getRewindTurnIndex.mockReturnValue(-1);
+      }
       if (kind === 'duplicate model id') history.push({ ...history[0]! });
       const snapshots =
         kind === 'no snapshots'
@@ -9022,25 +9058,40 @@ describe('Session', () => {
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
 
-    it('restores a captured history snapshot', () => {
-      const history: Content[] = [
-        { role: 'user', parts: [{ text: 'first' }] },
-        { role: 'model', parts: [{ text: 'first reply' }] },
-      ];
-      markApiHistoryPrompt(history[0]!, 'p1');
-      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+    it.each(['in-process', 'JSON roundtrip'])(
+      'restores a captured history snapshot through %s',
+      (transport) => {
+        const history: Content[] = [
+          { role: 'user', parts: [{ text: 'first' }] },
+          { role: 'model', parts: [{ text: 'first reply' }] },
+        ];
+        markApiHistoryPrompt(history[0]!, 'p1');
+        vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
-      const snapshot = session.captureHistorySnapshot();
-      session.restoreHistory(snapshot);
+        const snapshot = session.captureHistorySnapshot();
+        const incoming =
+          transport === 'in-process'
+            ? snapshot
+            : JSON.parse(
+                JSON.stringify(
+                  snapshot.map((content) => ({
+                    ...content,
+                    rewindId: getApiHistoryPromptId(content),
+                  })),
+                ),
+              );
+        session.restoreHistory(incoming);
 
-      expect(snapshot).toEqual(history);
-      const restored = vi.mocked(mockChat.setHistory).mock.calls[0]![0];
-      expect(restored).toEqual(history);
-      expect(restored[0]).not.toBe(history[0]);
-      expect(restored[0]!.parts).not.toBe(history[0]!.parts);
-      expect(getApiHistoryPromptId(restored[0]!)).toBe('p1');
-      expect(mockChat.getHistory).not.toHaveBeenCalled();
-    });
+        expect(snapshot).toEqual(history);
+        const restored = vi.mocked(mockChat.setHistory).mock.calls[0]![0];
+        expect(restored).toEqual(history);
+        expect(restored[0]).not.toBe(history[0]);
+        expect(restored[0]!.parts).not.toBe(history[0]!.parts);
+        expect(getApiHistoryPromptId(restored[0]!)).toBe('p1');
+        expect(restored[0]).not.toHaveProperty('rewindId');
+        expect(mockChat.getHistory).not.toHaveBeenCalled();
+      },
+    );
 
     it('clears the active Todo plan revision when restoring history', async () => {
       enableSessionWorkflowRevisionContext();

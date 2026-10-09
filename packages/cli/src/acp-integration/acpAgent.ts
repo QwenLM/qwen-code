@@ -184,6 +184,7 @@ import {
   SessionSourceService,
   SessionSourceError,
 } from '@qwen-code/qwen-code-core';
+import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { isDeepStrictEqual } from 'node:util';
@@ -14082,7 +14083,12 @@ class QwenAgent implements Agent {
           }
 
           const rewindFiles = params['rewindFiles'] !== false;
-          const historyBeforeRewind = session.captureHistorySnapshot();
+          const historyBeforeRewind = session
+            .captureHistorySnapshot()
+            .map((content) => ({
+              ...content,
+              rewindId: getApiHistoryPromptId(content),
+            }));
           let rewindResult;
           let releaseHistoryMutation: () => void;
           try {

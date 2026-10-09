@@ -88,12 +88,19 @@ The compatibility check must include the genuine placeholder-text prompt that
 previously stayed in model history after the visible turn was removed.
 
 ACP selects targets by their snapshot identity, not a second classification of
-model text. Without snapshots, the model's retained turn ordinals cannot safely
+model text. It resolves the recorder's complete-branch boundary by that same
+prompt ID: retries can add snapshots without adding recorded user turns, so a
+snapshot index is not a recorder index. The derived association survives full
+and selective cold restore; missing or duplicated recorded identities refuse.
+Without snapshots, the model's retained turn ordinals cannot safely
 identify the recorder's complete-branch ordinals, so ACP conversation rewind
 refuses rather than guessing. Only the initial ordinary
 prompt send acquires its prompt identity; tool/automatic continuations do not.
 Unavailable or ambiguous associations refuse before changing conversation,
 files, or recording. Snapshot-list eligibility follows the same resolver.
+ACP history rollback carries each entry's `rewindId` through JSON and removes
+that transport metadata before restoring model content. Existing clients
+already echo the history array, so no new option or client-side counter is needed.
 
 Acceptance requires the same legacy fixture to cut at its source record,
 identified turns to keep resolving, unlinked/ambiguous targets to refuse, and

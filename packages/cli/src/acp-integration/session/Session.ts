@@ -4825,8 +4825,12 @@ export class Session implements SessionContext {
       .getSnapshots();
     const promptId = snapshotsBeforeRewind[targetTurnIndex]?.promptId;
     const apiTruncateIndex = promptId ? this.getRewindCutPoint(promptId) : -1;
+    const recorder = this.config.getChatRecordingService();
+    const recordingTurnIndex = promptId
+      ? (recorder?.getRewindTurnIndex(promptId) ?? -1)
+      : -1;
 
-    if (apiTruncateIndex < 0) {
+    if (apiTruncateIndex < 0 || recordingTurnIndex < 0) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot rewind to the requested turn. It may have been compressed or does not exist, or its model-history identity is missing or ambiguous.',
@@ -4866,25 +4870,22 @@ export class Session implements SessionContext {
     fileHistoryService.restoreFromSnapshots(survivingSnapshots);
 
     const approvalMode = this.config.getApprovalMode();
-    this.config
-      .getChatRecordingService()
-      ?.rewindRecording(
-        targetTurnIndex,
-        { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
-        survivingSnapshots,
-        {
-          mode: approvalMode,
-          ...(approvalMode === ApprovalMode.PLAN
-            ? {
-                prePlanMode:
-                  this.config.getPrePlanMode() ?? ApprovalMode.DEFAULT,
-                ...(this.config.getPlanExecutionMode?.()
-                  ? { planExecutionMode: this.config.getPlanExecutionMode() }
-                  : {}),
-              }
-            : {}),
-        },
-      );
+    recorder?.rewindRecording(
+      recordingTurnIndex,
+      { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
+      survivingSnapshots,
+      {
+        mode: approvalMode,
+        ...(approvalMode === ApprovalMode.PLAN
+          ? {
+              prePlanMode: this.config.getPrePlanMode() ?? ApprovalMode.DEFAULT,
+              ...(this.config.getPlanExecutionMode?.()
+                ? { planExecutionMode: this.config.getPlanExecutionMode() }
+                : {}),
+            }
+          : {}),
+      },
+    );
 
     if (shouldDrainAutomaticQueues) {
       void this.#drainCronQueue();
@@ -4899,6 +4900,11 @@ export class Session implements SessionContext {
   }
 
   getRewindCutPoint(promptId: string): number {
+    if (
+      (this.config.getChatRecordingService()?.getRewindTurnIndex(promptId) ??
+        -1) < 0
+    )
+      return -1;
     if (
       this.config
         .getFileHistoryService()
@@ -4923,8 +4929,11 @@ export class Session implements SessionContext {
     }
 
     const restoredHistory = history.map((content) => {
-      const copy = structuredClone(content);
-      markApiHistoryPrompt(copy, getApiHistoryPromptId(content));
+      const { rewindId, ...message } = content as Content & {
+        rewindId?: unknown;
+      };
+      const copy = structuredClone(message);
+      markApiHistoryPrompt(copy, getApiHistoryPromptId(content) ?? rewindId);
       return copy;
     });
     this.config.getLlmClient()!.setHistory(restoredHistory);
