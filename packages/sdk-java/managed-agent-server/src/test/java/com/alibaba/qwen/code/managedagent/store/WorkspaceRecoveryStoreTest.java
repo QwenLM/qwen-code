@@ -60,8 +60,8 @@ class WorkspaceRecoveryStoreTest {
             jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
                     + " storage_id, display_name, config_ref, policy_ref, state) VALUES ('tenant', ?, 1, 'storage',"
                     + " 'Test', ?, ?, 'ACTIVE')", workspace, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                    + " VALUES ('tenant', ?, ?, TRUE, TRUE)", workspace, "actor".getBytes(StandardCharsets.UTF_8));
+            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                    + " VALUES ('tenant', ?, ?, 'OPERATOR')", workspace, "actor".getBytes(StandardCharsets.UTF_8));
         }
         guard.register("tenant", "storage", UUID.randomUUID().toString());
         String fence = UUID.randomUUID().toString();
