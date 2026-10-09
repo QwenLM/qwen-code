@@ -544,6 +544,150 @@ describe('hosted child wait recovery (#13708)', () => {
     }
   });
 
+  /** The admitted orphan's chain completes against the attached daemon. */
+  async function settleOrphan(
+    session: ManagedSession,
+    runId: string,
+    text: string,
+  ): Promise<HostedChildAgentSession> {
+    const children = childrenOf(session);
+    await children.dispatchStarted(runId, {
+      dispatchId: `dispatch-${runId.split(':').at(-1)}`,
+      runtime: { runtimeBindingId: 'binding-2', generation: '1' },
+    });
+    await children.attach(runId, 'child-session-2');
+    await children.settleCompleted(runId, {
+      result: Buffer.from(`{"review":"${text}"}`, 'utf8'),
+      receipt: Buffer.from('{"stopReason":"end_turn"}', 'utf8'),
+    });
+    await children.accept(runId);
+    return children;
+  }
+
+  it('an admitted orphan polling mid-flight folds its late settlement truthfully', async () => {
+    await parkWedged(true);
+    const orphanRunId = `${PROMPT_ID}:call-2`;
+    const first = await open('boot-2', false);
+    try {
+      await settleTheChild(first);
+      await resumeTurn(first).resumeAgentWaitRuns(
+        [{ ...waitRun, functionCallId: 'call-1' }],
+        'recovered',
+        new AbortController().signal,
+      );
+      await childrenOf(first).admit({
+        childRunId: orphanRunId,
+        ownerScopeId: SESSION_ID,
+        rootSessionId: SESSION_ID,
+        completion: 'tool',
+        description: 'second audit',
+        prompt: 'review two',
+        definition: {
+          definitionId: 'hosted-agent/hosted-workspace-files/1',
+          definitionRevision: 1,
+          definitionDigest: first.authority.sessionHeader.definitionRef.digest,
+        },
+        workingDirectory: '.',
+        executionCallId: orphanRunId,
+      });
+      // Mid-flight only: a dispatch, no settlement yet — the fill's own
+      // poll must wait, and the late answer must be the truthful one.
+      await childrenOf(first).dispatchStarted(orphanRunId, {
+        dispatchId: 'dispatch-call-2',
+        runtime: { runtimeBindingId: 'binding-2', generation: '1' },
+      });
+    } finally {
+      await first.close();
+    }
+    const replacement = await open('boot-3', false);
+    try {
+      const driving = (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        await settleOrphan(replacement, orphanRunId, 'two late diffs clean');
+      })();
+      const filled = await fillParkedRoundAgentGaps({
+        managed: replacement,
+        sessionId: SESSION_ID,
+        promptId: PROMPT_ID,
+        cwd: root,
+        children: childrenOf(replacement),
+      });
+      await driving;
+      expect(filled).toBe(1);
+      const projected = await replacement.sink.project();
+      const callTwo = toolResultEntries(projected).find((entry) =>
+        entry.message?.parts?.some(
+          (part) => part.functionResponse?.id === 'call-2',
+        ),
+      );
+      expect(JSON.stringify(callTwo?.message?.parts)).toContain(
+        'two late diffs clean',
+      );
+      expect(JSON.stringify(callTwo?.message?.parts)).not.toContain(
+        'cancelled',
+      );
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('an aborted signal abandons an admitted orphan honestly, and the child keeps its ledger', async () => {
+    await parkWedged(true);
+    const orphanRunId = `${PROMPT_ID}:call-2`;
+    const first = await open('boot-2', false);
+    try {
+      await settleTheChild(first);
+      await resumeTurn(first).resumeAgentWaitRuns(
+        [{ ...waitRun, functionCallId: 'call-1' }],
+        'recovered',
+        new AbortController().signal,
+      );
+      await childrenOf(first).admit({
+        childRunId: orphanRunId,
+        ownerScopeId: SESSION_ID,
+        rootSessionId: SESSION_ID,
+        completion: 'tool',
+        description: 'second audit',
+        prompt: 'review two',
+        definition: {
+          definitionId: 'hosted-agent/hosted-workspace-files/1',
+          definitionRevision: 1,
+          definitionDigest: first.authority.sessionHeader.definitionRef.digest,
+        },
+        workingDirectory: '.',
+        executionCallId: orphanRunId,
+      });
+    } finally {
+      await first.close();
+    }
+    const replacement = await open('boot-3', false);
+    try {
+      const abort = new AbortController();
+      abort.abort();
+      await fillParkedRoundAgentGaps({
+        managed: replacement,
+        sessionId: SESSION_ID,
+        promptId: PROMPT_ID,
+        cwd: root,
+        children: childrenOf(replacement),
+        signal: abort.signal,
+      });
+      const projected = await replacement.sink.project();
+      const callTwo = toolResultEntries(projected).find((entry) =>
+        entry.message?.parts?.some(
+          (part) => part.functionResponse?.id === 'call-2',
+        ),
+      );
+      expect(JSON.stringify(callTwo?.message?.parts)).toContain(
+        'cancelled before the child agent finished',
+      );
+      const record = childrenOf(replacement).record(orphanRunId);
+      expect(record?.run.state).not.toBe('cancelled');
+    } finally {
+      await replacement.close();
+    }
+  });
+
   it('an admitted orphan never gets the fabricated answer: its own outcome folds', async () => {
     await parkWedged(true);
     const first = await open('boot-2', false);
@@ -609,6 +753,76 @@ describe('hosted child wait recovery (#13708)', () => {
       );
       expect(JSON.stringify(callTwo?.message?.parts)).not.toContain(
         'cancelled',
+      );
+      expect(children.acceptance(orphanRunId)).toBeDefined();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('an oversized admitted-orphan answer folds with the truncation marker, never as an error', async () => {
+    await parkWedged(true);
+    const orphanRunId = `${PROMPT_ID}:call-2`;
+    const first = await open('boot-2', false);
+    try {
+      await settleTheChild(first);
+      await resumeTurn(first).resumeAgentWaitRuns(
+        [{ ...waitRun, functionCallId: 'call-1' }],
+        'recovered',
+        new AbortController().signal,
+      );
+      await childrenOf(first).admit({
+        childRunId: orphanRunId,
+        ownerScopeId: SESSION_ID,
+        rootSessionId: SESSION_ID,
+        completion: 'tool',
+        description: 'second audit',
+        prompt: 'review two',
+        definition: {
+          definitionId: 'hosted-agent/hosted-workspace-files/1',
+          definitionRevision: 1,
+          definitionDigest: first.authority.sessionHeader.definitionRef.digest,
+        },
+        workingDirectory: '.',
+        executionCallId: orphanRunId,
+      });
+    } finally {
+      await first.close();
+    }
+    const replacement = await open('boot-3', false);
+    try {
+      const children = childrenOf(replacement);
+      await children.dispatchStarted(orphanRunId, {
+        dispatchId: 'dispatch-2',
+        runtime: { runtimeBindingId: 'binding-2', generation: '1' },
+      });
+      await children.attach(orphanRunId, 'child-session-2');
+      await children.settleCompleted(orphanRunId, {
+        result: Buffer.from(
+          '{"review":"' + 'r'.repeat(8 * 1024) + '"}',
+          'utf8',
+        ),
+        receipt: Buffer.from('{"stopReason":"end_turn"}', 'utf8'),
+      });
+      await children.accept(orphanRunId);
+      const filled = await fillParkedRoundAgentGaps({
+        managed: replacement,
+        sessionId: SESSION_ID,
+        promptId: PROMPT_ID,
+        cwd: root,
+        children,
+        messageFitsInline: (_type, parts) =>
+          JSON.stringify(parts).length < 2048,
+      });
+      expect(filled).toBe(1);
+      const projected = await replacement.sink.project();
+      const callTwo = toolResultEntries(projected).find((entry) =>
+        entry.message?.parts?.some(
+          (part) => part.functionResponse?.id === 'call-2',
+        ),
+      );
+      expect(JSON.stringify(callTwo?.message?.parts)).toContain(
+        'truncated: the full result is on the acceptance record',
       );
       expect(children.acceptance(orphanRunId)).toBeDefined();
     } finally {

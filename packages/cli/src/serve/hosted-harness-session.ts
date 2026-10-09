@@ -630,15 +630,37 @@ export async function fillParkedRoundAgentGaps(input: {
             await input.managed.resources.read(acceptance.contentRef)
           ).toString('utf8');
           const whole = convertToFunctionResponse(name, callId, [{ text }]);
+          // The same fit discipline as the live arm: the answer still must
+          // land, folded to the inline bound with its marker instead of
+          // erroring the recovered Turn — the full bytes stay on the
+          // acceptance record, and the fit predicate, not an estimate,
+          // measures the fold.
+          let fitted: Part[] | undefined;
           if (
-            input.messageFitsInline !== undefined &&
-            !input.messageFitsInline('tool_result', whole, 'recovered')
+            input.messageFitsInline === undefined ||
+            input.messageFitsInline('tool_result', whole, 'recovered')
           ) {
+            fitted = whole;
+          } else {
+            const marker =
+              '\n… (truncated: the full result is on the acceptance record)';
+            for (
+              let head = Math.floor(text.length / 2);
+              head > 0 && fitted === undefined;
+              head = Math.floor(head / 2)
+            ) {
+              const folded = convertToFunctionResponse(name, callId, [
+                { text: text.slice(0, head) + marker },
+              ]);
+              if (input.messageFitsInline('tool_result', folded, 'recovered'))
+                fitted = folded;
+            }
+          }
+          if (fitted === undefined)
             throw new Error(
               'Admitted child agent result cannot be recorded inline.',
             );
-          }
-          await writeFold(whole);
+          await writeFold(fitted);
           await children.markAccepted(runId);
           input.consume?.(runId);
           break;
@@ -5525,6 +5547,19 @@ export function registerHostedHarnessSessionRoutes(
             cwd: session.cwd,
             children: session.childAgents,
             signal: session.active?.abort.signal,
+            messageFitsInline: (type, parts, model) =>
+              Buffer.byteLength(
+                JSON.stringify(
+                  record(session, sessionId, type, null, {
+                    daemonPromptId: promptId,
+                    model,
+                    message: {
+                      role: type === 'assistant' ? 'model' : 'user',
+                      parts,
+                    },
+                  }),
+                ),
+              ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
             consume: (childRunId) => session.childConsumption.add(childRunId),
           });
         }
