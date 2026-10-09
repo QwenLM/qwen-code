@@ -51,7 +51,11 @@ function tool(rawInput: unknown, rawOutput: unknown): TrajectoryToolRow {
   };
 }
 
-async function mount(row: TrajectoryRow, language: 'en' | 'zh-CN' = 'en') {
+async function mount(
+  row: TrajectoryRow,
+  language: 'en' | 'zh-CN' = 'en',
+  filterProps: { hiddenByFilter?: boolean; onClearFilter?: () => void } = {},
+) {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -65,6 +69,7 @@ async function mount(row: TrajectoryRow, language: 'en' | 'zh-CN' = 'en') {
         <I18nProvider language={language}>
           <TrajectoryInspector
             row={next}
+            {...filterProps}
             title="Record"
             hiddenByCollapse={false}
             onReveal={() => {}}
@@ -79,6 +84,22 @@ async function mount(row: TrajectoryRow, language: 'en' | 'zh-CN' = 'en') {
   await update(row);
   return { container, update };
 }
+
+it('keeps the selected output while a filter hides its record', async () => {
+  const onClearFilter = vi.fn();
+  const { container } = await mount(tool({}, 'original output'), 'en', {
+    hiddenByFilter: true,
+    onClearFilter,
+  });
+  expect(container.textContent).toContain(
+    'This record does not match the current filters.',
+  );
+  await click(container, 'Output');
+  expect(container.querySelector('pre')?.textContent).toBe('original output');
+  await click(container, 'Clear filters');
+  expect(onClearFilter).toHaveBeenCalledTimes(1);
+  expect(container.querySelector('pre')?.textContent).toBe('original output');
+});
 
 async function render(row: TrajectoryRow, language: 'en' | 'zh-CN' = 'en') {
   return (await mount(row, language)).container;
