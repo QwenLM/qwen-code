@@ -11889,8 +11889,6 @@ describe('LlmChat', async () => {
     /** A per-tool-layer spill envelope whose recovery pointer sits at the front. */
     const spillEnvelope = (n: number) =>
       `<persisted-output>\nOutput too large (512 KB). Full output saved to: /home/runner/.qwen/tmp/project-temp-dir/shell_${'a'.repeat(12)}${n}.log\nFull output sha256: ${'f'.repeat(64)}\nNote: this file may be cleaned up after 24 hours.\n\nPreview (up to 2100 chars):\n${'p'.repeat(1_900)}\n</persisted-output>`;
-    const SPILL_PATH_PREFIX =
-      'Full output saved to: /home/runner/.qwen/tmp/project-temp-dir/shell_';
     const reportUsage = async (promptTokenCount: number, target = chat) => {
       mockStreamsOnce(
         textStream('ok', {
@@ -11909,8 +11907,8 @@ describe('LlmChat', async () => {
       expect(resultChars(1)).toBeLessThan(12_000);
       // The destroyed middle chars are only worth it if the shrink buys
       // admission: the send the model receives has to estimate below the auto
-      // trigger. Asserted here only — in the floor band the budget may
-      // legitimately overshoot and the send crosses `auto` anyway.
+      // trigger. A floor that still crosses auto is retained only when the
+      // aggregate-only request would reach the hard tier.
       expect(
         vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
           ?.precomputedEffectiveTokens,
@@ -11960,30 +11958,42 @@ describe('LlmChat', async () => {
       expect(resultChars(1)).toBeLessThanOrEqual(30_000);
     });
 
-    it('keeps every parallel result whole when the floor covers the batch', async () => {
-      // Floor band: 4,000 characters per result across eight results, so all of
-      // them fit and none is replaced by a bare stub that drops its spill path.
+    it('preserves parallel results when the floor still admits real compaction', async () => {
       await reportUsage(849_500);
-      await sendDrain(
-        [0, 1, 2, 3, 4, 5, 6, 7].map((n) =>
-          fnResponse(
-            'shell',
-            { output: `${spillEnvelope(n)}${'x'.repeat(18_000)}` },
-            `spilled-${n}`,
-          ),
-        ),
-        'second',
+      vi.mocked(chat.tryCompress).mockRestore();
+      const admission = new Error('stop after real PreCompact admission');
+      const firePreCompactEvent = vi.fn().mockRejectedValue(admission);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        firePreCompactEvent,
+        isManaged: () => true,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+      const compress = vi.spyOn(ChatCompressionService.prototype, 'compress');
+      const outputs = Array.from(
+        { length: 8 },
+        (_, n) => `${spillEnvelope(n)}${'x'.repeat(18_000)}`,
       );
-      // MIN_PRESSURE_TOOL_OUTPUT_CHARS x 8 results: the floor is per result, so
-      // the whole batch fits and every spill pointer survives.
-      expect(resultChars(1)).toBe(32_000);
+      await expect(
+        sendDrain(
+          outputs.map((output, n) =>
+            fnResponse('shell', { output }, `spilled-${n}`),
+          ),
+          'second',
+        ),
+      ).rejects.toBe(admission);
+      // The real gate runs; the hook stops before any summary/model request.
+      const pending = compress.mock.calls.at(-1)?.[1];
       expect(
-        resultOutputs(1).every((output) => output.includes(SPILL_PATH_PREFIX)),
-      ).toBe(true);
+        pending?.pendingUserMessage?.parts?.map(
+          (part) => part.functionResponse?.response?.['output'],
+        ),
+      ).toEqual(outputs);
+      expect(pending?.precomputedEffectiveTokens).toBeGreaterThan(850_000);
+      expect(pending?.precomputedEffectiveTokens).toBeLessThan(977_000);
+      expect(firePreCompactEvent).toHaveBeenCalledOnce();
     });
 
-    it('counts a result carrying media against the per-result floor', async () => {
-      await reportUsage(NEAR_AUTO);
+    it('preserves media and text when their floor still crosses auto', async () => {
+      await reportUsage(847_500);
       await sendDrain(
         [
           {
@@ -12000,12 +12010,34 @@ describe('LlmChat', async () => {
         ],
         'second',
       );
-      // Only the media payload is charged to the headroom: the text beside it is
-      // shortened like any other result, so both results keep the floor.
-      expect(resultChars(1)).toBe(8_000);
+      // Media leaves too little headroom for both floors; the aggregate-only
+      // candidate fits below hard, so compaction receives the full results.
+      expect(resultChars(1)).toBe(40_000);
       expect(resultOutputs(1).map((output) => output.length)).toEqual([
-        4_000, 4_000,
+        20_000, 20_000,
       ]);
+      expect(
+        vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
+          ?.precomputedEffectiveTokens,
+      ).toBeGreaterThan(850_000);
+      expect(
+        (requestAt(1).contents as Content[])
+          .flatMap((entry) => entry.parts ?? [])
+          .find((part) => part.functionResponse?.id === 'media-result')
+          ?.functionResponse?.parts,
+      ).toEqual([{ inlineData: { mimeType: 'image/png', data: 'BASE64' } }]);
+    });
+
+    it('keeps the floor when the aggregate-only request would reach hard', async () => {
+      mockGeneratorConfig({ contextWindowSize: 32_768 });
+      await reportUsage(27_010);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBe(4_000);
+      const effectiveTokens = vi
+        .mocked(chat.tryCompress)
+        .mock.calls.at(-1)?.[3]?.precomputedEffectiveTokens;
+      expect(effectiveTokens).toBeGreaterThan(27_852.8);
+      expect(effectiveTokens).toBeLessThan(30_852.8);
     });
 
     it('invalidates the file read cache when the send guard cuts the batch', async () => {
