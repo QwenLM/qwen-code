@@ -661,6 +661,36 @@ describe('useTextBuffer', () => {
       expect(getBufferState(result).text).toBe(`@${filePath} `);
     });
 
+    it('should separate a pasted path from the word the cursor sits in', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({ viewport, isValidPath: () => true }),
+      );
+      const filePath = '/path/to/a/valid/file.txt';
+      act(() => result.current.insert('word'));
+      act(() => result.current.insert(filePath, { paste: true }));
+      expect(getBufferState(result).text).toBe(`word @${filePath} `);
+    });
+
+    it('should read the character before the cursor by code point', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({ viewport, isValidPath: () => true }),
+      );
+      const filePath = '/path/to/a/valid/file.txt';
+      act(() => result.current.insert('🙂word'));
+      act(() => result.current.insert(filePath, { paste: true }));
+      expect(getBufferState(result).text).toBe(`🙂word @${filePath} `);
+    });
+
+    it('should separate a pasted path after a trailing backslash', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({ viewport, isValidPath: () => true }),
+      );
+      const filePath = '/path/to/a/valid/file.txt';
+      act(() => result.current.insert('see C:\\proj\\'));
+      act(() => result.current.insert(filePath, { paste: true }));
+      expect(getBufferState(result).text).toBe(`see C:\\proj\\ @${filePath} `);
+    });
+
     it('should not prepend @ to an invalid file path on insert', () => {
       const { result } = renderHook(() =>
         useTextBuffer({ viewport, isValidPath: () => false }),

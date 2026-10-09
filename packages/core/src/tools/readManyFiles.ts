@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import type {
   FileType,
@@ -24,6 +25,8 @@ import {
 import { hasVerifiableInode } from '../utils/file-identity.js';
 import { getFolderStructure } from '../utils/getFolderStructure.js';
 import { openNoFollow } from '../utils/no-follow-open.js';
+
+const debugLogger = createDebugLogger('READ_MANY_FILES');
 
 /**
  * Options for reading multiple files.
@@ -88,6 +91,35 @@ export interface FileReadInfo {
 }
 
 /**
+ * Why a validated reference produced neither content nor a file entry.
+ * `identity-changed` is the security drop (the target was replaced between
+ * validation and the read); `snapshot-failed` is environmental (ENOSPC,
+ * read-only TMPDIR, EMFILE); `not-validated` means the caller supplied an
+ * identity map that does not cover the path; `unreadable` means the identity
+ * check could not complete, or the read itself failed.
+ */
+export type ReadManyFilesDropReason =
+  | 'not-validated'
+  | 'identity-changed'
+  | 'snapshot-failed'
+  | 'unreadable';
+
+/**
+ * A reference that was dropped without producing content, reported so the
+ * caller can tell the user instead of leaving the drop silent (#8226).
+ */
+export interface ReadManyFilesDroppedFile {
+  /** Caller-facing label for the reference. */
+  path: string;
+  /**
+   * Canonical path the drop was decided on. Callers key their own
+   * bookkeeping by it, since one canonical path can carry several labels.
+   */
+  canonicalPath: string;
+  reason: ReadManyFilesDropReason;
+}
+
+/**
  * Result from reading multiple files.
  */
 export interface ReadManyFilesResult {
@@ -103,6 +135,12 @@ export interface ReadManyFilesResult {
    * Used for recording each file read as a separate tool result.
    */
   files: FileReadInfo[];
+
+  /**
+   * References that produced neither content nor a {@link FileReadInfo},
+   * with the reason each was dropped.
+   */
+  dropped: ReadManyFilesDroppedFile[];
 
   /**
    * Error message if an error occurred during file search.
@@ -150,17 +188,36 @@ export async function readManyFiles(
   const seenFiles = new Set<string>();
   const contentParts: Part[] = [];
   const files: FileReadInfo[] = [];
+  const dropped: ReadManyFilesDroppedFile[] = [];
+
+  const dropReference = (
+    path: string,
+    reason: ReadManyFilesDropReason,
+    canonicalPath: string,
+  ): void => {
+    dropped.push({ path, canonicalPath, reason });
+    debugLogger.warn(`Dropped ${path} (${reason})`);
+  };
 
   try {
     const projectRoot = config.getProjectRoot();
 
     for (const rawPattern of inputPatterns) {
       signal?.throwIfAborted();
-      const normalizedPattern = rawPattern.replace(/\\/g, '/');
+      // Separator normalization exists for Windows-style patterns. An
+      // absolute POSIX path may contain a literal backslash, and rewriting
+      // it here would miss the caller's identity and display maps, which are
+      // keyed by the realpath.
+      const normalizedPattern = path.isAbsolute(rawPattern)
+        ? rawPattern
+        : rawPattern.replace(/\\/g, '/');
       const fullPath = path.resolve(projectRoot, normalizedPattern);
       const displayPath = displayPaths?.get(fullPath) ?? fullPath;
       const validatedIdentity = validatedPathIdentities?.get(fullPath);
-      if (validatedPathIdentities && !validatedIdentity) continue;
+      if (validatedPathIdentities && !validatedIdentity) {
+        dropReference(displayPath, 'not-validated', fullPath);
+        continue;
+      }
       if (validatedIdentity && !hasVerifiableInode(validatedIdentity.ino)) {
         if (!seenFiles.has(fullPath)) {
           seenFiles.add(fullPath);
@@ -173,11 +230,15 @@ export async function readManyFiles(
         }
         continue;
       }
-      if (
-        validatedIdentity &&
-        !(await matchesValidatedPathIdentity(fullPath, validatedIdentity))
-      ) {
-        continue;
+      if (validatedIdentity) {
+        const identity = await matchesValidatedPathIdentity(
+          fullPath,
+          validatedIdentity,
+        );
+        if (identity !== 'match') {
+          dropReference(displayPath, dropReasonForIdentity(identity), fullPath);
+          continue;
+        }
       }
       const stats = fs.existsSync(fullPath) ? fs.statSync(fullPath) : null;
 
@@ -188,14 +249,30 @@ export async function readManyFiles(
           displayPath,
           signal,
         );
-        if (
-          validatedIdentity &&
-          !(await matchesValidatedPathIdentity(fullPath, validatedIdentity))
-        ) {
-          continue;
+        if (validatedIdentity) {
+          const identity = await matchesValidatedPathIdentity(
+            fullPath,
+            validatedIdentity,
+          );
+          if (identity !== 'match') {
+            dropReference(
+              displayPath,
+              dropReasonForIdentity(identity),
+              fullPath,
+            );
+            continue;
+          }
         }
         contentParts.push(...dirParts);
         files.push(info);
+        continue;
+      }
+
+      // A validated reference that is neither a directory nor a regular file
+      // (a FIFO, a socket, or a path that vanished) reaches no branch below,
+      // so report it here rather than letting it disappear.
+      if (validatedIdentity && !stats?.isFile()) {
+        dropReference(displayPath, 'identity-changed', fullPath);
         continue;
       }
 
@@ -215,14 +292,28 @@ export async function readManyFiles(
             (standardFileSystem || fileType !== 'text') &&
             stats.size <= SNAPSHOT_MAX_SIZE_BYTES;
         }
-        const snapshot = shouldSnapshot
+        const snapshotResult = shouldSnapshot
           ? await snapshotValidatedFile(fullPath, validatedIdentity!, signal)
           : undefined;
-        if (shouldSnapshot && !snapshot) continue;
-        let readResult;
+        if (shouldSnapshot && !snapshotResult?.ok) {
+          dropReference(
+            displayPath,
+            snapshotResult?.reason === 'identity-changed'
+              ? 'identity-changed'
+              : 'snapshot-failed',
+            fullPath,
+          );
+          continue;
+        }
+        const snapshot = snapshotResult?.ok ? snapshotResult : undefined;
+        let readResult: FileReadOutcome;
         const validateAfterRead =
           validatedIdentity && !snapshot && !shouldUseTextHandle
-            ? () => matchesValidatedPathIdentity(fullPath, validatedIdentity)
+            ? async () =>
+                (await matchesValidatedPathIdentity(
+                  fullPath,
+                  validatedIdentity,
+                )) === 'match'
             : undefined;
         if (shouldUseTextHandle) {
           try {
@@ -237,7 +328,10 @@ export async function readManyFiles(
           } catch (error) {
             if (signal?.aborted || isAbortError(error)) throw error;
             const errorMessage = getErrorMessage(error);
-            readResult = createFileReadErrorResult(displayPath, errorMessage);
+            readResult = {
+              ok: true,
+              ...createFileReadErrorResult(displayPath, errorMessage),
+            };
           }
         } else {
           try {
@@ -258,9 +352,11 @@ export async function readManyFiles(
             await snapshot?.cleanup();
           }
         }
-        if (readResult) {
+        if (readResult.ok) {
           contentParts.push(...readResult.contentParts);
           files.push(readResult.info);
+        } else {
+          dropReference(displayPath, readResult.reason, fullPath);
         }
       }
     }
@@ -272,6 +368,7 @@ export async function readManyFiles(
     return {
       contentParts: [errorMessage],
       files: [],
+      dropped,
       error: errorMessage,
     };
   }
@@ -285,8 +382,17 @@ export async function readManyFiles(
     });
   }
 
-  return { contentParts: contentParts as PartListUnion, files };
+  return { contentParts: contentParts as PartListUnion, files, dropped };
 }
+
+/**
+ * What a validated read produced. A refusal carries the cause so the drop the
+ * caller reports names what actually happened: a proven identity change, or a
+ * check that could not complete.
+ */
+type FileReadOutcome =
+  | { ok: true; contentParts: Part[]; info: FileReadInfo }
+  | { ok: false; reason: 'identity-changed' | 'unreadable' };
 
 async function readValidatedTextFileContent(
   config: Config,
@@ -295,7 +401,7 @@ async function readValidatedTextFileContent(
   preserveUnsupportedImage = false,
   signal: AbortSignal | undefined,
   displayPath: string,
-): ReturnType<typeof readFileContent> {
+): Promise<FileReadOutcome> {
   // Where O_NOFOLLOW does not exist (Windows) the helper compensates with
   // an lstat/open/fstat identity check instead of collapsing to a plain
   // open that follows symlinks (#8227); the validated-identity re-check
@@ -304,7 +410,7 @@ async function readValidatedTextFileContent(
   try {
     const stats = await source.stat();
     if (!fileStatsMatchValidatedIdentity(stats, expected)) {
-      return null;
+      return { ok: false, reason: 'identity-changed' };
     }
     return await readFileContent(
       config,
@@ -326,17 +432,27 @@ async function readValidatedTextFileContent(
   }
 }
 
+type IdentityCheck = 'match' | 'mismatch' | 'inconclusive';
+
+/** A check that could not complete is reported as unreadable, not as a swap. */
+function dropReasonForIdentity(check: IdentityCheck): ReadManyFilesDropReason {
+  return check === 'mismatch' ? 'identity-changed' : 'unreadable';
+}
+
 async function matchesValidatedPathIdentity(
   filePath: string,
   expected: ReadManyFilesPathIdentity,
-): Promise<boolean> {
+): Promise<IdentityCheck> {
   try {
     const canonicalPath = await fs.promises.realpath(filePath);
-    if (canonicalPath !== filePath) return false;
+    if (canonicalPath !== filePath) return 'mismatch';
     const stats = await fs.promises.stat(canonicalPath);
-    return statsMatchValidatedIdentity(stats, expected);
-  } catch {
-    return false;
+    return statsMatchValidatedIdentity(stats, expected) ? 'match' : 'mismatch';
+  } catch (error) {
+    debugLogger.warn(
+      `Identity check could not complete for ${filePath}: ${getErrorMessage(error)}`,
+    );
+    return 'inconclusive';
   }
 }
 
@@ -358,18 +474,20 @@ function fileStatsMatchValidatedIdentity(
   return stats.isFile() && statsMatchValidatedIdentity(stats, expected);
 }
 
-async function snapshotValidatedFile(
-  filePath: string,
-  expected: ReadManyFilesPathIdentity,
-  signal?: AbortSignal,
-): Promise<
+type SnapshotOutcome =
   | {
+      ok: true;
       filePath: string;
       stats: fs.Stats;
       cleanup: () => Promise<void>;
     }
-  | undefined
-> {
+  | { ok: false; reason: 'identity-changed' | 'too-large' | 'failed' };
+
+async function snapshotValidatedFile(
+  filePath: string,
+  expected: ReadManyFilesPathIdentity,
+  signal?: AbortSignal,
+): Promise<SnapshotOutcome> {
   let snapshotDir: string | undefined;
   let result:
     | { filePath: string; stats: fs.Stats; cleanup: () => Promise<void> }
@@ -382,10 +500,16 @@ async function snapshotValidatedFile(
     try {
       const stats = await source.stat();
       if (!fileStatsMatchValidatedIdentity(stats, expected)) {
-        return undefined;
+        debugLogger.warn(
+          `Snapshot refused for ${filePath}: identity changed since validation`,
+        );
+        return { ok: false, reason: 'identity-changed' };
       }
       if (stats.size > SNAPSHOT_MAX_SIZE_BYTES) {
-        return undefined;
+        debugLogger.warn(
+          `Snapshot refused for ${filePath}: ${stats.size} bytes exceeds the ${SNAPSHOT_MAX_SIZE_BYTES}-byte snapshot cap`,
+        );
+        return { ok: false, reason: 'too-large' };
       }
 
       snapshotDir = await fs.promises.mkdtemp(
@@ -409,7 +533,12 @@ async function snapshotValidatedFile(
             Math.min(buffer.length, remaining),
             sourcePosition,
           );
-          if (bytesRead === 0) return undefined;
+          if (bytesRead === 0) {
+            debugLogger.warn(
+              `Snapshot refused for ${filePath}: source ended ${stats.size - sourcePosition} bytes early`,
+            );
+            return { ok: false, reason: 'identity-changed' };
+          }
           let written = 0;
           while (written < bytesRead) {
             const writeResult = await target.write(
@@ -428,7 +557,12 @@ async function snapshotValidatedFile(
           1,
           sourcePosition,
         );
-        if (extraBytes !== 0) return undefined;
+        if (extraBytes !== 0) {
+          debugLogger.warn(
+            `Snapshot refused for ${filePath}: source grew while it was copied`,
+          );
+          return { ok: false, reason: 'identity-changed' };
+        }
       } finally {
         await target.close();
       }
@@ -438,14 +572,17 @@ async function snapshotValidatedFile(
         cleanup: () =>
           fs.promises.rm(snapshotDir!, { recursive: true, force: true }),
       };
-      return result;
+      return { ok: true, ...result };
     } finally {
       await source.close();
     }
   } catch (error) {
     result = undefined;
     if (signal?.aborted || isAbortError(error)) throw error;
-    return undefined;
+    debugLogger.warn(
+      `Snapshot failed for ${filePath}: ${getErrorMessage(error)}`,
+    );
+    return { ok: false, reason: 'failed' };
   } finally {
     if (snapshotDir && !result) {
       await fs.promises.rm(snapshotDir, { recursive: true, force: true });
@@ -513,7 +650,7 @@ async function readFileContent(
     'textFileHandle' | 'textFileStats' | 'textFileMaxScanBytes' | 'fileType'
   >,
   canonicalPath?: string,
-): Promise<{ contentParts: Part[]; info: FileReadInfo } | null> {
+): Promise<FileReadOutcome> {
   try {
     const fileReadResult = await processSingleFileContent(filePath, config, {
       preserveUnsupportedImage,
@@ -526,7 +663,7 @@ async function readFileContent(
       fileReadResult.stats = validatedStats;
     }
     if (validateAfterRead && !(await validateAfterRead())) {
-      return null;
+      return { ok: false, reason: 'identity-changed' };
     }
 
     const prefixText: Part = { text: `\nContent from ${displayPath}:\n` };
@@ -541,6 +678,7 @@ async function readFileContent(
           ? fileReadResult.llmContent
           : `Failed to read ${displayPath}: ${fileReadResult.error}`;
       return {
+        ok: true,
         contentParts: [prefixText, { text: errorText }],
         info: {
           filePath: displayPath,
@@ -577,6 +715,7 @@ async function readFileContent(
       }
       const contentParts: Part[] = [prefixText, { text: fileContentForLlm }];
       return {
+        ok: true,
         contentParts,
         info: {
           filePath: displayPath,
@@ -594,6 +733,7 @@ async function readFileContent(
       ? [prefixText, ...(mediaParts as Part[])]
       : [prefixText, mediaParts];
     return {
+      ok: true,
       contentParts,
       info: {
         filePath: displayPath,
@@ -605,7 +745,8 @@ async function readFileContent(
     if (signal?.aborted || isAbortError(error)) {
       throw error;
     }
-    return null;
+    debugLogger.warn(`Read failed for ${filePath}: ${getErrorMessage(error)}`);
+    return { ok: false, reason: 'unreadable' };
   }
 }
 
