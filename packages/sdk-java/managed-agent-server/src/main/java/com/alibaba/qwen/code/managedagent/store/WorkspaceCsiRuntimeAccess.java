@@ -225,13 +225,16 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
             Runnable retirementFence = () -> {
                 storage.verifyRegistration(registration);
                 var reserved = storage.lockPublication(bindings, binding);
-                if (reserved.retirement() != null || reserved.binding().getVersion() != binding.getVersion()) throw unavailable();
+                if (reserved.retirement() != null || reserved.binding().getVersion() != binding.getVersion()) {
+                    throw unavailable();
+                }
             };
             Map<String, Object> evidence;
             String action = (String) requestBody.get("action");
-            if ("prepare".equals(action)) evidence = JdbcCsiActivationAdmission.readPreparation(original, guard, head,
-                    JSON.valueToTree(requestBody.get("subject")), retirementFence);
-            else {
+            if ("prepare".equals(action)) {
+                evidence = JdbcCsiActivationAdmission.readPreparation(original, guard, head,
+                        JSON.valueToTree(requestBody.get("subject")), retirementFence);
+            } else {
                 retirementFence.run();
                 evidence = Map.of("kind", "ready");
             }
