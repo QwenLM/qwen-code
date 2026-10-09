@@ -5,6 +5,7 @@ import { cleanupReact, mountReact } from '../test/reactHarness';
 import {
   DaemonTargetProvider,
   useDaemonTarget,
+  useInterceptHostLinks,
   type DaemonTargetController,
 } from './daemon-target';
 
@@ -21,6 +22,7 @@ function mountController(): { current: DaemonTargetController | undefined } {
   };
   function Probe() {
     ref.current = useDaemonTarget();
+    useInterceptHostLinks();
     return null;
   }
   mountReact(
@@ -93,6 +95,49 @@ describe('DaemonTargetProvider (#13727)', () => {
     expect(new URL(window.location.href).searchParams.get('daemon')).toBe(
       'https://focus.example',
     );
+  });
+
+  it('turns a covered-host anchor click into an in-app focus of that session', () => {
+    const ref = mountController();
+    const anchor = document.createElement('a');
+    anchor.href =
+      '/session/s-123?daemon=' + encodeURIComponent('https://alpha.example');
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true });
+    act(() => {
+      document.body.appendChild(anchor);
+      anchor.dispatchEvent(click);
+    });
+    expect(click.defaultPrevented).toBe(true);
+    expect(ref.current?.activeOrigin).toBe('https://alpha.example');
+    expect(ref.current?.pendingHandoff).toEqual({
+      kind: 'open',
+      origin: 'https://alpha.example',
+      sessionId: 's-123',
+    });
+    anchor.remove();
+  });
+
+  it('leaves uncovered, off-origin, and same-daemon links alone', () => {
+    mountController();
+    for (const href of [
+      'https://other.example/session/s-1?daemon=https%3A%2F%2Falpha.example',
+      '/session/s-2?daemon=https%3A%2F%2Fstranger.example',
+      '/session/s-3?daemon=https%3A%2F%2Ffocus.example',
+      '/session/s-4',
+    ]) {
+      const anchor = document.createElement('a');
+      anchor.href = href;
+      const click = new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+      });
+      act(() => {
+        document.body.appendChild(anchor);
+        anchor.dispatchEvent(click);
+      });
+      expect(click.defaultPrevented).toBe(false);
+      anchor.remove();
+    }
   });
 
   it('hands an intent across a focus switch exactly once', () => {

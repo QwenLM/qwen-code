@@ -237,7 +237,10 @@ import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { createTrajectoryPageLoader } from './trajectory/transcriptPageLoader';
 import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
 import { WorkspaceLocation } from './components/workspaces/WorkspaceLocation';
-import { useDaemonTargetOptional } from './config/daemon-target';
+import {
+  useDaemonTargetOptional,
+  useInterceptHostLinks,
+} from './config/daemon-target';
 import { useFanoutOrigins, useHostFanout } from './config/host-fanout';
 import { SplitView } from './components/SplitView';
 import { ChevronLeftIcon, GaugeIcon, LayersIcon } from 'lucide-react';
@@ -3765,6 +3768,9 @@ export function App({
   // their live workspaces/sessions; embedded shells have no controller and
   // fan out to nothing.
   const daemonTarget = useDaemonTargetOptional();
+  // Same-origin links pointing at a connected host become in-app focus
+  // switches instead of document reloads (#13727).
+  useInterceptHostLinks();
   const fanoutOrigins = useFanoutOrigins();
   const { workspacesByOrigin, refreshAll: refreshAllHosts } =
     useHostFanout(fanoutOrigins);

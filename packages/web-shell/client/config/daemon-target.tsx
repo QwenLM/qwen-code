@@ -217,6 +217,60 @@ export function useDaemonTargetOptional(): DaemonTargetController | undefined {
 }
 
 /**
+ * Intercept same-origin anchor clicks that point at another connected host
+ * (#13727): a transcript/session link with `?daemon=B` would otherwise
+ * hard-reload the document, losing all sidebar and composer state. When the
+ * target is inside the CSP-covered set the click becomes an in-app focus
+ * switch (open that session there); anything uncovered keeps the default
+ * navigation, which still re-serves the shell widened for the host.
+ */
+export function useInterceptHostLinks(): void {
+  const controller = useDaemonTargetOptional();
+  useEffect(() => {
+    if (!controller) return undefined;
+    const handler = (event: MouseEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey
+      ) {
+        return;
+      }
+      const anchor = (event.target as Element | null)?.closest?.('a[href]');
+      if (!anchor) return;
+      let url: URL;
+      try {
+        url = new URL(anchor.getAttribute('href') ?? '', window.location.href);
+      } catch {
+        return;
+      }
+      if (url.origin !== window.location.origin) return;
+      const raw = url.searchParams.get('daemon');
+      if (!raw) return; // Same-daemon links: the SPA router already owns them.
+      const daemon = getAllowedDaemonOrigin(raw);
+      if (!daemon || daemon === controller.activeOrigin) return;
+      if (!controller.coversOrigin(daemon)) return;
+      event.preventDefault();
+      const sessionMatch = url.pathname.match(/\/session\/([^/]+)/);
+      const sessionId = sessionMatch?.[1]
+        ? decodeURIComponent(sessionMatch[1])
+        : undefined;
+      controller.focusHostWithHandoff(
+        { origin: daemon },
+        sessionId
+          ? { kind: 'open', origin: daemon, sessionId }
+          : { kind: 'create', origin: daemon },
+      );
+    };
+    document.addEventListener('click', handler, true);
+    return () => document.removeEventListener('click', handler, true);
+  }, [controller]);
+}
+
+/**
  * Keep the URL's `fanout` params equal to the saved-host set minus the
  * focused daemon (which `?daemon=` already covers). Runs on mount, on host
  * catalog changes, on focus switches, on cross-tab storage writes, and when

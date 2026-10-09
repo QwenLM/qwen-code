@@ -1189,6 +1189,9 @@ const EN: Messages = {
   'workspaceHost.openHost': (v) => `Open ${v?.host ?? ''}`,
   'workspaceHost.statusOffline': 'offline',
   'workspaceHost.statusUnauthorized': 'unauthorized',
+  'workspaceHost.focused': 'connected',
+  'workspaceHost.focusedHint':
+    'This page is connected to this daemon — the chat runs against it.',
   'workspaceHost.offlineHint':
     'This host could not be reached; showing its last known projects.',
   'workspaceHost.unauthorizedHint':
@@ -5455,6 +5458,8 @@ const ZH: Messages = {
   'workspaceHost.openHost': (v) => `打开 ${v?.host ?? ''}`,
   'workspaceHost.statusOffline': '离线',
   'workspaceHost.statusUnauthorized': '未授权',
+  'workspaceHost.focused': '已连接',
+  'workspaceHost.focusedHint': '本页面正连到这台 daemon，会话在这里运行。',
   'workspaceHost.offlineHint':
     '无法连接这台主机，当前显示的是最近一次已知的项目。',
   'workspaceHost.unauthorizedHint':

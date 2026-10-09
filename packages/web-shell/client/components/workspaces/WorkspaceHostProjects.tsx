@@ -67,12 +67,20 @@ export function WorkspaceHostHeading() {
 }
 
 function CurrentHostHeading() {
+  const { t } = useI18n();
   const origin = useCurrentHostOrigin();
   const others = useOtherOrigins(origin);
   if (others.length === 0) return null;
   return (
     <div className={GROUP_LABEL_CLASS} title={origin}>
       <HostLabel origin={origin} />
+      <span
+        className={sectionStyles.badge}
+        data-testid="host-focused-badge"
+        title={t('workspaceHost.focusedHint')}
+      >
+        {t('workspaceHost.focused')}
+      </span>
     </div>
   );
 }
@@ -103,23 +111,32 @@ function useOpenHostedWorkspaceFlow(): (
 }
 
 /**
- * Live projects on the other hosts, grouped by host below the focused list.
- * Each group polls its own daemon; a host that drops offline or rejects the
- * saved credential keeps its last known projects with a muted status hint.
+ * Live projects on the other hosts, grouped by host among the focused one's
+ * rank (#13727): when `rankOf` is provided, every group carries its own
+ * flex order inside the sidebar's host container, so a focused switch keeps
+ * all groups in place. Each group polls its own daemon; a host that drops
+ * offline or rejects the saved credential keeps its last known projects
+ * with a muted status hint.
  */
 export function OtherHostProjects({
   onOpenHostSession,
+  rankOf,
 }: {
   onOpenHostSession?: OpenHostSessionHandler;
+  rankOf?: (origin: string) => number;
 }) {
   const enabled = useContext(WorkspaceHostsEnabled);
-  return enabled ? <OtherHosts onOpenHostSession={onOpenHostSession} /> : null;
+  return enabled ? (
+    <OtherHosts onOpenHostSession={onOpenHostSession} rankOf={rankOf} />
+  ) : null;
 }
 
 function OtherHosts({
   onOpenHostSession,
+  rankOf,
 }: {
   onOpenHostSession?: OpenHostSessionHandler;
+  rankOf?: (origin: string) => number;
 }) {
   const origin = useCurrentHostOrigin();
   const origins = useOtherOrigins(origin);
@@ -130,7 +147,10 @@ function OtherHosts({
   useHostFanout(origins);
   if (origins.length === 0) return null;
   return (
-    <div data-testid="other-host-projects">
+    <div
+      data-testid="other-host-projects"
+      style={rankOf ? { display: 'contents' } : undefined}
+    >
       {origins.map((hostOrigin) => (
         <FanoutHostGroup
           key={hostOrigin}
@@ -140,6 +160,7 @@ function OtherHosts({
             NO_SAVED_WORKSPACES
           }
           onOpenHostSession={onOpenHostSession}
+          order={rankOf?.(hostOrigin)}
         />
       ))}
     </div>
@@ -152,10 +173,13 @@ function FanoutHostGroup({
   origin,
   saved,
   onOpenHostSession,
+  order,
 }: {
   origin: string;
   saved: WorkspaceHost['workspaces'];
   onOpenHostSession?: OpenHostSessionHandler;
+  /** Flex paint order inside the ranked host list (#13727). */
+  order?: number;
 }) {
   const { t } = useI18n();
   const { workspaces, status, generation, refresh } =
@@ -202,7 +226,7 @@ function FanoutHostGroup({
   const snapshotWorkspaces = liveWorkspaces ?? saved;
 
   return (
-    <div>
+    <div style={order !== undefined ? { order } : undefined}>
       <button
         type="button"
         className={`${GROUP_LABEL_CLASS} hover:text-foreground`}
