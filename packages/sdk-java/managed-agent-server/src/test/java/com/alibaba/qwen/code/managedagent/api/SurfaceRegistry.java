@@ -549,8 +549,9 @@ public enum SurfaceRegistry {
          * admits OPERATOR or above, or the Session's recorded owner,
          * under no submitter shape gate — only the read grant, an ACTIVE
          * Session ({@code 409 session_inactive} otherwise) and a pending
-         * Action; on the widened OPERATOR arm it additionally requires
-         * the Session's creator-keyed execution facts. Below the read
+         * Action; every bound admission additionally certifies the
+         * Session's creator-keyed execution facts, whichever arm
+         * admitted the caller. Below the read
          * grant: {@code 404 session_not_found}; a readable actor below
          * OPERATOR gets {@code 403 session_operation_forbidden} on the
          * Session families and {@code 403 action_forbidden} on respond;
@@ -564,17 +565,13 @@ public enum SurfaceRegistry {
          */
         OPERATOR,
         /**
-         * Today's creator families whose slice-C destinations differ:
-         * lifecycle (close, archive, unarchive, delete — D4's OWNER),
-         * cwd change (D4's OPERATOR) and Action respond (D4's OPERATOR,
-         * same class here because the current code admits the recorded
-         * creator for all three). Below the Workspace read grant: {@code
-         * 404}; a readable non-creator gets {@code 403
-         * session_operation_forbidden} on lifecycle and cwd, {@code 403
-         * action_forbidden} on respond; cwd also requires a workspace-bound
-         * Session and a trusted actor. The legacy arm of lifecycle and
-         * respond is tenant-wide (respond additionally requires a recorded
-         * creator or create command).
+         * The lifecycle family (close, archive, unarchive and delete —
+         * D4's OWNER): the Session's recorded owner ({@code
+         * owner_actor_key}, falling back to the creator records for
+         * Sessions written before V40) with a current read grant is
+         * admitted. Below the Workspace read grant: {@code 404
+         * session_not_found}; a readable non-owner gets {@code 403
+         * session_operation_forbidden}. The legacy arm is tenant-wide.
          */
         OWNER,
         /**

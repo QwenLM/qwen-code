@@ -593,7 +593,7 @@ class ManagedWorkspaceAdmissionTest {
     }
 
     // The pre-V40 fallback: a bound Session whose owner and creator
-    // columns are both NULL (the state the V48 backfill leaves rows it
+    // columns are both NULL (the state the V53 backfill leaves rows it
     // cannot attribute) is owned through its create-command record alone.
     @Test
     void aPreV40BoundSessionFallsBackToTheCreateCommandOwner() {
