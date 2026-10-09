@@ -115,7 +115,10 @@ function sequentialInput(
   const output = result.output.hookSpecificOutput;
   return {
     ...effective,
-    ...(output?.['updatedInput'] && typeof output['updatedInput'] === 'object'
+    // PreToolUse replacements are validated by the shared helper above.
+    ...(event !== HookEventName.PreToolUse &&
+    output?.['updatedInput'] &&
+    typeof output['updatedInput'] === 'object'
       ? { tool_input: output['updatedInput'] }
       : {}),
     ...(typeof output?.['updatedPrompt'] === 'string'
@@ -378,6 +381,15 @@ export class HostedHookSession {
       this.recoveredBrokers.delete(id);
       this.releasedOwners.add(id);
     }
+  }
+
+  /**
+   * Whether this Session's Hook owner currently holds the Workspace
+   * mount — the tool turn must not mistake that hold for its own
+   * acquisition-free state when a foreground child would need the mount.
+   */
+  get mountHeld(): boolean {
+    return this.acquired;
   }
 
   get hasPendingOperations(): boolean {

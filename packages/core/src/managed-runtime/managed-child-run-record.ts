@@ -507,9 +507,13 @@ function parseChildAgentRun(value: unknown): ChildAgentRun {
   const childSessionId = nullable(body.childSessionId, (each) =>
     id(each, 'childSessionId'),
   );
-  // The Session exists only once the control plane admitted its creation.
+  // The Session exists once the control plane admitted its creation, and
+  // the mint alone never dispatches: a never-started proof may name the
+  // Session it minted (the mint is exactly what survives the create→
+  // attach window), everything before that proof may not.
   if (
     childSessionId !== null &&
+    run.execution !== 'not_started_proven' &&
     UNSTARTED_EXECUTION_STATES.includes(run.execution)
   ) {
     fail('Child run childSessionId needs its admitted creation dispatch.');
@@ -522,7 +526,13 @@ function parseChildAgentRun(value: unknown): ChildAgentRun {
   }
   // The Session the child runs in is hosted by a Runtime binding, set with
   // the dispatch and unaddable once dispatched, like the definition pin.
-  if (childSessionId !== null && run.runtime === null) {
+  // The never-started proof is the one terminal that has no dispatch to
+  // host from: minted, never dispatched, so never bound.
+  if (
+    childSessionId !== null &&
+    run.runtime === null &&
+    run.execution !== 'not_started_proven'
+  ) {
     fail('Child run childSessionId needs the Runtime binding that hosts it.');
   }
   // A dispatch that never started (not_started_proven) may carry no
@@ -597,7 +607,7 @@ function parseChildAgentRun(value: unknown): ChildAgentRun {
   }
   if (
     stopReason === 'creation_failed' &&
-    (run.execution !== 'not_started_proven' || childSessionId !== null)
+    run.execution !== 'not_started_proven'
   ) {
     fail('Child run creation_failed needs a creation that never started.');
   }
