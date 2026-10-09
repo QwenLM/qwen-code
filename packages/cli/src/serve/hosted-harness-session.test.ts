@@ -2848,18 +2848,18 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 15_000 },
     );
-    // Two passes: adopt, one harmless status poll, adopt, a dying release
-    // (pending), then adopt, one harmless status poll, adopt, the
-    // completing release — exactly the affirmative release result the
-    // consume depends on.
+    // Two passes: the 409-refused adopt leaves nothing to stop (no poll),
+    // the release block's own adopt then meets a dying release (pending);
+    // the next pass repeats both adopts and the release completes —
+    // exactly the affirmative release result the consume depends on.
     expect(repair.order).toEqual([
       'acquire',
-      'status',
       'acquire',
       'release',
       'acquire',
       'release',
     ]);
+    expect(repair.order).not.toContain('status');
     expect(repair.order).not.toContain('cancel');
     const key = {
       tenantId: 'tenant',
@@ -2883,6 +2883,155 @@ describe('Hosted Harness no-tool session', () => {
     expect(refreshed.body.run.state).toBe('failed');
     expect(refreshed.body.run.execution).toBe('outcome_unknown');
     await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  }, 45_000);
+
+  it('settles the aftermath over a Broker that reports the wake session released, polling nothing', async () => {
+    const inputId = await prewriteAutomationParkedWakeSession();
+    const repair = mockRepairBroker();
+    // The lease is gone for good: the adopt refuses 409
+    // runtime_session_not_acquirable and every status poll would answer
+    // 404 runtime_session_not_found — the pair the real Broker answers
+    // for a released identity. The aftermath must not let that 404
+    // escape as a failed pass: nothing remains to stop, so it polls
+    // nothing, and the 409-aware release block completes the park.
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockImplementation(
+      () => {
+        repair.order.push('acquire');
+        return Promise.reject(
+          new HostedWorkspaceBrokerRejection(
+            409,
+            'runtime_session_not_acquirable',
+          ),
+        );
+      },
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockImplementation(
+      () => {
+        repair.order.push('status');
+        return Promise.reject(
+          new HostedWorkspaceBrokerRejection(404, 'runtime_session_not_found'),
+        );
+      },
+    );
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    // The classification's block is the verified starting point: only
+    // after it does the aftermath run, so the order assertions below
+    // read a settled, complete sequence, never one mid-flight.
+    await vi.waitFor(
+      async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: 15_000 },
+    );
+    await vi.waitFor(
+      async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 15_000 },
+    );
+    // One pass: the refused adopt stops nothing, the release block's own
+    // adopt tolerates the same 409, and the explicit release completes
+    // it. A single poll would have met the 404 above and wedged the
+    // Session behind a read that can never answer.
+    expect(repair.order).toEqual(['acquire', 'acquire', 'release']);
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const journal = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      key,
+    );
+    expect(
+      journal.events.some(
+        (event) =>
+          event.kind === 'turn.settled' && event.payload['turnId'] === inputId,
+      ),
+    ).toBe(true);
+    const refreshed = await authorize(
+      supertest(server).post(`/session/${SESSION_ID}/automations/operations`),
+    ).send({ operationId: randomUUID(), ...fireBody() });
+    expect(refreshed.status).toBe(202);
+    expect(refreshed.body.run.state).toBe('failed');
+    expect(refreshed.body.run.execution).toBe('outcome_unknown');
+    // The released-session answers are the probe's fixture, not the
+    // close path's: the delete below re-acquires the lease it hands
+    // back, so the Broker goes back to answering adoptable first.
+    vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockImplementation(
+      async function (this: HostedWorkspaceBroker) {
+        repair.order.push('acquire');
+        this.runtime = {
+          bindingId: 'binding',
+          generation: '1',
+          workspaceGeneration: '1',
+        };
+      },
+    );
+    vi.mocked(HostedWorkspaceBroker.prototype.status).mockResolvedValue({
+      state: 'settled',
+    } as never);
+    await vi.waitFor(
+      async () => {
+        const closed = await headers(
+          supertest(server).delete(`/session/${SESSION_ID}`),
+        );
+        expect(closed.status).toBe(204);
+      },
+      { timeout: 15_000 },
+    );
+    // The parked call's cancelled tool_result is durably paired with its
+    // call, and the checkpoint left await_runtime for good.
+    const reopened = await openManagedSession({
+      runtimeBaseDir: state.root,
+      transcriptPath: '',
+      sessionId: SESSION_ID,
+      sessionKey: key,
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      workerId: BOOT_ID,
+      activationLeaseDurationMs: 60_000,
+      journalStore: new LocalJsonlManagedSessionJournalStore({
+        runtimeBaseDir: state.root,
+        sessionId: SESSION_ID,
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+      }),
+      resourceStore: LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      }),
+    });
+    try {
+      const projected = await reopened.sink.project();
+      const cancelled = projected.filter(
+        (entry) =>
+          entry.type === 'tool_result' &&
+          entry.daemonPromptId === inputId &&
+          (entry.message?.parts ?? []).some(
+            (part) =>
+              part.functionResponse?.response?.['executionStatus'] ===
+              'cancelled',
+          ),
+      );
+      expect(cancelled).toHaveLength(1);
+      const checkpoint =
+        await createManagedHarnessHandle(reopened).ensureRunnable();
+      expect(checkpoint.continuation.phase).not.toBe('await_runtime');
+    } finally {
+      await reopened.close().catch(() => undefined);
+    }
   }, 45_000);
 
   it('repairs through the reconcile route while blocked, and reports once consumed', async () => {
@@ -3076,6 +3225,135 @@ describe('Hosted Harness no-tool session', () => {
     ).toBe(false);
     releaseClassify();
     repair.unlatch();
+    await vi.waitFor(
+      async () => {
+        const status = await authorize(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        );
+        expect(status.body.recoveryBlocked).toBe(false);
+      },
+      { timeout: 15_000 },
+    );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  }, 45_000);
+
+  it('refuses a prompt whose wake-park probe let the pump block the Session', async () => {
+    await prewriteAutomationParkedWakeSession();
+    const repair = mockRepairBroker();
+    repair.unlatch();
+    // The pump's first post-load classification hangs at its projection
+    // read: the prompt route's checkpoint probe must run first, while
+    // the Session is still unblocked.
+    const originalProject = ManagedSessionRecordSink.prototype.project;
+    let afterLoad = false;
+    let classificationHung = false;
+    let releaseClassify!: () => void;
+    const classifyGate = new Promise<void>((resolve) => {
+      releaseClassify = resolve;
+    });
+    vi.spyOn(ManagedSessionRecordSink.prototype, 'project').mockImplementation(
+      function (this: ManagedSessionRecordSink) {
+        if (afterLoad && !classificationHung) {
+          classificationHung = true;
+          return classifyGate.then(() => originalProject.call(this));
+        }
+        return originalProject.call(this);
+      },
+    );
+    // The route probe's checkpoint read hangs next, so the block lands
+    // strictly between the probe's start and its answer.
+    const originalAuthorization =
+      LocalManagedSessionAuthority.prototype.harnessRunAuthorization;
+    let probeHung = false;
+    let probedResolve!: () => void;
+    let releaseProbe!: () => void;
+    const probed = new Promise<void>((resolve) => {
+      probedResolve = resolve;
+    });
+    const probeGate = new Promise<void>((resolve) => {
+      releaseProbe = resolve;
+    });
+    vi.spyOn(
+      LocalManagedSessionAuthority.prototype,
+      'harnessRunAuthorization',
+    ).mockImplementation(function (this: LocalManagedSessionAuthority) {
+      if (afterLoad && !probeHung) {
+        probeHung = true;
+        probedResolve();
+        return probeGate.then(() => originalAuthorization.call(this));
+      }
+      return originalAuthorization.call(this);
+    });
+    // The worker release hangs last: the aftermath then holds the block
+    // with the cancelled results already committed — exactly the window
+    // in which the probe's answer (no in-progress items remain) can no
+    // longer see the park.
+    let releaseHung = false;
+    let releasingResolve!: () => void;
+    let releaseRelease!: () => void;
+    const releasing = new Promise<void>((resolve) => {
+      releasingResolve = resolve;
+    });
+    const releaseGate = new Promise<void>((resolve) => {
+      releaseRelease = resolve;
+    });
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockImplementation(
+      () => {
+        repair.order.push('release');
+        if (!releaseHung) {
+          releaseHung = true;
+          releasingResolve();
+          return releaseGate;
+        }
+        return Promise.resolve();
+      },
+    );
+    const server = await app(true);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({ managedSessionStore: store() });
+    expect(loaded.status).toBe(200);
+    afterLoad = true;
+    const authorize = (request: supertest.Test) =>
+      headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    const prompt = [{ type: 'text', text: 'hello' }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    // Promise.resolve dispatches the supertest thenable at once (its
+    // request only leaves on .then), so the probe is in flight while
+    // the test drives the pump below.
+    const prompted = Promise.resolve(
+      authorize(supertest(server).post(`/session/${SESSION_ID}/prompt`)).send({
+        prompt,
+        promptId: randomUUID(),
+        payloadDigest,
+      }),
+    );
+    // The probe is in flight; the pump now classifies the same park,
+    // and its aftermath stops, commits the cancelled results and parks
+    // at the held release — the block the probe started before.
+    await probed;
+    releaseClassify();
+    await releasing;
+    releaseProbe();
+    const refused = await prompted;
+    // The post-probe re-read, not the probe, held the line: the durable
+    // session-scope code, while the transient-window one belongs to the
+    // probe's own finding (the sibling pin above).
+    expect(refused.status).toBe(409);
+    expect(refused.body.code).toBe('hosted_turn_recovery_required');
+    // Nothing was admitted.
+    const journal = await LocalJsonlManagedSessionJournalStore.read(
+      path.join(state.root, `${SESSION_ID}.jsonl`),
+      { tenantId: 'tenant', workspaceId: 'workspace', sessionId: SESSION_ID },
+    );
+    expect(
+      journal.events.some(
+        (event) =>
+          event.kind === 'input.accepted' &&
+          event.payload['source'] === 'hosted-harness',
+      ),
+    ).toBe(false);
+    releaseRelease();
     await vi.waitFor(
       async () => {
         const status = await authorize(

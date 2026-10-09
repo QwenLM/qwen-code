@@ -585,13 +585,15 @@ export async function settleCrashedWakeTurnAftermath(params: {
             // passive takeover does — re-acquiring a READY session under
             // this same identity is idempotent server-side, and a 409
             // runtime_session_not_acquirable refusal is exactly the
-            // already-released answer (so nothing remains to stop).
+            // already-released (or mid-release) answer: nothing there
+            // remains to stop.
             const parkedBroker = await originalRuntimeBroker(
               session.managed,
               turnId,
               items,
               brokerOptions,
             );
+            let adopted = true;
             try {
               await parkedBroker.acquire();
             } catch (cause) {
@@ -604,12 +606,21 @@ export async function settleCrashedWakeTurnAftermath(params: {
               ) {
                 throw cause;
               }
+              adopted = false;
             }
-            broker = await stopParkedRuntimeExecutions({
-              session: session.managed,
-              promptId: turnId,
-              brokerOptions,
-            });
+            // The stop only makes sense on the session this pass
+            // actually adopted: on a released (or mid-release) identity
+            // every Broker read answers 404 runtime_session_not_found,
+            // which is no RecoveryDeclined and would escape to the outer
+            // catch as a failed pass — wedging the consume behind a poll
+            // that can never answer. Skip it; the 409-aware release
+            // block below still completes what the lease owes.
+            if (adopted)
+              broker = await stopParkedRuntimeExecutions({
+                session: session.managed,
+                promptId: turnId,
+                brokerOptions,
+              });
           } catch (cause) {
             // A decline is deterministic evidence read from the journal
             // (a shell under a hooks/MCP definition, a mismatched own
@@ -3935,14 +3946,30 @@ export function registerHostedHarnessSessionRoutes(
       });
       return;
     }
-    if (session.active) return error(res, 409, 'hosted_turn_active');
-    if (
-      session.blocked ||
-      session.managed.authority.currentActivation?.phase !== 'active' ||
-      session.mcp?.hasPendingOperations() ||
-      session.hooks?.hasPendingOperations
-    )
-      return error(res, 409, 'hosted_turn_recovery_required');
+    // Every latch that guards the turn slot, re-runnable as one
+    // expression. The wake-park probe below returns to the event loop,
+    // and whatever ran meanwhile (the pump's recovery classification, a
+    // concurrent admission, a DELETE closing the Session) may flip any
+    // of them, so the claim's check-then-set is atomic only against the
+    // LAST synchronous evaluation of this exact set: this first call
+    // refuses early, the post-probe one is what guards the claim.
+    const turnSlotLatch = (): string | undefined => {
+      if (session.mcpClosing) return 'hosted_session_closing';
+      if (session.hooksBusy) return 'hosted_hook_operation_active';
+      if (session.mcpBusy || session.mcpRecovering)
+        return 'hosted_mcp_operation_active';
+      if (session.active) return 'hosted_turn_active';
+      if (
+        session.blocked ||
+        session.managed.authority.currentActivation?.phase !== 'active' ||
+        session.mcp?.hasPendingOperations() ||
+        session.hooks?.hasPendingOperations
+      )
+        return 'hosted_turn_recovery_required';
+      return undefined;
+    };
+    const latched = turnSlotLatch();
+    if (latched !== undefined) return error(res, 409, latched);
     const acceptedSequence = acceptedInputSequence(session, promptId);
     if (acceptedSequence !== undefined) {
       if (!unsettledInputs(session).has(promptId)) {
@@ -4041,11 +4068,16 @@ export function registerHostedHarnessSessionRoutes(
         return error(res, 409, 'hosted_turn_recovery_in_progress');
       }
     }
-    // The probe returned to the event loop: the wake pump may have
-    // claimed the turn slot meanwhile (it re-reads busy after its own
-    // awaits). Re-read before claiming — this pair is what makes the
-    // check-then-claim above atomic again.
-    if (session.active) return error(res, 409, 'hosted_turn_active');
+    // The probe returned to the event loop: the pump's own recovery
+    // classification, a concurrent admission, or a DELETE closing the
+    // Session may have run meanwhile. Re-run the full latch set —
+    // re-reading session.active alone would certify a claim over a
+    // Session the probe let wedge — then the journal's own guard; this
+    // is what makes the check-then-claim above atomic again.
+    const relatched = turnSlotLatch();
+    if (relatched !== undefined) return error(res, 409, relatched);
+    if (unsettledInputs(session).size !== 0)
+      return error(res, 409, 'hosted_turn_recovery_required');
     const abort = new AbortController();
     const deadline =
       deadlineMs === undefined ? null : Date.now() + (deadlineMs as number);
