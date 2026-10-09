@@ -16,6 +16,7 @@ import { ToolMode } from '../../tools/code-mode.js';
 import { CoreToolScheduler } from '../../core/coreToolScheduler.js';
 import { ToolSearchTool } from '../../tools/tool-search.js';
 import { hasAgentSkillExecBinding } from './subagent-plan-tool-policy.js';
+import type { ToolConfig } from './agent-types.js';
 
 // The skill-announcement gate asks whether the model can INVOKE a skill, and
 // that is two conditions, not one.
@@ -789,20 +790,70 @@ describe('AgentCore skill-gate inputs', () => {
       expect(exec?.description).not.toContain('"name":"write_file"');
     });
 
-    it.each([
+    const execSkillPolicies: Array<{
+      label: string;
+      bounds: Omit<ToolConfig, 'tools'>;
+      allowed: boolean;
+    }> = [
+      { label: 'unbounded exec', bounds: {}, allowed: true },
       {
-        tools: [ToolNames.EXEC, ToolNames.READ_FILE],
-        executionAllowedTools: [ToolNames.READ_FILE],
+        label: 'blocked exec',
+        bounds: { disallowedTools: [ToolNames.EXEC] },
+        allowed: false,
       },
       {
-        tools: [ToolNames.EXEC, ToolNames.READ_FILE, ToolNames.WRITE_FILE],
-        executionAllowedTools: [] as string[],
-        nestedExecutionAllowedTools: [ToolNames.READ_FILE],
+        label: 'blocked Skill',
+        bounds: { disallowedTools: [ToolNames.SKILL] },
+        allowed: false,
       },
-    ])(
-      'closes the listing/gate gap when the config bounds the exec route: %j',
-      async (toolConfig) => {
-        const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+      {
+        label: 'explicit Skill execution grant',
+        bounds: { executionAllowedTools: [ToolNames.SKILL] },
+        allowed: true,
+      },
+      {
+        label: 'exec execution carve-out',
+        bounds: { executionAllowedTools: [ToolNames.EXEC] },
+        allowed: true,
+      },
+      {
+        label: 'read-only execution',
+        bounds: { executionAllowedTools: [ToolNames.READ_FILE] },
+        allowed: false,
+      },
+      {
+        label: 'nested Skill with empty direct execution',
+        bounds: {
+          executionAllowedTools: [],
+          nestedExecutionAllowedTools: [ToolNames.SKILL],
+        },
+        allowed: true,
+      },
+      {
+        label: 'nested read-only with empty direct execution',
+        bounds: {
+          executionAllowedTools: [],
+          nestedExecutionAllowedTools: [ToolNames.READ_FILE],
+        },
+        allowed: false,
+      },
+      {
+        label: 'nested denial overrides the exec carve-out',
+        bounds: {
+          executionAllowedTools: [ToolNames.EXEC],
+          nestedExecutionAllowedTools: [],
+        },
+        allowed: false,
+      },
+    ];
+    it.each(
+      [ToolMode.Direct, ToolMode.CodeMode, ToolMode.CodeModeOnly].flatMap(
+        (mode) => execSkillPolicies.map((policy) => ({ ...policy, mode })),
+      ),
+    )(
+      'matches listing and invocation for $label in $mode',
+      async ({ bounds, allowed, mode }) => {
+        const config = makeFakeConfig({ toolMode: mode });
         const registry = new ToolRegistry(config);
         vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
         registry.registerTool(new ExecTool(config));
@@ -815,15 +866,20 @@ describe('AgentCore skill-gate inputs', () => {
           { systemPrompt: '' },
           { model: 'test-model' },
           { max_turns: 1 },
-          toolConfig,
+          { tools: [ToolNames.EXEC, ToolNames.READ_FILE], ...bounds },
         );
 
         const willHaveSkill = (
           core as unknown as { willHaveSkillTool: () => boolean }
         ).willHaveSkillTool();
         const declared = await declaredNames(core);
-        expect(willHaveSkill).toBe(false);
-        expect(gate(core, declared)).toBe(false);
+        const expected = mode !== ToolMode.Direct && allowed;
+        expect.soft(gate(core, declared)).toBe(expected);
+        expect(willHaveSkill).toBe(expected);
+        if (bounds.executionAllowedTools?.length === 0) {
+          expect(declared.has(ToolNames.SKILL)).toBe(false);
+          expect(executable(core, ToolNames.SKILL)).toBe(false);
+        }
       },
     );
 

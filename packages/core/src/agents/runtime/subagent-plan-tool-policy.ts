@@ -180,14 +180,16 @@ export function toolConfigAllowsSkill(
   // list holding only inline declarations inherits: both take the explicit
   // branch there, which declares no registry tool.
   const inheritsRegistry = names.includes('*');
-  // Naming an available exec gateway reaches the nested Skill binding only
-  // while the config's own execution bounds keep that route open —
-  // `canInvokeSkill()` honours both lists, so the listing must too.
+  // The exec wrapper does not need an execution-list entry in code modes.
+  // An explicit nested list is authoritative; otherwise either Skill itself
+  // or the exec carve-out grants the nested binding, as in AgentCore.
   const execRouteOpen =
-    (toolConfig.executionAllowedTools === undefined ||
-      toolConfig.executionAllowedTools.includes(ToolNames.EXEC)) &&
-    (toolConfig.nestedExecutionAllowedTools === undefined ||
-      toolConfig.nestedExecutionAllowedTools.includes(ToolNames.SKILL));
+    !matchesAgentToolBlocklist(toolConfig.disallowedTools, ToolNames.EXEC) &&
+    (toolConfig.nestedExecutionAllowedTools !== undefined
+      ? toolConfig.nestedExecutionAllowedTools.includes(ToolNames.SKILL)
+      : toolConfig.executionAllowedTools === undefined ||
+        toolConfig.executionAllowedTools.includes(ToolNames.SKILL) ||
+        toolConfig.executionAllowedTools.includes(ToolNames.EXEC));
   const reachesThroughExec =
     execBindingsAvailable && execRouteOpen && names.includes(ToolNames.EXEC);
   return (
