@@ -19,6 +19,8 @@ import {
 } from './managed-session-storage';
 import { useManagedSession } from './use-managed-session';
 import { useManagedActions } from './use-managed-actions';
+import { useManagedCwdChange } from './use-managed-cwd-change';
+import { ManagedSessionCwdControl } from './ManagedSessionCwdControl';
 import { toManagedPermissionRequest } from './managed-approval';
 import { isNonRetryableClientError } from './managed-request-error';
 import { ManagedSessionProgress } from './ManagedSessionProgress';
@@ -176,6 +178,13 @@ function ManagedSessionsContent({
         : null,
     [approvals.action, messages],
   );
+  const cwd = useManagedCwdChange(
+    provider,
+    clientId,
+    sessionId,
+    detail.summary,
+    detail.refreshSummary,
+  );
   // The reason line below is mounted exactly when this holds, so the dialog can
   // point at it without ever leaving a dangling IDREF. A latch-only render has
   // no `alert` node and no operable option left, so this line is the only place
@@ -306,7 +315,7 @@ function ManagedSessionsContent({
 
   async function submit() {
     const abort = lifetime.current;
-    if (!abort || abort.signal.aborted || busy) return;
+    if (!abort || abort.signal.aborted || busy || cwd.isBlocked()) return;
     setDiscarded(false);
     let attempt = pendingRef.current;
     if (!attempt) {
@@ -547,6 +556,30 @@ function ManagedSessionsContent({
                 {t('managed.workspaceDirectory')}:{' '}
                 {summary.workspace.cwdRelative}
               </p>
+              <ManagedSessionCwdControl
+                key={`${provider.storageKey}:${summary.sessionId}`}
+                summary={summary}
+                supported={Boolean(provider.cwdChange)}
+                cwd={cwd}
+                disabledReason={
+                  active ||
+                  pendingApproval ||
+                  busy ||
+                  pending?.sessionId === sessionId
+                    ? t('managed.cwd.busy')
+                    : undefined
+                }
+                onSubmit={(path, revision) => {
+                  if (
+                    pendingRef.current?.sessionId === sessionId ||
+                    busy ||
+                    active ||
+                    pendingApproval
+                  )
+                    return Promise.resolve();
+                  return cwd.submit(path, revision);
+                }}
+              />
               {!summary.capabilities.workspaceTurns && (
                 <p className="text-muted-foreground">
                   {t('managed.workspaceExecutionUnavailable')}
@@ -765,6 +798,7 @@ function ManagedSessionsContent({
                   type="submit"
                   disabled={
                     busy ||
+                    cwd.blocked ||
                     (!pending &&
                       (!text.trim() ||
                         Boolean(sessionId && !summary?.capabilities.canSend)))

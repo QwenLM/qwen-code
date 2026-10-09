@@ -98,6 +98,38 @@ export function createJavaManagedAgentProvider(
     storageKey: storageKey(options),
     canCancel: true,
     acceptsWorkspaceCwd: false,
+    ...(options.productScope?.trim()
+      ? {
+          cwdChange: {
+            async submit(sessionId, request, command) {
+              return requireCwdOperation(
+                await client.changeCwd(
+                  {
+                    ...request,
+                    sessionId,
+                    idempotencyKey: command.idempotencyKey,
+                    requestId: managedRequestId(),
+                  },
+                  command.signal,
+                ),
+                sessionId,
+              );
+            },
+            async query(sessionId, operationId, request) {
+              const result = requireCwdOperation(
+                await client.queryOperation(
+                  { sessionId, operationId },
+                  request.signal,
+                ),
+                sessionId,
+              );
+              if (result.operationId !== operationId)
+                throw new Error('Cwd operation identity mismatch');
+              return result;
+            },
+          },
+        }
+      : {}),
     actions: {
       async listPending(sessionId, request) {
         // The service lists only requested Actions, newest first, so one page
@@ -358,10 +390,25 @@ function toSessionSummary(
       // server refuses anyone else.
       canCancel: sessionActive && active && turnStatus !== 'cancelling',
       ...(workspaceTurns ? { workspaceTurns: true } : {}),
+      ...(session.capabilities?.cwdChange === true ? { cwdChange: true } : {}),
       ...(session.capabilities?.actions === true ? { actions: true } : {}),
     },
     ...(errorCode ? { failure: { code: errorCode, message: errorCode } } : {}),
   };
+}
+
+function requireCwdOperation(
+  operation: Awaited<ReturnType<JavaManagedAgentClient['queryOperation']>>,
+  sessionId: string,
+) {
+  if (
+    operation.type !== 'cwd_change' ||
+    operation.sessionId !== sessionId ||
+    !operation.operationId
+  ) {
+    throw new Error('Cwd operation identity mismatch');
+  }
+  return operation;
 }
 
 function toPendingAction(action: JavaAgentAction): ManagedAgentPendingAction[] {

@@ -40,6 +40,36 @@ export function useManagedSession(
   });
   const [loadingOlder, setLoadingOlder] = useState(false);
   const lifetime = useRef<AbortController | undefined>(undefined);
+  const summaryRef = useRef<ManagedAgentSessionSummary | undefined>(undefined);
+  const retainSummary = useCallback((incoming: ManagedAgentSessionSummary) => {
+    const previous = summaryRef.current;
+    const workspace = previous?.workspace;
+    const next =
+      previous?.sessionId === incoming.sessionId &&
+      workspace &&
+      incoming.workspace?.workspaceId === workspace.workspaceId &&
+      (workspace.contextRevision ?? 0) >
+        (incoming.workspace.contextRevision ?? 0)
+        ? { ...incoming, workspace }
+        : incoming;
+    summaryRef.current = next;
+    return next;
+  }, []);
+  const refreshSummary = useCallback(
+    async (signal?: AbortSignal) => {
+      const abort = lifetime.current;
+      if (!sessionId || !abort || abort.signal.aborted) return undefined;
+      const read = await provider.getSession(sessionId, {
+        clientId,
+        signal: signal ? AbortSignal.any([signal, abort.signal]) : abort.signal,
+      });
+      if (abort.signal.aborted || signal?.aborted) return undefined;
+      const summary = retainSummary(read);
+      setState((current) => ({ ...current, summary }));
+      return summary;
+    },
+    [provider, clientId, sessionId, retainSummary],
+  );
   const cursorRef = useRef<string | undefined>(undefined);
   // Paging state: whether any older page was ever loaded, the highest id any
   // page returned (the paged region's top edge), and whether the user paged
@@ -73,6 +103,7 @@ export function useManagedSession(
   useEffect(() => {
     const abort = new AbortController();
     lifetime.current = abort;
+    summaryRef.current = undefined;
     cursorRef.current = undefined;
     pagedRef.current = false;
     pagedHeadRef.current = undefined;
@@ -83,8 +114,11 @@ export function useManagedSession(
     if (!sessionId) return () => abort.abort();
     const opts = { clientId, signal: abort.signal };
     const update = (change: Partial<ManagedSessionState>) => {
-      if (!abort.signal.aborted)
-        setState((current) => ({ ...current, ...change }));
+      if (abort.signal.aborted) return;
+      const next = change.summary
+        ? { ...change, summary: retainSummary(change.summary) }
+        : change;
+      setState((current) => ({ ...current, ...next }));
     };
     const fail = (writer: 'stream' | 'poll', error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
@@ -95,11 +129,12 @@ export function useManagedSession(
       update({ error: message, loading: false });
     };
     const snapshot = async (preserveLoadedPages: boolean) => {
-      const [summary, transcript] = await Promise.all([
+      const [read, transcript] = await Promise.all([
         provider.getSession(sessionId, opts),
         provider.getTranscript(sessionId, { ...opts, limit: 100 }),
       ]);
       if (abort.signal.aborted) return transcript.lastEventId;
+      const summary = retainSummary(read);
       if (preserveLoadedPages) {
         // The stream never replays events at or below the snapshot head,
         // so the snapshot is the sole authority for that range (assumed
@@ -234,6 +269,11 @@ export function useManagedSession(
               events: mergeManagedEvents(current.events, [event]),
               error: undefined,
             }));
+            if (event.type === 'context_changed') {
+              void refreshSummary().catch((error: unknown) =>
+                fail('poll', error),
+              );
+            }
           }
           if (gap) {
             const head = await snapshot(true);
@@ -270,9 +310,10 @@ export function useManagedSession(
             const summary = await provider.getSession(sessionId, opts);
             if (!abort.signal.aborted) {
               const release = releaseError('stream');
+              const retained = retainSummary(summary);
               setState((current) => ({
                 ...current,
-                summary,
+                summary: retained,
                 error: release.clear ? release.reveal : current.error,
               }));
             }
@@ -295,9 +336,10 @@ export function useManagedSession(
           // that is still armed.
           if (!abort.signal.aborted) {
             const release = releaseError('poll');
+            const retained = retainSummary(summary);
             setState((current) => ({
               ...current,
-              summary,
+              summary: retained,
               error: release.clear ? release.reveal : current.error,
             }));
           }
@@ -307,7 +349,15 @@ export function useManagedSession(
       }
     })();
     return () => abort.abort();
-  }, [provider, clientId, sessionId, revision, releaseError]);
+  }, [
+    provider,
+    clientId,
+    sessionId,
+    revision,
+    releaseError,
+    retainSummary,
+    refreshSummary,
+  ]);
 
   const loadOlder = useCallback(async () => {
     const abort = lifetime.current;
@@ -383,5 +433,5 @@ export function useManagedSession(
     state.sessionId === sessionId
       ? state
       : { events: [], loading: Boolean(sessionId) };
-  return { ...visible, loadingOlder, loadOlder, reload };
+  return { ...visible, loadingOlder, loadOlder, reload, refreshSummary };
 }

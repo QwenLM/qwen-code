@@ -20,9 +20,12 @@ export interface JavaAgentEnvironment {
 
 export type JavaAgentSession = Omit<
   Schemas['WebShellSession'],
-  'environment'
+  'environment' | 'capabilities'
 > & {
   environment?: JavaAgentEnvironment | null;
+  capabilities: Schemas['WebShellSessionCapabilities'] & {
+    cwdChange?: boolean;
+  };
 };
 
 export type JavaAgentWorkspace = Schemas['WebShellWorkspace'];
@@ -190,6 +193,13 @@ export class JavaManagedAgentClient {
     signal?: AbortSignal,
   ): Promise<Schemas['WebShellOperation']> {
     return this.post('/operations/query', request, signal);
+  }
+
+  changeCwd(
+    request: Schemas['WebShellChangeCwdRequest'],
+    signal?: AbortSignal,
+  ): Promise<Schemas['WebShellCwdOperation']> {
+    return this.post('/sessions/cwd/change', request, signal);
   }
 
   getToolResult(sessionId: string, itemId: string, signal?: AbortSignal) {

@@ -46,6 +46,137 @@ describe('useManagedSession', () => {
     root = undefined;
   });
 
+  it('refreshes only the summary on context events and preserves a higher revision', async () => {
+    const bound = (revision: number) => ({
+      sessionId: 'session-1',
+      workspace: {
+        workspaceId: 'ws',
+        cwdRelative: `dir-${revision}`,
+        contextRevision: revision,
+        state: 'ready' as const,
+      },
+    });
+    const getSession = vi
+      .fn()
+      .mockResolvedValueOnce(bound(1))
+      .mockResolvedValueOnce(bound(3))
+      .mockResolvedValue(bound(2));
+    const getTranscript = vi.fn().mockResolvedValue(transcript(1));
+    let emit!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      emit = resolve;
+    });
+    const provider = {
+      getSession,
+      getTranscript,
+      async *subscribeEvents(_id: string, opts: { signal: AbortSignal }) {
+        await gate;
+        yield {
+          ...event(2),
+          type: 'context_changed' as const,
+          turnId: '',
+          data: { contextRevision: 3 },
+        };
+        await new Promise((resolve) =>
+          opts.signal.addEventListener('abort', resolve),
+        );
+      },
+    } as unknown as ManagedAgentProvider;
+    let latest!: ReturnType<typeof useManagedSession>;
+    function Probe() {
+      latest = useManagedSession(provider, 'c', 'session-1');
+      return null;
+    }
+    root = createRoot(document.createElement('div'));
+    await act(async () => {
+      root!.render(<Probe />);
+    });
+    await act(async () => {
+      emit();
+    });
+    expect(latest.summary?.workspace?.contextRevision).toBe(3);
+    expect(getTranscript).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await latest.refreshSummary();
+    });
+    expect(latest.summary?.workspace?.contextRevision).toBe(3);
+    expect(latest.events.map((item) => item.id)).toEqual([1, 2]);
+  });
+
+  it('keeps the highest revision when poll and event refresh resolve in one React batch', async () => {
+    vi.useFakeTimers();
+    try {
+      const bound = (revision: number) => ({
+        sessionId: 'session-1',
+        workspace: {
+          workspaceId: 'ws',
+          cwdRelative: `dir-${revision}`,
+          contextRevision: revision,
+        },
+      });
+      let poll!: (value: ReturnType<typeof bound>) => void;
+      let refresh!: (value: ReturnType<typeof bound>) => void;
+      let emit!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        emit = resolve;
+      });
+      const getSession = vi
+        .fn()
+        .mockResolvedValueOnce(bound(1))
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              poll = resolve;
+            }),
+        )
+        .mockImplementationOnce(
+          () =>
+            new Promise((resolve) => {
+              refresh = resolve;
+            }),
+        );
+      const getTranscript = vi.fn().mockResolvedValue(transcript(0));
+      const provider = {
+        getSession,
+        getTranscript,
+        async *subscribeEvents(_id: string, opts: { signal: AbortSignal }) {
+          await gate;
+          yield { ...event(1), type: 'context_changed' as const };
+          await new Promise((resolve) =>
+            opts.signal.addEventListener('abort', resolve),
+          );
+        },
+      } as unknown as ManagedAgentProvider;
+      let latest!: ReturnType<typeof useManagedSession>;
+      function Probe() {
+        latest = useManagedSession(provider, 'c', 'session-1');
+        return null;
+      }
+      root = createRoot(document.createElement('div'));
+      await act(async () => {
+        root!.render(<Probe />);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      expect(getSession).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        emit();
+        for (let i = 0; i < 4; i++) await Promise.resolve();
+        expect(getSession).toHaveBeenCalledTimes(3);
+        poll(bound(3));
+        for (let i = 0; i < 2; i++) await Promise.resolve();
+        refresh(bound(2));
+        for (let i = 0; i < 2; i++) await Promise.resolve();
+      });
+      expect(latest.summary?.workspace?.contextRevision).toBe(3);
+      expect(latest.summary?.workspace?.cwdRelative).toBe('dir-3');
+      expect(getTranscript).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reloads the transcript after a stream gap and resumes after it', async () => {
     const cursors: Array<number | undefined> = [];
     const getTranscript = vi
