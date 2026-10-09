@@ -12470,6 +12470,270 @@ describe('useLlmStream', () => {
       },
     );
 
+    it.each(
+      boundaryModes.flatMap((mode) =>
+        ['\n', '\r\n'].flatMap((newline) =>
+          [
+            { block: 'past-cap math', rows: 30, indent: '' },
+            { block: 'close at cap', rows: 18, indent: '' },
+            {
+              block: 'zero-kept math opener',
+              rows: 3,
+              indent: ' '.repeat(1600),
+            },
+          ].map((fixture) => ({ ...mode, newline, ...fixture })),
+        ),
+      ),
+    )(
+      'resumes closed overbudget math in $name ($newline, $block)',
+      async ({ start, end, newline, rows, indent }) => {
+        const mode: { current: 'raw' | 'render' } = { current: start };
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          mode,
+        );
+        const intro = `intro${newline}${newline}`;
+        const openMath = [
+          `${indent}$$`,
+          ...Array.from({ length: rows }, (_, i) =>
+            i === 1 ? '' : i === 2 ? '```ts' : `x_${i}`,
+          ),
+        ].join(newline);
+        const closing = `${newline}$$${newline}   `;
+        const completedMath = `${openMath}${closing}${newline}`;
+        const continuation = `${newline}More prose.`;
+        const stream = await streamStages(result, [
+          `${intro}${openMath}`,
+          closing,
+          `${newline}Done.`,
+          continuation,
+        ]);
+        try {
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          expect(llmContentItems().map((item) => item.text)).toEqual([intro]);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(openMath);
+          mode.current = end;
+          await stream.advance();
+          // The closing delimiter alone does not terminate the following blank.
+          expect(llmContentItems().map((item) => item.text)).toEqual([intro]);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(
+            `${openMath}${closing}`,
+          );
+          await stream.advance();
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          expect(llmContentItems().map((item) => item.text)).toEqual([
+            intro,
+            completedMath,
+          ]);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe('Done.');
+          await stream.advance();
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(
+            `Done.${continuation}`,
+          );
+          expect(
+            llmContentItems()
+              .map((item) => item.text)
+              .join('') + result.current.pendingHistoryItems[0]?.text,
+          ).toBe(`${intro}${completedMath}Done.${continuation}`);
+          await stream.advance();
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+          expect(result.current.pendingHistoryItems).toEqual([]);
+          expect(
+            llmContentItems()
+              .map((item) => item.text)
+              .join(''),
+          ).toBe(`${intro}${completedMath}Done.${continuation}`);
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
+    it.each(
+      boundaryModes.flatMap((mode) =>
+        ['\n', '\r\n'].map((newline) => ({ ...mode, newline })),
+      ),
+    )(
+      'repairs a closed fence before dense text in $name ($newline)',
+      async ({ start, end, newline }) => {
+        const mode: { current: 'raw' | 'render' } = { current: start };
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          mode,
+        );
+        const delimiter = newline === '\n' ? '```' : '~~~~';
+        const intro = `intro${newline}${newline}`;
+        const code = ['one', '', '$$', '', 'three'];
+        const headSource = [`${delimiter}py`, ...code.slice(0, 4), ''].join(
+          newline,
+        );
+        const tailSource = [
+          code[4],
+          delimiter,
+          ...Array.from({ length: 15 }, (_, i) => `- item ${i}`),
+        ].join(newline);
+        const reopening = `${delimiter}py qwen-code:start-line=5\n`;
+        const closing = `${delimiter}\n`;
+        const later = `${newline}${newline}later${newline}${newline}Done.`;
+        const continuation = `${newline}More prose.`;
+        const stream = await streamStages(result, [
+          intro,
+          `${headSource}${tailSource}`,
+          later,
+          continuation,
+        ]);
+        try {
+          mode.current = end;
+          await stream.advance();
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          const committed = llmContentItems().map((item) => item.text);
+          const pending = result.current.pendingHistoryItems[0]?.text ?? '';
+          expect(committed).toEqual([intro, `${headSource}${closing}`]);
+          expect(pending).toBe(`${reopening}${tailSource}`);
+          expect(vi.mocked(findLastSafeSplitPoint)).toHaveBeenCalled();
+          expect(
+            committed[0] +
+              committed[1]!.slice(0, -closing.length) +
+              pending.slice(reopening.length),
+          ).toBe(`${intro}${headSource}${tailSource}`);
+          await stream.advance();
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          expect(llmContentItems()).toHaveLength(3);
+          expect(llmContentItems()[2]!.text).toBe(
+            `${reopening}${tailSource}${newline}${newline}`,
+          );
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(
+            `later${newline}${newline}Done.`,
+          );
+          await stream.advance();
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(
+            `later${newline}${newline}Done.${continuation}`,
+          );
+          await stream.advance();
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+          expect(result.current.pendingHistoryItems).toEqual([]);
+          const final = llmContentItems().map((item) => item.text);
+          expect(final).toHaveLength(4);
+          expect(
+            final[0] +
+              final[1]!.slice(0, -closing.length) +
+              final[2]!.slice(reopening.length) +
+              final[3],
+          ).toBe(`${intro}${headSource}${tailSource}${later}${continuation}`);
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
+    it.each(['raw', 'render'] as const)(
+      'keeps a short closed math block followed by dense text pending in %s',
+      async (renderMode) => {
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { current: renderMode },
+        );
+        const content = [
+          '$$',
+          'x',
+          '$$',
+          ...Array.from({ length: 30 }, (_, i) => `dense ${i}`),
+          '',
+          'Done.',
+        ].join('\n');
+        const stream = await streamStages(result, [content, '\nMore prose.']);
+        try {
+          expect(llmContentItems()).toHaveLength(0);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(content);
+          await stream.advance();
+          expect(llmContentItems()).toHaveLength(0);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(
+            `${content}\nMore prose.`,
+          );
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
+    it.each(['raw', 'render'] as const)(
+      'keeps earlier math whole when fence repair retreats into a literal fence in %s',
+      async (renderMode) => {
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { current: renderMode },
+        );
+        const content = [
+          '$$',
+          '````ts',
+          'equation',
+          '$$',
+          '```py',
+          'first',
+          '',
+          'second',
+          '```',
+          ...Array.from({ length: 24 }, (_, i) => `- dense ${i}`),
+        ].join('\n');
+        const stream = await streamStages(result, [
+          'intro\n\n',
+          content,
+          '\nMore prose.',
+        ]);
+        try {
+          await stream.advance();
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          expect(llmContentItems().map((item) => item.text)).toEqual([
+            'intro\n\n',
+          ]);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(content);
+          await stream.advance();
+          expect(llmContentItems()).toHaveLength(1);
+          expect(result.current.pendingHistoryItems[0]?.text).toBe(
+            `${content}\nMore prose.`,
+          );
+          await stream.advance();
+          expect(result.current.streamingState).toBe(StreamingState.Idle);
+          expect(result.current.pendingHistoryItems).toEqual([]);
+          expect(
+            llmContentItems()
+              .map((item) => item.text)
+              .join(''),
+          ).toBe(`intro\n\n${content}\nMore prose.`);
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
     const makeBoundaryTable = (rows: number) =>
       [
         '| A | B |',

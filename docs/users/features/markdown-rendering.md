@@ -46,6 +46,10 @@ While a confirmed table is streaming in raw mode, a header that wraps beyond
 the live preview's height limit shows its beginning within that limit. The
 complete table remains available when the response is committed.
 
+A completed display-math block can move into scrollback as a whole once its
+following blank line is complete. Ordinary code fences can commit at internal
+blank lines while preserving code highlighting and continuous line numbers.
+
 ## Assistant and Tool Images
 
 Image parts use a separate TUI display path and behave the same in Markdown

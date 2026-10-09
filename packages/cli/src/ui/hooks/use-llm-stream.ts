@@ -2009,10 +2009,14 @@ export const useLlmStream = (
         const allowTableExit =
           renderModeRef?.current === 'raw' && isTableStart(bufferLines, 0);
         let boundaryIndex = -1;
+        let fencedBoundaryIndex = -1;
+        let fencedBoundaryStart = -1;
         let offset = 0;
         let activeCodeFence: string | null = null;
+        let activeCodeFenceStart = -1;
         let activeCodeLanguage: string | null = null;
         let inMathBlock = false;
+        let allowMathExit = false;
         let capAllowsCodeSplit = false;
         // The last split entry has no terminating newline, even when empty.
         for (let k = 0; k < bufferLines.length - 1; k++) {
@@ -2034,25 +2038,36 @@ export const useLlmStream = (
             const fence = CODE_FENCE_RE.exec(line);
             if (fence) {
               activeCodeFence = fence[1]!;
+              activeCodeFenceStart = offset - sourceLine.length - 1;
               activeCodeLanguage = parseCodeFenceInfo(fence[2]).lang;
             } else if (/^ *\$\$ *$/.test(line)) {
               inMathBlock = true;
             }
           }
-          if (k + 1 === keptLines) {
+          if (k + 1 === keptLines || (keptLines === 0 && k === 0)) {
             capAllowsCodeSplit =
               activeCodeFence !== null &&
               activeCodeLanguage?.toLowerCase() !== 'mermaid';
+            allowMathExit = inMathBlock;
           }
+          const allowBlockExit = allowTableExit || allowMathExit;
           if (!activeCodeFence && !inMathBlock && line.trim() === '') {
             if (k <= keptLines) {
               boundaryIndex = offset;
-            } else if (boundaryIndex < 0 && allowTableExit) {
+            } else if (boundaryIndex < 0 && allowBlockExit) {
               boundaryIndex = offset;
               break;
             }
+          } else if (
+            activeCodeFence &&
+            activeCodeLanguage?.toLowerCase() !== 'mermaid' &&
+            line.trim() === '' &&
+            k <= keptLines
+          ) {
+            fencedBoundaryIndex = offset;
+            fencedBoundaryStart = activeCodeFenceStart;
           }
-          if (k >= keptLines && (boundaryIndex > 0 || !allowTableExit)) break;
+          if (k >= keptLines && (boundaryIndex > 0 || !allowBlockExit)) break;
         }
         let target: number;
         if (boundaryIndex < 0) {
@@ -2065,10 +2080,12 @@ export const useLlmStream = (
           // gutter), so commit the budget-fit prefix and keep streaming. Restrict
           // this to code blocks: other tall blocks (tables/lists) must stay whole
           // and are still kept pending.
-          const capIndex = charIndexAfterLine(newLlmMessageBuffer, keptLines);
+          const fallbackIndex = capAllowsCodeSplit
+            ? charIndexAfterLine(newLlmMessageBuffer, keptLines)
+            : fencedBoundaryIndex;
           const fenceInfo =
-            capAllowsCodeSplit && capIndex > 0
-              ? getEnclosingFenceInfo(newLlmMessageBuffer, capIndex)
+            fallbackIndex > 0
+              ? getEnclosingFenceInfo(newLlmMessageBuffer, fallbackIndex)
               : null;
           // Only hard-split a real code block. Other tall blocks (tables/lists)
           // must stay whole, and mermaid needs its whole source to render a
@@ -2077,7 +2094,7 @@ export const useLlmStream = (
           if (!fenceInfo || fenceInfo.lang?.toLowerCase() === 'mermaid') {
             break; // no safe boundary yet → keep pending
           }
-          target = capIndex;
+          target = fallbackIndex;
         } else {
           target = boundaryIndex;
         }
@@ -2086,6 +2103,14 @@ export const useLlmStream = (
             ? findLastSafeSplitPoint(newLlmMessageBuffer, target)
             : target;
         if (splitPoint <= 0 || splitPoint >= newLlmMessageBuffer.length) {
+          break;
+        }
+        // Legacy helpers can see literal fences in earlier display math.
+        if (
+          boundaryIndex < 0 &&
+          !capAllowsCodeSplit &&
+          splitPoint < fencedBoundaryStart
+        ) {
           break;
         }
         // Repair fences when the split lands inside a code block so the tail
