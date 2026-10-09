@@ -883,6 +883,13 @@ export const useLlmStream = (
   // React state can lag by one render; this tracks the actual stream lifetime.
   const activeModelStreamsRef = useRef(0);
   const activeShellSignalsRef = useRef(new Set<AbortSignal>());
+  const shellOwnsPendingItem = useCallback(
+    (item: HistoryItemWithoutId | null) =>
+      activeShellSignalsRef.current.size > 0 &&
+      item?.type === 'tool_group' &&
+      item.isUserInitiated === true,
+    [],
+  );
   // A continuation may be admitted while an earlier submission is finalizing.
   const submissionActivitiesByGenerationRef = useRef(new Map<number, number>());
   const settleSubmissionStateIfIdle = useCallback(() => {
@@ -1406,17 +1413,26 @@ export const useLlmStream = (
     // in-flight content — reading the React-state copy at the consumer
     // would race with stream chunks that haven't re-rendered yet.
     const pendingItemAtCancel = pendingHistoryItemRef.current;
-    const shellOwnsPendingItem =
-      activeShellSignalsRef.current.size > 0 &&
-      pendingItemAtCancel?.type === 'tool_group' &&
-      pendingItemAtCancel.isUserInitiated;
+    const shellOwnsPendingItemAtCancel =
+      shellOwnsPendingItem(pendingItemAtCancel);
     turnCancelledRef.current = true;
     submissionLeaseGenerationRef.current += 1;
     setSubmissionInFlight(activeShellSignalsRef.current.size > 0);
     const foregroundAbortController = abortControllerRef.current;
+    // A completed foreground stream can leave only a detached Shell behind.
+    // Classify the controllers this cancellation actually aborts: a live
+    // foreground owner takes precedence; otherwise detached owners are next.
+    // Stream count alone includes already-aborted unwind and excludes tools
+    // whose model stream ended but whose controller is still retained.
     const shellOnlyCancellation =
-      foregroundAbortController !== null &&
-      activeShellSignalsRef.current.has(foregroundAbortController.signal);
+      activeShellSignalsRef.current.size > 0 &&
+      (foregroundAbortController && !foregroundAbortController.signal.aborted
+        ? activeShellSignalsRef.current.has(foregroundAbortController.signal)
+        : ![...detachedToolContinuationAbortControllersRef.current].some(
+            (controller) =>
+              !controller.signal.aborted &&
+              !activeShellSignalsRef.current.has(controller.signal),
+          ));
     if (
       foregroundAbortController &&
       !foregroundAbortController.signal.aborted
@@ -1473,7 +1489,7 @@ export const useLlmStream = (
       logApiCancel(config, cancellationEvent);
     }
 
-    if (pendingHistoryItemRef.current && !shellOwnsPendingItem) {
+    if (pendingHistoryItemRef.current && !shellOwnsPendingItemAtCancel) {
       commitItemInOrder(pendingHistoryItemRef.current, Date.now());
     }
     addItem(
@@ -1494,7 +1510,7 @@ export const useLlmStream = (
         Date.now(),
       );
     }
-    if (!shellOwnsPendingItem) {
+    if (!shellOwnsPendingItemAtCancel) {
       setPendingHistoryItem(null);
     }
     clearRetryCountdown();
@@ -1536,6 +1552,7 @@ export const useLlmStream = (
     config,
     getPromptCount,
     setSubmissionInFlight,
+    shellOwnsPendingItem,
   ]);
 
   const applyVisionBridgeIfNeeded = useCallback(
@@ -2282,6 +2299,12 @@ export const useLlmStream = (
       if (turnCancelledRef.current) {
         return;
       }
+      // An older aborted model stream may report cancellation after a new
+      // Shell submission has reset turnCancelledRef. The processor owns that
+      // live panel and its single final history row until Shell settlement.
+      if (shellOwnsPendingItem(pendingHistoryItemRef.current)) {
+        return;
+      }
 
       lastPromptErroredRef.current = false;
       // Persist any streamed reasoning (collapsed) above the cancelled answer.
@@ -2327,6 +2350,7 @@ export const useLlmStream = (
       setPendingHistoryItem,
       setThought,
       clearRetryCountdown,
+      shellOwnsPendingItem,
     ],
   );
 
@@ -2956,7 +2980,10 @@ export const useLlmStream = (
               // chunk appends to this turn's pending item — visible in the UI
               // as "t" → "te" → "tes" cumulative rendering even though each
               // turn is persisted as a clean, separate assistant message.
-              if (pendingHistoryItemRef.current) {
+              if (
+                pendingHistoryItemRef.current &&
+                !shellOwnsPendingItem(pendingHistoryItemRef.current)
+              ) {
                 commitItemInOrder(
                   pendingHistoryItemRef.current,
                   userMessageTimestamp,
@@ -3340,6 +3367,7 @@ export const useLlmStream = (
       stagePendingAssistantItem,
       setPendingAssistantItems,
       dualOutput,
+      shellOwnsPendingItem,
     ],
   );
 
@@ -4186,7 +4214,10 @@ export const useLlmStream = (
             return;
           }
 
-          if (pendingHistoryItemRef.current) {
+          if (
+            pendingHistoryItemRef.current &&
+            !shellOwnsPendingItem(pendingHistoryItemRef.current)
+          ) {
             commitItemInOrder(
               pendingHistoryItemRef.current,
               userMessageTimestamp,
@@ -4464,6 +4495,7 @@ export const useLlmStream = (
       releaseUndeliveredGoalTurn,
       retainSubmissionActivity,
       setSubmissionInFlight,
+      shellOwnsPendingItem,
     ],
   );
 

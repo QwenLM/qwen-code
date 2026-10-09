@@ -17519,90 +17519,114 @@ describe('useLlmStream', () => {
       expect(result.current.streamingState).toBe(StreamingState.Idle);
     });
 
-    it('keeps a shell cancellable when a delayed duplicate-tool continuation replaces the foreground controller', async () => {
-      const finalizer = deferred<void>();
-      const continuation = deferred<void>();
-      const shell = deferred<ShellExecutionResult>();
-      mockFinalizeToolResponses.mockImplementationOnce(
-        async (_config, entries) => {
-          await finalizer.promise;
-          return entries;
-        },
-      );
-      const client = new MockedLlmClientClass(mockConfig);
-      client.getHistoryToolCallFingerprints.mockReturnValue(
-        new Map([
-          [
-            'tool-history',
-            getToolCallFingerprint('shell', { command: 'echo duplicate' }),
-          ],
-        ]),
-      );
-      mockSendMessageStream
-        .mockReturnValueOnce(
-          (async function* () {
-            yield {
-              type: ServerLlmEventType.ToolCallRequest,
-              value: {
-                callId: 'tool-history',
-                providerCallId: 'tool-history',
-                name: 'shell',
-                args: { command: 'echo duplicate' },
-                isClientInitiated: false,
-                prompt_id: 'prompt-shell-boundary',
-              },
-            };
-          })(),
-        )
-        .mockReturnValueOnce(
-          (async function* () {
-            await continuation.promise;
-            yield {
-              type: ServerLlmEventType.Finished,
-              value: { reason: 'STOP', usageMetadata: undefined },
-            };
-          })(),
+    it.each([false, true])(
+      'keeps a shell cancellable when a delayed duplicate-tool continuation replaces the foreground controller (continuation settled: %s)',
+      async (settleContinuationFirst) => {
+        const finalizer = deferred<void>();
+        const continuation = deferred<void>();
+        const shell = deferred<ShellExecutionResult>();
+        mockFinalizeToolResponses.mockImplementationOnce(
+          async (_config, entries) => {
+            await finalizer.promise;
+            return entries;
+          },
         );
-      mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
-      const { result } = renderTestHook([], client);
-      let original: Promise<void> | undefined;
-      await act(async () => {
-        original = result.current.submitQuery('duplicate original');
-      });
-      await waitFor(() =>
-        expect(mockFinalizeToolResponses).toHaveBeenCalledTimes(1),
-      );
-      act(() => result.current.cancelOngoingRequest());
-      await act(async () => {
-        await result.current.submitQuery(
-          'printf shell-result',
-          SendMessageType.UserQuery,
-          undefined,
-          { shellMode: true },
+        const client = new MockedLlmClientClass(mockConfig);
+        client.getHistoryToolCallFingerprints.mockReturnValue(
+          new Map([
+            [
+              'tool-history',
+              getToolCallFingerprint('shell', { command: 'echo duplicate' }),
+            ],
+          ]),
         );
-      });
-      const shellSignal = mockExecuteRuntimeShell.mock
-        .calls[0][4] as AbortSignal;
-      expect(shellSignal.aborted).toBe(false);
-      await act(async () => {
-        finalizer.resolve();
-      });
-      await waitFor(() =>
-        expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
-      );
-      act(() => result.current.cancelOngoingRequest());
-      expect(
-        (mockSendMessageStream.mock.calls[1][1] as AbortSignal).aborted,
-      ).toBe(true);
-      expect(shellSignal.aborted).toBe(true);
-      expect(result.current.streamingState).toBe(StreamingState.Responding);
-      await act(async () => {
-        shell.resolve(shellResult(true));
-        continuation.resolve();
-        await original;
-      });
-      expect(result.current.streamingState).toBe(StreamingState.Idle);
-    });
+        mockSendMessageStream
+          .mockReturnValueOnce(
+            (async function* () {
+              yield {
+                type: ServerLlmEventType.ToolCallRequest,
+                value: {
+                  callId: 'tool-history',
+                  providerCallId: 'tool-history',
+                  name: 'shell',
+                  args: { command: 'echo duplicate' },
+                  isClientInitiated: false,
+                  prompt_id: 'prompt-shell-boundary',
+                },
+              };
+            })(),
+          )
+          .mockReturnValueOnce(
+            (async function* () {
+              await continuation.promise;
+              yield {
+                type: ServerLlmEventType.Finished,
+                value: { reason: 'STOP', usageMetadata: undefined },
+              };
+            })(),
+          );
+        mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
+        const { result } = renderTestHook([], client);
+        let original: Promise<void> | undefined;
+        await act(async () => {
+          original = result.current.submitQuery('duplicate original');
+        });
+        await waitFor(() =>
+          expect(mockFinalizeToolResponses).toHaveBeenCalledTimes(1),
+        );
+        act(() => result.current.cancelOngoingRequest());
+        const scheduler = new CronScheduler();
+        const wakeup = scheduler.scheduleWakeup(60, 'continuation wakeup');
+        const cancelWakeups = vi.spyOn(scheduler, 'cancelAllWakeups');
+        vi.mocked(mockConfig.getCronScheduler).mockReturnValue(scheduler);
+        const previousApiCancels = mockLogApiCancel.mock.calls.length;
+        await act(async () => {
+          await result.current.submitQuery(
+            'printf shell-result',
+            SendMessageType.UserQuery,
+            undefined,
+            { shellMode: true },
+          );
+        });
+        const shellSignal = mockExecuteRuntimeShell.mock
+          .calls[0][4] as AbortSignal;
+        expect(shellSignal.aborted).toBe(false);
+        await act(async () => {
+          finalizer.resolve();
+        });
+        await waitFor(() =>
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+        );
+        if (settleContinuationFirst) {
+          await act(async () => {
+            continuation.resolve();
+            await original;
+          });
+        }
+        act(() => result.current.cancelOngoingRequest());
+        expect(
+          (mockSendMessageStream.mock.calls[1][1] as AbortSignal).aborted,
+        ).toBe(!settleContinuationFirst);
+        expect(shellSignal.aborted).toBe(true);
+        expect(mockLogApiCancel.mock.calls.length - previousApiCancels).toBe(
+          settleContinuationFirst ? 0 : 1,
+        );
+        expect(cancelWakeups).toHaveBeenCalledTimes(
+          settleContinuationFirst ? 0 : 1,
+        );
+        expect(scheduler.list().some((job) => job.id === wakeup.id)).toBe(
+          settleContinuationFirst,
+        );
+        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        await act(async () => {
+          shell.resolve(shellResult(true));
+          continuation.resolve();
+          await original;
+        });
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+        scheduler.destroy();
+      },
+    );
 
     it.each([false, true])(
       'retains concurrent Shell cancellation ownership during model unwind (repeat: %s)',
@@ -17711,6 +17735,217 @@ describe('useLlmStream', () => {
       },
     );
 
+    it.each([false, true])(
+      'cancels the remaining owners on the first Esc after the model finishes normally (detached model active: %s)',
+      async (detachedModelActive) => {
+        const model = deferred<void>();
+        const sideModel = deferred<void>();
+        const shell = deferred<ShellExecutionResult>();
+        const scheduler = new CronScheduler();
+        const wakeup = scheduler.scheduleWakeup(60, 'next self-paced tick');
+        const cancelWakeups = vi.spyOn(scheduler, 'cancelAllWakeups');
+        vi.mocked(mockConfig.getCronScheduler).mockReturnValue(scheduler);
+        mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
+        mockSendMessageStream.mockImplementationOnce(() =>
+          (async function* () {
+            await model.promise;
+            yield {
+              type: ServerLlmEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+        if (detachedModelActive) {
+          mockSendMessageStream.mockImplementationOnce((_query, signal) =>
+            (async function* () {
+              await sideModel.promise;
+              yield signal.aborted
+                ? { type: ServerLlmEventType.UserCancelled }
+                : {
+                    type: ServerLlmEventType.Finished,
+                    value: { reason: 'STOP', usageMetadata: undefined },
+                  };
+            })(),
+          );
+        }
+        const { result } = renderTestHook();
+        let foreground: Promise<void> | undefined;
+        let sideQuestion: Promise<void> | undefined;
+        let shellCallId: string | undefined;
+        const finalShellRows = () =>
+          mockAddItem.mock.calls.filter(
+            ([item]) =>
+              item.type === 'tool_group' &&
+              item.tools.some(
+                (tool: IndividualToolCallDisplay) =>
+                  tool.callId === shellCallId,
+              ),
+          );
+        try {
+          await act(async () => {
+            foreground = result.current.submitQuery('ordinary model request');
+          });
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+          );
+          if (detachedModelActive) {
+            await act(async () => {
+              sideQuestion = result.current.submitQuery('?btw active model');
+            });
+            await waitFor(() =>
+              expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+            );
+          }
+          await act(async () => {
+            await result.current.submitQuery(
+              '?btw ignored; printf shell-result',
+              SendMessageType.UserQuery,
+              undefined,
+              { shellMode: true },
+            );
+          });
+          const modelSignal = mockSendMessageStream.mock
+            .calls[0][1] as AbortSignal;
+          const shellSignal = mockExecuteRuntimeShell.mock
+            .calls[0][4] as AbortSignal;
+          expect(shellSignal).not.toBe(modelSignal);
+          const pendingShell = result.current.pendingHistoryItems.find(
+            (item) => item.type === 'tool_group' && item.isUserInitiated,
+          );
+          if (pendingShell?.type !== 'tool_group') {
+            throw new Error('Expected detached Shell panel');
+          }
+          const callId = pendingShell.tools[0].callId;
+          shellCallId = callId;
+          await act(async () => {
+            model.resolve();
+            await foreground;
+          });
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+          expect(result.current.pendingHistoryItems).toContainEqual(
+            pendingShell,
+          );
+          expect(
+            mockAddItem.mock.calls.filter(
+              ([item]) =>
+                item.type === 'tool_group' &&
+                item.tools.some(
+                  (tool: IndividualToolCallDisplay) => tool.callId === callId,
+                ),
+            ),
+          ).toHaveLength(0);
+          const clock = vi
+            .spyOn(Date, 'now')
+            .mockReturnValue(Date.now() + 2000);
+          try {
+            act(() =>
+              mockExecuteRuntimeShell.mock.calls[0][3]({
+                type: 'data',
+                chunk: 'output after foreground completion',
+              }),
+            );
+          } finally {
+            clock.mockRestore();
+          }
+          expect(result.current.pendingHistoryItems).toContainEqual(
+            expect.objectContaining({
+              type: 'tool_group',
+              tools: [
+                expect.objectContaining({
+                  callId,
+                  status: ToolCallStatus.Executing,
+                  resultDisplay: 'output after foreground completion',
+                }),
+              ],
+            }),
+          );
+          act(() => result.current.cancelOngoingRequest());
+          expect(shellSignal.aborted).toBe(true);
+          expect(modelSignal.aborted).toBe(false);
+          expect(mockLogApiCancel).toHaveBeenCalledTimes(
+            detachedModelActive ? 1 : 0,
+          );
+          expect(cancelWakeups).toHaveBeenCalledTimes(
+            detachedModelActive ? 1 : 0,
+          );
+          expect(scheduler.list().some((job) => job.id === wakeup.id)).toBe(
+            !detachedModelActive,
+          );
+          if (detachedModelActive) {
+            expect(
+              (mockSendMessageStream.mock.calls[1][1] as AbortSignal).aborted,
+            ).toBe(true);
+          }
+        } finally {
+          await act(async () => {
+            model.resolve();
+            sideModel.resolve();
+            shell.resolve(shellResult(true));
+            await Promise.all([foreground, sideQuestion]);
+          });
+          scheduler.destroy();
+        }
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+        expect(finalShellRows()).toHaveLength(1);
+        expect(finalShellRows()[0][0].tools[0].status).toBe(
+          ToolCallStatus.Canceled,
+        );
+      },
+    );
+
+    it('defensively commits a model-owned shared-slot tool row while a Shell is live', async () => {
+      // Production model tool groups use the scheduler's separate display slot.
+      // Inject the shared slot explicitly to pin the ownership discriminator;
+      // this fixture does not establish a reachable model continuation path.
+      const actual = await vi.importActual<
+        typeof import('./shellCommandProcessor.js')
+      >('./shellCommandProcessor.js');
+      let setPendingItem!: Parameters<typeof useShellCommandProcessor>[1];
+      vi.mocked(useShellCommandProcessor).mockImplementation((...args) => {
+        setPendingItem = args[1];
+        return actual.useShellCommandProcessor(...args);
+      });
+      const shell = deferred<ShellExecutionResult>();
+      mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery(
+          'printf shell-result',
+          SendMessageType.UserQuery,
+          undefined,
+          { shellMode: true },
+        );
+      });
+      const shellItem = result.current.pendingHistoryItems.find(
+        (item) => item.type === 'tool_group',
+      );
+      if (shellItem?.type !== 'tool_group')
+        throw new Error('Expected live Shell panel');
+      const modelItem = {
+        ...shellItem,
+        isUserInitiated: undefined,
+        tools: shellItem.tools.map((tool) => ({
+          ...tool,
+          callId: 'defensive-model-tool',
+        })),
+      };
+      act(() => setPendingItem(modelItem));
+      act(() => result.current.cancelOngoingRequest());
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) =>
+            item.type === 'tool_group' &&
+            item.tools.some(
+              (tool: IndividualToolCallDisplay) =>
+                tool.callId === 'defensive-model-tool',
+            ),
+        ),
+      ).toHaveLength(1);
+      expect(result.current.pendingHistoryItems).not.toContainEqual(modelItem);
+      await act(async () => shell.resolve(shellResult(true)));
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
     it('keeps a new shell busy when an older model emits its cancellation event', async () => {
       const shell = deferred<ShellExecutionResult>();
       const model = deferred<void>();
@@ -17739,11 +17974,64 @@ describe('useLlmStream', () => {
           { shellMode: true },
         );
       });
+      const pendingShell = result.current.pendingHistoryItems.find(
+        (item) => item.type === 'tool_group' && item.isUserInitiated,
+      );
+      expect(pendingShell?.type).toBe('tool_group');
+      const callId =
+        pendingShell?.type === 'tool_group'
+          ? pendingShell.tools[0].callId
+          : undefined;
+      const shellRows = () =>
+        mockAddItem.mock.calls
+          .map(([item]) => item)
+          .filter(
+            (item) =>
+              item.type === 'tool_group' &&
+              item.tools.some(
+                (tool: IndividualToolCallDisplay) => tool.callId === callId,
+              ),
+          );
+      const cancellationNoticesBefore = mockAddItem.mock.calls.filter(
+        ([item]) =>
+          item.type === 'info' && item.text === 'User cancelled the request.',
+      ).length;
       await act(async () => {
         model.resolve();
         await oldSubmission;
       });
       expect(result.current.streamingState).toBe(StreamingState.Responding);
+      expect(shellRows()).toHaveLength(0);
+      expect(result.current.pendingHistoryItems).toContainEqual(pendingShell);
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) =>
+            item.type === 'info' && item.text === 'User cancelled the request.',
+        ),
+      ).toHaveLength(cancellationNoticesBefore);
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2000);
+      try {
+        act(() => {
+          mockExecuteRuntimeShell.mock.calls[0][3]({
+            type: 'data',
+            chunk: 'new shell output',
+          });
+        });
+      } finally {
+        clock.mockRestore();
+      }
+      expect(result.current.pendingHistoryItems).toContainEqual(
+        expect.objectContaining({
+          type: 'tool_group',
+          tools: [
+            expect.objectContaining({
+              callId,
+              status: ToolCallStatus.Executing,
+              resultDisplay: 'new shell output',
+            }),
+          ],
+        }),
+      );
       act(() => result.current.cancelOngoingRequest());
       expect(
         (mockExecuteRuntimeShell.mock.calls[0][4] as AbortSignal).aborted,
@@ -17754,6 +18042,8 @@ describe('useLlmStream', () => {
       await waitFor(() =>
         expect(result.current.streamingState).toBe(StreamingState.Idle),
       );
+      expect(shellRows()).toHaveLength(1);
+      expect(shellRows()[0].tools[0].status).toBe(ToolCallStatus.Canceled);
     });
   });
 
