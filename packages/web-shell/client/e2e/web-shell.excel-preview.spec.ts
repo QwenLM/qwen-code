@@ -474,6 +474,14 @@ test('keeps large worksheets virtual while scrolling through wrapped and merged 
     exact: true,
   });
   await expect(lastRowNumber).toBeVisible();
+  await preview.getByRole('table').evaluate((element) => {
+    element.style.fontFamily = '"Arial Black", monospace';
+  });
+  expect(
+    await lastRowNumber.evaluate(
+      (element) => element.getBoundingClientRect().width,
+    ),
+  ).toBeGreaterThanOrEqual(56);
   const rowNumberBounds = await lastRowNumber.evaluate((element) => {
     const range = document.createRange();
     range.selectNodeContents(element);
@@ -483,6 +491,9 @@ test('keeps large worksheets virtual while scrolling through wrapped and merged 
   });
   expect(rowNumberBounds.left).toBeGreaterThanOrEqual(0);
   expect(rowNumberBounds.right).toBeGreaterThanOrEqual(0);
+  await preview.screenshot({
+    path: info.outputPath('adaptive-row-gutter.png'),
+  });
   await preview.getByRole('tab', { name: 'Long', exact: true }).click();
   await expect(preview.getByRole('table')).toContainText('Long sheet top');
   await expect(preview).not.toContainText('Preview limited to');
@@ -502,7 +513,48 @@ test('keeps large worksheets virtual while scrolling through wrapped and merged 
   expect(await scroll.evaluate((element) => element.scrollTop)).toBe(0);
 });
 
-test('previews incoming unsent Blob and leaves invalid workbook downloadable', async ({
+test('bounds worksheet tabs and reaches the final sheet across groups', async ({
+  page,
+}, info) => {
+  const workbook = new ExcelJS.Workbook();
+  for (let i = 0; i < 60; i++)
+    workbook.addWorksheet(`Sheet ${i}`).addRow([`Content ${i}`]);
+  const bytes = Buffer.from(await workbook.xlsx.writeBuffer());
+  const mock = await install(page, info, createWebShellDaemonScenario(), bytes);
+  await mock.open();
+  await pasteWorkbook(page, bytes);
+  const preview = page.locator(previewSelector);
+  await expect(preview.getByRole('table')).toContainText('Content 0');
+  await expect(preview.getByRole('tab')).toHaveCount(50);
+  await preview.getByRole('button', { name: 'Next worksheets' }).click();
+  await expect(preview.getByRole('table')).toContainText('Content 50');
+  await expect(preview.getByRole('tab')).toHaveCount(10);
+  await preview
+    .getByRole('tab', { name: 'Sheet 50', exact: true })
+    .press('End');
+  await expect(
+    preview.getByRole('tab', { name: 'Sheet 59', exact: true }),
+  ).toBeFocused();
+  await expect(preview.getByRole('table')).toContainText('Content 59');
+  await preview.screenshot({ path: info.outputPath('worksheet-groups.png') });
+  await preview
+    .getByRole('tab', { name: 'Sheet 59', exact: true })
+    .press('Home');
+  await expect(
+    preview.getByRole('tab', { name: 'Sheet 0', exact: true }),
+  ).toBeFocused();
+  await expect(preview.getByRole('table')).toContainText('Content 0');
+  await preview.getByRole('button', { name: 'Next worksheets' }).click();
+  await preview
+    .getByRole('tab', { name: 'Sheet 50', exact: true })
+    .press('ArrowLeft');
+  await expect(
+    preview.getByRole('tab', { name: 'Sheet 49', exact: true }),
+  ).toBeFocused();
+  await expect(preview.getByRole('table')).toContainText('Content 49');
+});
+
+test('@smoke previews incoming unsent Blob and leaves invalid workbook downloadable', async ({
   page,
 }, info) => {
   const bytes = await workbookBytes();
@@ -641,7 +693,7 @@ test('retains all content when peripheral empty cells carry formatting', async (
   for (let row = 1; row <= 2000; row++)
     sheet.addRow([`Order ${row}`, row, row * 2]);
   sheet.getCell('XFD1').font = { bold: true };
-  sheet.getRow(5000).font = { bold: true };
+  sheet.getCell('C5000').font = { bold: true };
   const bytes = Buffer.from(await book.xlsx.writeBuffer());
   const scenario = createWebShellDaemonScenario({
     events: [

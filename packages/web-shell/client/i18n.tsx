@@ -727,6 +727,8 @@ const EN: Messages = {
   'excel.row': 'Row',
   'excel.truncated': (v) =>
     `Preview limited to ${v?.cells} cells per worksheet. Download the original for all content.`,
+  'excel.previousWorksheets': 'Previous worksheets',
+  'excel.nextWorksheets': 'Next worksheets',
   'excel.empty': 'This worksheet is empty.',
   'excel.notCalculated': 'Not calculated',
   'excel.tooLarge':
@@ -5024,6 +5026,8 @@ const ZH: Messages = {
   'excel.row': '行',
   'excel.truncated': (v) =>
     `每个工作表最多预览 ${v?.cells} 个单元格。下载原文件查看全部内容。`,
+  'excel.previousWorksheets': '上一组工作表',
+  'excel.nextWorksheets': '下一组工作表',
   'excel.empty': '此工作表为空。',
   'excel.notCalculated': '未计算',
   'excel.tooLarge': 'Excel 预览支持最大 10 MiB 的文件，请下载原文件打开。',

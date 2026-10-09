@@ -94,6 +94,16 @@ describe('findLicenseFile', () => {
     expect(resolved).toBe(path.join(packageDir, 'License'));
   });
 
+  it('finds JSZip’s LICENSE.markdown attribution', async () => {
+    await fs.writeFile(
+      path.join(packageDir, 'LICENSE.markdown'),
+      'JSZip license',
+    );
+    expect(await findLicenseFile(packageDir)).toBe(
+      path.join(packageDir, 'LICENSE.markdown'),
+    );
+  });
+
   it('prefers LICENSE over other variants', async () => {
     await fs.writeFile(path.join(packageDir, 'LICENSE'), 'Apache-2.0');
     await fs.writeFile(path.join(packageDir, 'LICENSE.md'), 'MIT');

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { DownloadIcon } from 'lucide-react';
+import { ChevronLeftIcon, ChevronRightIcon, DownloadIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { Button } from '../ui/button';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
@@ -20,6 +20,8 @@ import {
   type ExcelPreviewWorkbookInfo,
   type ExcelPreviewSheet,
 } from './excel-preview-types';
+
+const MAX_VISIBLE_SHEET_TABS = 50;
 
 export default function SpreadsheetPreview({
   workspacePath,
@@ -41,6 +43,7 @@ export default function SpreadsheetPreview({
   const [error, setError] = useState<string>();
   const [downloadUrl, setDownloadUrl] = useState<string>();
   const [downloading, setDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string>();
   const [attempt, setAttempt] = useState(0);
   const [sheetIndex, setSheetIndex] = useState(0);
   const workerRef = useRef<Worker | undefined>(undefined);
@@ -49,6 +52,16 @@ export default function SpreadsheetPreview({
     undefined,
   );
   const ownerRef = useRef<object | undefined>(undefined);
+  const sheetTabsRef = useRef<HTMLDivElement>(null);
+  const focusSheetTabRef = useRef(false);
+  useEffect(() => {
+    if (focusSheetTabRef.current) {
+      focusSheetTabRef.current = false;
+      sheetTabsRef.current
+        ?.querySelector<HTMLButtonElement>('[data-state="active"]')
+        ?.focus();
+    }
+  }, [sheetIndex]);
   useEffect(() => {
     const owner = {};
     ownerRef.current = owner;
@@ -61,6 +74,7 @@ export default function SpreadsheetPreview({
     setError(undefined);
     setDownloadUrl(undefined);
     setDownloading(false);
+    setDownloadError(undefined);
     setSheetIndex(0);
     setSelectedSheet(undefined);
     requestedSheetRef.current = undefined;
@@ -146,6 +160,13 @@ export default function SpreadsheetPreview({
   const sheet =
     selectedSheet?.index === sheetIndex ? selectedSheet.sheet : undefined;
 
+  const sheetTabStart =
+    Math.floor(sheetIndex / MAX_VISIBLE_SHEET_TABS) * MAX_VISIBLE_SHEET_TABS;
+  const sheetTabEnd = Math.min(
+    sheetTabStart + MAX_VISIBLE_SHEET_TABS,
+    workbook?.sheetNames.length ?? 0,
+  );
+
   return (
     <Tabs
       value={String(sheetIndex)}
@@ -154,25 +175,71 @@ export default function SpreadsheetPreview({
       className="h-full min-h-0 min-w-0 flex-1 gap-0 bg-background text-foreground"
     >
       <div className="flex min-w-0 items-end gap-2 border-b border-border">
+        {workbook && workbook.sheetNames.length > MAX_VISIBLE_SHEET_TABS && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 shrink-0"
+            aria-label={t('excel.previousWorksheets')}
+            disabled={sheetTabStart === 0}
+            onClick={() => setSheetIndex(sheetTabStart - 1)}
+          >
+            <ChevronLeftIcon />
+          </Button>
+        )}
         {workbook && workbook.sheetNames.length > 0 ? (
           <TabsList
+            ref={sheetTabsRef}
             variant="line"
             aria-label={t('excel.worksheet')}
             className="-mb-px min-w-0 flex-1 justify-start gap-1 overflow-x-auto p-0 group-data-horizontal/tabs:h-6"
+            onKeyDownCapture={(event) => {
+              const next =
+                event.key === 'ArrowRight'
+                  ? Math.min(sheetIndex + 1, workbook.sheetNames.length - 1)
+                  : event.key === 'ArrowLeft'
+                    ? Math.max(sheetIndex - 1, 0)
+                    : event.key === 'Home'
+                      ? 0
+                      : event.key === 'End'
+                        ? workbook.sheetNames.length - 1
+                        : undefined;
+              if (next !== undefined) {
+                event.preventDefault();
+                if (next !== sheetIndex) {
+                  focusSheetTabRef.current = true;
+                  setSheetIndex(next);
+                }
+              }
+            }}
           >
-            {workbook.sheetNames.map((name, index) => (
-              <TabsTrigger
-                key={index}
-                value={String(index)}
-                title={name}
-                className="h-6 max-w-48 flex-none rounded-none rounded-t-lg border-border bg-muted/40 px-4 py-0 text-xs font-normal text-foreground after:hidden data-[state=active]:border-b-background data-[state=active]:bg-background data-[state=active]:text-[var(--agent-blue-400)] dark:data-[state=active]:text-[var(--agent-blue-400)]"
-              >
-                <span className="truncate">{name}</span>
-              </TabsTrigger>
-            ))}
+            {workbook.sheetNames
+              .slice(sheetTabStart, sheetTabEnd)
+              .map((name, offset) => (
+                <TabsTrigger
+                  key={sheetTabStart + offset}
+                  value={String(sheetTabStart + offset)}
+                  title={name}
+                  className="h-6 max-w-48 flex-none rounded-none rounded-t-lg border-border bg-muted/40 px-4 py-0 text-xs font-normal text-foreground after:hidden data-[state=active]:border-b-background data-[state=active]:bg-background data-[state=active]:text-[var(--agent-blue-400)] dark:data-[state=active]:text-[var(--agent-blue-400)]"
+                >
+                  <span className="truncate">{name}</span>
+                </TabsTrigger>
+              ))}
           </TabsList>
         ) : (
           <span className="flex-1" />
+        )}
+        {workbook && workbook.sheetNames.length > MAX_VISIBLE_SHEET_TABS && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-6 w-6 shrink-0"
+            aria-label={t('excel.nextWorksheets')}
+            disabled={sheetTabEnd === workbook.sheetNames.length}
+            onClick={() => setSheetIndex(sheetTabEnd)}
+          >
+            <ChevronRightIcon />
+          </Button>
         )}
         {downloadUrl ? (
           <Button variant="ghost" size="sm" asChild>
@@ -194,6 +261,7 @@ export default function SpreadsheetPreview({
               onClick={() => {
                 const owner = ownerRef.current;
                 setDownloading(true);
+                setDownloadError(undefined);
                 void downloadWorkspaceFile(
                   workspaceActions,
                   workspacePath,
@@ -202,7 +270,7 @@ export default function SpreadsheetPreview({
                 )
                   .catch((reason: unknown) => {
                     if (ownerRef.current === owner)
-                      setError(extractErrorDetail(reason));
+                      setDownloadError(extractErrorDetail(reason));
                   })
                   .finally(() => {
                     if (ownerRef.current === owner) setDownloading(false);
@@ -215,6 +283,11 @@ export default function SpreadsheetPreview({
           )
         )}
       </div>
+      {downloadError && (
+        <p role="status" className="px-3 py-2 text-xs text-destructive">
+          {downloadError}
+        </p>
+      )}
       <TabsContent
         value={String(sheetIndex)}
         className="flex min-h-0 flex-1 flex-col pt-2"
@@ -258,6 +331,7 @@ export default function SpreadsheetPreview({
 
 function SpreadsheetTable({ sheet }: { sheet: ExcelPreviewSheet }) {
   const { t } = useI18n();
+  const gutterWidth = `max(56px, calc(${String(sheet.rows.length).length}ch + 0.5rem + 1px))`;
   const scrollRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
     count: sheet.rows.length,
@@ -304,11 +378,11 @@ function SpreadsheetTable({ sheet }: { sheet: ExcelPreviewSheet }) {
       <table
         aria-label={sheet.name}
         aria-rowcount={sheet.rows.length + 1}
-        className="min-w-full table-fixed border-separate border-spacing-0 text-sm"
-        style={{ width: 56 + sheet.columns * 160 }}
+        className="min-w-full table-fixed border-separate border-spacing-0 text-sm tabular-nums"
+        style={{ width: `calc(${gutterWidth} + ${sheet.columns * 160}px)` }}
       >
         <colgroup>
-          <col style={{ width: 56 }} />
+          <col style={{ width: gutterWidth }} />
           {Array.from({ length: sheet.columns }, (_, c) => (
             <col key={c} />
           ))}
@@ -352,7 +426,7 @@ function SpreadsheetTable({ sheet }: { sheet: ExcelPreviewSheet }) {
               >
                 <th
                   scope="row"
-                  className="sticky left-0 z-10 border-b border-r border-border bg-muted px-1 py-1 text-right font-normal text-muted-foreground"
+                  className="sticky left-0 z-10 border-b border-r border-border bg-muted whitespace-nowrap px-1 py-1 text-right font-normal text-muted-foreground"
                 >
                   {r + 1}
                 </th>

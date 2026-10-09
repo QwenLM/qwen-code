@@ -76,6 +76,148 @@ describe('SpreadsheetPreview', () => {
     vi.unstubAllGlobals();
   });
 
+  it('bounds mounted tabs while every worksheet remains keyboard reachable', async () => {
+    await render(blob());
+    const worker = workers[0]!;
+    act(() =>
+      worker.onmessage?.({
+        data: {
+          type: 'loaded',
+          workbook: {
+            sheetNames: Array.from({ length: 5000 }, (_, i) => `Sheet ${i}`),
+          },
+        },
+      }),
+    );
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(50);
+    const next = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Next worksheets"]',
+    )!;
+    act(() => next.click());
+    expect(worker.postMessage).toHaveBeenLastCalledWith({
+      type: 'sheet',
+      index: 50,
+    });
+    const key = (value: string) =>
+      act(() => {
+        container
+          .querySelector('[role="tab"][data-state="active"]')!
+          .dispatchEvent(
+            new KeyboardEvent('keydown', {
+              key: value,
+              bubbles: true,
+              cancelable: true,
+            }),
+          );
+      });
+    key('ArrowLeft');
+    expect(worker.postMessage).toHaveBeenLastCalledWith({
+      type: 'sheet',
+      index: 49,
+    });
+    expect(document.activeElement?.textContent).toBe('Sheet 49');
+    key('End');
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(50);
+    expect(worker.postMessage).toHaveBeenLastCalledWith({
+      type: 'sheet',
+      index: 4999,
+    });
+    expect(document.activeElement?.textContent).toBe('Sheet 4999');
+    key('Home');
+    expect(worker.postMessage).toHaveBeenLastCalledWith({
+      type: 'sheet',
+      index: 0,
+    });
+    expect(document.activeElement?.textContent).toBe('Sheet 0');
+  });
+
+  it('keeps a loaded preview usable when an overlapping download fails', async () => {
+    vi.stubGlobal('Blob', NodeBlob);
+    type Bytes = {
+      path: string;
+      offset: number;
+      sizeBytes: number;
+      returnedBytes: number;
+      contentBase64: string;
+    };
+    const pending: Array<{
+      resolve: (bytes: Bytes) => void;
+      reject: (reason: Error) => void;
+    }> = [];
+    const actions = {
+      stat: vi
+        .fn()
+        .mockResolvedValue({ type: 'file', sizeBytes: 4, modifiedMs: 1 }),
+      readFileBytes: vi.fn(
+        () =>
+          new Promise<Bytes>((resolve, reject) =>
+            pending.push({ resolve, reject }),
+          ),
+      ),
+      readWorkspaceFile: vi.fn(),
+      listScheduledTasks: vi.fn(),
+      updateScheduledTask: vi.fn(),
+      deleteScheduledTask: vi.fn(),
+    };
+    await act(async () =>
+      root.render(
+        <I18nProvider language="en">
+          <SpreadsheetPreview
+            workspacePath="report.xlsx"
+            workspaceActions={actions}
+          />
+        </I18nProvider>,
+      ),
+    );
+    expect(pending).toHaveLength(1);
+    await act(async () => container.querySelector('button')!.click());
+    expect(pending).toHaveLength(2);
+    await act(async () => {
+      pending[0]!.resolve({
+        path: 'report.xlsx',
+        offset: 0,
+        sizeBytes: 4,
+        returnedBytes: 4,
+        contentBase64: 'eGxzeA==',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    const worker = workers[0]!;
+    act(() =>
+      worker.onmessage?.({
+        data: { type: 'loaded', workbook: { sheetNames: ['One', 'Two'] } },
+      }),
+    );
+    act(() =>
+      worker.onmessage?.({
+        data: {
+          type: 'sheet',
+          index: 0,
+          sheet: {
+            name: 'One',
+            columns: 1,
+            truncated: false,
+            merges: [],
+            rows: [[{ text: 'Revenue', style: {} }]],
+          },
+        },
+      }),
+    );
+    await act(async () => pending[1]!.reject(new Error('Download failed')));
+    expect(container.querySelector('table')?.textContent).toContain('Revenue');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      'Download failed',
+    );
+    act(() =>
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]')[1]!.focus(),
+    );
+    expect(worker.postMessage).toHaveBeenLastCalledWith({
+      type: 'sheet',
+      index: 1,
+    });
+  });
+
   it.each(['construction', 'async error'])(
     'keeps the original downloadable when worker %s fails',
     async (failure) => {

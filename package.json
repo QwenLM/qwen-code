@@ -119,6 +119,7 @@
     "pre-commit": "node scripts/pre-commit.js"
   },
   "overrides": {
+    "brace-expansion@1": "1.1.21",
     "ansi-regex": "6.2.2",
     "cliui": {
       "wrap-ansi": "7.0.0"

@@ -207,7 +207,7 @@ describe('Excel preview projection', () => {
     for (let row = 1; row <= 2000; row++)
       sheet.addRow([`Row ${row}`, row, row * 2]);
     sheet.getCell('XFD1').font = { bold: true };
-    sheet.getRow(5000).font = { bold: true };
+    sheet.getCell('C5000').font = { bold: true };
     const empty = book.addWorksheet('Only formatting');
     empty.getCell('XFD1').fill = {
       type: 'pattern',
@@ -219,6 +219,7 @@ describe('Excel preview projection', () => {
     merged.getCell('B2').value = 'Master';
     const loaded = await preview(book);
     expect(loaded.worksheets[0]!.columnCount).toBe(16384);
+    expect(loaded.worksheets[0]!.rowCount).toBe(5000);
     const projected = projectExcelSheet(loaded, 0);
     expect(projected).toMatchObject({ columns: 3, truncated: false });
     expect(projected.rows).toHaveLength(2000);
@@ -236,6 +237,45 @@ describe('Excel preview projection', () => {
     expect(mergedProjection.merges).toEqual([
       { top: 1, left: 1, bottom: 3, right: 4 },
     ]);
+  });
+
+  it('bounds work for a styled empty far column in every row without serializing the sheet', async () => {
+    const book = new ExcelJS.Workbook();
+    const sheet = book.addWorksheet('Sparse');
+    for (let row = 1; row <= 200; row++) {
+      sheet.addRow([`Row ${row}`, row, row * 2]);
+      sheet.getCell(row, 16384).font = { bold: true };
+    }
+    const loaded = await preview(book);
+    const sparse = loaded.worksheets[0]!;
+    expect(sparse.columnCount).toBe(16384);
+    let cellAccesses = 0;
+    for (const row of sparse.getRows(1, 200)!) {
+      const internal = row as ExcelJS.Row & { _cells: ExcelJS.Cell[] };
+      internal._cells = new Proxy(internal._cells, {
+        has(target, property) {
+          cellAccesses++;
+          return Reflect.has(target, property);
+        },
+        get(target, property, receiver) {
+          if (typeof property === 'string' && /^\d+$/.test(property))
+            cellAccesses++;
+          return Reflect.get(target, property, receiver);
+        },
+      });
+    }
+    const model = vi.spyOn(sparse, 'model', 'get');
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = projectExcelSheet(loaded, 0);
+      expect(result.rows).toHaveLength(200);
+      expect(result).toMatchObject({
+        columns: 3,
+        truncated: false,
+        merges: [],
+      });
+    }
+    expect(model).not.toHaveBeenCalled();
+    expect(cellAccesses).toBeLessThan(5000);
   });
 
   it('budgets all grid cells without independent sheet or column limits', async () => {

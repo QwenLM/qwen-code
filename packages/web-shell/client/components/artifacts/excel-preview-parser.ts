@@ -1,6 +1,6 @@
 import ExcelJS from 'exceljs';
 import { format } from 'ssf';
-import type { Cell, CellValue, Worksheet } from 'exceljs';
+import type { Cell, CellValue, Row, Worksheet } from 'exceljs';
 import {
   MAX_EXCEL_PREVIEW_CELLS,
   MAX_EXCEL_PREVIEW_MERGED_CELLS,
@@ -150,6 +150,16 @@ export function getExcelWorkbookInfo(
   };
 }
 
+// ExcelJS 4.4.0 stores sparse arrays: its public iterators and model getter
+// scan every hole up to XFD. Enumerate present entries for preview work instead.
+type SparseWorksheet = Worksheet & {
+  _rows: (Row & { _cells: (Cell | undefined)[] })[];
+  _merges: Record<
+    string,
+    { top: number; left: number; bottom: number; right: number }
+  >;
+};
+
 export function projectExcelSheet(
   workbook: ExcelJS.Workbook,
   index: number,
@@ -161,17 +171,18 @@ export function projectExcelSheet(
   ) {
     throw new RangeError('Worksheet index is outside the preview range.');
   }
-  const sheet = workbook.worksheets[index]!;
-  // Peripheral formatting-only cells must not consume the rectangular budget.
-  // eachCell includes merged placeholders, preserving the full merged extent.
+  const sheet = workbook.worksheets[index]! as SparseWorksheet;
+  // Ignore peripheral formatting-only cells, preserving merged placeholders.
   let columns = 0;
   let lastRow = 0;
-  sheet.eachRow((row, rowNumber) => {
-    lastRow = rowNumber;
-    row.eachCell((_cell, column) => {
-      columns = Math.max(columns, column);
-    });
-  });
+  for (const row of Object.values(sheet._rows)) {
+    if (!row) continue;
+    for (const cell of Object.values(row._cells)) {
+      if (!cell || cell.type === ExcelJS.ValueType.Null) continue;
+      lastRow = Math.max(lastRow, row.number);
+      columns = Math.max(columns, Number(cell.col));
+    }
+  }
   const rowCount =
     columns === 0
       ? 0
@@ -190,18 +201,13 @@ export function projectExcelSheet(
             : null;
       }),
     ),
-    merges: sheet.model.merges
-      .map((range) => {
-        const [start, end] = range.split(':');
-        const a = address(start!);
-        const b = address(end ?? start!);
-        return {
-          top: a.row,
-          left: a.column,
-          bottom: b.row,
-          right: b.column,
-        };
-      })
+    merges: Object.values(sheet._merges)
+      .map((merge) => ({
+        top: merge.top - 1,
+        left: merge.left - 1,
+        bottom: merge.bottom - 1,
+        right: merge.right - 1,
+      }))
       .filter((merge) => merge.top < rowCount && merge.left < columns),
   };
 }

@@ -178,6 +178,7 @@ export async function findLicenseFile(packageDir, licenseFileHint) {
     licenseFileHint,
     'LICENSE',
     'LICENSE.md',
+    'LICENSE.markdown',
     'LICENSE.txt',
     'LICENSE-MIT.txt',
     'LICENSE-MIT',

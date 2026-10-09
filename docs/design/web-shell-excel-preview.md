@@ -37,6 +37,11 @@ the shared Tabs primitive, with rounded top corners and muted inactive tabs.
 The active tab uses blue text and a background matching the panel, with its bottom
 border hidden to join a narrow panel-colored gap above the grid. Allow horizontal
 overflow and keyboard arrow navigation, and reset scrolling when switching sheets.
+Mount at most 50 tabs at a time, with previous/next group buttons; retain every
+worksheet and its original index. Arrow keys cross groups and Home/End reach the
+first/last worksheet. Download failures have a separate status and do not discard
+a successful preview. The row-number gutter defaults to a 56 px minimum and grows
+with the row-number digits in the current font, using tabular numerals.
 
 ExcelJS reads workbook data. Use the small SSF formatter for Excel number formats
 instead of implementing a custom number-format parser. Preserve formula cached
@@ -49,7 +54,9 @@ styles/themes and embedded objects are outside this preview's fidelity guarantee
 Limit preview input to 10 MiB and each selected sheet to 100,000 grid cells,
 including empty positions inside the content/merge extent. Ignore peripheral
 formatting-only cells when finding this extent; keep original coordinates and
-merged placeholders. Replace independent worksheet-count, row-count and
+merged placeholders. Iterate ExcelJS 4.4.0 sparse row/cell storage directly and
+read normalized merge bounds without serializing the entire worksheet model;
+revalidate these private structures when upgrading ExcelJS. Replace independent worksheet-count, row-count and
 column-count caps with this budget: retain all columns and as many complete rows
 as fit within floor(100,000 / column count). Empty sheets have no preview rows.
 Show the truncation notice only when the selected sheet exceeds that budget.
@@ -99,7 +106,9 @@ ExcelJS is absent from initial entries and its lazy worker is published correctl
 Check huge merged ranges, exact/over-limit area and count, accumulation across
 sheets, concurrent load isolation, and peripheral empty formatting. Verify the
 first-party webview CSP permits blob workers while restrictive third-party hosts
-still receive the download fallback.
+still receive the download fallback. Verify bounded tabs with thousands of
+worksheets, navigation across groups, six-digit row numbers in a wide font,
+independent download failures, and sparse distant formatting without hole scans.
 
 ## Open questions
 
