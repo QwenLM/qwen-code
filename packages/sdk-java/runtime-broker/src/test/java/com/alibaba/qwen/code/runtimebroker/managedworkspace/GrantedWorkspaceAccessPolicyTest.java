@@ -19,16 +19,16 @@ class GrantedWorkspaceAccessPolicyTest {
     void grantsOnlyTheExactTenantActorAndWorkspace() {
         GrantedWorkspaceAccessPolicy policy = GrantedWorkspaceAccessPolicy
                 .builder()
-                .grant(TENANT, "alice", "ws-a", WorkspaceAccess.CREATE)
-                .grant(TENANT, "bob", "ws-a", WorkspaceAccess.READ)
+                .grant(TENANT, "alice", "ws-a", WorkspaceAccess.OPERATOR)
+                .grant(TENANT, "bob", "ws-a", WorkspaceAccess.READER)
                 .build();
 
-        assertEquals(WorkspaceAccess.CREATE,
+        assertEquals(WorkspaceAccess.OPERATOR,
                 policy.accessFor(new WorkspaceActor(TENANT, "alice"), WORKSPACE));
-        assertEquals(WorkspaceAccess.CREATE, policy.accessFor(
+        assertEquals(WorkspaceAccess.OPERATOR, policy.accessFor(
                 new WorkspaceActor(copy(TENANT), copy("alice")),
                 workspace(copy(TENANT), copy("ws-a"), WorkspaceState.ACTIVE)));
-        assertEquals(WorkspaceAccess.READ,
+        assertEquals(WorkspaceAccess.READER,
                 policy.accessFor(new WorkspaceActor(TENANT, "bob"), WORKSPACE));
         assertEquals(WorkspaceAccess.NONE,
                 policy.accessFor(new WorkspaceActor(TENANT, "carol"), WORKSPACE));
@@ -46,7 +46,7 @@ class GrantedWorkspaceAccessPolicyTest {
     void neverCrossesTenantsEvenForTheSameIds() {
         GrantedWorkspaceAccessPolicy policy = GrantedWorkspaceAccessPolicy
                 .builder()
-                .grant(OTHER_TENANT, "alice", "ws-a", WorkspaceAccess.CREATE)
+                .grant(OTHER_TENANT, "alice", "ws-a", WorkspaceAccess.OPERATOR)
                 .build();
 
         assertEquals(WorkspaceAccess.NONE,
@@ -62,12 +62,12 @@ class GrantedWorkspaceAccessPolicyTest {
     void treatsATenantThatDiffersInCaseAsAnotherTenant() {
         GrantedWorkspaceAccessPolicy policy = GrantedWorkspaceAccessPolicy
                 .builder()
-                .grant("TENANT-A", "alice", "ws-a", WorkspaceAccess.CREATE)
+                .grant("TENANT-A", "alice", "ws-a", WorkspaceAccess.OPERATOR)
                 .build();
 
         assertEquals(WorkspaceAccess.NONE, policy.accessFor(
                 new WorkspaceActor("TENANT-A", "alice"), WORKSPACE));
-        assertEquals(WorkspaceAccess.CREATE, policy.accessFor(
+        assertEquals(WorkspaceAccess.OPERATOR, policy.accessFor(
                 new WorkspaceActor("TENANT-A", "alice"),
                 workspace("TENANT-A", "ws-a", WorkspaceState.ACTIVE)));
     }
@@ -76,30 +76,30 @@ class GrantedWorkspaceAccessPolicyTest {
     void rejectsAmbiguousOrEmptyGrants() {
         GrantedWorkspaceAccessPolicy.Builder builder =
                 GrantedWorkspaceAccessPolicy.builder()
-                        .grant(TENANT, "alice", "ws-a", WorkspaceAccess.READ);
+                        .grant(TENANT, "alice", "ws-a", WorkspaceAccess.READER);
 
         assertThrows(IllegalArgumentException.class, () -> builder.grant(
-                TENANT, "alice", "ws-a", WorkspaceAccess.CREATE));
+                TENANT, "alice", "ws-a", WorkspaceAccess.OPERATOR));
         assertThrows(IllegalArgumentException.class, () -> builder.grant(
                 TENANT, "alice", "ws-b", WorkspaceAccess.NONE));
         assertThrows(IllegalArgumentException.class,
                 () -> builder.grant(TENANT, "alice", "ws-b", null));
         assertThrows(IllegalArgumentException.class, () -> builder.grant(
-                TENANT, "alice\n", "ws-b", WorkspaceAccess.READ));
+                TENANT, "alice\n", "ws-b", WorkspaceAccess.READER));
         assertThrows(IllegalArgumentException.class, () -> builder.grant(
-                TENANT, "alice", "ws/b", WorkspaceAccess.READ));
+                TENANT, "alice", "ws/b", WorkspaceAccess.READER));
         assertThrows(IllegalArgumentException.class, () -> builder.grant(
-                "tenant/a", "alice", "ws-b", WorkspaceAccess.READ));
+                "tenant/a", "alice", "ws-b", WorkspaceAccess.READER));
     }
 
     @Test
     void keepsABuiltPolicyWhenTheBuilderIsReused() {
         GrantedWorkspaceAccessPolicy.Builder builder =
                 GrantedWorkspaceAccessPolicy.builder()
-                        .grant(TENANT, "alice", "ws-a", WorkspaceAccess.READ);
+                        .grant(TENANT, "alice", "ws-a", WorkspaceAccess.READER);
         GrantedWorkspaceAccessPolicy policy = builder.build();
 
-        builder.grant(TENANT, "alice", "ws-b", WorkspaceAccess.CREATE);
+        builder.grant(TENANT, "alice", "ws-b", WorkspaceAccess.OPERATOR);
 
         assertEquals(WorkspaceAccess.NONE, policy.accessFor(
                 new WorkspaceActor(TENANT, "alice"),
@@ -111,19 +111,19 @@ class GrantedWorkspaceAccessPolicyTest {
         GrantedWorkspaceAccessPolicy policy = GrantedWorkspaceAccessPolicy
                 .builder()
                 .grant(TENANT, "alice@example.com", "ws-a",
-                        WorkspaceAccess.READ)
+                        WorkspaceAccess.READER)
                 .build();
 
-        assertEquals(WorkspaceAccess.READ, policy.accessFor(
+        assertEquals(WorkspaceAccess.READER, policy.accessFor(
                 new WorkspaceActor(TENANT, "alice@example.com"), WORKSPACE));
     }
 
     @Test
     void createImpliesRead() {
-        assertTrue(WorkspaceAccess.CREATE.canRead());
-        assertTrue(WorkspaceAccess.CREATE.canCreate());
-        assertTrue(WorkspaceAccess.READ.canRead());
-        assertFalse(WorkspaceAccess.READ.canCreate());
+        assertTrue(WorkspaceAccess.OPERATOR.canRead());
+        assertTrue(WorkspaceAccess.OPERATOR.canCreate());
+        assertTrue(WorkspaceAccess.READER.canRead());
+        assertFalse(WorkspaceAccess.READER.canCreate());
         assertFalse(WorkspaceAccess.NONE.canRead());
     }
 }
