@@ -1548,6 +1548,9 @@ class ManagedAgentApiContractTest {
                 .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "agent create"),
                 body);
         String changed = body.replace("Review code.", "Review code carefully.");
+        exchange(drift, "updateAgent", 400, post("/v1/agents/{id}", agentId)
+                .header(TENANT, tenant).header(IDEMPOTENCY_KEY, "agent update"),
+                changed);
         JsonNode updated = json(exchange(drift, "updateAgent", 202,
                 post("/v1/agents/{id}", agentId).header(TENANT, tenant)
                         .header(IDEMPOTENCY_KEY, "agent-update"), changed));
