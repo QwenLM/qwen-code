@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.managedagent;
 
 import org.springframework.http.HttpStatus;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import org.junit.jupiter.params.ParameterizedTest;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
@@ -503,6 +505,54 @@ class ManagedSessionLifecycleTest {
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND event_type = 'session.updated'",
                 Integer.class, tenant, sessionId)).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"\u00a0", "\ufeff", "\u2007", "\u202f"})
+    void refusesUnicodeBlankTitlesBeforeAdmission(String title) throws Exception {
+        String tenant = tenant();
+        String sessionId = emptySession(tenant);
+        lifecycle(patch("/v1/agents/sessions/{id}", sessionId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(java.util.Map.of("title", title))), tenant, "blank")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("invalid_title"));
+        assertThat(store.findCommand(tenant, "RENAME_SESSION", "blank")).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_session_rename_delivery"
+                + " WHERE tenant_id = ? AND session_id = ?", Integer.class, tenant, sessionId)).isZero();
+        assertThat(store.beginOperation(tenant, sessionId, OperationKind.CLOSE,
+                "", "close", "close-digest").replayed()).isFalse();
+    }
+
+    @ParameterizedTest
+    @CsvSource({"409,session_mutation_superseded,409", "409,other_conflict,503",
+            "400,session_mutation_superseded,503"})
+    void preservesOnlyTheNamedSupersededTitleConflict(int privateStatus, String code, int expectedStatus)
+            throws Exception {
+        String tenant = tenant();
+        String sessionId = emptySession(tenant);
+        HarnessConnector controlled = mock(HarnessConnector.class);
+        doReturn(true).when(controlled).isAvailable();
+        doReturn(true).when(controlled).supportsFencedTitles();
+        doReturn(new HarnessConnector.Attachment("boot")).when(controlled)
+                .createOrLoad(anyString(), anyString(), anyBoolean(), anyBoolean());
+        DaemonHttpException refusal = mock(DaemonHttpException.class);
+        doReturn(privateStatus).when(refusal).getStatusCode();
+        doReturn(code).when(refusal).getErrorCode();
+        doThrow(refusal).when(controlled).rename(anyString(), anyString(), anyString(), anyLong());
+        ManagedAgentService subject = new ManagedAgentService(store,
+                new RequestDigests(), null, controlled, null);
+        harness.setAvailable(false);
+        try {
+            assertThatThrownBy(() -> subject.renameSession(tenant, null, "superseded", sessionId, "title"))
+                    .isInstanceOfSatisfying(ApiException.class, error -> {
+                        assertThat(error.getStatus().value()).isEqualTo(expectedStatus);
+                        assertThat(error.getCode()).isEqualTo(expectedStatus == 409
+                                ? "session_mutation_superseded" : "hosted_harness_unavailable");
+                    });
+        } finally {
+            harness.setAvailable(true);
+        }
     }
 
     @ParameterizedTest

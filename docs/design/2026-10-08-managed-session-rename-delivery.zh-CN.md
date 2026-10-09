@@ -10,7 +10,9 @@
 
 新改名在受理前检查 Harness 可用性及标题协议能力，不附着 Session，也不发送标题。禁用或不支持协议的 Harness 不创建命令和投递，不阻塞生命周期。已完成回执仍先于这些检查重放。
 
-改名投递迁移使用 V54，位于 main 的 V53 Workspace 角色与 Session owner 迁移之后。表与投递契约不变；本 PR 尚未以原冲突编号合并。
+改名投递迁移使用 V55，位于 main 的 V53 Workspace 角色与 Session owner、V54 child lineage 迁移之后。表与投递契约不变；本 PR 尚未以原冲突编号合并。
+
+仅包含 Unicode 空白的标题在受理前按 Harness 空标题契约拒绝。私有端明确的 `409 session_mutation_superseded` 继续作为公共冲突返回，不转换为可重试的依赖失败。改名回执探测与首次投递读取不锁定缺失索引项；tenant 与 Session 锁继续串行化受理。
 
 受理沿用 tenant 和 Session 锁，并在同一事务保存最新标题投递。版本号是 Session 范围内递增的正有符号 64 位整数。新键或 FAILED 键的重试获得新版本；PENDING 同键重试复用原版本。COMPLETED 同键仍先从公共回执回答，再考虑新工作准入。同键改换内容或 Session 仍然冲突。
 

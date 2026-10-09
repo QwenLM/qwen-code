@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
@@ -27,6 +28,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.store.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedArtifactReader;
+import com.alibaba.qwen.code.managedagent.store.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.store.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.store.StoreModels;
@@ -231,6 +233,74 @@ public class ManagedAgentService {
         return response(admission);
     }
 
+    /**
+     * H4b: creates a child Session under its parent's exact Workspace
+     * binding, called only by the control plane's child result relay. The
+     * idempotency key derives from the parent's committed launch record
+     * (tenant | parent | childRunId), so a redriven creation answers the
+     * original admission and never mints a second Session, and the launch
+     * input becomes the child's first turn. The lineage stamps in the same
+     * transaction, and the relay reads it back from the row.
+     */
+    public CommandAdmission createChildSession(String tenantId,
+            String parentSessionId, String childRunId, String description,
+            String prompt) {
+        SessionRecord parent = store.requireSession(tenantId, parentSessionId);
+        if (parent.workspace() == null || !"ACTIVE".equals(parent.status())) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "child_parent_unavailable",
+                    "The parent Session cannot admit a child.");
+        }
+        String creationKey = childCreationKey(parentSessionId, childRunId);
+        List<InputBlock> blocks = List.of(new InputBlock("input_text",
+                description.isBlank() ? prompt
+                        : "[" + description + "]\n\n" + prompt));
+        List<Map<String, Object>> input = input(blocks, false);
+        if (!input.isEmpty() && !harness.isWorkspaceFilesAvailable()) {
+            throw new ApiException(HttpStatus.CONFLICT,
+                    "workspace_unavailable",
+                    "Hosted Workspace execution is not available.");
+        }
+        StoreModels.SessionLineage parentLineage = store.findChildLineage(
+                tenantId, parentSessionId);
+        StoreModels.SessionLineage lineage = new StoreModels.SessionLineage(
+                parentSessionId,
+                parentLineage == null ? parentSessionId
+                        : parentLineage.rootSessionId(),
+                childRunId, parentLineage == null ? 1
+                        : parentLineage.depth() + 1);
+        String title = description.isBlank() ? "child agent"
+                : description.length() > 256 ? description.substring(0, 256)
+                        : description;
+        Map<String, Object> semantic = new LinkedHashMap<>();
+        semantic.put("child", childRunId);
+        semantic.put("title", title);
+        semantic.put("input", input);
+        String requestDigest = digests.digest(semantic);
+        StoreModels.Admission admission;
+        try {
+            admission = store.insertChildSessionCommand(tenantId,
+                    parentSessionId, creationKey, requestDigest, title, input,
+                    SubmitHarnessTurn.computePayloadDigest(input), lineage);
+        } catch (DuplicateKeyException error) {
+            admission = store.replayChildSessionCommand(tenantId,
+                    parentSessionId, creationKey, requestDigest);
+        }
+        if (!admission.replayed()) {
+            dispatch(tenantId, admission);
+        }
+        return response(admission);
+    }
+
+    /** The derivation of H4a decision 3: the launch's own record key —
+     * sha256 hex of the parent's Session id, the `child_run` domain and
+     * the run id, joined by NUL, exactly `ManagedExtensionProjection.recordKey`. */
+    public static String childCreationKey(String parentSessionId,
+            String childRunId) {
+        return ManagedExtensionProjection.recordKey(parentSessionId,
+                "child_run", childRunId);
+    }
+
     public CommandAdmission submitTurn(String tenantId, String actorId,
             String idempotencyKey, String sessionId,
             List<InputBlock> blocks) {
@@ -360,6 +430,13 @@ public class ManagedAgentService {
                 } catch (RuntimeException cleanupError) {
                     LOG.warn("Failed to retire rename tenant={} session={}",
                             tenantId, sessionId, cleanupError);
+                }
+                if (error instanceof DaemonHttpException refusal
+                        && refusal.getStatusCode() == HttpStatus.CONFLICT.value()
+                        && "session_mutation_superseded".equals(refusal.getErrorCode())) {
+                    throw new ApiException(HttpStatus.CONFLICT,
+                            "session_mutation_superseded",
+                            "A later Session title attempt has been admitted.");
                 }
                 if (error instanceof ApiException failure) {
                     throw failure;
@@ -1111,7 +1188,9 @@ public class ManagedAgentService {
     }
 
     private static String validRenameTitle(String title) {
-        if (title == null || title.isBlank() || title.length() > 256) {
+        if (title == null || title.length() > 256
+                || title.codePoints().allMatch(character -> Character.isWhitespace(character)
+                        || Character.isSpaceChar(character) || character == 0xfeff)) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "invalid_title",
                     "Title must contain 1-256 characters.");
         }
