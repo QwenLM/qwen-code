@@ -198,12 +198,17 @@ describe('extractClaims', () => {
     ]);
   });
 
-  it.each(['PR 1,234', '12,34 passed', '1,234,56 passed', 'x123 passed'])(
-    'does not extract a count from %s',
-    (text) => {
-      expect(extractClaims(text).filter((c) => c.kind === 'count')).toEqual([]);
-    },
-  );
+  it.each([
+    'PR 1,234',
+    '12,34 passed',
+    '1,234,56 passed',
+    'x123 passed',
+    '12,34 tests passed',
+    '1,234,56 specs to pass',
+    '1,2345 assertions green',
+  ])('does not extract a count from %s', (text) => {
+    expect(extractClaims(text).filter((c) => c.kind === 'count')).toEqual([]);
+  });
 
   it('does not extract a Test Files file-count line as a test-count claim', () => {
     // A pasted vitest summary nests 'Test Files  3 passed (3)' above
