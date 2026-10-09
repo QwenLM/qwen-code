@@ -106,6 +106,14 @@ The `frame` subscription stays, for the half that needs layout to be finished:
 reading each mounted item's real row count. Idle still costs nothing, since
 neither event fires when nothing moves.
 
+Moving is not free, and the cost is worth stating rather than leaving to be
+measured later. A window-only move bumps the same `revision` a measurement
+does, so the O(session) height map and prefix sum re-run and produce an
+identical array; and no item in the transcript is memoized, so the render path
+of every mounted item re-executes, not just the one or two that entered the
+window. At a cap-bound 400-item window that is 400 render paths per wheel step.
+Memoizing the item is the worthwhile half of this and is not done here.
+
 ## Decision 4 — the transcript's offset inside the scroll content is `root.y - host.content.y`
 
 `Renderable.y` is absolute: the getter adds the parent's `y`. Walking up the
@@ -223,6 +231,13 @@ four styled captures carry three distinct digests, with `00-bottom` and
 
 ## Follow-ups
 
+- Decision 8 compensates for a bundle-level defect at the transcript item, and
+  the same escalation is still live for every other subtree. `esbuild.config.js`
+  defines `process.env.NODE_ENV` as `'production'`, so `react/jsx-dev-runtime`
+  resolves to a build whose `jsxDEV` is `void 0`, while `@opentui/react`'s root
+  boundary renders its fallback through `jsxDEV`. An exhaustion-class failure in
+  the banner, the composer, the footer or a dialog therefore still blanks the
+  screen. The fix belongs in the build config or upstream, not here.
 - The two other reported defects — the composer caret that reads as missing,
   and the flickering markdown h3 — are untouched by this change. The caret is
   handled by a separate change (#13693); the h3 flicker has no tracker entry.
