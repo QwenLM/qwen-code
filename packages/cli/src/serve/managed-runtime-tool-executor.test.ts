@@ -1845,6 +1845,20 @@ describe('relativizeGlobText', () => {
     const text = '/srv/api/weird\\/srv/api/x.ts';
     expect(relativizeGlobText(text, '/srv/api')).toBe('weird\\/srv/api/x.ts');
   });
+
+  it('does not strip roots from sibling path names with word characters (#13524)', () => {
+    expect(relativizeGlobText('/srv/api2', '/srv/api')).toBe('/srv/api2');
+    expect(relativizeGlobText('/srv/api_user', '/srv/api')).toBe(
+      '/srv/api_user',
+    );
+    expect(relativizeGlobText('/srv/apifoo', '/srv/api')).toBe('/srv/apifoo');
+  });
+
+  it('does not strip a root followed by a literal backslash (#13524)', () => {
+    expect(relativizeGlobText('/srv/api\\weird', '/srv/api')).toBe(
+      '/srv/api\\weird',
+    );
+  });
 });
 
 describe('readWorkspaceContext', () => {
