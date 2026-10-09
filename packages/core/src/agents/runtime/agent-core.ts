@@ -1870,12 +1870,14 @@ export class AgentCore {
     declaredToolNames: ReadonlySet<string | undefined>,
   ): boolean {
     return (
-      (declaredToolNames.has(ToolNames.SKILL) ||
-        (isCodeModeEnabled(this.runtimeContext.getToolMode?.()) &&
-          declaredToolNames.has(ToolNames.EXEC) &&
-          !!this.runtimeContext.getToolRegistry().getTool(ToolNames.SKILL) &&
-          this.codeModeAllowedToolNames?.includes(ToolNames.SKILL) === true)) &&
-      this.isToolExecutionAllowed(ToolNames.SKILL, true)
+      (declaredToolNames.has(ToolNames.SKILL) &&
+        this.runtimeContext.getToolMode?.() !== ToolMode.CodeModeOnly &&
+        this.isToolExecutionAllowed(ToolNames.SKILL)) ||
+      (isCodeModeEnabled(this.runtimeContext.getToolMode?.()) &&
+        declaredToolNames.has(ToolNames.EXEC) &&
+        !!this.runtimeContext.getToolRegistry().getTool(ToolNames.SKILL) &&
+        this.codeModeAllowedToolNames?.includes(ToolNames.SKILL) === true &&
+        this.isToolExecutionAllowed(ToolNames.SKILL, true))
     );
   }
 

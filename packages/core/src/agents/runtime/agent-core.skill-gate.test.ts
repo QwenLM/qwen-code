@@ -790,6 +790,46 @@ describe('AgentCore skill-gate inputs', () => {
       expect(exec?.description).not.toContain('"name":"write_file"');
     });
 
+    it.each(
+      [ToolMode.Direct, ToolMode.CodeMode, ToolMode.CodeModeOnly].flatMap(
+        (toolMode) => [false, true].map((inline) => ({ toolMode, inline })),
+      ),
+    )(
+      'checks the direct Skill route when nested Skill is excluded in $toolMode, inline=$inline',
+      async ({ toolMode, inline }) => {
+        const config = makeFakeConfig({ toolMode });
+        const registry = new ToolRegistry(config);
+        vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+        registry.registerTool(new ExecTool(config));
+        registry.registerTool(new MockTool({ name: ToolNames.SKILL }));
+        registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));
+        const core = new AgentCore(
+          'direct-skill-nested-exclusion',
+          config,
+          { systemPrompt: '' },
+          { model: 'test-model' },
+          { max_turns: 1 },
+          {
+            tools: inline ? [ToolNames.EXEC, { name: ToolNames.SKILL }] : ['*'],
+            executionAllowedTools: [
+              ToolNames.EXEC,
+              ToolNames.SKILL,
+              ToolNames.READ_FILE,
+            ],
+            nestedExecutionAllowedTools: [ToolNames.READ_FILE],
+          },
+        );
+        const declared = await declaredNames(core);
+        const hasDirectSkill = toolMode !== ToolMode.CodeModeOnly;
+        expect(declared.has(ToolNames.SKILL)).toBe(hasDirectSkill || inline);
+        expect(executable(core, ToolNames.SKILL)).toBe(true);
+        if (toolMode !== ToolMode.Direct) {
+          expect(codeModeAllowed(core)).not.toContain(ToolNames.SKILL);
+        }
+        expect(gate(core, declared)).toBe(hasDirectSkill);
+      },
+    );
+
     const execSkillPolicies: Array<{
       label: string;
       bounds: Omit<ToolConfig, 'tools'>;
