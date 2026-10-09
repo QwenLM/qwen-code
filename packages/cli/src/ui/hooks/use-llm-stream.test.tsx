@@ -16949,6 +16949,7 @@ describe('useLlmStream', () => {
   });
 
   describe('shell execution lifetime', () => {
+    let outputUpdateIntervalMs = 0;
     const shellResult = (aborted = false): ShellExecutionResult => ({
       output: 'shell result',
       rawOutput: Buffer.from('shell result'),
@@ -16971,6 +16972,7 @@ describe('useLlmStream', () => {
       const actual = await vi.importActual<
         typeof import('./shellCommandProcessor.js')
       >('./shellCommandProcessor.js');
+      outputUpdateIntervalMs = actual.OUTPUT_UPDATE_INTERVAL_MS;
       vi.mocked(useShellCommandProcessor).mockImplementation(
         actual.useShellCommandProcessor,
       );
@@ -17151,7 +17153,9 @@ describe('useLlmStream', () => {
       expect(
         mockAddItem.mock.calls.some(([item]) => item.type === 'tool_group'),
       ).toBe(false);
-      const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2000);
+      const clock = vi
+        .spyOn(Date, 'now')
+        .mockReturnValue(Date.now() + outputUpdateIntervalMs + 1);
       try {
         act(() => {
           mockExecuteRuntimeShell.mock.calls[0][3]({
@@ -17836,7 +17840,7 @@ describe('useLlmStream', () => {
           ).toHaveLength(0);
           const clock = vi
             .spyOn(Date, 'now')
-            .mockReturnValue(Date.now() + 2000);
+            .mockReturnValue(Date.now() + outputUpdateIntervalMs + 1);
           try {
             act(() =>
               mockExecuteRuntimeShell.mock.calls[0][3]({
@@ -17946,12 +17950,247 @@ describe('useLlmStream', () => {
       expect(result.current.streamingState).toBe(StreamingState.Idle);
     });
 
+    it.each([false, true])(
+      'keeps Shell cancellable when deferred logging admits a continuation (continuation settled: %s)',
+      async (settleContinuationFirst) => {
+        const logging = deferred<void>();
+        const continuation = deferred<void>();
+        const shell = deferred<ShellExecutionResult>();
+        const logger = {
+          logMessage: vi.fn().mockReturnValueOnce(logging.promise),
+        } as unknown as Parameters<typeof useLlmStream>[20];
+        const submissionInFlightRef = { current: false };
+        const onSubmissionSettled = vi.fn();
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          undefined,
+          undefined,
+          logger,
+          {
+            current: {
+              peekNextUserBatchKey: () => undefined,
+              submissionInFlightRef,
+              onSubmissionSettled,
+            },
+          },
+        );
+        mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
+        mockSendMessageStream.mockImplementationOnce(() =>
+          (async function* () {
+            await continuation.promise;
+            yield {
+              type: ServerLlmEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+        let shellSubmission: Promise<void> | undefined;
+        let modelSubmission: Promise<void> | undefined;
+        try {
+          await act(async () => {
+            shellSubmission = result.current.submitQuery(
+              'printf deferred-shell',
+              SendMessageType.UserQuery,
+              undefined,
+              { shellMode: true },
+            );
+          });
+          await waitFor(() =>
+            expect(logger!.logMessage).toHaveBeenCalledTimes(1),
+          );
+          expect(mockExecuteRuntimeShell).not.toHaveBeenCalled();
+          await act(async () => {
+            modelSubmission = result.current.submitQuery(
+              [
+                {
+                  functionResponse: {
+                    name: 'tool',
+                    response: { output: 'done' },
+                  },
+                },
+              ],
+              SendMessageType.ToolResult,
+            );
+          });
+          await waitFor(() =>
+            expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+          );
+          if (settleContinuationFirst) {
+            await act(async () => {
+              continuation.resolve();
+              await modelSubmission;
+            });
+          }
+          await act(async () => {
+            logging.resolve();
+            await shellSubmission;
+          });
+          const signal = mockExecuteRuntimeShell.mock
+            .calls[0][4] as AbortSignal;
+          const aborted = vi.fn();
+          signal.addEventListener('abort', aborted);
+          act(() => result.current.cancelOngoingRequest());
+          expect(signal.aborted).toBe(true);
+          act(() => result.current.cancelOngoingRequest());
+          expect(aborted).toHaveBeenCalledTimes(1);
+          expect(submissionInFlightRef.current).toBe(true);
+          expect(onSubmissionSettled).not.toHaveBeenCalled();
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+        } finally {
+          await act(async () => {
+            logging.resolve();
+            continuation.resolve();
+            shell.resolve(shellResult(true));
+            await Promise.all([shellSubmission, modelSubmission]);
+          });
+        }
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+        expect(submissionInFlightRef.current).toBe(false);
+        expect(onSubmissionSettled).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each(['Finished', 'stream exhaustion', 'Esc', 'UserCancelled'] as const)(
+      'flushes staged assistant rows at %s while preserving a live Shell panel',
+      async (boundary) => {
+        const model = deferred<void>();
+        const unwind = deferred<void>();
+        const shell = deferred<ShellExecutionResult>();
+        mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
+        mockSendMessageStream.mockImplementationOnce(() =>
+          (async function* () {
+            yield {
+              type: ServerLlmEventType.Content,
+              value: 'beforeafter',
+              parts: [
+                { text: 'before' },
+                { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+                { text: 'after' },
+              ],
+            };
+            await model.promise;
+            if (boundary !== 'stream exhaustion') {
+              yield boundary === 'Finished'
+                ? {
+                    type: ServerLlmEventType.Finished,
+                    value: { reason: 'STOP', usageMetadata: undefined },
+                  }
+                : { type: ServerLlmEventType.UserCancelled };
+              await unwind.promise;
+            }
+          })(),
+        );
+        const { result } = renderTestHook();
+        let modelSubmission: Promise<void> | undefined;
+        let clock: MockInstance | undefined;
+        let shellCallId: string | undefined;
+        try {
+          await act(async () => {
+            modelSubmission = result.current.submitQuery(
+              'stream with staged content',
+            );
+          });
+          await waitFor(() =>
+            expect(result.current.pendingHistoryItems).toContainEqual(
+              expect.objectContaining({ type: 'gemini', text: 'before' }),
+            ),
+          );
+          const originalTimestamp = mockAddItem.mock.calls.find(
+            ([item]) =>
+              item.type === 'user' &&
+              item.text === 'stream with staged content',
+          )![1];
+          await act(async () => {
+            await result.current.submitQuery(
+              '?btw ignored; printf shell-result',
+              SendMessageType.UserQuery,
+              undefined,
+              { shellMode: true },
+            );
+          });
+          const panel = result.current.pendingHistoryItems.find(
+            (item) => item.type === 'tool_group' && item.isUserInitiated,
+          );
+          if (panel?.type !== 'tool_group')
+            throw new Error('Expected live Shell panel');
+          shellCallId = panel.tools[0].callId;
+          const boundaryTimestamp = Date.now() + 60000;
+          clock = vi.spyOn(Date, 'now').mockReturnValue(boundaryTimestamp);
+          if (boundary === 'Esc') {
+            act(() => result.current.cancelOngoingRequest());
+          } else {
+            await act(async () => {
+              model.resolve();
+              if (boundary === 'stream exhaustion') await modelSubmission;
+            });
+          }
+          await waitFor(() =>
+            expect(
+              mockAddItem.mock.calls.filter(
+                ([item]) => item.type === 'gemini' && item.text === 'before',
+              ),
+            ).toHaveLength(1),
+          );
+          const assistantCall = mockAddItem.mock.calls.find(
+            ([item]) => item.type === 'gemini' && item.text === 'before',
+          )!;
+          expect(assistantCall[1]).toBe(
+            boundary === 'Esc' ? boundaryTimestamp : originalTimestamp,
+          );
+          expect(result.current.pendingHistoryItems).not.toContainEqual(
+            expect.objectContaining({ type: 'gemini', text: 'before' }),
+          );
+          expect(result.current.pendingHistoryItems).toContainEqual(panel);
+          expect(
+            mockAddItem.mock.calls.filter(
+              ([item]) =>
+                item.type === 'tool_group' &&
+                item.tools.some(
+                  (tool: IndividualToolCallDisplay) =>
+                    tool.callId === shellCallId,
+                ),
+            ),
+          ).toHaveLength(0);
+        } finally {
+          clock?.mockRestore();
+          await act(async () => {
+            model.resolve();
+            unwind.resolve();
+            shell.resolve(shellResult(boundary === 'Esc'));
+            await modelSubmission;
+          });
+        }
+        const history = mockAddItem.mock.calls.map(([item]) => item);
+        const assistantIndex = history.findIndex(
+          (item) => item.type === 'gemini' && item.text === 'before',
+        );
+        const shellRows = history.filter(
+          (item) =>
+            item.type === 'tool_group' &&
+            item.tools.some(
+              (tool: IndividualToolCallDisplay) => tool.callId === shellCallId,
+            ),
+        );
+        expect(shellRows).toHaveLength(1);
+        expect(assistantIndex).toBeLessThan(history.indexOf(shellRows[0]));
+        expect(result.current.pendingHistoryItems).toEqual([]);
+      },
+    );
+
     it('keeps a new shell busy when an older model emits its cancellation event', async () => {
       const shell = deferred<ShellExecutionResult>();
       const model = deferred<void>();
       mockExecuteRuntimeShell.mockResolvedValue({ result: shell.promise });
-      mockSendMessageStream.mockImplementation(() =>
+      mockSendMessageStream.mockImplementationOnce(() =>
         (async function* () {
+          yield {
+            type: ServerLlmEventType.Thought,
+            value: {
+              subject: 'cancelled model subject',
+              description: 'cancelled model reasoning',
+            },
+          };
           await model.promise;
           yield { type: ServerLlmEventType.UserCancelled };
         })(),
@@ -17963,6 +18202,9 @@ describe('useLlmStream', () => {
       });
       await waitFor(() =>
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+      );
+      await waitFor(() =>
+        expect(result.current.thought?.subject).toBe('cancelled model subject'),
       );
       act(() => result.current.cancelOngoingRequest());
       expect(result.current.streamingState).toBe(StreamingState.Idle);
@@ -18001,6 +18243,7 @@ describe('useLlmStream', () => {
         await oldSubmission;
       });
       expect(result.current.streamingState).toBe(StreamingState.Responding);
+      expect(result.current.thought).toBeNull();
       expect(shellRows()).toHaveLength(0);
       expect(result.current.pendingHistoryItems).toContainEqual(pendingShell);
       expect(
@@ -18009,7 +18252,9 @@ describe('useLlmStream', () => {
             item.type === 'info' && item.text === 'User cancelled the request.',
         ),
       ).toHaveLength(cancellationNoticesBefore);
-      const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 2000);
+      const clock = vi
+        .spyOn(Date, 'now')
+        .mockReturnValue(Date.now() + outputUpdateIntervalMs + 1);
       try {
         act(() => {
           mockExecuteRuntimeShell.mock.calls[0][3]({

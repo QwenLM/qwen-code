@@ -601,6 +601,11 @@ export const useLlmStream = (
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  // Submission preprocessing may await logging while a continuation replaces
+  // the foreground slot. Preserve the exact owner for a later Shell launch.
+  const submissionAbortControllersBySignalRef = useRef(
+    new WeakMap<AbortSignal, AbortController>(),
+  );
   const activeInteractionPromptIdRef = useRef<string | undefined>(undefined);
   const activeInteractionOwnerRef = useRef<
     NonNullable<ReturnType<typeof getActiveInteractionSpan>> | undefined
@@ -1275,11 +1280,7 @@ export const useLlmStream = (
     async (done: Promise<void>, signal: AbortSignal) => {
       activeShellSignalsRef.current.add(signal);
       const shellAbortController =
-        abortControllerRef.current?.signal === signal
-          ? abortControllerRef.current
-          : [...detachedToolContinuationAbortControllersRef.current].find(
-              (controller) => controller.signal === signal,
-            );
+        submissionAbortControllersBySignalRef.current.get(signal);
       // A tool continuation can replace the foreground controller while this
       // command is still running. Keep the shell independently cancellable.
       if (shellAbortController) {
@@ -1291,6 +1292,7 @@ export const useLlmStream = (
         await done;
       } finally {
         activeShellSignalsRef.current.delete(signal);
+        submissionAbortControllersBySignalRef.current.delete(signal);
         if (shellAbortController) {
           auxiliaryAbortRefsRef.current.delete(shellAbortController);
         }
@@ -1489,7 +1491,9 @@ export const useLlmStream = (
       logApiCancel(config, cancellationEvent);
     }
 
-    if (pendingHistoryItemRef.current && !shellOwnsPendingItemAtCancel) {
+    if (shellOwnsPendingItemAtCancel) {
+      commitPendingAssistantItems(Date.now());
+    } else if (pendingHistoryItemRef.current) {
       commitItemInOrder(pendingHistoryItemRef.current, Date.now());
     }
     addItem(
@@ -1543,6 +1547,7 @@ export const useLlmStream = (
   }, [
     streamingState,
     addItem,
+    commitPendingAssistantItems,
     commitItemInOrder,
     setPendingHistoryItem,
     onCancelSubmit,
@@ -2303,6 +2308,8 @@ export const useLlmStream = (
       // Shell submission has reset turnCancelledRef. The processor owns that
       // live panel and its single final history row until Shell settlement.
       if (shellOwnsPendingItem(pendingHistoryItemRef.current)) {
+        commitPendingAssistantItems(userMessageTimestamp);
+        setThought(null);
         return;
       }
 
@@ -2345,6 +2352,7 @@ export const useLlmStream = (
     [
       addItem,
       commitPendingThought,
+      commitPendingAssistantItems,
       commitItemInOrder,
       pendingHistoryItemRef,
       setPendingHistoryItem,
@@ -2980,10 +2988,9 @@ export const useLlmStream = (
               // chunk appends to this turn's pending item — visible in the UI
               // as "t" → "te" → "tes" cumulative rendering even though each
               // turn is persisted as a clean, separate assistant message.
-              if (
-                pendingHistoryItemRef.current &&
-                !shellOwnsPendingItem(pendingHistoryItemRef.current)
-              ) {
+              if (shellOwnsPendingItem(pendingHistoryItemRef.current)) {
+                commitPendingAssistantItems(userMessageTimestamp);
+              } else if (pendingHistoryItemRef.current) {
                 commitItemInOrder(
                   pendingHistoryItemRef.current,
                   userMessageTimestamp,
@@ -3355,6 +3362,7 @@ export const useLlmStream = (
       clearRetryCountdown,
       setThought,
       commitPendingThought,
+      commitPendingAssistantItems,
       pendingHistoryItemRef,
       pendingAssistantItemsRef,
       pendingThoughtItemRef,
@@ -3846,6 +3854,10 @@ export const useLlmStream = (
 
       const abortController = new AbortController();
       const abortSignal = abortController.signal;
+      submissionAbortControllersBySignalRef.current.set(
+        abortSignal,
+        abortController,
+      );
       const inheritedToolContinuationOwner = metadata?.toolContinuationOwner;
       const isDetachedToolContinuation =
         inheritedToolContinuationOwner?.survivesGenerationChange === true;
@@ -4214,10 +4226,9 @@ export const useLlmStream = (
             return;
           }
 
-          if (
-            pendingHistoryItemRef.current &&
-            !shellOwnsPendingItem(pendingHistoryItemRef.current)
-          ) {
+          if (shellOwnsPendingItem(pendingHistoryItemRef.current)) {
+            commitPendingAssistantItems(userMessageTimestamp);
+          } else if (pendingHistoryItemRef.current) {
             commitItemInOrder(
               pendingHistoryItemRef.current,
               userMessageTimestamp,
@@ -4447,6 +4458,11 @@ export const useLlmStream = (
         }
       });
       return submission.finally(() => {
+        // Model/tool controller retention has its own owners. This lookup is
+        // needed after submission only while its Shell is still executing.
+        if (!activeShellSignalsRef.current.has(abortSignal)) {
+          submissionAbortControllersBySignalRef.current.delete(abortSignal);
+        }
         releaseSubmissionActivity();
         if (detachedAbortController && !keepToolContinuationAbortController) {
           detachedToolContinuationAbortControllersRef.current.delete(
