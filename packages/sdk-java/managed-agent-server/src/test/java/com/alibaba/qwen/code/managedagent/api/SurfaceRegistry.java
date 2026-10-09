@@ -12,7 +12,7 @@ import java.util.Set;
  * handler set is kept in exact bijection with these constants by
  * {@code SurfaceRegistryGateTest}, and today's per-route admission is pinned
  * by {@code SurfaceAdmissionAcceptanceTest}; rule flips towards the actor
- * roles land with contract v1.34 in slice C and change this file with them.
+ * roles land with contract v1.37 in slice C and change this file with them.
  *
  * <p>Rule classes name today's admission as implemented, after the design's
  * D5 vocabulary. Where a route's behaviour splits by Session kind (bound vs
@@ -56,7 +56,7 @@ public enum SurfaceRegistry {
             Surface.PUBLIC, RuleClass.READER,
             EnumSet.of(Capability.SESSION_OPERATION_GET)),
     PUBLIC_CWD_CHANGE(Method.POST, "/v1/agents/sessions/{sessionId}/cwd",
-            Surface.PUBLIC, RuleClass.OWNER,
+            Surface.PUBLIC, RuleClass.OPERATOR,
             EnumSet.of(Capability.SESSION_CWD_CHANGE)),
     PUBLIC_TURN_EVENTS(Method.POST, "/v1/agents/sessions/{sessionId}/events",
             Surface.PUBLIC, RuleClass.OPERATOR,
@@ -96,7 +96,7 @@ public enum SurfaceRegistry {
             EnumSet.of(Capability.ACTION_GET)),
     PUBLIC_ACTION_RESPOND(Method.POST,
             "/v1/agents/sessions/{sessionId}/actions/{actionId}/responses",
-            Surface.PUBLIC, RuleClass.OWNER,
+            Surface.PUBLIC, RuleClass.OPERATOR,
             EnumSet.of(Capability.ACTION_RESPOND)),
     // ManagedArtifactController: tool-result and artifact routes.
     PUBLIC_TOOL_RESULT_GET(Method.GET,
@@ -210,7 +210,7 @@ public enum SurfaceRegistry {
             EnumSet.of(Capability.SESSION_OPERATION_GET)),
     WEBSHELL_CWD_CHANGE(Method.POST,
             "/api/agent/web-shell/v1/sessions/cwd/change",
-            Surface.WEBSHELL, RuleClass.OWNER,
+            Surface.WEBSHELL, RuleClass.OPERATOR,
             EnumSet.of(Capability.SESSION_CWD_CHANGE)),
     WEBSHELL_ACTION_LIST(Method.POST, "/api/agent/web-shell/v1/actions/query",
             Surface.WEBSHELL, RuleClass.READER,
@@ -220,7 +220,7 @@ public enum SurfaceRegistry {
             EnumSet.of(Capability.ACTION_GET)),
     WEBSHELL_ACTION_RESPOND(Method.POST,
             "/api/agent/web-shell/v1/actions/respond",
-            Surface.WEBSHELL, RuleClass.OWNER,
+            Surface.WEBSHELL, RuleClass.OPERATOR,
             EnumSet.of(Capability.ACTION_RESPOND)),
     WEBSHELL_TOOL_RESULT_GET(Method.POST,
             "/api/agent/web-shell/v1/tool-results/get",
@@ -379,8 +379,13 @@ public enum SurfaceRegistry {
         this.template = template;
         this.surface = surface;
         this.ruleClass = ruleClass;
-        // unmodifiableSet keeps the declaration order; Set.copyOf does not
-        // (the dual-purpose events route relies on TURN_SUBMIT first).
+        // An EnumSet iterates in ordinal order and unmodifiableSet
+        // preserves that backing order, so a multi-capability route's
+        // first capability is its lowest-ordinal one (the dual-purpose
+        // events route relies on TURN_SUBMIT first; the acceptance walk
+        // keys bodies and expected statuses off it, and
+        // SurfaceRegistryGateTest pins it). Set.copyOf has unspecified
+        // iteration order and must stay off this path.
         this.capabilities =
                 java.util.Collections.unmodifiableSet(capabilities);
     }
@@ -512,18 +517,19 @@ public enum SurfaceRegistry {
     public enum RuleClass {
         /**
          * Bound-Session creation: a trusted actor ({@code 401
-         * actor_required} without one) holding {@code can_read} ({@code 404
-         * workspace_not_found} below) and {@code can_create} ({@code 403
-         * workspace_forbidden} below) on an {@code ACTIVE} Workspace ({@code
-         * 409 workspace_unavailable} otherwise) is admitted. The legacy arm
-         * — the same route with no Workspace selection, the design's
-         * {@code legacy_create} — admits any tenant caller, actor or not.
+         * actor_required} without one) holding READER or above ({@code
+         * 404 workspace_not_found} below) and OPERATOR or above ({@code
+         * 403 workspace_forbidden} below) on an {@code ACTIVE} Workspace
+         * ({@code 409 workspace_unavailable} otherwise) is admitted. The
+         * legacy arm — the same route with no Workspace selection, the
+         * design's {@code legacy_create} — admits any tenant caller,
+         * actor or not.
          */
         WORKSPACE_CREATE,
         /**
          * Reads of a Session and its records (events, items, turns, tasks,
-         * Actions and catalogs, JSON and SSE): the caller needs
-         * {@code can_read} on the bound Workspace and gets {@code 404
+         * Actions and catalogs, JSON and SSE): the caller needs a read
+         * grant on the bound Workspace and gets {@code 404
          * session_not_found} below it — this class holds the {@code
          * 404-below-read} contract of #12867. The two Session lists carry
          * the same predicate as a filter: they answer any tenant caller
@@ -546,33 +552,52 @@ public enum SurfaceRegistry {
          */
         READER_ACTOR_POLICY,
         /**
-         * Today's submitter family (D4's OPERATOR destination): Turn
-         * submit, Turn cancel and rename admit only the Session's creator
-         * while the creator still holds {@code can_create}, and refuse a
-         * readable non-creator with {@code 409 workspace_unavailable}
-         * (slice C normalises the refusal to {@code 403
-         * session_operation_forbidden}). The legacy arm is tenant-wide.
+         * The OPERATOR families. Turn submit, Turn cancel, rename and cwd
+         * change admit a caller holding OPERATOR or above on the bound
+         * Workspace under the unchanged shape gates (a live, ACTIVE,
+         * undeleted qwen-code Session on the frozen execution profile
+         * behind the deployment files opt-in), and only while the
+         * Session's creator-keyed execution facts hold — the Registry
+         * still backs the binding exactly, it stays ACTIVE, and the
+         * create-command actor keeps OPERATOR or above (the passive-
+         * attachment subset the execution authority re-verifies). Cancel
+         * admits on role and shape alone — its delivery reuses the
+         * admitted attachment and re-checks no grants. Action respond
+         * admits OPERATOR or above, or the Session's recorded owner,
+         * under no submitter shape gate — only the read grant, an ACTIVE
+         * Session ({@code 409 session_inactive} otherwise) and a pending
+         * Action; every bound admission additionally certifies the
+         * Session's creator-keyed execution facts, whichever arm
+         * admitted the caller. Below the read
+         * grant: {@code 404 session_not_found}; a readable actor below
+         * OPERATOR gets {@code 403 session_operation_forbidden} on the
+         * Session families and {@code 403 action_forbidden} on respond;
+         * an admitted OPERATOR blocked by the shape gates or the
+         * creator-keyed facts keeps the family's domain {@code 409
+         * workspace_unavailable}. cwd additionally requires a trusted
+         * actor ({@code 401 actor_required}). The legacy arm of the
+         * submitter family is tenant-wide, respond stays owner-gated plus
+         * the tenant-wide ownerless fall-through for unbound Sessions,
+         * and cwd has no legacy arm ({@code 400 unsupported_feature}).
          */
         OPERATOR,
         /**
-         * Today's creator families whose slice-C destinations differ:
-         * lifecycle (close, archive, unarchive, delete — D4's OWNER),
-         * cwd change (D4's OPERATOR) and Action respond (D4's OPERATOR,
-         * same class here because the current code admits the recorded
-         * creator for all three). Below the Workspace read grant: {@code
-         * 404}; a readable non-creator gets {@code 403
-         * session_operation_forbidden} on lifecycle and cwd, {@code 403
-         * action_forbidden} on respond; cwd also requires a workspace-bound
-         * Session and a trusted actor. The legacy arm of lifecycle and
-         * respond is tenant-wide (respond additionally requires a recorded
-         * creator or create command).
+         * The lifecycle family (close, archive, unarchive and delete —
+         * D4's OWNER): the Session's recorded owner ({@code
+         * owner_actor_key}; with no owner record the create-command
+         * actor — H4b child Sessions register the cascade's synthetic
+         * one — and a command-less pre-V40 row its creator) with a
+         * current read grant is admitted. Below the Workspace read
+         * grant: {@code 404
+         * session_not_found}; a readable non-owner gets {@code 403
+         * session_operation_forbidden}. The legacy arm is tenant-wide.
          */
         OWNER,
         /**
          * Workspace discovery lists and reads: a trusted actor is required
          * ({@code 401 actor_required} without one) and the answers are
-         * filtered to the caller's {@code can_read} Workspaces, so an
-         * ungranted Workspace is invisible.
+         * filtered to the Workspaces the caller may read, so an ungranted
+         * Workspace is invisible.
          */
         WORKSPACE_DISCOVERY,
         /**
@@ -583,11 +608,19 @@ public enum SurfaceRegistry {
         TENANT_SCOPED,
         /**
          * Internal Session-store and tool-publication routes: no actor at
-         * all; the writer HMAC credential issued for the Session scope
-         * answers a wrong token {@code 403
-         * writer_credential_invalid}, and on a dedicated internal
-         * listener the routing filter answers a public-connector caller
-         * {@code 404}.
+         * all. The nine Session-store routes plus the publication {@code
+         * finished}, {@code admissions/prepare}, {@code receipts/verify},
+         * {@code receipts/commit} and {@code range} routes gate on the
+         * Session-scoped writer HMAC and answer a wrong token {@code 403
+         * writer_credential_invalid}; the seven publication data and
+         * operation routes gate on the publication token and operation id
+         * and never see the writer HMAC. On the {@code grants} route —
+         * and on {@code receipts/commit} when the body fails parse or
+         * scope validation — payload parsing and publication-scope
+         * validation run before the credential check, so the refusal
+         * lands as a {@code 400} ({@code 404} on the operation-status
+         * read). On a dedicated internal listener the routing filter
+         * answers a public-connector caller {@code 404}.
          */
         INTERNAL_WRITER
     }
