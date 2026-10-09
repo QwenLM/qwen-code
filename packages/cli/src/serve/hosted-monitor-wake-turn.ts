@@ -166,7 +166,7 @@ export function createMonitorWakeRunTurn(params: {
 export function withChildAgentConsumption(
   runWakeTurn: (
     turn: HostedMonitorWakeTurn,
-  ) => Promise<'settled' | 'settled_incomplete' | 'busy'>,
+  ) => Promise<'settled' | 'busy' | 'recovery' | 'settled_incomplete'>,
   session: {
     blocked: boolean;
     childAgents?: HostedChildAgentSession;
@@ -174,7 +174,7 @@ export function withChildAgentConsumption(
   writeStderr: (line: string) => void = () => {},
 ): (
   turn: HostedMonitorWakeTurn,
-) => Promise<'settled' | 'settled_incomplete' | 'busy'> {
+) => Promise<'settled' | 'busy' | 'recovery' | 'settled_incomplete'> {
   return async (turn) => {
     const outcome = await runWakeTurn(turn);
     if (
