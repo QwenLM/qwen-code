@@ -306,15 +306,17 @@ export const WORKSPACE_RESTRICTED_ROOT_SETTINGS = [
  * Settings a Workspace may only make stricter.
  *
  * A cloned repository must not loosen a boundary the operator set — open
- * the user's session to peers, force incoming messages through, or let the
- * model run workflow scripts in a session locked to named workflows — so
- * the loosening direction is dropped like a restricted setting. The
+ * the user's session to peers, force incoming messages through, let the
+ * model run workflow scripts in a session locked to named workflows, or
+ * re-enable unattended self-updates the operator declined — so the
+ * loosening direction is dropped like a restricted setting. The
  * tightening direction is the one a repository has a legitimate reason to
  * set — automation agents in a monorepo that must not be able to reach a
  * person's session, say, or a repository that wants only its named
- * workflows run — so a workspace value that is stricter than the value in
- * force without it is honored. System scope stays the admin override: when
- * it sets the key the workspace value is dropped regardless.
+ * workflows run, or one validated against the CLI version it pins — so a
+ * workspace value that is stricter than the value in force without it is
+ * honored. System scope stays the admin override: when it sets the key
+ * the workspace value is dropped regardless.
  *
  * `strictness` ranks the behavior a value produces; higher is stricter.
  * An unrecognized value gets the rank of the fail-closed behavior its
@@ -357,6 +359,13 @@ export const WORKSPACE_TIGHTEN_ONLY_SETTINGS = [
             : value === 'refuse'
               ? 3
               : 2,
+  },
+  {
+    section: 'general',
+    key: 'enableAutoUpdate',
+    // The switch defaults to on and only `false` stops the unattended
+    // install, so anything else ranks with the default.
+    strictness: (value: unknown): number => (value === false ? 1 : 0),
   },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
