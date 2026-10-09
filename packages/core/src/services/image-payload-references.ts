@@ -11,6 +11,8 @@ import { approxBase64Bytes } from '../core/inlineMediaLimit.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 
 const IMAGE_ID_LENGTH = 12;
+// Request-local metadata: survives shallow copies, but is never sent as JSON.
+export const IMAGE_REATTACHMENT_START = Symbol('imageReattachmentStart');
 // Anchor the match to the full output of `imageReferenceText` so only the
 // markers eviction actually wrote resolve against the store. A bare
 // `Image #<id>` echo (a model reply quoting the id, or a post-compaction
@@ -128,13 +130,20 @@ export function buildReattachParts(
     }
   }
   if (recent.length === 0) return [];
-  return [
-    {
-      text: reattachContextText(recent.map((img) => img.id)),
-      partMetadata: { [REATTACH_BOUNDARY_METADATA]: true },
-    },
-    ...recent.flatMap(labeledReattachParts),
-  ];
+  return createImageReattachmentParts(recent);
+}
+
+function createImageReattachmentParts(images: StoredImagePayload[]): Part[] {
+  // Both markers delimit the same volatile region: `partMetadata` feeds
+  // `trailingReattachPartCount` before conversion, the symbol rides the
+  // converted wire block. Dropping either silently disables one of the
+  // two DashScope cache-breakpoint paths.
+  const introduction: Part & { [IMAGE_REATTACHMENT_START]: true } = {
+    text: reattachContextText(images.map((img) => img.id)),
+    partMetadata: { [REATTACH_BOUNDARY_METADATA]: true },
+    [IMAGE_REATTACHMENT_START]: true,
+  };
+  return [introduction, ...images.flatMap(labeledReattachParts)];
 }
 
 /**
@@ -238,12 +247,9 @@ export function prepareImagePayloadsForRequest(
     return transformed;
   }
 
-  const reattachParts: Part[] = [
-    {
-      text: reattachContextText([...reattachById.keys()]),
-    },
-    ...[...reattachById.values()].flatMap(labeledReattachParts),
-  ];
+  const reattachParts = createImageReattachmentParts([
+    ...reattachById.values(),
+  ]);
 
   const last = transformed.at(-1);
   if (last?.role === 'user') {
