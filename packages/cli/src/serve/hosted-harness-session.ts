@@ -5246,6 +5246,47 @@ export function registerHostedHarnessSessionRoutes(
         ),
     );
   });
+  app.post('/session/:id/title/retire', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    const revision = object(req.body)?.['managedRenameRevision'];
+    if (
+      typeof revision !== 'string' ||
+      !/^[1-9][0-9]{0,18}$/u.test(revision) ||
+      BigInt(revision) > 9223372036854775807n
+    ) {
+      return error(res, 400, 'invalid_session_title_revision');
+    }
+    void session.managed.authority
+      .retireSessionTitle(
+        {
+          operation: 'renameSession',
+          commandId: `hosted-title-retire:${revision}`,
+          sessionKey: session.managed.authority.sessionHeader.sessionKey,
+          contentDigest: createHash('sha256').update(revision).digest('hex'),
+        },
+        revision,
+        { class: 'trusted_entry' },
+      )
+      .then(
+        ({ title }) =>
+          res.json({
+            sessionId: req.params['id'],
+            managedRenameRevision: revision,
+            persisted: true,
+            retired: true,
+            title,
+          }),
+        (failure: unknown) =>
+          error(
+            res,
+            failure instanceof ManagedSessionConflictError ? 409 : 503,
+            failure instanceof ManagedSessionConflictError
+              ? 'session_mutation_superseded'
+              : 'managed_session_title_retirement_failed',
+          ),
+      );
+  });
   const close = async (
     req: Request,
     res: Response,

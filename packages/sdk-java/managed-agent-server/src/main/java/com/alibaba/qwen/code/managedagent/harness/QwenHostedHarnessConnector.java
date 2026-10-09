@@ -127,7 +127,18 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     @Override
     public boolean supportsFencedTitles() {
         try {
-            return client().capabilities().getTitleProtocolVersion() == 1;
+            int version = client().capabilities().getTitleProtocolVersion();
+            return version == 1 || version == 2;
+        } catch (com.alibaba.qwen.code.daemon.DaemonException
+                | IllegalStateException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
+    public boolean supportsTitleRetirement() {
+        try {
+            return client().capabilities().getTitleProtocolVersion() == 2;
         } catch (com.alibaba.qwen.code.daemon.DaemonException
                 | IllegalStateException unavailable) {
             return false;
@@ -499,6 +510,19 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     private void doRename(String tenantId, String sessionId, String title) {
         HarnessSessionRef ref = attachment(tenantId, sessionId, false);
         client().updateSessionTitle(ref, title);
+    }
+
+    @Override
+    public TitleRetirement retireRename(String tenantId, String sessionId, long revision) {
+        try {
+            HarnessSessionRef ref = attachment(tenantId, sessionId, false);
+            HostedHarnessClient current = client();
+            String bootId = current.capabilities().getBootId();
+            return new TitleRetirement(current.retireSessionTitle(ref, revision).getTitle(), bootId);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
     }
 
     @Override

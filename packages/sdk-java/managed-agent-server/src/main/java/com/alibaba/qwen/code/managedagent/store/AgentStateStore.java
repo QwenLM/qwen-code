@@ -113,6 +113,9 @@ public interface AgentStateStore {
 
     void retryRename(StoreModels.RenameDelivery delivery, String owner, long availableAt);
 
+    SessionRecord completeRenameRetirement(StoreModels.RenameDelivery delivery,
+            String owner, String retainedTitle, String harnessBootId);
+
     SessionRecord completeSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId);

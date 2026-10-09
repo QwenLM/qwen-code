@@ -507,6 +507,11 @@ class HostedConcurrentTurnBurstMySqlIT {
         }
 
         @Override
+        public boolean supportsTitleRetirement() {
+            return true;
+        }
+
+        @Override
         public void rename(String tenantId, String sessionId, String title, long revision) {
             rename(tenantId, sessionId, title);
         }

@@ -134,6 +134,116 @@ function renameCommand(commandId: string) {
 }
 
 describe('managed session metadata', () => {
+  it('retires an unapplied title durably without inventing a retained title', async () => {
+    const harness = await createHarness();
+    const retire = (
+      authority: LocalManagedSessionAuthority,
+      revision: string,
+    ) =>
+      authority.retireSessionTitle(
+        renameCommand(`hosted-title-retire:${revision}`),
+        revision,
+        { class: 'trusted_entry' },
+      );
+    const write = (
+      authority: LocalManagedSessionAuthority,
+      revision: string,
+      title: string,
+    ) =>
+      authority.commitDomainRecord(
+        renameCommand(`hosted-title:${revision}`),
+        {
+          domain: 'session_metadata',
+          content: { title, managedRenameRevision: revision },
+        },
+        { class: 'trusted_entry' },
+      );
+    await withAuthority(harness, async (authority) => {
+      expect(await retire(authority, '2')).toEqual({ title: null });
+      const sequence = authority.committedSequence;
+      expect(await retire(authority, '2')).toEqual({ title: null });
+      expect(authority.committedSequence).toBe(sequence);
+      await expect(write(authority, '1', 'Old')).rejects.toMatchObject({
+        code: 'managed_session_title_superseded',
+      });
+      await expect(write(authority, '2', 'Late')).rejects.toMatchObject({
+        code: 'managed_session_title_superseded',
+      });
+      await authority.commitDomainRecord(
+        renameCommand('recorder-after-retirement'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'Manual', titleSource: 'manual' },
+        },
+        { class: 'trusted_entry' },
+      );
+    });
+    await withAuthority(harness, async (authority) => {
+      expect(await retire(authority, '2')).toEqual({ title: null });
+      await expect(write(authority, '2', 'Late')).rejects.toMatchObject({
+        code: 'managed_session_title_superseded',
+      });
+      await write(authority, '3', 'New');
+    });
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      )?.title,
+    ).toBe('New');
+  });
+
+  it('retains an applied title and revokes its replay without lowering later watermarks', async () => {
+    const harness = await createHarness();
+    const write = (
+      authority: LocalManagedSessionAuthority,
+      revision: string,
+      title: string,
+    ) =>
+      authority.commitDomainRecord(
+        renameCommand(`hosted-title:${revision}`),
+        {
+          domain: 'session_metadata',
+          content: { title, managedRenameRevision: revision },
+        },
+        { class: 'trusted_entry' },
+      );
+    const retire = (
+      authority: LocalManagedSessionAuthority,
+      revision: string,
+    ) =>
+      authority.retireSessionTitle(
+        renameCommand(`hosted-title-retire:${revision}`),
+        revision,
+        { class: 'trusted_entry' },
+      );
+    await withAuthority(harness, async (authority) => {
+      await write(authority, '4', 'Applied');
+      expect(await retire(authority, '4')).toEqual({ title: 'Applied' });
+      await expect(write(authority, '4', 'Applied')).rejects.toMatchObject({
+        code: 'managed_session_title_superseded',
+      });
+      await write(authority, '5', 'Newer');
+      expect(await retire(authority, '3')).toEqual({ title: 'Newer' });
+      const sequence = authority.committedSequence;
+      expect(await retire(authority, '4')).toEqual({ title: 'Applied' });
+      expect(authority.committedSequence).toBe(sequence);
+    });
+    await withAuthority(harness, async (authority) => {
+      expect(await retire(authority, '4')).toEqual({ title: 'Applied' });
+      await expect(write(authority, '4', 'Applied')).rejects.toMatchObject({
+        code: 'managed_session_title_superseded',
+      });
+      await write(authority, '6', 'Newest');
+    });
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      )?.title,
+    ).toBe('Newest');
+  });
+
   it('fences delayed hosted titles across cold reopen and recorder renames', async () => {
     const harness = await createHarness();
     const write = (

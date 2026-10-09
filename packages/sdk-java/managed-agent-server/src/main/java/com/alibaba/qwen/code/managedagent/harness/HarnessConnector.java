@@ -16,6 +16,8 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsFencedTitles() { return false; }
 
+    default boolean supportsTitleRetirement() { return false; }
+
     default JsonNode settleLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted lifecycle is unavailable");
     }
@@ -102,6 +104,10 @@ public interface HarnessConnector extends AutoCloseable {
         throw new UnsupportedOperationException("Fenced Session titles are unavailable");
     }
 
+    default TitleRetirement retireRename(String tenantId, String sessionId, long revision) {
+        throw new UnsupportedOperationException("Session title retirement is unavailable");
+    }
+
     /**
      * Closes the Session and returns the boot ID of the Harness that
      * answered. A Harness that does not hold the Session answers too.
@@ -125,6 +131,9 @@ public interface HarnessConnector extends AutoCloseable {
     }
 
     record Admission(long lastEventId, String eventEpoch) {
+    }
+
+    record TitleRetirement(String title, String bootId) {
     }
 
     record SourceEvent(Long id, String type, Object data, String promptId,

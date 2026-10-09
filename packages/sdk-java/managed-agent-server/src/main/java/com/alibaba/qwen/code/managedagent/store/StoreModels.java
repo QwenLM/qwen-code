@@ -94,7 +94,11 @@ public final class StoreModels {
     }
 
     public record RenameDelivery(String tenantId, String sessionId,
-            String idempotencyKey, String title, long revision, int attemptCount) {
+            String idempotencyKey, String title, long revision, int attemptCount, String state) {
+        public RenameDelivery(String tenantId, String sessionId, String idempotencyKey,
+                String title, long revision, int attemptCount) {
+            this(tenantId, sessionId, idempotencyKey, title, revision, attemptCount, "PENDING");
+        }
     }
 
     public record SessionMutation(SessionRecord session, boolean replayed) {
