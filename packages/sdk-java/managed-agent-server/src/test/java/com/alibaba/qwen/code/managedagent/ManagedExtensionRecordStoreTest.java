@@ -535,6 +535,79 @@ class ManagedExtensionRecordStoreTest {
                 "child_acceptance")).hasSize(1);
     }
 
+    @Test
+    void gatesAChildRunDeliveryOnItsAcceptanceRecord() throws Exception {
+        CommitResource inputResource = hookResource("input-g", "managed-input",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        CommitResource resultResource = hookResource("result-g",
+                "managed-child-result",
+                "{\"summary\":\"clean\"}".getBytes(StandardCharsets.UTF_8));
+        CommitResource receiptResource = hookResource("receipt-g",
+                "managed-runtime-receipt",
+                "{}".getBytes(StandardCharsets.UTF_8));
+        String sessionId = UUID.randomUUID().toString();
+        ExtensionRecordJournal journal = journal(sessionId);
+        settleChildAgentChain(sessionId, "sent", journal, inputResource,
+                resultResource, receiptResource);
+        // The acceptance is authoritative: accepted/consumed before it is
+        // refused, unknown/rejected after it is refused, and the relay's
+        // accepting -> unknown retry stays legal while it is absent.
+        ObjectNode unknown = childAgent(sessionId, "sent", "settled",
+                "settled", "binding-1", inputResource);
+        unknown.withObject("/run").put("dispatchId", "dispatch-1");
+        unknown.put("childSessionId", "session-child");
+        unknown.put("stopReason", "completed");
+        unknown.set("resultRef", hookRef(resultResource));
+        unknown.set("terminalReceiptRef", hookRef(receiptResource));
+        unknown.withObject("/run").withObject("/delivery")
+                .put("state", "unknown");
+        ObjectNode accepted = unknown.deepCopy();
+        accepted.withObject("/run").withObject("/delivery").put("state",
+                "accepted");
+        assertRefused("a delivery reaching accepted ahead of its acceptance",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "reaches accepted or consumed only with its acceptance record",
+                () -> journal.commit(journal.requestDomain("agent-5",
+                        "child_run", accepted, List.of(), 5_000)));
+        commitDomain(journal, "agent-6", "child_run", unknown, List.of());
+        assertRefused("a delivery still reaching accepted without it",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "reaches accepted or consumed only with its acceptance record",
+                () -> journal.commit(journal.requestDomain("agent-7",
+                        "child_run", accepted, List.of(), 7_000)));
+        // The same requirement's second pre-acceptance disjunct:
+        // `consumed` past the first commit must also refuse.
+        ObjectNode consumedPre = unknown.deepCopy();
+        consumedPre.withObject("/run").withObject("/delivery").put("state",
+                "consumed");
+        assertRefused("a delivery reaching consumed without its acceptance",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "reaches accepted or consumed only with its acceptance record",
+                () -> journal.commit(journal.requestDomain("agent-7b",
+                        "child_run", consumedPre, List.of(), 7_500)));
+        commitDomain(journal, "accept-1", "child_acceptance",
+                acceptance(resultResource, receiptResource, "accepted"),
+                List.of(resultResource, receiptResource));
+        ObjectNode rejected = unknown.deepCopy();
+        rejected.withObject("/run").withObject("/delivery").put("state",
+                "rejected");
+        assertRefused("a delivery retracting after its acceptance",
+                sessionId, ManagedExtensionRecordStore.ERROR_REJECTED,
+                "cannot go unknown or rejected after its acceptance record",
+                () -> journal.commit(journal.requestDomain("agent-8",
+                        "child_run", rejected, List.of(), 8_000)));
+        commitDomain(journal, "agent-9", "child_run", accepted, List.of());
+        // And the consumed-with-acceptance commit lands (settlement
+        // vocabulary, not a refusal).
+        ObjectNode consumed = unknown.deepCopy();
+        consumed.withObject("/run").withObject("/delivery").put("state",
+                "consumed");
+        commitDomain(journal, "agent-9b", "child_run", consumed, List.of());
+        assertThat(records.listRecords(TENANT, sessionId, "child_run")
+                .get(0).required("run").required("delivery")
+                .required("state").textValue()).isEqualTo("consumed");
+    }
+
     /** Commits a child agent through its settled result. */
     private static void settleChildAgentChain(String sessionId,
             String completion, ExtensionRecordJournal journal,

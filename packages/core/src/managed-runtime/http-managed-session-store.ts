@@ -842,7 +842,11 @@ class ManagedSessionStoreHttpClient {
           attempt === 0 &&
           error instanceof ManagedSessionStoreHttpError &&
           ((error.status === 409 &&
-            error.remoteCode === 'workspace_lifecycle_admission_closed') ||
+            (error.remoteCode === 'workspace_lifecycle_admission_closed' ||
+              // The verdict/mint gate's refusal is a rollbackable
+              // non-commit: the corrected retry must reach the backend
+              // without the authority latching a write failure behind it.
+              error.remoteCode === 'child_run_lineage_minted')) ||
             (this.lifecycleAuthority &&
               (error.status === 403 ||
                 (error.status === 409 &&

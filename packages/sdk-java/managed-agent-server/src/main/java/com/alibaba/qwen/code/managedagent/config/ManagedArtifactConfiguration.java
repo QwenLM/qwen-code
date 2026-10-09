@@ -33,6 +33,18 @@ public class ManagedArtifactConfiguration {
     }
 
     /**
+     * The child result relay's own tick: the shared default taskScheduler
+     * also runs every sibling recovery, and this page's sequential
+     * harness calls would stall all of theirs behind one slow Session.
+     * Unconditional — the @Scheduled wiring binds by name at context
+     * refresh whether or not the broker lane is on.
+     */
+    @Bean
+    public ThreadPoolTaskScheduler childRelayScheduler(ThreadPoolTaskSchedulerBuilder builder) {
+        return builder.poolSize(1).threadNamePrefix("child-relay-").build();
+    }
+
+    /**
      * The recovery tick runs blocking JDBC, so it must never share the
      * one-thread default pool. Gated exactly like the Broker bean that carries
      * the tick: a deployment with the Broker off must not pay for an idle

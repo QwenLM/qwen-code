@@ -11,7 +11,7 @@ import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Repository;
 
 /**
- * H6b: the JDBC side of the automation runtime — the V54 ledgers (the
+ * H6b: the JDBC side of the automation runtime — the V55 ledgers (the
  * definition mirror with its lease and watermark, the occurrence decisions,
  * the public command replay) and the small reads the scanner and service
  * need from the Session store. No row here is a journal fact: the Session

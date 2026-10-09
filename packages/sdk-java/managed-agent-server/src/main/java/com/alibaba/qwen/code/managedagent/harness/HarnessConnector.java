@@ -95,6 +95,17 @@ public interface HarnessConnector extends AutoCloseable {
                 "Automation operations are unavailable");
     }
 
+    /**
+     * H4b: one child operation onto the Session's journal, from the
+     * control plane's relay (dispatch/attach/result/accept/cancel/
+     * close-scope). The Hosted side settles it before answering.
+     */
+    default void runChildOperation(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        throw new UnsupportedOperationException(
+                "Child operations are unavailable");
+    }
+
     void rename(String tenantId, String sessionId, String title);
 
     /**

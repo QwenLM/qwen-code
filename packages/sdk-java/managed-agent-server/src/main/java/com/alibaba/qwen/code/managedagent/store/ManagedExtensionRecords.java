@@ -914,10 +914,13 @@ public final class ManagedExtensionRecords {
             id(session, "childSessionId");
         }
         String execution = text(run, "execution");
-        // The Session exists only once the control plane admitted its
-        // creation.
+        // The Session exists once the control plane admitted its
+        // creation, and the mint alone never dispatches: a never-started
+        // proof may name the Session it minted (the mint is exactly what
+        // survives the create→attach window), everything earlier may not.
         require(session.isNull() || execution != null
-                && !CHILD_UNSTARTED_EXECUTIONS.contains(execution),
+                && (!CHILD_UNSTARTED_EXECUTIONS.contains(execution)
+                        || "not_started_proven".equals(execution)),
                 "Child run childSessionId needs its admitted creation"
                         + " dispatch");
         require(!session.isNull()
@@ -926,8 +929,11 @@ public final class ManagedExtensionRecords {
                 "Child run childSessionId is set once creation is proven");
         // The Session the child runs in is hosted by a Runtime binding,
         // set with the dispatch and unaddable once dispatched, like the
-        // definition pin.
-        require(session.isNull() || !run.get("runtime").isNull(),
+        // definition pin. The never-started proof is the one terminal
+        // with no dispatch to host from: minted, never dispatched, so
+        // never bound.
+        require(session.isNull() || !run.get("runtime").isNull()
+                || "not_started_proven".equals(execution),
                 "Child run childSessionId needs the Runtime binding that"
                         + " hosts it");
         // A dispatch that never started (not_started_proven) may carry no
@@ -1015,8 +1021,7 @@ public final class ManagedExtensionRecords {
                 "Child run failed needs settled or not_started_proven"
                         + " execution");
         require(!"creation_failed".equals(stopReason)
-                || "not_started_proven".equals(execution)
-                        && session.isNull(),
+                || "not_started_proven".equals(execution),
                 "Child run creation_failed needs a creation that never"
                         + " started");
         require(!"child_failed".equals(stopReason)

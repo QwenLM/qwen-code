@@ -21,11 +21,16 @@ import { pendingSessionInputs } from './hosted-wake-intake.js';
 // model-free on the close path. See
 // docs/design/2026-10-03-managed-shell-monitor-runtime.md.
 
-/** One pending monitor notification, ready to be delivered to its turn. */
+/** One pending notification, ready to be delivered to its turn. */
 export interface HostedMonitorWakeTurn {
   readonly turnId: string;
   readonly text: string;
-  /** The input's source, so a settle hook can tell an automation turn apart. */
+  /**
+   * The committed input's source (`monitor`, H6's `automation`, or H4b's
+   * `child_agent`): an automation run settles from its turn, and a child
+   * acceptance's evidence gets consumed after the turn settles, which a
+   * monitor notification never owes.
+   */
   readonly source?: string;
 }
 
@@ -67,7 +72,7 @@ export interface HostedMonitorWakeDeps {
    */
   runTurn(
     turn: HostedMonitorWakeTurn,
-  ): Promise<'settled' | 'busy' | 'recovery'>;
+  ): Promise<'settled' | 'busy' | 'recovery' | 'settled_incomplete'>;
   /** A failure the pump itself cannot recover: the owner decides. */
   failed(cause: unknown): void;
   /**
@@ -202,12 +207,12 @@ export class HostedMonitorWakeScheduler {
 }
 
 /**
- * The unadmittable path: a monitor notification that never ran a turn
- * settles cancelled without a model turn, under the turn-result record's
- * own idempotency key. Called on the close path so no wedged notification
- * parks the Session as `hosted_turn_recovery_required` at its next open.
- * A notification whose wake turn already started belongs to the recovery
- * fleet, never to a `cancelled` line on top of a turn that ran.
+ * The unadmittable path: a monitor or child-agent notification that never
+ * ran a turn settles cancelled without a model turn, under the turn-result
+ * record's own idempotency key. Called on the close path so no wedged
+ * notification parks the Session as `hosted_turn_recovery_required` at its
+ * next open. A notification whose wake turn already started belongs to the
+ * recovery fleet, never to a `cancelled` line on top of a turn that ran.
  */
 export async function settlePendingMonitorInputs(params: {
   readonly authority: LocalManagedSessionAuthority;
