@@ -618,29 +618,6 @@ public class ManagedAgentStore implements AgentStateStore {
         return new SessionMutationCommand(sessionId, "PENDING", false);
     }
 
-    @Override
-    public Optional<SessionMutationCommand> replaySessionMutation(
-            String tenantId, String operation, String idempotencyKey,
-            String requestDigest, String sessionId) {
-        Optional<CommandRecord> existing = findCommand(tenantId, operation,
-                idempotencyKey, false);
-        if (existing.isEmpty()) {
-            return Optional.empty();
-        }
-        CommandRecord command = existing.get();
-        if (!command.requestDigest().equals(requestDigest)
-                || !command.sessionId().equals(sessionId)) {
-            throw new ApiException(HttpStatus.CONFLICT,
-                    "idempotency_conflict",
-                    "The idempotency key was reused with different content.");
-        }
-        if ("FAILED".equals(command.status())) {
-            return Optional.empty();
-        }
-        return Optional.of(new SessionMutationCommand(sessionId,
-                command.status(), true));
-    }
-
     @Transactional
     public SessionRecord completeSessionMutation(String tenantId,
             String operation, String idempotencyKey, String sessionId,

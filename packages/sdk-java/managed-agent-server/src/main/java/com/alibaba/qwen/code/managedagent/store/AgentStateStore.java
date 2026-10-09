@@ -68,17 +68,6 @@ public interface AgentStateStore {
             String operation, String idempotencyKey, String requestDigest,
             String sessionId, SessionMutationKind kind);
 
-    /**
-     * The non-locking replay probe of {@link #beginSessionMutation},
-     * answered before any mutable gate so a role revoked after admission
-     * still resolves a retry to the command it already wrote. Empty when
-     * no command exists, or when a {@code FAILED} one waits for the
-     * re-arm {@link #beginSessionMutation} performs on a fresh admission.
-     */
-    Optional<SessionMutationCommand> replaySessionMutation(String tenantId,
-            String operation, String idempotencyKey, String requestDigest,
-            String sessionId);
-
     SessionRecord completeSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId,
             SessionMutationKind kind, String title, String harnessBootId);
