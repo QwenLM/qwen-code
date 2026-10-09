@@ -147,6 +147,17 @@ public class BrokerSecurity {
                             + " from server.port; the surface routing is"
                             + " port-based.");
         }
+        // The trusted channel adapter surface authenticates by the tenant
+        // header alone, so its only protection is an isolated internal
+        // listener; enabling it on the shared listener is refused here.
+        if (properties.getChannels().isEnabled() && internal.getPort() <= 0) {
+            throw new IllegalStateException(
+                    "qwen.managed-agent.channels.enabled requires an isolated"
+                            + " qwen.managed-agent.internal-server.port; the"
+                            + " trusted adapter surface authenticates by the"
+                            + " tenant header alone and must never share a"
+                            + " listener with the public surface.");
+        }
         // The two keys protect different domains; reusing one key hands a
         // signing-key holder the journal write credential.
         if (mode == Mode.SIGNED && bindingKeyBytes != null

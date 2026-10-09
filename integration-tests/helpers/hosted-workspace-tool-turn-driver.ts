@@ -227,7 +227,10 @@ let modelCalls = 0;
 const modelReply: FakeOpenAIHandler = ({ body }) => {
   modelCalls++;
   const tools = body['tools'] as Array<{ function: { name: string } }>;
+  // Since H4b, a depth-0 Shell-lane Session whose child kind gate is on
+  // advertises the Agent tool beside the Shell vocabulary.
   assert.deepEqual(tools.map((tool) => tool.function.name).sort(), [
+    ...(shellProfile ? ['agent'] : []),
     'edit',
     ...(shellProfile ? ['monitor'] : []),
     'read_file',

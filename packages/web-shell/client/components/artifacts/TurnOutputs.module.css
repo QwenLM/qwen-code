@@ -43,6 +43,12 @@
   font-weight: 400;
 }
 
+.artifactTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .reviewSummary {
   min-width: 0;
   display: flex;
