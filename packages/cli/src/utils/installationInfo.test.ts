@@ -13,6 +13,7 @@ import {
   PackageManager,
   resolveUpdateCommand,
 } from './installationInfo.js';
+import { setLanguageAsync, t } from '../i18n/index.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
@@ -217,11 +218,9 @@ describe('getInstallationInfo', () => {
 
     const disabledInfo = getInstallationInfo(projectRoot, false);
 
-    expect(disabledInfo.updateMessage).toContain(
-      'Please rerun the standalone installer to update',
-    );
-    expect(disabledInfo.updateMessage).not.toContain(
-      'Attempting to automatically update now',
+    expect(disabledInfo.updateMessage).toBe(
+      'Standalone install detected. Please rerun the standalone installer to update: ' +
+        'curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash',
     );
   });
 
@@ -268,6 +267,16 @@ describe('getInstallationInfo', () => {
     expect(info.updateCommand).toBeUndefined();
     expect(info.updateMessage).toContain('Standalone install detected');
     expect(info.updateMessage).not.toContain('npm install');
+
+    const winDisabled = getInstallationInfo(projectRoot, false);
+
+    expect(winDisabled.updateMessage).toContain(
+      'Please rerun the standalone installer to update',
+    );
+    expect(winDisabled.updateMessage).toContain('install-qwen-standalone.ps1');
+    expect(winDisabled.updateMessage).not.toContain(
+      'Attempting to automatically update now',
+    );
   });
 
   it('should detect macOS standalone installs and avoid npm auto-update', () => {
@@ -708,6 +717,16 @@ describe('resolveUpdateCommand', () => {
 });
 
 describe('formatUpdateInstructions', () => {
+  const standaloneDisabledInfo = {
+    packageManager: PackageManager.STANDALONE,
+    isGlobal: true,
+    isStandalone: true,
+    standaloneDir: '/Users/test/.local/lib/qwen-code',
+    updateMessage:
+      'Standalone install detected. Please rerun the standalone installer to update: ' +
+      'curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash',
+  };
+
   it('formats package-manager update commands', () => {
     expect(
       formatUpdateInstructions(
@@ -752,6 +771,21 @@ describe('formatUpdateInstructions', () => {
         '1.2.3',
       ),
     ).toEqual(['Running via npx, update not applicable.']);
+  });
+
+  it('splits standalone guidance into a translatable prefix line and the installer command', () => {
+    expect(formatUpdateInstructions(standaloneDisabledInfo, '1.2.3')).toEqual([
+      'Standalone install detected. Please rerun the standalone installer to update:',
+      ' curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh | bash',
+    ]);
+  });
+
+  it('translates the standalone prefix line in zh', async () => {
+    const lines = formatUpdateInstructions(standaloneDisabledInfo, '1.2.3');
+
+    await setLanguageAsync('zh');
+    expect(t(lines[0]!)).toBe('检测到独立安装。请重新运行独立安装程序以更新：');
+    await setLanguageAsync('en');
   });
 });
 

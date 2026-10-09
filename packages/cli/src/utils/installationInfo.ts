@@ -132,6 +132,17 @@ function formatUpdateMessage(
     ];
   }
 
+  // The prefix must stay byte-identical to the i18n key in locales/*.js; with
+  // the interpolated command the line is an unmatchable lookup key.
+  const standalonePrefix =
+    'Standalone install detected. Please rerun the standalone installer to update: ';
+  if (message.startsWith(standalonePrefix)) {
+    return [
+      standalonePrefix.trimEnd(),
+      ` ${message.slice(standalonePrefix.length)}`,
+    ];
+  }
+
   return [message];
 }
 
