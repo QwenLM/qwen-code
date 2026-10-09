@@ -69,6 +69,21 @@ export function rememberWorkspaceHost(
   }
 }
 
+/**
+ * Drop a host from the saved workspace catalog, e.g. when its connection is
+ * removed from Settings: the fan-out group must disappear in the same tab,
+ * not just on the next load.
+ */
+export function forgetWorkspaceHost(origin: string): void {
+  const hosts = readWorkspaceHosts().filter((host) => host.origin !== origin);
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(hosts));
+    window.dispatchEvent(new Event(CHANGE_EVENT));
+  } catch {
+    // Connections remain usable when browser persistence is unavailable.
+  }
+}
+
 /** Saved hosts, kept in sync with catalog updates from this and other tabs. */
 export function useWorkspaceHosts(): WorkspaceHost[] {
   const [hosts, setHosts] = useState(readWorkspaceHosts);

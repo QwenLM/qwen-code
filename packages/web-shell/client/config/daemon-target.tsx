@@ -36,7 +36,10 @@ import {
   getFanoutOrigins,
   syncFanoutParams,
 } from './daemon';
-import { readRemoteConnections } from './remote-connections';
+import {
+  readRemoteConnections,
+  REMOTE_CONNECTIONS_CHANGE_EVENT,
+} from './remote-connections';
 import {
   readWorkspaceHosts,
   WORKSPACE_HOSTS_CHANGE_EVENT,
@@ -233,10 +236,12 @@ export function useFanoutUrlSync(): void {
     };
     sync();
     window.addEventListener(WORKSPACE_HOSTS_CHANGE_EVENT, sync);
+    window.addEventListener(REMOTE_CONNECTIONS_CHANGE_EVENT, sync);
     window.addEventListener('storage', sync);
     window.addEventListener('focus', sync);
     return () => {
       window.removeEventListener(WORKSPACE_HOSTS_CHANGE_EVENT, sync);
+      window.removeEventListener(REMOTE_CONNECTIONS_CHANGE_EVENT, sync);
       window.removeEventListener('storage', sync);
       window.removeEventListener('focus', sync);
     };

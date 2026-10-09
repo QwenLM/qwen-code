@@ -21,7 +21,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { DaemonClient } from '@qwen-code/sdk/daemon';
 import type { DaemonCapabilities } from '@qwen-code/sdk/daemon';
 import { getDaemonToken } from './daemon';
-import { readRemoteConnections } from './remote-connections';
+import { useRemoteConnections } from './remote-connections';
 import { useWorkspaceHosts } from './workspace-hosts';
 import { useDaemonTargetOptional } from './daemon-target';
 
@@ -181,12 +181,13 @@ export const HOST_FANOUT_POLL_MS = POLL_MS;
  */
 export function useFanoutOrigins(): string[] {
   const hosts = useWorkspaceHosts();
+  const connections = useRemoteConnections();
   const focused = useDaemonTargetOptional()?.activeOrigin;
   const pageOrigin = window.location.origin;
   return useMemo(() => {
     const origins = new Set<string>([
       ...hosts.map((host) => host.origin),
-      ...readRemoteConnections(),
+      ...connections,
     ]);
     const active = focused ?? '';
     origins.delete(active);
@@ -196,7 +197,7 @@ export function useFanoutOrigins(): string[] {
       origins.delete(pageOrigin);
     }
     return [...origins].sort();
-  }, [hosts, focused, pageOrigin]);
+  }, [hosts, connections, focused, pageOrigin]);
 }
 
 export interface HostCapabilitiesState {
