@@ -952,58 +952,68 @@ function ArenaSelect({
   // window grows the frame past the region and the clip takes the pane the
   // user opened it to read. Both panes cap to what the region leaves: the
   // preview clips its runs to the leftover rows (reserving the diff pane's
-  // two chrome rows when both are open), and the detailed diff gets a line
-  // cap from what the list's zero-row floor leaves, because its 181-line
-  // ceiling can never fit a region.
+  // margin and title rows when both are open), and the detailed diff gets a
+  // line cap from what the list's zero-row floor leaves, because its 181-line
+  // ceiling can never fit a region. Neither paints at all when the region
+  // cannot pay its own chrome.
   const diffOpen = Boolean(showDetailedDiff && selectedResult);
   const diffLines = diffOpen ? visibleDiffLines(selectedResult?.diff) : [];
   // The diff pane's margin and title, the title measured the way the
   // preview pane measures its own: a model id long enough to wrap it would
   // otherwise be paid one row for two.
-  const diffChromeRows =
-    diffOpen && selectedResult
-      ? 1 +
-        wrappedRows(
-          sanitizeTerminalLine(
-            `Detailed Diff · ${selectedResult.model.modelId}`,
-          ),
-          frameContentWidth,
-        )
-      : 0;
-  const previewBudget =
-    regionHeight === undefined
-      ? undefined
-      : Math.max(0, regionHeight - 12 - diffChromeRows);
-  const preview =
+  const diffPaneChrome = selectedResult
+    ? 1 +
+      wrappedRows(
+        sanitizeTerminalLine(`Detailed Diff · ${selectedResult.model.modelId}`),
+        frameContentWidth,
+      )
+    : 0;
+  const diffChromeRows = diffOpen ? diffPaneChrome : 0;
+  // What the region leaves once the frame's own 12 rows are paid.
+  const paneRoom =
+    regionHeight === undefined ? undefined : Math.max(0, regionHeight - 12);
+  const clipPreview = (budget: number | undefined) =>
     showPreview && selectedResult
-      ? clipAgentPreview(selectedResult, frameContentWidth, previewBudget)
+      ? clipAgentPreview(selectedResult, frameContentWidth, budget)
       : undefined;
+  // Affordability is priced against the widest the preview can be, so a pane
+  // that passes still fits once the preview is re-clipped to what the pane
+  // leaves. A pane the region cannot pay does not paint and charges nothing —
+  // the frame is unshrinkable inside the clipped region, so painting it grows
+  // the frame past the region and the clip takes the list's rows instead.
+  let preview = clipPreview(paneRoom);
+  const diffVisible =
+    diffOpen &&
+    (paneRoom === undefined ||
+      paneRoom - (preview?.rows ?? 0) >= diffChromeRows);
+  if (diffVisible && paneRoom !== undefined) {
+    preview = clipPreview(Math.max(0, paneRoom - diffChromeRows));
+  }
   const previewRows = preview?.rows ?? 0;
   let agentWindowRows: number;
   let diffLineCap: number | undefined;
   if (regionHeight === undefined) {
     agentWindowRows = rows.length;
+  } else if (diffVisible) {
+    // The pane pays its margin and title rows, then as many diff lines as
+    // fit (one row for the empty diff's notice — which a zero-line budget
+    // does not paint); the list windows from the rest. diffVisible already
+    // established the pane can pay its chrome, so neither budget clamps a
+    // deficit away.
+    const lineBudget = regionHeight - 12 - previewRows - diffChromeRows;
+    diffLineCap = lineBudget;
+    const painted =
+      diffLines.length === 0
+        ? lineBudget === 0
+          ? 0
+          : 1
+        : Math.min(diffLines.length, lineBudget);
+    agentWindowRows = Math.floor((lineBudget - painted) / 2);
   } else {
-    const afterPanes = regionHeight - 12 - previewRows;
-    if (diffOpen) {
-      // The pane pays its margin and title rows, then as many diff lines as
-      // fit (one row for the empty diff's notice — which a zero-line budget
-      // does not paint); the list windows from the rest.
-      const lineBudget = Math.max(0, afterPanes - diffChromeRows);
-      diffLineCap = lineBudget;
-      const painted =
-        diffLines.length === 0
-          ? lineBudget === 0
-            ? 0
-            : 1
-          : Math.min(diffLines.length, lineBudget);
-      agentWindowRows = Math.max(
-        0,
-        Math.floor((afterPanes - diffChromeRows - painted) / 2),
-      );
-    } else {
-      agentWindowRows = Math.max(0, Math.floor(afterPanes / 2));
-    }
+    agentWindowRows = Math.max(
+      0,
+      Math.floor((regionHeight - 12 - previewRows) / 2),
+    );
   }
   const agentOffset = getSelectionScrollOffset(
     sel,
@@ -1142,7 +1152,7 @@ function ArenaSelect({
           })}
       </box>
       {preview && <AgentPreview preview={preview} />}
-      {showDetailedDiff && selectedResult && (
+      {diffVisible && selectedResult && (
         <AgentDetailedDiff
           result={selectedResult}
           maxLines={diffLineCap}

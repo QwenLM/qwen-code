@@ -531,12 +531,15 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
   // with it: the cursor can only sit on a server row, so a window that
   // follows it never scrolls the tail rows into view — the one diagnostic
   // the long-list case exists for would never paint. Its two rows come out
-  // of the step's region budget, so the frame still fits the region.
+  // of the step's region budget, so the frame still fits the region, and it
+  // only takes them when the list keeps a row of its own — at exactly two
+  // budget rows the hint would leave the list zero, painting no server while
+  // the header still counts them and refusing every key that addresses a row.
   const debugHintRows =
     servers.some(
       (s) => s.status === 'disconnected' && !s.isDisabled && !s.approvalState,
     ) &&
-    (bodyWindowRows === undefined || bodyWindowRows >= 2)
+    (bodyWindowRows === undefined || bodyWindowRows >= 3)
       ? 2
       : 0;
   const serverWindowRows =

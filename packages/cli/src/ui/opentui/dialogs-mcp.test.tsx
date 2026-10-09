@@ -575,4 +575,32 @@ describe('OpenTuiMcpDialog list windows', () => {
     expect(screen.getByText('srv_11')).toBeTruthy();
     expect(screen.getByText(/Run qwen --debug to see error logs/)).toBeTruthy();
   });
+
+  it('lets the --debug hint yield when the region leaves the list two rows', async () => {
+    // Region 11 (a 16-row terminal, a short window or a tmux split) leaves
+    // bodyWindowRows = 2. The hint used to take both at >= 2, so the list
+    // painted zero of twelve servers while the step header still counted
+    // them, and the zero-row refusal killed the arrows and Enter with it —
+    // one row *less* of region painted a server. The hint only spends rows
+    // the list can spare.
+    const servers = [
+      serverWith({ name: 'srv_0', status: MCPServerStatus.DISCONNECTED }),
+      ...Array.from({ length: 11 }, (_, i) =>
+        serverWith({ name: `srv_${i + 1}` }),
+      ),
+    ];
+    render(
+      <OpenTuiMcpDialog
+        servers={servers}
+        availableTerminalHeight={11}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByText('srv_0')).toBeTruthy();
+    expect(screen.queryByText(/Run qwen --debug to see error logs/)).toBeNull();
+
+    await press('return');
+    expect(screen.getByText(/Esc to back/)).toBeTruthy();
+  });
 });

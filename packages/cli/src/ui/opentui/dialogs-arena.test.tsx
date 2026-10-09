@@ -167,6 +167,37 @@ const fourConfig = {
   getArenaManager: () => fourAgentManager,
 } as unknown as Config;
 
+// One settled agent whose model id pushes the detailed-diff title past the
+// thirty columns a width-40 frame leaves, so the pane costs three rows
+// (margin + a two-row title) instead of its two-row minimum.
+const wrappedTitleManager = {
+  getAgentStates: () => [
+    {
+      agentId: 'a1',
+      model: { modelId: 'qwen3-coder-plus' },
+      status: AgentStatus.COMPLETED,
+      stats: { durationMs: 1000, outputTokens: 42 },
+    },
+  ],
+  getResult: () => ({
+    task: 'task',
+    agents: [
+      {
+        agentId: 'a1',
+        model: { modelId: 'qwen3-coder-plus' },
+        approachSummary: 'did the thing',
+        stats: { outputTokens: 42, durationMs: 1000, toolCalls: 1 },
+        diffSummary: { additions: 40, deletions: 0, files: [] },
+        diff: Array.from({ length: 40 }, (_, l) => `+line ${l}`).join('\n'),
+      },
+    ],
+  }),
+};
+
+const wrappedTitleConfig = {
+  getArenaManager: () => wrappedTitleManager,
+} as unknown as Config;
+
 const twoModelStartConfig = {
   getArenaManager: () => ({
     getAgents: () => [],
@@ -762,5 +793,68 @@ describe('OpenTuiArenaDialog select pane charging', () => {
     expect(screen.queryByText('+line 4')).toBeNull();
     // The marker is a diff line, clipped to the pane's 28 columns here.
     expect(screen.getByText(/more rows than/)).toBeTruthy();
+  });
+
+  it('does not paint a detailed-diff pane the region cannot pay', async () => {
+    // At width 40 the pane's content is thirty columns, so a sixteen-column
+    // model id wraps the title into two rows and the pane costs three. A
+    // fourteen-row region leaves two: the pane used to paint its margin and
+    // title unconditionally while lineBudget and agentWindowRows clamped the
+    // deficit away with Math.max(0, …), so the unshrinkable frame painted
+    // fifteen rows into fourteen — the highlighted agent row vanished under a
+    // title over zero diff lines. Affordability is now decided before the
+    // pane paints, matching the sibling preview pane's rule that a budget
+    // which cannot pay the chrome paints nothing.
+    mocks.state.width = 40;
+    render(
+      <OpenTuiArenaDialog
+        mode="select"
+        config={wrappedTitleConfig}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={14}
+      />,
+    );
+
+    await press('d');
+    expect(screen.queryByText(/Detailed Diff/)).toBeNull();
+    expect(screen.getByText('qwen3-coder-plus')).toBeTruthy();
+  });
+
+  it('drops a detailed-diff pane the shrunken region can no longer pay', async () => {
+    // showDetailedDiff is component state and survives a resize, and nothing
+    // re-checked affordability, so a pane opened at a tall region kept
+    // painting its margin and title after the terminal shrank below what it
+    // costs — the same overflow, reached without a narrow terminal.
+    mocks.state.width = 40;
+    const { rerender } = render(
+      <OpenTuiArenaDialog
+        mode="select"
+        config={wrappedTitleConfig}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={24}
+      />,
+    );
+
+    await press('d');
+    expect(screen.getByText(/Detailed Diff · qwen3-coder-plus/)).toBeTruthy();
+
+    rerender(
+      <OpenTuiArenaDialog
+        mode="select"
+        config={wrappedTitleConfig}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={14}
+      />,
+    );
+    expect(screen.queryByText(/Detailed Diff/)).toBeNull();
+    expect(screen.getByText('qwen3-coder-plus')).toBeTruthy();
+
+    // The stranded-open flag still clears, so the pane is not wedged.
+    await press('d');
+    await press('d');
+    expect(screen.queryByText(/Detailed Diff/)).toBeNull();
   });
 });
