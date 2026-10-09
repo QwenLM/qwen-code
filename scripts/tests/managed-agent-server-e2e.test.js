@@ -636,6 +636,25 @@ describe('managed-agent-server e2e runner', () => {
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
+  // The mirror of the stall bound: a poll already in flight at the deadline
+  // must be allowed to answer. The final iteration can start with a sliver
+  // of budget left, and a dependency that becomes ready inside that sliver
+  // is ready — discarding its answer misreports it as a wedged predicate.
+  it('waitUntil lets the final in-flight poll answer past the deadline', async () => {
+    const { waitUntil } = loadWaitUntil();
+    const started = Date.now();
+    await expect(
+      waitUntil(
+        'probe',
+        async () => {
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          return Date.now() - started >= 200;
+        },
+        250,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
   it('waitUntil reports a child that exited early', async () => {
     const { waitUntil } = loadWaitUntil();
     await expect(

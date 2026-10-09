@@ -596,9 +596,15 @@ async function waitUntil(
           predicate(Math.max(1, deadline - Date.now())),
         ),
         new Promise<boolean>((_, reject) => {
+          // Floor the bound: the final iteration can start with a sliver of
+          // budget left, and a poll that would answer just past the deadline
+          // must resolve the wait, not be discarded and misreported as a
+          // wedged predicate. The clamp re-admits up to ~500ms of overshoot
+          // on a genuinely wedged poll — the same trade runMysql's probe
+          // timeout floor makes for the synchronous path.
           const stallTimer = setTimeout(
             () => reject(stall),
-            Math.max(1, deadline - Date.now()),
+            Math.max(500, deadline - Date.now()),
           );
           stallTimer.unref();
         }),
