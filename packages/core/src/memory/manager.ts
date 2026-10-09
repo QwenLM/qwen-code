@@ -1151,11 +1151,14 @@ export class MemoryManager {
         },
       });
       // The main agent saved memory itself; do not keep skipping on the
-      // strength of an older no-op. Pending turns stay pending for the next run.
+      // strength of an older no-op. Drop the snapshot with it: a close-time
+      // flush would otherwise fork over the live tail (this turn's own memory
+      // write included) while its gate inspected the skipped turn.
       const cadence = this.extractCadence.get(params.sessionId);
       if (cadence) {
         cadence.armed = false;
         cadence.skips = 0;
+        delete cadence.pending;
       }
       if (wroteUserMemory && params.config) {
         await this.recordUserMutation(
@@ -1295,8 +1298,9 @@ export class MemoryManager {
    * below the compaction warning. A skip records the turn as pending for
    * {@link flushPendingExtract} and leaves the cursor untouched.
    * Arming requires a completed run, so a skip can overlap this session's own
-   * extraction only when that run is a trailing request with older history
-   * (see {@link recordCadenceOutcome}).
+   * extraction when that run is a trailing request with older history, and also
+   * when it is a direct run whose own gate returned false (see
+   * {@link recordCadenceOutcome}).
    */
   private shouldSkipForCadence(params: ScheduleExtractParams): boolean {
     const budget = getExtractNoopSkipTurns();
@@ -1341,8 +1345,17 @@ export class MemoryManager {
     // refunding here would let a streak reach twice the documented N.
     const carried = this.extractCadence.get(params.sessionId);
     const previous = carried?.pending;
+    // History also shrinks under the snapshot when compaction runs, which is
+    // not a trailing request: a run shorter than what this session already
+    // extracted means the snapshot predates the shrink, so it must neither be
+    // carried forward nor replayed by a close-time flush.
+    const shrank =
+      carried !== undefined &&
+      params.history.length < carried.lastExtractedLength;
     const carry =
-      previous !== undefined && previous.history.length > params.history.length;
+      !shrank &&
+      previous !== undefined &&
+      previous.history.length > params.history.length;
     this.extractCadence.set(params.sessionId, {
       armed:
         result.extractorEngaged === true && result.touchedTopics.length === 0,

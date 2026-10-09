@@ -2404,6 +2404,87 @@ describe('MemoryManager', () => {
       ).toHaveLength(6);
     });
 
+    it('keeps a later skipped turn pending when an older direct run completes', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+
+      // `belowCompactionWarn: false` means the cadence gate declines, so the
+      // run starts directly while the next turn — evaluated before the
+      // `extractRunning` branch — skips instead of queueing behind it.
+      let release!: () => void;
+      vi.mocked(runAutoMemoryExtract).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve(engagedNoop());
+          }),
+      );
+      const direct = mgr.scheduleExtract(
+        extractParams(tmp.projectRoot, 'sess', turns(4)),
+      );
+      await vi.waitFor(() =>
+        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2),
+      );
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+      release();
+      await direct;
+      await mgr.drain();
+
+      // The direct run is the older request here too, so the skip survives it.
+      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(3);
+      expect(
+        vi.mocked(runAutoMemoryExtract).mock.calls[2][0].history,
+      ).toHaveLength(6);
+    });
+
+    it('drops the pending snapshot when compaction shrank the history under it', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 4);
+      expect((await turn(mgr, 6)).skippedReason).toBe('cadence');
+
+      // Compaction collapses the live history below what the session already
+      // extracted, so this run is not an older trailing request: the skipped
+      // snapshot predates the shrink and must not be carried or replayed.
+      await turn(mgr, 2);
+
+      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+    });
+
+    it('drops the pending snapshot when the turn wrote to a memory file', async () => {
+      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
+      const mgr = new MemoryManager();
+      await turn(mgr, 2);
+      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
+
+      // The main agent saved memory itself, so the cadence disarms and the
+      // skipped snapshot goes with it: replaying it at the close boundary would
+      // fork over this turn's live tail, memory write included.
+      const wrote = await mgr.scheduleExtract({
+        ...extractParams(tmp.projectRoot, 'sess', [
+          ...turns(4),
+          content(
+            'model',
+            fnCall('write_file', {
+              file_path: path.join(
+                tmp.projectRoot,
+                '.qwen/memory/user/test.md',
+              ),
+            }),
+          ),
+        ]),
+        belowCompactionWarn: true,
+      });
+      expect(wrote.skippedReason).toBe('memory_tool');
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+
+      await expect(mgr.flushPendingExtract('sess')).resolves.toBe(true);
+      expect(runAutoMemoryExtract).toHaveBeenCalledTimes(1);
+    });
+
     it('keeps a carried skip pending without refunding its budget', async () => {
       vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '2');
       const mgr = new MemoryManager();
