@@ -425,7 +425,13 @@ function count(value: unknown, label: string, min = 0, max?: number): number {
     label,
   );
   if (number < min || (max !== undefined && number > max)) {
-    fail(`${label} is out of range.`);
+    // Pair to the Java store's identical refusal, so a cross-language
+    // failure reads alike wherever the boundary caught it.
+    fail(
+      max !== undefined
+        ? `${label} must be an integer from ${min} to ${max}.`
+        : `${label} must be an integer from ${min} or more.`,
+    );
   }
   return number;
 }
@@ -464,8 +470,13 @@ function sameJson(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-function isTerminal(state: ExtensionRunState): boolean {
+/** The run states after which no observation, output or run change may land. */
+export function isTerminalRunState(state: ExtensionRunState): boolean {
   return TERMINAL_RUN_STATES.includes(state);
+}
+
+function isTerminal(state: ExtensionRunState): boolean {
+  return isTerminalRunState(state);
 }
 
 function isRecoveryReason(

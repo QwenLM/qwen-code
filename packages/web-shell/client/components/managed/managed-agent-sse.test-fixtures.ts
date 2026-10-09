@@ -58,6 +58,12 @@ export function javaSessionPayload(lastSequence: number): string {
     createdAt: 1,
     updatedAt: 1,
     lastSequence,
+    capabilities: {
+      tasks: true,
+      artifacts: false,
+      actions: false,
+      workspaceTurns: false,
+    },
   };
   return JSON.stringify(payload);
 }

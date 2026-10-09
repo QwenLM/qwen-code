@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -47,6 +48,7 @@ import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.core.Ordered;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.util.ReflectionTestUtils;
 
 class HostedPublicWorkspaceIT {
     private static final String TOKEN = "g0-local-fixture";
@@ -168,7 +170,261 @@ class HostedPublicWorkspaceIT {
         }
     }
 
-    private void runFiles() throws Exception {
+    // W2: a controlled cwd change settles through the production server and
+    // the deployment's real Workspace probe, on both API surfaces.
+    @Test
+    @Timeout(150)
+    void workspaceCwdChangeSettlesThroughBothSurfaces() throws Exception {
+        List<Path> roots = boot();
+        Files.createDirectory(roots.get(0).resolve("child2"));
+        register("workspace-0", "storage-0");
+        register("workspace-1", "storage-1");
+        Map<String, Object> creation = Map.of("agent_id", "qwen-code",
+                "input", List.of(Map.of("type", "input_text", "text",
+                        "G0_FILES")), "workspace",
+                Map.of("workspace_id", "workspace-0", "cwd_relative", "child"));
+        String session = request("POST", "/v1/agents/sessions", creation,
+                "w2-create", "actor", 202).path("id").asText();
+        // The Session first runs a real tool Turn in the original
+        // directory, so the later Turn has something to escape from.
+        awaitTurn(session, null, "child", roots.get(0));
+
+        Map<String, Object> change = Map.of("cwd_relative", "child2//",
+                "expected_context_revision", 1);
+        JsonNode operation = request("POST",
+                "/v1/agents/sessions/" + session + "/cwd", change, "w2-cwd-1",
+                "actor", 202);
+        assertThat(operation.path("type").asText()).isEqualTo("cwd_change");
+        assertThat(operation.path("target_cwd_relative").asText())
+                .isEqualTo("child2");
+        assertThat(operation.path("expected_context_revision").asLong())
+                .isEqualTo(1);
+        assertThat(operation.path("status").asText())
+                .isIn("pending", "installing");
+        assertThat(operation.path("replayed").asBoolean()).isFalse();
+        String operationId = operation.path("id").asText();
+
+        // The same key replays even spelled differently once normalized.
+        JsonNode replay = request("POST",
+                "/v1/agents/sessions/" + session + "/cwd",
+                Map.of("cwd_relative", "child2/./",
+                        "expected_context_revision", 1),
+                "w2-cwd-1", "actor", 202);
+        assertThat(replay.path("id").asText()).isEqualTo(operationId);
+        assertThat(replay.path("replayed").asBoolean()).isTrue();
+
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+            JsonNode polled = request("GET", "/v1/agents/sessions/" + session
+                    + "/operations/" + operationId, null, null, "actor", 200);
+            assertThat(polled.path("status").asText()).isEqualTo("completed");
+            assertThat(polled.path("result_context_revision").asLong())
+                    .isEqualTo(2);
+            assertThat(polled.path("replayed").asBoolean()).isFalse();
+        });
+        JsonNode read = request("GET", "/v1/agents/sessions/" + session,
+                null, null, "actor", 200);
+        assertThat(read.at("/workspace/cwd_relative").asText())
+                .isEqualTo("child2");
+        assertThat(read.at("/workspace/context_revision").asLong())
+                .isEqualTo(2);
+        assertThat(read.at("/workspace/state").asText()).isEqualTo("ready");
+        JsonNode events = request("GET", "/v1/agents/sessions/" + session
+                + "/events", null, null, "actor", 200);
+        JsonNode changed = null;
+        for (JsonNode event : events.path("data")) {
+            if ("session.context.changed"
+                    .equals(event.path("type").asText())) {
+                changed = event;
+            }
+        }
+        assertThat(changed).as("session.context.changed in %s", events)
+                .isNotNull();
+        assertThat(changed.path("data").path("cwdRelative").asText())
+                .isEqualTo("child2");
+        assertThat(changed.path("data").path("contextRevision").asLong())
+                .isEqualTo(2);
+        assertThat(changed.path("data").path("workspaceId").asText())
+                .isEqualTo("workspace-0");
+
+        Map<String, Object> webChange = Map.of("sessionId", session,
+                "idempotencyKey", "w2-cwd-web-1", "cwdRelative", ".",
+                "expectedContextRevision", 2);
+        JsonNode webOperation = request("POST",
+                "/api/agent/web-shell/v1/sessions/cwd/change", webChange,
+                null, "actor", 202);
+        assertThat(webOperation.path("type").asText())
+                .isEqualTo("cwd_change");
+        String webOperationId = webOperation.path("operationId").asText();
+        JsonNode webReplay = request("POST",
+                "/api/agent/web-shell/v1/sessions/cwd/change", webChange,
+                null, "actor", 202);
+        assertThat(webReplay.path("operationId").asText())
+                .isEqualTo(webOperationId);
+        assertThat(webReplay.path("replayed").asBoolean()).isTrue();
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+            JsonNode polled = request("POST",
+                    "/api/agent/web-shell/v1/operations/query",
+                    Map.of("sessionId", session,
+                            "operationId", webOperationId),
+                    null, "actor", 200);
+            assertThat(polled.path("status").asText()).isEqualTo("completed");
+            assertThat(polled.path("resultContextRevision").asLong())
+                    .isEqualTo(3);
+        });
+
+        assertRefusal(request("POST",
+                "/v1/agents/sessions/" + session + "/cwd",
+                Map.of("cwd_relative", "..", "expected_context_revision",
+                        3), "w2-bad-lexical", "actor", 400), "invalid_cwd");
+        assertRefusal(request("POST",
+                "/v1/agents/sessions/" + session + "/cwd",
+                Map.of("cwd_relative", "child",
+                        "expected_context_revision", 1),
+                "w2-stale-revision", "actor", 409), "context_revision_conflict");
+        String legacy = request("POST", "/v1/agents/sessions",
+                Map.of("agent_id", "qwen-code"), "w2-legacy", null, 202)
+                .path("id").asText();
+        assertRefusal(request("POST",
+                "/v1/agents/sessions/" + legacy + "/cwd",
+                Map.of("cwd_relative", ".", "expected_context_revision",
+                        1), "w2-legacy-cwd", "actor", 400),
+                "unsupported_feature");
+        request("POST", "/v1/agents/sessions/" + session + "/cwd",
+                Map.of("cwd_relative", "child",
+                        "expected_context_revision", 3),
+                "w2-stranger", "stranger", 404);
+
+        // A missing target fails the operation, never the Session.
+        JsonNode missing = request("POST",
+                "/v1/agents/sessions/" + session + "/cwd",
+                Map.of("cwd_relative", "missing",
+                        "expected_context_revision", 3),
+                "w2-missing-dir", "actor", 202);
+        String missingOperation = missing.path("id").asText();
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+            JsonNode polled = request("GET", "/v1/agents/sessions/" + session
+                    + "/operations/" + missingOperation, null, null,
+                    "actor", 200);
+            assertThat(polled.path("status").asText()).isEqualTo("failed");
+            assertThat(polled.path("failure_code").asText())
+                    .isEqualTo("workspace_unavailable");
+            assertThat(polled.path("result_context_revision")
+                    .isMissingNode()).isTrue();
+        });
+        read = request("GET", "/v1/agents/sessions/" + session, null, null,
+                "actor", 200);
+        assertThat(read.at("/workspace/cwd_relative").asText())
+                .isEqualTo(".");
+        assertThat(read.at("/workspace/context_revision").asLong())
+                .isEqualTo(3);
+
+        // The WebShell twin's failed projection must carry failureCode too —
+        // the contract condition requires it, and generated clients read it.
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            JsonNode polled = request("POST",
+                    "/api/agent/web-shell/v1/operations/query",
+                    Map.of("sessionId", session,
+                            "operationId", missingOperation),
+                    null, "actor", 200);
+            assertThat(polled.path("status").asText()).isEqualTo("failed");
+            assertThat(polled.path("failureCode").asText())
+                    .isEqualTo("workspace_unavailable");
+        });
+
+        // The Session is not wedged: the next admitted change completes.
+        String recovered = request("POST",
+                "/v1/agents/sessions/" + session + "/cwd",
+                Map.of("cwd_relative", "child2",
+                        "expected_context_revision", 3),
+                "w2-recovered", "actor", 202).path("id").asText();
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
+            JsonNode polled = request("GET", "/v1/agents/sessions/" + session
+                    + "/operations/" + recovered, null, null, "actor", 200);
+            assertThat(polled.path("status").asText()).isEqualTo("completed");
+            assertThat(polled.path("result_context_revision").asLong())
+                    .isEqualTo(4);
+        });
+
+        events = request("GET", "/v1/agents/sessions/" + session + "/events",
+                null, null, "actor", 200);
+        long changedEvents = 0;
+        for (JsonNode event : events.path("data")) {
+            if ("session.context.changed"
+                    .equals(event.path("type").asText())) {
+                changedEvents++;
+            }
+        }
+        // Each completed change emitted once; the refused one emitted none.
+        assertThat(changedEvents).isEqualTo(3);
+
+        // #13112 landed the missing half of the pivot: a bound later Turn
+        // installs the committed binding on its fresh Runtime Session, so
+        // the turn's file writes land only in the changed directory — a
+        // stale-runtime reuse would land them back in the original one.
+        // The sentinel makes the direction discriminating: identical bytes
+        // flowed through both Turns of the fixture model otherwise.
+        Files.writeString(roots.get(0).resolve("child")
+                .resolve("proof.txt"), "sentinel");
+        String laterTurn = request("POST",
+                "/v1/agents/sessions/" + session + "/events",
+                Map.of("type", "agent.session.input.message", "input",
+                        List.of(Map.of("type", "input_text", "text",
+                                "G0_FILES"))),
+                "w2-later-turn", "actor", 202).path("turn_id").asText();
+        awaitTurn(session, laterTurn, "child2", roots.get(0));
+        assertThat(Files.readString(roots.get(0).resolve("child2")
+                .resolve("proof.txt"))).isEqualTo("after");
+        assertThat(roots.get(0).resolve("proof.txt")).doesNotExist();
+        // The sentinel survives: a reused pre-change installation would
+        // have overwritten it with the fixture's "before"->"after".
+        assertThat(Files.readString(roots.get(0).resolve("child")
+                .resolve("proof.txt"))).isEqualTo("sentinel");
+    }
+
+    private static void assertRefusal(JsonNode refusal, String code) {
+        assertThat(refusal.path("error").path("code").asText())
+                .isEqualTo(code);
+    }
+
+    // Waits a Turn out to COMPLETED with the same diagnostics the sibling
+    // flows dump on failure, and pins the directory it was supposed to
+    // write in — the pivot evidence for the later Turn.
+    private void awaitTurn(String session, String turnId, String cwd,
+            Path workspaceRoot) throws Exception {
+        await().atMost(Duration.ofSeconds(35)).failFast(() -> {
+            if ("FAILED".equals(turnStatus(session, turnId))) {
+                throw new AssertionError(String.format("Turn failed. Turn:"
+                        + " %s; events: %s; model requests: %s; Harness: %s",
+                        jdbc.queryForList("SELECT status, error_code FROM"
+                                + " managed_agent_turn WHERE session_id = ?",
+                                session),
+                        jdbc.queryForList("SELECT event_type, data_json FROM"
+                                + " managed_agent_event WHERE session_id = ?",
+                                session), modelRequests.size(),
+                        Files.readString(
+                                temporary.resolve("harness.log"))));
+            }
+        }).untilAsserted(() -> {
+            assertThat(modelFailure.get()).isNull();
+            assertThat(turnStatus(session, turnId))
+                    .isEqualTo("COMPLETED");
+        });
+        assertThat(workspaceRoot.resolve(cwd).resolve("proof.txt"))
+                .exists();
+    }
+
+    private String turnStatus(String session, String turnId) {
+        if (turnId == null) {
+            return jdbc.queryForObject("SELECT status FROM"
+                    + " managed_agent_turn WHERE session_id = ?",
+                    String.class, session);
+        }
+        return jdbc.queryForObject("SELECT status FROM managed_agent_turn"
+                + " WHERE session_id = ? AND turn_id = ?", String.class,
+                session, turnId);
+    }
+
+    private List<Path> boot() throws Exception {
         Path cli = Path.of(System.getProperty("qwen.cli.entry", "../../../dist/cli.js")).toAbsolutePath();
         assertThat(cli).as("Build and bundle the CLI first").isRegularFile();
         node = System.getProperty("node.executable");
@@ -184,14 +440,25 @@ class HostedPublicWorkspaceIT {
         List<Path> roots = List.of(Files.createDirectory(temporary.resolve("workspace-a")),
                 Files.createDirectory(temporary.resolve("workspace-b")));
         for (Path root : roots) Files.createDirectory(root.resolve("child"));
-        port = freePort();
-        int harnessPort = freePort();
-        int brokerPort = freePort();
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
+        int harnessPort;
+        int brokerPort;
+        try (ServerSocket springSocket = new ServerSocket(0);
+                ServerSocket harnessSocket = new ServerSocket(0);
+                ServerSocket brokerSocket = new ServerSocket(0)) {
+            port = springSocket.getLocalPort();
+            harnessPort = harnessSocket.getLocalPort();
+            brokerPort = brokerSocket.getLocalPort();
+        }
         startSpring(cli, roots, harnessPort, brokerPort);
         startHarness(cli, harnessPort, brokerPort);
+        return roots;
+    }
+
+    private void runFiles() throws Exception {
+        List<Path> roots = boot();
 
         for (int index = 0; index < roots.size(); index++) {
             String workspace = "workspace-" + index;
@@ -331,17 +598,33 @@ class HostedPublicWorkspaceIT {
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename, "rename-" + workspace,
                     "actor", 200).path("metadata").path("title").asText()).isEqualTo("Renamed " + workspace);
 
-            // A creator whose can_create grant is revoked keeps read access but loses
-            // admission: submit, cancel and rename all answer workspace_unavailable,
-            // nothing new executes, and no PENDING command row is left behind.
-            jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE"
+            // A creator whose grant drops to READER, with the Workspace draining,
+            // keeps read access but loses admission of new work: submit and rename
+            // answer workspace_unavailable, and no PENDING command row is left
+            // behind. Cancelling only aborts work already running, so a Turn
+            // started before the revocation is still cancelled and stops without
+            // running another tool.
+            int beforeRevokedCancel = modelRequests.size();
+            String revokedTurn = request("POST", "/v1/agents/sessions/" + session + "/events", hold,
+                    "hold-revoked-" + workspace, "actor", 202).path("turn_id").asText();
+            await().atMost(Duration.ofSeconds(35)).until(() -> modelRequests.size() > beforeRevokedCancel);
+            jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+            jdbc.update("UPDATE managed_workspace_registry SET state = 'DRAINING'"
+                    + " WHERE tenant_id = ? AND workspace_id = ?", tenant, workspace);
+            // Harness still runs the Turn, but this Java owner has lost its ref.
+            ((Map<?, ?>) ReflectionTestUtils.getField(spring.getBean(HarnessConnector.class), "attachments")).clear();
+            Map<String, Object> revokedCancel = Map.of("type", "agent.session.cancel", "turn_id", revokedTurn);
+            request("POST", "/v1/agents/sessions/" + session + "/events", revokedCancel,
+                    "nocreate-cancel-" + workspace, "actor", 202);
+            await().atMost(Duration.ofSeconds(35)).untilAsserted(() -> assertThat(jdbc.queryForObject(
+                    "SELECT status FROM managed_agent_turn WHERE session_id = ? AND turn_id = ?",
+                    String.class, session, revokedTurn)).isEqualTo("CANCELLED"));
+            heldReply.countDown();
+            heldReply = new CountDownLatch(1);
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
                     "nocreate-later-" + workspace, "actor", 409).path("error").path("code").asText())
-                    .isEqualTo("workspace_unavailable");
-            assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", cancel,
-                    "nocreate-cancel-" + workspace, "actor", 409).path("error").path("code").asText())
                     .isEqualTo("workspace_unavailable");
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename,
                     "nocreate-rename-" + workspace, "actor", 409).path("error").path("code").asText())
@@ -350,14 +633,16 @@ class HostedPublicWorkspaceIT {
                     Long.class, session)).isEqualTo(executions * 2);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
                     + " WHERE tenant_id = ? AND command_status = 'PENDING'", Integer.class, tenant)).isZero();
-            jdbc.update("UPDATE managed_workspace_access SET can_create = TRUE"
+            jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+            jdbc.update("UPDATE managed_workspace_registry SET state = 'ACTIVE'"
+                    + " WHERE tenant_id = ? AND workspace_id = ?", tenant, workspace);
 
-            // With the running Turn settled, revoking the creator's read grant hides the
+            // With the running Turn settled, revoking the creator's grant hides the
             // bound Session from every later-Turn path: submit, cancel and rename all fall
             // through to the legacy gate and answer session_not_found.
-            jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE"
+            jdbc.update("DELETE FROM managed_workspace_access"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
@@ -369,11 +654,30 @@ class HostedPublicWorkspaceIT {
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename,
                     "revoked-rename-" + workspace, "actor", 404).path("error").path("code").asText())
                     .isEqualTo("session_not_found");
-            jdbc.update("UPDATE managed_workspace_access SET can_read = TRUE"
-                    + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
+            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                    + " VALUES (?, ?, ?, 'OPERATOR')",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+
+            String registeredStorage = jdbc.queryForObject("SELECT storage_id FROM managed_workspace_registry"
+                    + " WHERE tenant_id = ? AND workspace_id = ?", String.class, tenant, workspace);
+            jdbc.update("UPDATE managed_workspace_registry SET "
+                    + (index == 0 ? "workspace_generation = workspace_generation + 1"
+                            : "storage_id = 'replacement-storage'")
+                    + " WHERE tenant_id = ? AND workspace_id = ?", tenant, workspace);
+            assertThat(request("POST", "/api/agent/web-shell/v1/sessions/get", Map.of("sessionId", session),
+                    null, "actor", 200).path("capabilities").path("workspaceTurns").asBoolean()).isFalse();
+            assertUnavailable(request("POST", "/v1/agents/sessions/" + session + "/events", later,
+                    "rebound-later-" + workspace, "actor", 409));
+            assertUnavailable(request("PATCH", "/v1/agents/sessions/" + session, rename,
+                    "rebound-rename-" + workspace, "actor", 409));
+            request("POST", "/v1/agents/sessions/" + session + "/events", revokedCancel,
+                    "rebound-cancel-" + workspace, "actor", 202);
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
+                    + " WHERE tenant_id = ? AND command_status = 'PENDING'", Integer.class, tenant)).isZero();
+            jdbc.update("UPDATE managed_workspace_registry SET workspace_generation = 1, storage_id = ?"
+                    + " WHERE tenant_id = ? AND workspace_id = ?", registeredStorage, tenant, workspace);
         }
-        assertThat(modelRequests).hasSize(approvals ? 16 : 18);
+        assertThat(modelRequests).hasSize(approvals ? 16 : 20);
         assertThat(modelFailure.get()).isNull();
         Map<String, Object> denied = Map.of("agent_id", "qwen-code", "workspace", Map.of("workspace_id", "workspace-0"),
                 "input", List.of(Map.of("type", "input_text", "text", "G0_FILES")));
@@ -399,14 +703,14 @@ class HostedPublicWorkspaceIT {
                 .timeout(Duration.ofSeconds(10)).header("X-Qwen-Tenant-Id", "other-tenant")
                 .header("X-G0-Fixture-Actor", "actor").build(), HttpResponse.BodyHandlers.ofString());
         assertThat(crossTenant.statusCode()).isEqualTo(403);
-        jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE WHERE tenant_id = ?", tenant);
+        jdbc.update("UPDATE managed_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
         request("POST", "/v1/agents/sessions", denied, "read-only", "actor", 403);
-        jdbc.update("UPDATE managed_workspace_access SET can_create = TRUE WHERE tenant_id = ?", tenant);
+        jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR' WHERE tenant_id = ?", tenant);
         jdbc.update("UPDATE managed_workspace_registry SET config_ref = 'unsupported' WHERE tenant_id = ?", tenant);
         assertUnavailable(request("POST", "/v1/agents/sessions", denied, "unsupported", "actor", 409));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?",
                 Integer.class, tenant)).isEqualTo(2);
-        assertThat(modelRequests).hasSize(approvals ? 16 : 18);
+        assertThat(modelRequests).hasSize(approvals ? 16 : 20);
     }
 
     private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) {
@@ -473,13 +777,13 @@ class HostedPublicWorkspaceIT {
         jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
                         + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, ?, 1, ?, 'G0', ?, ?, 'ACTIVE')",
                 tenant, workspace, storage, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, ?, ?, TRUE, TRUE)", tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                        + " VALUES (?, ?, ?, 'OPERATOR')", tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
         // The reader grant exists in both runs so the later-Turn block can also run under
         // approval-mode=default without colliding with the access table's primary key.
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, ?, ?, TRUE, ?)", tenant, workspace, "reader".getBytes(StandardCharsets.UTF_8),
-                !approvals);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                        + " VALUES (?, ?, ?, ?)", tenant, workspace, "reader".getBytes(StandardCharsets.UTF_8),
+                !approvals ? "OPERATOR" : "READER");
     }
 
     private void answerActions(String session, boolean web) throws Exception {
@@ -548,9 +852,13 @@ class HostedPublicWorkspaceIT {
             if (!harness.isAlive()) {
                 throw new AssertionError("Hosted Harness exited: " + Files.readString(log));
             }
-            assertThat(http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort + "/capabilities"))
+            HttpResponse<String> response = http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort + "/capabilities"))
                     .timeout(Duration.ofSeconds(2)).header("Authorization", "Bearer " + TOKEN).build(),
-                    HttpResponse.BodyHandlers.discarding()).statusCode()).isEqualTo(200);
+                    HttpResponse.BodyHandlers.ofString());
+            assertThat(response.statusCode())
+                    .withFailMessage("Hosted Harness port %s returned %s: %s%n%s", harnessPort,
+                            response.statusCode(), response.body(), Files.readString(log))
+                    .isEqualTo(200);
         });
     }
 
@@ -632,10 +940,6 @@ class HostedPublicWorkspaceIT {
     // Every creation refusal here shares one declared code; the fixture, not the code, selects the branch.
     private static void assertUnavailable(JsonNode refusal) {
         assertThat(refusal.path("error").path("code").asText()).isEqualTo("workspace_unavailable");
-    }
-
-    private static int freePort() throws IOException {
-        try (ServerSocket socket = new ServerSocket(0)) { return socket.getLocalPort(); }
     }
 
     @AfterEach

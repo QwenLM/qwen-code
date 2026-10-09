@@ -12,6 +12,25 @@ const FOLLOWUP_SETTING_KEYS = [
 ] as const;
 
 describe('web-shell i18n catalog', () => {
+  it('keeps filter translations available and pluralizes record counts', () => {
+    const en = getTranslator('en');
+    expect(en('trajectory.filter.search')).toBe('Search loaded records…');
+    expect(getTranslator('zh-CN')('trajectory.filter.search')).toBe(
+      '搜索已加载记录…',
+    );
+    expect(en('trajectory.filter.count', { count: 1 })).toBe(
+      '1 matching record',
+    );
+    expect(en('trajectory.filter.count', { count: 2 })).toBe(
+      '2 matching records',
+    );
+    expect(en('trajectory.filter.truncated', { count: 1 })).toContain(
+      '(1 record)',
+    );
+    expect(en('trajectory.filter.truncated', { count: 2 })).toContain(
+      '(2 records)',
+    );
+  });
   it('keeps the follow-up suggestion setting copy overridden in EN', () => {
     const t = getTranslator('en');
     for (const key of FOLLOWUP_SETTING_KEYS) {

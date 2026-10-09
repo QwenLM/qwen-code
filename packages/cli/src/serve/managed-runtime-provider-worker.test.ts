@@ -20,6 +20,7 @@ import {
 } from 'vitest';
 import { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
+import { FileHistoryService } from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
 import {
@@ -52,6 +53,7 @@ import {
 import {
   MANAGED_RUNTIME_PROVIDER_PROTOCOL,
   MANAGED_RUNTIME_PROVIDER_ROUTE,
+  MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
   managedRuntimeProviderLimit,
   type ManagedRuntimeProviderSession,
 } from './managed-runtime-provider-protocol.js';
@@ -64,6 +66,11 @@ import {
   WORKSPACE_CONTEXT_CONFIG_REF,
   WORKSPACE_EXECUTION_PROFILE,
 } from './managed-workspace-activation.js';
+import { ManagedRuntimeProviderWorker } from './managed-runtime-provider-worker.js';
+import {
+  ManagedToolExecutor,
+  ManagedToolUnavailableError,
+} from './managed-runtime-tool-executor.js';
 
 const retirementWarning = vi.hoisted(() => vi.fn());
 
@@ -114,6 +121,296 @@ const HEADERS = {
   'x-qwen-managed-lease-id': 'lease-01',
   'x-qwen-managed-lease-epoch': '4',
 };
+
+describe('Managed Runtime provider admission seal', () => {
+  let workspace: string;
+  let executor: ManagedToolExecutor;
+  let provider: ManagedRuntimeProviderWorker;
+  const retirementId = '550e8400-e29b-41d4-a716-446655440000';
+
+  beforeEach(() => {
+    workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-provider-seal-'));
+    vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(
+      path.join(workspace, 'global'),
+    );
+    executor = new ManagedToolExecutor(async () => undefined);
+    provider = new ManagedRuntimeProviderWorker(executor, async () => ({
+      directory: workspace,
+      workspaceRoot: workspace,
+      preapproved: true,
+    }));
+    executor.attachProvider(provider);
+  });
+  afterEach(async () => {
+    await executor.close();
+    vi.restoreAllMocks();
+    fs.rmSync(workspace, { recursive: true, force: true });
+  });
+
+  it('refuses a pending acquire after the original context lookup resumes', async () => {
+    let enter!: () => void;
+    let resume!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    provider = new ManagedRuntimeProviderWorker(executor, async () => {
+      enter();
+      await gate;
+      return {
+        directory: workspace,
+        workspaceRoot: workspace,
+        preapproved: true,
+      };
+    });
+    executor.attachProvider(provider);
+    const manifest = vi.spyOn(ManagedToolRuntime.prototype, 'manifest');
+    const request = provider.control(SESSION, { kind: 'acquire' });
+    const refusal = request.catch((error: unknown) => error);
+    await entered;
+    executor.sealAdmission(retirementId);
+    expect(
+      executor.getDrainObservation(retirementId).pendingInvocations,
+    ).toBeGreaterThan(0);
+    resume();
+    expect(await refusal).toBeInstanceOf(ManagedToolUnavailableError);
+    expect(manifest).not.toHaveBeenCalled();
+    expect(getSessionModel(SESSION.runtimeSessionId)).toBeUndefined();
+    expect(executor.getDrainObservation(retirementId).blockers).toContain(
+      'provider_lifecycle_unqualified',
+    );
+    await expect(
+      provider.control(
+        { ...SESSION, runtimeSessionId: 'fresh-provider' },
+        { kind: 'acquire' },
+      ),
+    ).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+  });
+
+  it('preserves original manifest, status, cancellation, history and release without clearing blockers', async () => {
+    fs.writeFileSync(path.join(workspace, 'input.txt'), 'provider bytes');
+    await provider.control(SESSION, { kind: 'acquire' });
+    const manifest = (await provider.control(SESSION, {
+      kind: 'manifest',
+    })) as ReturnType<ManagedToolRuntime['manifest']>;
+    const identity: ManagedToolCallIdentity = {
+      sessionId: SESSION.runtimeSessionId,
+      promptId: 'turn-a',
+      callId: 'call-a',
+      capabilityDigest: manifest.capabilityDigest,
+      policyRevision: manifest.policyRevision,
+    };
+    await provider.control(SESSION, {
+      kind: 'bind-history',
+      binding: {
+        ownerSessionId: SESSION.harnessSessionId,
+        ownerRuntimeSessionId: SESSION.runtimeSessionId,
+        executionCwd: workspace,
+        snapshots: [],
+      },
+    });
+    await provider.control(SESSION, { kind: 'begin-turn', identity });
+    const prepared = (await provider.control(SESSION, {
+      kind: 'prepare',
+      identity,
+      toolName: 'read_file',
+      input: { file_path: path.join(workspace, 'input.txt') },
+    })) as ManagedToolPrepareResponse;
+    const original = reference(prepared);
+    await provider.control(SESSION, { kind: 'preflight', reference: original });
+    await provider.control(SESSION, { kind: 'execute', reference: original });
+    executor.sealAdmission(retirementId);
+    expect(await provider.control(SESSION, { kind: 'manifest' })).toEqual(
+      manifest,
+    );
+    expect(
+      await provider.control(SESSION, { kind: 'status', reference: original }),
+    ).toMatchObject({
+      state: 'settled',
+      result: { executionStatus: 'success' },
+    });
+    expect(
+      await provider.control(SESSION, { kind: 'cancel', reference: original }),
+    ).toMatchObject({ state: 'settled' });
+    expect(await provider.control(SESSION, { kind: 'history' })).toMatchObject({
+      ownerSessionId: SESSION.harnessSessionId,
+    });
+    await expect(
+      provider.control(SESSION, { kind: 'checkpoint', promptId: 'fresh-turn' }),
+    ).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+    await expect(
+      provider.control(SESSION, {
+        kind: 'prepare',
+        identity: { ...identity, callId: 'fresh-call' },
+        toolName: 'read_file',
+        input: { file_path: path.join(workspace, 'input.txt') },
+      }),
+    ).rejects.toBeInstanceOf(ManagedToolUnavailableError);
+    expect(await provider.control(SESSION, { kind: 'release' })).toBe(true);
+    expect(executor.getDrainObservation(retirementId).blockers).toContain(
+      'provider_lifecycle_unqualified',
+    );
+    await executor.close();
+    expect(executor.getDrainObservation(retirementId).workState).toBe(
+      'BLOCKED',
+    );
+  });
+
+  it.each([false, true])(
+    'settles execution queued behind a checkpoint when admission sealed=%s',
+    async (sealed) => {
+      fs.writeFileSync(path.join(workspace, 'input.txt'), 'provider bytes');
+      await provider.control(SESSION, { kind: 'acquire' });
+      const manifest = (await provider.control(SESSION, {
+        kind: 'manifest',
+      })) as ReturnType<ManagedToolRuntime['manifest']>;
+      const identity: ManagedToolCallIdentity = {
+        sessionId: SESSION.runtimeSessionId,
+        promptId: 'turn-a',
+        callId: 'call-a',
+        capabilityDigest: manifest.capabilityDigest,
+        policyRevision: manifest.policyRevision,
+      };
+      await provider.control(SESSION, {
+        kind: 'bind-history',
+        binding: {
+          ownerSessionId: SESSION.harnessSessionId,
+          ownerRuntimeSessionId: SESSION.runtimeSessionId,
+          executionCwd: workspace,
+          snapshots: [],
+        },
+      });
+      await provider.control(SESSION, { kind: 'begin-turn', identity });
+      let enterCheckpoint!: () => void;
+      let enterExecute!: () => void;
+      let resume!: () => void;
+      const checkpointEntered = new Promise<void>((resolve) => {
+        enterCheckpoint = resolve;
+      });
+      const executeEntered = new Promise<void>((resolve) => {
+        enterExecute = resolve;
+      });
+      const held = new Promise<void>((resolve) => {
+        resume = resolve;
+      });
+      const makeSnapshot = FileHistoryService.prototype.makeSnapshot;
+      vi.spyOn(FileHistoryService.prototype, 'makeSnapshot').mockImplementation(
+        async function (this: FileHistoryService, promptId) {
+          if (promptId === 'held-turn') {
+            enterCheckpoint();
+            await held;
+          }
+          return makeSnapshot.call(this, promptId);
+        },
+      );
+      const execute = ManagedToolRuntime.prototype.execute;
+      vi.spyOn(ManagedToolRuntime.prototype, 'execute').mockImplementation(
+        function (this: ManagedToolRuntime, ref) {
+          const pending = execute.call(this, ref);
+          enterExecute();
+          return pending;
+        },
+      );
+      const checkpoint = provider.control(SESSION, {
+        kind: 'checkpoint',
+        promptId: 'held-turn',
+      });
+      try {
+        await checkpointEntered;
+        const prepared = (await provider.control(SESSION, {
+          kind: 'prepare',
+          identity,
+          toolName: 'read_file',
+          input: { file_path: path.join(workspace, 'input.txt') },
+        })) as ManagedToolPrepareResponse;
+        const ref = reference(prepared);
+        await provider.control(SESSION, { kind: 'preflight', reference: ref });
+        const pending = provider.control(SESSION, {
+          kind: 'execute',
+          reference: ref,
+        });
+        const outcome = pending.catch((error: unknown) => error);
+        await executeEntered;
+        expect(
+          await provider.control(SESSION, { kind: 'status', reference: ref }),
+        ).toMatchObject({ state: 'executing' });
+        if (sealed) executor.sealAdmission(retirementId);
+        resume();
+        await checkpoint;
+        if (sealed)
+          expect(await outcome).toBeInstanceOf(ManagedToolUnavailableError);
+        else
+          expect(await outcome).toMatchObject({ executionStatus: 'success' });
+        expect(
+          await provider.control(SESSION, { kind: 'status', reference: ref }),
+        ).toMatchObject({
+          state: 'settled',
+          result: { executionStatus: sealed ? 'not_started' : 'success' },
+        });
+        expect(provider.getDrainInspection().pendingInvocations).toBe(0);
+        expect(provider.hasActiveSession(SESSION.runtimeSessionId)).toBe(false);
+        expect(
+          await provider.control(SESSION, { kind: 'cancel', reference: ref }),
+        ).toMatchObject({ state: 'settled' });
+        await expect(
+          provider.control(SESSION, { kind: 'release' }),
+        ).resolves.toBe(true);
+      } finally {
+        resume();
+        await checkpoint;
+      }
+    },
+  );
+
+  it('rechecks admission after the context lookup before beginning a new turn', async () => {
+    let enter!: () => void;
+    let resume!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    let parked = false;
+    provider = new ManagedRuntimeProviderWorker(executor, async () => {
+      if (parked) {
+        enter();
+        await gate;
+      }
+      return {
+        directory: workspace,
+        workspaceRoot: workspace,
+        preapproved: true,
+      };
+    });
+    executor.attachProvider(provider);
+    await provider.control(SESSION, { kind: 'acquire' });
+    const manifest = (await provider.control(SESSION, {
+      kind: 'manifest',
+    })) as ReturnType<ManagedToolRuntime['manifest']>;
+    const identity: ManagedToolCallIdentity = {
+      sessionId: SESSION.runtimeSessionId,
+      promptId: 'turn-a',
+      callId: 'call-a',
+      capabilityDigest: manifest.capabilityDigest,
+      policyRevision: manifest.policyRevision,
+    };
+    const begin = vi.spyOn(ManagedToolRuntime.prototype, 'beginTurn');
+    parked = true;
+    const request = provider.control(SESSION, { kind: 'begin-turn', identity });
+    const refusal = request.catch((error: unknown) => error);
+    await entered;
+    executor.sealAdmission(retirementId);
+    resume();
+    expect(await refusal).toBeInstanceOf(ManagedToolUnavailableError);
+    expect(begin).not.toHaveBeenCalled();
+    expect(executor.getDrainObservation(retirementId).pendingInvocations).toBe(
+      0,
+    );
+  });
+});
 
 function reference(
   prepared: ManagedToolPrepareResponse,
@@ -383,6 +680,66 @@ describe('Managed Runtime provider worker', () => {
     expect((await post({ kind: 'manifest' })).status).toBe(409);
   });
 
+  it('refuses a PreToolUse replacement over HTTP without running either input', async () => {
+    const original = path.join(workspace, 'original.txt');
+    const replaced = path.join(workspace, 'replaced.txt');
+    // A test MessageBus stands in for a deployed command hook.
+    const request = vi.fn(async (hookRequest: { eventName: string }) => ({
+      success: true,
+      output:
+        hookRequest.eventName === 'PreToolUse'
+          ? {
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse',
+                updatedInput: { file_path: replaced, content: 'B' },
+              },
+            }
+          : {},
+    }));
+    vi.spyOn(Config.prototype, 'getDisableAllHooks').mockReturnValue(false);
+    vi.spyOn(Config.prototype, 'getMessageBus').mockReturnValue({
+      request,
+    } as unknown as ReturnType<Config['getMessageBus']>);
+    await begin();
+    const ref = reference(
+      await prepare('write_file', { file_path: original, content: 'A' }),
+    );
+    await control({ kind: 'confirmation', reference: ref });
+    await control({
+      kind: 'confirm',
+      reference: ref,
+      outcome: ToolConfirmationOutcome.ProceedOnce,
+    });
+
+    const refused = await control({ kind: 'preflight', reference: ref });
+    expect(refused).toEqual({
+      shouldProceed: false,
+      blockType: 'denied',
+      blockReason: expect.stringContaining('not supported'),
+    });
+    expect(await control({ kind: 'preflight', reference: ref })).toEqual(
+      refused,
+    );
+    expect(
+      (
+        await post({
+          kind: 'confirm',
+          reference: ref,
+          outcome: ToolConfirmationOutcome.ProceedOnce,
+          phase: 'preflight',
+        })
+      ).status,
+    ).toBe(409);
+    expect((await post({ kind: 'execute', reference: ref })).status).toBe(409);
+    expect(
+      request.mock.calls.filter(
+        ([hookRequest]) => hookRequest.eventName === 'PreToolUse',
+      ),
+    ).toHaveLength(1);
+    expect(fs.existsSync(original)).toBe(false);
+    expect(fs.existsSync(replaced)).toBe(false);
+  });
+
   it('fences Session identity, changed prepared input and legacy raw execution', async () => {
     await begin();
     expect(await control({ kind: 'acquire' })).toBe(true);
@@ -591,6 +948,95 @@ describe('Managed Runtime provider worker', () => {
     expect(backgroundShell.status).toBe(409);
     expect(await backgroundShell.json()).toMatchObject({
       code: 'managed_runtime_provider_operation_failed',
+    });
+  });
+
+  it.each([false, true])(
+    'reads Workspace context without a provider Session, confined to the Workspace (linked root: %s)',
+    async (linkedRoot) => {
+      if (linkedRoot) {
+        await worker.close();
+        const linkedWorkspace = path.join(storage, 'workspace-link');
+        fs.symlinkSync(workspace, linkedWorkspace, 'dir');
+        worker = await startManagedRuntimeAttestationWorker({
+          ...BOOT,
+          workspaceCwd: linkedWorkspace,
+        });
+      }
+      fs.writeFileSync(path.join(workspace, 'QWEN.md'), 'project rules');
+      const outside = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-provider-outside-'),
+      );
+      try {
+        // A planted symlink must not promote a host file into the system
+        // instruction.
+        fs.writeFileSync(path.join(outside, 'secret.txt'), 'host-secret');
+        fs.symlinkSync(
+          path.join(outside, 'secret.txt'),
+          path.join(workspace, 'AGENTS.md'),
+        );
+        expect(await control({ kind: 'workspace-context' })).toEqual({
+          files: [{ name: 'QWEN.md', text: 'project rules' }],
+        });
+
+        fs.rmSync(path.join(workspace, 'AGENTS.md'));
+        fs.writeFileSync(
+          path.join(workspace, 'AGENTS.md'),
+          'x'.repeat(MANAGED_WORKSPACE_CONTEXT_FILE_CHARS + 10),
+        );
+        const { files } = await control<{
+          files: Array<{ name: string; text: string }>;
+        }>({ kind: 'workspace-context' });
+        expect(files.map((file) => file.name)).toEqual([
+          'QWEN.md',
+          'AGENTS.md',
+        ]);
+        expect(files[1].text).toHaveLength(
+          MANAGED_WORKSPACE_CONTEXT_FILE_CHARS,
+        );
+        expect(files[1].text).toContain('[Truncated');
+
+        // An astral character at the cut must not leave a lone surrogate:
+        // one of the two offsets splits a pair whatever the note's length.
+        for (const prefix of ['', 'x']) {
+          fs.writeFileSync(
+            path.join(workspace, 'AGENTS.md'),
+            prefix + '😀'.repeat(MANAGED_WORKSPACE_CONTEXT_FILE_CHARS),
+          );
+          const astral = await control<{
+            files: Array<{ name: string; text: string }>;
+          }>({ kind: 'workspace-context' });
+          expect(astral.files[1].text).not.toMatch(
+            /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
+          );
+          expect(astral.files[1].text).toContain('[Truncated');
+        }
+
+        // One file under both names is injected once.
+        fs.rmSync(path.join(workspace, 'AGENTS.md'));
+        fs.symlinkSync('QWEN.md', path.join(workspace, 'AGENTS.md'));
+        expect(await control({ kind: 'workspace-context' })).toEqual({
+          files: [{ name: 'QWEN.md', text: 'project rules' }],
+        });
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+      // The read claimed no provider Session, so the legacy protocol is intact.
+      await acquire();
+    },
+  );
+
+  it('reads Workspace context for an already-claimed provider Session', async () => {
+    // The production ordering: the Harness reads from inside acquire(), after
+    // the acquire control claimed this Session. Refusing that state answered
+    // 409 managed_runtime_identity_conflict, which the best-effort catch
+    // swallowed — every Hosted turn ran without instructions and looked
+    // healthy.
+    fs.writeFileSync(path.join(workspace, 'QWEN.md'), 'project rules');
+    await acquire();
+
+    expect(await control({ kind: 'workspace-context' })).toEqual({
+      files: [{ name: 'QWEN.md', text: 'project rules' }],
     });
   });
 

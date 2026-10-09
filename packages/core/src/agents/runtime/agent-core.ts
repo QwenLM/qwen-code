@@ -118,8 +118,8 @@ import type {
 } from './agent-events.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
-import { matchesToolPattern } from '../../permissions/rule-parser.js';
 import { canonicalToolName, ToolNames } from '../../tools/tool-names.js';
+import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { getToolExposure, ToolMode } from '../../tools/code-mode.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
@@ -144,6 +144,7 @@ import {
   isLeaderOnlyToolUnavailableInSubagent,
   isPlanLifecycleToolUnavailableInSubagent,
   isToolExcludedForCurrentContext,
+  matchesAgentToolBlocklist,
   toolConfigAllowsSkill,
 } from './subagent-plan-tool-policy.js';
 
@@ -383,8 +384,10 @@ Important Rules:
  - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
   }
 
-  // Context files (QWEN.md + output-language.md) keep the subagent aligned
-  // with project conventions; the volatile auto-memory section stays last.
+  // Context files and memory policy keep the subagent aligned. The policy
+  // promises the changing legacy catalog at the request tail: LlmChat appends
+  // it for in-process runs, and peer-process executors (codex/ACP) must
+  // append `getAutoMemoryContext()` themselves.
   return assembleSystemPrompt({
     base: finalPrompt,
     contextFiles: runtimeContext.getUserMemory(),
@@ -692,11 +695,6 @@ export class AgentCore {
       toolRegistry.isPermissionDeferred?.(name) === true &&
       toolRegistry.isDeferredAndHidden?.(name) === true;
 
-    const isDisallowed = (name: string): boolean =>
-      this.toolConfig?.disallowedTools?.some((pattern) =>
-        matchesToolPattern(pattern, name),
-      ) === true;
-
     if (this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly) {
       const stringTools =
         this.toolConfig?.tools.filter(
@@ -724,7 +722,7 @@ export class AgentCore {
               (inheritsCodeModeBindings &&
                 getToolExposure(name) === 'code-mode-callable')) &&
             !isExcluded(name) &&
-            !isDisallowed(name) &&
+            !this.isToolDisallowedByAgentConfig(name, toolRegistry) &&
             this.isToolExecutionAllowed(name),
         );
       if (
@@ -750,11 +748,14 @@ export class AgentCore {
           (tool) =>
             !isExcluded(tool.name) &&
             !isHiddenByEagerAllowList(tool.name) &&
-            (!tool.name || !isDisallowed(tool.name)),
+            (!tool.name ||
+              !this.isToolDisallowedByAgentConfig(tool.name, toolRegistry)),
         ),
       );
       return declarations.filter(
-        (declaration) => !declaration.name || !isDisallowed(declaration.name),
+        (declaration) =>
+          !declaration.name ||
+          !this.isToolDisallowedByAgentConfig(declaration.name, toolRegistry),
       );
     }
 
@@ -838,13 +839,10 @@ export class AgentCore {
 
     // Apply disallowedTools blocklist (supports MCP server-level patterns).
     if (this.toolConfig?.disallowedTools?.length) {
-      const disallowed = this.toolConfig.disallowedTools;
-      return toolsList.filter((t) => {
-        if (!t.name) return true;
-        return !disallowed.some((pattern) =>
-          matchesToolPattern(pattern, t.name!),
-        );
-      });
+      return toolsList.filter(
+        (t) =>
+          !t.name || !this.isToolDisallowedByAgentConfig(t.name, toolRegistry),
+      );
     }
 
     return toolsList;
@@ -1842,12 +1840,21 @@ export class AgentCore {
    * must be enforced here too, symmetrically to the execution allowlist
    * re-check (round-6 review, R6-8).
    */
-  private isToolDisallowedByAgentConfig(toolName: string): boolean {
+  private isToolDisallowedByAgentConfig(
+    toolName: string,
+    toolRegistry?: ToolRegistry,
+  ): boolean {
     const disallowed = this.toolConfig?.disallowedTools;
     if (!disallowed?.length) {
       return false;
     }
-    return disallowed.some((pattern) => matchesToolPattern(pattern, toolName));
+    const registry = toolRegistry ?? this.runtimeContext.getToolRegistry();
+    return matchesAgentToolBlocklist(
+      disallowed,
+      toolName,
+      registry.getPermissionAliases?.(toolName),
+      registry.getMcpToolIdentity?.(toolName),
+    );
   }
 
   /**
