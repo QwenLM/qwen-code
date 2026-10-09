@@ -17194,6 +17194,17 @@ describe('Hosted Harness Runtime turn takeover', () => {
     await vi.waitFor(() => expect(dropSpy).toHaveBeenCalled(), {
       timeout: 10_000,
     });
+    // The drop was invoked, but the drive's busy flag clears only in its
+    // finally — wait for that too, or the next /prompt can meet a 409.
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: 10_000 },
+    );
     // The new Turn's write needs an execution identity of its own — the
     // parked Turn's prepare mock still answers its own id.
     vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockResolvedValue(
