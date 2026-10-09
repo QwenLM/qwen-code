@@ -2271,8 +2271,9 @@ describe('ShellExecutionService child_process fallback', () => {
       Buffer.from([0x1b, 0x5b, 0x33, 0x31, 0x6d]), // \x1b[31m
       Buffer.alloc(2045, 'A'),
     ]);
-    mockChildProcess.stdout.pause = vi.fn();
-    mockChildProcess.stdout.resume = vi.fn();
+    const stdout = mockChildProcess.stdout!;
+    stdout.pause = vi.fn();
+    stdout.resume = vi.fn();
     const handlePromise = ShellExecutionService.execute(
       'echo',
       process.cwd(),
@@ -2290,11 +2291,12 @@ describe('ShellExecutionService child_process fallback', () => {
       },
     );
     await new Promise(process.nextTick);
-    mockChildProcess.stdout?.emit('data', payload);
+    stdout.emit('data', payload);
     mockChildProcess.emit('exit', 0, null);
     mockChildProcess.emit('close', 0, null);
     const result = await (await handlePromise).result;
     expect(result.output).not.toMatch(/^[0-9;]*m/);
+    // Use the exact string from shellExecutionService.ts
     expect(result.output).toContain(
       '[Middle output omitted from this preview; complete bytes are retained in the managed capture.]',
     );
@@ -2309,8 +2311,9 @@ describe('ShellExecutionService child_process fallback', () => {
       Buffer.from([0xe9, 0x94, 0x99]),
       Buffer.alloc(2046, 'A'),
     ]);
-    mockChildProcess.stdout.pause = vi.fn();
-    mockChildProcess.stdout.resume = vi.fn();
+    const stdout = mockChildProcess.stdout!;
+    stdout.pause = vi.fn();
+    stdout.resume = vi.fn();
     const handlePromise = ShellExecutionService.execute(
       'echo',
       process.cwd(),
@@ -2328,7 +2331,7 @@ describe('ShellExecutionService child_process fallback', () => {
       },
     );
     await new Promise(process.nextTick);
-    mockChildProcess.stdout?.emit('data', payload);
+    stdout.emit('data', payload);
     mockChildProcess.emit('exit', 0, null);
     mockChildProcess.emit('close', 0, null);
     const result = await (await handlePromise).result;
@@ -2344,9 +2347,9 @@ describe('ShellExecutionService child_process fallback', () => {
       Buffer.from([0xb0, 0xa1]),
       Buffer.alloc(2047, 'A'),
     ]);
-    mockChildProcess.stdout.pause = vi.fn();
-    mockChildProcess.stdout.resume = vi.fn();
-
+    const stdout = mockChildProcess.stdout!;
+    stdout.pause = vi.fn();
+    stdout.resume = vi.fn();
     // Mock the encoding to be latin1 so it doesn't try to decode as UTF-8
     const systemEncoding = await import('../utils/systemEncoding.js');
     const spy = vi
@@ -2370,7 +2373,7 @@ describe('ShellExecutionService child_process fallback', () => {
       },
     );
     await new Promise(process.nextTick);
-    mockChildProcess.stdout?.emit('data', payload);
+    stdout.emit('data', payload);
     mockChildProcess.emit('exit', 0, null);
     mockChildProcess.emit('close', 0, null);
     const result = await (await handlePromise).result;
