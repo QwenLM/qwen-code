@@ -31,7 +31,6 @@ import {
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
   HostedWorkspaceBroker,
-  HostedWorkspaceBrokerRejection,
   type HostedWorkspaceBrokerOptions,
 } from './hosted-workspace-broker.js';
 
@@ -339,27 +338,6 @@ export async function stopParkedRuntimeExecutions(input: {
     authorization.checkpoint.tools?.items ?? [],
     input.brokerOptions,
   );
-  // A replacement Broker (the Harness and its Broker died together)
-  // answers status, cancel and release only for a Runtime Session it has
-  // adopted: 404 runtime_session_not_found for a status query against a
-  // persisted READY owner it never knew, 503 runtime_reconciliation_
-  // required for the release. Adopt first, as the passive takeover does —
-  // it dispatches nothing, and re-acquiring a READY session under this
-  // same identity is idempotent server-side. A refusal to adopt under
-  // this identity is the durable proof the session is already gone —
-  // already-released answers true, so there is nothing more to stop here.
-  try {
-    await broker.acquire();
-  } catch (cause) {
-    if (
-      cause instanceof HostedWorkspaceBrokerRejection &&
-      cause.status === 409 &&
-      cause.code === 'runtime_session_not_acquirable'
-    ) {
-      return broker;
-    }
-    throw cause;
-  }
   for (const item of authorization.checkpoint.tools?.items ?? []) {
     if (item.state !== 'in_progress' || item.outcomeSource !== 'runtime')
       continue;

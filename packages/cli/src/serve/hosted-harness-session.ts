@@ -539,6 +539,33 @@ export async function settleCrashedWakeTurnAftermath(params: {
         let broker: HostedWorkspaceBroker | undefined;
         if (runtimeItems.some((item) => item.state === 'in_progress')) {
           try {
+            // A parked crash on a replacement Broker owns nothing until
+            // adopted: status queries answer 404
+            // runtime_session_not_found, a release 503
+            // runtime_reconciliation_required. Adopt first, as the
+            // passive takeover does — re-acquiring a READY session under
+            // this same identity is idempotent server-side, and a 409
+            // runtime_session_not_acquirable refusal is exactly the
+            // already-released answer (so nothing remains to stop).
+            const parkedBroker = await originalRuntimeBroker(
+              session.managed,
+              turnId,
+              items,
+              brokerOptions,
+            );
+            try {
+              await parkedBroker.acquire();
+            } catch (cause) {
+              if (
+                !(
+                  cause instanceof HostedWorkspaceBrokerRejection &&
+                  cause.status === 409 &&
+                  cause.code === 'runtime_session_not_acquirable'
+                )
+              ) {
+                throw cause;
+              }
+            }
             broker = await stopParkedRuntimeExecutions({
               session: session.managed,
               promptId: turnId,
