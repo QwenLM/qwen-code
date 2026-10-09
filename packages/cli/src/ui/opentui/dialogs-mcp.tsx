@@ -30,6 +30,7 @@ import {
   dialogContentWidth,
 } from './dialogs-shared.js';
 import {
+  chromeRows,
   clipToRows,
   findNextEnabledIndex,
   followScrollOffset,
@@ -437,29 +438,105 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
     setCursor: setResourceCursor,
   } = useBatchSafeCursor();
 
-  // The frame (4), the two-row step header, the body's margin row (1) and
-  // the footer hint (2) come off the region first; all four cursor-driven
-  // bodies — the server list, the detail's action column, and the tool and
-  // resource lists — window from what is left instead of mapping every row
-  // into the clipped frame, where the cursor kept walking rows nothing
-  // painted and Enter opened them. A zero-row window refuses the arrows and
-  // Enter the way the shared list hook does.
   const regionHeight = clampDialogHeight(props.availableTerminalHeight);
-  const listWindowRows =
-    regionHeight === undefined
-      ? MCP_LIST_MAX_ROWS
-      : Math.max(0, Math.min(MCP_LIST_MAX_ROWS, regionHeight - 9));
-  // ink windows only the tool and resource lists (VISIBLE_*_COUNT); the
-  // server list and the detail column are unwindowed there, so they pay out
-  // of the full region budget instead of the ten-row cap — a tall region
-  // paints every row it can pay for.
-  const bodyWindowRows =
-    regionHeight === undefined ? undefined : Math.max(0, regionHeight - 9);
   const { width } = useTerminalDimensions();
   const contentWidth = dialogContentWidth(width);
 
   const currentStep = (navigationStack[navigationStack.length - 1] ??
     MCP_MANAGEMENT_STEPS.SERVER_LIST) as McpManagementStep;
+
+  const serverTools = selectedServer
+    ? (getServerTools?.(selectedServer) ?? [])
+    : [];
+  const serverResources = selectedServer
+    ? (getServerResources?.(selectedServer) ?? [])
+    : [];
+
+  // The step header's runs, shared by the charge below and the paint: a
+  // config-owned server name or resource URI wraps on a narrow terminal, and
+  // a flat two-row charge under-pays it, growing the unshrinkable frame past
+  // the region. The tool detail's annotation chips share the name's row, so
+  // the name clips to what the chips leave and the row stays one.
+  const toolDetailChips = selectedTool?.annotations
+    ? [
+        selectedTool.annotations.destructiveHint
+          ? ` [${t('destructive')}]`
+          : '',
+        selectedTool.annotations.idempotentHint ? ` [${t('idempotent')}]` : '',
+        selectedTool.annotations.readOnlyHint ? ` [${t('read-only')}]` : '',
+        selectedTool.annotations.openWorldHint ? ` [${t('open-world')}]` : '',
+      ].join('')
+    : '';
+  const toolDetailName = clipToWidth(
+    selectedTool?.name || t('Tool Detail'),
+    Math.max(1, contentWidth - getCachedStringWidth(toolDetailChips)),
+  );
+  const serverDetailTitle = selectedServer?.name || t('Server Detail');
+  const toolListTitle = t('Tools for {{serverName}}', {
+    serverName: selectedServer?.name || 'Server',
+  });
+  const toolListCount = `(${serverTools.length} ${
+    serverTools.length === 1 ? t('tool') : t('tools')
+  })`;
+  const resourceListTitle = t('Resources for {{serverName}}', {
+    serverName: selectedServer?.name || 'Server',
+  });
+  const resourceListCount = `(${serverResources.length} ${
+    serverResources.length === 1 ? t('resource') : t('resources')
+  })`;
+  const resourceDetailTitle = selectedResource?.uri || t('Resource Detail');
+  const serverSubline = t('Server');
+  const authenticateTitle = t('OAuth Authentication');
+  const serverListTitle = t('Manage MCP servers');
+  const serverListCount = `${servers.length} ${
+    servers.length === 1 ? t('server') : t('servers')
+  }`;
+  const headerRuns: string[] = (() => {
+    switch (currentStep) {
+      case MCP_MANAGEMENT_STEPS.SERVER_DETAIL:
+        return [serverDetailTitle];
+      case MCP_MANAGEMENT_STEPS.TOOL_LIST:
+        return [toolListTitle, toolListCount];
+      case MCP_MANAGEMENT_STEPS.TOOL_DETAIL:
+        return [toolDetailName + toolDetailChips, serverSubline];
+      case MCP_MANAGEMENT_STEPS.RESOURCE_LIST:
+        return [resourceListTitle, resourceListCount];
+      case MCP_MANAGEMENT_STEPS.RESOURCE_DETAIL:
+        return [resourceDetailTitle, serverSubline];
+      case MCP_MANAGEMENT_STEPS.AUTHENTICATE:
+        return [authenticateTitle];
+      default:
+        return [serverListTitle, serverListCount];
+    }
+  })();
+  const footerText = mcpStepFooter(currentStep, servers.length);
+  // The frame (4), the body's margin row (1) and the footer hint's margin
+  // row (1) are the rows no run can wrap into; the header and footer runs
+  // are charged the rows they wrap into at the content width. All four
+  // cursor-driven bodies — the server list, the detail's action column, and
+  // the tool and resource lists — window from what is left instead of
+  // mapping every row into the clipped frame, where the cursor kept walking
+  // rows nothing painted and Enter opened them. A zero-row window refuses
+  // the arrows and Enter the way the shared list hook does.
+  const stepChromeRows = chromeRows({
+    fixed: 6,
+    runs: [
+      ...headerRuns.map((text) => ({ text, width: contentWidth })),
+      { text: footerText, width: contentWidth },
+    ],
+  });
+  const listWindowRows =
+    regionHeight === undefined
+      ? MCP_LIST_MAX_ROWS
+      : Math.max(0, Math.min(MCP_LIST_MAX_ROWS, regionHeight - stepChromeRows));
+  // ink windows only the tool and resource lists (VISIBLE_*_COUNT); the
+  // server list and the detail column are unwindowed there, so they pay out
+  // of the full region budget instead of the ten-row cap — a tall region
+  // paints every row it can pay for.
+  const bodyWindowRows =
+    regionHeight === undefined
+      ? undefined
+      : Math.max(0, regionHeight - stepChromeRows);
 
   const navigateToStep = (step: string) =>
     setNavigationStack((prev) => [...prev, step]);
@@ -471,12 +548,6 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
   // raw prop order: groupMcpServersBySource reorders by source (user first),
   // so indexing the raw prop would open a different server than highlighted.
   const flatServers = groupedServers.flatMap((group) => group.servers);
-  const serverTools = selectedServer
-    ? (getServerTools?.(selectedServer) ?? [])
-    : [];
-  const serverResources = selectedServer
-    ? (getServerResources?.(selectedServer) ?? [])
-    : [];
   const detailActions = selectedServer
     ? buildMcpServerActions(selectedServer, {
         resourcesSupported: !!getServerResources,
@@ -787,21 +858,16 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
       case MCP_MANAGEMENT_STEPS.SERVER_DETAIL:
         return (
           <text fg={C.accent} attributes={1}>
-            {selectedServer?.name || t('Server Detail')}
+            {serverDetailTitle}
           </text>
         );
       case MCP_MANAGEMENT_STEPS.TOOL_LIST:
         return (
           <box flexDirection="column">
             <text fg={C.accent} attributes={1}>
-              {t('Tools for {{serverName}}', {
-                serverName: selectedServer?.name || 'Server',
-              })}
+              {toolListTitle}
             </text>
-            <text fg={C.dim}>
-              ({serverTools.length}{' '}
-              {serverTools.length === 1 ? t('tool') : t('tools')})
-            </text>
+            <text fg={C.dim}>{toolListCount}</text>
           </box>
         );
       case MCP_MANAGEMENT_STEPS.TOOL_DETAIL:
@@ -809,7 +875,7 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
           <box flexDirection="column">
             <box flexDirection="row">
               <text fg={C.accent} attributes={1}>
-                {selectedTool?.name || t('Tool Detail')}
+                {toolDetailName}
               </text>
               {selectedTool?.annotations?.destructiveHint && (
                 <text fg={C.red}> [{t('destructive')}]</text>
@@ -824,48 +890,40 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
                 <text fg={C.text}> [{t('open-world')}]</text>
               )}
             </box>
-            <text fg={C.dim}>{t('Server')}</text>
+            <text fg={C.dim}>{serverSubline}</text>
           </box>
         );
       case MCP_MANAGEMENT_STEPS.RESOURCE_LIST:
         return (
           <box flexDirection="column">
             <text fg={C.accent} attributes={1}>
-              {t('Resources for {{serverName}}', {
-                serverName: selectedServer?.name || 'Server',
-              })}
+              {resourceListTitle}
             </text>
-            <text fg={C.dim}>
-              ({serverResources.length}{' '}
-              {serverResources.length === 1 ? t('resource') : t('resources')})
-            </text>
+            <text fg={C.dim}>{resourceListCount}</text>
           </box>
         );
       case MCP_MANAGEMENT_STEPS.RESOURCE_DETAIL:
         return (
           <box flexDirection="column">
             <text fg={C.accent} attributes={1}>
-              {selectedResource?.uri || t('Resource Detail')}
+              {resourceDetailTitle}
             </text>
-            <text fg={C.dim}>{t('Server')}</text>
+            <text fg={C.dim}>{serverSubline}</text>
           </box>
         );
       case MCP_MANAGEMENT_STEPS.AUTHENTICATE:
         return (
           <text fg={C.accent} attributes={1}>
-            {t('OAuth Authentication')}
+            {authenticateTitle}
           </text>
         );
       default:
         return (
           <box flexDirection="column">
             <text fg={C.accent} attributes={1}>
-              {t('Manage MCP servers')}
+              {serverListTitle}
             </text>
-            <text fg={C.dim}>
-              {servers.length}{' '}
-              {servers.length === 1 ? t('server') : t('servers')}
-            </text>
+            <text fg={C.dim}>{serverListCount}</text>
           </box>
         );
     }
@@ -1276,7 +1334,7 @@ export function OpenTuiMcpDialog(props: OpenTuiMcpDialogProps) {
           <text fg={C.dim}>{t('Loading...')}</text>
         )}
       </box>
-      <FooterHint text={mcpStepFooter(currentStep, servers.length)} />
+      <FooterHint text={footerText} />
     </DialogFrame>
   );
 }

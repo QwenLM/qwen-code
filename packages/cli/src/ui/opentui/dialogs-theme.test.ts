@@ -156,7 +156,10 @@ describe('computeThemePreviewLayout', () => {
       const region = clampDialogHeight(height)!;
       const window = regionListWindow(
         region,
-        8,
+        // The frame (4), the title row and its margin (2) and the footer
+        // hint (2) — both runs fit their one row at any width this pure
+        // arithmetic walk uses.
+        { fixed: 8 },
         ITEM_COUNT,
         THEME_DIALOG_MAX_ITEMS_TO_SHOW,
       );

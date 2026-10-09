@@ -12,7 +12,7 @@
 
 // @vitest-environment jsdom
 
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import { render } from '@testing-library/react';
 import { execFile } from 'node:child_process';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -22,12 +22,14 @@ vi.mock('node:child_process', async (importOriginal) => {
   const execFile = vi.fn();
   return { ...actual, default: { ...actual, execFile }, execFile };
 });
+const miscState = vi.hoisted(() => ({ width: 100 }));
 vi.mock('@opentui/react', () => ({
   useRenderer: () => ({
     addInputHandler: vi.fn(),
     removeInputHandler: vi.fn(),
   }),
   useKeyboard: vi.fn(),
+  useTerminalDimensions: () => ({ width: miscState.width, height: 40 }),
 }));
 const buildJsxRuntime = vi.hoisted(() => async () => {
   const React = await import('react');
@@ -90,6 +92,10 @@ import {
 } from './dialogs-misc.js';
 import { C } from './theme.js';
 import type { LoadedSettings } from '../../config/settings.js';
+
+beforeEach(() => {
+  miscState.width = 100;
+});
 
 describe('Shell (ink dialog chrome)', () => {
   it('frames with a rounded border.default outline and a bold primary title', () => {
@@ -224,6 +230,27 @@ describe('sized bodies window from the region budget', () => {
       />,
     );
     expect(scrollboxOf(container)['height']).toBe(14);
+  });
+
+  it('charges the Shell title the rows it wraps into at a narrow width', () => {
+    // An eleven-column terminal gives the shell a three-column content
+    // width, so even the four-column 'Diff' title wraps to two rows: the
+    // measured chrome is seven, not the flat six, and the scrollbox windows
+    // one row shorter instead of the frame growing past the region.
+    miscState.width = 11;
+    const config = {
+      getShellExecutionSandbox: () => undefined,
+    } as unknown as Config;
+    const { container } = render(
+      <OpenTuiDiffDialog
+        config={config}
+        settings={settingsWith({})}
+        onClose={() => {}}
+        availableTerminalHeight={17}
+      />,
+    );
+    expect(scrollboxOf(container)).toMatchObject({ height: 10, marginTop: 1 });
+    miscState.width = 100;
   });
 
   it('windows the /subagents scrollbox the same way', () => {

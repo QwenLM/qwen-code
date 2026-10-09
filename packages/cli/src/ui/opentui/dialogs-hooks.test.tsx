@@ -21,6 +21,7 @@ import { render, screen } from '@testing-library/react';
 const mocks = vi.hoisted(() => {
   const state = {
     keyboardHandlers: [] as Array<(key: unknown) => void>,
+    width: 100,
   };
   async function buildJsxRuntime() {
     const React = await import('react');
@@ -73,7 +74,7 @@ vi.mock('@opentui/react', async () => {
       addInputHandler: () => {},
       removeInputHandler: () => {},
     }),
-    useTerminalDimensions: () => ({ width: 100, height: 40 }),
+    useTerminalDimensions: () => ({ width: mocks.state.width, height: 40 }),
   };
 });
 
@@ -374,6 +375,26 @@ function configWith(options: {
 describe('OpenTuiHooksDialog', () => {
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
+    mocks.state.width = 100;
+  });
+
+  it('charges the footer hint the rows it wraps into at a narrow width', () => {
+    // At a 38-column terminal the 31-column events footer wraps to two rows:
+    // the measured chrome pays it, so a fifteen-row region leaves the events
+    // list one row, where the flat count left two — and the unshrinkable
+    // frame grew a row past the region.
+    mocks.state.width = 38;
+    render(
+      <OpenTuiHooksDialog
+        config={configWith({})}
+        settings={settingsWith()}
+        onClose={vi.fn()}
+        availableTerminalHeight={15}
+      />,
+    );
+
+    expect(screen.getByText(DISPLAY_HOOK_EVENTS[0]!)).toBeTruthy();
+    expect(screen.queryByText(DISPLAY_HOOK_EVENTS[1]!)).toBeNull();
   });
 
   it('drills from an event through its matcher to a hook and back out', async () => {

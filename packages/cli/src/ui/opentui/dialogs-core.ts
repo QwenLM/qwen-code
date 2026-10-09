@@ -196,6 +196,35 @@ export function selectionWindow(
 }
 
 /**
+ * The chrome a region-mounted dialog pays out of the region before its list
+ * windows from what is left. `fixed` counts only rows no text run can wrap
+ * into — the frame's border and padding, margins and spacers. Every chrome
+ * text run goes in `runs` and is charged the rows the renderer's own word
+ * wrap gives it at the width it paints at: a run charged a flat row that
+ * wraps under-pays the frame, and the unshrinkable frame grows past the
+ * region by the difference. `measuredRows` carries what a dialog-level
+ * measurement already derived from `wrappedRows` (e.g. a two-run title
+ * row's), so no part of the charge is a hand count of what a run paints.
+ */
+export interface DialogChrome {
+  readonly fixed: number;
+  readonly runs?: ReadonlyArray<{
+    readonly text: string;
+    readonly width: number;
+  }>;
+  readonly measuredRows?: number;
+}
+
+/** The rows a dialog's chrome pays out of its region budget. */
+export function chromeRows(chrome: DialogChrome): number {
+  let rows = chrome.fixed + (chrome.measuredRows ?? 0);
+  for (const run of chrome.runs ?? []) {
+    rows += wrappedRows(run.text, run.width);
+  }
+  return rows;
+}
+
+/**
  * The window a region-mounted dialog's list pays for itself: the region rows
  * left after the dialog's own chrome, capped the way ink's selection lists
  * cap, with the scroll arrows paid out of the window itself — ink's rule,
@@ -207,7 +236,7 @@ export function selectionWindow(
  */
 export function regionListWindow(
   regionHeight: number | undefined,
-  chromeRows: number,
+  chrome: DialogChrome,
   itemCount: number,
   cap: number,
 ): { maxItemsToShow: number; showScrollArrows: boolean } {
@@ -215,7 +244,7 @@ export function regionListWindow(
     const maxItemsToShow = Math.min(cap, itemCount);
     return { maxItemsToShow, showScrollArrows: maxItemsToShow < itemCount };
   }
-  const rows = regionHeight - chromeRows;
+  const rows = regionHeight - chromeRows(chrome);
   if (rows <= 0) {
     return { maxItemsToShow: 0, showScrollArrows: false };
   }

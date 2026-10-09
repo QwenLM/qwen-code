@@ -23,15 +23,17 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import { toOriginalKey } from './key-map.js';
-import { useKeyboard } from '@opentui/react';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import { cycleTab, regionListWindow } from './dialogs-core.js';
 import {
   DEFAULT_MAX_ITEMS_TO_SHOW,
   DialogSelect,
+  dialogAreaWidth,
   useDialogSelect,
   type DialogListItem,
 } from './dialogs-shared.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
+import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
 import type { ExtensionUpdateCheckState } from './dialog-data.js';
 
 export const EXTENSIONS_TABS = {
@@ -232,13 +234,29 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
       [rows],
     );
 
-  // The single border (2), the tab bar (1), the content margin (1), the
-  // status line when there is one (2) and the footer hint (2) come off the
-  // region first; the list windows from what is left instead of painting
-  // every row while the hook windows at the flat default.
+  // The single border (2), the tab bar (1), the content margin (1) and the
+  // margins over the status line and the footer hint are the rows no run can
+  // wrap into; the status text and the footer hint are charged the rows they
+  // wrap into at the frame's content width (border and padding take a column
+  // each side), and the list windows from what is left.
+  const hint =
+    tabFooter ??
+    (tabLocked || view !== 'list'
+      ? t('Enter to select · Esc to go back')
+      : extensionsFooterHint(activeTab));
+  const { width } = useTerminalDimensions();
+  const extensionsContentWidth = Math.max(1, dialogAreaWidth(width) - 4);
   const listWindow = regionListWindow(
     clampDialogHeight(availableTerminalHeight),
-    status ? 8 : 6,
+    {
+      fixed: 5 + (status ? 1 : 0),
+      runs: [
+        ...(status
+          ? [{ text: status.text, width: extensionsContentWidth }]
+          : []),
+        { text: hint, width: extensionsContentWidth },
+      ],
+    },
     listItems.length,
     DEFAULT_MAX_ITEMS_TO_SHOW,
   );
@@ -424,12 +442,6 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
       }
     }
   });
-
-  const hint =
-    tabFooter ??
-    (tabLocked || view !== 'list'
-      ? t('Enter to select · Esc to go back')
-      : extensionsFooterHint(activeTab));
 
   const renderInstalledContent = () => {
     if (view === 'detail' && currentRow) {
@@ -644,7 +656,24 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
           );
         })}
         <text fg={tabLocked || view !== 'list' ? '#555555' : C.dim}>
-          {t('(Tab / ←→ to switch)')}
+          {
+            // The chrome charges the tab bar one row, so the hint gets the
+            // columns the tabs leave rather than wrapping onto a second.
+            truncateToWidth(
+              t('(Tab / ←→ to switch)'),
+              Math.max(
+                0,
+                extensionsContentWidth -
+                  EXTENSIONS_TAB_ORDER.reduce(
+                    (total, tab) =>
+                      total +
+                      getCachedStringWidth(` ${extensionsTabLabel(tab)} `) +
+                      2,
+                    0,
+                  ),
+              ),
+            )
+          }
         </text>
       </box>
 

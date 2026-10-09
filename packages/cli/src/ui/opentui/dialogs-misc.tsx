@@ -38,7 +38,7 @@ import {
 } from '../editors/editorSettingsManager.js';
 import { getScopeItems } from '../../config/dialogScopeUtils.js';
 import { t } from '../../i18n/index.js';
-import type { DialogListItem } from './dialogs-core.js';
+import { wrappedRows, type DialogListItem } from './dialogs-core.js';
 import {
   DialogFrame,
   DialogSelect,
@@ -113,9 +113,16 @@ export function Shell({
   );
 }
 
-/** The Shell frame's rows above a sized body: border and padding 4, title 1,
- * the body's marginTop 1. */
-export const SHELL_BODY_CHROME_ROWS = 6;
+/** The Shell frame's rows above a sized body: border and padding (4), the
+ * title measured at the shell's content width — a long localized title wraps
+ * to rows a flat count never pays, and the unshrinkable frame grows past the
+ * region by the difference — and the body's marginTop (1). */
+export function shellBodyChromeRows(
+  title: string,
+  contentWidth: number,
+): number {
+  return 5 + wrappedRows(title, contentWidth);
+}
 const DIFF_BODY_ROWS = 14;
 const SUBAGENTS_BODY_ROWS = 12;
 
@@ -517,12 +524,17 @@ export function OpenTuiDiffDialog({
   // natural height then never exceeds the region, so the bottom border stays
   // inside it instead of painting past it.
   const regionHeight = clampDialogHeight(availableTerminalHeight);
+  const { width } = useTerminalDimensions();
   const bodyRows =
     regionHeight === undefined
       ? DIFF_BODY_ROWS
       : Math.max(
           1,
-          Math.min(DIFF_BODY_ROWS, regionHeight - SHELL_BODY_CHROME_ROWS),
+          Math.min(
+            DIFF_BODY_ROWS,
+            regionHeight -
+              shellBodyChromeRows('Diff', dialogContentWidth(width)),
+          ),
         );
   const [lines, setLines] = useState<string[]>([]);
   useEffect(() => {
@@ -604,12 +616,17 @@ export function OpenTuiSubagentListDialog({
 }: P) {
   useEsc(onClose);
   const regionHeight = clampDialogHeight(availableTerminalHeight);
+  const { width } = useTerminalDimensions();
   const bodyRows =
     regionHeight === undefined
       ? SUBAGENTS_BODY_ROWS
       : Math.max(
           1,
-          Math.min(SUBAGENTS_BODY_ROWS, regionHeight - SHELL_BODY_CHROME_ROWS),
+          Math.min(
+            SUBAGENTS_BODY_ROWS,
+            regionHeight -
+              shellBodyChromeRows('Subagents', dialogContentWidth(width)),
+          ),
         );
   const [rows, setRows] = useState<Array<{ name: string; desc: string }>>([]);
   const [loading, setLoading] = useState(true);

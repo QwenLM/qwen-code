@@ -2480,6 +2480,33 @@ nothing (a six-row region) the dead main view lets Esc close it rather than
 arming the must-connect error over a list that cannot paint, because the armed
 error swallows every later Esc.
 
+## Decision 72 — the list-window chrome is enumerated, and every text run in it is measured, not counted
+
+The review rounds kept re-opening the same class: a dialog's window budget
+charged its chrome as a hand-counted constant — `regionListWindow` took a
+bare `chromeRows: number` — so every chrome text run that word-wraps at a
+narrow terminal (a footer hint, a title, a status line, a step header) was
+paid one row while painting two, and the unshrinkable frame grew past the
+region by the difference. Each round found another entrance. The charge is
+now structural: `regionListWindow` takes a `DialogChrome` — the `fixed` rows
+no run can wrap into (frame border and padding, margins, spacers), the
+`runs` every chrome text run is listed in, each measured by the renderer's
+own `wrappedRows` at the width it paints at, and `measuredRows` for what a
+dialog-level measurement already derived (the two-run title rows). The nine
+call sites and the three inlined budgets moved onto it: the theme dialog's
+title and footer (and its item labels, which now clip to the row like the
+hooks and permissions labels already did), the extensions dialog's status
+line and footer hint (and its tab bar's trailing hint, clipped the way the
+shared tab bar clips), the hooks dialog's footer, the permissions scope
+step's title, question and below-frame footer, the MCP dialog's per-step
+header runs and footer, and the Shell's title, whose
+`SHELL_BODY_CHROME_ROWS` constant became `shellBodyChromeRows(title, width)`
+for the auth wizard and the diff and subagents bodies. Each measurement is
+pinned by a narrow-width test whose assertion goes red when the charge is
+reverted to the flat count, and the zero floor survives: a region that
+cannot pay the measured chrome still windows to zero rows with the keys
+refusing them.
+
 ## Coverage boundary
 
 What was verified, and how far the verification reaches:

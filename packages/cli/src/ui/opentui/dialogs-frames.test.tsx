@@ -20,18 +20,19 @@
  * from the region budget instead of relying on the clip.
  */
 
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, within } from '@testing-library/react';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getCachedStringWidth } from '../utils/textUtils.js';
 
+const frameState = vi.hoisted(() => ({ width: 100 }));
 vi.mock('@opentui/react', () => ({
   useRenderer: () => ({
     addInputHandler: vi.fn(),
     removeInputHandler: vi.fn(),
   }),
   useKeyboard: vi.fn(),
-  useTerminalDimensions: () => ({ width: 100, height: 40 }),
+  useTerminalDimensions: () => ({ width: frameState.width, height: 40 }),
 }));
 
 const buildJsxRuntime = vi.hoisted(() => async () => {
@@ -128,6 +129,10 @@ function layoutOf(node: Element | null | undefined): Record<string, unknown> {
 }
 
 describe('sibling dialog frames (region clips, frame does not shrink)', () => {
+  beforeEach(() => {
+    frameState.width = 100;
+  });
+
   it('the shared dialog frame keeps its natural height for the clip too', () => {
     // Measured on /mcp's tool list: a shrinkable frame let a short region
     // squeeze the unsized tool rows to zero and paint them over each other
@@ -281,6 +286,65 @@ describe('sibling dialog frames (region clips, frame does not shrink)', () => {
     const splitColumn =
       tall.container.firstElementChild?.firstElementChild?.firstElementChild;
     expect(layoutOf(splitColumn)).toMatchObject({ width: '45%' });
+  });
+
+  it('charges the theme footer hint the rows it wraps into at a narrow width', () => {
+    // At a forty-column terminal the 44-column footer hint wraps to two
+    // rows, so the measured chrome is nine, not the flat eight: a
+    // twelve-row region pays the scroll arrows and one theme row, where the
+    // flat count paid two rows — and the unshrinkable frame grew a row past
+    // the region.
+    frameState.width = 40;
+    const themeSettings = {
+      merged: {},
+      user: { settings: {} },
+      workspace: { settings: {} },
+      forScope: () => ({ settings: {} }),
+    } as unknown as LoadedSettings;
+    const { container } = render(
+      <OpenTuiThemeDialog
+        onSelect={() => {}}
+        onHighlight={() => {}}
+        settings={themeSettings}
+        availableTerminalHeight={12}
+      />,
+    );
+    // One numbered theme row paints; the second is beyond the window.
+    expect(within(container).getByText(/^\s*1\.$/)).toBeTruthy();
+    expect(within(container).queryByText(/^\s*2\.$/)).toBeNull();
+    expect(within(container).getByText(/Tab to configure scope/)).toBeTruthy();
+    frameState.width = 100;
+  });
+
+  it('clips a theme label to the one row its item charge pays', () => {
+    // Each theme row is charged one physical row, so the label clips to the
+    // columns the row owns: at a forty-column terminal with the preview pane
+    // painted, the column is 32 * 0.45 - 2 = 12 and the label owns
+    // 12 - 3 - 2 = 7 of them, so a longer name clips instead of wrapping
+    // onto a second row. The custom theme is the highlighted (last) row, so
+    // the window follows the cursor down to it.
+    frameState.width = 40;
+    const themeSettings = {
+      merged: { ui: { theme: 'a-very-long-custom-theme-name' } },
+      user: {
+        settings: {
+          ui: { customThemes: { 'a-very-long-custom-theme-name': {} } },
+        },
+      },
+      workspace: { settings: {} },
+      forScope: () => ({ settings: {} }),
+    } as unknown as LoadedSettings;
+    const { container } = render(
+      <OpenTuiThemeDialog
+        onSelect={() => {}}
+        onHighlight={() => {}}
+        settings={themeSettings}
+        availableTerminalHeight={24}
+      />,
+    );
+    expect(within(container).getByText('a-very-')).toBeTruthy();
+    expect(within(container).queryByText(/a-very-long/)).toBeNull();
+    frameState.width = 100;
   });
 
   it('windows the skills scrollbox to zero rows when the region cannot pay the chrome', () => {

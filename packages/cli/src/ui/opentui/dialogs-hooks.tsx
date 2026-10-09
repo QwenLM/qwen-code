@@ -368,23 +368,43 @@ export function OpenTuiHooksDialog({
             : `${handlerEvent} - ${t('Matcher:')} ${sanitizeTerminalLine(handlerMatcher)}`,
           contentWidth,
         ) + wrappedRows(getHookShortDescription(handlerEvent), contentWidth);
-  // The fixed chrome: frame (4), the header, the body's margin row (1), the
-  // list's margin row (1) and the footer hint (2).
+  // The rows no run can wrap into: the frame (4), the body's margin row (1),
+  // the list's margin row (1) and the footer hint's margin (1). The footer
+  // hint is charged the rows it wraps into at the content width, like the
+  // header, the notice and the banner.
+  const footerText =
+    view.step === 'events'
+      ? t('Enter to select · Esc to cancel')
+      : view.step === 'detail'
+        ? t('Esc to go back')
+        : t('Enter to select · Esc to go back');
   const eventsWindow = regionListWindow(
     regionHeight,
-    8 + headerRows + noticeRows + bannerRows + eventsNoteRows,
+    {
+      fixed: 7,
+      runs: [{ text: footerText, width: contentWidth }],
+      measuredRows: headerRows + noticeRows + bannerRows + eventsNoteRows,
+    },
     eventItems.length,
     MAX_ROWS,
   );
   const matchersWindow = regionListWindow(
     regionHeight,
-    8 + headerRows + matchersHeaderRows + noticeRows + bannerRows,
+    {
+      fixed: 7,
+      runs: [{ text: footerText, width: contentWidth }],
+      measuredRows: headerRows + matchersHeaderRows + noticeRows + bannerRows,
+    },
     matcherItems.length,
     MAX_ROWS,
   );
   const handlersWindow = regionListWindow(
     regionHeight,
-    8 + headerRows + handlersHeaderRows + noticeRows + bannerRows,
+    {
+      fixed: 7,
+      runs: [{ text: footerText, width: contentWidth }],
+      measuredRows: headerRows + handlersHeaderRows + noticeRows + bannerRows,
+    },
     handlerItems.length,
     MAX_ROWS,
   );
@@ -661,20 +681,20 @@ export function OpenTuiHooksDialog({
   switch (view.step) {
     case 'events':
       body = renderEvents();
-      footer = t('Enter to select · Esc to cancel');
+      footer = footerText;
       break;
     case 'matchers':
       body = renderMatchers(view.event);
-      footer = t('Enter to select · Esc to go back');
+      footer = footerText;
       break;
     case 'handlers':
       body = renderHandlers(view.event, view.matcher);
-      footer = t('Enter to select · Esc to go back');
+      footer = footerText;
       break;
     case 'detail': {
       const row = handlerRows[view.index];
       body = row ? renderDetail(row) : renderHandlers(view.event, view.matcher);
-      footer = t('Esc to go back');
+      footer = footerText;
       break;
     }
     default: {

@@ -36,7 +36,11 @@ import {
 } from './dialogs-shared.js';
 import { regionListWindow, type DialogListItem } from './dialogs-core.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
-import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
+import {
+  clipToWidth,
+  getCachedStringWidth,
+  truncateToWidth,
+} from '../utils/textUtils.js';
 
 export const THEME_DIALOG_MAX_ITEMS_TO_SHOW = 12;
 
@@ -203,12 +207,33 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
   const safeInitialThemeIndex = initialThemeIndex >= 0 ? initialThemeIndex : 0;
 
   const regionHeight = clampDialogHeight(availableTerminalHeight);
-  // The frame (4), the title row and its margin (2) and the footer hint (2)
-  // come off the region first; the list windows from what is left, capped at
-  // the ink constant, instead of painting twelve rows into every region.
+  // The pane windows from the same region the list does; ink's floor at the
+  // left column's height is inert here because the windowed column never
+  // exceeds the budget the region leaves.
+  const layout = computeThemePreviewLayout(regionHeight);
+  const { width } = useTerminalDimensions();
+  const contentWidth = dialogContentWidth(width);
+  // The title row's width is the left column's: its 45% share of the frame's
+  // content less the column's padding, or the whole content width once the
+  // preview pane sheds.
+  const titleColumnWidth = layout.showPreview
+    ? Math.max(1, Math.floor(contentWidth * 0.45) - 2)
+    : Math.max(1, contentWidth);
+  const themeTitleRun = `> ${t('Select Theme')} `;
+  const themeFooterText = t('(Use Enter to select, Tab to configure scope)');
+  // The frame (4), the title's margin (1) and the footer hint's margin (1)
+  // are the rows no run can wrap into; the title and the footer are charged
+  // the rows they wrap into at the width they paint, and the list windows
+  // from what is left, capped at the ink constant.
   const themeWindow = regionListWindow(
     regionHeight,
-    8,
+    {
+      fixed: 6,
+      runs: [
+        { text: themeTitleRun, width: titleColumnWidth },
+        { text: themeFooterText, width: contentWidth },
+      ],
+    },
     themeItems.length,
     THEME_DIALOG_MAX_ITEMS_TO_SHOW,
   );
@@ -235,7 +260,20 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
   const initialScopeIndex = scopeItems.findIndex(
     (item) => item.value === selectedScope,
   );
-  const scopeWindow = regionListWindow(regionHeight, 8, scopeItems.length, 10);
+  const scopeTitleRun = `> ${t('Apply To')}`;
+  const scopeFooterText = t('(Use Enter to apply scope, Tab to go back)');
+  const scopeWindow = regionListWindow(
+    regionHeight,
+    {
+      fixed: 6,
+      runs: [
+        { text: scopeTitleRun, width: contentWidth },
+        { text: scopeFooterText, width: contentWidth },
+      ],
+    },
+    scopeItems.length,
+    10,
+  );
   const scopeList = useDialogSelect({
     items: scopeItems,
     initialIndex: initialScopeIndex >= 0 ? initialScopeIndex : 0,
@@ -258,21 +296,12 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
     selectedScope,
     settings,
   );
-  // The pane windows from the same region the list does; ink's floor at the
-  // left column's height is inert here because the windowed column never
-  // exceeds the budget the region leaves.
-  const layout = computeThemePreviewLayout(regionHeight);
-  // The list's chrome charges the title one row plus its margin, and the
-  // scope message shares that row, so it clips to what the title leaves in
-  // the left column (its 45% share minus the padding) instead of wrapping
-  // onto a second row the charge never paid.
-  const { width } = useTerminalDimensions();
-  const themeTitleRun = `> ${t('Select Theme')} `;
+  // The scope message shares the title row, so it clips to what the title
+  // leaves in the left column instead of wrapping onto a second row the
+  // charge never paid.
   const scopeMessageWidth = Math.max(
     0,
-    (layout.showPreview
-      ? Math.floor(dialogContentWidth(width) * 0.45) - 2
-      : dialogContentWidth(width)) - getCachedStringWidth(themeTitleRun),
+    titleColumnWidth - getCachedStringWidth(themeTitleRun),
   );
 
   return (
@@ -309,12 +338,30 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
                     (direction === 'down' ? 1 : -1),
                 )
               }
-              renderLabel={(item, { titleColor }) => (
-                <box flexDirection="row">
-                  <text fg={titleColor}>{`${item.themeNameDisplay} `}</text>
-                  <text fg={C.dim}>{item.themeTypeDisplay}</text>
-                </box>
-              )}
+              renderLabel={(item, { titleColor }) => {
+                // Each item row is charged one physical row, so the label
+                // clips to the columns the row owns: the column's width less
+                // DialogSelect's indicator and number boxes.
+                const labelWidth = Math.max(
+                  1,
+                  titleColumnWidth - 3 - String(themeItems.length).length,
+                );
+                const nameRun = clipToWidth(
+                  `${item.themeNameDisplay} `,
+                  labelWidth,
+                );
+                return (
+                  <box flexDirection="row">
+                    <text fg={titleColor}>{nameRun}</text>
+                    <text fg={C.dim}>
+                      {clipToWidth(
+                        item.themeTypeDisplay,
+                        Math.max(0, labelWidth - getCachedStringWidth(nameRun)),
+                      )}
+                    </text>
+                  </box>
+                );
+              }}
             />
           </box>
 
@@ -377,18 +424,20 @@ export function OpenTuiThemeDialog(props: OpenTuiThemeDialogProps) {
               )
             }
             renderLabel={(item, { titleColor }) => (
-              <text fg={titleColor}>{item.label}</text>
+              <text fg={titleColor}>
+                {clipToWidth(
+                  item.label,
+                  Math.max(
+                    1,
+                    contentWidth - 3 - String(scopeItems.length).length,
+                  ),
+                )}
+              </text>
             )}
           />
         </box>
       )}
-      <FooterHint
-        text={
-          mode === 'theme'
-            ? t('(Use Enter to select, Tab to configure scope)')
-            : t('(Use Enter to apply scope, Tab to go back)')
-        }
-      />
+      <FooterHint text={mode === 'theme' ? themeFooterText : scopeFooterText} />
     </DialogFrame>
   );
 }

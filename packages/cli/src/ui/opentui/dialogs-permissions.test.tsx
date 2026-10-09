@@ -151,6 +151,35 @@ describe('OpenTuiPermissionsDialog rule rows', () => {
     expect(painted.includes('evil > spoof')).toBe(true);
   });
 
+  it('charges the scope step title, question and footer the rows they wrap into', () => {
+    // At a 34-column terminal the scope step's question wraps to two rows
+    // and the footer below the frame wraps to two, so the measured chrome is
+    // fourteen, not the flat ten-plus-rule-block: a thirteen-row region pays
+    // no scope row, where the flat count painted one — and the unshrinkable
+    // frame grew past the region. Two rows more and the first scope row is
+    // back.
+    mocks.state.width = 34;
+    renderPermissions([], 13);
+    press('return'); // rule list → add-rule-input
+    for (const ch of ['B', 'a', 's', 'h']) press(ch);
+    press('return'); // → add-rule-scope
+
+    expect(screen.getByText(/Add allow permission rule/)).toBeTruthy();
+    expect(screen.queryByText(/Project settings/)).toBeNull();
+  });
+
+  it('pays the scope list a row once the region covers the measured chrome', () => {
+    // Same step two rows taller: the region covers the measured chrome and
+    // the first scope row paints.
+    mocks.state.width = 34;
+    renderPermissions([], 15);
+    press('return');
+    for (const ch of ['B', 'a', 's', 'h']) press(ch);
+    press('return');
+
+    expect(screen.getByText(/Project settings/)).toBeTruthy();
+  });
+
   it('flattens a newline inside a workspace directory row', () => {
     const { container } = render(
       <OpenTuiPermissionsDialog

@@ -370,10 +370,13 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
   // whose DialogFrame pays border and padding first.
   const rowLabelWidth = (containerWidth: number, itemCount: number) =>
     Math.max(0, containerWidth - 2 - (String(itemCount).length + 2));
-  // The scope step's chrome: frame (4), title (1), spacer (1), the rule block
-  // (measured — the rule text is whatever was typed, so a flat count
-  // under-pays the moment it wraps), spacer (1), the question (1) and the
-  // footer below the frame (2). The block paints two columns in.
+  // The scope step's chrome: the frame (4), the two spacer rows (2) and the
+  // footer's margin row (1) are the rows no run can wrap into; the title,
+  // the question and the footer are charged the rows they wrap into at the
+  // width they paint (the footer paints below the frame, a column in), and
+  // the rule block is measured the same way — the rule text is whatever was
+  // typed, so a flat count under-pays the moment it wraps. The block paints
+  // two columns in.
   const scopeRuleBlockRows =
     wrappedRows(sanitizeTerminalLine(pendingRuleText), areaWidth - 6) +
     wrappedRows(
@@ -382,7 +385,24 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
     );
   const scopeWindow = regionListWindow(
     regionHeight,
-    10 + scopeRuleBlockRows,
+    {
+      fixed: 7,
+      runs: [
+        {
+          text: t('Add {{type}} permission rule', { type: activeTab.id }),
+          width: Math.max(1, areaWidth - 4),
+        },
+        {
+          text: t('Where should this rule be saved?'),
+          width: Math.max(1, areaWidth - 4),
+        },
+        {
+          text: t('Enter to confirm · Esc to cancel'),
+          width: Math.max(1, areaWidth - 1),
+        },
+      ],
+      measuredRows: scopeRuleBlockRows,
+    },
     scopeItems.length,
     10,
   );

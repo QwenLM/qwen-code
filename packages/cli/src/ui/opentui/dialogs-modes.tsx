@@ -621,33 +621,40 @@ export function OpenTuiEffortDialog(props: {
     value: tier,
     label: `${tier} — ${t(EFFORT_DESCRIPTIONS[tier])}`,
   }));
-  // The frame (4), the title and its margin (measured — the subtitle wraps
-  // on narrow terminals), the footer hint and the unconfigured-model note
-  // (both measured the same way) come off the region first; the tier list
-  // windows from what is left instead of the flat ten-row default.
+  // The frame (4) and the margin rows under the title, the note and the
+  // footer hint are the rows no run can wrap into; the title — measured
+  // through the two-run dialogTitleRows measurement, since the subtitle
+  // wraps on narrow terminals — the unconfigured-model note and the footer
+  // hint are charged the rows they wrap into at the content width, and the
+  // tier list windows from what is left instead of the flat ten-row default.
   const regionHeight = clampDialogHeight(props.availableTerminalHeight);
   const { width } = useTerminalDimensions();
   const effortContentWidth = dialogContentWidth(width);
-  const effortTitleRows =
-    dialogTitleRows(
-      t('Reasoning Effort'),
-      t('(applied across all providers; clamped per model)'),
-      effortContentWidth,
-    ) + 1;
+  const effortTitleRows = dialogTitleRows(
+    t('Reasoning Effort'),
+    t('(applied across all providers; clamped per model)'),
+    effortContentWidth,
+  );
   const noteText = currentEffort
     ? t(
         '{{effort}} is not available for this model — using the model/provider default.',
         { effort: currentEffort },
       )
     : t('No effort configured — using the model/provider default.');
-  const noteRows =
-    configuredIndex === -1 ? 1 + wrappedRows(noteText, effortContentWidth) : 0;
-  const effortFooterRows =
-    1 +
-    wrappedRows(t('(Use Enter to select, Esc to cancel)'), effortContentWidth);
+  const showEffortNote = configuredIndex === -1;
+  const effortFooterText = t('(Use Enter to select, Esc to cancel)');
   const tierWindow = regionListWindow(
     regionHeight,
-    4 + effortTitleRows + noteRows + effortFooterRows,
+    {
+      fixed: 4 + 1 + (showEffortNote ? 1 : 0) + 1,
+      measuredRows: effortTitleRows,
+      runs: [
+        ...(showEffortNote
+          ? [{ text: noteText, width: effortContentWidth }]
+          : []),
+        { text: effortFooterText, width: effortContentWidth },
+      ],
+    },
     items.length,
     DEFAULT_MAX_ITEMS_TO_SHOW,
   );
@@ -801,18 +808,21 @@ export function OpenTuiOutputStyleDialog(props: {
   // the flat ten-row default.
   const { width } = useTerminalDimensions();
   const styleContentWidth = dialogContentWidth(width);
-  const styleTitleRows =
-    dialogTitleRows(
-      t('Output Style'),
-      t('(applies now and persists to settings)'),
-      styleContentWidth,
-    ) + 1;
-  const styleFooterRows =
-    1 +
-    wrappedRows(t('(Use Enter to select, Esc to cancel)'), styleContentWidth);
+  const styleTitleRows = dialogTitleRows(
+    t('Output Style'),
+    t('(applies now and persists to settings)'),
+    styleContentWidth,
+  );
+  const styleFooterText = t('(Use Enter to select, Esc to cancel)');
   const styleWindow = regionListWindow(
     clampDialogHeight(props.availableTerminalHeight),
-    4 + styleTitleRows + styleFooterRows,
+    {
+      // The frame (4) and the margin rows under the title and the footer
+      // hint; the runs themselves are measured.
+      fixed: 4 + 1 + 1,
+      measuredRows: styleTitleRows,
+      runs: [{ text: styleFooterText, width: styleContentWidth }],
+    },
     items.length,
     DEFAULT_MAX_ITEMS_TO_SHOW,
   );

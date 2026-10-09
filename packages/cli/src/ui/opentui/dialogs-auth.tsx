@@ -81,7 +81,7 @@ import {
   truncateToWidth,
 } from '../utils/textUtils.js';
 import { caretSpans, useLineEdit } from './line-edit.js';
-import { Shell, SHELL_BODY_CHROME_ROWS } from './dialogs-misc.js';
+import { Shell, shellBodyChromeRows } from './dialogs-misc.js';
 import {
   findNextEnabledIndex,
   getSelectionScrollOffset,
@@ -1438,21 +1438,38 @@ function AuthDialogFlow({
   // whose blank rows a short region sheds the way ink's dialogs shed them.
   const { width } = useTerminalDimensions();
   const contentWidth = dialogContentWidth(width);
+  const viewTitle = useMemo(() => {
+    if (viewLevel !== 'provider-setup') {
+      return VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'];
+    }
+    const p = setupFlow.state.provider;
+    if (!p) return t('Provider Setup');
+    const flowTitle = p.uiLabels?.flowTitle ?? p.label;
+    const { stepIndex, totalSteps, step } = setupFlow.state;
+    return t('{{flowTitle}} · Step {{step}}/{{total}} · {{stepLabel}}', {
+      flowTitle,
+      step: String(stepIndex),
+      total: String(totalSteps),
+      stepLabel: getStepLabel(step, p),
+    });
+  }, [viewLevel, setupFlow.state]);
   const regionHeight = clampDialogHeight(availableTerminalHeight);
   const tosLabel = `${t('Terms of Services and Privacy Notice')}:`;
   const tosUrl =
     'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/';
   // Chrome charged ahead of every windowed list: the Shell's own rows plus
-  // the rows the view's other runs paint. The hint and an armed error are
-  // measured at the content width, so a wrapped run is charged the rows it
-  // occupies; the main view also carries the clipped rule and the terms runs.
+  // the rows the view's other runs paint. The Shell's title, the hint and an
+  // armed error are measured at the content width, so a wrapped run is
+  // charged the rows it occupies; the main view also carries the clipped
+  // rule and the terms runs.
+  const shellChromeRows = shellBodyChromeRows(viewTitle, contentWidth);
   const hintRows = 1 + wrappedRows(NAV_HINT_SELECT, contentWidth);
   const errorRows = errorMessage
     ? 1 + wrappedRows(errorMessage, contentWidth)
     : 0;
-  const listChromeRows = SHELL_BODY_CHROME_ROWS + hintRows + errorRows;
+  const listChromeRows = shellChromeRows + hintRows + errorRows;
   const fullMainChromeRows =
-    SHELL_BODY_CHROME_ROWS +
+    shellChromeRows +
     2 +
     1 +
     wrappedRows(tosLabel, contentWidth) +
@@ -1474,12 +1491,12 @@ function AuthDialogFlow({
     shedMainFooter &&
     wizardListWindow(
       regionHeight,
-      SHELL_BODY_CHROME_ROWS + errorRows,
+      shellChromeRows + errorRows,
       MAIN_ITEMS.length,
       2,
     ) < 1;
   const mainChromeRows =
-    (shedMainFooter ? SHELL_BODY_CHROME_ROWS + errorRows : fullMainChromeRows) -
+    (shedMainFooter ? shellChromeRows + errorRows : fullMainChromeRows) -
     (shedMainMargin ? 1 : 0);
   const listWindow: StepWindow = {
     regionHeight,
@@ -1588,24 +1605,6 @@ function AuthDialogFlow({
     onClose,
     mainWindow,
   ]);
-
-  // -- View title -------------------------------------------------------------
-
-  const viewTitle = useMemo(() => {
-    if (viewLevel !== 'provider-setup') {
-      return VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'];
-    }
-    const p = setupFlow.state.provider;
-    if (!p) return t('Provider Setup');
-    const flowTitle = p.uiLabels?.flowTitle ?? p.label;
-    const { stepIndex, totalSteps, step } = setupFlow.state;
-    return t('{{flowTitle}} · Step {{step}}/{{total}} · {{stepLabel}}', {
-      flowTitle,
-      step: String(stepIndex),
-      total: String(totalSteps),
-      stepLabel: getStepLabel(step, p),
-    });
-  }, [viewLevel, setupFlow.state]);
 
   // -- Render -------------------------------------------------------------------
 

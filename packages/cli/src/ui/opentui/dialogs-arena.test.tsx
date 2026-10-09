@@ -610,6 +610,50 @@ describe('OpenTuiArenaDialog select pane charging', () => {
     expect(screen.getByText(/\[openai\] model-5/)).toBeTruthy();
   });
 
+  it('pays the more-models guide the rows it wraps into, so the frame stays inside the region', () => {
+    // Two selectable models at a twelve-row region and an 80-column
+    // terminal: the 87-column modelProviders URL wraps to two rows at the
+    // frame's seventy-column content width, so the guide block paints four
+    // rows. Charged a flat three, the window would still pay one model row
+    // and the unshrinkable frame would grow one row past the region, losing
+    // its bottom border; charged the measured four, the window pays zero
+    // rows and the frame is exactly the region. One region row more pays a
+    // model row again.
+    mocks.state.width = 80;
+    const twoModelConfig = {
+      getArenaManager: () => ({ getAgents: () => [] }),
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'openai',
+      }),
+      getAllConfiguredModels: () => [
+        { authType: 'openai', id: 'm1', label: 'model-1' },
+        { authType: 'openai', id: 'm2', label: 'model-2' },
+      ],
+    } as unknown as Config;
+    const { rerender } = render(
+      <OpenTuiArenaDialog
+        mode="start"
+        config={twoModelConfig}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={12}
+      />,
+    );
+    expect(screen.queryByText(/\[openai\] model-1/)).toBeNull();
+    expect(screen.getByText(/modelProviders guide/)).toBeTruthy();
+    rerender(
+      <OpenTuiArenaDialog
+        mode="start"
+        config={twoModelConfig}
+        onClose={() => {}}
+        notify={() => {}}
+        availableTerminalHeight={13}
+      />,
+    );
+    expect(screen.getByText(/\[openai\] model-1/)).toBeTruthy();
+  });
+
   it('clears the start error on the next key, so a premature Enter cannot wedge the list', async () => {
     // Two models at a twelve-row region leave the model window one row.
     // Enter with fewer than two checks arms the error, whose two rows then

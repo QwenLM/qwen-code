@@ -399,8 +399,10 @@ describe('OpenTuiMcpDialog list windows', () => {
     );
     await press('return'); // server list → server detail
 
-    // The error's leading rows paint, clipped to the three rows it is
-    // charged (the six-row window less the spacer and the two action rows).
+    // The error's leading rows paint, clipped to the four rows it is
+    // charged (the seven-row window — the detail header's single measured
+    // row is charged one, not the flat two — less the spacer and the two
+    // action rows).
     expect(screen.getByText(/Failed to parse:/)).toBeTruthy();
     const text = document.body.textContent ?? '';
     expect(text.includes('e'.repeat(500))).toBe(false);
@@ -408,9 +410,9 @@ describe('OpenTuiMcpDialog list windows', () => {
     expect(screen.getByText('Disable')).toBeTruthy();
     // The clip pays rows, not columns: a bare column clip lets greedy word
     // wrap leave the row the long token starts partly empty, so the painted
-    // value wraps into one more row than the three it is charged.
+    // value wraps into one more row than the four it is charged.
     const painted = screen.getByText(/Failed to parse:/).textContent ?? '';
-    expect(wrappedRows(painted, 72)).toBeLessThanOrEqual(3);
+    expect(wrappedRows(painted, 72)).toBeLessThanOrEqual(4);
   });
 
   it('refuses the resource list keys at a zero-row window', async () => {
@@ -574,6 +576,34 @@ describe('OpenTuiMcpDialog list windows', () => {
     // The window followed the cursor to the last server; the hint stayed.
     expect(screen.getByText('srv_11')).toBeTruthy();
     expect(screen.getByText(/Run qwen --debug to see error logs/)).toBeTruthy();
+  });
+
+  it('charges the step footer the rows it wraps into at a narrow width', () => {
+    // At a forty-column terminal the 46-column server-list footer wraps to
+    // two rows, so the measured step chrome is ten, not the flat nine:
+    // region twelve leaves the server list two rows — the group header and
+    // srv_0 — and the --debug hint (gated on three) stays off. The flat
+    // count left three rows, paid the hint two of them, and grew the frame
+    // a row past the region; the one-row window then followed the cursor
+    // onto srv_0, scrolling the group header off.
+    mocks.state.width = 40;
+    const servers = [
+      serverWith({ name: 'srv_0', status: MCPServerStatus.DISCONNECTED }),
+      ...Array.from({ length: 11 }, (_, i) =>
+        serverWith({ name: `srv_${i + 1}` }),
+      ),
+    ];
+    render(
+      <OpenTuiMcpDialog
+        servers={servers}
+        availableTerminalHeight={12}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByText(/User MCPs/)).toBeTruthy();
+    expect(screen.getByText('srv_0')).toBeTruthy();
+    expect(screen.queryByText(/Run qwen --debug/)).toBeNull();
   });
 
   it('lets the --debug hint yield when the region leaves the list two rows', async () => {

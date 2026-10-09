@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => {
     inputHandlers: [] as Array<(sequence: string) => boolean>,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
     pasteHandlers: [] as Array<(event: unknown) => void>,
+    width: 100,
   };
   const renderer = {
     addInputHandler(handler: (sequence: string) => boolean) {
@@ -96,7 +97,7 @@ vi.mock('@opentui/react', () => ({
     mocks.state.pasteHandlers.push(handler);
   },
   useRenderer: () => mocks.renderer,
-  useTerminalDimensions: () => ({ width: 100, height: 40 }),
+  useTerminalDimensions: () => ({ width: mocks.state.width, height: 40 }),
 }));
 
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
@@ -318,6 +319,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     mocks.state.inputHandlers.length = 0;
     mocks.state.keyboardHandlers.length = 0;
     mocks.state.pasteHandlers.length = 0;
+    mocks.state.width = 100;
     core.applyProviderInstallPlan.mockReset().mockResolvedValue(undefined);
     core.logAuth.mockReset();
   });
@@ -1411,6 +1413,21 @@ describe('the wizard frame keeps its natural height', () => {
     const consumed = await pressEsc();
     expect(consumed).toBe(true);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('charges the Shell title the rows it wraps into at a narrow width', async () => {
+    // At a 38-column terminal the 32-column sub-menu title wraps to two
+    // rows, so the measured shell chrome is seven, not the flat six: a
+    // fourteen-row region pays one provider row (a row's stride is three),
+    // where the flat count paid two — and the unshrinkable frame grew a row
+    // past the region.
+    mocks.state.width = 38;
+    renderDialog({ availableTerminalHeight: 14 });
+    await press('down'); // main: THIRD_PARTY_PROVIDERS
+    await press('return'); // → thirdparty-select
+    expect(screen.getByText('Third-party Providers · Provider')).toBeTruthy();
+    expect(screen.getByText('DeepSeek API Key')).toBeTruthy();
+    expect(screen.queryByText('Grok (xAI) API Key')).toBeNull();
   });
 
   it('refuses the sub-menu keys when the region pays zero provider rows', async () => {
