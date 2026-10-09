@@ -1120,11 +1120,7 @@ export function WebShellSidebar({
   // focus, so switching hosts never reshuffles the sidebar.
   const fanoutOrigins = useFanoutOrigins();
   const focusedHostOrigin = useMemo(
-    () =>
-      new URL(
-        workspace.baseUrl || window.location.origin,
-        window.location.origin,
-      ).origin,
+    () => workspace.baseUrl || window.location.origin,
     [workspace.baseUrl],
   );
   const rankedHostOrigins = useMemo(
