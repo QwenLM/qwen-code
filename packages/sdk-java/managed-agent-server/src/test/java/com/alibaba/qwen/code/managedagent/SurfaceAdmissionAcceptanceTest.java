@@ -815,6 +815,8 @@ class SurfaceAdmissionAcceptanceTest {
         variables.put("actionId", pendingAction);
         variables.put("workspaceId", "ws");
         variables.put("agentId", "agent-missing");
+        variables.put("channelId", "channel-missing");
+        variables.put("deliveryId", "delivery-missing");
         variables.put("itemId", artifactItemId);
         variables.put("artifactId", artifactId);
         variables.put("resourceId", "resource-0000000000000000");

@@ -20,6 +20,7 @@ public class ManagedAgentProperties {
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
     private final Auth auth = new Auth();
     private final InternalServer internalServer = new InternalServer();
+    private final Channels channels = new Channels();
     private String agentRevision = "1";
     // The tool profiles a stored AgentDefinition may select (D8c-1).
     // hosted-workspace-files/2 joins only after the #13166 glob rollout.
@@ -38,6 +39,10 @@ public class ManagedAgentProperties {
 
     public InternalServer getInternalServer() {
         return internalServer;
+    }
+
+    public Channels getChannels() {
+        return channels;
     }
 
     public SessionStore getSessionStore() {
@@ -920,6 +925,37 @@ public class ManagedAgentProperties {
 
         public void setEnvironment(Map<String, String> environment) {
             this.environment = environment;
+        }
+    }
+
+    /** H5b/H5c: the trusted channel adapter surface and its claim lease. */
+    public static class Channels {
+        private boolean enabled;
+        private Duration claimLease = Duration.ofMinutes(10);
+        private Duration scanDelay = Duration.ofSeconds(30);
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
+        }
+
+        public Duration getClaimLease() {
+            return claimLease;
+        }
+
+        public void setClaimLease(Duration claimLease) {
+            this.claimLease = claimLease;
+        }
+
+        public Duration getScanDelay() {
+            return scanDelay;
+        }
+
+        public void setScanDelay(Duration scanDelay) {
+            this.scanDelay = scanDelay;
         }
     }
 }
