@@ -13,9 +13,7 @@ const packageDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
 );
-const runtimeRoot = process.argv[2]
-  ? path.resolve(process.argv[2])
-  : path.join(packageDir, 'runtime', 'qwen-code');
+const runtimeRoot = path.join(packageDir, 'runtime', 'qwen-code');
 const nodePath =
   process.platform === 'win32'
     ? path.join(runtimeRoot, 'node', 'node.exe')
