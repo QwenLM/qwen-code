@@ -1907,10 +1907,14 @@ export class HostedWorkspaceToolTurn {
                 sessionId: this.promptId,
                 promptId: this.promptId,
                 callId: request.runtimeCallId,
-                // The worker replays the v3 dispatch reference verbatim, so
-                // registration must use the same prefixed args digest —
-                // never the bare inputDigest used by the legacy prepare.
-                argsDigest: request.argsDigest,
+                // The worker replays the dispatch reference of the lane the
+                // request actually took: a v3 prepare stores and replays the
+                // prefixed argsDigest, while the legacy prepare's replay
+                // carries the bare input digest. Registration must name the
+                // same lane's value or the worker's prepare never matches it.
+                argsDigest: prepared
+                  ? request.argsDigest
+                  : request.inputDigest!,
               },
               capture: {
                 tenantId: authority.sessionHeader.sessionKey.tenantId,
