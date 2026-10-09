@@ -35,7 +35,8 @@ public class ManagedActionService {
             LoggerFactory.getLogger(ManagedActionService.class);
     private static final int INPUT_PREVIEW_BYTES = 8192;
     private static final Set<String> PREVIEW_TOOLS =
-            Set.of("read_file", "write_file", "edit", "run_shell_command");
+            Set.of("read_file", "write_file", "edit", "run_shell_command",
+                    "agent");
     private final ManagedAgentService sessions;
     private final ManagedActionStore actions;
     private final ManagedExtensionRecordStore resources;

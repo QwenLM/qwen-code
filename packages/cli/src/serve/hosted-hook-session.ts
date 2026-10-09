@@ -473,6 +473,15 @@ export class HostedHookSession {
     await this.retrying;
   }
 
+  /**
+   * Whether this Session's Hook owner currently holds the Workspace
+   * mount — the tool turn must not mistake that hold for its own
+   * acquisition-free state when a foreground child would need the mount.
+   */
+  get mountHeld(): boolean {
+    return this.acquired;
+  }
+
   get hasPendingOperations(): boolean {
     return this.pendingRecords().length > 0;
   }
