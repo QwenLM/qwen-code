@@ -120,13 +120,23 @@ class RecordArtifactInvocation extends BaseToolInvocation<
       const title = isRecordableDerivedChild(filename, locator.workspacePath)
         ? filename
         : callerTitle;
+      const { derivedFromTitle: _callerMarker, ...callerMetadata } =
+        this.params.metadata ?? {};
       const callerDescription = trimOptional(this.params.description);
+      const derivedDescription =
+        !callerDescription && callerTitle !== title ? callerTitle : undefined;
+      // The marker is extra JSON. A bag that already fills the store cap
+      // cannot carry it, and ingest would drop the record after success.
+      const markDerived =
+        derivedDescription !== undefined &&
+        !metadataExceedsBudget(callerMetadata, 'derivedFromTitle');
       const description =
-        callerDescription || (callerTitle !== title ? callerTitle : undefined);
-      const metadata =
-        description && !callerDescription
-          ? { ...this.params.metadata, derivedFromTitle: true }
-          : this.params.metadata;
+        callerDescription || (markDerived ? derivedDescription : undefined);
+      const metadata = markDerived
+        ? { ...callerMetadata, derivedFromTitle: true }
+        : Object.keys(callerMetadata).length > 0
+          ? callerMetadata
+          : undefined;
       const artifact: ToolArtifact = {
         title,
         kind: this.params.kind,
@@ -786,8 +796,9 @@ function formatDirectoryExpansion(
 
 function metadataExceedsBudget(
   metadata: Record<string, string | number | boolean | null> | undefined,
+  key: 'expandedFromDirectory' | 'derivedFromTitle' = 'expandedFromDirectory',
 ): boolean {
-  const withMarker = { ...metadata, expandedFromDirectory: true };
+  const withMarker = { ...metadata, [key]: true };
   return Buffer.byteLength(JSON.stringify(withMarker), 'utf8') > 4096;
 }
 

@@ -493,7 +493,9 @@ function ArtifactCard({
           <ArtifactIcon artifact={artifact} className={styles.iconSvg} />
         </span>
         <div className={styles.artifactInfo}>
-          <div className={styles.title}>{displayName}</div>
+          <div className={`${styles.title} ${styles.artifactTitle}`}>
+            {displayName}
+          </div>
           <div className={styles.artifactMeta}>
             {[
               artifact.metadata?.['artifactType'] === 'web_preview_snapshot'

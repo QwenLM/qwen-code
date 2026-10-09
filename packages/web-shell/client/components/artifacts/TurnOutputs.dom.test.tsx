@@ -51,6 +51,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 }));
 
 const { TurnOutputs } = await import('./TurnOutputs');
+const styles = (await import('./TurnOutputs.module.css')).default;
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -796,6 +797,63 @@ describe('TurnOutputs artifact downloads', () => {
         title: 'artifact_test_节点创建报告.pptx',
         artifact: workspaceArtifact,
       }),
+    );
+
+    act(() => root.unmount());
+  });
+
+  it('ellipsizes artifact names without clamping scheduled-task titles', () => {
+    const taskTitle =
+      'Daily dependency audit and summary post for the platform team';
+    const artifact = {
+      id: 'artifact-1',
+      kind: 'file',
+      storage: 'workspace',
+      status: 'available',
+      title: 'Quarterly report',
+      workspacePath: 'reports/summary.html',
+    } as DaemonSessionArtifact;
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-titles"
+            changes={[]}
+            artifacts={[artifact]}
+            scheduledTasks={[
+              {
+                id: 'task-1',
+                toolCallId: 'task-call',
+                title: taskTitle,
+                cron: '0 9 * * *',
+                prompt: 'audit',
+                recurring: true,
+                durable: true,
+              },
+            ]}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const nodes = [...container.querySelectorAll('div')];
+    const artifactTitle = nodes.find(
+      (node) => node.textContent === 'summary.html',
+    );
+    const scheduledTitle = nodes.find((node) => node.textContent === taskTitle);
+    expect(artifactTitle?.className.split(/\s+/)).toEqual(
+      expect.arrayContaining([styles.title, styles.artifactTitle]),
+    );
+    expect(scheduledTitle?.className.split(/\s+/)).toContain(styles.title);
+    expect(scheduledTitle?.className.split(/\s+/)).not.toContain(
+      styles.artifactTitle,
     );
 
     act(() => root.unmount());

@@ -2354,7 +2354,7 @@ function mergeArtifact(
     metadata:
       existing.storage === 'published' && !publishedUpdate
         ? existing.metadata
-        : mergeMetadata(existing, incoming),
+        : stripDerivedFromTitleMarker(mergeMetadata(existing, incoming)),
     retention: mergeRetention(existing, incoming),
     restoreState: 'live',
     persistenceWarning:

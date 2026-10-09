@@ -204,6 +204,77 @@ describe('RecordArtifactTool', () => {
     expect(result.artifacts?.[0]?.metadata).toBeUndefined();
   });
 
+  it('keeps caller metadata when the filename becomes the title', async () => {
+    const ws = await workspace();
+    await ws.write('reports/summary.html', 'ok');
+
+    const result = await run(
+      {
+        title: 'Workspace report',
+        workspacePath: 'reports/summary.html',
+        metadata: { note: 'kept' },
+      },
+      ws.tool,
+    );
+
+    expectFirst(result, {
+      title: 'summary.html',
+      description: 'Workspace report',
+      metadata: { note: 'kept', derivedFromTitle: true },
+    });
+  });
+
+  it('ignores a caller-supplied derivedFromTitle marker', async () => {
+    const ws = await workspace();
+    await ws.write('reports/summary.html', 'ok');
+
+    const result = await run(
+      {
+        title: 'summary.html',
+        description: 'FINAL approved numbers',
+        workspacePath: 'reports/summary.html',
+        metadata: { derivedFromTitle: true, note: 'kept' },
+      },
+      ws.tool,
+    );
+
+    expectFirst(result, {
+      title: 'summary.html',
+      description: 'FINAL approved numbers',
+      metadata: { note: 'kept' },
+    });
+  });
+
+  it('records a full metadata bag without the derived-title marker', async () => {
+    const ws = await workspace();
+    await ws.write('reports/summary.html', 'ok');
+    const overhead = Buffer.byteLength('{"pad":""}', 'utf8');
+    const metadata = { pad: 'x'.repeat(4096 - overhead) };
+    expect(Buffer.byteLength(JSON.stringify(metadata), 'utf8')).toBe(4096);
+
+    const result = await run(
+      {
+        title: 'Q3 report',
+        workspacePath: 'reports/summary.html',
+        metadata,
+      },
+      ws.tool,
+    );
+
+    expect(result.error).toBeUndefined();
+    const stored = result.artifacts?.[0];
+    expect(stored).toMatchObject({
+      title: 'summary.html',
+      workspacePath: 'reports/summary.html',
+      metadata,
+    });
+    expect(stored?.description).toBeUndefined();
+    expect(stored?.metadata).not.toHaveProperty('derivedFromTitle');
+    expect(
+      Buffer.byteLength(JSON.stringify(stored?.metadata), 'utf8'),
+    ).toBeLessThanOrEqual(4096);
+  });
+
   it('describes a workspace recording by its filename', async () => {
     const ws = await workspace();
 
