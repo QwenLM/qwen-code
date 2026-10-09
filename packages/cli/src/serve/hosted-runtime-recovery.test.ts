@@ -19,10 +19,18 @@ import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-co
 import {
   stopParkedRuntimeExecutions,
   recoverHostedRuntimeTurn,
+  RecoveryDeclined,
+  settleInterruptedTurnRuntime,
+  settleParkedTurnCancelled,
   type HostedRecoveryTurn,
   type HostedRuntimeRecoveryOutcome,
 } from './hosted-runtime-recovery.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
+import {
+  commitHostedFileHistory,
+  readHostedFileHistory,
+} from './hosted-file-history.js';
+import { HARNESS_MODEL_START_PHASES } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 
@@ -436,6 +444,104 @@ describe('recoverHostedRuntimeTurn', () => {
       await replacement.close();
     }
   });
+  /**
+   * Drives a fresh session to a parked await_action checkpoint: the model
+   * answered with call-1, the approval is requested, and the owner died
+   * asking. The durable Action decides through endAction below.
+   */
+  const ACTION_ID = '77777777-7777-4777-8777-777777777777';
+
+  async function parkAtAwaitAction(
+    expiresAt = Date.now() + 3_600_000,
+  ): Promise<ManagedSession> {
+    const session = await open('boot-1', true);
+    const harness = createManagedHarnessHandle(session);
+    await harness.ensureRunnable();
+    await session.sink.write({
+      uuid: 'assistant-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: new Date().toISOString(),
+      type: 'assistant',
+      cwd: root,
+      version: 'hosted-harness/1',
+      daemonPromptId: PROMPT_ID,
+      message: {
+        role: 'assistant',
+        parts: [
+          {
+            functionCall: {
+              id: 'call-1',
+              name: 'write_file',
+              args: { file_path: '0.txt', content: 'x' },
+            },
+          },
+        ],
+      },
+    });
+    await harness.commitDurableWait(
+      {
+        requestId: ACTION_ID,
+        kind: 'execute',
+        source: 'tool_call',
+        optionsRef: await session.resources.publish(
+          'managed-approval',
+          Buffer.from(
+            JSON.stringify({
+              v: 1,
+              requestId: ACTION_ID,
+              turnId: PROMPT_ID,
+              functionCallId: 'call-1',
+              toolName: 'write_file',
+              policyRevision: 'pol-1',
+              inputRevision: 1,
+              createdAt: expiresAt - 20_000,
+              expiresAt,
+              options: [{ id: 'allow' }, { id: 'deny' }],
+            }),
+          ),
+        ),
+        inputRevision: 'rev-1',
+        invocationRef: await session.resources.publish(
+          'managed-invocation',
+          Buffer.from('{"toolCallId":"call-1"}', 'utf8'),
+        ),
+        attemptId: 'att-1',
+        routeRef: await session.resources.publish(
+          'managed-route',
+          Buffer.from('{"model":"qwen3-coder-plus"}', 'utf8'),
+        ),
+      },
+      { turnId: PROMPT_ID, promptId: PROMPT_ID },
+    );
+    await session.close();
+    resetManagedRuntimeDispatchGatesForTest();
+    return session;
+  }
+
+  async function endAction(
+    session: ManagedSession,
+    state: 'decided' | 'expired' | 'cancelled',
+  ): Promise<void> {
+    const decisionRef =
+      state === 'decided'
+        ? await session.resources.publish(
+            'managed-decision',
+            Buffer.from('{"optionId":"deny"}', 'utf8'),
+          )
+        : null;
+    await session.authority.resolveAction(
+      {
+        operation: 'resolveAction',
+        commandId: `resolveAction:${ACTION_ID}:${state}`,
+        sessionKey: session.authority.sessionHeader.sessionKey,
+        contentDigest: decisionRef?.digest ?? DIGEST,
+      },
+      state === 'decided'
+        ? { requestId: ACTION_ID, state: 'decided', decisionRef: decisionRef! }
+        : { requestId: ACTION_ID, state, decisionRef: null },
+    );
+  }
 
   it('settles parked executions under their original ids and reports ready', async () => {
     await parkAtAwaitRuntime();
@@ -1279,6 +1385,593 @@ describe('recoverHostedRuntimeTurn', () => {
       });
       expect(acquire).not.toHaveBeenCalled();
       expect(execute).not.toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('takes a turn killed between the tool call and its result out of the durable wait', async () => {
+    // The H5/F5 follow-up witness: a channel turn died with its Shell
+    // execution in flight, and settling only its terminal record wedged
+    // the Session — `await_runtime` is not a model-start phase.
+    await parkAtAwaitRuntime('run_shell_command');
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'settled',
+    });
+    const release = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'release')
+      .mockResolvedValue();
+    const replacement = await open('boot-2', false);
+    try {
+      const parked = await replacement.authority.harnessRunAuthorization();
+      expect(
+        parked.status === 'runnable' && parked.checkpoint.continuation.phase,
+      ).toBe('await_runtime');
+      const runtime = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: true,
+      });
+      expect(runtime.kind).toBe('ready');
+      if (runtime.kind !== 'ready') throw new Error('expected a ready verdict');
+      expect(runtime.broker?.runtimeSessionId).toBe(PROMPT_ID);
+      // The assistant's functionCall meets a cancelled functionResponse,
+      // or the resumed thread's next model round is malformed.
+      const projected = await replacement.sink.project();
+      const response = projected
+        .filter(
+          (entry) =>
+            entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+        )
+        .flatMap((entry) => entry.message?.parts ?? [])
+        .map((part) => part.functionResponse)
+        .find(Boolean);
+      expect(response).toMatchObject({
+        id: 'call-1',
+        name: 'run_shell_command',
+      });
+      expect(response?.response).toMatchObject({
+        executionStatus: 'cancelled',
+      });
+      // The durable wait is gone: the phase the next turn reads starts a
+      // model request again.
+      const authorization =
+        await replacement.authority.harnessRunAuthorization();
+      expect(authorization.status).toBe('runnable');
+      if (authorization.status === 'runnable')
+        expect(
+          HARNESS_MODEL_START_PHASES.has(
+            authorization.checkpoint.continuation.phase,
+          ),
+        ).toBe(true);
+      // The lease hands back only after the caller's terminal record is
+      // durable, so it is not this helper's to release.
+      expect(release).not.toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('drops the interrupted turn’s pending file-history obligation', async () => {
+    await parkAtAwaitRuntime('write_file', true);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'settled',
+    });
+    const replacement = await open('boot-2', false);
+    try {
+      await commitHostedFileHistory(replacement, {
+        schemaVersion: 1,
+        state: { ownerSessionId: SESSION_ID, snapshots: [], files: {} },
+        pendingTurn: PROMPT_ID,
+        pendingUndo: null,
+      });
+      await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: true,
+      });
+      expect(
+        (await readHostedFileHistory(replacement))?.pendingTurn,
+      ).toBeNull();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('hands the runtime back even on a retry that already left the wait', async () => {
+    // A settlement split across attempts — the first pass stopped and
+    // settled the executions, the second's checkpoint says model-start —
+    // still owes the dead turn's runtime session, or the F9 lease leak
+    // returns on exactly that shape (R6/R8 P1).
+    await parkAtAwaitRuntime('write_file', false, true);
+    const status = vi.spyOn(HostedWorkspaceBroker.prototype, 'status');
+    const replacement = await open('boot-2', false);
+    try {
+      const runtime = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: true,
+      });
+      expect(runtime.kind).toBe('ready');
+      if (runtime.kind !== 'ready') throw new Error('expected a ready verdict');
+      expect(runtime.broker?.runtimeSessionId).toBe(PROMPT_ID);
+      expect(status).not.toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('owns only the interrupted turn it names', async () => {
+    await parkAtAwaitRuntime();
+    const status = vi.spyOn(HostedWorkspaceBroker.prototype, 'status');
+    const replacement = await open('boot-2', false);
+    try {
+      await expect(
+        settleInterruptedTurnRuntime({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: '44444444-4444-4444-8444-444444444444',
+          brokerOptions,
+          toolProfile: true,
+        }),
+      ).resolves.toEqual({ kind: 'ready' });
+      expect(status).not.toHaveBeenCalled();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('keeps a turn with the recovery fleet when the stop cannot be proven', async () => {
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockResolvedValue({
+      state: 'unknown',
+    });
+    const replacement = await open('boot-2', false);
+    try {
+      await expect(
+        settleInterruptedTurnRuntime({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          toolProfile: true,
+        }),
+      ).rejects.toThrow('unknown');
+      // Nothing settles on the refused path.
+      const projected = await replacement.sink.project();
+      expect(
+        projected.filter(
+          (entry) =>
+            entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+        ),
+      ).toHaveLength(0);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it.each([
+    { message: 'Session Store answered 503', errorClass: Error },
+    { message: undefined, errorClass: RecoveryDeclined },
+  ])(
+    'refuses to settle over a checkpoint it cannot verify (message=$message)',
+    async ({ message, errorClass }) => {
+      // A faulting Store read erases into a blocked/missing_state verdict;
+      // treated as "no wait", the settlement would report a live execution
+      // cancelled and wedge the Session it claims to unblock (R4 P1). The
+      // transient shape is an ordinary fault the caller may retry; only a
+      // durable verdict declines outright (R6 P1).
+      await parkAtAwaitRuntime();
+      const status = vi.spyOn(HostedWorkspaceBroker.prototype, 'status');
+      const cancel = vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel');
+      const replacement = await open('boot-2', false);
+      try {
+        vi.spyOn(
+          replacement.authority,
+          'harnessRunAuthorization',
+        ).mockResolvedValue({
+          status: 'blocked',
+          reason: 'missing_state',
+          ...(message === undefined ? {} : { message }),
+        } as never);
+        await expect(
+          settleInterruptedTurnRuntime({
+            session: replacement,
+            sessionId: SESSION_ID,
+            cwd: root,
+            promptId: PROMPT_ID,
+            brokerOptions,
+            toolProfile: true,
+          }),
+        ).rejects.toThrow(errorClass);
+        expect(status).not.toHaveBeenCalled();
+        expect(cancel).not.toHaveBeenCalled();
+        const projected = await replacement.sink.project();
+        expect(
+          projected.filter(
+            (entry) =>
+              entry.daemonPromptId === PROMPT_ID &&
+              entry.type === 'tool_result',
+          ),
+        ).toHaveLength(0);
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
+
+  it('holds an interrupted turn that waits on its approval', async () => {
+    // A durable approval outlives its owner: the helper neither settles
+    // over it nor lets the caller block the Session — the approval's own
+    // resolve route must stay usable (R4 P1).
+    await parkAtAwaitAction();
+    const status = vi.spyOn(HostedWorkspaceBroker.prototype, 'status');
+    const cancel = vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel');
+    const release = vi.spyOn(HostedWorkspaceBroker.prototype, 'release');
+    const replacement = await open('boot-2', false);
+    try {
+      await commitHostedFileHistory(replacement, {
+        schemaVersion: 1,
+        state: { ownerSessionId: SESSION_ID, snapshots: [], files: {} },
+        pendingTurn: PROMPT_ID,
+        pendingUndo: null,
+      });
+      const parked = await replacement.authority.harnessRunAuthorization();
+      expect(
+        parked.status === 'runnable' && parked.checkpoint.continuation.phase,
+      ).toBe('await_action');
+      await expect(
+        settleInterruptedTurnRuntime({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          toolProfile: true,
+        }),
+      ).resolves.toEqual({ kind: 'held' });
+      expect(status).not.toHaveBeenCalled();
+      expect(cancel).not.toHaveBeenCalled();
+      expect(release).not.toHaveBeenCalled();
+      // A held approval is not the dead marker the cleanup drops: the
+      // Turn still owns its file history until the decision drives it,
+      // and no tool result is faked while the answer is still owed.
+      expect((await readHostedFileHistory(replacement))?.pendingTurn).toBe(
+        PROMPT_ID,
+      );
+      expect(
+        (await replacement.sink.project()).filter(
+          (entry) =>
+            entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+        ),
+      ).toHaveLength(0);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it.each(['decided', 'expired', 'cancelled'] as const)(
+    'advances an approval that ended %s and answers the abandoned call',
+    async (state) => {
+      // R6 P1: the final Action outlives the dead owner — the wait must
+      // advance and the turn settle, never hold again on the next attempt.
+      await parkAtAwaitAction();
+      const status = vi.spyOn(HostedWorkspaceBroker.prototype, 'status');
+      const replacement = await open('boot-2', false);
+      try {
+        await commitHostedFileHistory(replacement, {
+          schemaVersion: 1,
+          state: { ownerSessionId: SESSION_ID, snapshots: [], files: {} },
+          pendingTurn: PROMPT_ID,
+          pendingUndo: null,
+        });
+        await endAction(replacement, state);
+        const runtime = await settleInterruptedTurnRuntime({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          toolProfile: true,
+        });
+        expect(runtime.kind).toBe('ready');
+        if (runtime.kind !== 'ready')
+          throw new Error('expected a ready verdict');
+        // F9: the turn acquired its Workspace before it asked — the
+        // verdict hands its promptId-named runtime session back for the
+        // caller to release, exactly like the await_runtime arm.
+        expect(runtime.broker?.runtimeSessionId).toBe(PROMPT_ID);
+        expect(status).not.toHaveBeenCalled();
+        // The durable wait moved past await_action into a phase the
+        // terminal record can advance from.
+        const authorization =
+          await replacement.authority.harnessRunAuthorization();
+        expect(authorization.status).toBe('runnable');
+        if (authorization.status === 'runnable')
+          expect(
+            HARNESS_MODEL_START_PHASES.has(
+              authorization.checkpoint.continuation.phase,
+            ),
+          ).toBe(true);
+        // call-1 meets a cancelled response — and exactly once on retry.
+        const owed = () =>
+          replacement.sink
+            .project()
+            .then((projected) =>
+              projected.filter(
+                (entry) =>
+                  entry.daemonPromptId === PROMPT_ID &&
+                  entry.type === 'tool_result',
+              ),
+            );
+        expect(await owed()).toHaveLength(1);
+        expect(
+          (await owed())[0]!.message?.parts?.[0]?.functionResponse?.response,
+        ).toMatchObject({ executionStatus: 'cancelled' });
+        expect(
+          (await readHostedFileHistory(replacement))?.pendingTurn,
+        ).toBeNull();
+        await settleInterruptedTurnRuntime({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          toolProfile: true,
+        });
+        expect(await owed()).toHaveLength(1);
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
+
+  it('expires an unanswered approval the interrupted owner stopped timing', async () => {
+    // R6 P1: the original waiter's expiry timer died with the Harness, so
+    // a still-requested Action whose durable deadline already passed must
+    // expire here — a still-live deadline keeps holding.
+    await parkAtAwaitAction(Date.now() - 1_000);
+    const replacement = await open('boot-2', false);
+    try {
+      const runtime = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: true,
+      });
+      expect(runtime.kind).toBe('ready');
+      expect(replacement.authority.action(ACTION_ID)?.state).toBe('expired');
+      if (runtime.kind !== 'ready') throw new Error('expected a ready verdict');
+      expect(runtime.broker?.runtimeSessionId).toBe(PROMPT_ID);
+      // The abandoned call meets the same cancelled response the other
+      // endings write.
+      const response = (await replacement.sink.project())
+        .filter(
+          (entry) =>
+            entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+        )
+        .flatMap((entry) => entry.message?.parts ?? [])
+        .map((part) => part.functionResponse)
+        .find(Boolean);
+      expect(response?.response).toMatchObject({
+        executionStatus: 'cancelled',
+      });
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('holds an unanswered approval whose deadline still lives', async () => {
+    await parkAtAwaitAction(Date.now() + 3_600_000);
+    const replacement = await open('boot-2', false);
+    try {
+      await expect(
+        settleInterruptedTurnRuntime({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          toolProfile: true,
+        }),
+      ).resolves.toEqual({ kind: 'held' });
+      expect(replacement.authority.action(ACTION_ID)?.state).toBe('requested');
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('clears the pending marker on a retry that already left the wait', async () => {
+    // First attempt stopped and settled the executions, then died before
+    // the history cleanup: the retry's checkpoint is already results_ready,
+    // and dropping the marker must not depend on the durable wait still
+    // being there (R4 P1 retry arm).
+    await parkAtAwaitRuntime('write_file', true);
+    const replacement = await open('boot-2', false);
+    try {
+      await settleParkedTurnCancelled({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+      });
+      const settledAuthorization =
+        await replacement.authority.harnessRunAuthorization();
+      expect(
+        settledAuthorization.status === 'runnable' &&
+          settledAuthorization.checkpoint.continuation.phase,
+      ).toBe('results_ready');
+      await commitHostedFileHistory(replacement, {
+        schemaVersion: 1,
+        state: { ownerSessionId: SESSION_ID, snapshots: [], files: {} },
+        pendingTurn: PROMPT_ID,
+        pendingUndo: null,
+      });
+      const status = vi.spyOn(HostedWorkspaceBroker.prototype, 'status');
+      const runtime = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: true,
+      });
+      expect(runtime.kind).toBe('ready');
+      if (runtime.kind !== 'ready') throw new Error('expected a ready verdict');
+      // The retry owes the handback too, or exactly this shape re-leaks
+      // the Workspace (R8 P1).
+      expect(runtime.broker?.runtimeSessionId).toBe(PROMPT_ID);
+      expect(status).not.toHaveBeenCalled();
+      expect(
+        (await readHostedFileHistory(replacement))?.pendingTurn,
+      ).toBeNull();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('hands the runtime back for a turn that died before its checkpoint bound its identity (F13)', async () => {
+    // The acquire-first window: the tool owned the Workspace before any
+    // checkpoint named the turn — a file-history marker is the durable
+    // trace, and a release against a never-acquired session only ever
+    // answers 404, which the caller already tolerates.
+    const session = await open('boot-1', true);
+    const harness = createManagedHarnessHandle(session);
+    const authority = session.authority;
+    const contentRef = await session.resources.publish(
+      'managed-input',
+      Buffer.from(JSON.stringify([{ type: 'text', text: 'write a file' }])),
+    );
+    const admissionRef = await session.resources.publish(
+      'managed-admission',
+      Buffer.from(JSON.stringify({ promptId: PROMPT_ID, digest: 'x' })),
+    );
+    await authority.submitInput(
+      {
+        operation: 'submitInput',
+        commandId: PROMPT_ID,
+        sessionKey: authority.sessionHeader.sessionKey,
+        contentDigest: DIGEST,
+      },
+      {
+        inputId: PROMPT_ID,
+        turnId: PROMPT_ID,
+        source: 'hosted-harness',
+        contentRef,
+        admissionRef,
+        deadline: null,
+        wakeReason: 'input',
+      },
+    );
+    await harness.ensureRunnable();
+    // The turn answered with its call and died while acquiring the
+    // Workspace — before a checkpoint could name it.
+    await session.sink.write({
+      uuid: 'assistant-1',
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: new Date().toISOString(),
+      type: 'assistant',
+      cwd: root,
+      version: 'hosted-harness/1',
+      daemonPromptId: PROMPT_ID,
+      message: {
+        role: 'assistant',
+        parts: [
+          {
+            functionCall: {
+              id: 'call-1',
+              name: 'write_file',
+              args: { file_path: '0.txt', content: 'x' },
+            },
+          },
+        ],
+      },
+    });
+    await commitHostedFileHistory(session, {
+      schemaVersion: 1,
+      state: { ownerSessionId: SESSION_ID, snapshots: [], files: {} },
+      pendingTurn: PROMPT_ID,
+      pendingUndo: null,
+    });
+    await session.close();
+    resetManagedRuntimeDispatchGatesForTest();
+    const replacement = await open('boot-2', false);
+    try {
+      const runtime = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: false,
+      });
+      expect(runtime.kind).toBe('ready');
+      if (runtime.kind !== 'ready') throw new Error('expected a ready verdict');
+      expect(runtime.broker?.runtimeSessionId).toBe(PROMPT_ID);
+      expect(
+        (await readHostedFileHistory(replacement))?.pendingTurn,
+      ).toBeNull();
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('hands the runtime back when the settlement itself split across attempts', async () => {
+    // The F9 retry shape, verbatim: the first call advanced the wait and
+    // died inside the answer writes; the second one's checkpoint is no
+    // longer await_action, so the handback must not be keyed on the phase
+    // (R8 P1). The cancelled response is written exactly once.
+    await parkAtAwaitAction();
+    const replacement = await open('boot-2', false);
+    try {
+      await endAction(replacement, 'decided');
+      const writes = vi.spyOn(replacement.sink, 'write');
+      writes.mockRejectedValueOnce(new Error('store flap'));
+      await expect(
+        settleInterruptedTurnRuntime({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          toolProfile: true,
+        }),
+      ).rejects.toThrow('store flap');
+      const mid = await replacement.authority.harnessRunAuthorization();
+      expect(
+        mid.status === 'runnable' && mid.checkpoint.continuation.phase,
+      ).toBe('model_output_committed');
+      writes.mockRestore();
+      const runtime = await settleInterruptedTurnRuntime({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        brokerOptions,
+        toolProfile: true,
+      });
+      expect(runtime.kind).toBe('ready');
+      if (runtime.kind !== 'ready') throw new Error('expected a ready verdict');
+      expect(runtime.broker?.runtimeSessionId).toBe(PROMPT_ID);
+      const owed = (await replacement.sink.project()).filter(
+        (entry) =>
+          entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+      );
+      expect(owed).toHaveLength(1);
     } finally {
       await replacement.close();
     }
