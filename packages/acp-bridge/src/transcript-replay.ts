@@ -17,6 +17,7 @@ import type {
 // Use the Node-free transcriptRecords subpath so the browser replay bundle
 // does not pull in the full core package barrel.
 import {
+  isInternalCodeModeToolResult,
   projectUserTranscriptForDisplay,
   stripGeneratedAttachmentTokens,
   type TranscriptProjectionDiagnostic,
@@ -555,6 +556,7 @@ export function createTranscriptUsageUpdate(
  * worse than one that shows none.
  */
 export interface TranscriptTimingMeta {
+  readonly executionId?: string;
   readonly kind: 'request' | 'tool';
   /**
    * Epoch ms. A request is logged when its stream ends, so its start time is
@@ -716,6 +718,9 @@ function parseTelemetryTiming(
   return {
     kind: 'request',
     ...shared,
+    ...(nonEmptyString(uiEvent['execution_id']) !== undefined
+      ? { executionId: nonEmptyString(uiEvent['execution_id']) }
+      : {}),
     ...(endMs !== undefined ? { startedAt: endMs - durationMs } : {}),
     status: eventName === EVENT_API_RESPONSE ? 'ok' : 'error',
     ...(ttftMs !== undefined && ttftMs >= 0 && ttftMs <= durationMs
@@ -984,7 +989,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         yield* this.projectAssistantRecord(record, emit, meta);
         break;
       case 'tool_result':
-        if (record.subtype !== 'code_mode_tool_result') {
+        if (!isInternalCodeModeToolResult(record)) {
           yield* this.projectToolResult(record, emit, meta);
         }
         break;

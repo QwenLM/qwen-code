@@ -236,6 +236,7 @@ import {
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
 import { createTrajectoryPageLoader } from './trajectory/transcriptPageLoader';
 import { WorkspacesOverviewPanel } from './components/workspaces/WorkspacesOverviewPanel';
+import { WorkspaceLocation } from './components/workspaces/WorkspaceLocation';
 import { SplitView } from './components/SplitView';
 import { ChevronLeftIcon, GaugeIcon, LayersIcon } from 'lucide-react';
 import type { PaneHeaderActionsRenderer } from './components/ChatPane';
@@ -271,6 +272,7 @@ import {
   getFileChangesByTurn,
   getScheduledTasksByTurn,
 } from './components/artifacts/turnOutputSelectors';
+import { artifactDisplayName } from './components/artifacts/artifactUtils';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
 import { usePrefersReducedMotion } from './hooks/usePrefersReducedMotion';
 import {
@@ -307,6 +309,10 @@ import { RewindDialog } from './components/dialogs/RewindDialog';
 import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
 import { WorkspaceAddStatusDialog } from './components/dialogs/WorkspaceAddStatusDialog';
 import { StandaloneContext } from './config/standalone';
+import {
+  WorkspaceHostsEnabled,
+  rememberWorkspaceHost,
+} from './config/workspace-hosts';
 import {
   addWorkspaceToDaemon,
   clearRemoteWorkspaceAddStep,
@@ -3769,6 +3775,23 @@ export function App({
     }
     return capabilityWorkspaces;
   }, [lockedWorkspaceCapability, workspace.capabilities?.workspaces]);
+  const workspaceHostsEnabled = useContext(WorkspaceHostsEnabled);
+  // Keep the connected host's saved project identities fresh so the sidebar
+  // can group local and remote projects and navigate back across hosts.
+  useEffect(() => {
+    if (!workspaceHostsEnabled || !workspace.capabilities?.workspaces) return;
+    rememberWorkspaceHost(
+      new URL(
+        workspace.baseUrl || window.location.origin,
+        window.location.origin,
+      ).origin,
+      workspace.capabilities.workspaces.filter((ws) => ws.kind !== 'live'),
+    );
+  }, [
+    workspaceHostsEnabled,
+    workspace.baseUrl,
+    workspace.capabilities?.workspaces,
+  ]);
   const ordinaryWorkspaces = useMemo(
     () => workspaces.filter((entry) => entry.kind !== 'live'),
     [workspaces],
@@ -5562,7 +5585,7 @@ export function App({
         id: `artifact:${artifactId}`,
         kind: 'artifact',
         artifactId,
-        title: artifact?.title ?? 'Artifact',
+        title: artifact ? artifactDisplayName(artifact) : 'Artifact',
         ...(connection.workspaceCwd
           ? { workspaceCwd: connection.workspaceCwd }
           : {}),
@@ -20775,6 +20798,11 @@ export function App({
                     </div>
                   ) : (
                     <ChatContextHeader
+                      location={
+                        workspaceHostsEnabled && mainView === 'chat' ? (
+                          <WorkspaceLocation cwd={connection.workspaceCwd} />
+                        ) : undefined
+                      }
                       content={
                         titleHeaderItemVisible
                           ? (sessionDisplayName ?? t('session.new'))

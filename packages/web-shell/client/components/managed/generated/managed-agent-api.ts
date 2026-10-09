@@ -59,7 +59,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description POST SSE consumed through fetch response.body. An afterSequence below the replay floor ends the stream with one agent.session.resync_required frame instead of a 409; reload the transcript and resume after its lastSequence. */
+        /** @description POST SSE consumed through fetch response.body. An afterSequence below the replay floor ends the stream with one agent.session.resync_required frame instead of a 409 only while the Snapshot backs the floor (replay_floor_sequence <= snapshot_through_sequence); a stream reconciliation discards the Snapshot without lowering the floor, and during that rebuild such a cursor is served from the retained events. On the resync frame, reload the transcript and resume after its lastSequence. */
         post: operations["webShellStreamEvents"];
         delete?: never;
         options?: never;
@@ -76,7 +76,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns and cancel its running Turns under the same opt-in, and may rename the Session, while the creator currently holds Workspace read and create grants on a registry row whose state is ACTIVE and the Session is an active, undeleted qwen-code Session on the frozen execution profile; Workspace close follows its separate close capability and lifecycle admission; archive and unarchive follow retention capabilities after reliable Workspace close; delete supports either L3 idle ACTIVE files Sessions or L2 CLOSED/ARCHIVED Sessions; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.32). The per-caller workspaceTurns capability on this surface advertises the same rule. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
+        /** @description Maps workspaceId/cwdRelative to public Workspace selection without using environmentId or absolute cwd. Shares G0's opt-in initial file-tool Turn admission and fixed server-owned profile with public Session creation. The Session creator may submit later Turns under the same opt-in with current read and create grants on the bound ACTIVE Workspace generation and storage. Cancellation of running work requires the creator’s read grant and the opt-in, even after create authority is revoked (a live cancel reuses the owner's resident Harness attachment; a cold connector cache passively re-attaches for a persisted cancellation after frozen identity checks, independently of current creation grants, registry state or mount readiness; new work still rechecks execution authority); Workspace close follows its separate close capability and lifecycle admission; archive and unarchive follow retention capabilities after reliable Workspace close; delete supports either L3 idle ACTIVE files Sessions or L2 CLOSED/ARCHIVED Sessions; controlled same-Workspace cwd changes ship through the durable cwd_change operations (v1.32). The per-caller workspaceTurns capability on this surface advertises current submit and rename admission; it does not gate cancellation. Freeze selection with the original idempotency key; admission does not prove physical directory readiness. */
         post: operations["webShellCreateSession"];
         delete?: never;
         options?: never;
@@ -530,10 +530,10 @@ export interface components {
             /** @default false */
             actions: boolean;
             /**
-             * @description True when the caller may submit later Turns of this Workspace-bound Session, cancel its running Turns and rename it: the deployment enables Workspace files, the caller created the Session and currently holds Workspace read and create grants on a registry row whose state is ACTIVE, and the Session is an active qwen-code Session on the frozen execution profile. False for every other caller and for unbound Sessions, which do not use it.
+             * @description True when the caller may submit later Turns of this Workspace-bound Session: the deployment enables Workspace files, the caller created the Session and currently holds Workspace read and create grants on a registry row whose state is ACTIVE and still carries the Workspace generation and storage identity the Session was bound to, and the Session is an active, undeleted qwen-code Session on the frozen execution profile. Cancelling only aborts work that is already running, so the creator may cancel a running Turn even when this is false, as long as they can still read the Workspace and the deployment still enables Workspace files. False for every other caller and for unbound Sessions, which do not use it.
              * @default false
              */
-            workspaceTurns?: boolean;
+            workspaceTurns: boolean;
             tasks: boolean;
             artifacts: boolean;
             /**

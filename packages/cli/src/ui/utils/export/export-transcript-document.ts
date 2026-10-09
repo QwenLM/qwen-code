@@ -16,6 +16,7 @@ import {
   type DaemonUserShellTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
 import { SchemaValidator } from '@qwen-code/qwen-code-core';
+import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
 import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
 import type { ExportSessionData } from './types.js';
 import exportTranscriptDocumentV1Schema from './export-transcript-document-v1.schema.json' with { type: 'json' };
@@ -403,15 +404,20 @@ function applyRecordExportPolicy(
       type === 'system' &&
       typeof subtype === 'string' &&
       VISIBLE_SYSTEM_RECORD_SUBTYPES.has(subtype);
+    const internalCodeModeToolResult = isInternalCodeModeToolResult(record);
     const visible =
       type === 'user' ||
       type === 'assistant' ||
-      type === 'tool_result' ||
+      (type === 'tool_result' && !internalCodeModeToolResult) ||
       acceptedSystemSubtype;
-    if (visible || type === 'system') {
+    if (visible || type === 'system' || internalCodeModeToolResult) {
       projectionRecords.push(record);
       const uuid = record['uuid'];
-      if (visible && typeof uuid === 'string') visibleRecordIds.add(uuid);
+      // The internal result projects no block of its own, but the replay
+      // machine stamps its uuid on the history-gap notice, which must survive.
+      if ((visible || internalCodeModeToolResult) && typeof uuid === 'string') {
+        visibleRecordIds.add(uuid);
+      }
       if (type === 'system' && !acceptedSystemSubtype) {
         diagnostics.add('record_internal_excluded', 'info');
       }

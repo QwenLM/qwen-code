@@ -331,6 +331,19 @@ class BrokerSecurityTest {
     }
 
     @Test
+    void refusesChannelsEnabledWithoutAnIsolatedInternalListener()
+            throws Exception {
+        ManagedAgentProperties properties = new ManagedAgentProperties();
+        properties.getChannels().setEnabled(true);
+        assertThatThrownBy(() -> security(properties, "127.0.0.1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("internal-server.port");
+        properties.getInternalServer().setPort(4183);
+        assertThatCode(() -> security(properties, "127.0.0.1"))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
     void refusesReusingTheSigningKeyAsTheBindingKey() throws Exception {
         ManagedAgentProperties properties = new ManagedAgentProperties();
         properties.getAuth().setMode("signed");
