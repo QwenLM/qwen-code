@@ -2919,6 +2919,26 @@ describe('Hosted Harness no-tool session', () => {
         );
       },
     );
+    // The consume's turn_result write gates the end of the settle: the
+    // classification, the adopt refusals, the cancelled-results commit
+    // and the release have all completed when it enters, so the order
+    // assertions read a settled sequence however fast the runner is —
+    // never the mid-flight of a blocked window that may already be gone.
+    const originalWrite = ManagedSessionRecordSink.prototype.write;
+    let releaseConsume!: () => void;
+    let consumeEntered = false;
+    const consuming = new Promise<void>((resolve) => {
+      releaseConsume = resolve;
+    });
+    vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+      function (this: ManagedSessionRecordSink, record) {
+        if (record.type === 'system' && record.subtype === 'turn_result') {
+          consumeEntered = true;
+          return consuming.then(() => originalWrite.call(this, record));
+        }
+        return originalWrite.call(this, record);
+      },
+    );
     const server = await app(true);
     const loaded = await headers(
       supertest(server).post(`/session/${SESSION_ID}/load`),
@@ -2926,18 +2946,18 @@ describe('Hosted Harness no-tool session', () => {
     expect(loaded.status).toBe(200);
     const authorize = (request: supertest.Test) =>
       headers(request).set('X-Qwen-Client-Id', loaded.body.clientId as string);
-    // The classification's block is the verified starting point: only
-    // after it does the aftermath run, so the order assertions below
-    // read a settled, complete sequence, never one mid-flight.
     await vi.waitFor(
-      async () => {
-        const status = await authorize(
-          supertest(server).get(`/session/${SESSION_ID}/status`),
-        );
-        expect(status.body.recoveryBlocked).toBe(true);
+      () => {
+        expect(consumeEntered).toBe(true);
       },
       { timeout: 15_000 },
     );
+    // One pass: the refused adopt stops nothing, the release block's own
+    // adopt tolerates the same 409, and the explicit release completes
+    // it. A single poll would have met the 404 above and wedged the
+    // Session behind a read that can never answer.
+    expect(repair.order).toEqual(['acquire', 'acquire', 'release']);
+    releaseConsume();
     await vi.waitFor(
       async () => {
         const status = await authorize(
@@ -2947,11 +2967,6 @@ describe('Hosted Harness no-tool session', () => {
       },
       { timeout: 15_000 },
     );
-    // One pass: the refused adopt stops nothing, the release block's own
-    // adopt tolerates the same 409, and the explicit release completes
-    // it. A single poll would have met the 404 above and wedged the
-    // Session behind a read that can never answer.
-    expect(repair.order).toEqual(['acquire', 'acquire', 'release']);
     const key = {
       tenantId: 'tenant',
       workspaceId: 'workspace',
