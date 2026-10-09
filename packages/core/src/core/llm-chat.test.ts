@@ -11907,6 +11907,14 @@ describe('LlmChat', async () => {
       await sendDrain([result()], 'second');
       expect(resultChars(1)).toBeLessThan(20_000);
       expect(resultChars(1)).toBeLessThan(12_000);
+      // The destroyed middle chars are only worth it if the shrink buys
+      // admission: the send the model receives has to estimate below the auto
+      // trigger. Asserted here only — in the floor band the budget may
+      // legitimately overshoot and the send crosses `auto` anyway.
+      expect(
+        vi.mocked(chat.tryCompress).mock.calls.at(-1)?.[3]
+          ?.precomputedEffectiveTokens,
+      ).toBeLessThan(850_000);
     });
 
     it('leaves results alone when the session is far from auto-compaction', async () => {
