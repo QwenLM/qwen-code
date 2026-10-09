@@ -256,6 +256,12 @@ const WRITE_SCENARIOS: WriteScenario[] = [
       await type(ptyProcess, 'Remember the repository policy.');
       await type(ptyProcess, '\r');
 
+      // A PreToolUse 'ask' joins the tool's normal approval as one merged
+      // confirmation: the hook's literal content heads the dialog regardless
+      // of approval mode, and approving it also admits the MCP call. All
+      // waits are screen-based, not rig.waitForText: OpenTUI emits pty bytes
+      // by cell diff and drops spaces over previously-blank cells, so
+      // multi-word rows never appear verbatim in the raw stream on that leg.
       if (scenario.verifiesLongConfirmation) {
         const constrainedScreen = await waitForScreen(
           screen,
