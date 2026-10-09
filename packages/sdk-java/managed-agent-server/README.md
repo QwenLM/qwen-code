@@ -836,7 +836,6 @@ Workspace, while the Session's creator-keyed execution facts hold, under the G0 
 described above has landed; public Workspace resume still requires
 product-route integration, and this internal guard is not a public resume
 capability yet.
-integration, and this internal guard is not a public resume capability yet.
 
 Build the container from the repository root:
 
