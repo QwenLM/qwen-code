@@ -121,9 +121,65 @@ describe('TrailingThinkingTagFilter', () => {
     expect(released.parse(padded(117), false, false)).toBe(padded(117));
   });
 
-  it('ignores the cap on the final call', () => {
-    expect(run(['Answer.\n</thinking>' + ' '.repeat(200)])).toBe('Answer.');
+  it('preserves over-cap suffixes consistently at every framing', () => {
+    const inputs = [
+      'Answer.\n' + ' '.repeat(200) + '</thinking>',
+      'Answer.\n</thinking>' + ' '.repeat(200),
+      'Answer.\n</thinking>\n' + ' '.repeat(200),
+    ];
+    for (const input of inputs) {
+      expect(run([input])).toBe(input);
+      expect(run(byChar(input))).toBe(input);
+    }
+    expect(run(['Answer.\n</thinking>'])).toBe('Answer.');
   });
+
+  it('preserves HTML and XML markup while controlling an ordinary orphan', () => {
+    const inputs = [
+      'Example:\n<div>\n</thinking>',
+      'Example:\n<th colspan="2">\n</thinking>',
+      'Example:\n<th' + ' '.repeat(200) + 'colspan="2">\n</thinking>',
+      'Example:\n</div>\n</thinking>',
+      'Example:\n<!--\n</thinking>',
+      'Example:\n<?xml\n</thinking>',
+      'Example:\n<![CDATA[\n</thinking>',
+    ];
+    for (const input of inputs) {
+      expect(run([input])).toBe(input);
+      expect(run(byChar(input))).toBe(input);
+    }
+    expect(run(['Answer.\n</thinking>'])).toBe('Answer.');
+  });
+
+  it.each([
+    ['<t', '<t'],
+    ['<th', '<th'],
+    ['<thi', '<thi'],
+    ['<thin', '<thin'],
+    ['<thinki', '<thinki'],
+    ['<thinkin', '<thinkin'],
+  ])(
+    'leaves an unresolved thinking opener available to quarantine: %s',
+    (prefix, expected) => {
+      expect(run([prefix, '\n</thinking>'])).toBe(expected);
+    },
+  );
+
+  it.each(['<think', '<thinking'])(
+    'keeps a complete thinking opener literal before a closing tag: %s',
+    (prefix) => {
+      expect(run([prefix, '\n</thinking>'])).toBe(`${prefix}\n</thinking>`);
+    },
+  );
+
+  it.each(['Answer~ ~~', 'Answer.< a'])(
+    'preserves marker separation across chunks: %s',
+    (answer) => {
+      const input = `${answer}\n</thinking>`;
+      expect(run([input])).toBe(answer);
+      expect(run(byChar(input))).toBe(answer);
+    },
+  );
 
   it('keeps a repeated closer however the deltas were cut', () => {
     // One-shot is the reference; the earlier closer lands at index 0 in the

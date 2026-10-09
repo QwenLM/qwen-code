@@ -5,8 +5,13 @@
  */
 
 const CLOSING_TAG_LINE = /\r?\n[ \t]*<\/(think|thinking)[ \t]*>[ \t\r\n]*$/i;
-/** An already-released closer, matched anywhere rather than only at line end. */
-const CLOSING_TAG_INLINE = /<\/(?:think|thinking)[ \t]*>/i;
+/** Any already-released closing markup makes later suffix removal ambiguous. */
+const RELEASED_CLOSING_MARKUP = /<\//;
+// The converter quarantines unresolved thinking-tag prefixes. Keep those
+// prefixes available to that quarantine logic; complete `<think` or
+// `<thinking` markup retains the existing literal-content behavior.
+const LITERAL_OPENING_MARKUP =
+  /<(?!(?:t|th|thi|thin|thinki|thinkin)\s*(?=<|$)|think(?=$)|thinking(?=$))[a-z!?]/i;
 const MAX_PENDING_LENGTH = 128;
 /**
  * Rolling window over released text. Wide enough to hold a closer split
@@ -32,10 +37,8 @@ export class TrailingThinkingTagFilter {
     // Bare closing tags are ambiguous in code or tagged examples. Keep those
     // answers verbatim rather than guessing which occurrence was intentional.
     this.literalContent ||=
-      /`|~{3}|<think(?:ing)?(?:\s|>)|<(?:pre|textarea|script|style)(?:\s|>)/i.test(
-        markers,
-      );
-    this.markerTail = markers.slice(-12);
+      /`|~{3}/.test(markers) || LITERAL_OPENING_MARKUP.test(markers);
+    this.markerTail = markers.replace(/\s+$/, ' ').slice(-12);
     for (const character of text) {
       if (character === '\n') {
         this.previousLineBlank = this.currentLineBlank;
@@ -86,18 +89,18 @@ export class TrailingThinkingTagFilter {
       candidateStart >= 0
         ? this.pending.slice(0, candidateStart)
         : this.pending;
-    // An earlier, already nonterminal closer makes a later identical suffix
-    // ambiguous. The closer can straddle a release boundary, so test it over
+    // Earlier, already-released closing markup makes a later suffix
+    // ambiguous. The markup can straddle a release boundary, so test it over
     // a cumulative view of what this filter has handed over plus this call's
     // prefix -- never the withheld candidate itself.
-    this.literalContent ||= CLOSING_TAG_INLINE.test(this.emittedTail + prefix);
+    this.literalContent ||= RELEASED_CLOSING_MARKUP.test(
+      this.emittedTail + prefix,
+    );
     const eligible =
       !this.literalContent &&
       candidateStart >= 0 &&
       (this.hasVisibleText || /\S/.test(prefix)) &&
-      // Only a still-open stream needs the bound; on the last call the whole
-      // tail is known, so a whitespace-padded tag still has to be caught.
-      (final || this.pending.length - candidateStart <= MAX_PENDING_LENGTH);
+      this.pending.length - candidateStart <= MAX_PENDING_LENGTH;
     if (eligible && (!final || (completed && closing))) {
       if (final && closing) {
         this.sanitizedTagName = closing[1]!.toLowerCase() as
@@ -115,7 +118,9 @@ export class TrailingThinkingTagFilter {
     // This release hands back a region the latch above never saw (the eligible
     // branch only sees `prefix`), so a complete closer here has to arm it too:
     // otherwise the same bytes keep or lose their final closer by framing.
-    this.literalContent ||= CLOSING_TAG_INLINE.test(this.emittedTail + result);
+    this.literalContent ||= RELEASED_CLOSING_MARKUP.test(
+      this.emittedTail + result,
+    );
     this.hasVisibleText ||= /\S/.test(result);
     this.noteReleased(result);
     return result;
