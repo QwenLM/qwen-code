@@ -3562,9 +3562,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant) {
         if (JdbcCsiFilesRetirementGuard.isProfile(context.binding().getRequest().getScope())
-                && (payload == null || !Set.of("read_file", "write_file", "edit").contains(String.valueOf(payload.get("toolName"))) || grant != null)) {
+                && (!(bindingRepository instanceof JdbcRuntimeBindingRepository)
+                        || payload == null || !Set.of("read_file", "write_file", "edit").contains(String.valueOf(payload.get("toolName"))) || grant != null)) {
             throw new RuntimeBrokerException(501, "csi_file_dispatch_unavailable",
-                    "Private CSI dispatch requires an original finite file payload.", false);
+                    "Private CSI dispatch requires original JDBC authorization and a finite file payload.", false);
         }
         if (!prepared.isCancelRequested()) {
             bindingRepository.requireHarnessAdmission(context.session().getScope(), context.session().getHarnessSessionId(), null);

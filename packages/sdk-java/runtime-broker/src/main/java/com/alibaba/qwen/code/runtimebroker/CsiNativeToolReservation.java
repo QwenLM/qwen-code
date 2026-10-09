@@ -584,5 +584,9 @@ final class CsiNativeToolReservation {
             this.commandId = commandId;
             this.inlineOnly = inlineOnly;
         }
+
+        String kind() {
+            return ref.path("kind").textValue();
+        }
     }
 }

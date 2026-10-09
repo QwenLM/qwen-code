@@ -311,7 +311,7 @@ public final class JdbcToolExecutionRepository
                 updateExecution(connection, unknown);
                 return null;
             }
-            if (continuation != null) {
+            if (continuation != null && !continuation.legacy()) {
                 JdbcCsiExecutionAdmission.requireDispatch(connection, continuation.original(), current);
             }
             ToolExecutionRecord claimed = current.withDispatch(ownerId,
@@ -485,8 +485,14 @@ public final class JdbcToolExecutionRepository
         var runtime = JdbcRuntimeSessionRepository.selectSession(connection, original.request().getScope(),
                 hint.getRuntimeSessionId(), true);
         original.requireSession(runtime);
-        JdbcCsiExecutionAdmission.verifyRelated(connection, original);
-        return new CsiContinuation(original, seal, runtime);
+        var continuation = new CsiContinuation(original, seal, runtime, JdbcCsiExecutionAdmission.legacyReference(hint));
+        continuation.require(hint);
+        if (continuation.legacy()) {
+            JdbcCsiExecutionAdmission.requireLegacyContinuation(connection, original);
+        } else {
+            JdbcCsiExecutionAdmission.verifyRelated(connection, original);
+        }
+        return continuation;
     }
 
     private static boolean running(ToolExecutionRecord current) {
@@ -500,13 +506,14 @@ public final class JdbcToolExecutionRepository
     }
 
     private record CsiContinuation(JdbcCsiFilesRetirementGuard.Original original, Long sealedBindingVersion,
-            RuntimeSessionRecord runtime) {
+            RuntimeSessionRecord runtime, boolean legacy) {
         void require(ToolExecutionRecord execution) {
             JdbcCsiActivationAdmission.requireExecution(original, execution);
             RuntimeAdmission.requireSession(runtime, execution);
             if (!"deferred".equals(execution.getReference().get("dispatchMode"))
-                    || !execution.getReference().keySet().equals(Set.of("dispatchMode", "sessionId", "promptId", "callId", "argsDigest",
-                            "batchId", "functionCallId", "partIndex", "ordinal", "inputRef", "toolDefinitionRef"))
+                    || !(legacy ? JdbcCsiExecutionAdmission.legacyReference(execution)
+                            : execution.getReference().keySet().equals(Set.of("dispatchMode", "sessionId", "promptId", "callId", "argsDigest",
+                                    "batchId", "functionCallId", "partIndex", "ordinal", "inputRef", "toolDefinitionRef")))
                     || !execution.getRequestDigest().matches("sha256:[0-9a-f]{64}")) {
                 throw csiContinuationUnavailable();
             }

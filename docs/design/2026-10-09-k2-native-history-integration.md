@@ -822,3 +822,26 @@ prove concurrent READ COMMITTED/warmed REPEATABLE READ races. Fresh Linux CSI,
 target-cluster qualification, genuine cold takeover, all-writer closure,
 aggregate DRAINED, trusted physical stop/NodeUnpublish, RELEASED and safe reuse
 remain open. Native review and maintainer scope review remain pending.
+
+### 7.3 Final-check refusal and historical-continuation boundaries
+
+The full Broker check reproduces a refusal regression: an in-memory repository
+can authorize the private finite payload through generic dispatch. Preserve the
+existing negative test and refuse that path before claim. Private dispatch must
+use the original JDBC native authorization; a finite tool name alone cannot
+select or authorize it.
+
+The explicit Agent gate also reproduces a historical-continuation regression:
+unconditional native inventory validation rejects old resource-free records
+before renewal, cancellation or settlement. Keep the existing original
+parent, Session, live lease, owner/generation, authorization-marker and immutable
+seal checks. A separate historical branch requires the complete locked related
+execution set, including terminal members, to retain exactly the old five-field
+reference and null SQL native grant. The original prefix must have no batches,
+intents, receipts or file history, and the resource inventory must contain no
+native input, declaration, outcome or file-history resource. New authorization
+on this branch remains refused. A peer native grant/reference or native resource
+blocks it without changing the original execution; removing native reference
+fields cannot qualify a downgrade. Native continuation retains full original
+membership and immutable-grant validation. These historical fixtures qualify
+continuation fences only, not native execution or cold takeover.

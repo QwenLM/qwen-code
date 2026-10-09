@@ -630,3 +630,20 @@ Linux mount/fd mapping、确定性模型 SSE 和 MockMvc HTTP/transaction adapte
 REPEATABLE READ 竞争。新的 Linux CSI、目标集群资格、真正 cold takeover、
 全部 writer 收口、聚合 DRAINED、可信物理 stop/NodeUnpublish、RELEASED 和安全
 复用仍开放；原生 review 和 maintainer 范围审查仍待完成。
+
+### 7.3 最终检查发现的拒绝与历史续接边界
+
+完整 Broker 检查复现一处拒绝边界回归：内存 repository 能通过通用 dispatch 授权
+私有有限 payload。保留既有负例，在 claim 前拒绝该路径。私有 dispatch 必须使用
+原始 JDBC native 授权；有限 tool 名称本身不能选择或授权它。
+
+显式 Agent gate 也复现一处历史续接回归：无条件 native inventory 校验在续约、取消
+或结算前拒绝旧 resource-free 记录。保留原始 parent、Session、live lease、
+owner/generation、authorization marker 和不可变 seal 检查。独立历史分支要求
+完整锁定关联执行集合，包括 terminal 成员，都保留确切旧五字段 reference，且 SQL
+native grant 为空。原始 prefix 不得有 batch、intent、receipt 或 file history；
+resource inventory 不得有原生 input、declaration、outcome 或 file-history resource。
+该分支的新授权继续拒绝。关联成员的 native grant/reference 或 native resource
+阻断此分支，原始执行不变；删去 native reference 字段不能取得降级资格。原生续接
+保留完整原始成员和不可变 grant 校验。这些历史 fixture 只验证续接边界，不证明
+原生执行或 cold takeover。

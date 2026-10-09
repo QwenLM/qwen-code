@@ -698,6 +698,10 @@ public final class JdbcRuntimeBindingRepository
             RuntimeAdmission.requireSession(jdbcSessions.findByIdForUpdate(
                     connection, binding.getRequest().getScope(), expected.getRuntimeSessionId()), expected);
             if (original != null) {
+                if (JdbcCsiExecutionAdmission.legacyReference(expected)) {
+                    throw new RuntimeBrokerException(501, "csi_file_dispatch_unavailable",
+                            "Historical CSI continuation cannot mint a native grant.", false);
+                }
                 return JdbcCsiExecutionAdmission.authorize(connection, original, binding, expected, owner, dispatchGeneration);
             }
             return JdbcToolExecutionRepository.authorizeDispatch(connection, expected,

@@ -23,6 +23,41 @@ public final class JdbcCsiExecutionAdmission {
     private JdbcCsiExecutionAdmission() {
     }
 
+    static boolean legacyReference(ToolExecutionRecord execution) {
+        return execution.getReference().keySet().equals(java.util.Set.of(
+                "dispatchMode", "sessionId", "promptId", "callId", "argsDigest"));
+    }
+
+    static void requireLegacyContinuation(Connection connection, JdbcCsiFilesRetirementGuard.Original original) throws SQLException {
+        var head = JdbcCsiActivationAdmission.lockNativeHead(connection, original);
+        var prefix = head.prefix();
+        require(prefix.batches().isEmpty() && prefix.intents().isEmpty() && prefix.receipts().isEmpty()
+                && prefix.fileHistory() == null);
+        for (var resource : CsiNativeToolReservation.inventory(connection, original).values()) {
+            require(!java.util.Set.of("managed-tool-input", "managed-tool-definition", "managed-tool-outcome", "managed-file_history")
+                    .contains(resource.kind()));
+        }
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT * FROM qwen_tool_execution WHERE binding_id = ? OR harness_session_id = ? OR runtime_session_id = ?"
+                        + " ORDER BY execution_call_id_hash LIMIT 4097 FOR UPDATE")) {
+            statement.setQueryTimeout(10);
+            statement.setString(1, original.bindingId());
+            statement.setString(2, original.request().getIsolationKey());
+            statement.setString(3, original.request().getIsolationKey());
+            try (ResultSet rows = statement.executeQuery()) {
+                int count = 0;
+                while (rows.next()) {
+                    require(++count <= 4096 && rows.getString("native_authorization_json") == null);
+                    var execution = JdbcToolExecutionRepository.mapExecution(rows);
+                    JsonNode stored = CsiNativeActivationProof.readObject(CsiNativeActivationProof.utf8(rows.getString("reference_json")));
+                    require(legacyReference(execution) && canonical(stored).equals(canonical(JSON.valueToTree(execution.getReference()))));
+                    JdbcCsiActivationAdmission.requireExecution(original, execution);
+                }
+            }
+        }
+        head.requireCurrentTime(connection);
+    }
+
     static void verifyRelated(Connection connection, JdbcCsiFilesRetirementGuard.Original original) throws SQLException {
         var head = JdbcCsiActivationAdmission.lockNativeHead(connection, original);
         var members = CsiNativeToolReservation.complete(connection, original, head.prefix(), CsiNativeToolReservation.inventory(connection, original));

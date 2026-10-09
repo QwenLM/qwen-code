@@ -824,6 +824,53 @@ class WorkspaceCsiNativeActivationGate {
     }
 
     @Test
+    void historicalContinuationCannotIgnoreNativePeerGrantOrReference() throws Exception {
+        ready();
+        var original = seedHistoricalExecuting(seedHistorical("legacy-original"));
+        var peer = seedHistorical("legacy-peer");
+        for (boolean grant : List.of(true, false)) {
+            if (grant) {
+                jdbc.update("UPDATE qwen_tool_execution SET native_authorization_json = '{}' WHERE execution_call_id = ?",
+                        peer.getExecutionCallId());
+            } else {
+                var changed = new java.util.LinkedHashMap<>(peer.getReference());
+                changed.put("batchId", UUID.randomUUID().toString());
+                jdbc.update("UPDATE qwen_tool_execution SET reference_json = ? WHERE execution_call_id = ?",
+                        JSON.writeValueAsString(changed), peer.getExecutionCallId());
+            }
+            var before = authorityRows();
+            rejected(() -> executions.renewDispatch(original.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120)),
+                    "csi_native_execution_unavailable");
+            assertThat(authorityRows()).isEqualTo(before);
+            jdbc.update("UPDATE qwen_tool_execution SET native_authorization_json = NULL, reference_json = ?"
+                            + " WHERE execution_call_id = ?", JSON.writeValueAsString(peer.getReference()), peer.getExecutionCallId());
+        }
+        assertThat(executions.renewDispatch(original.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120))).isNotNull();
+    }
+
+    @Test
+    void historicalContinuationCannotDowngradeNativeExecutionResources() throws Exception {
+        ready();
+        var original = seedHistoricalExecuting(seedHistorical("legacy-original"));
+        for (String kind : List.of("managed-tool-input", "managed-tool-definition", "managed-tool-outcome", "managed-file_history")) {
+            String id = UUID.randomUUID().toString();
+            byte[] bytes = "{}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            jdbc.update("INSERT INTO qwen_managed_session_resource"
+                            + " (session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version,"
+                            + " byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, created_at)"
+                            + " SELECT session_scope_key, tenant_id, workspace_id, session_id, ?, ?, 1, 2, ?, 'INLINE', ?, ?, 'STAGED', created_at"
+                            + " FROM qwen_managed_session_resource ORDER BY resource_id LIMIT 1",
+                    id, kind, CsiNativeActivationProof.sha256(bytes), bytes, id);
+            var before = authorityRows();
+            rejected(() -> executions.requestCancel(original.getExecutionCallId(), original.getVersion()),
+                    "csi_native_execution_unavailable");
+            assertThat(authorityRows()).isEqualTo(before);
+            assertThat(jdbc.update("DELETE FROM qwen_managed_session_resource WHERE resource_id = ?", id)).isEqualTo(1);
+        }
+        assertThat(executions.renewDispatch(original.getExecutionCallId(), "owner", 1, Duration.ofSeconds(120))).isNotNull();
+    }
+
+    @Test
     void expiredOriginalFencesUnknownWithoutRegrantOrReconciliation() throws Exception {
         ready();
         var executing = seedHistoricalExecuting(seedHistorical("expired"));
