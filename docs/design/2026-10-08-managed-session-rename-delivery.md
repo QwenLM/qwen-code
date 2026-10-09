@@ -10,7 +10,7 @@ A same-key sibling can fail while another request remains inside the Harness. Re
 
 A fresh rename checks Harness availability and title protocol support without attaching or sending a title before admission. A disabled or unsupported Harness creates no command or delivery and does not block lifecycle. Completed receipts still replay before these checks.
 
-The rename-delivery migration is V56, following main’s V53 Workspace role/Session owner, V54 child lineage and V55 channel binding migrations. It keeps the same table and delivery contract; the PR has not been merged with the earlier colliding number.
+The rename-delivery migration is V57, following main’s V53 Workspace role/Session owner, V54 child lineage, V55 channel binding and V56 operation actor-key migrations. It keeps the same table and delivery contract; the PR has not been merged with the earlier colliding number.
 
 Unicode-whitespace-only titles are rejected before admission using the Harness blank-title contract. A named private `409 session_mutation_superseded` remains that public conflict rather than becoming a retryable dependency failure. Rename replay probes and the first delivery read do not lock missing index entries; tenant and Session locks still serialize admission.
 
