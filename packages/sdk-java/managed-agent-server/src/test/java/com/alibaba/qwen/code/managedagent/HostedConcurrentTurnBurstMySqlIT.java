@@ -502,6 +502,11 @@ class HostedConcurrentTurnBurstMySqlIT {
         }
 
         @Override
+        public boolean supportsFencedTitles() {
+            return true;
+        }
+
+        @Override
         public void rename(String tenantId, String sessionId, String title, long revision) {
             rename(tenantId, sessionId, title);
         }

@@ -124,6 +124,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsFencedTitles() {
+        try {
+            return client().capabilities().getTitleProtocolVersion() == 1;
+        } catch (com.alibaba.qwen.code.daemon.DaemonException
+                | IllegalStateException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
     public boolean supportsLifecycle() {
         if (!isWorkspaceFilesAvailable()) {
             return false;

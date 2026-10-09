@@ -14,6 +14,8 @@ public interface HarnessConnector extends AutoCloseable {
 
     default boolean supportsLifecycle() { return false; }
 
+    default boolean supportsFencedTitles() { return false; }
+
     default JsonNode settleLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted lifecycle is unavailable");
     }

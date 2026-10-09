@@ -8,11 +8,13 @@ A same-key sibling can fail while another request remains inside the Harness. Re
 
 ## Ordering and retry contract
 
+A fresh rename checks Harness availability and title protocol support without attaching or sending a title before admission. A disabled or unsupported Harness creates no command or delivery and does not block lifecycle. Completed receipts still replay before these checks.
+
 Admission takes the existing tenant and Session locks and atomically stores the latest title delivery. Its revision is a positive signed 64-bit counter scoped to that Session. A new key, or a retry of a FAILED key, gets a new revision. PENDING same-key retries reuse their revision. COMPLETED keys still answer from the public receipt before new-work admission. Different content or a different Session under the same key still conflicts.
 
 The private title request carries the revision as a decimal string. The Harness advertises title protocol version 1; the SDK refuses older implementations before sending the mutation. The final metadata write compares the persisted watermark inside the authority's existing serial journal transaction. Older revisions are refused. The durable command identity is stable per revision, so replay does not append another title. Ordinary title writers retain the watermark. A cold reopen reads the same committed metadata; the check does not depend on a Java replica's cache or a process-local lock.
 
-Public completion and failure cleanup compare the delivery's revision, key and Session scope. A late sibling cannot complete or retire a newer attempt. The original requested event stays unique; retries do not create another requested receipt.
+Public completion compares the delivery's revision, key and Session scope. Inline requests and recovery workers both claim the same delivery before remote I/O. A losing claimant neither sends nor retires the receipt. Failure cleanup additionally requires the exact current owner, RUNNING state and unexpired lease under the tenant and Session locks shared with takeover. A late or expired owner cannot retire the current claimant's command or a newer attempt. The original requested event stays unique; retries do not create another requested receipt.
 
 ## Recovery and lifecycle
 
@@ -20,9 +22,11 @@ The latest delivery survives process death and ambiguous transport failures. Ava
 
 An empty Session's first rename creates its Harness journal under the normal creation authority. If creation conflicts or its result is unknown, title delivery reloads passively for both bound and unbound Sessions, even before the public attachment boot has been saved. This recovers a first title whose private commit succeeded but whose reply was lost.
 
+Workspace migration also counts every unfinished title delivery in its tenant/storage idle gate, even when the public command is FAILED or the delivery lease expired. It cannot install a migration fence while recovery can still write the title.
+
 Close, archive, delete and cwd changes refuse admission while a title delivery remains unfinished. A FAILED public command can still have an accepted remote write, so its delivery must finish before sealing or moving the Session. A fresh rename may supersede that delivery. Existing completed lifecycle receipts remain replayable.
 
-The two stores are not one transaction: titles may temporarily differ while delivery is pending or a dependency is unavailable. Recovery establishes eventual equality for the latest admitted attempt. A permanently unavailable Harness remains an external blocker; the server preserves the delivery rather than claiming completion.
+The two stores are not one transaction: titles may temporarily differ while delivery is pending or a dependency is unavailable. Recovery establishes eventual equality for the latest admitted attempt. A permanently unavailable Harness remains an external blocker; the server preserves the delivery rather than claiming completion. A protocol refusal after admission does not establish that an earlier attempt never wrote. Protocol errors after sending, including invalid reply fields, remain ambiguous and continue recovery; no retry cap discards them.
 
 ## Acceptance
 
@@ -31,6 +35,8 @@ The two stores are not one transaction: titles may temporarily differ while deli
 - Losing a reply after the latest remote commit is repaired by durable redelivery, with no second journal title record.
 - Completed public replay, changed-content rejection and tenant/Session isolation remain intact.
 - A closing or moving Session cannot strand unfinished title delivery; after delivery completes, lifecycle admission proceeds.
-- Disabled replicas leave delivery state and retry leases untouched.
+- Disabled replicas leave delivery state and retry leases untouched; fresh disabled/unsupported requests create no delivery.
+- Inline ownership prevents immediate peer claims; an expired owner cannot retire the replacement owner's receipt.
+- Workspace migration rejects unfinished title work independently of public receipt status.
 
 Verification uses focused Java/SDK and Core/Hosted route regressions plus a controlled real Spring/H2 + Node Harness transport probe. Scripted providers, H2 and fault injection are reported separately from real-model or production database coverage.

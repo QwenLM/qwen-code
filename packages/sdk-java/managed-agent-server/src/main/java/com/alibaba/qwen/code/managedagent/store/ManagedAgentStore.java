@@ -616,12 +616,13 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public void abandonSessionRename(String tenantId, String key, String sessionId, long revision) {
+    public void abandonSessionRename(String tenantId, String key, String sessionId, long revision, String owner) {
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenantId);
         requireSessionForUpdate(tenantId, sessionId);
         if (jdbc.queryForObject("SELECT COUNT(*) FROM managed_session_rename_delivery"
-                        + " WHERE tenant_id = ? AND session_id = ? AND revision = ? AND idempotency_key = ?",
-                Integer.class, tenantId, sessionId, revision, key) == 1) {
+                        + " WHERE tenant_id = ? AND session_id = ? AND revision = ? AND idempotency_key = ?"
+                        + " AND delivery_state = 'RUNNING' AND lease_owner = ? AND lease_until > ?",
+                Integer.class, tenantId, sessionId, revision, key, owner, clock.millis()) == 1) {
             abandonSessionMutation(tenantId, "RENAME_SESSION", key, sessionId);
         }
     }
@@ -637,6 +638,8 @@ public class ManagedAgentStore implements AgentStateStore {
     @Override
     @Transactional
     public Optional<RenameDelivery> claimRename(RenameDelivery delivery, String owner, Duration lease) {
+        WorkspaceMigrationAdmission.lockTenant(jdbc, delivery.tenantId());
+        requireSessionForUpdate(delivery.tenantId(), delivery.sessionId());
         long now = clock.millis();
         int claimed = jdbc.update("UPDATE managed_session_rename_delivery SET delivery_state = 'RUNNING',"
                         + " lease_owner = ?, lease_until = ?, attempt_count = attempt_count + 1"

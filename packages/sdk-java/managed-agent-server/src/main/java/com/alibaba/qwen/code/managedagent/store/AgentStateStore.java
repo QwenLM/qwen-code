@@ -75,7 +75,7 @@ public interface AgentStateStore {
             String sessionId, String title, String harnessBootId, long revision);
 
     void abandonSessionRename(String tenantId, String idempotencyKey,
-            String sessionId, long revision);
+            String sessionId, long revision, String owner);
 
     List<StoreModels.RenameDelivery> deliverableRenames(long now);
 

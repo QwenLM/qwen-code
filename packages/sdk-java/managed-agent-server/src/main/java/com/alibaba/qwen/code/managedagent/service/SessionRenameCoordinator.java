@@ -73,7 +73,7 @@ public class SessionRenameCoordinator {
                     delivery.title(), attachment.bootId(), delivery.revision());
         } catch (RuntimeException failure) {
             try {
-                store.abandonSessionRename(delivery.tenantId(), delivery.idempotencyKey(), delivery.sessionId(), delivery.revision());
+                store.abandonSessionRename(delivery.tenantId(), delivery.idempotencyKey(), delivery.sessionId(), delivery.revision(), owner);
             } catch (RuntimeException cleanupError) {
                 LOG.warn("Failed to retire Session title delivery session={}", delivery.sessionId(), cleanupError);
             }
