@@ -641,7 +641,7 @@ class ManagedCwdChangeOperationTest {
         assertFailed(fixture, revokedId, revokedOp, "workspace_unavailable");
     }
 
-    // V55: settlement re-checks the persisted initiator — an operation
+    // V56: settlement re-checks the persisted initiator — an operation
     // admitted before only its initiator's demotion fails with the W2
     // guard's own code, and the directory never moves; a demoted creator
     // hits the creator-keyed rung for the same outcome.

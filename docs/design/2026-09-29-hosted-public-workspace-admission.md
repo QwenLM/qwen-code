@@ -20,7 +20,7 @@ changes; the follow-up's only UI changes are enabling the creator's composer and
 its Cancel control.
 
 A follow-up (the actor-roles enforcement of
-`2026-10-07-managed-agent-actor-roles.md`, contract v1.36) admits later Turns
+`2026-10-07-managed-agent-actor-roles.md`, contract v1.37) admits later Turns
 for any caller holding OPERATOR on the bound Workspace under the same opt-in,
 while the Session's creator-keyed execution facts hold (the registry still
 backs the binding, state is ACTIVE, and the actor recorded by the Workspace

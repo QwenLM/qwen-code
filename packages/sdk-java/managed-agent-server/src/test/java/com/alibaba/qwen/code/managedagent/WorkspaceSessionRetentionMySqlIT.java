@@ -359,7 +359,7 @@ class WorkspaceSessionRetentionMySqlIT {
                 .containsEntry("result_context_revision", null)
                 .containsEntry("lifecycle_protocol_version", 0)
                 .containsEntry("lifecycle_effects_receipt_json", null)
-                // V55 grandfather: a pre-V55 operation settles on the
+                // V56 grandfather: a pre-V56 operation settles on the
                 // creator-keyed facts alone.
                 .containsEntry("actor_key", null);
         var properties = new ManagedAgentProperties();

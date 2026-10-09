@@ -12,7 +12,7 @@ import java.util.Set;
  * handler set is kept in exact bijection with these constants by
  * {@code SurfaceRegistryGateTest}, and today's per-route admission is pinned
  * by {@code SurfaceAdmissionAcceptanceTest}; rule flips towards the actor
- * roles land with contract v1.36 in slice C and change this file with them.
+ * roles land with contract v1.37 in slice C and change this file with them.
  *
  * <p>Rule classes name today's admission as implemented, after the design's
  * D5 vocabulary. Where a route's behaviour splits by Session kind (bound vs

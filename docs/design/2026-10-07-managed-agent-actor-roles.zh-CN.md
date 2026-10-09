@@ -112,11 +112,11 @@ owner 的更新路径（移交命令）是建在此列之上的后续切片，�
 
 所有重读授权的在线行为（SSE 读授权复查、artifact 流中重验、执行期 `authorizePassiveAttachment`）按 `role` 以相同阈值查询，撤销因此保持今天的含义。
 
-在绑定臂上，新工作 —— Turn 提交、改名与 cwd 变更 —— 还要额外担保 Session 的「创建者键」执行事实成立 —— Registry 仍精确支撑该绑定并处于 ACTIVE，且 Workspace 创建命令记录的 actor 保持 OPERATOR 及以上，因为被准入的工作以该 actor 的授权执行（执行授权复查的是同一条 join）。Turn 取消只凭 OPERATOR 角色与可执行形态准入，因为它的投递复用已准入的 attachment、不复查任何授权。每个绑定 Action 回答同样在准入时担保同一组创建者键事实，无论由哪条臂 —— 记录的 owner 还是 Workspace operator —— 准入。这些事实失效时按族给出域名级 `409 workspace_unavailable`，在准入时同步拒绝，而不是让一个注定失败的 Turn 异步落空。cwd 操作的结算同时复查记录的创建者键事实与 V55 持久化的发起者角色 —— 准入之后降级任何一个 actor 都以 `workspace_unavailable` 失败（V55 前的存量行没有发起者键，仍只按创建者键事实结算）；这正是 W2 设计「准入后撤销授权仍阻止变更」在放宽后的准入下应有的形态。
+在绑定臂上，新工作 —— Turn 提交、改名与 cwd 变更 —— 还要额外担保 Session 的「创建者键」执行事实成立 —— Registry 仍精确支撑该绑定并处于 ACTIVE，且 Workspace 创建命令记录的 actor 保持 OPERATOR 及以上，因为被准入的工作以该 actor 的授权执行（执行授权复查的是同一条 join）。Turn 取消只凭 OPERATOR 角色与可执行形态准入，因为它的投递复用已准入的 attachment、不复查任何授权。每个绑定 Action 回答同样在准入时担保同一组创建者键事实，无论由哪条臂 —— 记录的 owner 还是 Workspace operator —— 准入。这些事实失效时按族给出域名级 `409 workspace_unavailable`，在准入时同步拒绝，而不是让一个注定失败的 Turn 异步落空。cwd 操作的结算同时复查记录的创建者键事实与 V56 持久化的发起者角色 —— 准入之后降级任何一个 actor 都以 `workspace_unavailable` 失败（V56 前的存量行没有发起者键，仍只按创建者键事实结算）；这正是 W2 设计「准入后撤销授权仍阻止变更」在放宽后的准入下应有的形态。
 
 ### D5 —— 版本化 surface 注册表
 
-服务器模块中的一个枚举 —— `api/SurfaceRegistry.java`，每条已实现路由一个常量 —— 字段为：HTTP 方法、路径模板、面（PUBLIC / WEBSHELL / INTERNAL）、能力 id（一个能力的公开/WebShell 孪生共享，例如 `TURN_SUBMIT`）、规则类（`legacy_create`、`legacy_tenant`、`workspace_create`、`reader`、`reader_actor`、`reader_actor_policy`、`operator`、`owner`、`workspace_discovery`、`tenant_scoped`、`internal_writer`）。这一个文件就是 issue R2 要求的枚举：逐路由声明哪类 actor 可读、改、取消、回答或删除。它的版本化方式与 surface 本身一致 —— 注册表变更随其实现的契约版本走（R1 翻转是 v1.36），因此对注册表 `git blame` 就是逐路由的权威历史。
+服务器模块中的一个枚举 —— `api/SurfaceRegistry.java`，每条已实现路由一个常量 —— 字段为：HTTP 方法、路径模板、面（PUBLIC / WEBSHELL / INTERNAL）、能力 id（一个能力的公开/WebShell 孪生共享，例如 `TURN_SUBMIT`）、规则类（`legacy_create`、`legacy_tenant`、`workspace_create`、`reader`、`reader_actor`、`reader_actor_policy`、`operator`、`owner`、`workspace_discovery`、`tenant_scoped`、`internal_writer`）。这一个文件就是 issue R2 要求的枚举：逐路由声明哪类 actor 可读、改、取消、回答或删除。它的版本化方式与 surface 本身一致 —— 注册表变更随其实现的契约版本走（R1 翻转是 v1.37），因此对注册表 `git blame` 就是逐路由的权威历史。
 
 ### D6 —— 构建门禁
 
@@ -139,14 +139,14 @@ owner 的更新路径（移交命令）是建在此列之上的后续切片，�
 | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | **A —— 注册表 + 门禁（先行 R2）** | 按今天规则建 `SurfaceRegistry`、对账门禁、验收探针、奇偶断言、本文档的双语路由矩阵                                                                                            | 全部为新文件：`api/SurfaceRegistry.java`、两个测试类；不改生产代码              |
 | **B —— 角色存储（R1 存储）**      | V53 迁移与回填、`WorkspaceAccess` 改名、注册表 store 读取改由 `role` 推导、`owner_actor_key` 列与创建时写入、fixture INSERT 更新（约 24 处）、迁移形态测试                    | `store/**`、runtime-broker 枚举、`db/migration`、测试 fixture；不改任何准入判定 |
-| **C —— 强制执行（R1）**           | 三个创建者辅助方法改指角色/owner、拒绝码归一、Action 回答向 OPERATOR 开放、按角色的 WebShell 能力广告、注册表规则翻转、探针期望翻转、契约 v1.36 与 OpenAPI 文本、契约测试更新 | `service/**`、`store/**` 校验点、controller、契约、A 的枚举与测试               |
+| **C —— 强制执行（R1）**           | 三个创建者辅助方法改指角色/owner、拒绝码归一、Action 回答向 OPERATOR 开放、按角色的 WebShell 能力广告、注册表规则翻转、探针期望翻转、契约 v1.37 与 OpenAPI 文本、契约测试更新 | `service/**`、`store/**` 校验点、controller、契约、A 的枚举与测试               |
 
 A ∥ B 是安全的：文件不相交（A 纯新增；B 改 store 侧）。C 必须在两者合入后串行，因为它同时改写 A 的注册表条目与 B 的辅助方法 —— 这是唯一真实的阻塞依赖，所以被排序而不是被抢跑。C 推进 #13535（移交命令与 legacy 收紧分别跟进为 #13617 与 #13618）；A 与 B 引用它。
 
 ## 5. 迁移与兼容
 
 - V53 沿用既有单版本纪律（迁移前停掉旧版本服务器；不用 `outOfOrder`）。
-- 契约 v1.36 记录：角色词表、submitter 族与 Action 族的 OPERATOR 准入、基于 owner 的生命周期、submitter 族拒绝语义 409 `workspace_unavailable` → 403 `session_operation_forbidden` 的变化、以及按角色的能力广告。
+- 契约 v1.37 记录：角色词表、submitter 族与 Action 族的 OPERATOR 准入、基于 owner 的生命周期、submitter 族拒绝语义 409 `workspace_unavailable` → 403 `session_operation_forbidden` 的变化、以及按角色的能力广告。
 - 客户端可观察的变化：可读但低于 OPERATOR 的 submitter（提交、取消、改名）在同一请求上的拒绝从 409 `workspace_unavailable` 归一为 403 `session_operation_forbidden`，而已过角色检查的 OPERATOR 在形态或创建者键事实失效处仍遇该族的域名级 409；Action 回答对非创建者的 OPERATOR 由拒绝变为成功；Turn 提交、改名与 cwd 变更在 Session 的创建者键执行事实成立期间对非创建者的 OPERATOR 开放，取消则只凭角色与形态对他们开放。其余对调用方保持不变。
 - 写 `can_read`/`can_create` 的测试 fixture 在切片 B 改写 `role`；曾考虑生成列方案，为保持单一事实源与 H2/MySQL 简单对齐而放弃。
 
@@ -173,7 +173,7 @@ A ∥ B 是安全的：文件不相交（A 纯新增；B 改 store 侧）。C �
 - [ ] 逐规则类探针矩阵在两个面上通过，含 404-低于读者 / 403-低于操作者的契约（R2，#12867 语义）。
 - [ ] Workspace 上的第二个 OPERATOR 能在公开路由与 WebShell 路由上回答一条待答审批（R1 被阻塞行为之一）。
 - [ ] `owner_actor_key` 存在，新绑定与 legacy 创建都默认写入创建者，并驱动原先每个创建者校验（移交词表就绪；命令本身为后续）：本 PR 后生命周期与回答以它为键，submit/cancel/rename/cwd 与执行仍以创建命令 actor 为键，移交重键形态由 #13617 决定（R1 被阻塞行为之二的存储半）。
-- [ ] 契约 v1.36 记录角色、拒绝归一与能力广告规则；OpenAPI changelog 点名它们。
+- [ ] 契约 v1.37 记录角色、拒绝归一与能力广告规则；OpenAPI changelog 点名它们。
 - [ ] managed-agent-server 全套测试在 H2 上绿；runner 提供 MySQL 时 `mysql-integration` profile 绿。
 
 ## 9. 评审待定项
@@ -190,7 +190,7 @@ L3 两条授权入口）。（第 2 节上一版正文里的 21 internal 已过�
 #13088 新增 `receipts/verify`，L3 又加两条授权入口；门禁从扫描推导
 一切，计数只是信息，不是被断言的常量。）
 
-规则类按已实现的准入命名。切片 C 之后（契约 v1.36）：`WORKSPACE_CREATE`（2）、
+规则类按已实现的准入命名。切片 C 之后（契约 v1.37）：`WORKSPACE_CREATE`（2）、
 `READER`（24）、`READER_ACTOR`（6）、`READER_ACTOR_POLICY`（1）、`OPERATOR`
 —— submitter 族加 cwd 变更与 Action respond（8）、`OWNER`
 —— 仅 lifecycle 族（8）、`WORKSPACE_DISCOVERY`（4）、`TENANT_SCOPED`

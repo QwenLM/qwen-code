@@ -588,7 +588,7 @@ curl -sS -X POST \
 directory. The change is same-Workspace only and requires the caller's OPERATOR
 role plus the Session's creator-keyed execution facts (the registry still backs
 the binding and stays `ACTIVE`, and the recorded create actor keeps OPERATOR or
-above; the V55-persisted initiator is re-checked at settlement the same way, so
+above; the V56-persisted initiator is re-checked at settlement the same way, so
 demoting either actor fails the operation with `workspace_unavailable`), an idle
 Session (`409 session_context_busy` while a Turn or another operation is open)
 and a matching `expected_context_revision` (`409 context_revision_conflict`
