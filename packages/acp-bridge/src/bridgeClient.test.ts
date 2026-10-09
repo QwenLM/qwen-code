@@ -418,6 +418,73 @@ describe('BridgeClient — managed external tool guard', () => {
     });
   });
 
+  it.each([true, false, undefined])(
+    'forwards only a true top-level permissionChecked marker (%s)',
+    async (permissionChecked) => {
+      const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
+        allowed: true,
+      });
+      const entry = {
+        sessionId: 'session-1',
+        effectiveCwd: '/workspace/worktree',
+        promptActive: true,
+        activePromptId: 'prompt-1',
+      };
+      const client = makeClient(undefined, {
+        resolveEntry: () => entry,
+        handler,
+      });
+      const args = { command: 'pwd', permissionChecked: true };
+
+      await expect(
+        client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+          toolCallId: 'call-1',
+          toolName: 'run_shell_command',
+          arguments: args,
+          ...(permissionChecked === undefined ? {} : { permissionChecked }),
+        }),
+      ).resolves.toEqual({ allowed: true });
+      expect(handler).toHaveBeenCalledExactlyOnceWith({
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+        toolCallId: 'call-1',
+        toolName: 'run_shell_command',
+        arguments: args,
+        effectiveCwd: '/workspace/worktree',
+        ...(permissionChecked === true ? { permissionChecked: true } : {}),
+      });
+    },
+  );
+
+  it.each(['true', 1, null, {}])(
+    'rejects a non-boolean permissionChecked marker (%j)',
+    async (permissionChecked) => {
+      const handler = vi.fn<ExternalToolGuardHandler>();
+      const client = makeClient(undefined, {
+        resolveEntry: () => ({
+          sessionId: 'session-1',
+          promptActive: true,
+          activePromptId: 'prompt-1',
+        }),
+        handler,
+      });
+
+      await expect(
+        client.extMethod(SERVE_CONTROL_EXT_METHODS.externalToolGuardPrepare, {
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+          toolCallId: 'call-1',
+          toolName: 'run_shell_command',
+          arguments: { command: 'pwd' },
+          permissionChecked,
+        }),
+      ).rejects.toThrow('Invalid external tool guard request');
+      expect(handler).not.toHaveBeenCalled();
+    },
+  );
+
   it('ignores a forged effective directory in the child payload', async () => {
     const handler = vi.fn<ExternalToolGuardHandler>().mockResolvedValue({
       allowed: true,
@@ -3868,6 +3935,44 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     expect(settledMidTurnMessageIds).toEqual(['mid-1']);
   });
 
+  it('drains with the background turn id when promptId is omitted', async () => {
+    // R1-14 (#11768): with promptActive false and no requestedPromptId, the
+    // drain ownership chain resolves through the middle term —
+    // entry.backgroundTurn.turnId (currentTurnMetadata) — before falling
+    // back to activePromptId. A background-only execution must therefore
+    // drain and stamp its injected frames with the background turn id even
+    // though the caller sent no promptId.
+    const publish = vi.fn().mockReturnValue(true);
+    const queue = [{ messageId: 'mid-1', text: 'Check the result' }];
+    const settledMidTurnMessageIds: string[] = [];
+    const client = makeClientWithEntry('sess:drain', {
+      sessionId: 'sess:drain',
+      promptActive: false,
+      activePromptId: 'stale-prompt',
+      backgroundTurn: {
+        turnId: 'bg-turn-1',
+        taskId: 'task',
+        kind: 'agent',
+        startedAt: 1,
+      },
+      midTurnMessageQueue: queue,
+      settledMidTurnMessageIds,
+      pendingPromptList: [],
+      events: { publish },
+    });
+
+    const result = await client.extMethod('craft/drainMidTurnQueue', {
+      sessionId: 'sess:drain',
+    });
+
+    expect(result['messages']).toEqual(['Check the result']);
+    expect(queue).toEqual([]);
+    expect(settledMidTurnMessageIds).toEqual(['mid-1']);
+    expect(publish).toHaveBeenCalledWith(
+      expect.objectContaining({ promptId: 'bg-turn-1' }),
+    );
+  });
+
   it('drains the queue, returns the messages, and publishes one injected frame', async () => {
     const publish = vi.fn().mockReturnValue(true);
     const entry = {
@@ -4050,12 +4155,13 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
   it('degrades a attachmentId reused across drained messages after its first use', async () => {
     const publish = vi.fn().mockReturnValue(true);
     const media = new SessionAttachmentStore();
+    const read = vi.spyOn(fsp, 'readFile');
     try {
       const reference = await media.putAttachment(
         Uint8Array.of(1, 2, 3),
         'image/png',
       );
-      const read = vi.spyOn(media, 'read');
+      read.mockClear();
       const entry = {
         sessionId: 'sess:shared-media',
         midTurnMessageQueue: [
@@ -4112,6 +4218,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       // serialized, so one stored blob cannot amplify the drain response.
       expect(read).toHaveBeenCalledTimes(1);
     } finally {
+      read.mockRestore();
       await media.close();
     }
   });

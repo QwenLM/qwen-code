@@ -21,6 +21,8 @@ export default {
   'Project level': '项目级',
   'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
     '剪贴板图片粘贴不可用，因为原生剪贴板模块加载失败。请重新安装 Qwen Code，或改用 npm 安装方式。',
+  'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.':
+    '剪贴板图片粘贴不可用：未找到受支持的剪贴板工具。Linux 下请安装 `wl-clipboard`（Wayland）或 `xclip`（X11），无显示器环境下请设置 DISPLAY/WAYLAND_DISPLAY。',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -184,6 +186,8 @@ export default {
   'toolDisplayName.UpdateGoal': '更新目标',
   'toolDisplayName.ProposeGoal': '提议目标',
   'toolDisplayName.SaveMemory': '保存记忆',
+  'toolDisplayName.ManageMemory': '管理记忆',
+  'toolDisplayName.SearchMemory': '搜索记忆',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Advisor': '审查模型',
   'toolDisplayName.Artifact': '制品',
@@ -423,6 +427,8 @@ export default {
     '回退不会影响手工编辑或通过 shell 命令修改的文件。',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     '无法回退到已被压缩的轮次，请尝试更近一些的轮次。',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    '无法将对话回退到该轮次：它已无法与模型历史对应（例如经过重试）。请尝试更近一些的轮次。',
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     '该轮次无法恢复文件（没有捕获到文件变更，或该轮次属于本次会话之前）。',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':

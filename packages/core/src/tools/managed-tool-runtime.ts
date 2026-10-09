@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  captureHookExecutionOwner,
+  runWithHookExecutionOwner,
+  type HookExecutionOwner,
+} from '../hooks/hook-execution-context.js';
+
 import { randomUUID } from 'node:crypto';
 import { deriveConfig, type Config } from '../config/config.js';
 import {
@@ -17,6 +23,7 @@ import {
 } from '../core/toolHookTriggers.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { runWithInvocationContext } from '../utils/invocation-context.js';
+import { isShellResultDisplay } from '../utils/shell-result.js';
 import {
   ToolConfirmationOutcome,
   type AnyDeclarativeTool,
@@ -53,6 +60,31 @@ function invocationParams(params: unknown): Record<string, unknown> {
   managedToolDigest(projected);
   return projected;
 }
+
+/**
+ * A prepared reference stays bound to its original arguments, so a hook
+ * replacement is refused rather than ignored. A deny or stop keeps its reason.
+ */
+function refuseUpdatedInput(
+  result: PreToolUseHookResult,
+): PreToolUseHookResult {
+  const { updatedInput, ...rest } = result;
+  if (
+    updatedInput === undefined ||
+    (!rest.shouldProceed && rest.blockType !== 'ask')
+  ) {
+    return rest;
+  }
+  return {
+    ...rest,
+    shouldProceed: false,
+    blockType: 'denied',
+    blockReason:
+      'PreToolUse updatedInput is not supported for managed tool invocations; the tool was not run.',
+  };
+}
+
+export class ManagedToolPreparationError extends Error {}
 
 export type ManagedToolConfirmationPhase = 'permission' | 'preflight';
 
@@ -127,6 +159,7 @@ interface CallSlot {
 }
 
 interface Entry {
+  readonly hookOwner: HookExecutionOwner | undefined;
   readonly reference: ManagedToolInvocationReference;
   readonly inputDigest: string;
   readonly tool: AnyDeclarativeTool;
@@ -234,14 +267,20 @@ export class ManagedToolRuntime {
   }
 
   private scoped<T>(identity: ManagedToolCallIdentity, action: () => T): T {
-    return promptIdContext.run(identity.promptId, () =>
-      runWithInvocationContext(
-        {
-          version: 1,
-          sessionId: identity.sessionId,
-          promptId: identity.promptId,
-        },
-        action,
+    const owner =
+      'invocationId' in identity && typeof identity.invocationId === 'string'
+        ? this.entries.get(identity.invocationId)?.hookOwner
+        : captureHookExecutionOwner(this.config);
+    return runWithHookExecutionOwner(owner, () =>
+      promptIdContext.run(identity.promptId, () =>
+        runWithInvocationContext(
+          {
+            version: 1,
+            sessionId: identity.sessionId,
+            promptId: identity.promptId,
+          },
+          action,
+        ),
       ),
     );
   }
@@ -385,8 +424,14 @@ export class ManagedToolRuntime {
     source?: Entry,
     mediaContext?: ManagedToolMediaContext,
   ): Promise<Entry> {
+    const hookOwner = source
+      ? source.hookOwner
+      : captureHookExecutionOwner(this.config);
     let tool = this.tools().find((candidate) => candidate.name === toolName);
-    if (!tool) throw new Error('Managed Runtime tool is unavailable.');
+    if (!tool)
+      throw new ManagedToolPreparationError(
+        'Managed Runtime tool is unavailable.',
+      );
     if (mediaContext !== undefined) {
       if (!this.bindMediaTool)
         throw new Error('Managed Runtime tool does not support media context.');
@@ -421,7 +466,16 @@ export class ManagedToolRuntime {
           source.invocation.params,
         ) as Record<string, unknown>;
     }
-    const invocation = tool.build(input);
+    let invocation: AnyToolInvocation;
+    try {
+      invocation = tool.build(input);
+    } catch (error) {
+      throw new ManagedToolPreparationError(
+        error instanceof Error
+          ? error.message
+          : 'Managed Runtime tool input is invalid.',
+      );
+    }
     const aware = invocation as {
       setCallId?: (id: string) => void;
       setPromptId?: (id: string) => void;
@@ -437,6 +491,7 @@ export class ManagedToolRuntime {
     };
     const toolUseId = generateToolUseId();
     const entry: Entry = {
+      hookOwner,
       reference,
       inputDigest,
       tool,
@@ -576,10 +631,12 @@ export class ManagedToolRuntime {
         this.config.getApprovalMode(),
         entry.controller.signal,
         entry.reference.callId,
+        entry.hookOwner,
       );
       this.assertExecutable(entry);
-      entry.preflightResult = structuredClone(result);
-      return result;
+      const settled = refuseUpdatedInput(result);
+      entry.preflightResult = structuredClone(settled);
+      return settled;
     });
     return structuredClone(await entry.preflight);
   }
@@ -607,7 +664,16 @@ export class ManagedToolRuntime {
       this.sharedFileHistory
         ? this.sharedFileHistory.execute(() => this.run(entry))
         : this.run(entry),
-    );
+    ).catch((error: unknown) => {
+      entry.result ??= {
+        executionStatus: 'not_started',
+        error: {
+          message: error instanceof Error ? error.message : String(error),
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
+      };
+      throw error;
+    });
     void entry.execution.catch(() => {});
     return entry.execution.then((result) => structuredClone(result));
   }
@@ -645,11 +711,15 @@ export class ManagedToolRuntime {
         this.config.getShellExecutionConfig(),
       );
       result = {
-        executionStatus: raw.error
-          ? signal.aborted
+        executionStatus:
+          isShellResultDisplay(raw.returnDisplay) &&
+          raw.returnDisplay.outcome === 'cancelled'
             ? 'cancelled'
-            : 'error'
-          : 'success',
+            : raw.error
+              ? signal.aborted
+                ? 'cancelled'
+                : 'error'
+              : 'success',
       };
       try {
         result.result = structuredClone({
@@ -701,6 +771,8 @@ export class ManagedToolRuntime {
           this.config.getApprovalMode(),
           undefined,
           entry.reference.callId,
+          undefined,
+          entry.hookOwner,
         );
       } else if (result.executionStatus === 'success' && result.result) {
         result.postHook = await firePostToolUseHook(
@@ -715,6 +787,8 @@ export class ManagedToolRuntime {
           this.config.getApprovalMode(),
           undefined,
           entry.reference.callId,
+          undefined,
+          entry.hookOwner,
         );
       }
     } catch (error) {
@@ -725,6 +799,15 @@ export class ManagedToolRuntime {
     }
     entry.result = structuredClone(result);
     return entry.result;
+  }
+
+  findStatus(
+    reference: ManagedToolInvocationReference,
+    afterSeq = 0,
+  ): ManagedToolInvocationStatus | undefined {
+    return this.entries.has(reference.invocationId)
+      ? this.status(reference, afterSeq)
+      : undefined;
   }
 
   status(
@@ -783,6 +866,24 @@ export class ManagedToolRuntime {
       this.snapshotPending ||
       this.pendingPreparations > 0 ||
       [...this.entries.values()].some((entry) => !entry.result)
+    );
+  }
+
+  async releasePrepared(): Promise<void> {
+    if (
+      this.snapshotPending ||
+      this.pendingPreparations > 0 ||
+      [...this.entries.values()].some(
+        (entry) => entry.execution !== undefined && !entry.result,
+      )
+    ) {
+      throw new Error('Managed Runtime still owns unfinished execution.');
+    }
+    for (const entry of this.entries.values()) {
+      if (!entry.result) this.requestCancel(entry);
+    }
+    await Promise.all(
+      [...this.entries.values()].map((entry) => entry.cancellation),
     );
   }
 

@@ -285,6 +285,30 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/attachment-uploads',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/attachment-uploads',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/attachment-uploads/:uploadId/chunks',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/attachment-uploads/:uploadId/chunks',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/attachment-uploads/:uploadId/complete',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/attachment-uploads/:uploadId/complete',
+  },
+  {
+    method: 'DELETE',
+    path: '/session/:id/attachment-uploads/:uploadId',
+    attribution: 'handler_resolved',
+    route: 'DELETE /session/:id/attachment-uploads/:uploadId',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/attachments',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/attachments',
@@ -706,6 +730,7 @@ export function resolveDaemonTelemetryRoute(
         suffix === '/workspace/voice/transcribe' ||
         suffix === '/workspace/permissions' ||
         suffix === '/workspace/trust/request' ||
+        suffix === '/workspace/trust/grant' ||
         suffix === '/workspace/init' ||
         suffix === '/workspace/reload' ||
         suffix === '/workspace/file/write' ||
@@ -817,6 +842,9 @@ export function resolveDaemonTelemetryRoute(
   }
   if (req.method === 'POST' && path === '/workspace/trust/request') {
     return { route: 'POST /workspace/trust/request' };
+  }
+  if (req.method === 'POST' && path === '/workspace/trust/grant') {
+    return { route: 'POST /workspace/trust/grant' };
   }
   if (path === '/workspace/voice') {
     if (req.method === 'GET') return { route: 'GET /workspace/voice' };

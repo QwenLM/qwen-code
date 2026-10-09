@@ -1,0 +1,1863 @@
+{
+  "contract": "managed-event-envelope/1",
+  "contractVersion": 1,
+  "formatVersion": 1,
+  "kinds": [
+    "input.accepted",
+    "wake.requested",
+    "activation.changed",
+    "model.attempt",
+    "message.committed",
+    "tool.intent",
+    "action.changed",
+    "tool.receipt",
+    "checkpoint.committed",
+    "context.compacted",
+    "cancel.requested",
+    "turn.settled",
+    "config.bound",
+    "lifecycle.changed",
+    "domain.committed",
+    "message.delta",
+    "message.retracted"
+  ],
+  "streams": ["authoritative_journal"],
+  "forbiddenFields": [
+    "absolutePath",
+    "localPath",
+    "pid",
+    "pod",
+    "runtimeBindingId",
+    "runtimeEndpoint",
+    "secretHandle",
+    "sidecar"
+  ],
+  "limits": {
+    "maxIdBytes": 512,
+    "maxTimeMs": 8640000000000000
+  },
+  "envelope": {
+    "v": 1,
+    "sessionId": "session-1",
+    "tenantId": "tenant-1",
+    "workspaceId": "workspace-1",
+    "stream": "authoritative_journal",
+    "sequence": 42,
+    "eventId": "evt-000042",
+    "kind": "domain.committed",
+    "occurredAt": 1760000000000,
+    "payloadRef": {
+      "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+    }
+  },
+  "envelopeCases": [
+    {
+      "id": "kind-input-accepted",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 101,
+        "eventId": "evt-000101",
+        "kind": "input.accepted",
+        "occurredAt": 1760000000001,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-wake-requested",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 102,
+        "eventId": "evt-000102",
+        "kind": "wake.requested",
+        "occurredAt": 1760000000002,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-activation-changed",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 103,
+        "eventId": "evt-000103",
+        "kind": "activation.changed",
+        "occurredAt": 1760000000003,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-model-attempt",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 104,
+        "eventId": "evt-000104",
+        "kind": "model.attempt",
+        "occurredAt": 1760000000004,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-message-committed",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 105,
+        "eventId": "evt-000105",
+        "kind": "message.committed",
+        "occurredAt": 1760000000005,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-tool-intent",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 106,
+        "eventId": "evt-000106",
+        "kind": "tool.intent",
+        "occurredAt": 1760000000006,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-action-changed",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 107,
+        "eventId": "evt-000107",
+        "kind": "action.changed",
+        "occurredAt": 1760000000007,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-tool-receipt",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 108,
+        "eventId": "evt-000108",
+        "kind": "tool.receipt",
+        "occurredAt": 1760000000008,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-checkpoint-committed",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 109,
+        "eventId": "evt-000109",
+        "kind": "checkpoint.committed",
+        "occurredAt": 1760000000009,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-context-compacted",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 110,
+        "eventId": "evt-000110",
+        "kind": "context.compacted",
+        "occurredAt": 1760000000010,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-cancel-requested",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 111,
+        "eventId": "evt-000111",
+        "kind": "cancel.requested",
+        "occurredAt": 1760000000011,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-turn-settled",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 112,
+        "eventId": "evt-000112",
+        "kind": "turn.settled",
+        "occurredAt": 1760000000012,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-config-bound",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 113,
+        "eventId": "evt-000113",
+        "kind": "config.bound",
+        "occurredAt": 1760000000013,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-lifecycle-changed",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 114,
+        "eventId": "evt-000114",
+        "kind": "lifecycle.changed",
+        "occurredAt": 1760000000014,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-domain-committed",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 115,
+        "eventId": "evt-000115",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000015,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-message-delta",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 116,
+        "eventId": "evt-000116",
+        "kind": "message.delta",
+        "occurredAt": 1760000000016,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-message-retracted",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 117,
+        "eventId": "evt-000117",
+        "kind": "message.retracted",
+        "occurredAt": 1760000000016,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "v-missing",
+      "valid": false,
+      "envelope": {
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "v-other",
+      "valid": false,
+      "envelope": {
+        "v": 2,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "session-id-missing",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "session-id-empty",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "session-id-not-string",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": 42,
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "session-id-over-512-bytes",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "session-id-not-nfc",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "e\u0301x",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "tenant-id-empty",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "workspace-id-missing",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "sequence-missing",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "sequence-zero",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 0,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "sequence-negative",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": -1,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "sequence-fractional",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 1.5,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "sequence-max-safe",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 9007199254740991,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "sequence-at-max",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 9007199254740990,
+        "eventId": "evt-000001",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000101,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "sequence-not-integer",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": "42",
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "event-id-missing",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "event-id-empty",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "event-id-over-512-bytes",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-missing",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "kind-unknown",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "session.exploded",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "occurred-at-missing",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "occurred-at-negative",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": -5,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "occurred-at-fractional",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000.5,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "occurred-at-over-max",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 8640000000000001,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "occurred-at-exactly-max",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 1,
+        "eventId": "evt-000001",
+        "kind": "domain.committed",
+        "occurredAt": 8640000000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "occurred-at-not-number",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": "now",
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "payload-ref-missing",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000
+      }
+    },
+    {
+      "id": "payload-ref-empty",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {}
+      }
+    },
+    {
+      "id": "payload-ref-extra-key",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000",
+          "resourceId": "res-1"
+        }
+      }
+    },
+    {
+      "id": "digest-uppercase",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        }
+      }
+    },
+    {
+      "id": "digest-short",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    {
+      "id": "digest-not-hex",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+        }
+      }
+    },
+    {
+      "id": "digest-null",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": null
+        }
+      }
+    },
+    {
+      "id": "unknown-field",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "note": "transport debugging"
+      }
+    },
+    {
+      "id": "envelope-not-object",
+      "valid": false,
+      "envelope": ["session-1", 42]
+    },
+    {
+      "id": "payload-body",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "payload": {
+          "domain": "monitor_run",
+          "version": 1,
+          "operationId": "op-000042",
+          "recordRef": {
+            "resourceId": "monitor-1",
+            "kind": "managed-monitor_run",
+            "schemaVersion": 1,
+            "byteLength": 128,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      }
+    },
+    {
+      "id": "forbidden-absolute-path",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "absolutePath": "leaked"
+      }
+    },
+    {
+      "id": "forbidden-local-path",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "localPath": "leaked"
+      }
+    },
+    {
+      "id": "forbidden-pid",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "pid": 4242
+      }
+    },
+    {
+      "id": "forbidden-pod",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "pod": "leaked"
+      }
+    },
+    {
+      "id": "forbidden-runtime-binding-id",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "runtimeBindingId": "leaked"
+      }
+    },
+    {
+      "id": "forbidden-runtime-endpoint",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "runtimeEndpoint": "leaked"
+      }
+    },
+    {
+      "id": "forbidden-secret-handle",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "secretHandle": "leaked"
+      }
+    },
+    {
+      "id": "forbidden-sidecar",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        },
+        "sidecar": "leaked"
+      }
+    },
+    {
+      "id": "sequence-one",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 1,
+        "eventId": "evt-000001",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000101,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "session-id-exactly-512-bytes",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 119,
+        "eventId": "evt-000119",
+        "kind": "message.committed",
+        "occurredAt": 1760000000019,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "session-id-exactly-512-chars",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 1,
+        "eventId": "evt-000001",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000101,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "workspace-and-digest-vary",
+      "valid": true,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-2",
+        "stream": "authoritative_journal",
+        "sequence": 122,
+        "eventId": "evt-000122",
+        "kind": "message.committed",
+        "occurredAt": 1760000000022,
+        "payloadRef": {
+          "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        }
+      }
+    },
+    {
+      "id": "digest-long",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 120,
+        "eventId": "evt-000120",
+        "kind": "message.committed",
+        "occurredAt": 1760000000020,
+        "payloadRef": {
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab"
+        }
+      }
+    },
+    {
+      "id": "session-id-lone-surrogate",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "x\ud800x",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 121,
+        "eventId": "evt-000121",
+        "kind": "message.committed",
+        "occurredAt": 1760000000021,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "event-id-not-nfc",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 123,
+        "eventId": "e\u0301x",
+        "kind": "message.committed",
+        "occurredAt": 1760000000023,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "event-id-lone-surrogate",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 124,
+        "eventId": "x\ud800x",
+        "kind": "message.committed",
+        "occurredAt": 1760000000024,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "tenant-id-not-nfc",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "e\u0301x",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 125,
+        "eventId": "evt-000125",
+        "kind": "message.committed",
+        "occurredAt": 1760000000025,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "tenant-id-over-512-bytes",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 126,
+        "eventId": "evt-000126",
+        "kind": "message.committed",
+        "occurredAt": 1760000000026,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "tenant-id-lone-surrogate",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "x\ud800x",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 127,
+        "eventId": "evt-000127",
+        "kind": "message.committed",
+        "occurredAt": 1760000000027,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "tenant-id-control-character",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-\u0007",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "workspace-id-empty",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "",
+        "stream": "authoritative_journal",
+        "sequence": 128,
+        "eventId": "evt-000128",
+        "kind": "message.committed",
+        "occurredAt": 1760000000028,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "workspace-id-not-nfc",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "e\u0301x",
+        "stream": "authoritative_journal",
+        "sequence": 129,
+        "eventId": "evt-000129",
+        "kind": "message.committed",
+        "occurredAt": 1760000000029,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "workspace-id-over-512-bytes",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac\u20ac",
+        "stream": "authoritative_journal",
+        "sequence": 130,
+        "eventId": "evt-000130",
+        "kind": "message.committed",
+        "occurredAt": 1760000000030,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "workspace-id-lone-surrogate",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "x\ud800x",
+        "stream": "authoritative_journal",
+        "sequence": 131,
+        "eventId": "evt-000131",
+        "kind": "message.committed",
+        "occurredAt": 1760000000031,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "workspace-id-control-character",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-\u0007",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "envelope-null",
+      "valid": false,
+      "envelope": null
+    },
+    {
+      "id": "stream-missing",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "stream-public-event",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "public_event",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "session-id-c1-control",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-\u0085",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "event-id-control-character",
+      "valid": false,
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-\u0007",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    }
+  ],
+  "dedupeCases": [
+    {
+      "id": "same-key",
+      "same": true,
+      "parseable": [true, true],
+      "first": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      },
+      "second": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "same-key-different-surroundings",
+      "same": true,
+      "parseable": [true, true],
+      "first": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      },
+      "second": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-other",
+        "kind": "message.committed",
+        "occurredAt": 1760000099999,
+        "payloadRef": {
+          "digest": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        }
+      }
+    },
+    {
+      "id": "different-tenant-same-key",
+      "same": false,
+      "parseable": [true, true],
+      "first": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      },
+      "second": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-2",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "different-sequence",
+      "same": false,
+      "parseable": [true, true],
+      "first": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      },
+      "second": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 43,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "different-session-id",
+      "same": false,
+      "parseable": [true, true],
+      "first": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      },
+      "second": {
+        "v": 1,
+        "sessionId": "session-2",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "unparseable-compares-false",
+      "same": false,
+      "parseable": [true, false],
+      "first": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      },
+      "second": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    },
+    {
+      "id": "both-unparseable-compare-false",
+      "same": false,
+      "parseable": [false, false],
+      "first": {
+        "v": 1,
+        "sessionId": "session-\u0085",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      },
+      "second": {
+        "v": 1,
+        "sessionId": "session-\u0085",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "sequence": 42,
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "631f42ee57f8e39d9491a76ba9477d32a11f8c2b8a3a4ff3c21b30760c600000"
+        }
+      }
+    }
+  ],
+  "fromEventCases": [
+    {
+      "id": "from-domain-committed",
+      "event": {
+        "v": 1,
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payload": {
+          "domain": "monitor_run",
+          "version": 1,
+          "operationId": "op-000042",
+          "recordRef": {
+            "resourceId": "monitor-1",
+            "kind": "managed-monitor_run",
+            "schemaVersion": 1,
+            "byteLength": 128,
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      },
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 42,
+        "eventId": "evt-000042",
+        "kind": "domain.committed",
+        "occurredAt": 1760000000000,
+        "payloadRef": {
+          "digest": "22b95fa7653ac96a2afca57754cdef360bfccfdab0c87786e109857b4cbe072a"
+        }
+      }
+    },
+    {
+      "id": "from-message-committed",
+      "event": {
+        "v": 1,
+        "sequence": 7,
+        "eventId": "evt-000007",
+        "sessionKey": {
+          "tenantId": "tenant-1",
+          "workspaceId": "workspace-1",
+          "sessionId": "session-1"
+        },
+        "kind": "message.committed",
+        "occurredAt": 1760000000123,
+        "payload": {
+          "messageId": "msg-000007",
+          "role": "assistant",
+          "modelAttemptId": "attempt-3",
+          "parentMessageId": null,
+          "contentRef": {
+            "resourceId": "tool-msg-7",
+            "kind": "managed-tool-message",
+            "schemaVersion": 1,
+            "byteLength": 2048,
+            "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        }
+      },
+      "envelope": {
+        "v": 1,
+        "sessionId": "session-1",
+        "tenantId": "tenant-1",
+        "workspaceId": "workspace-1",
+        "stream": "authoritative_journal",
+        "sequence": 7,
+        "eventId": "evt-000007",
+        "kind": "message.committed",
+        "occurredAt": 1760000000123,
+        "payloadRef": {
+          "digest": "059ea699791df6b2407e3b2298fb012ded39cb2e98d2689a72670d250a2b0f2f"
+        }
+      }
+    }
+  ]
+}

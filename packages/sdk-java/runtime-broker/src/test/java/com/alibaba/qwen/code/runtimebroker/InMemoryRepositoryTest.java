@@ -31,6 +31,11 @@ import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 
 class InMemoryRepositoryTest {
+    @Test
+    void takeoverEvidenceAndPaginationPreserveTheExecutionContract() {
+        ExecutionTakeoverContract.verify(new InMemoryToolExecutionRepository(), "memory-takeover");
+    }
+
     private static final Instant START = Instant.parse(
             "2026-09-18T00:00:00Z");
     private static final RuntimeScope SCOPE = new RuntimeScope("tenant",

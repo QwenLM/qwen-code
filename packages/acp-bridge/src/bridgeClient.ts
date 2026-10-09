@@ -1623,6 +1623,7 @@ export class BridgeClient implements Client {
       messageId: string;
       displayText: string;
       content: ContentBlock[];
+      _meta?: Record<string, unknown>;
       attachmentReferences?: SessionAttachmentReference[];
     }> = [];
     try {
@@ -1750,6 +1751,7 @@ export class BridgeClient implements Client {
     const toolCallId = params['toolCallId'];
     const toolName = params['toolName'];
     const args = params['arguments'];
+    const permissionChecked = params['permissionChecked'];
     if (
       typeof sessionId !== 'string' ||
       sessionId.length === 0 ||
@@ -1759,7 +1761,9 @@ export class BridgeClient implements Client {
       toolCallId.length === 0 ||
       typeof toolName !== 'string' ||
       toolName.length === 0 ||
-      !isRecord(args)
+      !isRecord(args) ||
+      (permissionChecked !== undefined &&
+        typeof permissionChecked !== 'boolean')
     ) {
       throw RequestError.invalidParams(
         undefined,
@@ -1791,6 +1795,7 @@ export class BridgeClient implements Client {
       toolCallId,
       toolName,
       arguments: args,
+      ...(permissionChecked === true ? { permissionChecked: true } : {}),
       effectiveCwd: entry.effectiveCwd,
       // Forwarded verbatim and explicitly untrusted: the host policy decides
       // whether it can establish this scope from state it owns.

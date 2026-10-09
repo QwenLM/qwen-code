@@ -492,6 +492,11 @@ export interface WebShellAtItem {
   iconTooltip?: string;
   insertText?: string;
   composerTag?: WebShellComposerTag;
+  /**
+   * Makes the item an action instead of a reference: choosing it removes the
+   * typed `@query` and calls this, inserting nothing.
+   */
+  onSelect?: () => void;
 }
 
 export type WebShellBuiltinAtProviderId =
@@ -533,6 +538,11 @@ export interface WebShellAtProvider {
   order?: number;
   tabs?: readonly WebShellAtProviderTab[];
   renderItem?: WebShellAtItemRenderer;
+  /**
+   * Claims a typed `@query` that names no category, so it searches this
+   * provider instead of falling back to files.
+   */
+  claimsTypedQuery?(query: string): boolean;
   search(params: {
     query: string;
     signal: AbortSignal;

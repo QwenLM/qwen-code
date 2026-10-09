@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   DaemonClient,
   DaemonHttpError,
+  DaemonAttachmentUploadError,
   DaemonPendingPromptLimitError,
   DaemonStandaloneCreationOutcomeUnknownError,
   DaemonTransportClosedError,
@@ -1050,6 +1051,28 @@ describe('createDaemonSessionActions', () => {
       expect.objectContaining({ operation: 'load_stats' }),
     );
   });
+
+  it.each([
+    ['reports', undefined, 2],
+    ['does not report', true, 0],
+  ] as const)(
+    '%s failed rewind calls when silent is %s',
+    async (_name, silent, notices) => {
+      const addNotice = vi.fn((notice) => notice);
+      const session = createMockSession('session-a');
+      session.getRewindSnapshots.mockRejectedValueOnce(new Error('no list'));
+      session.rewind.mockRejectedValueOnce(new Error('busy'));
+      const { actions } = createActionsHarness({ addNotice, session });
+
+      await expect(actions.getRewindSnapshots({ silent })).rejects.toThrow(
+        'no list',
+      );
+      await expect(
+        actions.rewindSession('prompt-1', { rewindFiles: false, silent }),
+      ).rejects.toThrow('busy');
+      expect(addNotice).toHaveBeenCalledTimes(notices);
+    },
+  );
 
   it('does not report a context usage error while the session is disconnected', async () => {
     const addNotice = vi.fn();
@@ -4917,6 +4940,38 @@ describe('createDaemonSessionActions', () => {
     expect(session.submitPrompt).not.toHaveBeenCalled();
   });
 
+  it('does not inline or admit an image after a negotiated chunk upload returns 404', async () => {
+    const session = createMockSession('session-a');
+    const failure = new DaemonAttachmentUploadError(
+      new DaemonHttpError(
+        404,
+        { code: 'attachment_upload_not_found' },
+        'Upload expired',
+      ),
+    );
+    session.uploadAttachment.mockRejectedValueOnce(failure);
+    const { actions } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments', 'session_attachment_chunk_upload'],
+          modelServices: [],
+        },
+      },
+    });
+    await expect(
+      actions.submitPrompt('look', {
+        images: [{ data: 'AQID', mimeType: 'image/png' }],
+      }),
+    ).rejects.toBe(failure);
+    expect(session.submitPrompt).not.toHaveBeenCalled();
+    expect(session.uploadAttachment).toHaveBeenCalledOnce();
+  });
+
   it('falls back to inline image data when the attachment route is unavailable', async () => {
     const session = createMockSession('session-a');
     session.uploadAttachment.mockRejectedValueOnce(
@@ -5294,6 +5349,51 @@ describe('createDaemonSessionActions', () => {
       label: 'look',
     });
     expect(onPromptRemoved).toHaveBeenCalledWith(session, 'prompt-1');
+  });
+
+  it('does not admit a queued prompt cancelled while its upload response was in flight', async () => {
+    const upload = createDeferred<{
+      type: 'image';
+      attachmentId: string;
+      mimeType: string;
+      size: number;
+    }>();
+    const controller = new AbortController();
+    const session = createMockSession('session-a');
+    session.uploadAttachment.mockReturnValueOnce(upload.promise);
+    const { actions, store } = createActionsHarness({
+      session,
+      connection: {
+        status: 'connected',
+        capabilities: {
+          v: 1,
+          mode: 'http-bridge',
+          features: ['session_attachments'],
+          modelServices: [],
+        },
+      },
+    });
+    const onAdmissionStarted = vi.fn();
+    const result = actions.submitPrompt('', {
+      signal: controller.signal,
+      optimisticUserMessage: false,
+      onAdmissionStarted,
+      images: [{ data: 'AQID', mimeType: 'image/png' }],
+    });
+    const rejected = result.catch((error: unknown) => error);
+    await vi.waitFor(() => expect(session.uploadAttachment).toHaveBeenCalled());
+    controller.abort();
+    upload.resolve({
+      type: 'image',
+      attachmentId: 'cancelled-upload',
+      mimeType: 'image/png',
+      size: 3,
+    });
+    expect(await rejected).toMatchObject({ name: 'AbortError' });
+    expect(session.removeAttachment).toHaveBeenCalledWith('cancelled-upload');
+    expect(session.submitPrompt).not.toHaveBeenCalled();
+    expect(onAdmissionStarted).not.toHaveBeenCalled();
+    expect(store.appendLocalUserMessage).not.toHaveBeenCalled();
   });
 
   it('keeps uploaded attachments when the admitted prompt already started', async () => {
@@ -6456,6 +6556,8 @@ function createMockSession(
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
     stats: vi.fn(),
     contextUsage: vi.fn(),
+    getRewindSnapshots: vi.fn(),
+    rewind: vi.fn(),
     tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
     workflowTasks: vi.fn(async () => ({
       v: 1 as const,

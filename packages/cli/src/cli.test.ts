@@ -51,6 +51,21 @@ const mocks = vi.hoisted(() => ({
   mcpRemoveHandler: vi.fn(),
   getCliVersion: vi.fn(),
   installManagedNpmUpdate: vi.fn(),
+  runWorkspaceRecoveryWorker: vi.fn(),
+  runSessionSendMcp: vi.fn(),
+  runManagedRuntimeAttestationWorker: vi.fn(),
+}));
+
+vi.mock('./commands/agents/session-send-mcp-server.js', () => ({
+  runSessionSendMcp: mocks.runSessionSendMcp,
+}));
+
+vi.mock('./serve/workspace-recovery-worker.js', () => ({
+  runWorkspaceRecoveryWorker: mocks.runWorkspaceRecoveryWorker,
+}));
+
+vi.mock('./serve/managed-runtime-attestation-worker.js', () => ({
+  runManagedRuntimeAttestationWorker: mocks.runManagedRuntimeAttestationWorker,
 }));
 
 vi.mock('./llm.js', () => ({
@@ -128,6 +143,17 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['managed-runtime-worker'])).toBe(
       'managed-runtime-worker',
     );
+    expect(
+      resolveBootstrapRoute([
+        'agents',
+        'session-send-mcp',
+        '--url',
+        'http://127.0.0.1:4170/x/send',
+      ]),
+    ).toBe('session-send-mcp');
+    expect(
+      resolveBootstrapRoute(['agents', 'join', 'https://hub/join/w']),
+    ).toBe('default');
   });
 
   it('keeps bundled entrypoint paths out of the route detection', async () => {
@@ -755,12 +781,64 @@ describe('runCliEntry', () => {
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
   });
 
-  it('rejects arguments on the hidden Runtime worker route', async () => {
-    await runCliEntry(['managed-runtime-worker', '--help']);
+  it('runs private recovery before inherited updates or normal CLI startup', async () => {
+    process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'] = '2.0.0';
+    await runCliEntry(['--workspace-recovery-worker']);
+    expect(mocks.runWorkspaceRecoveryWorker).toHaveBeenCalledOnce();
+    expect(mocks.installManagedNpmUpdate).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
+  });
+
+  it('serves session_send without normal startup or any stdout output', async () => {
+    await runCliEntry([
+      'agents',
+      'session-send-mcp',
+      '--url',
+      'http://127.0.0.1:4170/sessions/s/runs/r/send',
+    ]);
+
+    expect(mocks.runSessionSendMcp).toHaveBeenCalledWith(
+      'http://127.0.0.1:4170/sessions/s/runs/r/send',
+    );
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(stdout.join('')).toBe('');
+  });
+
+  it('refuses session-send-mcp without a URL, on stderr only', async () => {
+    await runCliEntry(['agents', 'session-send-mcp']);
+
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain('--url');
+    expect(stdout.join('')).toBe('');
+    expect(mocks.runSessionSendMcp).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['managed-runtime-worker', '--help'],
+    ['managed-runtime-worker', '--container-boot'],
+    ['managed-runtime-worker', '--container-boot', '/boot.json', 'extra'],
+    ['managed-runtime-worker', '/boot.json', '--container-boot'],
+  ])('rejects invalid hidden Runtime worker arguments: %j', async (...argv) => {
+    await runCliEntry(argv);
 
     expect(process.exitCode).toBe(1);
     expect(stderr.join('')).toContain(
       'Managed Runtime worker arguments are invalid.',
+    );
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.runManagedRuntimeAttestationWorker).not.toHaveBeenCalled();
+  });
+
+  it('passes the boot file to the container worker without starting the CLI', async () => {
+    await runCliEntry([
+      'managed-runtime-worker',
+      '--container-boot',
+      '/boot.json',
+    ]);
+    expect(mocks.runManagedRuntimeAttestationWorker).toHaveBeenCalledWith(
+      '/boot.json',
     );
     expect(mocks.main).not.toHaveBeenCalled();
   });
@@ -927,6 +1005,16 @@ describe('runCliEntry', () => {
 
     expect(mocks.main).toHaveBeenCalledTimes(1);
     expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+  });
+
+  it('lets the entrypoint report a fatal MCP configuration failure once', async () => {
+    const error = new FatalError('Repair operator settings and restart.', 52);
+    mocks.mcpListHandler.mockRejectedValueOnce(error);
+    const stdout = vi.spyOn(process.stdout, 'write');
+    const stderr = vi.spyOn(process.stderr, 'write');
+    await expect(runCliEntry(['mcp', 'list'])).rejects.toBe(error);
+    expect(stdout).not.toHaveBeenCalled();
+    expect(stderr).not.toHaveBeenCalled();
   });
 
   it('fails MCP fast-path validation without loading the full CLI', async () => {
@@ -1751,6 +1839,7 @@ describe('bootstrap import boundaries', () => {
   it('keeps bootstrap top-level help commands aligned with config registrations', () => {
     const configSource = readFileSync('src/config/config.ts', 'utf8');
     const commandNameByIdentifier = new Map([
+      ['agentsCommand', 'agents'],
       ['authCommand', 'auth'],
       ['batchCommand', 'batch'],
       ['boardCommand', 'board'],

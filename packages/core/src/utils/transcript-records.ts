@@ -144,11 +144,16 @@ const KNOWN_RECORD_SUBTYPES = new Set([
   'omni_recall',
   'session_execution_engine',
   'session_sources_snapshot',
+  'session_approval_mode',
   'branch_checkpoint',
   'goal_state',
   'goal_runtime',
   'goal_turn_end',
+  'code_mode_tool_result',
   'turn_result',
+  'user_text_elements',
+  'agent_mention',
+  'agent_message',
   ...ARTIFACT_RECORD_SUBTYPES,
   ...MANAGED_SESSION_RECORD_SUBTYPES,
 ]);
@@ -292,6 +297,15 @@ export function isTranscriptArtifactRecord(record: {
     record.type === 'system' &&
     typeof record.subtype === 'string' &&
     ARTIFACT_RECORD_SUBTYPES.has(record.subtype)
+  );
+}
+
+export function isInternalCodeModeToolResult(record: {
+  readonly type?: unknown;
+  readonly subtype?: unknown;
+}): boolean {
+  return (
+    record.type === 'tool_result' && record.subtype === 'code_mode_tool_result'
   );
 }
 

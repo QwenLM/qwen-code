@@ -314,6 +314,7 @@ export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 export {
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  describeBridgedArgumentError,
   resolveDeferredToolCall,
 } from './tools/tool-call.js';
 export type {
@@ -414,6 +415,8 @@ export * from './ipc/peer-controllers.js';
 export * from './ipc/peer-directory.js';
 export * from './ipc/peer-drop-reports.js';
 export * from './ipc/peer-envelope.js';
+export * from './agents/session-agents/contract.js';
+export * from './agents/session-agents/envelope.js';
 export * from './ipc/peer-frames.js';
 export * from './ipc/peer-routing.js';
 export * from './ipc/peer-send.js';
@@ -909,6 +912,10 @@ export {
   type PostToolBatchHookResult,
   generateToolUseId,
 } from './core/toolHookTriggers.js';
+export {
+  appendToolHookContextToParts,
+  boundToolHookContext,
+} from './core/tool-hook-context.js';
 
 // ============================================================================
 // Startup profiler — cross-package event sink (first-screen perf observability)
@@ -965,3 +972,10 @@ export type {
 export * from './services/session-sources.js';
 export { RecordSourceTool } from './tools/record-source.js';
 export { resolveReviewWorkflowConcurrency } from './agents/runtime/review-workflow.js';
+
+export {
+  captureHookExecutionOwner,
+  getHookExecutionOwner,
+  runWithHookExecutionOwner,
+} from './hooks/hook-execution-context.js';
+export type { HookExecutionOwner } from './hooks/hook-execution-context.js';

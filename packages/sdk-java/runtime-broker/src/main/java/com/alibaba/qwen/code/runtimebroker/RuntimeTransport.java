@@ -31,11 +31,28 @@ public interface RuntimeTransport {
         return failed;
     }
 
+    /** Separate CSI receipt; context attestation alone cannot prove the mounted storage. */
+    default CompletionStage<Map<String, Object>> attestCsi(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            Map<String, Object> storage, Map<String, Object> pod) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "workspace_csi_attestation_unavailable", "Workspace CSI attestation is unavailable.", false));
+    }
+
+    /** Explicit comparison inputs are component expectations, not trusted CSI placement provenance. */
+    default CompletionStage<Map<String, Object>> acknowledgeCsi(RuntimeLease lease, RuntimeSession session,
+            Map<String, Object> boot, Map<String, Object> expectedPod, Map<String, Object> request,
+            Map<String, Object> expectedCaptureIdentity) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "workspace_csi_acknowledgement_unavailable", "Workspace CSI acknowledgement is unavailable.", false));
+    }
+
     /**
      * Installs directory context only; does not activate a Session. The
-     * binding must be READY and be the one the Session was acquired on, at
-     * the same generation, and hold the Session's placement: its scope and,
-     * under session isolation, its Harness Session.
+     * Session record must be ACQUIRING or READY and name this binding at its
+     * current generation. The binding must be READY with no drain requested
+     * and hold the Session's placement: its scope and, under session
+     * isolation, its Harness Session.
      */
     default CompletionStage<Map<String, Object>> installContext(
             RuntimeBindingRecord runtime, RuntimeSessionRecord session,
@@ -48,11 +65,70 @@ public interface RuntimeTransport {
     CompletionStage<Void> acquire(RuntimeLease lease,
             RuntimeSession session);
 
+    default CompletionStage<Void> installPublisher(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> publisher) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "managed_tool_publisher_unavailable",
+                "Runtime transport does not support output publication.", false));
+    }
+
+    default CompletionStage<Map<String, Object>> acknowledge(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> receipt) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "managed_tool_result_acknowledge_unsupported",
+                "Runtime transport does not support result acknowledgement.", false));
+    }
+
     CompletionStage<Object> control(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> operation);
 
     CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference);
+
+    default CompletionStage<Void> installPublication(RuntimeLease lease,
+            RuntimeSession session, RuntimePublicationGrant grant) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_publication_unsupported",
+                "Runtime transport does not support publication grants.", false));
+    }
+
+    default CompletionStage<Map<String, Object>> executeV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> payload, Map<String, Object> capture) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_tool_v3_unsupported",
+                "Runtime transport does not support Tool v3.", false));
+    }
+
+    default CompletionStage<Map<String, Object>> statusV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            long afterSequence) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_tool_v3_unsupported", "Runtime transport does not support Tool v3 status.", false));
+    }
+
+    default CompletionStage<Map<String, Object>> cancelV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_tool_v3_unsupported", "Runtime transport does not support Tool v3 cancel.", false));
+    }
+
+    default CompletionStage<Map<String, Object>> acknowledgeV3(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> receipt) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "runtime_tool_v3_unsupported", "Runtime transport does not support Tool v3 ACK.", false));
+    }
+
+    default CompletionStage<Map<String, Object>> execute(RuntimeLease lease,
+            RuntimeSession session, Map<String, Object> reference,
+            Map<String, Object> payload) {
+        Map<String, Object> request = new java.util.LinkedHashMap<>(reference);
+        request.remove("dispatchMode");
+        request.putAll(payload);
+        return execute(lease, session, Map.copyOf(request));
+    }
 
     CompletionStage<Map<String, Object>> cancel(RuntimeLease lease,
             RuntimeSession session, Map<String, Object> reference);

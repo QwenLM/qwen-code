@@ -854,6 +854,16 @@ const fakeWorkspace = {
       requiresOperatorAction: true,
     };
   },
+  async grantWorkspaceTrust() {
+    return {
+      v: 1,
+      workspaceCwd: TEST_WORKSPACE,
+      folderTrustEnabled: true,
+      effective: { state: 'trusted', source: 'file' },
+      explicitTrustLevel: 'TRUST_FOLDER',
+      requiresDaemonRestartForChanges: false,
+    };
+  },
   async getWorkspacePermissionsStatus() {
     return {
       v: 1,
@@ -1790,6 +1800,34 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       },
     });
   });
+
+  it.each(['agent-host', 'agent'])(
+    'session/new rejects the reserved %s source',
+    async (sourceType) => {
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      const ack = await post(connId, {
+        jsonrpc: '2.0',
+        id: 91,
+        method: 'session/new',
+        params: { cwd: '/ws', sourceType, sourceId: 'ag_x' },
+      });
+      expect(ack.status).toBe(202);
+      const [frame] = (await got) as Array<{
+        id: number;
+        error: { code: number; data?: { errorKind?: string } };
+      }>;
+      expect(frame).toMatchObject({
+        id: 91,
+        error: {
+          code: -32602,
+          data: { errorKind: 'reserved_session_source' },
+        },
+      });
+    },
+  );
 
   it('maps workspace session admission failures to retryable RPC error data', async () => {
     bridge.spawnOrAttach = async () => {
@@ -5207,15 +5245,16 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
-  it.each(['session/load', 'session/resume'] as const)(
-    '%s restores reserved-source transcripts on the generic surface',
-    async (method) => {
+  it.each([
+    ['session/load', 'standalone', '550e8400-e29b-41d4-a716-446655440133'],
+    ['session/resume', 'standalone', '550e8400-e29b-41d4-a716-446655440134'],
+    ['session/load', 'agent', '550e8400-e29b-41d4-a716-446655440135'],
+    ['session/resume', 'agent', '550e8400-e29b-41d4-a716-446655440136'],
+  ] as const)(
+    '%s strips %s source metadata on the generic surface',
+    async (method, sourceType, sessionId) => {
       await withRuntimeDir(async () => {
-        const sessionId =
-          method === 'session/load'
-            ? '550e8400-e29b-41d4-a716-446655440133'
-            : '550e8400-e29b-41d4-a716-446655440134';
-        await writeStoredSession(sessionId, 'active', undefined, 'standalone');
+        await writeStoredSession(sessionId, 'active', undefined, sourceType);
         const loadCount = bridge.loadRequests.length;
         const resumeCount = bridge.resumeRequests.length;
 
@@ -7815,6 +7854,96 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(requestSpy).not.toHaveBeenCalled();
     trustSpy.mockRestore();
     requestSpy.mockRestore();
+  });
+
+  it('dispatches _qwen/workspace/trust/grant', async () => {
+    // The pre-write status must differ from the post-write grant result on
+    // the asserted fields, so the reply below can only be satisfied by the
+    // grant result — not by the dispatcher echoing the pre-write status.
+    const trustSpy = vi
+      .spyOn(fakeWorkspace, 'getWorkspaceTrustStatus')
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: TEST_WORKSPACE,
+        folderTrustEnabled: true,
+        effective: { state: 'untrusted', source: 'file' },
+        explicitTrustLevel: null,
+        requiresDaemonRestartForChanges: true,
+      });
+    // A real grant notifies the trust monitor, whose reconcile closes this
+    // generation before the reply is built, so the spy closes it too.
+    const generationGuard = createWorkspaceGenerationGuard();
+    const grant = fakeWorkspace.grantWorkspaceTrust.bind(fakeWorkspace);
+    const grantSpy = vi
+      .spyOn(fakeWorkspace, 'grantWorkspaceTrust')
+      .mockImplementation(async (ctx) => {
+        generationGuard.close();
+        return grant(ctx);
+      });
+    await restartServer({ generationGuard });
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 216,
+      method: '_qwen/workspace/trust/grant',
+      params: {},
+    });
+    const frames = (await got) as Array<{ id: number; result?: unknown }>;
+    expect(frames[0]).toMatchObject({
+      id: 216,
+      result: {
+        v: 1,
+        workspaceCwd: TEST_WORKSPACE,
+        folderTrustEnabled: true,
+        effective: { state: 'trusted', source: 'file' },
+      },
+    });
+    expect(grantSpy).toHaveBeenCalledTimes(1);
+    trustSpy.mockRestore();
+    grantSpy.mockRestore();
+  });
+
+  it('rejects _qwen/workspace/trust/grant when folder trust is disabled', async () => {
+    const trustSpy = vi
+      .spyOn(fakeWorkspace, 'getWorkspaceTrustStatus')
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: TEST_WORKSPACE,
+        folderTrustEnabled: false,
+        effective: { state: 'trusted', source: 'disabled' },
+        explicitTrustLevel: null,
+        requiresDaemonRestartForChanges: true,
+      });
+    const grantSpy = vi.spyOn(fakeWorkspace, 'grantWorkspaceTrust');
+
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 217,
+      method: '_qwen/workspace/trust/grant',
+      params: {},
+    });
+
+    const frames = (await got) as Array<{
+      id: number;
+      error?: { code: number; message: string };
+    }>;
+    expect(frames[0]).toMatchObject({
+      id: 217,
+      error: {
+        code: -32600,
+        message: 'Folder trust is disabled for this workspace',
+      },
+    });
+    expect(grantSpy).not.toHaveBeenCalled();
+    trustSpy.mockRestore();
+    grantSpy.mockRestore();
   });
 
   it('dispatches _qwen/workspace/permissions', async () => {
@@ -11856,6 +11985,8 @@ describe('ACP WebSocket transport security', () => {
   let lanPort: number;
   let bridge: FakeBridge;
   let previousCdpMcpCommand: string | undefined;
+  let credentialStore: CredentialStore | undefined;
+  let desktopRelayCredential: string | undefined;
 
   beforeEach(() => {
     previousCdpMcpCommand = process.env['QWEN_CDP_MCP_COMMAND'];
@@ -11876,6 +12007,7 @@ describe('ACP WebSocket transport security', () => {
       webShellToken?: string;
       hostname?: string;
       reportedLocalPort?: number;
+      desktopRelaySessionId?: string;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -11884,9 +12016,18 @@ describe('ACP WebSocket transport security', () => {
       app.use(express.json());
       const archiveCoordinator = new SessionArchiveCoordinator();
       const credentials =
-        opts.localControlToken || opts.webShellToken
+        opts.localControlToken ||
+        opts.webShellToken ||
+        opts.desktopRelaySessionId
           ? new CredentialStore(opts.token)
           : undefined;
+      credentialStore = credentials;
+      desktopRelayCredential = opts.desktopRelaySessionId
+        ? credentials!.createDesktopRelayCredential({
+            acpPath: '/acp',
+            sessionId: opts.desktopRelaySessionId,
+          })
+        : undefined;
       if (opts.webShellToken) credentials!.addWebShellToken(opts.webShellToken);
       if (opts.localControlToken) {
         credentials!.addPairingToken('test-pairing', opts.localControlToken);
@@ -11916,6 +12057,7 @@ describe('ACP WebSocket transport security', () => {
         }),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
+        clientMcpOverWs: opts.desktopRelaySessionId !== undefined,
         ...(opts.cdpTunnelOverWs
           ? {
               cdpTunnelOverWs: true,
@@ -12052,6 +12194,112 @@ describe('ACP WebSocket transport security', () => {
   }
 
   // ── Host allowlist ──────────────────────────────────────────────────
+  it('rejects a primary desktop relay credential on the local-control listener', async () => {
+    await startServer({
+      token: 'runtime-token',
+      localControlToken: 'pairing-token',
+      desktopRelaySessionId: 'session-1',
+    });
+    const result = await wsConnectLocalControl(desktopRelayCredential!);
+    result.socket?.close();
+    expect(result.code).toBe(401);
+    const primary = await wsConnect({
+      headers: { Authorization: `Bearer ${desktopRelayCredential!}` },
+    });
+    primary.close();
+  });
+
+  it('limits a desktop relay credential to one ACP connection, client, server, and session', async () => {
+    await startServer({
+      token: 'runtime-token',
+      desktopRelaySessionId: 'session-1',
+    });
+    const credential = desktopRelayCredential!;
+    const ws = await wsConnect({
+      headers: { Authorization: `Bearer ${credential}` },
+    });
+
+    await expect(
+      sendRpc(ws, {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          clientInfo: { name: 'qwen-desktop-relay', version: '1.0.0' },
+        },
+      }),
+    ).resolves.toMatchObject({ result: expect.any(Object) });
+    await expect(
+      sendRpc(ws, {
+        type: 'mcp_register',
+        server: 'desktop-node-repl',
+        sessionId: 'other-session',
+      }),
+    ).resolves.toMatchObject({ code: 'credential_scope_violation' });
+    await expect(
+      sendRpc(ws, {
+        type: 'mcp_register',
+        server: 'other-server',
+        sessionId: 'session-1',
+      }),
+    ).resolves.toMatchObject({ code: 'credential_scope_violation' });
+    await expect(
+      sendRpc(ws, {
+        type: 'mcp_register',
+        server: 'desktop-node-repl',
+        sessionId: 'session-1',
+      }),
+    ).resolves.toMatchObject({ code: 'not_wired' });
+
+    const replay = await wsConnectRaw('127.0.0.1', undefined, {
+      Authorization: `Bearer ${credential}`,
+    });
+    expect(replay.code).toBe(401);
+
+    const wrongClientCredential = credentialStore!.createDesktopRelayCredential(
+      {
+        acpPath: '/acp',
+        sessionId: 'session-1',
+      },
+    )!;
+    const wrongClient = await wsConnect({
+      headers: { Authorization: `Bearer ${wrongClientCredential}` },
+    });
+    await expect(
+      sendRpc(wrongClient, {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'initialize',
+        params: { clientInfo: { name: 'other-client', version: '1.0.0' } },
+      }),
+    ).resolves.toMatchObject({ error: { code: -32600 } });
+
+    const frameOnlyCredential = credentialStore!.createDesktopRelayCredential({
+      acpPath: '/acp',
+      sessionId: 'session-1',
+    })!;
+    const frameOnly = await wsConnect({
+      headers: { Authorization: `Bearer ${frameOnlyCredential}` },
+    });
+    await sendRpc(frameOnly, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'initialize',
+      params: {
+        clientInfo: { name: 'qwen-desktop-relay', version: '1.0.0' },
+      },
+    });
+    const closed = new Promise<number>((resolve) =>
+      frameOnly.once('close', (code) => resolve(code)),
+    );
+    frameOnly.send(
+      JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'session/new' }),
+    );
+    await expect(closed).resolves.toBe(1008);
+    ws.close();
+    wrongClient.close();
+  });
+
   it('accepts WS upgrade with loopback Host header', async () => {
     await startServer();
     const result = await wsConnectRaw('127.0.0.1', undefined);
@@ -12920,6 +13168,36 @@ describe('ACP WebSocket transport security', () => {
     expect(res).toMatchObject({
       id: 2,
       result: { accepted: true, desiredState: 'untrusted' },
+    });
+    expect(tiers).toEqual(['mutation']);
+    ws.close();
+  });
+
+  it('classifies _qwen/workspace/trust/grant as a WS mutation method', async () => {
+    const tiers: string[] = [];
+    await startServer({
+      checkRate: (_key, tier) => {
+        tiers.push(tier);
+        return true;
+      },
+    });
+    const ws = await wsConnect();
+    await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {},
+    });
+    const res = await sendRpc(ws, {
+      jsonrpc: '2.0',
+      id: 2,
+      method: '_qwen/workspace/trust/grant',
+      params: {},
+    });
+
+    expect(res).toMatchObject({
+      id: 2,
+      result: { effective: { state: 'trusted' } },
     });
     expect(tiers).toEqual(['mutation']);
     ws.close();

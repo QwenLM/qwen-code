@@ -28,6 +28,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   BranchWhilePromptActiveError,
+  CdWhilePromptActiveError,
   InvalidClientIdError,
   BridgeChannelQuarantinedError,
   InvalidPermissionOptionError,
@@ -473,6 +474,233 @@ describe('createAcpSessionBridge', () => {
         { sessionId: session.sessionId, holds: [] },
       ]);
       expect(summary().hasRunningBackgroundTasks).toBeUndefined();
+      await bridge.shutdown();
+    });
+
+    // R1-17 (#11768): the backgroundTurn disjuncts in branch/fork/rewind
+    // admission and queue callbacks had no test — the existing busy-guard
+    // table only ever produced the busy state with an in-flight prompt. An
+    // admitted background notification turn is a different way to reach the
+    // same guard. The queued-cd table below pins branch, fork and rewind
+    // admission individually, including rejection before entering the queue.
+    // The branchSession and launchSessionForkAgent queue-callback disjuncts
+    // remain masked by their own admission checks and are the
+    // residual R1-17 gap. The side-task term (`concurrentSideTask` in
+    // `session-control-plane.ts`) is a concurrent-release decision and is not
+    // pinned here.
+    const admittedBackgroundTurn = {
+      turnId: 'notification-1',
+      taskId: 'Explore-1',
+      kind: 'agent',
+      sourceTurnId: 'user-1',
+      toolUseId: 'call-1',
+      label: 'Explore',
+      startedAt: 1000,
+    } as const;
+
+    it.each([
+      {
+        operation: 'branch',
+        method: SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.branchSession(sessionId, {}),
+        errorType: BranchWhilePromptActiveError,
+      },
+      {
+        operation: 'rewind',
+        method: SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.rewindSession(sessionId, { promptId: 'prompt-1' }),
+        errorType: SessionBusyError,
+      },
+      {
+        operation: 'fork',
+        method: SERVE_CONTROL_EXT_METHODS.sessionForkAgent,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.launchSessionForkAgent(sessionId, 'review this'),
+        errorType: SessionBusyError,
+      },
+      {
+        operation: 'cd',
+        method: SERVE_CONTROL_EXT_METHODS.sessionCd,
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.changeSessionCwd(sessionId, { path: WS_B }),
+        errorType: CdWhilePromptActiveError,
+      },
+    ])(
+      'rejects $operation while an admitted background turn is running',
+      async ({ invoke, errorType, method }) => {
+        // R1-3: the error class alone cannot distinguish a synchronous
+        // admission rejection from a post-dispatch refusal — a child-side
+        // busy answer is mapped into SessionBusyError too. Each arm wires an
+        // ext-method impl that throws for the operation's own method, so a
+        // change that moves the busy check after the child dispatch fails
+        // twice over: the call is recorded on the fake agent and the
+        // operation rejects with the impl's error instead of the guard's.
+        const handle = makeChannel({
+          extMethodImpl: (calledMethod) => {
+            if (calledMethod === method) {
+              throw new Error('mutation must not reach a busy session');
+            }
+            return {};
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await expect(
+          handle.agentConnection.extMethod('_qwencode/start_turn', {
+            sessionId: session.sessionId,
+            source: 'background_notification',
+            ...admittedBackgroundTurn,
+          }),
+        ).resolves.toEqual({ accepted: true });
+        expect(
+          bridge.getSessionSummary(session.sessionId).backgroundTurn,
+        ).toMatchObject({ turnId: admittedBackgroundTurn.turnId });
+
+        await expect(invoke(bridge, session.sessionId)).rejects.toBeInstanceOf(
+          errorType,
+        );
+        expect(handle.agent.extMethodCalls).not.toContainEqual(
+          expect.objectContaining({ method }),
+        );
+        await bridge.shutdown();
+      },
+    );
+
+    it.each([
+      {
+        operation: 'branch',
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.branchSession(sessionId, {}),
+        errorType: BranchWhilePromptActiveError,
+      },
+      {
+        operation: 'fork',
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.launchSessionForkAgent(sessionId, 'review this'),
+        errorType: SessionBusyError,
+      },
+      {
+        operation: 'rewind',
+        invoke: (bridge: ReturnType<typeof makeBridge>, sessionId: string) =>
+          bridge.rewindSession(sessionId, { promptId: 'prompt-1' }),
+        errorType: SessionBusyError,
+      },
+    ])(
+      'rejects $operation synchronously while an in-flight cd holds the queue during a background turn',
+      async ({ invoke, errorType }) => {
+        const hangingCd = deferred<Record<string, unknown>>();
+        const handle = makeChannel({
+          extMethodImpl: (method) =>
+            method === SERVE_CONTROL_EXT_METHODS.sessionCd
+              ? hangingCd.promise
+              : {},
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const cd = bridge.changeSessionCwd(session.sessionId, { path: WS_B });
+        void cd.catch(() => undefined);
+        await vi.waitFor(() =>
+          expect(handle.agent.extMethodCalls).toContainEqual(
+            expect.objectContaining({
+              method: SERVE_CONTROL_EXT_METHODS.sessionCd,
+            }),
+          ),
+        );
+
+        await expect(
+          handle.agentConnection.extMethod('_qwencode/start_turn', {
+            sessionId: session.sessionId,
+            source: 'background_notification',
+            ...admittedBackgroundTurn,
+          }),
+        ).resolves.toEqual({ accepted: true });
+
+        const outcome = await Promise.race([
+          invoke(bridge, session.sessionId).then(
+            () => 'queued-success',
+            (error) => error,
+          ),
+          new Promise<'queued-timeout'>((resolve) =>
+            setTimeout(() => resolve('queued-timeout'), 100),
+          ),
+        ]);
+        expect(outcome).toBeInstanceOf(errorType);
+
+        hangingCd.resolve({
+          previousCwd: WS_A,
+          newCwd: WS_B,
+          warnings: [],
+        });
+        await cd;
+        await bridge.shutdown();
+      },
+    );
+
+    // R1-1: the cd guard (pinned by the `cd` row above) and the
+    // `entryHasLocalWork` term are the two deferred sites the branch/fork/rewind
+    // rows cannot reach. Retention is decided on the detach path —
+    // `maybeCloseIdleSession('last_client_detached')` evaluates
+    // `entryIsAutoCloseCandidate` inside the awaited `detachClient` — and is
+    // only observable with no event subscriber attached: the candidate check
+    // returns early on `subscriberCount > 0`, one line before `entryHasLocalWork`
+    // runs, so a subscribed session would pass for the wrong reason and stay
+    // green under the mutation. The release half below is the reaper's idle
+    // TTL, which is what proves the turn was the only thing holding it.
+    it('retains a detached session whose only work is an admitted background turn', async () => {
+      let conditionalCloseCalls = 0;
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+            conditionalCloseCalls++;
+          }
+          return { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionReapIntervalMs: 10,
+        sessionIdleTimeoutMs: 10,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await expect(
+        handle.agentConnection.extMethod('_qwencode/start_turn', {
+          sessionId: session.sessionId,
+          source: 'background_notification',
+          ...admittedBackgroundTurn,
+        }),
+      ).resolves.toEqual({ accepted: true });
+      expect(
+        bridge.getSessionSummary(session.sessionId).backgroundTurn,
+      ).toMatchObject({ turnId: admittedBackgroundTurn.turnId });
+      await sendActiveWorkSnapshot(handle, 1, [
+        { sessionId: session.sessionId, holds: [] },
+      ]);
+
+      await bridge.detachClient(session.sessionId, session.clientId);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(conditionalCloseCalls).toBe(0);
+      expect(bridge.sessionCount).toBe(1);
+      expect(bridge.getSessionSummary(session.sessionId).activeWorkState).toBe(
+        'active',
+      );
+
+      await handle.agentConnection.extNotification('_qwencode/end_turn', {
+        sessionId: session.sessionId,
+        source: 'background_notification',
+        reason: 'end_turn',
+        turnId: admittedBackgroundTurn.turnId,
+      });
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+      expect(conditionalCloseCalls).toBe(1);
+
       await bridge.shutdown();
     });
 
@@ -6026,6 +6254,64 @@ describe('createAcpSessionBridge', () => {
       }),
     ).resolves.toEqual({ stopReason: 'end_turn' });
     expect(handles[0]?.agent.promptCalls[0]?.sessionId).toBe('persisted-1');
+
+    await bridge.shutdown();
+  });
+
+  it('returns the explicit load approval override in restored state', async () => {
+    let approvalMode = ApprovalMode.PLAN;
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          loadSessionImpl: () =>
+            ({
+              modes: {
+                currentModeId: ApprovalMode.PLAN,
+                _meta: { planExecutionMode: ApprovalMode.YOLO },
+                availableModes: [],
+              },
+              configOptions: [
+                {
+                  id: 'mode',
+                  name: 'Approval mode',
+                  type: 'select',
+                  currentValue: ApprovalMode.PLAN,
+                  options: [],
+                },
+              ],
+            }) as unknown as LoadSessionResponse,
+          extMethodImpl: (method, params) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionApprovalMode) {
+              const previous = approvalMode;
+              approvalMode = params['mode'] as ApprovalMode;
+              return { previous, current: approvalMode };
+            }
+            return {};
+          },
+        }).channel,
+    });
+
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-approval',
+      workspaceCwd: WS_A,
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+
+    expect(loaded.state.modes?.currentModeId).toBe(ApprovalMode.DEFAULT);
+    expect(loaded.state.modes?._meta?.['planExecutionMode']).toBeUndefined();
+    expect(
+      loaded.state.configOptions?.find((option) => option.id === 'mode'),
+    ).toMatchObject({ currentValue: ApprovalMode.DEFAULT });
+
+    const attached = await bridge.loadSession({
+      sessionId: 'persisted-approval',
+      workspaceCwd: WS_A,
+    });
+    expect(attached.state.modes?.currentModeId).toBe(ApprovalMode.DEFAULT);
+    expect(attached.state.modes?._meta?.['planExecutionMode']).toBeUndefined();
+    expect(
+      attached.state.configOptions?.find((option) => option.id === 'mode'),
+    ).toMatchObject({ currentValue: ApprovalMode.DEFAULT });
 
     await bridge.shutdown();
   });
@@ -17132,6 +17418,120 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('binds chunk uploads to registered clients and revokes them on detach', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const { uploadId } = bridge.createSessionAttachmentUpload(
+          session.sessionId,
+          { name: 'test.txt', mimeType: 'text/plain', size: 3 },
+          { clientId: session.clientId },
+        );
+        expect(() =>
+          bridge.appendSessionAttachmentUpload(
+            session.sessionId,
+            uploadId,
+            0,
+            Buffer.from('abc'),
+          ),
+        ).toThrow(expect.objectContaining({ status: 404 }));
+        bridge.appendSessionAttachmentUpload(
+          session.sessionId,
+          uploadId,
+          0,
+          Buffer.from('abc'),
+          { clientId: session.clientId },
+        );
+        const reference = await bridge.completeSessionAttachmentUpload(
+          session.sessionId,
+          uploadId,
+          { clientId: session.clientId },
+        );
+        expect(
+          (
+            await bridge.readSessionAttachment(
+              session.sessionId,
+              reference.attachmentId,
+            )
+          )?.data.toString(),
+        ).toBe('abc');
+        const pending = bridge.createSessionAttachmentUpload(
+          session.sessionId,
+          { name: 'pending.txt', mimeType: 'text/plain', size: 3 },
+          { clientId: session.clientId },
+        );
+        await bridge.detachClient(session.sessionId, session.clientId);
+        expect(() =>
+          bridge.appendSessionAttachmentUpload(
+            session.sessionId,
+            pending.uploadId,
+            0,
+            Buffer.from('abc'),
+            { clientId: session.clientId },
+          ),
+        ).toThrow();
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it("frees a detached client's staged uploads while another client keeps the session open", async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        expect(second.sessionId).toBe(first.sessionId);
+        expect(first.clientId).toBeTruthy();
+        expect(second.clientId).toBeTruthy();
+        expect(second.clientId).not.toBe(first.clientId);
+        const create = (clientId: string | undefined) =>
+          bridge.createSessionAttachmentUpload(
+            first.sessionId,
+            {
+              name: 'staged.bin',
+              mimeType: 'application/octet-stream',
+              size: 1,
+            },
+            { clientId },
+          );
+        for (let i = 0; i < 8; i++) create(first.clientId);
+        expect(() => create(second.clientId)).toThrow(
+          expect.objectContaining({ status: 429 }),
+        );
+        await bridge.detachClient(first.sessionId, first.clientId);
+        for (let i = 0; i < 8; i++) {
+          expect(() => create(second.clientId)).not.toThrow();
+        }
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it('closes captured attachment stores during bridge shutdown', async () => {
+      const close = vi.spyOn(SessionAttachmentStore.prototype, 'close');
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        bridge.createSessionAttachmentUpload(session.sessionId, {
+          name: 'test.txt',
+          mimeType: 'text/plain',
+          size: 3,
+        });
+        close.mockClear();
+        await bridge.shutdown();
+        expect(close).toHaveBeenCalled();
+      } finally {
+        close.mockRestore();
+        await bridge.shutdown();
+      }
+    });
+
     it('keeps attachment references on the event bus and resolves bytes for ACP', async () => {
       const prompts: PromptRequest[] = [];
       const factory: ChannelFactory = async () =>
@@ -17173,7 +17573,15 @@ describe('createAcpSessionBridge', () => {
       );
 
       expect(prompts[0]?.prompt).toEqual([
-        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        {
+          type: 'image',
+          data: 'AQID',
+          mimeType: 'image/png',
+          _meta: {
+            'qwen.daemon.attachmentContext':
+              expect.stringContaining('"absolutePath":'),
+          },
+        },
       ]);
       expect(prompts[0]?._meta?.['qwen.daemon.attachmentReferences']).toEqual([
         reference,
@@ -17303,6 +17711,10 @@ describe('createAcpSessionBridge', () => {
       expect(prompts[0]?.prompt).toEqual([
         {
           type: 'resource',
+          _meta: {
+            'qwen.daemon.attachmentContext':
+              expect.stringContaining('"absolutePath":'),
+          },
           resource: {
             uri: 'attachment:///notes.txt',
             mimeType: 'text/plain',
@@ -17311,6 +17723,10 @@ describe('createAcpSessionBridge', () => {
         },
         {
           type: 'resource',
+          _meta: {
+            'qwen.daemon.attachmentContext':
+              expect.stringContaining('"absolutePath":'),
+          },
           resource: {
             uri: 'attachment:///report.pdf',
             mimeType: 'application/pdf',
@@ -18330,6 +18746,102 @@ describe('createAcpSessionBridge', () => {
         await bridge.shutdown();
       },
     );
+
+    it('answers the snapshot listing only after a rewind queued behind a branch has run', async () => {
+      const tracked = new Set<string>([
+        SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
+      ]);
+      const calls: string[] = [];
+      const branchGate = deferred<void>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (tracked.has(method)) calls.push(method);
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
+            await branchGate.promise;
+            return { newSessionId: 'branch-session', title: 'Branch' };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+            return { targetTurnIndex: 1, filesChanged: [], filesFailed: [] };
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+            // What the agent lists once the rewind has truncated.
+            return {
+              snapshots: [{ promptId: 'session########0', turnIndex: 0 }],
+            };
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const branch = bridge.branchSession(session.sessionId, {});
+      const rewind = bridge.rewindSession(session.sessionId, {
+        promptId: 'session########1',
+      });
+      await vi.waitFor(() =>
+        expect(calls).toEqual([SERVE_CONTROL_EXT_METHODS.sessionBranch]),
+      );
+
+      // Asked while the rewind is still waiting its turn: no answer yet.
+      let listed: { snapshots: unknown[] } | undefined;
+      const listing = bridge
+        .getRewindSnapshots(session.sessionId)
+        .then((result) => {
+          listed = result;
+          return result;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(listed).toBeUndefined();
+      expect(calls).toEqual([SERVE_CONTROL_EXT_METHODS.sessionBranch]);
+
+      branchGate.resolve();
+      await branch;
+      await rewind;
+      await expect(listing).resolves.toEqual({
+        snapshots: [{ promptId: 'session########0', turnIndex: 0 }],
+      });
+      expect(calls).toEqual([
+        SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
+      ]);
+      await bridge.shutdown();
+    });
+
+    it('still answers the snapshot listing after an admitted rewind failed', async () => {
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+            throw new Error('rewind blew up');
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+            return { snapshots: [] };
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.rewindSession(session.sessionId, {
+          promptId: 'session########1',
+        }),
+      ).rejects.toThrow();
+      await expect(
+        bridge.getRewindSnapshots(session.sessionId),
+      ).resolves.toEqual({ snapshots: [] });
+      await bridge.shutdown();
+    });
 
     it.each([
       {
@@ -37401,6 +37913,54 @@ describe('createAcpSessionBridge — background notifications', () => {
   });
 });
 
+describe('createAcpSessionBridge — session agent records', () => {
+  const request = {
+    kind: 'agent_message' as const,
+    recordKey: 'run-1:result',
+    modelText: '<agent_message from="claude-B">done</agent_message>',
+    payload: {
+      displayText: 'done',
+      author: { agentId: 'agent-1', name: 'claude-B' },
+      runId: 'run-1',
+      status: 'completed' as const,
+    },
+  };
+
+  it('forwards the record to the live session and returns its id', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionExternalRecord
+          ? { sessionId: params['sessionId'], recordId: 'rec-1', created: true }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.appendExternalRecord(session.sessionId, request),
+    ).resolves.toEqual({
+      sessionId: session.sessionId,
+      recordId: 'rec-1',
+      created: true,
+    });
+    expect(handle.agent.extMethodCalls).toContainEqual({
+      method: SERVE_CONTROL_EXT_METHODS.sessionExternalRecord,
+      params: { sessionId: session.sessionId, ...request },
+    });
+    await bridge.shutdown();
+  });
+
+  it('rejects a record for an unknown session', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    await expect(
+      bridge.appendExternalRecord('missing', request),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    await bridge.shutdown();
+  });
+});
+
 /**
  * `enqueueMidTurnMessage` backs the web-shell mid-turn drain: the browser
  * pushes a message typed during a turn, the ACP child drains it via
@@ -38481,7 +39041,15 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         type: 'text',
         text: 'two images\n[Attachment is no longer available]',
       },
-      { type: 'image', data: 'AQI=', mimeType: 'image/png' },
+      {
+        type: 'image',
+        data: 'AQI=',
+        mimeType: 'image/png',
+        _meta: {
+          'qwen.daemon.attachmentContext':
+            expect.stringContaining('"absolutePath":'),
+        },
+      },
     ]);
     releases[1]!();
     await vi.waitFor(() =>
@@ -38561,7 +39129,15 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         type: 'text',
         text: 'm2\n[Attachment is no longer available]',
       },
-      { type: 'image', data: 'AQI=', mimeType: 'image/png' },
+      {
+        type: 'image',
+        data: 'AQI=',
+        mimeType: 'image/png',
+        _meta: {
+          'qwen.daemon.attachmentContext':
+            expect.stringContaining('"absolutePath":'),
+        },
+      },
     ]);
     releases[2]!();
     await vi.waitFor(() =>

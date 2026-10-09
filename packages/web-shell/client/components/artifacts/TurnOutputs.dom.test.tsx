@@ -104,7 +104,7 @@ afterEach(() => {
 });
 
 describe('TurnOutputs artifact downloads', () => {
-  it('shows Download for every available workspace artifact kind', () => {
+  it('shows Download for available and changed workspace artifact kinds', () => {
     const kinds = [
       'file',
       'link',
@@ -117,16 +117,18 @@ describe('TurnOutputs artifact downloads', () => {
       'document',
       'other',
     ];
-    const artifacts = kinds.map(
-      (kind, index) =>
-        ({
-          id: `artifact-${index}`,
-          kind,
-          storage: 'workspace',
-          status: 'available',
-          title: `${kind} artifact`,
-          workspacePath: `output/${kind}`,
-        }) as DaemonSessionArtifact,
+    const artifacts = kinds.flatMap((kind, index) =>
+      ['available', 'changed'].map(
+        (status) =>
+          ({
+            id: `artifact-${index}-${status}`,
+            kind,
+            storage: 'workspace',
+            status,
+            title: `${kind} ${status} artifact`,
+            workspacePath: `output/${kind}`,
+          }) as DaemonSessionArtifact,
+      ),
     );
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -167,12 +169,12 @@ describe('TurnOutputs artifact downloads', () => {
       Array.from(container.querySelectorAll('button')).filter(
         (button) => button.textContent?.trim() === 'Download',
       ),
-    ).toHaveLength(kinds.length);
+    ).toHaveLength(artifacts.length);
 
     act(() => root.unmount());
   });
 
-  it('downloads workspace bytes with the artifact basename', async () => {
+  it('downloads current changed workspace bytes with the artifact basename', async () => {
     const click = vi
       .spyOn(HTMLAnchorElement.prototype, 'click')
       .mockImplementation(() => {});
@@ -192,8 +194,10 @@ describe('TurnOutputs artifact downloads', () => {
                 id: 'artifact-1',
                 kind: 'pdf',
                 storage: 'workspace',
-                status: 'available',
+                status: 'changed',
                 title: 'Report',
+                sizeBytes: 3,
+                metadata: { 'qwen.workspace.sizeBytes': 2 },
                 workspacePath: 'reports/report.pdf',
                 mimeType: 'application/pdf',
               } as DaemonSessionArtifact,
@@ -222,6 +226,13 @@ describe('TurnOutputs artifact downloads', () => {
     expect(click).toHaveBeenCalledOnce();
     expect(click.mock.instances[0]?.download).toBe('report.pdf');
     expect(createdBlobs[0]?.type).toBe('application/pdf');
+    const savedContent = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsText(createdBlobs[0]!);
+    });
+    expect(savedContent).toBe('abc');
 
     act(() => root.unmount());
   });
@@ -481,7 +492,7 @@ describe('TurnOutputs artifact downloads', () => {
     act(() => root.unmount());
   });
 
-  it('does not show Download for managed, pending, or pathless artifacts', () => {
+  it('does not show Download for managed, unavailable, or pathless artifacts', () => {
     const artifacts = [
       {
         id: 'workspace-1',
@@ -506,6 +517,14 @@ describe('TurnOutputs artifact downloads', () => {
         status: 'pending',
         title: 'pending artifact',
         workspacePath: 'output/pending.txt',
+      },
+      {
+        id: 'missing-1',
+        kind: 'file',
+        storage: 'workspace',
+        status: 'missing',
+        title: 'missing artifact',
+        workspacePath: 'output/missing.txt',
       },
       {
         id: 'pathless-1',

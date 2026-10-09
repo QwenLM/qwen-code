@@ -342,6 +342,7 @@ function ensureBuiltins(): Promise<void> {
         { name: 'weixin', promise: import('@qwen-code/channel-weixin') },
         { name: 'dingtalk', promise: import('@qwen-code/channel-dingtalk') },
         { name: 'dws', promise: import('@qwen-code/channel-dws') },
+        { name: 'email', promise: import('@qwen-code/channel-email') },
         { name: 'wecom', promise: import('@qwen-code/channel-wecom') },
         { name: 'feishu', promise: import('@qwen-code/channel-feishu') },
         { name: 'qqbot', promise: import('@qwen-code/channel-qqbot') },

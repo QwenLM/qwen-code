@@ -571,4 +571,112 @@ describe('trailingSystemNotifications provenance signal', () => {
       ).kind,
     ).toBe('none');
   });
+
+  it('does not count a delivered notification turn entry (#12042 shape A)', () => {
+    // `client.ts` stamps the record of a notification turn it actually sends
+    // with `deliveredTurn: true`. The trim exists only for records persisted
+    // BEFORE their turn ran; a delivered-but-unanswered entry is an
+    // interrupted prompt, so it must stay classifiable.
+    const messages = [
+      modelRecord('earlier answer'),
+      { ...notificationRecord(), deliveredTurn: true },
+    ];
+    expect(
+      buildSessionHistoryFromConversation({ messages })
+        .trailingSystemNotifications,
+    ).toBe(0);
+  });
+
+  it('counts a cold record behind a delivered one only up to the delivered entry', () => {
+    // A failed delivered turn leaves [cold, delivered] at the tail: the
+    // trailing count is 0 (the last entry is delivered), so neither entry is
+    // trimmed and both ride the Retry re-submission. The reverse order —
+    // [delivered, cold], a new notification persisted after the turn failed —
+    // counts 1 and trims only the genuinely cold tail entry.
+    const delivered = {
+      ...notificationRecord(),
+      deliveredTurn: true,
+    };
+    expect(
+      buildSessionHistoryFromConversation({
+        messages: [notificationRecord(), delivered],
+      }).trailingSystemNotifications,
+    ).toBe(0);
+    expect(
+      buildSessionHistoryFromConversation({
+        messages: [delivered, notificationRecord()],
+      }).trailingSystemNotifications,
+    ).toBe(1);
+  });
+});
+
+describe('internal Code Mode tool results', () => {
+  it('keeps the internal functionResponse out of model history', () => {
+    const base = {
+      sessionId: 'session',
+      timestamp: '2026-10-07T00:00:00.000Z',
+      cwd: '/workspace',
+      version: 'test',
+    };
+    const messages: ChatRecord[] = [
+      {
+        ...base,
+        uuid: 'call',
+        parentUuid: null,
+        type: 'assistant',
+        message: {
+          role: 'model',
+          parts: [{ functionCall: { id: 'outer', name: 'exec' } }],
+        },
+      },
+      {
+        ...base,
+        uuid: 'nested',
+        parentUuid: 'call',
+        type: 'tool_result',
+        subtype: 'code_mode_tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'nested',
+                name: 'write_file',
+                response: { output: 'internal' },
+              },
+            },
+          ],
+        },
+      },
+      {
+        ...base,
+        uuid: 'result',
+        parentUuid: 'nested',
+        type: 'tool_result',
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'outer',
+                name: 'exec',
+                response: { output: 'script finished' },
+              },
+            },
+          ],
+        },
+      },
+    ];
+
+    const parts = buildApiHistoryFromConversation({ messages }).flatMap(
+      (entry) => entry.parts ?? [],
+    );
+
+    expect(parts.some((part) => part.functionResponse?.id === 'outer')).toBe(
+      true,
+    );
+    expect(parts.some((part) => part.functionResponse?.id === 'nested')).toBe(
+      false,
+    );
+  });
 });

@@ -55,6 +55,7 @@ const {
     mockSecondaryWorkspaceActions,
     mockWorkspace: {
       capabilities: {
+        features: [] as string[],
         workspaceCwd: '/primary',
         workspaces: [
           {
@@ -378,6 +379,7 @@ afterEach(() => {
   mockSecondaryWorkspaceActions.readWorkspaceFileBytes.mockReset();
   mockSecondaryWorkspaceActions.fileStat.mockReset();
   mockWorkspace.client.workspaceByCwd.mockClear();
+  mockWorkspace.capabilities.features = [];
   latestArtifactWorkspaceTarget = undefined;
   mockWorkspace.capabilities = {
     workspaceCwd: '/primary',

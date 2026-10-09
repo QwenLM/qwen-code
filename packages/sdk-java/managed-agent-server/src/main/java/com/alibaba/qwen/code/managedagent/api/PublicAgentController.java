@@ -1,19 +1,25 @@
 package com.alibaba.qwen.code.managedagent.api;
 
+import com.alibaba.qwen.code.managedagent.api.ApiModels.ChangeCwdRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CommandAdmission;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.DeletedSession;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.CreateSessionRequest;
-import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicEvent;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCommandOperation;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicCwdOperation;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicSession;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTask;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTaskEvent;
+import com.alibaba.qwen.code.managedagent.api.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.SessionEventRequest;
 import com.alibaba.qwen.code.managedagent.api.ApiModels.UpdateSessionRequest;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.service.ManagedAgentService.SessionMutationResult;
 import com.alibaba.qwen.code.managedagent.service.ManagedEventStreamService;
+import com.alibaba.qwen.code.managedagent.service.ManagedTaskService;
+import com.alibaba.qwen.code.managedagent.service.SessionLifecycleService;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import jakarta.validation.Valid;
-import java.util.List;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -34,11 +40,16 @@ import org.springframework.web.bind.annotation.RestController;
 public class PublicAgentController {
     private final ManagedAgentService service;
     private final ManagedEventStreamService streams;
+    private final SessionLifecycleService lifecycle;
+    private final ManagedTaskService tasks;
 
     public PublicAgentController(ManagedAgentService service,
-            ManagedEventStreamService streams) {
+            ManagedEventStreamService streams,
+            SessionLifecycleService lifecycle, ManagedTaskService tasks) {
         this.service = service;
         this.streams = streams;
+        this.lifecycle = lifecycle;
+        this.tasks = tasks;
     }
 
     @PostMapping
@@ -60,13 +71,14 @@ public class PublicAgentController {
                     "Phase 1 streams through the Session events route.");
         }
         CommandAdmission admission = selection == null
-                ? service.createSession(tenant.tenantId(), idempotencyKey,
-                        request.agentId(), null, request.metadata(),
+                ? service.createSession(tenant.tenantId(), tenant.actorId(),
+                        idempotencyKey, request.agentId(),
+                        request.agentRevision(), null, request.metadata(),
                         request.input())
                 : service.createWorkspaceSession(tenant.tenantId(),
                         tenant.requireActorId(), idempotencyKey,
-                        request.agentId(), null, request.metadata(),
-                        request.input(), selection);
+                        request.agentId(), request.agentRevision(), null,
+                        request.metadata(), request.input(), selection);
         PublicSession session = service.getPublicSession(tenant.tenantId(),
                 tenant.actorId(), admission.sessionId());
         return ResponseEntity.status(HttpStatus.ACCEPTED)
@@ -99,12 +111,20 @@ public class PublicAgentController {
                 idempotencyKey, sessionId, request.title()));
     }
 
-    @PostMapping("/{sessionId}/archive")
-    public ResponseEntity<PublicSession> archive(TenantContext tenant,
+    @PostMapping("/{sessionId}/close")
+    public ResponseEntity<PublicCommandOperation> close(TenantContext tenant,
             @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String idempotencyKey) {
-        return mutation(service.archiveSession(tenant.tenantId(), tenant.actorId(),
-                idempotencyKey, sessionId));
+        return operation(tenant, idempotencyKey, sessionId,
+                OperationKind.CLOSE);
+    }
+
+    @PostMapping("/{sessionId}/archive")
+    public ResponseEntity<PublicCommandOperation> archive(
+            TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader("Idempotency-Key") String idempotencyKey) {
+        return operation(tenant, idempotencyKey, sessionId,
+                OperationKind.ARCHIVE);
     }
 
     @PostMapping("/{sessionId}/unarchive")
@@ -116,15 +136,30 @@ public class PublicAgentController {
     }
 
     @DeleteMapping("/{sessionId}")
-    public ResponseEntity<DeletedSession> delete(TenantContext tenant,
-            @PathVariable String sessionId,
+    public ResponseEntity<PublicCommandOperation> delete(
+            TenantContext tenant, @PathVariable String sessionId,
             @RequestHeader("Idempotency-Key") String idempotencyKey) {
-        SessionMutationResult<DeletedSession> result = service.deleteSession(
-                tenant.tenantId(), tenant.actorId(), idempotencyKey, sessionId);
-        return ResponseEntity.ok()
-                .header("X-Qwen-Idempotent-Replay",
-                        Boolean.toString(result.replayed()))
-                .body(result.body());
+        return operation(tenant, idempotencyKey, sessionId,
+                OperationKind.DELETE);
+    }
+
+    @GetMapping("/{sessionId}/operations/{operationId}")
+    public Object getOperation(TenantContext tenant,
+            @PathVariable String sessionId,
+            @PathVariable String operationId) {
+        return lifecycle.getPublicOperation(tenant.tenantId(),
+                tenant.actorId(), sessionId, operationId);
+    }
+
+    @PostMapping("/{sessionId}/cwd")
+    public ResponseEntity<PublicCwdOperation> changeCwd(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            @Valid @RequestBody ChangeCwdRequest request) {
+        return ResponseEntity.accepted().body(lifecycle.admitPublicCwdChange(
+                tenant.tenantId(), tenant.actorId(), sessionId,
+                idempotencyKey, request.cwdRelative(),
+                request.expectedContextRevision()));
     }
 
     @PostMapping("/{sessionId}/events")
@@ -171,9 +206,8 @@ public class PublicAgentController {
             return streams.publicStream(tenant.tenantId(), tenant.actorId(),
                     sessionId, cursor);
         }
-        List<PublicEvent> events = service.publicEvents(tenant.tenantId(),
-                tenant.actorId(), sessionId, cursor, limit);
-        return new PublicList<>("list", events, false, null);
+        return service.publicEvents(tenant.tenantId(), tenant.actorId(),
+                sessionId, cursor, limit);
     }
 
     @GetMapping("/{sessionId}/items")
@@ -183,6 +217,47 @@ public class PublicAgentController {
             @RequestParam(defaultValue = "20") int limit) {
         return service.listPublicItems(tenant.tenantId(), tenant.actorId(),
                 sessionId, after, limit);
+    }
+
+    @GetMapping("/{sessionId}/turns")
+    public PublicList<PublicTurn> turns(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestParam(required = false) String cursor,
+            @RequestParam(defaultValue = "20") int limit) {
+        return service.listPublicTurns(tenant.tenantId(), tenant.actorId(),
+                sessionId, cursor, limit);
+    }
+
+    @GetMapping("/{sessionId}/turns/{turnId}")
+    public PublicTurn turn(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String turnId) {
+        return service.getPublicTurn(tenant.tenantId(), tenant.actorId(),
+                sessionId, turnId);
+    }
+
+    @GetMapping("/{sessionId}/tasks")
+    public PublicList<PublicTask> tasks(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestParam(required = false) String cursor,
+            @RequestParam(defaultValue = "20") int limit) {
+        return tasks.listPublicTasks(tenant.tenantId(), tenant.actorId(),
+                sessionId, cursor, limit);
+    }
+
+    @GetMapping("/{sessionId}/tasks/{taskId}")
+    public PublicTask task(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String taskId) {
+        return tasks.getPublicTask(tenant.tenantId(), tenant.actorId(),
+                sessionId, taskId);
+    }
+
+    @GetMapping("/{sessionId}/tasks/{taskId}/events")
+    public PublicList<PublicTaskEvent> taskEvents(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String taskId,
+            @RequestParam(required = false) String after,
+            @RequestParam(defaultValue = "20") int limit) {
+        return tasks.listPublicTaskEvents(tenant.tenantId(), tenant.actorId(),
+                sessionId, taskId, after, limit);
     }
 
     private static long parseSequence(String header, long fallback) {
@@ -199,6 +274,14 @@ public class PublicAgentController {
             throw new ApiException(HttpStatus.BAD_REQUEST,
                     "invalid_event_cursor", "Last-Event-ID is invalid.");
         }
+    }
+
+    private ResponseEntity<PublicCommandOperation> operation(
+            TenantContext tenant, String idempotencyKey, String sessionId,
+            OperationKind kind) {
+        return ResponseEntity.accepted().body(lifecycle.admitPublic(
+                tenant.tenantId(), tenant.actorId(), idempotencyKey,
+                sessionId, kind));
     }
 
     private static ResponseEntity<PublicSession> mutation(

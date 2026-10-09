@@ -12,6 +12,7 @@ import {
 import {
   DAEMON_APPROVAL_MODES,
   useAgents,
+  useWorkspace,
   type DaemonWorkspaceAgentDetail,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
@@ -24,7 +25,9 @@ import {
   type AgentSelection,
   type AgentLevelFilter,
 } from './agents-manager-logic';
+import { isAgentCollaborationEnabledForWorkspace } from '../../utils/workspace';
 import { AgentCreatePage } from './AgentCreatePage';
+import { LazyAgentsRoute } from '../workspace-agents/lazy-agents-route';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -75,9 +78,13 @@ import type { EmbeddedManagerPage } from '../plugins/manager-page';
 import styles from './AgentsManagerPage.module.css';
 
 interface AgentsManagerPageProps {
+  initialAgentView?: 'agents' | 'squads' | 'runtime' | 'new-agent';
   onClose: () => void;
   embedded?: EmbeddedManagerPage;
   initialCreateScope?: 'workspace' | 'global' | null;
+  workspaceCwd?: string;
+  /** Puts `@name ` into the chat composer, from an agent card. */
+  onMentionAgent?: (name: string) => void;
 }
 
 function levelLabel(level: string, t: ReturnType<typeof useI18n>['t']): string {
@@ -125,9 +132,12 @@ function unwrapPlainText(value: string): string {
 }
 
 export function AgentsManagerPage({
+  initialAgentView,
   onClose,
   embedded,
   initialCreateScope,
+  workspaceCwd,
+  onMentionAgent,
 }: AgentsManagerPageProps) {
   const { t } = useI18n();
   const {
@@ -150,6 +160,25 @@ export function AgentsManagerPage({
     Boolean(initialCreateScope),
   );
   const [editOpen, setEditOpen] = useState(false);
+  // The roster and runtimes (agents that answer @-mentions in chat) exist only
+  // when the daemon mounts its routes, i.e. `experimental.agentCollaboration`
+  // is on for this workspace. Read the capability rather than rendering the
+  // entry and letting every call 404. Definition CRUD below is unaffected — it
+  // is a different, unconditional feature.
+  const workspace = useWorkspace();
+  const collaborationAvailable = isAgentCollaborationEnabledForWorkspace(
+    workspace.capabilities,
+    workspaceCwd,
+  );
+  // Embedded (the Plugins page's Agents tab) it opens on the definitions it
+  // manages there; the roster is one click away.
+  const [agentsOpen, setAgentsOpen] = useState(
+    () => !initialCreateScope && !embedded && collaborationAvailable,
+  );
+  // The daemon can answer late, or be replaced by one with a different answer.
+  useEffect(() => {
+    if (!collaborationAvailable) setAgentsOpen(false);
+  }, [collaborationAvailable]);
   const [listNotice, setListNotice] = useState<string | null>(null);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
@@ -171,8 +200,10 @@ export function AgentsManagerPage({
   }, [agents]);
 
   useEffect(() => {
-    embedded?.onDetailChange(Boolean(selectedName || createOpen || editOpen));
-  }, [createOpen, editOpen, embedded, selectedName]);
+    embedded?.onDetailChange(
+      Boolean(selectedName || createOpen || editOpen || agentsOpen),
+    );
+  }, [createOpen, editOpen, embedded, agentsOpen, selectedName]);
 
   useEffect(() => {
     if (!selection) {
@@ -204,10 +235,14 @@ export function AgentsManagerPage({
   }, [agentsError]);
 
   useEffect(() => {
-    if (initialCreateScope) setCreateOpen(true);
+    if (initialCreateScope) {
+      setAgentsOpen(false);
+      setCreateOpen(true);
+    }
   }, [initialCreateScope]);
 
   function returnToList(): void {
+    setAgentsOpen(false);
     setCreateOpen(false);
     setEditOpen(false);
     setSelection(null);
@@ -308,6 +343,20 @@ export function AgentsManagerPage({
   ) : (
     standaloneNavigation
   );
+
+  if (agentsOpen && collaborationAvailable) {
+    return (
+      <div className="flex w-full flex-col gap-6 pb-8">
+        {navigation}
+        <LazyAgentsRoute
+          initialView={initialAgentView}
+          workspaceCwd={workspaceCwd}
+          {...(onMentionAgent ? { onMentionAgent } : {})}
+          onOpenDefinitions={() => setAgentsOpen(false)}
+        />
+      </div>
+    );
+  }
 
   // ── Create view ──
   if (createOpen) {
@@ -610,10 +659,18 @@ export function AgentsManagerPage({
               {t('agents.title')}
             </h1>
             <p className="mt-1 text-sm text-muted-foreground tabular-nums">
+              {t('agents.description')}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground tabular-nums">
               {t('agent.count', { count: agents.length })}
             </p>
           </div>
           <div className="flex gap-2">
+            {collaborationAvailable ? (
+              <Button variant="outline" onClick={() => setAgentsOpen(true)}>
+                {t('collab.sharedThreads')}
+              </Button>
+            ) : null}
             <Button
               variant="outline"
               disabled={loading}

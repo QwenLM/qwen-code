@@ -8,6 +8,10 @@ import type { LogAttributes, LogRecord } from '@opentelemetry/api-logs';
 import { logs } from '@opentelemetry/api-logs';
 import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 import type { Config } from '../config/config.js';
+// The #13003 experiment flag is read through its single definition, kept in a
+// no-import leaf module so telemetry can share it with `memory/recall.ts`
+// (which owns the flag but already imports this file) without a module cycle.
+import { isSkipSelectorOnUniqueStrongHitEnabled } from '../memory/recall-experiment.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import {
@@ -59,6 +63,9 @@ import {
   EVENT_MEMORY_DREAM,
   EVENT_MEMORY_RECALL,
   EVENT_MEMORY_RECALL_DELIVERY,
+  EVENT_MEMORY_SEARCH,
+  EVENT_MEMORY_MIGRATION,
+  EVENT_MEMORY_RECALL_MODE_TRANSITION,
   EVENT_TOOL_OUTPUT_TRUNCATED,
 } from './constants.js';
 import {
@@ -139,6 +146,9 @@ import type {
   MemoryDreamEvent,
   MemoryRecallEvent,
   MemoryRecallDeliveryEvent,
+  MemorySearchEvent,
+  MemoryMigrationEvent,
+  MemoryRecallModeTransitionEvent,
 } from './types.js';
 import type { HookCallEvent } from './types.js';
 import type { UiEvent, UiSubagentIdentity } from './uiTelemetry.js';
@@ -1564,8 +1574,16 @@ export function logMemoryDream(config: Config, event: MemoryDreamEvent): void {
     'event.name': EVENT_MEMORY_DREAM,
     'event.timestamp': event['event.timestamp'],
     trigger: event.trigger,
+    scope: event.scope,
     status: event.status,
+    created_entries: event.created_entries,
+    updated_entries: event.updated_entries,
+    deleted_entries: event.deleted_entries,
     deduped_entries: event.deduped_entries,
+    split_entries: event.split_entries,
+    keyword_backfilled: event.keyword_backfilled,
+    dirty_mutations: event.dirty_mutations,
+    scheduling_reason: event.scheduling_reason,
     touched_topics_count: event.touched_topics_count,
     touched_topics: event.touched_topics,
     duration_ms: event.duration_ms,
@@ -1578,6 +1596,7 @@ export function logMemoryDream(config: Config, event: MemoryDreamEvent): void {
   });
   recordMemoryDreamMetrics(config, event.duration_ms, {
     trigger: event.trigger,
+    scope: event.scope,
     status: event.status,
     deduped_entries: event.deduped_entries,
   });
@@ -1598,7 +1617,13 @@ export function logMemoryRecall(
     docs_selected: event.docs_selected,
     strategy: event.strategy,
     duration_ms: event.duration_ms,
+    scan_duration_ms: event.scan_duration_ms,
+    fast_duration_ms: event.fast_duration_ms,
+    selector_duration_ms: event.selector_duration_ms,
   };
+  if (event.selector_skipped !== undefined) {
+    attributes['selector_skipped'] = event.selector_skipped;
+  }
 
   const logger = logs.getLogger(SERVICE_NAME);
   logger.emit({
@@ -1608,6 +1633,18 @@ export function logMemoryRecall(
   recordMemoryRecallMetrics(config, event.duration_ms, {
     strategy: event.strategy,
     docs_selected: event.docs_selected,
+    // The selector_skipped metric dimension belongs to the #13003
+    // skip-selector experiment: attach it only while the experiment is
+    // enabled AND the recall mode had a skip decision to make (structured;
+    // legacy recalls leave the event field undefined), so deployments
+    // without the flag keep the pre-existing attribute space on these
+    // series and legacy-mode recalls do not mix a constant `false` into the
+    // experiment's control series. Logs keep any explicit decision,
+    // regardless of the experiment flag.
+    ...(isSkipSelectorOnUniqueStrongHitEnabled() &&
+    typeof event.selector_skipped === 'boolean'
+      ? { selector_skipped: event.selector_skipped }
+      : {}),
   });
 }
 
@@ -1626,6 +1663,7 @@ export function logMemoryRecallDelivery(
     strategy: event.strategy,
     docs_selected: event.docs_selected,
     latency_ms: event.latency_ms,
+    router_delivered: event.router_delivered,
   };
   if (event.discard_reason) {
     attributes['discard_reason'] = event.discard_reason;
@@ -1641,5 +1679,55 @@ export function logMemoryRecallDelivery(
     delivery_point: event.delivery_point,
     ...(event.discard_reason ? { discard_reason: event.discard_reason } : {}),
     strategy: event.strategy,
+  });
+}
+
+export function logMemorySearch(
+  config: Config,
+  event: MemorySearchEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_MEMORY_SEARCH,
+    'event.timestamp': event['event.timestamp'],
+    mode: event.mode,
+    docs_scanned: event.docs_scanned,
+    results_returned: event.results_returned,
+    duration_ms: event.duration_ms,
+  };
+  logs.getLogger(SERVICE_NAME).emit({
+    body: `Memory search: mode=${event.mode}. Returned ${event.results_returned}/${event.docs_scanned} docs.`,
+    attributes,
+  });
+}
+
+export function logMemoryMigration(
+  config: Config,
+  event: MemoryMigrationEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  logs.getLogger(SERVICE_NAME).emit({
+    body: `Memory metadata migration: scope=${event.scope}. status=${event.status}. Committed ${event.committed}/${event.batch_files}.`,
+    attributes: {
+      ...getCommonAttributes(config),
+      ...event,
+      'event.name': EVENT_MEMORY_MIGRATION,
+    },
+  });
+}
+
+export function logMemoryRecallModeTransition(
+  config: Config,
+  event: MemoryRecallModeTransitionEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+  logs.getLogger(SERVICE_NAME).emit({
+    body: `Memory recall mode transition: ${event.from_mode} -> ${event.to_mode}. status=${event.status}.`,
+    attributes: {
+      ...getCommonAttributes(config),
+      ...event,
+      'event.name': EVENT_MEMORY_RECALL_MODE_TRANSITION,
+    },
   });
 }

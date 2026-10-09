@@ -29,9 +29,35 @@ import {
 } from './rule-parser.js';
 import { PermissionManager } from './permission-manager.js';
 import type { PermissionManagerConfig } from './permission-manager.js';
+import type { PermissionCheckContext, PermissionRule } from './types.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
-import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
+import {
+  generateLegacyMcpToolName,
+  normalizeToolNameForProvider,
+} from '../utils/tool-name-utils.js';
+import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
+import type { CallableTool } from '@google/genai';
 import { ToolNames, ToolDisplayNames } from '../tools/tool-names.js';
+import { ToolMode } from '../tools/code-mode.js';
+
+// Builds the tool exactly as MCP discovery builds it, so the permission
+// aliases under test are the tool's own advertised `permissionAliases` — the
+// exact raw identity first, then the legacy spelling — never a hand-written
+// stand-in that could drift from the producer (same pattern as
+// mcp-server-rule-collision.test.ts).
+const callableTool = { callTool: async () => [] } as unknown as CallableTool;
+function prodTool(
+  serverName: string,
+  serverToolName: string,
+): DiscoveredMCPTool {
+  return new DiscoveredMCPTool(
+    callableTool,
+    serverName,
+    serverToolName,
+    'test tool',
+    {},
+  );
+}
 
 const debugLoggerMock = vi.hoisted(() => ({
   isEnabled: vi.fn().mockReturnValue(false),
@@ -61,14 +87,153 @@ vi.mock('../utils/shell-utils.js', async (importOriginal) => {
   };
 });
 
-// `shellTypeMock` backs the file-level `vi.mock` above, so it is a mutable
-// file-global that every describe building a real PermissionManager reads.
-// Reset it for the whole file rather than only inside
-// `describe('PermissionManager')`, so the later top-level describes cannot
-// inherit a shell type left behind by an earlier test's execution order.
+// `shellTypeMock` backs the file-level `vi.mock` above: reset it file-wide,
+// not just in `describe('PermissionManager')`, so no later describe inherits
+// a shell type an earlier test left behind.
 beforeEach(() => {
   shellTypeMock.value = 'bash';
 });
+
+// ─── Shared helpers ──────────────────────────────────────────────────────────
+
+/** `matchesRule` with only a literal specifier and/or tool params set. */
+const matchesAgent = (
+  rule: PermissionRule,
+  toolParams?: Record<string, unknown>,
+  specifier?: string,
+  toolName = 'agent',
+) =>
+  matchesRule(
+    rule,
+    toolName,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    specifier,
+    toolParams,
+  );
+
+/** A parsed `key:value` param matcher, as `parseRule` emits it. */
+const paramMatcher = (key: string, valuePattern: string) => ({
+  key,
+  valuePattern,
+});
+
+/** `matchesRule` with only a file path set. */
+const matchesPath = (
+  rule: PermissionRule,
+  toolName: string,
+  filePath: string,
+  pathCtx = { projectRoot: '/project', cwd: '/project' },
+) => matchesRule(rule, toolName, undefined, filePath, undefined, pathCtx);
+
+/** Runs `run` against a fresh temp directory and always removes it. */
+async function withTempRoot(run: (root: string) => unknown): Promise<void> {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
+  try {
+    await run(root);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/** Makes `<root>/<name>` (holding `files`) and a `<root>/link` symlink to it. */
+function linkDir(
+  root: string,
+  files: Record<string, string> = {},
+  name = 'protected',
+) {
+  const dir = path.join(root, name);
+  const link = path.join(root, 'link');
+  fs.mkdirSync(dir);
+  for (const [file, text] of Object.entries(files)) {
+    fs.writeFileSync(path.join(dir, file), text);
+  }
+  fs.symlinkSync(dir, link, 'dir');
+  return { dir, link };
+}
+
+type PmOpts = Partial<{
+  permissionsAllow: string[];
+  permissionsAsk: string[];
+  permissionsDeny: string[];
+  coreTools: string[];
+  projectRoot: string;
+  cwd: string;
+  approvalMode: string;
+  /**
+   * `settings.tools.eager`: tools whose schemas ride in the initial request.
+   * Absent = no restriction; `[]` is active and defers every non-exempt
+   * tool. Independent of the permission rules (#10075).
+   */
+  eagerTools: string[];
+  /** Live folder trust; absent reads as trusted. */
+  isTrustedFolder: () => boolean;
+}>;
+
+function makeConfig(opts: PmOpts = {}): PermissionManagerConfig {
+  return {
+    ...(opts.isTrustedFolder ? { isTrustedFolder: opts.isTrustedFolder } : {}),
+    getPermissionsAllow: () => opts.permissionsAllow,
+    getPermissionsAsk: () => opts.permissionsAsk,
+    getPermissionsDeny: () => opts.permissionsDeny,
+    getCoreTools: () => opts.coreTools,
+    getEagerTools: () => opts.eagerTools,
+    getProjectRoot: () => opts.projectRoot ?? '/project',
+    getCwd: () => opts.cwd ?? '/project',
+    getApprovalMode: () => opts.approvalMode ?? 'default',
+  };
+}
+
+/** An initialized PermissionManager over `makeConfig(opts)`. */
+function makePm(opts?: PmOpts): PermissionManager {
+  const manager = new PermissionManager(makeConfig(opts));
+  manager.initialize();
+  return manager;
+}
+
+/** Sets the mocked shell first: the manager must be built under that shell. */
+function makeShellPm(shell: typeof shellTypeMock.value, opts?: PmOpts) {
+  shellTypeMock.value = shell;
+  return makePm(opts);
+}
+
+/** A shell-like tool context; `cwd` is set only when given. */
+const shellCtx =
+  (toolName: string) =>
+  (command: string, cwd?: string): PermissionCheckContext => ({
+    toolName,
+    command,
+    ...(cwd === undefined ? {} : { cwd }),
+  });
+const sh = shellCtx('run_shell_command');
+const mon = shellCtx('monitor');
+
+/** An `agent` context: optional literal specifier plus tool params. */
+const agentCtx = (
+  toolParams: Record<string, unknown>,
+  specifier?: string,
+): PermissionCheckContext => ({
+  toolName: 'agent',
+  ...(specifier === undefined ? {} : { specifier }),
+  toolParams,
+});
+
+/** Object.prototype keys that must never resolve via the alias table (#10400). */
+const PROTO_KEYS = [
+  'toString',
+  'valueOf',
+  'hasOwnProperty',
+  'isPrototypeOf',
+  'propertyIsEnumerable',
+  'toLocaleString',
+  '__proto__',
+];
+
+/** The session allow list, which has no public accessor. */
+const sessionAllowRules = (pm: PermissionManager) =>
+  (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules.allow;
 
 // ─── getToolNameAliases ──────────────────────────────────────────────────────
 
@@ -105,11 +270,6 @@ describe('getToolNameAliases', () => {
 // ─── resolveToolName ─────────────────────────────────────────────────────────
 
 describe('resolveToolName', () => {
-  it('resolves canonical names', async () => {
-    expect(resolveToolName('run_shell_command')).toBe('run_shell_command');
-    expect(resolveToolName('read_file')).toBe('read_file');
-  });
-
   it('resolves display-name aliases', async () => {
     expect(resolveToolName('Shell')).toBe('run_shell_command');
     expect(resolveToolName('ShellTool')).toBe('run_shell_command');
@@ -128,48 +288,32 @@ describe('resolveToolName', () => {
     expect(resolveToolName('Write')).toBe('write_file');
   });
 
-  it('resolves Agent category', async () => {
-    expect(resolveToolName('Agent')).toBe('agent');
-    expect(resolveToolName('agent')).toBe('agent');
-    expect(resolveToolName('AgentTool')).toBe('agent');
-  });
-
-  it('resolves legacy task aliases to agent', async () => {
-    expect(resolveToolName('task')).toBe('agent');
-    expect(resolveToolName('Task')).toBe('agent');
-    expect(resolveToolName('TaskTool')).toBe('agent');
-  });
-
-  it('resolves TodoList aliases (incl. legacy TodoWrite) to todo_write', async () => {
-    expect(resolveToolName('todo_write')).toBe('todo_write');
-    // The display name shown in the UI; a user writing allow: ["TodoList"]
-    // must resolve to the tool, not be silently dropped.
-    expect(resolveToolName('TodoList')).toBe('todo_write');
-    // Legacy display name (renamed from TodoWrite) keeps resolving.
-    expect(resolveToolName('TodoWrite')).toBe('todo_write');
-    expect(resolveToolName('TodoWriteTool')).toBe('todo_write');
-  });
-
-  it('returns unknown names unchanged', async () => {
-    expect(resolveToolName('my_mcp_tool')).toBe('my_mcp_tool');
-    expect(resolveToolName('mcp__server__tool')).toBe('mcp__server__tool');
-    expect(resolveToolName('constructor')).toBe('constructor');
-  });
-
-  it('returns Object.prototype-keyed names unchanged (#10400)', async () => {
-    // Keys inherited from Object.prototype must never resolve to the
-    // prototype value (e.g. the `constructor` function): only own
-    // properties of the alias table are aliases (#10400).
-    for (const name of [
-      'toString',
-      'valueOf',
-      'hasOwnProperty',
-      'isPrototypeOf',
-      'propertyIsEnumerable',
-      'toLocaleString',
-      '__proto__',
-    ]) {
-      expect(resolveToolName(name)).toBe(name);
+  // Rows without a canonical name expect every name back unchanged.
+  it.each<[string, string[], string?]>([
+    ['resolves canonical names', ['run_shell_command', 'read_file']],
+    ['resolves Agent category', ['Agent', 'agent', 'AgentTool'], 'agent'],
+    [
+      'resolves legacy task aliases to agent',
+      ['task', 'Task', 'TaskTool'],
+      'agent',
+    ],
+    // `TodoList` is the UI display name, so allow: ["TodoList"] must resolve
+    // rather than be silently dropped; `TodoWrite` is the legacy name.
+    [
+      'resolves TodoList aliases (incl. legacy TodoWrite) to todo_write',
+      ['todo_write', 'TodoList', 'TodoWrite', 'TodoWriteTool'],
+      'todo_write',
+    ],
+    [
+      'returns unknown names unchanged',
+      ['my_mcp_tool', 'mcp__server__tool', 'constructor'],
+    ],
+    // Inherited keys must never resolve to the prototype value (e.g. the
+    // `constructor` function): only own alias-table keys are aliases.
+    ['returns Object.prototype-keyed names unchanged (#10400)', PROTO_KEYS],
+  ])('%s', (_title, names, canonical) => {
+    for (const name of names) {
+      expect(resolveToolName(name)).toBe(canonical ?? name);
     }
   });
 });
@@ -177,11 +321,9 @@ describe('resolveToolName', () => {
 // ─── resolveToolName exhaustiveness (#9827) ─────────────────────────────────
 
 describe('resolveToolName exhaustiveness (#9827)', () => {
-  // Every built-in tool's canonical name AND display name must resolve
-  // through TOOL_NAME_ALIASES. A tool added to tool-names.ts without a
-  // matching rule-parser alias entry silently never matches any permission
-  // rule — the exact #9827 bug class. Let drift fail CI instead of
-  // failing silently for a user.
+  // Every built-in tool's canonical AND display name must resolve through
+  // TOOL_NAME_ALIASES: a tool added to tool-names.ts without an alias entry
+  // silently matches no permission rule (#9827), so drift must fail CI.
   it.each(
     Object.entries(ToolDisplayNames).map(([key, displayName]) => ({
       key,
@@ -194,8 +336,7 @@ describe('resolveToolName exhaustiveness (#9827)', () => {
       expect(canonicalName).toBeDefined();
       // The canonical name itself is a valid rule spelling.
       expect(resolveToolName(canonicalName)).toBe(canonicalName);
-      // The /tools display name — the spelling users copy into rules —
-      // must resolve to the canonical tool.
+      // So must the /tools display name, the spelling users copy into rules.
       expect(resolveToolName(displayName)).toBe(canonicalName);
     },
   );
@@ -210,8 +351,14 @@ describe('resolveToolName exhaustiveness (#9827)', () => {
 // ─── getSpecifierKind ────────────────────────────────────────────────────────
 
 describe('getSpecifierKind', () => {
-  it('returns "command" for shell tools', async () => {
-    expect(getSpecifierKind('run_shell_command')).toBe('command');
+  it.each([
+    ['command', 'shell', ['run_shell_command']],
+    ['domain', 'web fetch', ['web_fetch']],
+    ['literal', 'other', ['Agent', 'task', 'mcp__server']],
+  ])('returns "%s" for %s tools', async (kind, _label, toolNames) => {
+    for (const toolName of toolNames) {
+      expect(getSpecifierKind(toolName)).toBe(kind);
+    }
   });
 
   it('returns "path" for file read/edit tools', async () => {
@@ -223,16 +370,6 @@ describe('getSpecifierKind', () => {
     expect(getSpecifierKind('grep_search')).toBe('path');
     expect(getSpecifierKind('glob')).toBe('path');
     expect(getSpecifierKind('list_directory')).toBe('path');
-  });
-
-  it('returns "domain" for web fetch tools', async () => {
-    expect(getSpecifierKind('web_fetch')).toBe('domain');
-  });
-
-  it('returns "literal" for other tools', async () => {
-    expect(getSpecifierKind('Agent')).toBe('literal');
-    expect(getSpecifierKind('task')).toBe('literal');
-    expect(getSpecifierKind('mcp__server')).toBe('literal');
   });
 });
 
@@ -284,14 +421,11 @@ describe('parseRule', () => {
     expect(r.specifierKind).toBeUndefined();
   });
 
-  it('parses Bash alias', async () => {
-    const r = parseRule('Bash');
-    expect(r.toolName).toBe('run_shell_command');
-  });
-
-  it('parses Monitor alias', async () => {
-    const r = parseRule('Monitor');
-    expect(r.toolName).toBe('monitor');
+  it.each([
+    ['Bash', 'run_shell_command'],
+    ['Monitor', 'monitor'],
+  ])('parses %s alias', async (raw, toolName) => {
+    expect(parseRule(raw).toolName).toBe(toolName);
   });
 
   it('parses a shell tool with a specifier', async () => {
@@ -301,40 +435,28 @@ describe('parseRule', () => {
     expect(r.specifierKind).toBe('command');
   });
 
-  it('parses Monitor with command specifier', async () => {
-    const r = parseRule('Monitor(tail -f *)');
-    expect(r.toolName).toBe('monitor');
-    expect(r.specifier).toBe('tail -f *');
-    expect(r.specifierKind).toBe('command');
-  });
-
-  it('parses Read with path specifier', async () => {
-    const r = parseRule('Read(./secrets/**)');
-    expect(r.toolName).toBe('read_file');
-    expect(r.specifier).toBe('./secrets/**');
-    expect(r.specifierKind).toBe('path');
-  });
-
-  it('parses Edit with path specifier', async () => {
-    const r = parseRule('Edit(/src/**/*.ts)');
-    expect(r.toolName).toBe('edit');
-    expect(r.specifier).toBe('/src/**/*.ts');
-    expect(r.specifierKind).toBe('path');
-  });
-
-  it('parses WebFetch with domain specifier', async () => {
-    const r = parseRule('WebFetch(domain:example.com)');
-    expect(r.toolName).toBe('web_fetch');
-    expect(r.specifier).toBe('domain:example.com');
-    expect(r.specifierKind).toBe('domain');
-  });
-
-  it('parses Agent with literal specifier', async () => {
-    const r = parseRule('Agent(Explore)');
-    expect(r.toolName).toBe('agent');
-    expect(r.specifier).toBe('Explore');
-    expect(r.specifierKind).toBe('literal');
-  });
+  // Rows: display name and specifier kind (the title), rule, tool, specifier.
+  it.each([
+    ['Monitor', 'command', 'Monitor(tail -f *)', 'monitor', 'tail -f *'],
+    ['Read', 'path', 'Read(./secrets/**)', 'read_file', './secrets/**'],
+    ['Edit', 'path', 'Edit(/src/**/*.ts)', 'edit', '/src/**/*.ts'],
+    [
+      'WebFetch',
+      'domain',
+      'WebFetch(domain:example.com)',
+      'web_fetch',
+      'domain:example.com',
+    ],
+    ['Agent', 'literal', 'Agent(Explore)', 'agent', 'Explore'],
+  ])(
+    'parses %s with %s specifier',
+    async (_name, kind, raw, toolName, specifier) => {
+      const r = parseRule(raw);
+      expect(r.toolName).toBe(toolName);
+      expect(r.specifier).toBe(specifier);
+      expect(r.specifierKind).toBe(kind);
+    },
+  );
 
   it('handles unknown tools without specifier', async () => {
     const r = parseRule('mcp__my_server__my_tool');
@@ -353,7 +475,6 @@ describe('parseRule', () => {
     expect(r.invalid).toBe(true);
     expect(r.toolName).toBe('run_shell_command');
     expect(r.specifier).toBeUndefined();
-    // Must not match any command
     expect(matchesRule(r, 'run_shell_command', 'git status')).toBe(false);
     expect(matchesRule(r, 'run_shell_command', 'rm -rf /')).toBe(false);
   });
@@ -391,164 +512,127 @@ describe('parseRules', () => {
 // ─── matchesCommandPattern (Shell glob) ──────────────────────────────────────
 
 describe('matchesCommandPattern', () => {
-  // Basic prefix matching (no wildcards)
+  const matches = matchesCommandPattern;
+
   describe('prefix matching without glob', () => {
     it('exact match', async () => {
-      expect(matchesCommandPattern('git', 'git')).toBe(true);
+      expect(matches('git', 'git')).toBe(true);
     });
 
     it('prefix + space', async () => {
-      expect(matchesCommandPattern('git', 'git status')).toBe(true);
-      expect(matchesCommandPattern('git commit', 'git commit -m "test"')).toBe(
-        true,
-      );
+      expect(matches('git', 'git status')).toBe(true);
+      expect(matches('git commit', 'git commit -m "test"')).toBe(true);
     });
 
     it('does not match as substring', async () => {
-      expect(matchesCommandPattern('git', 'gitcommit')).toBe(false);
+      expect(matches('git', 'gitcommit')).toBe(false);
     });
   });
 
-  // Wildcard at tail
   describe('wildcard at tail', () => {
     it('matches any arguments', async () => {
-      expect(matchesCommandPattern('git *', 'git status')).toBe(true);
-      expect(matchesCommandPattern('git *', 'git commit -m "test"')).toBe(true);
-      expect(matchesCommandPattern('npm run *', 'npm run build')).toBe(true);
+      expect(matches('git *', 'git status')).toBe(true);
+      expect(matches('git *', 'git commit -m "test"')).toBe(true);
+      expect(matches('npm run *', 'npm run build')).toBe(true);
     });
 
     it('matches commands with leading env var assignments', async () => {
       expect(
-        matchesCommandPattern(
-          'python3 *',
-          'PYTHONPATH=/tmp/lib python3 -c "print(1)"',
-        ),
+        matches('python3 *', 'PYTHONPATH=/tmp/lib python3 -c "print(1)"'),
       ).toBe(true);
     });
 
     it('matches commands containing embedded newlines (dotAll)', async () => {
       expect(
-        matchesCommandPattern(
-          'python3 *',
-          'python3 -c "\nimport sys\nprint(sys.version)\n"',
-        ),
+        matches('python3 *', 'python3 -c "\nimport sys\nprint(sys.version)\n"'),
       ).toBe(true);
     });
 
     it('space-star requires word boundary (ls * does not match lsof)', async () => {
-      expect(matchesCommandPattern('ls *', 'ls -la')).toBe(true);
-      expect(matchesCommandPattern('ls *', 'lsof')).toBe(false);
+      expect(matches('ls *', 'ls -la')).toBe(true);
+      expect(matches('ls *', 'lsof')).toBe(false);
     });
 
     it('no-space-star allows prefix matching (ls* matches lsof)', async () => {
-      expect(matchesCommandPattern('ls*', 'ls -la')).toBe(true);
-      expect(matchesCommandPattern('ls*', 'lsof')).toBe(true);
+      expect(matches('ls*', 'ls -la')).toBe(true);
+      expect(matches('ls*', 'lsof')).toBe(true);
     });
 
     it('does not match different command', async () => {
-      expect(matchesCommandPattern('git *', 'echo hello')).toBe(false);
+      expect(matches('git *', 'echo hello')).toBe(false);
     });
   });
 
-  // Wildcard at head
   describe('wildcard at head', () => {
     it('matches any command ending with pattern', async () => {
-      expect(matchesCommandPattern('* --version', 'node --version')).toBe(true);
-      expect(matchesCommandPattern('* --version', 'npm --version')).toBe(true);
-      expect(matchesCommandPattern('* --help *', 'npm --help install')).toBe(
-        true,
-      );
+      expect(matches('* --version', 'node --version')).toBe(true);
+      expect(matches('* --version', 'npm --version')).toBe(true);
+      expect(matches('* --help *', 'npm --help install')).toBe(true);
     });
 
     it('does not match non-matching suffix', async () => {
-      expect(matchesCommandPattern('* --version', 'node --help')).toBe(false);
+      expect(matches('* --version', 'node --help')).toBe(false);
     });
   });
 
-  // Wildcard in middle
   describe('wildcard in middle', () => {
     it('matches middle segments', async () => {
-      expect(matchesCommandPattern('git * main', 'git checkout main')).toBe(
-        true,
-      );
-      expect(matchesCommandPattern('git * main', 'git merge main')).toBe(true);
+      expect(matches('git * main', 'git checkout main')).toBe(true);
+      expect(matches('git * main', 'git merge main')).toBe(true);
     });
 
     it('does not match different suffix', async () => {
-      expect(matchesCommandPattern('git * main', 'git checkout dev')).toBe(
-        false,
-      );
+      expect(matches('git * main', 'git checkout dev')).toBe(false);
     });
   });
 
-  // Word boundary rule: space before * matters
   describe('word boundary rule (space before *)', () => {
     it('Bash(ls *): matches "ls -la" but NOT "lsof"', async () => {
-      expect(matchesCommandPattern('ls *', 'ls -la')).toBe(true);
-      expect(matchesCommandPattern('ls *', 'ls')).toBe(true); // "ls" alone
-      expect(matchesCommandPattern('ls *', 'lsof')).toBe(false);
+      expect(matches('ls *', 'ls -la')).toBe(true);
+      expect(matches('ls *', 'ls')).toBe(true); // "ls" alone
+      expect(matches('ls *', 'lsof')).toBe(false);
     });
 
     it('Bash(ls*): matches both "ls -la" and "lsof"', async () => {
-      expect(matchesCommandPattern('ls*', 'ls -la')).toBe(true);
-      expect(matchesCommandPattern('ls*', 'lsof')).toBe(true);
-      expect(matchesCommandPattern('ls*', 'ls')).toBe(true);
+      expect(matches('ls*', 'ls -la')).toBe(true);
+      expect(matches('ls*', 'lsof')).toBe(true);
+      expect(matches('ls*', 'ls')).toBe(true);
     });
 
     it('Bash(npm *): matches "npm run" but NOT "npmx"', async () => {
-      expect(matchesCommandPattern('npm *', 'npm run build')).toBe(true);
-      expect(matchesCommandPattern('npm *', 'npmx install')).toBe(false);
+      expect(matches('npm *', 'npm run build')).toBe(true);
+      expect(matches('npm *', 'npmx install')).toBe(false);
     });
   });
 
-  // Shell operator awareness
-  //
-  // Key insight: operator boundary extraction means we only match against
-  // the FIRST simple command. So `git *` still matches `git status && rm -rf /`
-  // because the first command IS `git status` which matches `git *`.
-  //
-  // The safety benefit: a pattern like `rm *` would NOT match
-  // `git status && rm -rf /` because the first command is `git status`.
-  // matchesCommandPattern operates on simple commands only.
-  // Compound command splitting is handled by PermissionManager.evaluate().
-  // These tests verify that matchesCommandPattern works correctly on
-  // individual simple commands (the sub-commands after splitting).
+  // matchesCommandPattern sees simple commands only: on a compound `git *`
+  // would match `git status && rm -rf /` and `rm *` would not. evaluate()
+  // splits compounds first; these pin matching on the sub-commands.
   describe('simple command matching (no operators)', () => {
     it('matches when no operators are present', async () => {
-      expect(
-        matchesCommandPattern('git *', 'git commit -m "hello world"'),
-      ).toBe(true);
+      expect(matches('git *', 'git commit -m "hello world"')).toBe(true);
     });
 
     it('operators inside quotes are not boundaries for splitCompoundCommand', async () => {
-      // "echo 'a && b'" → the && is inside quotes, not an operator
-      expect(matchesCommandPattern('echo *', "echo 'a && b'")).toBe(true);
+      expect(matches('echo *', "echo 'a && b'")).toBe(true);
     });
   });
 
-  // Special: lone * matches any command
   describe('lone wildcard', () => {
     it('* matches any single command', async () => {
-      expect(matchesCommandPattern('*', 'anything here')).toBe(true);
+      expect(matches('*', 'anything here')).toBe(true);
     });
   });
 
-  // Exact command match with specifier
   describe('exact command specifier', () => {
     it('Bash(npm run build) matches exact command', async () => {
-      expect(matchesCommandPattern('npm run build', 'npm run build')).toBe(
-        true,
-      );
+      expect(matches('npm run build', 'npm run build')).toBe(true);
     });
     it('Bash(npm run build) also matches with trailing args (prefix)', async () => {
-      expect(
-        matchesCommandPattern('npm run build', 'npm run build --verbose'),
-      ).toBe(true);
+      expect(matches('npm run build', 'npm run build --verbose')).toBe(true);
     });
     it('Bash(npm run build) does not match different command', async () => {
-      expect(matchesCommandPattern('npm run build', 'npm run test')).toBe(
-        false,
-      );
+      expect(matches('npm run build', 'npm run test')).toBe(false);
     });
   });
 });
@@ -556,65 +640,40 @@ describe('matchesCommandPattern', () => {
 // ─── splitCompoundCommand ────────────────────────────────────────────────────
 
 describe('splitCompoundCommand', () => {
-  it('simple command returns single-element array', async () => {
-    expect(splitCompoundCommand('git status')).toEqual(['git status']);
+  const split = splitCompoundCommand;
+
+  it.each([
+    ['splits on &&', 'git status && rm -rf /', ['git status', 'rm -rf /']],
+    ['splits on ||', 'git push || echo failed', ['git push', 'echo failed']],
+    ['splits on ;', 'echo hello; echo world', ['echo hello', 'echo world']],
+    ['splits on |', 'git log | grep fix', ['git log', 'grep fix']],
+    ['handles three-part compound', 'a && b && c', ['a', 'b', 'c']],
+    ['handles mixed operators', 'a && b | c; d', ['a', 'b', 'c', 'd']],
+    [
+      'trims whitespace around sub-commands',
+      '  git status  &&  rm -rf /  ',
+      ['git status', 'rm -rf /'],
+    ],
+  ])('%s', async (_title, command, parts) => {
+    expect(split(command)).toEqual(parts);
   });
 
-  it('splits on &&', async () => {
-    expect(splitCompoundCommand('git status && rm -rf /')).toEqual([
-      'git status',
-      'rm -rf /',
-    ]);
-  });
-
-  it('splits on ||', async () => {
-    expect(splitCompoundCommand('git push || echo failed')).toEqual([
-      'git push',
-      'echo failed',
-    ]);
-  });
-
-  it('splits on ;', async () => {
-    expect(splitCompoundCommand('echo hello; echo world')).toEqual([
-      'echo hello',
-      'echo world',
-    ]);
-  });
-
-  it('splits on |', async () => {
-    expect(splitCompoundCommand('git log | grep fix')).toEqual([
-      'git log',
-      'grep fix',
-    ]);
-  });
-
-  it('handles three-part compound', async () => {
-    expect(splitCompoundCommand('a && b && c')).toEqual(['a', 'b', 'c']);
-  });
-
-  it('handles mixed operators', async () => {
-    expect(splitCompoundCommand('a && b | c; d')).toEqual(['a', 'b', 'c', 'd']);
-  });
-
-  it('does not split on operators inside single quotes', async () => {
-    expect(splitCompoundCommand("echo 'a && b'")).toEqual(["echo 'a && b'"]);
-  });
-
-  it('does not split on operators inside double quotes', async () => {
-    expect(splitCompoundCommand('echo "a && b"')).toEqual(['echo "a && b"']);
-  });
-
-  it('handles escaped characters', async () => {
+  it.each([
+    ['simple command returns single-element array', 'git status'],
+    ['does not split on operators inside single quotes', "echo 'a && b'"],
+    ['does not split on operators inside double quotes', 'echo "a && b"'],
     // A backslash escapes exactly one character, so `\&` is a literal
     // ampersand argument and the command really is a single one.
-    expect(splitCompoundCommand('echo a \\& b')).toEqual(['echo a \\& b']);
+    ['handles escaped characters', 'echo a \\& b'],
+  ])('%s', async (_title, command) => {
+    expect(split(command)).toEqual([command]);
   });
 
   it('escapes only the first of two ampersands', async () => {
     // `echo a \&& b` is not an escaped `&&`: the backslash consumes the first
     // ampersand and the second is a live async operator. `bash -x` runs it as
     // two commands, `echo a '&'` and `b`, so the splitter has to see two.
-    expect(splitCompoundCommand('echo a \\&& b')).toEqual(['echo a \\&', 'b']);
+    expect(split('echo a \\&& b')).toEqual(['echo a \\&', 'b']);
   });
 
   // Rows starting with a plain `'c\'` are split only by bash's reading, so
@@ -665,14 +724,14 @@ describe('splitCompoundCommand', () => {
     ["echo $x'a\\' ; touch /tmp/x", ["echo $x'a\\'", 'touch /tmp/x']],
     ['echo "$"\'a\\\' ; touch /tmp/x', ['echo "$"\'a\\\'', 'touch /tmp/x']],
   ])('splits after the quoted word in %s', async (command, parts) => {
-    expect(splitCompoundCommand(command)).toEqual(parts);
+    expect(split(command)).toEqual(parts);
   });
 
   it('keeps an escaped quote inside double quotes and a line continuation', async () => {
-    expect(splitCompoundCommand('echo "a\\" ; touch /tmp/x"')).toEqual([
+    expect(split('echo "a\\" ; touch /tmp/x"')).toEqual([
       'echo "a\\" ; touch /tmp/x"',
     ]);
-    expect(splitCompoundCommand('echo a\\\nb')).toEqual(['echo a\\\nb']);
+    expect(split('echo a\\\nb')).toEqual(['echo a\\\nb']);
   });
 
   // The `echo 'a\'' ; rm x'` row is one command to bash but stays split, as on
@@ -700,54 +759,44 @@ describe('splitCompoundCommand', () => {
       ["echo done # note 'a\\''", "touch /tmp/x # it's", 'echo z', 'echo w'],
     ],
   ])('keeps the boundaries main found in %s', async (command, parts) => {
-    expect(splitCompoundCommand(command)).toEqual(parts);
+    expect(split(command)).toEqual(parts);
   });
 
   // The #11851 rows below put the target in a segment that ends at an operator;
   // the last segment is trimmed separately.
   it('keeps a redirection target bash does not treat as whitespace in the last segment', async () => {
-    expect(splitCompoundCommand('cat f & echo x >\u00a0')).toEqual([
+    expect(split('cat f & echo x >\u00a0')).toEqual([
       'cat f',
       'echo x >\u00a0',
     ]);
-    expect(splitCompoundCommand('cat f & echo x >\v')).toEqual([
-      'cat f',
-      'echo x >\v',
-    ]);
-  });
-
-  it('trims whitespace around sub-commands', async () => {
-    expect(splitCompoundCommand('  git status  &&  rm -rf /  ')).toEqual([
-      'git status',
-      'rm -rf /',
-    ]);
+    expect(split('cat f & echo x >\v')).toEqual(['cat f', 'echo x >\v']);
   });
 
   // The async operator. Everything after a bare `&` is a separate command that
   // the shell will run, so leaving it joined let one segment's allow rule
   // authorise whatever followed it.
-  it('splits on the async operator', async () => {
-    expect(splitCompoundCommand('git status & rm -rf /tmp/x')).toEqual([
-      'git status',
-      'rm -rf /tmp/x',
-    ]);
-  });
-
-  it('splits on repeated async operators', async () => {
-    expect(splitCompoundCommand('a & b & c')).toEqual(['a', 'b', 'c']);
-  });
-
-  it('drops the empty segment after a trailing async operator', async () => {
-    expect(splitCompoundCommand('npm test &')).toEqual(['npm test']);
-  });
-
-  it('splits an unquoted URL query the way the shell does', async () => {
+  it.each([
+    [
+      'splits on the async operator',
+      'git status & rm -rf /tmp/x',
+      ['git status', 'rm -rf /tmp/x'],
+    ],
+    ['splits on repeated async operators', 'a & b & c', ['a', 'b', 'c']],
+    ['splits a mix of long and bare operators', 'a && b & c', ['a', 'b', 'c']],
+    [
+      'drops the empty segment after a trailing async operator',
+      'npm test &',
+      ['npm test'],
+    ],
     // Not a special case: an unquoted `&` in a URL really is the async
     // operator, and bash runs `b=2` as its own command.
-    expect(splitCompoundCommand('curl http://x?a=1&b=2')).toEqual([
-      'curl http://x?a=1',
-      'b=2',
-    ]);
+    [
+      'splits an unquoted URL query the way the shell does',
+      'curl http://x?a=1&b=2',
+      ['curl http://x?a=1', 'b=2'],
+    ],
+  ])('%s', async (_title, command, parts) => {
+    expect(split(command)).toEqual(parts);
   });
 
   it.each([
@@ -760,25 +809,22 @@ describe('splitCompoundCommand', () => {
     ['exec 3<&4'],
     ['cat <&3'],
   ])('does not split %s, where & belongs to a redirection', async (command) => {
-    expect(splitCompoundCommand(command)).toEqual([command]);
+    expect(split(command)).toEqual([command]);
   });
 
   it.each([["echo 'x & y'"], ['echo "x & y"']])(
     'does not split %s, where & is quoted',
     async (command) => {
-      expect(splitCompoundCommand(command)).toEqual([command]);
+      expect(split(command)).toEqual([command]);
     },
   );
 
-  // #11851: bash only treats space, tab and newline as word separators. `\r`,
-  // `\v`, `\f` and `\u00a0` are ordinary word characters to bash, so in
-  // `echo x >\r& rm …` the redirection target is the `\r` and the `&` is the
-  // async operator — bash runs two commands. When the scan skipped those four
-  // as if they were whitespace, both halves stayed in one segment and the
-  // first command's allow rule covered the second.
-  // Titles carry the escaped spelling: the raw characters are invisible in a
-  // terminal and a `\v` or `\f` in a title collapses a line break in the XML of
-  // the JUnit report.
+  // #11851: bash separates words only on space, tab and newline, so in
+  // `echo x >\r& rm …` the `\r` (likewise `\v`, `\f`, `\u00a0`) is the redirect
+  // target and `&` the async operator: two commands. Skipping those four as
+  // whitespace kept one segment, so the first allow rule covered the second.
+  // Titles use the escaped spelling: raw characters are invisible in a
+  // terminal, and a `\v` or `\f` collapses a line break in the JUnit XML.
   it.each([
     ['\\r', 'echo x >\r& rm -rf /tmp/x', 'echo x >\r'],
     ['\\v', 'echo x >\v& rm -rf /tmp/x', 'echo x >\v'],
@@ -789,10 +835,9 @@ describe('splitCompoundCommand', () => {
   ])(
     'splits a command with %s between the > and the &',
     async (_label, command, first) => {
-      // The character is the redirect target, so it stays: trimming discards
-      // only the separators bash's lexer discards, not `String.prototype.trim`'s
-      // wider set.
-      expect(splitCompoundCommand(command)).toEqual([first, 'rm -rf /tmp/x']);
+      // The character is the redirect target, so it stays: trimming drops only
+      // what bash's lexer drops, not `String.prototype.trim`'s wider set.
+      expect(split(command)).toEqual([first, 'rm -rf /tmp/x']);
     },
   );
 
@@ -816,7 +861,7 @@ describe('splitCompoundCommand', () => {
       ['cat >\r', 'echo hi'],
     ],
   ])('splits on a newline with %s', async (_label, command, parts) => {
-    expect(splitCompoundCommand(command)).toEqual(parts);
+    expect(split(command)).toEqual(parts);
   });
 
   // Over-correction guard: the longer operators must keep winning over the
@@ -825,30 +870,23 @@ describe('splitCompoundCommand', () => {
     ['a && b', ['a', 'b']],
     ['a |& b', ['a', 'b']],
   ])('keeps %s splitting on the longer operator', async (command, expected) => {
-    expect(splitCompoundCommand(command)).toEqual(expected);
+    expect(split(command)).toEqual(expected);
   });
 
-  it('splits a mix of long and bare operators', async () => {
-    expect(splitCompoundCommand('a && b & c')).toEqual(['a', 'b', 'c']);
-  });
-
-  // The backward scan for a redirection has to respect escaping. `\>` is a
-  // literal `>` argument, so bash backgrounds the `echo` and then runs the
-  // `rm`; reading it as a redirection kept both in one segment and let the
-  // `echo`'s allow rule authorise the `rm`.
+  // The backward redirection scan must respect escaping: `\>` is a literal
+  // argument, so bash backgrounds the `echo` and runs the `rm`; reading it as
+  // a redirection kept one segment and the `echo` allow rule covered the `rm`.
   it.each([
     ['echo a \\> & rm -rf /tmp/x', ['echo a \\>', 'rm -rf /tmp/x']],
     ['echo a \\< & rm -rf /tmp/x', ['echo a \\<', 'rm -rf /tmp/x']],
   ])('splits %s, where the redirection is escaped', async (command, parts) => {
-    expect(splitCompoundCommand(command)).toEqual(parts);
+    expect(split(command)).toEqual(parts);
   });
 
   it('keeps an escaped backslash before a real redirection unsplit', async () => {
     // Two backslashes are a literal backslash, so the `>` really is a
     // redirection and the `&` really does duplicate a descriptor.
-    expect(splitCompoundCommand('echo a \\\\>& 2')).toEqual([
-      'echo a \\\\>& 2',
-    ]);
+    expect(split('echo a \\\\>& 2')).toEqual(['echo a \\\\>& 2']);
   });
 
   // Inside `$(( … ))` / `(( … ))` a bare `&` is bitwise AND. Splitting there
@@ -859,12 +897,12 @@ describe('splitCompoundCommand', () => {
     ['(( a & b ))'],
     ['echo $(( (x & y) + z ))'],
   ])('does not split %s, where & is arithmetic', async (command) => {
-    expect(splitCompoundCommand(command)).toEqual([command]);
+    expect(split(command)).toEqual([command]);
   });
 
   it('still splits a bare & that follows an arithmetic expansion', async () => {
     // Over-correction guard: the depth counter has to come back down.
-    expect(splitCompoundCommand('echo $(( a & b )) & rm -rf /tmp/x')).toEqual([
+    expect(split('echo $(( a & b )) & rm -rf /tmp/x')).toEqual([
       'echo $(( a & b ))',
       'rm -rf /tmp/x',
     ]);
@@ -875,7 +913,7 @@ describe('splitCompoundCommand', () => {
   it.each([['& echo hi'], ['   & echo hi']])(
     'treats the leading & in %s as the async operator',
     async (command) => {
-      expect(splitCompoundCommand(command)).toEqual(['echo hi']);
+      expect(split(command)).toEqual(['echo hi']);
     },
   );
 });
@@ -883,8 +921,10 @@ describe('splitCompoundCommand', () => {
 // ─── splitCompoundCommandSegments ────────────────────────────────────────────
 
 describe('splitCompoundCommandSegments', () => {
+  const segments = splitCompoundCommandSegments;
+
   it('reports the operator that terminated each segment', async () => {
-    expect(splitCompoundCommandSegments('a & b && c | d')).toEqual([
+    expect(segments('a & b && c | d')).toEqual([
       { command: 'a', terminator: '&' },
       { command: 'b', terminator: '&&' },
       { command: 'c', terminator: '|' },
@@ -893,13 +933,13 @@ describe('splitCompoundCommandSegments', () => {
   });
 
   it('reports an empty terminator for a single command', async () => {
-    expect(splitCompoundCommandSegments('git status')).toEqual([
+    expect(segments('git status')).toEqual([
       { command: 'git status', terminator: '' },
     ]);
   });
 
   it('keeps the async terminator on a trailing background command', async () => {
-    expect(splitCompoundCommandSegments('npm test &')).toEqual([
+    expect(segments('npm test &')).toEqual([
       { command: 'npm test', terminator: '&' },
     ]);
   });
@@ -908,15 +948,11 @@ describe('splitCompoundCommandSegments', () => {
     // shell-semantics reads `&` as backgrounded, so the `cd` must not move the
     // cwd the write is attributed to — `&&` must, and the merge loop is what
     // decides which operator a boundary carries.
-    expect(
-      splitCompoundCommandSegments("cd 'a\\' & echo {} > settings.json"),
-    ).toEqual([
+    expect(segments("cd 'a\\' & echo {} > settings.json")).toEqual([
       { command: "cd 'a\\'", terminator: '&' },
       { command: 'echo {} > settings.json', terminator: '' },
     ]);
-    expect(
-      splitCompoundCommandSegments("cd 'a\\' && echo {} > settings.json"),
-    ).toEqual([
+    expect(segments("cd 'a\\' && echo {} > settings.json")).toEqual([
       { command: "cd 'a\\'", terminator: '&&' },
       { command: 'echo {} > settings.json', terminator: '' },
     ]);
@@ -928,46 +964,36 @@ describe('splitCompoundCommandSegments', () => {
 describe('resolvePathPattern', () => {
   const projectRoot = '/project';
   const cwd = '/project/subdir';
+  const resolve = (pattern: string) =>
+    resolvePathPattern(pattern, projectRoot, cwd);
 
   it('// prefix → absolute from filesystem root', async () => {
-    expect(
-      resolvePathPattern('//Users/alice/secrets/**', projectRoot, cwd),
-    ).toBe('/Users/alice/secrets/**');
+    expect(resolve('//Users/alice/secrets/**')).toBe('/Users/alice/secrets/**');
   });
 
   it('~/ prefix → relative to home directory', async () => {
-    const result = resolvePathPattern('~/Documents/*.pdf', projectRoot, cwd);
+    const result = resolve('~/Documents/*.pdf');
     expect(result).toContain('Documents/*.pdf');
-    // On POSIX systems the home dir starts with '/'; on Windows it may look like
-    // 'C:/Users/foo'. Either way, verify the result begins with the (normalized)
-    // home directory.
+    // The home dir starts with '/' on POSIX and may be 'C:/Users/foo' on
+    // Windows; either way the result begins with the normalized home dir.
     const normalizedHome = os.homedir().replace(/\\/g, '/');
     expect(result.startsWith(normalizedHome)).toBe(true);
   });
 
   it('/ prefix → relative to project root (NOT absolute)', async () => {
-    expect(resolvePathPattern('/src/**/*.ts', projectRoot, cwd)).toBe(
-      '/project/src/**/*.ts',
-    );
+    expect(resolve('/src/**/*.ts')).toBe('/project/src/**/*.ts');
   });
 
   it('./ prefix → relative to cwd', async () => {
-    expect(resolvePathPattern('./secrets/**', projectRoot, cwd)).toBe(
-      '/project/subdir/secrets/**',
-    );
+    expect(resolve('./secrets/**')).toBe('/project/subdir/secrets/**');
   });
 
   it('no prefix → relative to cwd', async () => {
-    expect(resolvePathPattern('*.env', projectRoot, cwd)).toBe(
-      '/project/subdir/*.env',
-    );
+    expect(resolve('*.env')).toBe('/project/subdir/*.env');
   });
 
   it('/Users/alice/file is relative to project root, NOT absolute', async () => {
-    // Leading slash patterns are project-root relative.
-    expect(resolvePathPattern('/Users/alice/file', projectRoot, cwd)).toBe(
-      '/project/Users/alice/file',
-    );
+    expect(resolve('/Users/alice/file')).toBe('/project/Users/alice/file');
   });
 });
 
@@ -976,192 +1002,87 @@ describe('resolvePathPattern', () => {
 describe('matchesPathPattern', () => {
   const projectRoot = '/project';
   const cwd = '/project';
-  const withTempRoot = (run: (root: string) => void): void => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
-    try {
-      run(root);
-    } finally {
-      fs.rmSync(root, { recursive: true, force: true });
-    }
-  };
+  const matches = (pattern: string, filePath: string) =>
+    matchesPathPattern(pattern, filePath, projectRoot, cwd);
+  /** Canonical-mode match with `root` as both project root and cwd. */
+  const matchesCanonical = (pattern: string, filePath: string, root: string) =>
+    matchesPathPattern(pattern, filePath, root, root, 'canonical');
 
   it('matches dotfiles (e.g. .env)', async () => {
-    expect(matchesPathPattern('.env', '/project/.env', projectRoot, cwd)).toBe(
-      true,
-    );
-    expect(matchesPathPattern('*.env', '/project/.env', projectRoot, cwd)).toBe(
-      true,
-    );
+    expect(matches('.env', '/project/.env')).toBe(true);
+    expect(matches('*.env', '/project/.env')).toBe(true);
   });
 
-  // A line terminator is an ordinary word character to bash, so a redirection
-  // target can end in one — and picomatch compiles `**` to a `.`-based body
-  // that the four JS line terminators do not match. Before they were
-  // substituted, every one of these was `false` and a `deny` silently became an
-  // `allow` (#11865).
+  // A line terminator is an ordinary word character to bash, so a redirect
+  // target can end in one, and picomatch's `.`-based `**` body matches none of
+  // the four JS line terminators. Unsubstituted, every row was `false` and a
+  // `deny` silently became an `allow` (#11865).
   it.each([
     ['\\r', '/project/out\r'],
     ['\\n', '/project/out\n'],
-    ['\\u2028', '/project/out\u2028'],
-    ['\\u2029', '/project/out\u2029'],
+    ['\\u2028', '/project/out '],
+    ['\\u2029', '/project/out '],
     ['a whole-target \\r', '/project/\r'],
   ])('matches a path ending in %s against **', async (_label, filePath) => {
-    expect(matchesPathPattern('//project/**', filePath, projectRoot, cwd)).toBe(
-      true,
-    );
-    expect(matchesPathPattern('./out*', filePath, projectRoot, cwd)).toBe(
-      filePath !== '/project/\r',
-    );
+    expect(matches('//project/**', filePath)).toBe(true);
+    expect(matches('./out*', filePath)).toBe(filePath !== '/project/\r');
   });
 
   it('still keeps * from crossing / for a line-terminator path', async () => {
-    expect(
-      matchesPathPattern('//project/*', '/project/a/out\r', projectRoot, cwd),
-    ).toBe(false);
-    expect(
-      matchesPathPattern('//project/*', '/project/out\r', projectRoot, cwd),
-    ).toBe(true);
+    expect(matches('//project/*', '/project/a/out\r')).toBe(false);
+    expect(matches('//project/*', '/project/out\r')).toBe(true);
   });
 
   it('** matches recursively across directories', async () => {
-    expect(
-      matchesPathPattern(
-        './secrets/**',
-        '/project/secrets/deep/nested/file.txt',
-        projectRoot,
-        cwd,
-      ),
-    ).toBe(true);
+    const file = '/project/secrets/deep/nested/file.txt';
+    expect(matches('./secrets/**', file)).toBe(true);
   });
 
   it('* matches single directory only', async () => {
-    expect(
-      matchesPathPattern(
-        '/src/*.ts',
-        '/project/src/index.ts',
-        projectRoot,
-        cwd,
-      ),
-    ).toBe(true);
-    expect(
-      matchesPathPattern(
-        '/src/*.ts',
-        '/project/src/nested/index.ts',
-        projectRoot,
-        cwd,
-      ),
-    ).toBe(false);
+    expect(matches('/src/*.ts', '/project/src/index.ts')).toBe(true);
+    expect(matches('/src/*.ts', '/project/src/nested/index.ts')).toBe(false);
   });
 
   it('/docs/** matches under project root docs', async () => {
-    expect(
-      matchesPathPattern(
-        '/docs/**',
-        '/project/docs/readme.md',
-        projectRoot,
-        cwd,
-      ),
-    ).toBe(true);
-    expect(
-      matchesPathPattern(
-        '/docs/**',
-        '/project/src/docs/readme.md',
-        projectRoot,
-        cwd,
-      ),
-    ).toBe(false);
+    expect(matches('/docs/**', '/project/docs/readme.md')).toBe(true);
+    expect(matches('/docs/**', '/project/src/docs/readme.md')).toBe(false);
   });
 
   it('//tmp/scratch.txt matches absolute path', async () => {
-    expect(
-      matchesPathPattern(
-        '//tmp/scratch.txt',
-        '/tmp/scratch.txt',
-        projectRoot,
-        cwd,
-      ),
-    ).toBe(true);
+    expect(matches('//tmp/scratch.txt', '/tmp/scratch.txt')).toBe(true);
   });
 
   it('does not match unrelated paths', async () => {
-    expect(
-      matchesPathPattern(
-        './secrets/**',
-        '/project/public/index.html',
-        projectRoot,
-        cwd,
-      ),
-    ).toBe(false);
+    expect(matches('./secrets/**', '/project/public/index.html')).toBe(false);
   });
 
-  it('matches a path after resolving parent-directory traversal', () => {
+  it('matches a path after resolving parent-directory traversal', () =>
     withTempRoot((root) => {
       const protectedDir = path.join(root, 'protected');
       const nestedDir = path.join(root, 'workspace', 'nested');
       fs.mkdirSync(protectedDir);
       fs.mkdirSync(nestedDir, { recursive: true });
+      const file = `${nestedDir}${path.sep}..${path.sep}..${path.sep}protected${path.sep}new.txt`;
+      const pattern = `/${path.basename(protectedDir)}/**`;
+      expect(matchesCanonical(pattern, file, root)).toBe(true);
+    }));
 
-      expect(
-        matchesPathPattern(
-          `/${path.basename(protectedDir)}/**`,
-          `${nestedDir}${path.sep}..${path.sep}..${path.sep}protected${path.sep}new.txt`,
-          root,
-          root,
-          'canonical',
-        ),
-      ).toBe(true);
-    });
-  });
-
-  it('matches the canonical target of a symlinked path', () => {
+  it('matches the canonical target of a symlinked path', () =>
     withTempRoot((root) => {
-      const protectedDir = path.join(root, 'protected');
-      const link = path.join(root, 'link');
-      fs.mkdirSync(protectedDir);
-      fs.writeFileSync(path.join(protectedDir, 'existing.txt'), 'protected');
-      fs.symlinkSync(protectedDir, link, 'dir');
+      const { link } = linkDir(root, { 'existing.txt': 'protected' });
+      const file = path.join(link, 'existing.txt');
+      expect(matchesPathPattern('/protected/**', file, root, root)).toBe(false);
+      expect(matchesCanonical('/protected/**', file, root)).toBe(true);
+    }));
 
-      expect(
-        matchesPathPattern(
-          '/protected/**',
-          path.join(link, 'existing.txt'),
-          root,
-          root,
-        ),
-      ).toBe(false);
-      expect(
-        matchesPathPattern(
-          '/protected/**',
-          path.join(link, 'existing.txt'),
-          root,
-          root,
-          'canonical',
-        ),
-      ).toBe(true);
-    });
-  });
-
-  it('canonicalizes through a file that causes ENOTDIR', () => {
+  it('canonicalizes through a file that causes ENOTDIR', () =>
     withTempRoot((root) => {
-      const protectedDir = path.join(root, 'protected');
-      const link = path.join(root, 'link');
-      fs.mkdirSync(protectedDir);
-      fs.writeFileSync(path.join(protectedDir, 'config.json'), '{}');
-      fs.symlinkSync(protectedDir, link, 'dir');
+      const { link } = linkDir(root, { 'config.json': '{}' });
+      const file = path.join(link, 'config.json', 'nested.txt');
+      expect(matchesCanonical('/protected/**', file, root)).toBe(true);
+    }));
 
-      expect(
-        matchesPathPattern(
-          '/protected/**',
-          path.join(link, 'config.json', 'nested.txt'),
-          root,
-          root,
-          'canonical',
-        ),
-      ).toBe(true);
-    });
-  });
-
-  it('canonicalizes a symlinked project root in restrictive rules', () => {
+  it('canonicalizes a symlinked project root in restrictive rules', () =>
     withTempRoot((root) => {
       const realRoot = path.join(root, 'real');
       const linkedRoot = path.join(root, 'linked');
@@ -1169,100 +1090,51 @@ describe('matchesPathPattern', () => {
       fs.mkdirSync(protectedDir, { recursive: true });
       fs.writeFileSync(path.join(protectedDir, 'file.txt'), 'protected');
       fs.symlinkSync(realRoot, linkedRoot, 'dir');
+      const file = path.join(protectedDir, 'file.txt');
+      expect(matchesCanonical('/protected/**', file, linkedRoot)).toBe(true);
+    }));
 
-      expect(
-        matchesPathPattern(
-          '/protected/**',
-          path.join(protectedDir, 'file.txt'),
-          linkedRoot,
-          linkedRoot,
-          'canonical',
-        ),
-      ).toBe(true);
-    });
-  });
-
-  it('canonicalizes the nearest existing ancestor for a new path', () => {
+  it('canonicalizes the nearest existing ancestor for a new path', () =>
     withTempRoot((root) => {
-      const protectedDir = path.join(root, 'protected');
-      const link = path.join(root, 'link');
-      fs.mkdirSync(protectedDir);
-      fs.symlinkSync(protectedDir, link, 'dir');
+      const { link } = linkDir(root);
+      const file = path.join(link, 'new', 'file.txt');
+      expect(matchesCanonical('/protected/**', file, root)).toBe(true);
+    }));
 
-      expect(
-        matchesPathPattern(
-          '/protected/**',
-          path.join(link, 'new', 'file.txt'),
-          root,
-          root,
-          'canonical',
-        ),
-      ).toBe(true);
-    });
-  });
-
-  it('matches the target of a dangling symlink', () => {
+  it('matches the target of a dangling symlink', () =>
     withTempRoot((root) => {
       const protectedDir = path.join(root, 'protected');
       const target = path.join(protectedDir, 'new.txt');
       const link = path.join(root, 'link.txt');
       fs.mkdirSync(protectedDir);
       fs.symlinkSync(target, link, 'file');
+      expect(matchesCanonical('/protected/**', link, root)).toBe(true);
+    }));
 
-      expect(
-        matchesPathPattern('/protected/**', link, root, root, 'canonical'),
-      ).toBe(true);
-    });
-  });
+  // Win32 normalizes `..` before traversing a reparse point; POSIX follows the
+  // symlink first and applies `..` to its target.
+  const targetRoot = process.platform === 'win32' ? 'project' : 'outside';
+  const otherRoot = process.platform === 'win32' ? 'outside' : 'project';
 
   // Title names the platform assumption so a future realpath-based resolution
   // in matchesPathPattern is seen to break it, not silently re-asserted.
-  it('preserves traversal semantics in a dangling symlink target (win32 collapses .. before the reparse point; POSIX follows the link first)', () => {
+  it('preserves traversal semantics in a dangling symlink target (win32 collapses .. before the reparse point; POSIX follows the link first)', () =>
     withTempRoot((root) => {
       const projectDir = path.join(root, 'project');
       const outsideDir = path.join(root, 'outside');
       fs.mkdirSync(projectDir);
       fs.mkdirSync(path.join(outsideDir, 'dir'), { recursive: true });
       fs.mkdirSync(path.join(outsideDir, 'safe'));
-
-      fs.symlinkSync(
-        path.join(outsideDir, 'dir'),
-        path.join(projectDir, 'inner'),
-        'dir',
-      );
+      const inner = path.join(projectDir, 'inner');
+      fs.symlinkSync(path.join(outsideDir, 'dir'), inner, 'dir');
       const link = path.join(projectDir, 'link.txt');
-      fs.symlinkSync(
-        `inner${path.sep}..${path.sep}safe${path.sep}new.txt`,
-        link,
-      );
+      const up = `${path.sep}..${path.sep}`;
+      fs.symlinkSync(`inner${up}safe${path.sep}new.txt`, link);
+      expect(matchesCanonical(`/${targetRoot}/safe/**`, link, root)).toBe(true);
+      expect(matchesCanonical(`/${otherRoot}/safe/**`, link, root)).toBe(false);
+    }));
 
-      // Win32 normalizes `..` before traversing a reparse point; POSIX follows
-      // the symlink first and applies `..` to its target.
-      const targetRoot = process.platform === 'win32' ? 'project' : 'outside';
-      const otherRoot = process.platform === 'win32' ? 'outside' : 'project';
-
-      expect(
-        matchesPathPattern(
-          `/${targetRoot}/safe/**`,
-          link,
-          root,
-          root,
-          'canonical',
-        ),
-      ).toBe(true);
-      expect(
-        matchesPathPattern(
-          `/${otherRoot}/safe/**`,
-          link,
-          root,
-          root,
-          'canonical',
-        ),
-      ).toBe(false);
-    });
-  });
-
-  it('resolves parent traversal after following a directory symlink (win32 collapses .. before the reparse point; POSIX follows the link first)', () => {
+  it('resolves parent traversal after following a directory symlink (win32 collapses .. before the reparse point; POSIX follows the link first)', () =>
     withTempRoot((root) => {
       const projectDir = path.join(root, 'project');
       const outsideDir = path.join(root, 'outside');
@@ -1271,90 +1143,49 @@ describe('matchesPathPattern', () => {
       fs.mkdirSync(path.join(outsideDir, 'dir'), { recursive: true });
       fs.mkdirSync(outsideSafeDir);
       fs.writeFileSync(path.join(outsideSafeDir, 'file.txt'), 'outside');
-
       const link = path.join(projectDir, 'link');
       fs.symlinkSync(path.join(outsideDir, 'dir'), link, 'dir');
-      const filePath = `${link}${path.sep}..${path.sep}safe${path.sep}file.txt`;
+      const file = `${link}${path.sep}..${path.sep}safe${path.sep}file.txt`;
+      expect(matchesCanonical(`/${targetRoot}/safe/**`, file, root)).toBe(true);
+      expect(matchesCanonical(`/${otherRoot}/safe/**`, file, root)).toBe(false);
+    }));
 
-      // Win32 normalizes `..` before traversing a reparse point; POSIX follows
-      // the symlink first and applies `..` to its target.
-      const targetRoot = process.platform === 'win32' ? 'project' : 'outside';
-      const otherRoot = process.platform === 'win32' ? 'outside' : 'project';
-
-      expect(
-        matchesPathPattern(
-          `/${targetRoot}/safe/**`,
-          filePath,
-          root,
-          root,
-          'canonical',
-        ),
-      ).toBe(true);
-      expect(
-        matchesPathPattern(
-          `/${otherRoot}/safe/**`,
-          filePath,
-          root,
-          root,
-          'canonical',
-        ),
-      ).toBe(false);
-    });
-  });
-
-  it('preserves matching against the lexical symlink path', () => {
+  it('preserves matching against the lexical symlink path', () =>
     withTempRoot((root) => {
-      const protectedDir = path.join(root, 'protected');
-      const link = path.join(root, 'link');
-      fs.mkdirSync(protectedDir);
-      fs.symlinkSync(protectedDir, link, 'dir');
-
-      expect(
-        matchesPathPattern('/link/**', path.join(link, 'new.txt'), root, root),
-      ).toBe(true);
-    });
-  });
+      const { link } = linkDir(root);
+      const file = path.join(link, 'new.txt');
+      expect(matchesPathPattern('/link/**', file, root, root)).toBe(true);
+    }));
 });
 
 // ─── matchesDomainPattern ────────────────────────────────────────────────────
 
 describe('matchesDomainPattern', () => {
-  it('matches exact domain', async () => {
-    expect(matchesDomainPattern('domain:example.com', 'example.com')).toBe(
-      true,
-    );
+  const matches = matchesDomainPattern;
+
+  it.each([
+    ['matches exact domain', 'domain:example.com', 'example.com', true],
+    [
+      'does not match different domain',
+      'domain:example.com',
+      'notexample.com',
+      false,
+    ],
+    ['is case-insensitive', 'domain:Example.COM', 'example.com', true],
+    ['handles missing prefix', 'example.com', 'example.com', true],
+  ])('%s', async (_title, pattern, domain, expected) => {
+    expect(matches(pattern, domain)).toBe(expected);
   });
 
   it('matches subdomain', async () => {
-    expect(matchesDomainPattern('domain:example.com', 'sub.example.com')).toBe(
-      true,
-    );
-    expect(
-      matchesDomainPattern('domain:example.com', 'deep.sub.example.com'),
-    ).toBe(true);
-  });
-
-  it('does not match different domain', async () => {
-    expect(matchesDomainPattern('domain:example.com', 'notexample.com')).toBe(
-      false,
-    );
-  });
-
-  it('is case-insensitive', async () => {
-    expect(matchesDomainPattern('domain:Example.COM', 'example.com')).toBe(
-      true,
-    );
-  });
-
-  it('handles missing prefix', async () => {
-    expect(matchesDomainPattern('example.com', 'example.com')).toBe(true);
+    expect(matches('domain:example.com', 'sub.example.com')).toBe(true);
+    expect(matches('domain:example.com', 'deep.sub.example.com')).toBe(true);
   });
 });
 
 // ─── matchesRule (unified) ───────────────────────────────────────────────────
 
 describe('matchesRule', () => {
-  // Basic tool name matching
   it('simple tool-name rule matches any invocation', async () => {
     const rule = parseRule('ShellTool');
     expect(matchesRule(rule, 'run_shell_command')).toBe(true);
@@ -1366,7 +1197,6 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'read_file')).toBe(false);
   });
 
-  // Shell command specifier
   it('specifier rule requires a command for shell tools', async () => {
     const rule = parseRule('Bash(git *)');
     expect(matchesRule(rule, 'run_shell_command')).toBe(false); // no command
@@ -1374,7 +1204,6 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'run_shell_command', 'echo hello')).toBe(false);
   });
 
-  // Monitor command specifier
   it('Monitor rule matches monitor invocations with command specifier', async () => {
     const rule = parseRule('Monitor(tail -f *)');
     expect(matchesRule(rule, 'monitor')).toBe(false); // no command
@@ -1397,12 +1226,10 @@ describe('matchesRule', () => {
 
   it('matchesRule checks individual simple commands (compound splitting is at PM level)', async () => {
     const rule = parseRule('Bash(git *)');
-    // matchesRule receives a simple command (already split by PM)
     expect(matchesRule(rule, 'run_shell_command', 'git status')).toBe(true);
     expect(matchesRule(rule, 'run_shell_command', 'rm -rf /')).toBe(false);
   });
 
-  // Meta-category matching: Read
   it('Read rule matches grep_search, glob, list_directory', async () => {
     const rule = parseRule('Read');
     expect(matchesRule(rule, 'read_file')).toBe(true);
@@ -1412,7 +1239,6 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'edit')).toBe(false); // not a read tool
   });
 
-  // Meta-category matching: Edit
   it('Edit rule matches edit, write_file, and notebook_edit', async () => {
     const rule = parseRule('Edit');
     expect(matchesRule(rule, 'edit')).toBe(true);
@@ -1421,131 +1247,47 @@ describe('matchesRule', () => {
     expect(matchesRule(rule, 'read_file')).toBe(false); // not an edit tool
   });
 
-  // File path matching
   it('Read with path specifier requires filePath', async () => {
     const rule = parseRule('Read(.env)');
-    const pathCtx = { projectRoot: '/project', cwd: '/project' };
-    // No filePath → no match
     expect(matchesRule(rule, 'read_file')).toBe(false);
-    // With filePath
-    expect(
-      matchesRule(
-        rule,
-        'read_file',
-        undefined,
-        '/project/.env',
-        undefined,
-        pathCtx,
-      ),
-    ).toBe(true);
-    expect(
-      matchesRule(
-        rule,
-        'read_file',
-        undefined,
-        '/project/other.txt',
-        undefined,
-        pathCtx,
-      ),
-    ).toBe(false);
+    expect(matchesPath(rule, 'read_file', '/project/.env')).toBe(true);
+    expect(matchesPath(rule, 'read_file', '/project/other.txt')).toBe(false);
   });
 
   it('Edit path specifier matches write_file too', async () => {
     const rule = parseRule('Edit(/src/**/*.ts)');
-    const pathCtx = { projectRoot: '/project', cwd: '/project' };
-    expect(
-      matchesRule(
-        rule,
-        'write_file',
-        undefined,
-        '/project/src/index.ts',
-        undefined,
-        pathCtx,
-      ),
-    ).toBe(true);
-    expect(
-      matchesRule(
-        rule,
-        'write_file',
-        undefined,
-        '/project/docs/readme.md',
-        undefined,
-        pathCtx,
-      ),
-    ).toBe(false);
+    expect(matchesPath(rule, 'write_file', '/project/src/index.ts')).toBe(true);
+    expect(matchesPath(rule, 'write_file', '/project/docs/readme.md')).toBe(
+      false,
+    );
   });
 
   it('Edit path specifier matches notebook_edit too', async () => {
     const rule = parseRule('Edit(/src/**/*.ipynb)');
-    const pathCtx = { projectRoot: '/project', cwd: '/project' };
-    expect(
-      matchesRule(
-        rule,
-        'notebook_edit',
-        undefined,
-        '/project/src/analysis.ipynb',
-        undefined,
-        pathCtx,
-      ),
-    ).toBe(true);
-    expect(
-      matchesRule(
-        rule,
-        'notebook_edit',
-        undefined,
-        '/project/docs/analysis.ipynb',
-        undefined,
-        pathCtx,
-      ),
-    ).toBe(false);
+    const inSrc = '/project/src/analysis.ipynb';
+    const inDocs = '/project/docs/analysis.ipynb';
+    expect(matchesPath(rule, 'notebook_edit', inSrc)).toBe(true);
+    expect(matchesPath(rule, 'notebook_edit', inDocs)).toBe(false);
   });
 
-  // WebFetch domain matching
   it('WebFetch domain specifier', async () => {
     const rule = parseRule('WebFetch(domain:example.com)');
-    expect(
-      matchesRule(rule, 'web_fetch', undefined, undefined, 'example.com'),
-    ).toBe(true);
-    expect(
-      matchesRule(rule, 'web_fetch', undefined, undefined, 'sub.example.com'),
-    ).toBe(true);
-    expect(
-      matchesRule(rule, 'web_fetch', undefined, undefined, 'other.com'),
-    ).toBe(false);
-    // No domain → no match
+    const fetches = (domain: string) =>
+      matchesRule(rule, 'web_fetch', undefined, undefined, domain);
+    expect(fetches('example.com')).toBe(true);
+    expect(fetches('sub.example.com')).toBe(true);
+    expect(fetches('other.com')).toBe(false);
     expect(matchesRule(rule, 'web_fetch')).toBe(false);
   });
 
-  // Agent literal matching
   it('Agent literal specifier', async () => {
     const rule = parseRule('Agent(Explore)');
     // Agent is an alias for 'task'; specifier matches via the specifier field
-    expect(
-      matchesRule(
-        rule,
-        'task',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        'Explore',
-      ),
-    ).toBe(true);
-    expect(
-      matchesRule(
-        rule,
-        'task',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        'Plan',
-      ),
-    ).toBe(false);
+    expect(matchesAgent(rule, undefined, 'Explore', 'task')).toBe(true);
+    expect(matchesAgent(rule, undefined, 'Plan', 'task')).toBe(false);
     expect(matchesRule(rule, 'task')).toBe(false); // no specifier
   });
 
-  // MCP tool matching
   it('MCP tool exact match', async () => {
     const rule = parseRule('mcp__puppeteer__puppeteer_navigate');
     expect(matchesRule(rule, 'mcp__puppeteer__puppeteer_navigate')).toBe(true);
@@ -1557,7 +1299,24 @@ describe('matchesRule', () => {
     const providerSafeName = normalizeToolNameForProvider(legacyName);
 
     expect(providerSafeName).not.toBe(legacyName);
-    expect(matchesRule(parseRule(legacyName), providerSafeName)).toBe(true);
+    // Production supplies the tool's advertised `permissionAliases` with the
+    // evaluation; for this name the legacy reduction is lossless, so the
+    // alias IS the exact raw spelling the matcher compares literally
+    // (#10199). Without the alias channel the registered name alone cannot
+    // vouch for a legacy unsafe spelling.
+    expect(
+      matchesRule(
+        parseRule(legacyName),
+        providerSafeName,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [legacyName],
+      ),
+    ).toBe(true);
   });
 
   it('keeps exact provider-safe MCP permission matches collision-safe', () => {
@@ -1567,8 +1326,39 @@ describe('matchesRule', () => {
     const slashedProviderName = normalizeToolNameForProvider(slashedName);
 
     expect(dottedProviderName).not.toBe(slashedProviderName);
-    expect(matchesRule(parseRule(dottedName), dottedProviderName)).toBe(true);
-    expect(matchesRule(parseRule(dottedName), slashedProviderName)).toBe(false);
+    expect(
+      matchesRule(
+        parseRule(dottedName),
+        dottedProviderName,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [dottedName],
+      ),
+    ).toBe(true);
+    // The negative arm threads the alias channel too. Unthreaded it returns
+    // `false` for the same structural reason the positive arm does, so it would
+    // not be comparing two aliased tools at all and the `.`-versus-`/`
+    // invariant this test is named for would go unobserved: both raws sanitize
+    // to the identical body `mcp__zybio__literature_search` and differ only in
+    // the FNV hash, so admitting a reduced spelling to the comparison has to be
+    // caught here.
+    expect(
+      matchesRule(
+        parseRule(dottedName),
+        slashedProviderName,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [slashedName],
+      ),
+    ).toBe(false);
   });
 
   it('MCP server-level match (2-part pattern)', async () => {
@@ -1581,10 +1371,20 @@ describe('matchesRule', () => {
   it('matches a legacy dotted MCP server rule against provider-safe names', () => {
     const rule = parseRule('mcp__zybio.db');
 
+    // Production supplies the tool's own `permissionAliases` with the
+    // evaluation; the alias carries the raw spelling the registered name
+    // lost (#10199).
     expect(
       matchesRule(
         rule,
         normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        ['mcp__zybio.db__query_uniprot'],
       ),
     ).toBe(true);
     expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);
@@ -1603,6 +1403,13 @@ describe('matchesRule', () => {
       matchesRule(
         rule,
         normalizeToolNameForProvider('mcp__zybio.db__query_uniprot'),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        ['mcp__zybio.db__query_uniprot'],
       ),
     ).toBe(true);
     expect(matchesRule(rule, 'mcp__other__query_uniprot')).toBe(false);
@@ -1622,30 +1429,26 @@ describe('matchesRule', () => {
     const r = parseRule('Agent(model:opus)');
     expect(r.toolName).toBe('agent');
     expect(r.specifier).toBeUndefined();
-    expect(r.toolParamMatchers).toEqual([
-      { key: 'model', valuePattern: 'opus' },
-    ]);
+    expect(r.toolParamMatchers).toEqual([paramMatcher('model', 'opus')]);
   });
 
   it('parseRule extracts multiple key:value pairs', async () => {
     const r = parseRule('Agent(model:opus,type:code)');
     expect(r.toolParamMatchers).toEqual([
-      { key: 'model', valuePattern: 'opus' },
-      { key: 'type', valuePattern: 'code' },
+      paramMatcher('model', 'opus'),
+      paramMatcher('type', 'code'),
     ]);
   });
 
   it('parseRule handles mixed specifier and param matchers', async () => {
     const r = parseRule('Agent(coder,model:opus)');
     expect(r.specifier).toBe('coder');
-    expect(r.toolParamMatchers).toEqual([
-      { key: 'model', valuePattern: 'opus' },
-    ]);
+    expect(r.toolParamMatchers).toEqual([paramMatcher('model', 'opus')]);
   });
 
   it('parseRule supports wildcard in value pattern', async () => {
     const r = parseRule('Agent(model:*)');
-    expect(r.toolParamMatchers).toEqual([{ key: 'model', valuePattern: '*' }]);
+    expect(r.toolParamMatchers).toEqual([paramMatcher('model', '*')]);
   });
 
   it('parseRule does not treat WebFetch domain: as key:value', async () => {
@@ -1662,34 +1465,8 @@ describe('matchesRule', () => {
 
   it('matchesRule matches tool with param matcher', async () => {
     const rule = parseRule('Agent(model:opus)');
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {
-          model: 'opus',
-        },
-      ),
-    ).toBe(true);
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {
-          model: 'sonnet',
-        },
-      ),
-    ).toBe(false);
+    expect(matchesAgent(rule, { model: 'opus' })).toBe(true);
+    expect(matchesAgent(rule, { model: 'sonnet' })).toBe(false);
   });
 
   it('matchesRule fails when toolParams missing for param matcher rule', async () => {
@@ -1699,123 +1476,23 @@ describe('matchesRule', () => {
 
   it('matchesRule supports wildcard value pattern', async () => {
     const rule = parseRule('Agent(model:*)');
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {
-          model: 'opus',
-        },
-      ),
-    ).toBe(true);
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {
-          model: 'sonnet',
-        },
-      ),
-    ).toBe(true);
+    expect(matchesAgent(rule, { model: 'opus' })).toBe(true);
+    expect(matchesAgent(rule, { model: 'sonnet' })).toBe(true);
     expect(matchesRule(rule, 'agent')).toBe(false); // no toolParams
   });
 
   it('matchesRule requires all param matchers to match', async () => {
     const rule = parseRule('Agent(model:opus,type:code)');
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {
-          model: 'opus',
-          type: 'code',
-        },
-      ),
-    ).toBe(true);
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {
-          model: 'opus',
-          type: 'chat',
-        },
-      ),
-    ).toBe(false);
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {
-          model: 'opus',
-        },
-      ),
-    ).toBe(false); // missing 'type' param
+    expect(matchesAgent(rule, { model: 'opus', type: 'code' })).toBe(true);
+    expect(matchesAgent(rule, { model: 'opus', type: 'chat' })).toBe(false);
+    expect(matchesAgent(rule, { model: 'opus' })).toBe(false); // missing 'type' param
   });
 
   it('matchesRule handles mixed specifier and param matchers', async () => {
     const rule = parseRule('Agent(coder,model:opus)');
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        'coder',
-        { model: 'opus' },
-      ),
-    ).toBe(true);
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        'coder',
-        { model: 'sonnet' },
-      ),
-    ).toBe(false); // param mismatch
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        'explore',
-        { model: 'opus' },
-      ),
-    ).toBe(false); // specifier mismatch
+    expect(matchesAgent(rule, { model: 'opus' }, 'coder')).toBe(true);
+    expect(matchesAgent(rule, { model: 'sonnet' }, 'coder')).toBe(false); // param mismatch
+    expect(matchesAgent(rule, { model: 'opus' }, 'explore')).toBe(false); // specifier mismatch
   });
 
   it('parseRule does not extract key:value for MCP tools (backward compat)', async () => {
@@ -1827,154 +1504,32 @@ describe('matchesRule', () => {
 
   it('matchesRule supports partial wildcard patterns', async () => {
     const rule = parseRule('Agent(model:op*)');
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {
-          model: 'opus',
-        },
-      ),
-    ).toBe(true);
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {
-          model: 'opera',
-        },
-      ),
-    ).toBe(true);
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {
-          model: 'sonnet',
-        },
-      ),
-    ).toBe(false);
+    expect(matchesAgent(rule, { model: 'opus' })).toBe(true);
+    expect(matchesAgent(rule, { model: 'opera' })).toBe(true);
+    expect(matchesAgent(rule, { model: 'sonnet' })).toBe(false);
   });
 
   it('matchesRule handles multi-wildcard patterns without ReDoS', async () => {
     const rule = parseRule('Agent(prompt:*x*x*x*x*x*y)');
-    // This should not hang (ReDoS) and should return false for non-matching input
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {
-          prompt: 'a'.repeat(1000),
-        },
-      ),
-    ).toBe(false);
-    // Should match when pattern is present
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {
-          prompt: 'xaxaxaxaxay',
-        },
-      ),
-    ).toBe(true);
+    // Must not hang (ReDoS), and returns false for non-matching input
+    expect(matchesAgent(rule, { prompt: 'a'.repeat(1000) })).toBe(false);
+    expect(matchesAgent(rule, { prompt: 'xaxaxaxaxay' })).toBe(true);
   });
 
   it('matchesRule coerces number values to string for matching', async () => {
     const rule = parseRule('Agent(count:42)');
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {
-          count: 42,
-        },
-      ),
-    ).toBe(true);
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        {
-          count: 43,
-        },
-      ),
-    ).toBe(false);
+    expect(matchesAgent(rule, { count: 42 })).toBe(true);
+    expect(matchesAgent(rule, { count: 43 })).toBe(false);
   });
 });
 
 // ─── PermissionManager ──────────────────────────────────────────────────────
 
-function makeConfig(
-  opts: Partial<{
-    permissionsAllow: string[];
-    permissionsAsk: string[];
-    permissionsDeny: string[];
-    coreTools: string[];
-    projectRoot: string;
-    cwd: string;
-    approvalMode: string;
-    /**
-     * `settings.tools.eager` — eager-by-default tool names whose schemas may
-     * ride in the initial request. Absent means "no restriction"; an empty
-     * array is active and defers every non-exempt tool. Wholly independent
-     * of the permission rules (#10075).
-     */
-    eagerTools: string[];
-    /** Live folder trust; absent reads as trusted. */
-    isTrustedFolder: () => boolean;
-  }> = {},
-): PermissionManagerConfig {
-  return {
-    ...(opts.isTrustedFolder ? { isTrustedFolder: opts.isTrustedFolder } : {}),
-    getPermissionsAllow: () => opts.permissionsAllow,
-    getPermissionsAsk: () => opts.permissionsAsk,
-    getPermissionsDeny: () => opts.permissionsDeny,
-    getCoreTools: () => opts.coreTools,
-    getEagerTools: () => opts.eagerTools,
-    getProjectRoot: () => opts.projectRoot ?? '/project',
-    getCwd: () => opts.cwd ?? '/project',
-    getApprovalMode: () => opts.approvalMode ?? 'default',
-  };
-}
-
 describe('PermissionManager', () => {
   let pm: PermissionManager;
+  const registration = (toolName: string) =>
+    pm.getToolRegistrationStatus(toolName);
+  const enabled = (toolName: string) => pm.isToolEnabled(toolName);
 
   it('does not implicitly allow read-only shell commands under internal sandbox policy', async () => {
     const manager = new PermissionManager({
@@ -1989,38 +1544,42 @@ describe('PermissionManager', () => {
 
   describe('basic rule evaluation', () => {
     beforeEach(() => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['ReadFileTool', 'Bash(git *)'],
-          permissionsAsk: ['WriteFileTool'],
-          permissionsDeny: ['ShellTool'],
-        }),
+      pm = makePm({
+        permissionsAllow: ['ReadFileTool', 'Bash(git *)'],
+        permissionsAsk: ['WriteFileTool'],
+        permissionsDeny: ['ShellTool'],
+      });
+    });
+
+    it.each([
+      ['returns deny for a denied tool', 'run_shell_command', 'deny'],
+      ['returns ask for an ask-rule tool', 'write_file', 'ask'],
+      ['returns allow for an allow-rule tool', 'read_file', 'allow'],
+      // 'glob' is covered by ReadFileTool via the Read meta-category, so
+      // use a tool not in any rule or meta-category.
+      ['returns default for unmatched tool', 'agent', 'default'],
+    ])('%s', async (_title, toolName, expected) => {
+      expect(await pm.evaluate({ toolName })).toBe(expected);
+    });
+
+    it('refuses a legacy truncated MCP permission alias on an exact entry', async () => {
+      // Built through the real producer: the 31-character server key pushes
+      // the raw identity past the 63-character budget, so registration
+      // truncates and hashes, and the legacy reduction middle-truncates at
+      // slice(0, 28) — keeping only the key's first 23 characters. A cut
+      // that reached the server segment vouches for no server, so the
+      // producer advertises only the exact raw identity (R12-1), and a
+      // persisted allow in the truncated spelling fails closed instead of
+      // auto-approving the tool; see mcp-server-rule-collision.test.ts
+      // (R8-1) for the two-servers-one-spelling witnesses.
+      const tool = prodTool(
+        'weather-forecast-server-premium',
+        'get_extended_forecast_for_next_week',
       );
-      pm.initialize();
-    });
-
-    it('returns deny for a denied tool', async () => {
-      expect(await pm.evaluate({ toolName: 'run_shell_command' })).toBe('deny');
-    });
-
-    it('returns ask for an ask-rule tool', async () => {
-      expect(await pm.evaluate({ toolName: 'write_file' })).toBe('ask');
-    });
-
-    it('returns allow for an allow-rule tool', async () => {
-      expect(await pm.evaluate({ toolName: 'read_file' })).toBe('allow');
-    });
-
-    it('returns default for unmatched tool', async () => {
-      // Note: 'glob' is covered by ReadFileTool via Read meta-category,
-      // so use a tool not in any rule or meta-category
-      expect(await pm.evaluate({ toolName: 'agent' })).toBe('default');
-    });
-
-    it('matches a legacy truncated MCP permission alias', async () => {
-      const rawName = `mcp__server__${'x'.repeat(80)}`;
-      const legacyName = rawName.slice(0, 28) + '___' + rawName.slice(-32);
-      const providerSafeName = normalizeToolNameForProvider(rawName);
+      const legacyName = generateLegacyMcpToolName(
+        'mcp__weather-forecast-server-premium__get_extended_forecast_for_next_week',
+      );
+      expect(tool.permissionAliases).not.toContain(legacyName);
       const pm2 = new PermissionManager(
         makeConfig({ permissionsAllow: [legacyName] }),
       );
@@ -2028,8 +1587,24 @@ describe('PermissionManager', () => {
 
       expect(
         await pm2.evaluate({
-          toolName: providerSafeName,
-          toolAliases: [legacyName],
+          toolName: tool.name,
+          toolAliases: tool.permissionAliases,
+        }),
+      ).toBe('default');
+
+      // Control: the same rule in the exact raw identity still names it.
+      const rawPm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: [
+            'mcp__weather-forecast-server-premium__get_extended_forecast_for_next_week',
+          ],
+        }),
+      );
+      rawPm.initialize();
+      expect(
+        await rawPm.evaluate({
+          toolName: tool.name,
+          toolAliases: tool.permissionAliases,
         }),
       ).toBe('allow');
     });
@@ -2042,162 +1617,89 @@ describe('PermissionManager', () => {
       );
       pm2.initialize();
 
+      // Production supplies the tool's own `permissionAliases` with the
+      // evaluation; the alias carries the raw spelling the registered name
+      // lost (#10199). For this name the legacy reduction is lossless, so
+      // the alias equals the raw spelling.
       expect(
         await pm2.evaluate({
           toolName: providerSafeName,
+          toolAliases: [legacyName],
         }),
       ).toBe('deny');
     });
 
     it('deny takes precedence over ask and allow', async () => {
-      const pm2 = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['run_shell_command'],
-          permissionsAsk: ['run_shell_command'],
-          permissionsDeny: ['run_shell_command'],
-        }),
-      );
-      pm2.initialize();
-      expect(await pm2.evaluate({ toolName: 'run_shell_command' })).toBe(
-        'deny',
-      );
+      const pm2 = makePm({
+        permissionsAllow: ['run_shell_command'],
+        permissionsAsk: ['run_shell_command'],
+        permissionsDeny: ['run_shell_command'],
+      });
+      const ctx = { toolName: 'run_shell_command' };
+      expect(await pm2.evaluate(ctx)).toBe('deny');
     });
 
     it('ask takes precedence over allow', async () => {
-      const pm2 = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['write_file'],
-          permissionsAsk: ['write_file'],
-        }),
-      );
-      pm2.initialize();
+      const pm2 = makePm({
+        permissionsAllow: ['write_file'],
+        permissionsAsk: ['write_file'],
+      });
       expect(await pm2.evaluate({ toolName: 'write_file' })).toBe('ask');
     });
   });
 
   describe('command-level evaluation', () => {
     beforeEach(() => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(git *)'],
-          permissionsDeny: ['Bash(rm *)'],
-        }),
-      );
-      pm.initialize();
+      pm = makePm({
+        permissionsAllow: ['Bash(git *)'],
+        permissionsDeny: ['Bash(rm *)'],
+      });
     });
 
-    it('allows a matching allowed command', async () => {
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'git status',
-        }),
-      ).toBe('allow');
-    });
-
-    it('denies a matching denied command', async () => {
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'rm -rf /',
-        }),
-      ).toBe('deny');
+    it.each([
+      ['allows a matching allowed command', 'git status', 'allow'],
+      ['denies a matching denied command', 'rm -rf /', 'deny'],
+    ])('%s', async (_title, command, expected) => {
+      expect(await pm.evaluate(sh(command))).toBe(expected);
     });
 
     it('resolves default to allow for readonly commands, ask for others', async () => {
-      // 'echo' is a readonly command, so it resolves to 'allow'
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'echo hello',
-        }),
-      ).toBe('allow');
-      // 'npm install' is not readonly, so it resolves to 'ask'
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'npm install',
-        }),
-      ).toBe('ask');
+      expect(await pm.evaluate(sh('echo hello'))).toBe('allow');
+      expect(await pm.evaluate(sh('npm install'))).toBe('ask');
     });
 
-    // Regression coverage for issue #4093: command substitution must never
-    // produce a hard 'deny' from resolveDefaultPermission. Before the fix
-    // the L4 default branch returned 'deny' for any command containing
-    // $(), backticks, <(), or >(), which:
-    //   1. could not be overridden by YOLO mode, and
-    //   2. fired inconsistently — only when hasRelevantRules() happened to
-    //      be true (e.g. a compound command where another sub-command
-    //      matched an unrelated allow rule). Standalone substitution
-    //      commands with no relevant rule skipped L4 entirely and got
-    //      'ask' from L3, producing surprising asymmetry.
-    // Both shapes must now resolve to 'ask' regardless of rule shape.
+    // Issue #4093: command substitution must never get a hard 'deny' from
+    // resolveDefaultPermission. The L4 default branch used to deny any command
+    // with $(), backticks, <() or >(), which YOLO could not override and which
+    // fired only when hasRelevantRules() was true (e.g. another compound part
+    // matched an unrelated allow rule); standalone ones got 'ask' from L3.
+    // Both shapes must now resolve to 'ask', whatever the rules.
     describe('command substitution (issue #4093)', () => {
-      it('returns ask for a standalone command with $() substitution', async () => {
+      it.each([
         // No 'python3' rule is configured, but the substitution must not
         // trip a deny — the only acceptable answer is 'ask'.
-        expect(
-          await pm.evaluate({
-            toolName: 'run_shell_command',
-            command: 'python3 -c "print($(echo hello))"',
-          }),
-        ).toBe('ask');
-      });
-
-      it('returns ask for a compound command where one sub-command matches an allow rule and another contains $()', async () => {
-        // Structurally equivalent to the scenario reported in issue #4093:
-        // the first sub-command (`git status`) matches the surrounding
-        // describe's `Bash(git *)` allow rule, which makes
-        // hasRelevantRules() return true and triggers full PM evaluation;
-        // the second sub-command (`python3 -c "..."`) contains command
-        // substitution and does not match any rule, so it falls into
-        // resolveDefaultPermission. Before the fix, that path returned
-        // 'deny' for the substitution sub-command and the most-restrictive
-        // combine made the whole compound deny. After the fix it returns
-        // 'ask' and the compound resolves to 'ask'.
-        expect(
-          await pm.evaluate({
-            toolName: 'run_shell_command',
-            command: 'git status && python3 -c "print($(echo hello))"',
-          }),
-        ).toBe('ask');
-      });
-
-      it('returns ask for backtick command substitution', async () => {
-        expect(
-          await pm.evaluate({
-            toolName: 'run_shell_command',
-            command: 'echo `whoami`',
-          }),
-        ).toBe('ask');
-      });
-
-      it('returns ask for process substitution <()', async () => {
-        expect(
-          await pm.evaluate({
-            toolName: 'run_shell_command',
-            command: 'diff <(ls /a) <(ls /b)',
-          }),
-        ).toBe('ask');
-      });
-
-      it('returns ask for >() output process substitution', async () => {
-        expect(
-          await pm.evaluate({
-            toolName: 'run_shell_command',
-            command: 'echo data > >(tee log.txt)',
-          }),
-        ).toBe('ask');
+        [
+          'a standalone command with $() substitution',
+          'python3 -c "print($(echo hello))"',
+        ],
+        // The #4093 scenario: `git status` matches `Bash(git *)`, so full
+        // evaluation runs; `python3 -c "..."` matches no rule and reaches
+        // resolveDefaultPermission, whose old 'deny' made the most-restrictive
+        // combine deny the whole compound; now it is 'ask'.
+        [
+          'a compound command where one sub-command matches an allow rule and another contains $()',
+          'git status && python3 -c "print($(echo hello))"',
+        ],
+        ['backtick command substitution', 'echo `whoami`'],
+        ['process substitution <()', 'diff <(ls /a) <(ls /b)'],
+        ['>() output process substitution', 'echo data > >(tee log.txt)'],
+      ])('returns ask for %s', async (_label, command) => {
+        expect(await pm.evaluate(sh(command))).toBe('ask');
       });
 
       it('still honors explicit deny rules over substitution-bearing commands', async () => {
         // The 'ask' from substitution must never downgrade a real deny rule.
-        expect(
-          await pm.evaluate({
-            toolName: 'run_shell_command',
-            command: 'rm -rf "$(pwd)/build"',
-          }),
-        ).toBe('deny');
+        expect(await pm.evaluate(sh('rm -rf "$(pwd)/build"'))).toBe('deny');
       });
     });
 
@@ -2208,344 +1710,145 @@ describe('PermissionManager', () => {
       expect(await pm.isCommandAllowed('ls')).toBe('allow');
     });
 
+    // The manager's own cwd is the '/project' default; the invocation's wins.
     it('resolves shell virtual file operations relative to the explicit cwd', async () => {
-      const pm2 = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Read(./subdir/secret.txt)'],
-          projectRoot: '/project',
-          cwd: '/project',
-        }),
-      );
-      pm2.initialize();
-
-      expect(
-        await pm2.evaluate({
-          toolName: 'run_shell_command',
-          command: 'cat ./secret.txt',
-          cwd: '/project/subdir',
-        }),
-      ).toBe('allow');
+      const pm2 = makePm({ permissionsAllow: ['Read(./subdir/secret.txt)'] });
+      const ctx = sh('cat ./secret.txt', '/project/subdir');
+      expect(await pm2.evaluate(ctx)).toBe('allow');
     });
 
     it('applies relative virtual file rules using the shell invocation cwd', async () => {
-      const pm2 = new PermissionManager(
-        makeConfig({
-          permissionsDeny: ['Read(./secret.txt)'],
-          projectRoot: '/project',
-          cwd: '/project',
-        }),
-      );
-      pm2.initialize();
-
-      expect(
-        await pm2.evaluate({
-          toolName: 'run_shell_command',
-          command: 'cat ./secret.txt',
-          cwd: '/project/subdir',
-        }),
-      ).toBe('deny');
+      const pm2 = makePm({ permissionsDeny: ['Read(./secret.txt)'] });
+      const ctx = sh('cat ./secret.txt', '/project/subdir');
+      expect(await pm2.evaluate(ctx)).toBe('deny');
     });
   });
 
   describe('monitor command-level evaluation', () => {
     it('Monitor(...) allow rule matches monitor invocations', async () => {
-      const pm2 = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Monitor(tail -f *)'],
-        }),
-      );
-      pm2.initialize();
-      expect(
-        await pm2.evaluate({
-          toolName: 'monitor',
-          command: 'tail -f /var/log/app.log',
-        }),
-      ).toBe('allow');
+      const pm2 = makePm({ permissionsAllow: ['Monitor(tail -f *)'] });
+      expect(await pm2.evaluate(mon('tail -f /var/log/app.log'))).toBe('allow');
     });
 
     it('Monitor(...) allow rule matches wrapped monitor invocations', async () => {
-      const pm2 = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Monitor(tail -f *)'],
-        }),
-      );
-      pm2.initialize();
-      expect(
-        await pm2.evaluate({
-          toolName: 'monitor',
-          command: `/bin/bash --noprofile -c 'tail -f /var/log/app.log &'`,
-        }),
-      ).toBe('allow');
+      const pm2 = makePm({ permissionsAllow: ['Monitor(tail -f *)'] });
+      const command = `/bin/bash --noprofile -c 'tail -f /var/log/app.log &'`;
+      expect(await pm2.evaluate(mon(command))).toBe('allow');
     });
 
     it('asks by default for wrapped commands with environment prefixes', async () => {
-      const pm2 = new PermissionManager(makeConfig({}));
-      pm2.initialize();
-      expect(
-        await pm2.evaluate({
-          toolName: 'monitor',
-          command: String.raw`FOO="bar baz" /bin/bash --noprofile -c 'tail -f /var/log/app.log &'`,
-        }),
-      ).toBe('ask');
+      const pm2 = makePm({});
+      const command = String.raw`FOO="bar baz" /bin/bash --noprofile -c 'tail -f /var/log/app.log &'`;
+      expect(await pm2.evaluate(mon(command))).toBe('ask');
     });
 
     it('Monitor(...) deny rule sees shell wrapper suffix commands', async () => {
-      const pm2 = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Monitor(tail -f *)'],
-          permissionsDeny: ['Monitor(rm *)'],
-        }),
-      );
-      pm2.initialize();
-      expect(
-        await pm2.evaluate({
-          toolName: 'monitor',
-          command: `/bin/bash -c 'tail -f /var/log/app.log' && rm -rf /tmp/owned`,
-        }),
-      ).toBe('deny');
+      const pm2 = makePm({
+        permissionsAllow: ['Monitor(tail -f *)'],
+        permissionsDeny: ['Monitor(rm *)'],
+      });
+      const command = `/bin/bash -c 'tail -f /var/log/app.log' && rm -rf /tmp/owned`;
+      expect(await pm2.evaluate(mon(command))).toBe('deny');
     });
 
     it('Monitor(...) deny rule blocks monitor invocations', async () => {
-      const pm2 = new PermissionManager(
-        makeConfig({
-          permissionsDeny: ['Monitor(rm *)'],
-        }),
-      );
-      pm2.initialize();
-      expect(
-        await pm2.evaluate({
-          toolName: 'monitor',
-          command: 'rm -rf /',
-        }),
-      ).toBe('deny');
+      const pm2 = makePm({ permissionsDeny: ['Monitor(rm *)'] });
+      expect(await pm2.evaluate(mon('rm -rf /'))).toBe('deny');
     });
 
     it('Monitor approval does NOT allow run_shell_command', async () => {
-      const pm2 = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Monitor(npm *)'],
-        }),
-      );
-      pm2.initialize();
-      // Same command via shell tool should NOT be allowed by Monitor rule
-      expect(
-        await pm2.evaluate({
-          toolName: 'run_shell_command',
-          command: 'npm install',
-        }),
-      ).not.toBe('allow');
+      const pm2 = makePm({ permissionsAllow: ['Monitor(npm *)'] });
+      expect(await pm2.evaluate(sh('npm install'))).not.toBe('allow');
     });
 
     it('Bash approval also allows monitor (shell rules cover monitor)', async () => {
-      const pm2 = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(npm *)'],
-        }),
-      );
-      pm2.initialize();
-      // Same command via monitor tool should be allowed by Bash rule
-      expect(
-        await pm2.evaluate({
-          toolName: 'monitor',
-          command: 'npm install',
-        }),
-      ).toBe('allow');
+      const pm2 = makePm({ permissionsAllow: ['Bash(npm *)'] });
+      expect(await pm2.evaluate(mon('npm install'))).toBe('allow');
     });
 
     it('Bash deny rule blocks equivalent monitor command', async () => {
-      const pm2 = new PermissionManager(
-        makeConfig({
-          permissionsDeny: ['Bash(rm *)'],
-        }),
-      );
-      pm2.initialize();
-      expect(
-        await pm2.evaluate({
-          toolName: 'monitor',
-          command: 'rm -rf /',
-        }),
-      ).toBe('deny');
+      const pm2 = makePm({ permissionsDeny: ['Bash(rm *)'] });
+      expect(await pm2.evaluate(mon('rm -rf /'))).toBe('deny');
     });
 
     it('resolves default to allow for readonly monitor commands', async () => {
-      const pm2 = new PermissionManager(makeConfig({}));
-      pm2.initialize();
-      expect(
-        await pm2.evaluate({
-          toolName: 'monitor',
-          command: 'echo hello',
-        }),
-      ).toBe('allow');
+      const pm2 = makePm({});
+      expect(await pm2.evaluate(mon('echo hello'))).toBe('allow');
     });
 
     it('applies relative virtual file deny rules using the monitor cwd', async () => {
-      // Mirrors the run_shell_command coverage above: when a monitor is
-      // started with an explicit `directory` (forwarded as `cwd` via
-      // buildPermissionCheckContext), relative-path deny rules must resolve
-      // against that directory rather than the global config cwd. Without
-      // this propagation a `Read(./secret.txt)` rule could be silently
-      // bypassed by switching the monitor's working directory.
-      const pm2 = new PermissionManager(
-        makeConfig({
-          permissionsDeny: ['Read(./secret.txt)'],
-          projectRoot: '/project',
-          cwd: '/project',
-        }),
-      );
-      pm2.initialize();
-
-      expect(
-        await pm2.evaluate({
-          toolName: 'monitor',
-          command: 'cat ./secret.txt',
-          cwd: '/project/subdir',
-        }),
-      ).toBe('deny');
+      // As for run_shell_command above: a monitor's explicit `directory`
+      // (forwarded as `cwd` by buildPermissionCheckContext) must anchor
+      // relative deny rules, not the config cwd, or switching the monitor's
+      // working directory silently bypasses `Read(./secret.txt)`.
+      const pm2 = makePm({ permissionsDeny: ['Read(./secret.txt)'] });
+      const ctx = mon('cat ./secret.txt', '/project/subdir');
+      expect(await pm2.evaluate(ctx)).toBe('deny');
     });
 
     it('resolves monitor virtual file allow rules relative to the explicit cwd', async () => {
-      const pm2 = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Read(./subdir/secret.txt)'],
-          projectRoot: '/project',
-          cwd: '/project',
-        }),
-      );
-      pm2.initialize();
-
-      expect(
-        await pm2.evaluate({
-          toolName: 'monitor',
-          command: 'cat ./secret.txt',
-          cwd: '/project/subdir',
-        }),
-      ).toBe('allow');
+      const pm2 = makePm({ permissionsAllow: ['Read(./subdir/secret.txt)'] });
+      const ctx = mon('cat ./secret.txt', '/project/subdir');
+      expect(await pm2.evaluate(ctx)).toBe('allow');
     });
   });
 
   describe('compound command evaluation', () => {
+    const echoRm = {
+      permissionsAllow: ['Bash(echo *)'],
+      permissionsDeny: ['Bash(rm *)'],
+    };
+
     it('keeps Git after a directory change in the confirmation boundary', async () => {
-      pm = new PermissionManager(
-        makeConfig({ permissionsAllow: ['Bash(cd *)'] }),
-      );
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'cd /tmp && git status',
-          cwd: process.cwd(),
-        }),
-      ).toBe('ask');
+      pm = makePm({ permissionsAllow: ['Bash(cd *)'] });
+      const ctx = sh('cd /tmp && git status', process.cwd());
+      expect(await pm.evaluate(ctx)).toBe('ask');
     });
 
     it('all sub-commands allowed → allow', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(safe-cmd *)', 'Bash(one-cmd *)'],
-        }),
-      );
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'safe-cmd arg1 && one-cmd arg2',
-        }),
-      ).toBe('allow');
+      pm = makePm({
+        permissionsAllow: ['Bash(safe-cmd *)', 'Bash(one-cmd *)'],
+      });
+      const ctx = sh('safe-cmd arg1 && one-cmd arg2');
+      expect(await pm.evaluate(ctx)).toBe('allow');
     });
 
     it('one sub-command unmatched (non-readonly) → ask (resolved from default)', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(safe-cmd *)'],
-        }),
-      );
-      pm.initialize();
+      pm = makePm({ permissionsAllow: ['Bash(safe-cmd *)'] });
       // 'two-cmd' is unknown/non-readonly, so its default permission is 'ask'
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'safe-cmd && two-cmd',
-        }),
-      ).toBe('ask');
+      expect(await pm.evaluate(sh('safe-cmd && two-cmd'))).toBe('ask');
     });
 
     it('one sub-command denied → deny', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(safe-cmd *)'],
-          permissionsDeny: ['Bash(evil-cmd *)'],
-        }),
-      );
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'safe-cmd && evil-cmd rm-all',
-        }),
-      ).toBe('deny');
+      pm = makePm({
+        permissionsAllow: ['Bash(safe-cmd *)'],
+        permissionsDeny: ['Bash(evil-cmd *)'],
+      });
+      expect(await pm.evaluate(sh('safe-cmd && evil-cmd rm-all'))).toBe('deny');
     });
 
     it('one sub-command ask + one allow → ask', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(git *)'],
-          permissionsAsk: ['Bash(npm *)'],
-        }),
-      );
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'git status && npm publish',
-        }),
-      ).toBe('ask');
+      pm = makePm({
+        permissionsAllow: ['Bash(git *)'],
+        permissionsAsk: ['Bash(npm *)'],
+      });
+      expect(await pm.evaluate(sh('git status && npm publish'))).toBe('ask');
     });
 
     it('pipe compound: all matched → allow', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(git *)', 'Bash(grep *)'],
-        }),
-      );
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'git log | grep fix',
-        }),
-      ).toBe('allow');
+      pm = makePm({ permissionsAllow: ['Bash(git *)', 'Bash(grep *)'] });
+      expect(await pm.evaluate(sh('git log | grep fix'))).toBe('allow');
     });
 
     it('pipe compound: second unmatched but readonly → allow (resolved from default)', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(git *)'],
-        }),
-      );
-      pm.initialize();
+      pm = makePm({ permissionsAllow: ['Bash(git *)'] });
       // 'grep' is a readonly command, so its default permission is 'allow'
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'git log | grep fix',
-        }),
-      ).toBe('allow');
+      expect(await pm.evaluate(sh('git log | grep fix'))).toBe('allow');
     });
 
     it('semicolon compound: deny in second → deny', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(echo *)'],
-          permissionsDeny: ['Bash(rm *)'],
-        }),
-      );
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'echo hello; rm -rf /',
-        }),
-      ).toBe('deny');
+      pm = makePm(echoRm);
+      expect(await pm.evaluate(sh('echo hello; rm -rf /'))).toBe('deny');
     });
 
     it.each<[string, string[], string]>([
@@ -2576,30 +1879,20 @@ describe('PermissionManager', () => {
       ],
       ["echo 'a\\'' ; rm x'", ['Bash(rm *)'], 'deny'],
     ])('%j with deny %j is %s', async (command, deny, expected) => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(echo *)', 'Bash(cat *)'],
-          permissionsDeny: deny,
-          cwd: '/repo',
-          projectRoot: '/repo',
-        }),
-      );
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command,
-          cwd: '/repo',
-        }),
-      ).toBe(expected);
+      pm = makePm({
+        permissionsAllow: ['Bash(echo *)', 'Bash(cat *)'],
+        permissionsDeny: deny,
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe(expected);
     });
 
-    // The declared tradeoff: bash runs one command here, since everything from
-    // `#` on is a comment, but the pre-fix reading splits inside it and a
-    // `Bash(rm *)` deny refuses a commit the user cannot see an `rm` in. Only
-    // shapes that bail out of #12096's comment fast path still reach it — a
-    // newline here, or `monitor` — while the single-line spelling stays one
-    // segment for `Bash(...)` rules and is allowed again.
+    // The declared tradeoff: bash runs one command (all from `#` on is a
+    // comment), but the pre-fix reading splits inside it, so `Bash(rm *)`
+    // refuses a commit with no visible `rm`. Only shapes that bail out of
+    // #12096's comment fast path (a newline, or `monitor`) still reach it; the
+    // single-line spelling stays one segment for `Bash(...)` rules: allowed.
     it.each<[string, string, string]>([
       [
         'run_shell_command',
@@ -2613,44 +1906,21 @@ describe('PermissionManager', () => {
         'allow',
       ],
     ])('%s %j is %s', async (toolName, command, expected) => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(git *)'],
-          permissionsDeny: ['Bash(rm *)'],
-        }),
-      );
-      pm.initialize();
+      pm = makePm({
+        permissionsAllow: ['Bash(git *)'],
+        permissionsDeny: ['Bash(rm *)'],
+      });
       expect(await pm.evaluate({ toolName, command })).toBe(expected);
     });
 
     it('|| compound: all allowed → allow', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(git *)', 'Bash(echo *)'],
-        }),
-      );
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'git push || echo failed',
-        }),
-      ).toBe('allow');
+      pm = makePm({ permissionsAllow: ['Bash(git *)', 'Bash(echo *)'] });
+      expect(await pm.evaluate(sh('git push || echo failed'))).toBe('allow');
     });
 
     it('operators inside quotes: treated as single command', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(echo *)'],
-        }),
-      );
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: "echo 'a && b'",
-        }),
-      ).toBe('allow');
+      pm = makePm({ permissionsAllow: ['Bash(echo *)'] });
+      expect(await pm.evaluate(sh("echo 'a && b'"))).toBe('allow');
     });
 
     it.each([
@@ -2663,12 +1933,11 @@ describe('PermissionManager', () => {
       ['bash', 'echo a#b ; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo a\v# comment ; rm -rf /tmp/x', 'deny'],
       ['bash', '# noop ; rm -rf /tmp/x', 'deny'],
-      // Leading whitespace must not turn the line into one comment-only
-      // segment: Bash executes nothing for either spelling, but collapsing it
-      // leaves no text for an explicit `Bash(...)` rule to match. The guard is
-      // about the line, not about the `#` the scan stopped at, so a second
-      // word-start `#` inside the comment must not collapse either: testing
-      // `command.slice(0, i).trim() !== ''` instead of the line keeps only the
+      // Leading whitespace must not make the line one comment-only segment:
+      // bash runs nothing either way, but collapsing leaves no text for a
+      // `Bash(...)` rule to match. The guard is about the line, not the `#` the
+      // scan stopped at, so a second word-start `#` must not collapse either:
+      // testing `command.slice(0, i).trim() !== ''` instead keeps only the
       // whitespace-led spelling and lets `# noop # ; rm -rf /tmp/x` through.
       ['bash', ' # noop ; rm -rf /tmp/x', 'deny'],
       ['bash', '\t# noop ; rm -rf /tmp/x', 'deny'],
@@ -2681,27 +1950,21 @@ describe('PermissionManager', () => {
       ['bash', 'echo hi # c\r; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo hi\t# comment ; rm -rf /tmp/x', 'allow'],
       ['bash', ' echo hi # comment ; rm -rf /tmp/x', 'allow'],
-      // `\`, `$` and the backtick are disjuncts of their own on the bail line
-      // (permission-manager.ts:102), not members of the ';&|(){}<>' literal,
-      // so each one needs a row where it is the FIRST guard character the scan
-      // meets. Otherwise the scan bails on something else and deleting that
-      // single disjunct leaves the suite green: the `echo $(date)` row above
-      // cannot pin `$` for exactly that reason, because with `$` gone the scan
-      // still bails at `(`. The backtick row is the security-relevant one —
-      // without the bail, `allow` would cover a command whose substitution
-      // really does execute.
+      // `\`, `$` and the backtick are their own disjuncts on the bail line
+      // (permission-manager.ts:102), not in the ';&|(){}<>' literal, so each
+      // needs a row where it is the FIRST guard the scan meets; otherwise
+      // deleting it leaves the suite green (`echo $(date)` cannot pin `$`: the
+      // scan still bails at `(`). The backtick row is the security-relevant
+      // one: without the bail, `allow` covers a substitution that executes.
       ['bash', 'echo `whoami` # c ; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo $HOME # c ; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo a\\ b # c ; rm -rf /tmp/x', 'deny'],
-      // Same standard for the remaining single-deletion survivors: the six
-      // characters of the bail literal not yet pinned above — `&`, `<`, `(`,
-      // `)`, `{`, `}` — and the two quote cross-checks, `&& !inDouble` and
-      // `&& !inSingle`. Each row makes its target disjunct
-      // the FIRST guard the scan meets and, so that deleting that one disjunct
-      // really changes the verdict, carries no OTHER bail character ahead of
-      // its `#` either. That is why the `(` and `{` probes are unbalanced
-      // fragments: any closing counterpart would keep the mutated scan
-      // bailing and leave the row green.
+      // Same standard for the other single-deletion survivors: the bail
+      // literal's `&`, `<`, `(`, `)`, `{`, `}` and the quote cross-checks
+      // `&& !inDouble` / `&& !inSingle`. Each row makes its target the FIRST
+      // guard the scan meets and carries no OTHER bail character before its
+      // `#`, so deleting that one disjunct changes the verdict; hence the
+      // unbalanced `(` and `{` probes (a closing counterpart keeps it bailing).
       ['bash', 'echo hi && rm -rf /tmp/x # c', 'deny'],
       ['bash', 'sort < /etc/passwd # c ; rm -rf /tmp/x', 'deny'],
       ['bash', 'echo (a # c ; rm -rf /tmp/x', 'deny'],
@@ -2714,58 +1977,37 @@ describe('PermissionManager', () => {
       ['bash', `echo "don't" # c ; rm -rf /tmp/x`, 'allow'],
       ['bash', `echo 'a"b' # c ; rm -rf /tmp/x`, 'allow'],
       // Characterization rows for #11815's measured table. Bash runs only the
-      // `echo`, but the `\` bails the fast path, and the splitter (which does
-      // not model comments) closes `'a\'` as bash does and splits at the
-      // in-comment separator: a fail-closed `ask` where `main` read the quote as
-      // unterminated and returned `allow`.
+      // `echo`, but `\` bails the fast path and the comment-blind splitter
+      // closes `'a\'` as bash does, splitting at the in-comment separator: a
+      // fail-closed `ask` where `main` read the quote as unterminated: `allow`.
       ['bash', "echo 'a\\' # note: use ; carefully", 'ask'],
       ['bash', "echo 'a\\' # trailing && touch /tmp/x", 'ask'],
       ['bash', "echo 'a\\' # trailing | touch /tmp/x", 'ask'],
     ] as const)(
       'handles comments conservatively for %s: %s',
       async (shell, command, expected) => {
-        shellTypeMock.value = shell;
-        pm = new PermissionManager(
-          makeConfig({
-            permissionsAllow: ['Bash(echo *)'],
-            permissionsDeny: ['Bash(rm *)'],
-          }),
-        );
-        pm.initialize();
-        expect(
-          await pm.evaluate({
-            toolName: 'run_shell_command',
-            command,
-          }),
-        ).toBe(expected);
+        pm = makeShellPm(shell, echoRm);
+        expect(await pm.evaluate(sh(command))).toBe(expected);
       },
     );
 
-    // Row 6 of the same measured table, kept out of it because the segment
-    // starts with `git`: the table's `Bash(echo *)` rule cannot match, so the
-    // verdict there comes from the read-only default (`ask`) rather than from a
-    // rule. The split is asserted as well — a bare `echo B` also resolves to
-    // `allow`, so the verdict alone would stay green if the apostrophe in
+    // Row 6 of the same measured table, kept out because its `git` segment
+    // cannot match the table's `Bash(echo *)` rule (the verdict would be the
+    // read-only default `ask`). The split is asserted too: a bare `echo B` is
+    // also `allow`, so the verdict alone stays green if the apostrophe in
     // `don't` ever stopped masking the `;`.
     it("keeps `git status # don't ; echo B` one allowed segment", async () => {
-      shellTypeMock.value = 'bash';
       const command = "git status # don't ; echo B";
       expect(splitCompoundCommand(command)).toEqual([command]);
-      pm = new PermissionManager(
-        makeConfig({ permissionsAllow: ['Bash(git *)'] }),
-      );
-      pm.initialize();
-      expect(
-        await pm.evaluate({ toolName: 'run_shell_command', command }),
-      ).toBe('allow');
+      pm = makeShellPm('bash', { permissionsAllow: ['Bash(git *)'] });
+      expect(await pm.evaluate(sh(command))).toBe('allow');
     });
 
-    // The comment fast path is only sound when the scanned string is literally
-    // what the shell executes. That holds for run_shell_command, but not for
-    // monitor: normalizePermissionContext() analyses the quote-stripped
-    // `safetyCommand` reconstruction while monitor spawns `spawnCommand`, so a
-    // `#` that only exists inside the wrapper's inner quotes would swallow a
-    // separator the spawned command really runs.
+    // The comment fast path is sound only when the scanned string is what the
+    // shell executes: true for run_shell_command, not for monitor, where
+    // normalizePermissionContext() analyses the quote-stripped `safetyCommand`
+    // but spawns `spawnCommand`, so a `#` inside the wrapper's inner quotes
+    // would swallow a separator the spawned command really runs.
     it.each([
       [
         "bash -c 'echo hi # done' ; rm -rf /tmp/x",
@@ -2776,542 +2018,404 @@ describe('PermissionManager', () => {
     ] as const)(
       'keeps splitting monitor commands whose comment is only apparent: %s',
       async (command, permissionsAllow, permissionsDeny) => {
-        shellTypeMock.value = 'bash';
-        pm = new PermissionManager(
-          makeConfig({
-            permissionsAllow: [...permissionsAllow],
-            permissionsDeny: [...permissionsDeny],
-          }),
-        );
-        pm.initialize();
-        expect(await pm.evaluate({ toolName: 'monitor', command })).toBe(
-          'deny',
-        );
+        pm = makeShellPm('bash', {
+          permissionsAllow: [...permissionsAllow],
+          permissionsDeny: [...permissionsDeny],
+        });
+        expect(await pm.evaluate(mon(command))).toBe('deny');
       },
     );
 
-    // `splitCommandForRules` has to drive every Bash-rule consumer, not just
-    // `evaluate()`. Each of the three below re-splits the command on its own
-    // path, so reverting any one of them to `splitCompoundCommand` would leave
-    // it silently disagreeing with `evaluate()` — citing a deny rule evaluate
-    // never applied, or hiding "Always allow" for a command that is allowed —
-    // while the rest of the suite stayed green. Every assertion pairs the bash
-    // arm (comment recognised → one segment) with the cmd arm (no Bash
-    // comments → the conservative split is expected).
+    // `splitCommandForRules` must drive every Bash-rule consumer, not just
+    // `evaluate()`: each of the three below re-splits on its own path, and
+    // reverting one to `splitCompoundCommand` silently disagrees with
+    // `evaluate()` (citing a deny it never applied, or hiding "Always allow"
+    // for an allowed command). Each pairs the bash arm (comment recognised →
+    // one segment) with the cmd arm (no Bash comments → conservative split).
     const commented = `echo 'a' # comment ; rm -rf /tmp/x`;
-
-    const buildPm = (
-      shell: 'bash' | 'cmd',
-      rules: {
-        permissionsAllow?: string[];
-        permissionsAsk?: string[];
-        permissionsDeny?: string[];
-      },
-    ) => {
-      shellTypeMock.value = shell;
-      const manager = new PermissionManager(makeConfig(rules));
-      manager.initialize();
-      return manager;
-    };
+    const denyRm = { permissionsDeny: ['Bash(rm *)'] };
 
     it('findMatchingDenyRule does not cite a rule the comment hid', () => {
-      const ctx = { toolName: 'run_shell_command', command: commented };
-      const deny = { permissionsDeny: ['Bash(rm *)'] };
-      expect(buildPm('bash', deny).findMatchingDenyRule(ctx)).toBeUndefined();
-      expect(buildPm('cmd', deny).findMatchingDenyRule(ctx)).toBe('Bash(rm *)');
+      const ctx = sh(commented);
+      expect(
+        makeShellPm('bash', denyRm).findMatchingDenyRule(ctx),
+      ).toBeUndefined();
+      expect(makeShellPm('cmd', denyRm).findMatchingDenyRule(ctx)).toBe(
+        'Bash(rm *)',
+      );
     });
 
     it('hasRelevantRules drops the segment the comment hid', () => {
-      const ctx = { toolName: 'run_shell_command', command: commented };
-      const deny = { permissionsDeny: ['Bash(rm *)'] };
-      expect(buildPm('bash', deny).hasRelevantRules(ctx)).toBe(false);
-      expect(buildPm('cmd', deny).hasRelevantRules(ctx)).toBe(true);
+      const ctx = sh(commented);
+      expect(makeShellPm('bash', denyRm).hasRelevantRules(ctx)).toBe(false);
+      expect(makeShellPm('cmd', denyRm).hasRelevantRules(ctx)).toBe(true);
     });
 
     it('hasMatchingAskRule does not ask for a rule the comment hid', () => {
-      const ctx = { toolName: 'run_shell_command', command: commented };
+      const ctx = sh(commented);
       const ask = { permissionsAsk: ['Bash(rm *)'] };
-      expect(buildPm('bash', ask).hasMatchingAskRule(ctx)).toBe(false);
-      expect(buildPm('cmd', ask).hasMatchingAskRule(ctx)).toBe(true);
+      expect(makeShellPm('bash', ask).hasMatchingAskRule(ctx)).toBe(false);
+      expect(makeShellPm('cmd', ask).hasMatchingAskRule(ctx)).toBe(true);
     });
 
-    // The three above pin the rule lookups; this pins the decision they add up
-    // to. Under a deny-only config the collapse demotes a hard `deny` to the
-    // tool default `ask`. That is the direction #11815 asks for — Bash runs
-    // only the pre-comment `echo`, so a rule about `rm` has nothing to match —
-    // and it cannot be gated away without also breaking the allow+deny arm,
-    // which must stay `allow`. It is pinned because `ask` is a behaviour change
-    // rather than a no-op: the confirmation dialog it lands on still segments
-    // with the legacy comment-blind splitter, so it lists the never-executed
-    // `rm -rf /tmp/x` and proposes `Bash(rm *)` from text inside the comment.
-    // See docs/design/safe-bash-comment-splitting.md, "Risks and constraints".
-    // Reverting `splitCommandForRules` to `splitCompoundCommand` reds the bash
-    // arm back to `deny`.
+    // The three above pin the rule lookups; this pins their decision. Under a
+    // deny-only config the collapse demotes a hard `deny` to the default `ask`,
+    // as #11815 asks (bash runs only the pre-comment `echo`, so an `rm` rule
+    // has nothing to match), and gating it away would break the allow+deny arm
+    // that must stay `allow`. Pinned because `ask` is a behaviour change: its
+    // dialog still segments with the comment-blind splitter, listing the
+    // never-run `rm -rf /tmp/x` and proposing `Bash(rm *)` (see
+    // docs/design/safe-bash-comment-splitting.md, "Risks and constraints").
+    // Reverting `splitCommandForRules` reds the bash arm back to `deny`.
     it('deny-only config: the commented command asks instead of denying', async () => {
-      const ctx = { toolName: 'run_shell_command', command: commented };
-      const deny = { permissionsDeny: ['Bash(rm *)'] };
-      expect(await buildPm('bash', deny).evaluate(ctx)).toBe('ask');
-      expect(await buildPm('cmd', deny).evaluate(ctx)).toBe('deny');
+      const ctx = sh(commented);
+      expect(await makeShellPm('bash', denyRm).evaluate(ctx)).toBe('ask');
+      expect(await makeShellPm('cmd', denyRm).evaluate(ctx)).toBe('deny');
     });
 
-    // The splitter's array is an intermediate result; the verdict is the
-    // guarantee. Before the fix the backward scan read these characters as
-    // whitespace, the `&` was not an async operator, and the whole command was
-    // one segment — so the `echo` allow rule covered the `rm`.
+    // The verdict, not the split, is the guarantee: before the fix the scan
+    // read these characters as whitespace, so `&` was no operator, the command
+    // was one segment, and the `echo` allow rule covered the `rm`.
     it.each([
       ['\\r', 'echo x >\r& rm -rf /tmp/x'],
       ['\\v', 'echo x >\v& rm -rf /tmp/x'],
       ['\\f', 'echo x >\f& rm -rf /tmp/x'],
-      // The NBSP verdict-level row: the path-deny test below is already a
-      // `deny` without the splitter fix (base never splits the NBSP payload at
-      // all, and the write op is attributed either way), so this is the row
-      // that discriminates for `\u00a0` — `allow` at the merge base, `deny`
-      // here.
+      // The NBSP verdict row: the path-deny test below is `deny` even without
+      // the splitter fix (base never splits the NBSP payload, and the write op
+      // is attributed either way), so this row discriminates for `\u00a0`:
+      // `allow` at the merge base, `deny` here.
       ['\\u00a0', 'echo x >\u00a0& rm -rf /tmp/x'],
     ])(
       'compound with %s inside the redirect target: deny in second → deny',
       async (_label, command) => {
-        pm = new PermissionManager(
-          makeConfig({
-            permissionsAllow: ['Bash(echo *)'],
-            permissionsDeny: ['Bash(rm *)'],
-          }),
-        );
-        pm.initialize();
-        expect(
-          await pm.evaluate({ toolName: 'run_shell_command', command }),
-        ).toBe('deny');
+        pm = makePm(echoRm);
+        expect(await pm.evaluate(sh(command))).toBe('deny');
       },
     );
 
     it('three-part compound: all must pass', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(git *)', 'Bash(npm *)', 'Bash(echo *)'],
-        }),
-      );
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'git add . && npm test && echo done',
-        }),
-      ).toBe('allow');
+      pm = makePm({
+        permissionsAllow: ['Bash(git *)', 'Bash(npm *)', 'Bash(echo *)'],
+      });
+      const ctx = sh('git add . && npm test && echo done');
+      expect(await pm.evaluate(ctx)).toBe('allow');
     });
 
     it('three-part compound: one unmatched (non-readonly) → ask (resolved from default)', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(git *)', 'Bash(echo *)'],
-        }),
-      );
-      pm.initialize();
+      pm = makePm({ permissionsAllow: ['Bash(git *)', 'Bash(echo *)'] });
       // 'npm test' is not readonly, so its default permission is 'ask'
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'git add . && npm test && echo done',
-        }),
-      ).toBe('ask');
+      const ctx = sh('git add . && npm test && echo done');
+      expect(await pm.evaluate(ctx)).toBe('ask');
     });
 
     it('isCommandAllowed also handles compound commands', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(safe-cmd *)', 'Bash(one-cmd *)'],
-          permissionsDeny: ['Bash(evil-cmd *)'],
-        }),
-      );
-      pm.initialize();
-      expect(await pm.isCommandAllowed('safe-cmd a && one-cmd b')).toBe(
-        'allow',
-      );
+      pm = makePm({
+        permissionsAllow: ['Bash(safe-cmd *)', 'Bash(one-cmd *)'],
+        permissionsDeny: ['Bash(evil-cmd *)'],
+      });
+      const allowed = (command: string) => pm.isCommandAllowed(command);
+      expect(await allowed('safe-cmd a && one-cmd b')).toBe('allow');
       // 'unknown-cmd' is not readonly, resolves to 'ask'
-      expect(await pm.isCommandAllowed('safe-cmd a && unknown-cmd')).toBe(
-        'ask',
-      );
-      expect(await pm.isCommandAllowed('safe-cmd a && evil-cmd b')).toBe(
-        'deny',
-      );
+      expect(await allowed('safe-cmd a && unknown-cmd')).toBe('ask');
+      expect(await allowed('safe-cmd a && evil-cmd b')).toBe('deny');
     });
   });
 
   describe('file path evaluation', () => {
     beforeEach(() => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsDeny: ['Read(.env)', 'Edit(/src/generated/**)'],
-          permissionsAllow: ['Read(/docs/**)'],
-          projectRoot: '/project',
-          cwd: '/project',
-        }),
-      );
-      pm.initialize();
+      pm = makePm({
+        permissionsDeny: ['Read(.env)', 'Edit(/src/generated/**)'],
+        permissionsAllow: ['Read(/docs/**)'],
+      });
+    });
+    const file = (toolName: string, filePath: string) => ({
+      toolName,
+      filePath,
     });
 
     it('denies reading a denied file', async () => {
-      expect(
-        await pm.evaluate({ toolName: 'read_file', filePath: '/project/.env' }),
-      ).toBe('deny');
+      const ctx = file('read_file', '/project/.env');
+      expect(await pm.evaluate(ctx)).toBe('deny');
     });
 
     it('denies editing in a denied directory', async () => {
-      expect(
-        await pm.evaluate({
-          toolName: 'edit',
-          filePath: '/project/src/generated/code.ts',
-        }),
-      ).toBe('deny');
+      const ctx = file('edit', '/project/src/generated/code.ts');
+      expect(await pm.evaluate(ctx)).toBe('deny');
     });
 
     it('denies an equivalent path containing parent traversal', async () => {
-      expect(
-        await pm.evaluate({
-          toolName: 'edit',
-          filePath: '/project/work/../src/generated/code.ts',
-        }),
-      ).toBe('deny');
+      const ctx = file('edit', '/project/work/../src/generated/code.ts');
+      expect(await pm.evaluate(ctx)).toBe('deny');
     });
 
-    it('canonicalizes restrictive rules without widening allow rules', async () => {
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
-      try {
-        const protectedDir = path.join(root, 'protected');
-        const link = path.join(root, 'link');
-        fs.mkdirSync(protectedDir);
-        fs.writeFileSync(path.join(protectedDir, 'file.txt'), 'protected');
-        fs.symlinkSync(protectedDir, link, 'dir');
-        const filePath = path.join(link, 'file.txt');
-
-        const denyManager = new PermissionManager(
-          makeConfig({
-            permissionsDeny: ['Edit(/protected/**)'],
-            projectRoot: root,
-            cwd: root,
-          }),
-        );
-        denyManager.initialize();
-        expect(await denyManager.evaluate({ toolName: 'edit', filePath })).toBe(
-          'deny',
-        );
-
-        const allowManager = new PermissionManager(
-          makeConfig({
-            permissionsAllow: ['Edit(/protected/**)'],
-            projectRoot: root,
-            cwd: root,
-          }),
-        );
-        allowManager.initialize();
-        expect(
-          await allowManager.evaluate({ toolName: 'edit', filePath }),
-        ).toBe('default');
-      } finally {
-        fs.rmSync(root, { recursive: true, force: true });
-      }
-    });
+    it('canonicalizes restrictive rules without widening allow rules', () =>
+      withTempRoot(async (root) => {
+        const { link } = linkDir(root, { 'file.txt': 'protected' });
+        const ctx = file('edit', path.join(link, 'file.txt'));
+        const rootedAt = { projectRoot: root, cwd: root };
+        const deny = makePm({
+          permissionsDeny: ['Edit(/protected/**)'],
+          ...rootedAt,
+        });
+        expect(await deny.evaluate(ctx)).toBe('deny');
+        const allow = makePm({
+          permissionsAllow: ['Edit(/protected/**)'],
+          ...rootedAt,
+        });
+        expect(await allow.evaluate(ctx)).toBe('default');
+      }));
 
     it('allows reading in an allowed directory', async () => {
-      expect(
-        await pm.evaluate({
-          toolName: 'read_file',
-          filePath: '/project/docs/readme.md',
-        }),
-      ).toBe('allow');
+      const ctx = file('read_file', '/project/docs/readme.md');
+      expect(await pm.evaluate(ctx)).toBe('allow');
     });
 
     it('Read deny applies to grep_search too (meta-category)', async () => {
-      expect(
-        await pm.evaluate({
-          toolName: 'grep_search',
-          filePath: '/project/.env',
-        }),
-      ).toBe('deny');
+      const ctx = file('grep_search', '/project/.env');
+      expect(await pm.evaluate(ctx)).toBe('deny');
     });
 
     it('returns default for unmatched path', async () => {
-      expect(
-        await pm.evaluate({
-          toolName: 'read_file',
-          filePath: '/project/src/index.ts',
-        }),
-      ).toBe('default');
+      const ctx = file('read_file', '/project/src/index.ts');
+      expect(await pm.evaluate(ctx)).toBe('default');
     });
   });
 
   describe('WebFetch domain evaluation', () => {
     beforeEach(() => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['WebFetch(domain:github.com)'],
-          permissionsDeny: ['WebFetch(domain:evil.com)'],
-        }),
+      pm = makePm({
+        permissionsAllow: ['WebFetch(domain:github.com)'],
+        permissionsDeny: ['WebFetch(domain:evil.com)'],
+      });
+    });
+
+    it.each([
+      ['allows fetch to allowed domain', 'github.com', 'allow'],
+      [
+        'allows fetch to subdomain of allowed domain',
+        'api.github.com',
+        'allow',
+      ],
+      ['denies fetch to denied domain', 'evil.com', 'deny'],
+      ['returns default for unmatched domain', 'example.com', 'default'],
+    ])('%s', async (_title, domain, expected) => {
+      expect(await pm.evaluate({ toolName: 'web_fetch', domain })).toBe(
+        expected,
       );
-      pm.initialize();
-    });
-
-    it('allows fetch to allowed domain', async () => {
-      expect(
-        await pm.evaluate({ toolName: 'web_fetch', domain: 'github.com' }),
-      ).toBe('allow');
-    });
-
-    it('allows fetch to subdomain of allowed domain', async () => {
-      expect(
-        await pm.evaluate({ toolName: 'web_fetch', domain: 'api.github.com' }),
-      ).toBe('allow');
-    });
-
-    it('denies fetch to denied domain', async () => {
-      expect(
-        await pm.evaluate({ toolName: 'web_fetch', domain: 'evil.com' }),
-      ).toBe('deny');
-    });
-
-    it('returns default for unmatched domain', async () => {
-      expect(
-        await pm.evaluate({ toolName: 'web_fetch', domain: 'example.com' }),
-      ).toBe('default');
     });
   });
 
   describe('isToolEnabled', () => {
     it('returns false for deny-ruled tools', async () => {
-      pm = new PermissionManager(
-        makeConfig({ permissionsDeny: ['ShellTool'] }),
-      );
-      pm.initialize();
-      expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
+      pm = makePm({ permissionsDeny: ['ShellTool'] });
+      expect(await enabled('run_shell_command')).toBe(false);
     });
 
     it('returns true for tools with only specifier deny rules', async () => {
-      pm = new PermissionManager(
-        makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
-      );
-      pm.initialize();
-      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      pm = makePm({ permissionsDeny: ['Bash(rm *)'] });
+      expect(await enabled('run_shell_command')).toBe(true);
     });
 
     it('excludeTools passed via permissionsDeny disables the tool', async () => {
-      pm = new PermissionManager(
-        makeConfig({ permissionsDeny: ['run_shell_command'] }),
-      );
-      pm.initialize();
-      expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
+      pm = makePm({ permissionsDeny: ['run_shell_command'] });
+      expect(await enabled('run_shell_command')).toBe(false);
     });
 
     it('Edit deny rule disables notebook_edit', async () => {
-      pm = new PermissionManager(makeConfig({ permissionsDeny: ['Edit'] }));
-      pm.initialize();
-      expect(await pm.isToolEnabled('notebook_edit')).toBe(false);
+      pm = makePm({ permissionsDeny: ['Edit'] });
+      expect(await enabled('notebook_edit')).toBe(false);
     });
 
     it('coreTools allowlist: listed tool is enabled', async () => {
-      pm = new PermissionManager(
-        makeConfig({ coreTools: ['read_file', 'Bash'] }),
-      );
-      pm.initialize();
-      expect(await pm.isToolEnabled('read_file')).toBe(true);
-      expect(await pm.isToolEnabled('run_shell_command')).toBe(true); // Bash resolves to run_shell_command
+      pm = makePm({ coreTools: ['read_file', 'Bash'] });
+      expect(await enabled('read_file')).toBe(true);
+      expect(await enabled('run_shell_command')).toBe(true); // Bash resolves to run_shell_command
     });
 
     it('coreTools allowlist: unlisted tool is disabled', async () => {
-      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
-      pm.initialize();
-      expect(await pm.isToolEnabled('read_file')).toBe(true);
-      expect(await pm.isToolEnabled('zoom_image')).toBe(false);
-      expect(await pm.isToolEnabled('run_shell_command')).toBe(false);
-      expect(await pm.isToolEnabled('edit')).toBe(false);
-      expect(await pm.isToolEnabled('notebook_edit')).toBe(false);
+      pm = makePm({ coreTools: ['read_file'] });
+      expect(await enabled('read_file')).toBe(true);
+      expect(await enabled('zoom_image')).toBe(false);
+      expect(await enabled('run_shell_command')).toBe(false);
+      expect(await enabled('edit')).toBe(false);
+      expect(await enabled('notebook_edit')).toBe(false);
     });
 
-    it('coreTools allowlist: ZoomImage alias enables zoom_image', async () => {
-      pm = new PermissionManager(makeConfig({ coreTools: ['ZoomImage'] }));
-      pm.initialize();
-      expect(await pm.isToolEnabled('zoom_image')).toBe(true);
-      expect(await pm.isToolEnabled('read_file')).toBe(false);
-    });
-
-    it('coreTools allowlist: NotebookEdit alias enables notebook_edit', async () => {
-      pm = new PermissionManager(makeConfig({ coreTools: ['NotebookEdit'] }));
-      pm.initialize();
-      expect(await pm.isToolEnabled('notebook_edit')).toBe(true);
-      expect(await pm.isToolEnabled('edit')).toBe(false);
-    });
+    // Rows: alias, the tool it enables, and a sibling that stays disabled.
+    it.each([
+      ['ZoomImage', 'zoom_image', 'read_file'],
+      ['NotebookEdit', 'notebook_edit', 'edit'],
+    ])(
+      'coreTools allowlist: %s alias enables %s',
+      async (alias, toolName, sibling) => {
+        pm = makePm({ coreTools: [alias] });
+        expect(await enabled(toolName)).toBe(true);
+        expect(await enabled(sibling)).toBe(false);
+      },
+    );
 
     it('coreTools allowlist gates loop_wakeup as a core scheduling tool', async () => {
+      pm = makePm({ coreTools: ['read_file'] });
+      expect(await enabled('loop_wakeup')).toBe(false);
+
+      pm = makePm({ coreTools: ['loop_wakeup'] });
+      expect(await enabled('loop_wakeup')).toBe(true);
+    });
+
+    it('coreTools allowlist gates managed memory tools', async () => {
       pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
       pm.initialize();
-      expect(await pm.isToolEnabled('loop_wakeup')).toBe(false);
 
-      pm = new PermissionManager(makeConfig({ coreTools: ['loop_wakeup'] }));
-      pm.initialize();
-      expect(await pm.isToolEnabled('loop_wakeup')).toBe(true);
+      expect(await pm.getToolRegistrationStatus('manage_memory')).toBe(
+        'disabled',
+      );
+      expect(await pm.getToolRegistrationStatus('search_memory')).toBe(
+        'disabled',
+      );
     });
 
     it('coreTools with specifier: tool-level check strips specifier', async () => {
       // "Bash(ls -l)" should register run_shell_command (specifier only affects runtime)
-      pm = new PermissionManager(makeConfig({ coreTools: ['Bash(ls -l)'] }));
-      pm.initialize();
-      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
-      expect(await pm.isToolEnabled('read_file')).toBe(false);
+      pm = makePm({ coreTools: ['Bash(ls -l)'] });
+      expect(await enabled('run_shell_command')).toBe(true);
+      expect(await enabled('read_file')).toBe(false);
     });
 
     it('empty coreTools: all tools enabled (no whitelist restriction)', async () => {
-      pm = new PermissionManager(makeConfig({ coreTools: [] }));
-      pm.initialize();
-      expect(await pm.isToolEnabled('read_file')).toBe(true);
-      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
+      pm = makePm({ coreTools: [] });
+      expect(await enabled('read_file')).toBe(true);
+      expect(await enabled('run_shell_command')).toBe(true);
     });
 
     it('coreTools allowlist + deny rule: deny takes precedence for listed tools', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          coreTools: ['read_file', 'Bash'],
-          permissionsDeny: ['Bash'],
-        }),
-      );
-      pm.initialize();
-      expect(await pm.isToolEnabled('read_file')).toBe(true);
-      expect(await pm.isToolEnabled('run_shell_command')).toBe(false); // in list but denied
+      pm = makePm({
+        coreTools: ['read_file', 'Bash'],
+        permissionsDeny: ['Bash'],
+      });
+      expect(await enabled('read_file')).toBe(true);
+      expect(await enabled('run_shell_command')).toBe(false); // in list but denied
     });
 
     it('permissionsAllow is not a whitelist — it never affects registration', async () => {
-      // `permissions.allow` is pure auto-approval. Configuring it must not
-      // remove, demote, or hide anything: that conflation is what silently
-      // dropped `edit` / `write_file` for the #10075 reporter. Restricting
-      // the eager tool surface is `tools.eager`'s job instead.
-      pm = new PermissionManager(
-        makeConfig({ permissionsAllow: ['read_file'] }),
-      );
-      pm.initialize();
-      expect(await pm.isToolEnabled('read_file')).toBe(true);
-      expect(await pm.isToolEnabled('run_shell_command')).toBe(true);
-      expect(await pm.getToolRegistrationStatus('run_shell_command')).toBe(
-        'registered',
-      );
-      expect(await pm.getToolRegistrationStatus('read_file')).toBe(
-        'registered',
-      );
+      // `permissions.allow` is pure auto-approval and must not remove, demote
+      // or hide anything: that conflation silently dropped `edit` /
+      // `write_file` for the #10075 reporter. Narrowing is `tools.eager`'s job.
+      pm = makePm({ permissionsAllow: ['read_file'] });
+      expect(await enabled('read_file')).toBe(true);
+      expect(await enabled('run_shell_command')).toBe(true);
+      expect(await registration('run_shell_command')).toBe('registered');
+      expect(await registration('read_file')).toBe('registered');
     });
 
     it('permissions.allow never rescues a tool the coreTools allowlist excludes', async () => {
-      // The #10075 decoupling must not revive in reverse: an allow rule
-      // covering a core tool that `coreTools` omits cannot re-register it
-      // — the legacy allowlist's hard `disabled` still wins.
-      pm = new PermissionManager(
-        makeConfig({
-          coreTools: ['read_file'],
-          permissionsAllow: ['edit'],
-        }),
-      );
-      pm.initialize();
-      expect(await pm.getToolRegistrationStatus('edit')).toBe('disabled');
-      expect(await pm.isToolEnabled('edit')).toBe(false);
-      expect(await pm.getToolRegistrationStatus('read_file')).toBe(
-        'registered',
-      );
+      // The #10075 decoupling in reverse: an allow rule cannot re-register a
+      // core tool `coreTools` omits; the legacy hard `disabled` still wins.
+      pm = makePm({ coreTools: ['read_file'], permissionsAllow: ['edit'] });
+      expect(await registration('edit')).toBe('disabled');
+      expect(await enabled('edit')).toBe(false);
+      expect(await registration('read_file')).toBe('registered');
     });
 
     it('permissions.ask never demotes or removes a tool', async () => {
-      // "Always require confirmation" must never become "tool
-      // unavailable": ask rules are pure confirmation routing and have no
-      // registration effect (#10075).
-      pm = new PermissionManager(makeConfig({ permissionsAsk: ['Edit'] }));
-      pm.initialize();
-      expect(await pm.getToolRegistrationStatus('edit')).toBe('registered');
-      expect(await pm.isToolEnabled('edit')).toBe(true);
+      // "Always require confirmation" must never become "tool unavailable":
+      // ask rules only route confirmation; no registration effect (#10075).
+      pm = makePm({ permissionsAsk: ['Edit'] });
+      expect(await registration('edit')).toBe('registered');
+      expect(await enabled('edit')).toBe(true);
     });
 
-    // Non-core tools bypass coreTools allowlist
     it('MCP tools bypass coreTools allowlist check', async () => {
-      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
-      pm.initialize();
-      // MCP tools should be enabled even if not in coreTools
-      expect(
-        await pm.isToolEnabled('mcp__markitdown__convert_to_markdown'),
-      ).toBe(true);
-      expect(await pm.isToolEnabled('mcp__puppeteer__navigate')).toBe(true);
+      pm = makePm({ coreTools: ['read_file'] });
+      expect(await enabled('mcp__markitdown__convert_to_markdown')).toBe(true);
+      expect(await enabled('mcp__puppeteer__navigate')).toBe(true);
     });
 
-    it('Skill tool bypasses coreTools allowlist check', async () => {
-      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
-      pm.initialize();
-      expect(await pm.isToolEnabled('skill')).toBe(true);
-    });
-
-    it('Agent tool bypasses coreTools allowlist check', async () => {
-      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
-      pm.initialize();
-      expect(await pm.isToolEnabled('agent')).toBe(true);
-    });
-
-    it('exit_plan_mode tool bypasses coreTools allowlist check', async () => {
-      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
-      pm.initialize();
-      expect(await pm.isToolEnabled('exit_plan_mode')).toBe(true);
-    });
-
-    it('ask_user_question tool bypasses coreTools allowlist check', async () => {
-      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
-      pm.initialize();
-      expect(await pm.isToolEnabled('ask_user_question')).toBe(true);
-    });
-
-    it('structured_output tool bypasses coreTools allowlist check', async () => {
-      // structured_output is a synthetic tool that only exists when the
-      // user opts into --json-schema. Treating it like agent/skill/
-      // exit_plan_mode (bypass the coreTools allowlist) is the right
-      // default: a run that combines `--json-schema X --core-tools read_file`
-      // intends "restrict the model's pluggable toolbelt to read_file"
-      // while still receiving the structured payload — silently dropping
-      // structured_output here would leave --json-schema with no terminal
-      // contract, so the run would loop until maxTurns.
-      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
-      pm.initialize();
-      expect(await pm.isToolEnabled('structured_output')).toBe(true);
-    });
+    it.each([
+      ['Skill', 'skill'],
+      ['Agent', 'agent'],
+      ['exit_plan_mode', 'exit_plan_mode'],
+      ['ask_user_question', 'ask_user_question'],
+      // structured_output exists only under --json-schema, and
+      // `--json-schema X --core-tools read_file` restricts the toolbelt while
+      // still wanting the payload: dropping it would leave --json-schema with
+      // no terminal contract, looping until maxTurns.
+      ['structured_output', 'structured_output'],
+    ])(
+      '%s tool bypasses coreTools allowlist check',
+      async (_label, toolName) => {
+        pm = makePm({ coreTools: ['read_file'] });
+        expect(await enabled(toolName)).toBe(true);
+      },
+    );
 
     it('Non-core tools still respect deny rules', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          coreTools: ['read_file'],
-          permissionsDeny: ['mcp__markitdown'],
-        }),
-      );
-      pm.initialize();
-      // MCP tool should be disabled due to deny rule, even though it bypasses coreTools
-      expect(
-        await pm.isToolEnabled('mcp__markitdown__convert_to_markdown'),
-      ).toBe(false);
-      // Other MCP tools without deny rule should still be enabled
-      expect(await pm.isToolEnabled('mcp__puppeteer__navigate')).toBe(true);
+      pm = makePm({
+        coreTools: ['read_file'],
+        permissionsDeny: ['mcp__markitdown'],
+      });
+      // Denied even though MCP tools bypass coreTools.
+      expect(await enabled('mcp__markitdown__convert_to_markdown')).toBe(false);
+      expect(await enabled('mcp__puppeteer__navigate')).toBe(true);
     });
   });
 
   describe('tools.eager allowlist (#9827, #10075)', () => {
+    it.each([
+      [ToolMode.Direct, undefined, 'registered'],
+      [ToolMode.CodeModeOnly, undefined, 'deferred'],
+      [ToolMode.CodeModeOnly, [], 'deferred'],
+      [ToolMode.CodeModeOnly, ['Read'], 'deferred'],
+      [ToolMode.CodeModeOnly, ['workflow'], 'registered'],
+      [ToolMode.CodeModeOnly, ['Workflow'], 'registered'],
+    ] as const)(
+      'registers workflow in %s with eager=%j as %s',
+      async (toolMode, eagerTools, expected) => {
+        pm = new PermissionManager({
+          ...makeConfig(),
+          getToolMode: () => toolMode,
+          getEagerTools: () => eagerTools,
+        });
+        pm.initialize();
+        expect(await pm.getToolRegistrationStatus(ToolNames.WORKFLOW)).toBe(
+          expected,
+        );
+        expect(await pm.isToolEnabled(ToolNames.WORKFLOW)).toBe(true);
+      },
+    );
+
+    it('keeps workflow deny rules ahead of Code Mode deferral and eager settings', async () => {
+      for (const eagerTools of [undefined, ['workflow']]) {
+        pm = new PermissionManager({
+          ...makeConfig({ permissionsDeny: ['Workflow'] }),
+          getToolMode: () => ToolMode.CodeModeOnly,
+          getEagerTools: () => eagerTools,
+        });
+        pm.initialize();
+        expect(await pm.getToolRegistrationStatus(ToolNames.WORKFLOW)).toBe(
+          'disabled',
+        );
+        expect(await pm.isToolEnabled(ToolNames.WORKFLOW)).toBe(false);
+      }
+    });
+
     it('unlisted built-in tools are deferred, not disabled', async () => {
-      // The reporter's configuration from #9827: only these tools ride in
-      // the eager request; send_message / update_goal / loop_wakeup /
-      // read_mcp_resource (whose large maxLength schemas break llama.cpp
-      // grammar compilation) must NOT reach it. They are DEFERRED — still
-      // registered and callable — rather than disabled, so they never
-      // silently disappear (#10075).
-      pm = new PermissionManager(
-        makeConfig({
-          eagerTools: [
-            'ReadFile',
-            'WriteFile',
-            'Edit',
-            'Grep',
-            'Glob',
-            'ListFiles',
-            'Shell',
-            'WebFetch',
-          ],
-        }),
-      );
-      pm.initialize();
+      // The #9827 reporter's config: only these ride in the eager request;
+      // send_message / update_goal / loop_wakeup / read_mcp_resource (whose
+      // large maxLength schemas break llama.cpp grammar compilation) must NOT.
+      // They are DEFERRED (still registered and callable), not disabled, so
+      // they never silently disappear (#10075).
+      pm = makePm({
+        eagerTools: [
+          'ReadFile',
+          'WriteFile',
+          'Edit',
+          'Grep',
+          'Glob',
+          'ListFiles',
+          'Shell',
+          'WebFetch',
+        ],
+      });
       expect(pm.isEagerToolAllowListActive()).toBe(true);
 
       for (const covered of [
@@ -3324,7 +2428,7 @@ describe('PermissionManager', () => {
         'run_shell_command',
         'web_fetch',
       ]) {
-        expect(await pm.getToolRegistrationStatus(covered)).toBe('registered');
+        expect(await registration(covered)).toBe('registered');
       }
 
       for (const uncovered of [
@@ -3333,24 +2437,20 @@ describe('PermissionManager', () => {
         'loop_wakeup',
         'read_mcp_resource',
       ]) {
-        expect(await pm.getToolRegistrationStatus(uncovered)).toBe('deferred');
+        expect(await registration(uncovered)).toBe('deferred');
         // Deferred is not disabled: a call still flows through the normal
         // approval path rather than a permission error (#10075).
-        expect(await pm.isToolEnabled(uncovered)).toBe(true);
+        expect(await enabled(uncovered)).toBe(true);
       }
     });
 
     it('permissions.allow does NOT defer anything (#10075 regression)', async () => {
-      // The regression this whole decoupling exists to prevent: configuring
-      // permissions.allow purely for auto-approval must never reshape the
-      // registry. Every built-in stays eagerly registered.
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['ReadFile', 'Grep'],
-          permissionsAsk: ['WebFetch'],
-        }),
-      );
-      pm.initialize();
+      // The regression the decoupling exists to prevent: permissions.allow is
+      // for auto-approval and must never reshape the registry.
+      pm = makePm({
+        permissionsAllow: ['ReadFile', 'Grep'],
+        permissionsAsk: ['WebFetch'],
+      });
       expect(pm.isEagerToolAllowListActive()).toBe(false);
       for (const name of [
         'read_file',
@@ -3359,92 +2459,68 @@ describe('PermissionManager', () => {
         'send_message',
         'update_goal',
       ]) {
-        expect(await pm.getToolRegistrationStatus(name)).toBe('registered');
+        expect(await registration(name)).toBe('registered');
       }
     });
 
     it('session-granted allow rules never change registration (#10075)', async () => {
-      pm = new PermissionManager(makeConfig({ eagerTools: ['ReadFile'] }));
-      pm.initialize();
-      expect(await pm.getToolRegistrationStatus('edit')).toBe('deferred');
+      pm = makePm({ eagerTools: ['ReadFile'] });
+      expect(await registration('edit')).toBe('deferred');
       pm.addSessionAllowRule('Edit');
       // The grant auto-approves, but registration is a startup decision
       // driven solely by tools.eager.
-      expect(await pm.getToolRegistrationStatus('edit')).toBe('deferred');
-      expect(await pm.isToolEnabled('edit')).toBe(true);
+      expect(await registration('edit')).toBe('deferred');
+      expect(await enabled('edit')).toBe(true);
     });
 
     it('an absent eager list leaves the allowlist inactive', async () => {
       // Only `undefined` means "no restriction" — see the empty-array case
       // below for the deliberate asymmetry.
-      pm = new PermissionManager(makeConfig({ permissionsAllow: [] }));
-      pm.initialize();
+      pm = makePm({ permissionsAllow: [] });
       expect(pm.isEagerToolAllowListActive()).toBe(false);
-      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
-        'registered',
-      );
+      expect(await registration('send_message')).toBe('registered');
     });
 
     it('specifier entries still cover their tool', async () => {
       // The eager gate is tool-level, not invocation-level, so a stray
       // specifier is stripped rather than making the entry match nothing.
-      pm = new PermissionManager(
-        makeConfig({ eagerTools: ['Bash(npm test)'] }),
-      );
-      pm.initialize();
-      expect(await pm.getToolRegistrationStatus('run_shell_command')).toBe(
-        'registered',
-      );
+      pm = makePm({ eagerTools: ['Bash(npm test)'] });
+      expect(await registration('run_shell_command')).toBe('registered');
     });
 
     it('meta-category entries cover their tool families', async () => {
-      pm = new PermissionManager(makeConfig({ eagerTools: ['Read'] }));
-      pm.initialize();
+      pm = makePm({ eagerTools: ['Read'] });
       for (const name of ['read_file', 'grep_search', 'glob']) {
-        expect(await pm.getToolRegistrationStatus(name)).toBe('registered');
+        expect(await registration(name)).toBe('registered');
       }
-      expect(await pm.getToolRegistrationStatus('write_file')).toBe('deferred');
+      expect(await registration('write_file')).toBe('deferred');
     });
 
     it('display-name entries resolve through aliases', async () => {
-      pm = new PermissionManager(
-        makeConfig({ eagerTools: ['SendMessage', 'UpdateGoal'] }),
-      );
-      pm.initialize();
-      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
-        'registered',
-      );
-      expect(await pm.getToolRegistrationStatus('update_goal')).toBe(
-        'registered',
-      );
-      expect(await pm.getToolRegistrationStatus('loop_wakeup')).toBe(
-        'deferred',
-      );
+      pm = makePm({ eagerTools: ['SendMessage', 'UpdateGoal'] });
+      expect(await registration('send_message')).toBe('registered');
+      expect(await registration('update_goal')).toBe('registered');
+      expect(await registration('loop_wakeup')).toBe('deferred');
     });
 
     it('an explicitly empty list is active and defers everything', async () => {
-      // `[]` is an active allowlist that names nothing; `tools.core` differs
-      // because its empty list is treated as unset.
-      // This is the gentler answer for constrained-decoding backends: the
-      // eager request carries almost no tool schemas, but every tool is
-      // still registered and reachable via ToolSearch.
-      pm = new PermissionManager(makeConfig({ eagerTools: [] }));
-      pm.initialize();
+      // `[]` is an active allowlist naming nothing (unlike `tools.core`, whose
+      // empty list reads as unset): the gentler answer for constrained-decoding
+      // backends, as the eager request carries almost no schemas while every
+      // tool stays registered and reachable via ToolSearch.
+      pm = makePm({ eagerTools: [] });
       expect(pm.isEagerToolAllowListActive()).toBe(true);
       for (const name of ['read_file', 'edit', 'send_message']) {
-        expect(await pm.getToolRegistrationStatus(name)).toBe('deferred');
-        expect(await pm.isToolEnabled(name)).toBe(true);
+        expect(await registration(name)).toBe('deferred');
+        expect(await enabled(name)).toBe(true);
       }
       // Exempt families still ride eagerly, so the session stays usable.
-      expect(await pm.getToolRegistrationStatus('tool_search')).toBe(
-        'registered',
-      );
+      expect(await registration('tool_search')).toBe('registered');
     });
 
     it('tolerates non-string entries instead of crashing initialize()', async () => {
-      // Settings load performs no element-type validation (the schema
-      // declares only `type: 'array'`), so a stray number/null must be
-      // skipped rather than crash registry construction.
+      // Settings load does no element-type validation (the schema says only
+      // `type: 'array'`): a stray number/null is skipped, not a crash.
       pm = new PermissionManager(
         makeConfig({
           eagerTools: [null, 42, 'ReadFile'] as unknown as string[],
@@ -3452,93 +2528,56 @@ describe('PermissionManager', () => {
       );
       expect(() => pm.initialize()).not.toThrow();
       expect(pm.isEagerToolAllowListActive()).toBe(true);
-      expect(await pm.getToolRegistrationStatus('read_file')).toBe(
-        'registered',
-      );
-      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
-        'deferred',
-      );
+      expect(await registration('read_file')).toBe('registered');
+      expect(await registration('send_message')).toBe('deferred');
     });
 
     it('tolerates Object.prototype-keyed entries without crashing (#10400)', async () => {
-      // Entries named after Object.prototype keys used to read the inherited
-      // prototype value through the plain-object alias table and surface a
-      // non-string toolName, crashing initialize() with
-      // `rule.toolName.startsWith is not a function` (CLI startup crash).
-      // They must behave like any other unknown canonical name: resolve to
-      // themselves as strings, match no registered tool, and never abort
-      // initialization (#10400).
+      // Object.prototype-named entries used to read the inherited value via
+      // the plain-object alias table, a non-string toolName that crashed
+      // initialize() with `rule.toolName.startsWith is not a function` (CLI
+      // startup crash). Like any unknown name they must resolve to themselves,
+      // match no registered tool and never abort initialization (#10400).
       pm = new PermissionManager(
-        makeConfig({
-          eagerTools: [
-            'constructor',
-            'toString',
-            'valueOf',
-            'hasOwnProperty',
-            'isPrototypeOf',
-            'propertyIsEnumerable',
-            'toLocaleString',
-            '__proto__',
-            'ReadFile',
-          ],
-        }),
+        makeConfig({ eagerTools: ['constructor', ...PROTO_KEYS, 'ReadFile'] }),
       );
       expect(() => pm.initialize()).not.toThrow();
       expect(pm.isEagerToolAllowListActive()).toBe(true);
-      // The valid entry still works and the prototype-keyed entries do not
-      // disturb the rest of the allowlist.
-      expect(await pm.getToolRegistrationStatus('read_file')).toBe(
-        'registered',
-      );
-      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
-        'deferred',
-      );
+      // The valid entry works; the prototype keys disturb nothing else.
+      expect(await registration('read_file')).toBe('registered');
+      expect(await registration('send_message')).toBe('deferred');
       // The lookup itself must survive a prototype-keyed tool name too.
-      await expect(
-        pm.getToolRegistrationStatus('constructor'),
-      ).resolves.toBeDefined();
+      await expect(registration('constructor')).resolves.toBeDefined();
     });
 
     it('malformed entries drop out but still leave the list active', async () => {
       // Deferring more than intended is recoverable (ToolSearch still
       // reaches every tool); silently ignoring a configured list would
       // resend exactly the schemas the user asked to keep out (#9827).
-      pm = new PermissionManager(
-        makeConfig({ eagerTools: ['', '   ', 'Bash(unbalanced'] }),
-      );
-      pm.initialize();
+      pm = makePm({ eagerTools: ['', '   ', 'Bash(unbalanced'] });
       expect(pm.isEagerToolAllowListActive()).toBe(true);
-      expect(await pm.getToolRegistrationStatus('send_message')).toBe(
-        'deferred',
-      );
-      expect(await pm.isToolEnabled('send_message')).toBe(true);
+      expect(await registration('send_message')).toBe('deferred');
+      expect(await enabled('send_message')).toBe(true);
     });
 
     it('logs the entries it dropped so a typo is not silent', async () => {
-      // A misspelt entry narrows the eager set to nothing and defers the
-      // whole toolset. That is recoverable, but it must not be invisible —
-      // silent reshaping of the toolset is what #10075 reported. Pin the
+      // A misspelt entry defers the whole toolset: recoverable, but it must
+      // not be invisible (silent reshaping is what #10075 reported). Pin the
       // console channel: the debug log file is off in default runs, where
       // this warning matters most.
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      pm = new PermissionManager(
-        makeConfig({ eagerTools: ['ReadFile', '', 'Bash(unbalanced'] }),
-      );
-      pm.initialize();
+      pm = makePm({ eagerTools: ['ReadFile', '', 'Bash(unbalanced'] });
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('tools.eager: ignoring 2 unusable entries'),
       );
       // The valid entry survives — dropping is per-entry, not all-or-nothing.
-      expect(await pm.getToolRegistrationStatus('read_file')).toBe(
-        'registered',
-      );
+      expect(await registration('read_file')).toBe('registered');
       warnSpy.mockRestore();
     });
 
     it('stays quiet when every entry parses', async () => {
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      pm = new PermissionManager(makeConfig({ eagerTools: ['ReadFile'] }));
-      pm.initialize();
+      pm = makePm({ eagerTools: ['ReadFile'] });
       expect(warnSpy).not.toHaveBeenCalledWith(
         expect.stringContaining('tools.eager'),
       );
@@ -3546,35 +2585,22 @@ describe('PermissionManager', () => {
     });
 
     it('deny rules still win over eager membership', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          eagerTools: ['ReadFile'],
-          permissionsDeny: ['ReadFile'],
-        }),
-      );
-      pm.initialize();
-      expect(await pm.getToolRegistrationStatus('read_file')).toBe('disabled');
-      expect(await pm.isToolEnabled('read_file')).toBe(false);
+      pm = makePm({ eagerTools: ['ReadFile'], permissionsDeny: ['ReadFile'] });
+      expect(await registration('read_file')).toBe('disabled');
+      expect(await enabled('read_file')).toBe(false);
     });
 
     it('deny via display name removes the tool from the registry', async () => {
-      pm = new PermissionManager(
-        makeConfig({ eagerTools: ['ReadFile'], permissionsDeny: ['Edit'] }),
-      );
-      pm.initialize();
-      expect(await pm.getToolRegistrationStatus('edit')).toBe('disabled');
+      pm = makePm({ eagerTools: ['ReadFile'], permissionsDeny: ['Edit'] });
+      expect(await registration('edit')).toBe('disabled');
     });
 
     it('combines with the coreTools allowlist', async () => {
-      // coreTools keeps its documented hard-disable semantic; tools.eager
-      // only demotes. A tool excluded by coreTools is disabled even when
-      // the eager list names it.
-      pm = new PermissionManager(
-        makeConfig({ eagerTools: ['ReadFile', 'Edit'], coreTools: ['Edit'] }),
-      );
-      pm.initialize();
-      expect(await pm.getToolRegistrationStatus('read_file')).toBe('disabled');
-      expect(await pm.getToolRegistrationStatus('edit')).toBe('registered');
+      // coreTools keeps its documented hard-disable; tools.eager only demotes,
+      // so a tool coreTools excludes is disabled even if the eager list has it.
+      pm = makePm({ eagerTools: ['ReadFile', 'Edit'], coreTools: ['Edit'] });
+      expect(await registration('read_file')).toBe('disabled');
+      expect(await registration('edit')).toBe('registered');
     });
 
     describe('exemptions stay eagerly registered', () => {
@@ -3586,44 +2612,37 @@ describe('PermissionManager', () => {
         ['plan-mode ask_user_question', 'ask_user_question'],
         ['task_stop', 'task_stop'],
         ['tool_search', 'tool_search'],
-        // The bridge's other half, exempt since the bridge landed (#10410) and
-        // untested until now: deleting that arm of isExemptFromEagerAllowList
-        // left this whole suite green. Both halves are also alwaysLoad=true, so
-        // the declaration list does not move without this arm — what it protects
-        // is the permission-deferred state other readers consult (speculation's
+        // The bridge's other half, exempt since #10410 yet untested: deleting
+        // that isExemptFromEagerAllowList arm left the suite green. Both halves
+        // are alwaysLoad=true, so the arm guards not the declaration list but
+        // the permission-deferred state other readers consult (speculation's
         // boundary check, the workflow-authoring skill's hidden-tool text).
         ['tool_call', 'tool_call'],
       ];
 
       it.each(exempt)('%s', async (_label, toolName) => {
-        pm = new PermissionManager(makeConfig({ eagerTools: ['ReadFile'] }));
-        pm.initialize();
-        expect(await pm.getToolRegistrationStatus(toolName)).toBe('registered');
+        pm = makePm({ eagerTools: ['ReadFile'] });
+        expect(await registration(toolName)).toBe('registered');
       });
 
       it('computer_use__* tools are exempt', async () => {
-        // The generated cua-driver family has no alias entry,
-        // meta-category, or wildcard rule form — its wire names churn on
-        // every version bump — and every member is shouldDefer=true, so the
-        // schemas never enter the eager request anyway.
-        pm = new PermissionManager(makeConfig({ eagerTools: ['ReadFile'] }));
-        pm.initialize();
-        expect(
-          await pm.getToolRegistrationStatus('computer_use__screenshot'),
-        ).toBe('registered');
+        // The generated cua-driver family has no alias, meta-category or
+        // wildcard rule form (its wire names churn every version) and is all
+        // shouldDefer=true, so its schemas never enter the eager request.
+        pm = makePm({ eagerTools: ['ReadFile'] });
+        expect(await registration('computer_use__screenshot')).toBe(
+          'registered',
+        );
       });
 
       it.each(exempt)(
         'a whole-tool deny rule still wins over the %s exemption',
         async (_label, toolName) => {
-          pm = new PermissionManager(
-            makeConfig({
-              eagerTools: ['ReadFile'],
-              permissionsDeny: [toolName],
-            }),
-          );
-          pm.initialize();
-          expect(await pm.getToolRegistrationStatus(toolName)).toBe('disabled');
+          pm = makePm({
+            eagerTools: ['ReadFile'],
+            permissionsDeny: [toolName],
+          });
+          expect(await registration(toolName)).toBe('disabled');
         },
       );
     });
@@ -3631,25 +2650,14 @@ describe('PermissionManager', () => {
 
   describe('session rules', () => {
     beforeEach(() => {
-      pm = new PermissionManager(makeConfig({}));
-      pm.initialize();
+      pm = makePm({});
     });
 
     it('addSessionAllowRule enables auto-approval for that pattern', async () => {
       // Use 'git commit' which is not readonly, so it resolves to 'ask' by default
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'git commit',
-        }),
-      ).toBe('ask');
+      expect(await pm.evaluate(sh('git commit'))).toBe('ask');
       pm.addSessionAllowRule('Bash(git *)');
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'git commit',
-        }),
-      ).toBe('allow');
+      expect(await pm.evaluate(sh('git commit'))).toBe('allow');
     });
 
     it('session deny rules override allow rules', async () => {
@@ -3660,28 +2668,19 @@ describe('PermissionManager', () => {
 
     it('a trust-gated allow rule is suspended while the folder is untrusted and restored with trust', async () => {
       // A project skill's `allowedTools` are repository-controlled: they
-      // auto-approve only while the folder is trusted, re-read at every
-      // decision, so a revocation mid-session takes effect at the next
-      // tool call and a later grant of trust restores the rule — the
-      // second side of the gate applied on the way in.
+      // auto-approve only while the folder is trusted, re-read per decision,
+      // so a mid-session revocation applies at the next call and a later
+      // grant restores the rule (the second side of the gate on the way in).
       let trusted = true;
-      pm = new PermissionManager(
-        makeConfig({ isTrustedFolder: () => trusted }),
-      );
-      pm.initialize();
-      const call = { toolName: 'run_shell_command', command: 'git commit' };
+      pm = makePm({ isTrustedFolder: () => trusted });
+      const call = sh('git commit');
       pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
       pm.addSessionAllowRule('Bash(npm *)'); // the user's own grant
       expect(await pm.evaluate(call)).toBe('allow');
 
       trusted = false;
       expect(await pm.evaluate(call)).toBe('ask');
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'npm test',
-        }),
-      ).toBe('allow');
+      expect(await pm.evaluate(sh('npm test'))).toBe('allow');
       // The effective-rules listing agrees with the decision.
       expect(pm.listRules().some((r) => r.rule.raw === 'Bash(git *)')).toBe(
         false,
@@ -3692,16 +2691,13 @@ describe('PermissionManager', () => {
     });
 
     it('an ungated grant of the same raw rule outranks the repo grant — the dedup must not inherit the suspension', async () => {
-      // A project skill grants `Bash(git *)` trust-gated; a user-level
-      // skill later grants the identical raw. The dedup keeps one entry,
-      // and it must carry the WIDER grant: the user's, which no folder
-      // trust suspends. A gated re-arrival (skill reload) stays a skip.
+      // A project skill grants `Bash(git *)` trust-gated, then a user-level
+      // skill the same raw: the one deduped entry must carry the WIDER grant,
+      // the user's, which no folder trust suspends. A gated re-arrival (skill
+      // reload) stays a skip.
       let trusted = true;
-      pm = new PermissionManager(
-        makeConfig({ isTrustedFolder: () => trusted }),
-      );
-      pm.initialize();
-      const call = { toolName: 'run_shell_command', command: 'git commit' };
+      pm = makePm({ isTrustedFolder: () => trusted });
+      const call = sh('git commit');
       pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
       pm.addSessionAllowRule('Bash(git *)'); // the user-level skill's grant
       trusted = false;
@@ -3710,24 +2706,15 @@ describe('PermissionManager', () => {
       // re-gates the entry the user now holds.
       pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
       expect(await pm.evaluate(call)).toBe('allow');
-      expect(
-        (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules
-          .allow,
-      ).toHaveLength(1);
+      expect(sessionAllowRules(pm)).toHaveLength(1);
     });
 
     it('a trust-gated rule stays in force when the config reports no trust probe', async () => {
       pm.addSessionAllowRule('Bash(git *)', { trustGated: true });
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'git commit',
-        }),
-      ).toBe('allow');
+      expect(await pm.evaluate(sh('git commit'))).toBe('allow');
     });
 
     it('clearSessionAllowRules drops live and AUTO-stashed session grants', async () => {
-      const call = { toolName: 'run_shell_command', command: 'npm test' };
       pm.addSessionAllowRule('Bash(git *)');
       pm.stripDangerousRulesForAutoMode();
       pm.addSessionAllowRule('Bash(npm *)');
@@ -3737,67 +2724,43 @@ describe('PermissionManager', () => {
       pm.restoreDangerousRules();
 
       expect(pm.getAllowRawStrings()).toEqual([]);
-      expect(await pm.evaluate(call)).not.toBe('allow');
+      expect(await pm.evaluate(sh('npm test'))).not.toBe('allow');
     });
 
     it('addSessionAllowRule deduplicates identical rules', () => {
       pm.addSessionAllowRule('Bash(git *)');
       pm.addSessionAllowRule('Bash(git *)');
-      expect(
-        (pm as unknown as { sessionRules: { allow: unknown[] } }).sessionRules
-          .allow,
-      ).toHaveLength(1);
+      expect(sessionAllowRules(pm)).toHaveLength(1);
     });
 
     it('malformed session allow rule is silently ignored', async () => {
       pm.addSessionAllowRule('Bash(git commit');
       // 'git commit' is not readonly, so default is 'ask'.
       // The malformed rule must not act as catch-all allow.
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'git commit',
-        }),
-      ).toBe('ask');
+      expect(await pm.evaluate(sh('git commit'))).toBe('ask');
     });
 
     it('malformed session deny rule is silently ignored', async () => {
       pm.addSessionDenyRule('Bash(rm -rf /)*');
       // Should NOT deny — the malformed rule must not act as catch-all
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'git status',
-        }),
-      ).not.toBe('deny');
+      expect(await pm.evaluate(sh('git status'))).not.toBe('deny');
     });
   });
 
   describe('allowedTools via permissionsAllow', () => {
     it('allow rule auto-approves matching tools/commands', async () => {
-      pm = new PermissionManager(
-        makeConfig({ permissionsAllow: ['ReadFileTool', 'Bash(git *)'] }),
-      );
-      pm.initialize();
+      pm = makePm({ permissionsAllow: ['ReadFileTool', 'Bash(git *)'] });
       expect(await pm.evaluate({ toolName: 'read_file' })).toBe('allow');
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command: 'git status',
-        }),
-      ).toBe('allow');
+      expect(await pm.evaluate(sh('git status'))).toBe('allow');
     });
   });
 
   describe('listRules', () => {
     it('returns all rules with type and scope', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['ReadFileTool'],
-          permissionsDeny: ['ShellTool'],
-        }),
-      );
-      pm.initialize();
+      pm = makePm({
+        permissionsAllow: ['ReadFileTool'],
+        permissionsDeny: ['ShellTool'],
+      });
       pm.addSessionAllowRule('Bash(git *)');
 
       const rules = pm.listRules();
@@ -3809,76 +2772,41 @@ describe('PermissionManager', () => {
     });
 
     it('excludes malformed rules from listing', async () => {
-      pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['ReadFileTool'],
-          permissionsDeny: ['Bash(rm -rf /)*'],
-        }),
-      );
-      pm.initialize();
+      pm = makePm({
+        permissionsAllow: ['ReadFileTool'],
+        permissionsDeny: ['Bash(rm -rf /)*'],
+      });
 
       const rules = pm.listRules();
-      // The malformed deny rule should be filtered out
       expect(rules.length).toBe(1);
       expect(rules[0]!.rule.toolName).toBe('read_file');
     });
   });
 
   describe('hasMatchingAskRule', () => {
-    it('returns false when shell ask comes only from default permission fallback', async () => {
-      pm = new PermissionManager(
-        makeConfig({ permissionsAllow: ['Bash(git add *)'] }),
-      );
-      pm.initialize();
+    const addThenCommit = sh('git add file && git commit -m "msg"');
 
-      expect(
-        pm.hasMatchingAskRule({
-          toolName: 'run_shell_command',
-          command: 'git add file && git commit -m "msg"',
-        }),
-      ).toBe(false);
+    it('returns false when shell ask comes only from default permission fallback', async () => {
+      pm = makePm({ permissionsAllow: ['Bash(git add *)'] });
+      expect(pm.hasMatchingAskRule(addThenCommit)).toBe(false);
     });
 
     it('returns true when an explicit ask rule matches a shell sub-command', async () => {
-      pm = new PermissionManager(
-        makeConfig({ permissionsAsk: ['Bash(git commit *)'] }),
-      );
-      pm.initialize();
-
-      expect(
-        pm.hasMatchingAskRule({
-          toolName: 'run_shell_command',
-          command: 'git add file && git commit -m "msg"',
-        }),
-      ).toBe(true);
+      pm = makePm({ permissionsAsk: ['Bash(git commit *)'] });
+      expect(pm.hasMatchingAskRule(addThenCommit)).toBe(true);
     });
 
-    it('matches an ask rule through a symlinked path', () => {
-      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
-      try {
-        const protectedDir = path.join(root, 'protected');
-        const link = path.join(root, 'link');
-        fs.mkdirSync(protectedDir);
-        fs.symlinkSync(protectedDir, link, 'dir');
-        pm = new PermissionManager(
-          makeConfig({
-            permissionsAsk: ['Edit(/protected/**)'],
-            projectRoot: root,
-            cwd: root,
-          }),
-        );
-        pm.initialize();
-
-        expect(
-          pm.hasMatchingAskRule({
-            toolName: 'edit',
-            filePath: path.join(link, 'file.txt'),
-          }),
-        ).toBe(true);
-      } finally {
-        fs.rmSync(root, { recursive: true, force: true });
-      }
-    });
+    it('matches an ask rule through a symlinked path', () =>
+      withTempRoot((root) => {
+        const { link } = linkDir(root);
+        pm = makePm({
+          permissionsAsk: ['Edit(/protected/**)'],
+          projectRoot: root,
+          cwd: root,
+        });
+        const ctx = { toolName: 'edit', filePath: path.join(link, 'file.txt') };
+        expect(pm.hasMatchingAskRule(ctx)).toBe(true);
+      }));
   });
 });
 
@@ -3920,83 +2848,48 @@ describe('getRuleDisplayName', () => {
 // ─── buildPermissionRules ────────────────────────────────────────────────────
 
 describe('buildPermissionRules', () => {
+  const build = buildPermissionRules;
+
   describe('path-based tools (Read/Edit)', () => {
-    it('generates Read rule scoped to parent directory for read_file', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'read_file',
-        filePath: '/Users/alice/.secrets',
-      });
-      // read_file is file-targeted → dirname gives /Users/alice, plus /** glob
-      expect(rules).toEqual(['Read(//Users/alice/**)']);
-    });
+    // File-targeted tools: the path's dirname, plus a /** glob.
+    it.each([
+      ['Read', 'read_file', '/Users/alice/.secrets', 'Read(//Users/alice/**)'],
+      [
+        'Read',
+        'zoom_image',
+        '/Users/alice/chart.png',
+        'Read(//Users/alice/**)',
+      ],
+      ['Edit', 'edit', '/external/file.ts', 'Edit(//external/**)'],
+      ['Edit', 'write_file', '/tmp/output.txt', 'Edit(//tmp/**)'],
+      ['Edit', 'notebook_edit', '/tmp/analysis.ipynb', 'Edit(//tmp/**)'],
+    ])(
+      'generates %s rule scoped to parent directory for %s',
+      async (_category, toolName, filePath, rule) => {
+        expect(build({ toolName, filePath })).toEqual([rule]);
+      },
+    );
 
-    it('generates Read rule scoped to parent directory for zoom_image', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'zoom_image',
-        filePath: '/Users/alice/chart.png',
-      });
-      expect(rules).toEqual(['Read(//Users/alice/**)']);
-    });
-
-    it('generates Read rule with directory as-is for grep_search', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'grep_search',
-        filePath: '/external/dir',
-      });
-      // grep_search is directory-targeted → path used as-is, plus /** glob
-      expect(rules).toEqual(['Read(//external/dir/**)']);
-    });
-
-    it('generates Read rule with directory as-is for glob', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'glob',
-        filePath: '/tmp/data',
-      });
-      expect(rules).toEqual(['Read(//tmp/data/**)']);
-    });
-
-    it('generates Read rule with directory as-is for list_directory', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'list_directory',
-        filePath: '/home/user/docs',
-      });
-      expect(rules).toEqual(['Read(//home/user/docs/**)']);
-    });
-
-    it('generates Edit rule scoped to parent directory for edit', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'edit',
-        filePath: '/external/file.ts',
-      });
-      // edit is file-targeted → dirname gives /external, plus /** glob
-      expect(rules).toEqual(['Edit(//external/**)']);
-    });
-
-    it('generates Edit rule scoped to parent directory for write_file', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'write_file',
-        filePath: '/tmp/output.txt',
-      });
-      expect(rules).toEqual(['Edit(//tmp/**)']);
-    });
-
-    it('generates Edit rule scoped to parent directory for notebook_edit', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'notebook_edit',
-        filePath: '/tmp/analysis.ipynb',
-      });
-      expect(rules).toEqual(['Edit(//tmp/**)']);
-    });
+    // Directory-targeted tools: the path as-is, plus a /** glob.
+    it.each([
+      ['grep_search', '/external/dir', 'Read(//external/dir/**)'],
+      ['glob', '/tmp/data', 'Read(//tmp/data/**)'],
+      ['list_directory', '/home/user/docs', 'Read(//home/user/docs/**)'],
+    ])(
+      'generates Read rule with directory as-is for %s',
+      async (toolName, filePath, rule) => {
+        expect(build({ toolName, filePath })).toEqual([rule]);
+      },
+    );
 
     it('falls back to bare display name when no filePath', async () => {
-      const rules = buildPermissionRules({ toolName: 'read_file' });
-      expect(rules).toEqual(['Read']);
+      expect(build({ toolName: 'read_file' })).toEqual(['Read']);
     });
   });
 
   describe('generated rules round-trip through parseRule and matchesRule', () => {
     it('Read rule for external file covers the containing directory', async () => {
-      const rules = buildPermissionRules({
+      const rules = build({
         toolName: 'read_file',
         filePath: '/Users/alice/.secrets',
       });
@@ -4008,188 +2901,120 @@ describe('buildPermissionRules', () => {
       expect(parsed.specifier).toBe('//Users/alice/**');
       expect(parsed.specifierKind).toBe('path');
 
-      // Should match the original file (inside the directory)
-      expect(
-        matchesRule(
-          parsed,
-          'read_file',
-          undefined,
-          '/Users/alice/.secrets',
-          undefined,
-          { projectRoot: '/some/project', cwd: '/some/project' },
-        ),
-      ).toBe(true);
-
-      // Should also match other files in the same directory
-      expect(
-        matchesRule(
-          parsed,
-          'read_file',
-          undefined,
-          '/Users/alice/.other',
-          undefined,
-          { projectRoot: '/some/project', cwd: '/some/project' },
-        ),
-      ).toBe(true);
-
-      // Should NOT match files in a different directory
-      expect(
-        matchesRule(
-          parsed,
-          'read_file',
-          undefined,
-          '/Users/bob/.secrets',
-          undefined,
-          { projectRoot: '/some/project', cwd: '/some/project' },
-        ),
-      ).toBe(false);
+      const reads = (filePath: string) =>
+        matchesPath(parsed, 'read_file', filePath, {
+          projectRoot: '/some/project',
+          cwd: '/some/project',
+        });
+      // Matches the original file, other files in the same directory, and
+      // nothing in a different directory.
+      expect(reads('/Users/alice/.secrets')).toBe(true);
+      expect(reads('/Users/alice/.other')).toBe(true);
+      expect(reads('/Users/bob/.secrets')).toBe(false);
     });
 
     it('Read rule also matches other read-family tools on the same path', async () => {
-      const rules = buildPermissionRules({
+      const rules = build({
         toolName: 'grep_search',
         filePath: '/external/dir',
       });
       const parsed = parseRule(rules[0]!);
-
-      // Should match grep_search on a file inside the dir
-      expect(
-        matchesRule(
-          parsed,
-          'grep_search',
-          undefined,
-          '/external/dir/file.txt',
-          undefined,
-          { projectRoot: '/p', cwd: '/p' },
-        ),
-      ).toBe(true);
-
-      // Should also match read_file (Read meta-category)
-      expect(
-        matchesRule(
-          parsed,
-          'read_file',
-          undefined,
-          '/external/dir/other.ts',
-          undefined,
-          { projectRoot: '/p', cwd: '/p' },
-        ),
-      ).toBe(true);
+      const matches = (toolName: string, filePath: string) =>
+        matchesPath(parsed, toolName, filePath, {
+          projectRoot: '/p',
+          cwd: '/p',
+        });
+      // Matches grep_search inside the dir, and read_file (Read meta-category)
+      expect(matches('grep_search', '/external/dir/file.txt')).toBe(true);
+      expect(matches('read_file', '/external/dir/other.ts')).toBe(true);
     });
   });
 
   describe('domain-based tools', () => {
     it('generates WebFetch rule with domain specifier', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'web_fetch',
-        domain: 'example.com',
-      });
-      expect(rules).toEqual(['WebFetch(example.com)']);
+      expect(build({ toolName: 'web_fetch', domain: 'example.com' })).toEqual([
+        'WebFetch(example.com)',
+      ]);
     });
 
     it('falls back to bare display name when no domain', async () => {
-      const rules = buildPermissionRules({ toolName: 'web_fetch' });
-      expect(rules).toEqual(['WebFetch']);
+      expect(build({ toolName: 'web_fetch' })).toEqual(['WebFetch']);
     });
   });
 
   describe('command-based tools', () => {
     it('generates Bash rule with command specifier', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'run_shell_command',
-        command: 'git status',
-      });
-      expect(rules).toEqual(['Bash(git status)']);
+      expect(build(sh('git status'))).toEqual(['Bash(git status)']);
     });
 
     it('falls back to bare display name when no command', async () => {
-      const rules = buildPermissionRules({ toolName: 'run_shell_command' });
-      expect(rules).toEqual(['Bash']);
+      expect(build({ toolName: 'run_shell_command' })).toEqual(['Bash']);
     });
 
     it('generates Monitor rule with command specifier', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'monitor',
-        command: 'tail -f /var/log/app.log',
-      });
-      expect(rules).toEqual(['Monitor(tail -f /var/log/app.log)']);
+      expect(build(mon('tail -f /var/log/app.log'))).toEqual([
+        'Monitor(tail -f /var/log/app.log)',
+      ]);
     });
 
     it('falls back to bare Monitor display name when no command', async () => {
-      const rules = buildPermissionRules({ toolName: 'monitor' });
-      expect(rules).toEqual(['Monitor']);
+      expect(build({ toolName: 'monitor' })).toEqual(['Monitor']);
     });
   });
 
   describe('literal-specifier tools', () => {
     it('generates Skill rule with specifier', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'skill',
-        specifier: 'Explore',
-      });
-      expect(rules).toEqual(['Skill(Explore)']);
+      expect(build({ toolName: 'skill', specifier: 'Explore' })).toEqual([
+        'Skill(Explore)',
+      ]);
     });
 
     it('generates Agent rule with specifier', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'agent',
-        specifier: 'research',
-      });
-      expect(rules).toEqual(['Agent(research)']);
+      expect(build({ toolName: 'agent', specifier: 'research' })).toEqual([
+        'Agent(research)',
+      ]);
     });
 
     it('falls back to bare display name when no specifier', async () => {
-      const rules = buildPermissionRules({ toolName: 'skill' });
-      expect(rules).toEqual(['Skill']);
+      expect(build({ toolName: 'skill' })).toEqual(['Skill']);
     });
   });
 
   describe('unknown / MCP tools', () => {
     it('uses the canonical name as display for MCP tools', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'mcp__puppeteer__navigate',
-      });
-      expect(rules).toEqual(['mcp__puppeteer__navigate']);
+      const toolName = 'mcp__puppeteer__navigate';
+      expect(build({ toolName })).toEqual([toolName]);
     });
   });
 
   describe('with toolParams (stable param serialization)', () => {
+    const agentRules = (params: Record<string, unknown>, specifier?: string) =>
+      build(agentCtx(params, specifier));
+
     it('serializes stable params (model, subagent_type) for Agent', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'agent',
-        specifier: 'coder',
-        toolParams: {
-          subagent_type: 'coder',
-          model: 'opus',
-          prompt: 'Fix the bug',
-        },
-      });
-      // prompt is not serialized (not in stableParamKeys)
-      // subagent_type is skipped because it matches specifier
+      const rules = agentRules(
+        { subagent_type: 'coder', model: 'opus', prompt: 'Fix the bug' },
+        'coder',
+      );
+      // prompt is not serialized (not in stableParamKeys); subagent_type is
+      // skipped because it matches specifier
       expect(rules).toEqual(['Agent(coder,model:opus)']);
     });
 
     it('does not serialize volatile params like prompt or query', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'agent',
-        toolParams: {
-          model: 'sonnet',
-          prompt: 'Some long prompt that should not be persisted',
-        },
+      const rules = agentRules({
+        model: 'sonnet',
+        prompt: 'Some long prompt that should not be persisted',
       });
       expect(rules).toEqual(['Agent(model:sonnet)']);
-      // Verify prompt is NOT in the rule string
       expect(rules[0]).not.toContain('prompt');
     });
 
     it('does not serialize sensitive params (no secret leakage)', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'agent',
-        toolParams: {
-          model: 'opus',
-          api_key: 'sk-secret-123',
-          token: 'bearer-xyz',
-        },
+      const rules = agentRules({
+        model: 'opus',
+        api_key: 'sk-secret-123',
+        token: 'bearer-xyz',
       });
       // api_key and token are not in stableParamKeys, so not serialized
       expect(rules).toEqual(['Agent(model:opus)']);
@@ -4198,12 +3023,9 @@ describe('buildPermissionRules', () => {
     });
 
     it('generates bare MCP tool name without specifier or params', async () => {
-      const rules = buildPermissionRules({
+      const rules = build({
         toolName: 'mcp__chrome__navigate',
-        toolParams: {
-          server_name: 'chrome',
-          url: 'https://example.com',
-        },
+        toolParams: { server_name: 'chrome', url: 'https://example.com' },
       });
       // MCP tools get bare name — specifier rejection in matchesRule
       // would make any specifier-carrying rule a dead entry
@@ -4211,27 +3033,20 @@ describe('buildPermissionRules', () => {
     });
 
     it('round-trips Agent rule with stable params through parseRule', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'agent',
-        specifier: 'coder',
-        toolParams: { subagent_type: 'coder', model: 'opus' },
-      });
+      const rules = agentRules(
+        { subagent_type: 'coder', model: 'opus' },
+        'coder',
+      );
       expect(rules).toEqual(['Agent(coder,model:opus)']);
 
-      // Parse the generated rule back
       const parsed = parseRule(rules[0]!);
       expect(parsed.toolName).toBe('agent');
       expect(parsed.specifier).toBe('coder');
-      expect(parsed.toolParamMatchers).toEqual([
-        { key: 'model', valuePattern: 'opus' },
-      ]);
+      expect(parsed.toolParamMatchers).toEqual([paramMatcher('model', 'opus')]);
     });
 
     it('handles number values in toolParams', async () => {
-      const rules = buildPermissionRules({
-        toolName: 'agent',
-        toolParams: { model: 'opus', count: 42 },
-      });
+      const rules = agentRules({ model: 'opus', count: 42 });
       // count is not in stableParamKeys, so not serialized
       expect(rules).toEqual(['Agent(model:opus)']);
     });
@@ -4241,110 +3056,81 @@ describe('buildPermissionRules', () => {
 // ─── buildHumanReadableRuleLabel ─────────────────────────────────────────────
 
 describe('buildHumanReadableRuleLabel', () => {
+  const label = (...rules: string[]) => buildHumanReadableRuleLabel(rules);
+
   it('returns empty string for empty rules array', () => {
     expect(buildHumanReadableRuleLabel([])).toBe('');
   });
 
-  it('converts bare Read rule to "read files"', () => {
-    expect(buildHumanReadableRuleLabel(['Read'])).toBe('read files');
+  it.each([
+    ['Read', 'read files'],
+    ['Bash', 'run commands'],
+    ['Monitor', 'monitor commands'],
+  ])('converts bare %s rule to "%s"', (rule, expected) => {
+    expect(label(rule)).toBe(expected);
   });
 
-  it('converts bare Bash rule to "run commands"', () => {
-    expect(buildHumanReadableRuleLabel(['Bash'])).toBe('run commands');
-  });
-
-  it('converts bare Monitor rule to "monitor commands"', () => {
-    expect(buildHumanReadableRuleLabel(['Monitor'])).toBe('monitor commands');
-  });
-
-  it('converts Read with absolute path specifier', () => {
-    const label = buildHumanReadableRuleLabel(['Read(//Users/mochi/.qwen/**)']);
-    expect(label).toBe('read files in /Users/mochi/.qwen/');
-  });
-
-  it('converts Read with relative path specifier', () => {
-    const label = buildHumanReadableRuleLabel(['Read(/src/**)']);
-    expect(label).toBe('read files in /src/');
-  });
-
-  it('converts Edit with path specifier', () => {
-    const label = buildHumanReadableRuleLabel(['Edit(//tmp/**)']);
-    expect(label).toBe('edit files in /tmp/');
-  });
-
-  it('converts Bash with command specifier', () => {
-    const label = buildHumanReadableRuleLabel(['Bash(git *)']);
-    expect(label).toBe("run 'git *' commands");
-  });
-
-  it('converts Monitor with command specifier', () => {
-    const label = buildHumanReadableRuleLabel(['Monitor(tail -f *)']);
-    expect(label).toBe("monitor 'tail -f *' commands");
-  });
-
-  it('converts WebFetch with domain specifier', () => {
-    const label = buildHumanReadableRuleLabel(['WebFetch(github.com)']);
-    expect(label).toBe('fetch from github.com');
-  });
-
-  it('converts Skill with literal specifier', () => {
-    const label = buildHumanReadableRuleLabel(['Skill(Explore)']);
-    expect(label).toBe('use skill "Explore"');
-  });
-
-  it('converts Agent with literal specifier', () => {
-    const label = buildHumanReadableRuleLabel(['Agent(research)']);
-    expect(label).toBe('use agent "research"');
+  // Rows: display name and specifier kind (the title), then rule and label.
+  it.each([
+    [
+      'Read',
+      'absolute path',
+      'Read(//Users/mochi/.qwen/**)',
+      'read files in /Users/mochi/.qwen/',
+    ],
+    ['Read', 'relative path', 'Read(/src/**)', 'read files in /src/'],
+    ['Edit', 'path', 'Edit(//tmp/**)', 'edit files in /tmp/'],
+    ['Bash', 'command', 'Bash(git *)', "run 'git *' commands"],
+    [
+      'Monitor',
+      'command',
+      'Monitor(tail -f *)',
+      "monitor 'tail -f *' commands",
+    ],
+    ['WebFetch', 'domain', 'WebFetch(github.com)', 'fetch from github.com'],
+    ['Skill', 'literal', 'Skill(Explore)', 'use skill "Explore"'],
+    ['Agent', 'literal', 'Agent(research)', 'use agent "research"'],
+  ])('converts %s with %s specifier', (_name, _kind, rule, expected) => {
+    expect(label(rule)).toBe(expected);
   });
 
   it('joins multiple rules with commas', () => {
-    const label = buildHumanReadableRuleLabel([
-      'Read(//Users/alice/**)',
-      'Bash(npm *)',
-    ]);
-    expect(label).toBe("read files in /Users/alice/, run 'npm *' commands");
+    expect(label('Read(//Users/alice/**)', 'Bash(npm *)')).toBe(
+      "read files in /Users/alice/, run 'npm *' commands",
+    );
   });
 
   it('handles unknown display names gracefully', () => {
-    const label = buildHumanReadableRuleLabel(['mcp__server__tool']);
-    expect(label).toBe('mcp__server__tool');
+    expect(label('mcp__server__tool')).toBe('mcp__server__tool');
   });
 
   it('handles unknown display name with specifier', () => {
-    const label = buildHumanReadableRuleLabel(['UnknownCategory(someValue)']);
-    expect(label).toBe('unknowncategory "someValue"');
+    expect(label('UnknownCategory(someValue)')).toBe(
+      'unknowncategory "someValue"',
+    );
   });
 
   it('cleans path with /* suffix', () => {
-    const label = buildHumanReadableRuleLabel(['Read(//home/user/docs/*)']);
-    expect(label).toBe('read files in /home/user/docs/');
+    expect(label('Read(//home/user/docs/*)')).toBe(
+      'read files in /home/user/docs/',
+    );
   });
 
-  it('round-trips from buildPermissionRules for file tool', () => {
-    const rules = buildPermissionRules({
-      toolName: 'read_file',
-      filePath: '/Users/alice/.secrets',
-    });
-    const label = buildHumanReadableRuleLabel(rules);
-    expect(label).toBe('read files in /Users/alice/');
-  });
-
-  it('round-trips from buildPermissionRules for shell command', () => {
-    const rules = buildPermissionRules({
-      toolName: 'run_shell_command',
-      command: 'git status',
-    });
-    const label = buildHumanReadableRuleLabel(rules);
-    expect(label).toBe("run 'git status' commands");
-  });
-
-  it('round-trips from buildPermissionRules for web fetch', () => {
-    const rules = buildPermissionRules({
-      toolName: 'web_fetch',
-      domain: 'example.com',
-    });
-    const label = buildHumanReadableRuleLabel(rules);
-    expect(label).toBe('fetch from example.com');
+  it.each<[string, PermissionCheckContext, string]>([
+    [
+      'file tool',
+      { toolName: 'read_file', filePath: '/Users/alice/.secrets' },
+      'read files in /Users/alice/',
+    ],
+    ['shell command', sh('git status'), "run 'git status' commands"],
+    [
+      'web fetch',
+      { toolName: 'web_fetch', domain: 'example.com' },
+      'fetch from example.com',
+    ],
+  ])('round-trips from buildPermissionRules for %s', (_kind, ctx, expected) => {
+    const rules = buildPermissionRules(ctx);
+    expect(buildHumanReadableRuleLabel(rules)).toBe(expected);
   });
 });
 
@@ -4352,124 +3138,60 @@ describe('buildHumanReadableRuleLabel', () => {
 
 describe('PermissionManager.findMatchingDenyRule', () => {
   it('returns the raw deny rule string when context matches', () => {
-    const pm = new PermissionManager(
-      makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
-    );
-    pm.initialize();
-
-    const result = pm.findMatchingDenyRule({
-      toolName: 'run_shell_command',
-      command: 'rm -rf /tmp/foo',
-    });
-    expect(result).toBe('Bash(rm *)');
+    const pm = makePm({ permissionsDeny: ['Bash(rm *)'] });
+    expect(pm.findMatchingDenyRule(sh('rm -rf /tmp/foo'))).toBe('Bash(rm *)');
   });
 
   it('returns undefined when no deny rule matches', () => {
-    const pm = new PermissionManager(
-      makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
-    );
-    pm.initialize();
-
-    const result = pm.findMatchingDenyRule({
-      toolName: 'run_shell_command',
-      command: 'git status',
-    });
-    expect(result).toBeUndefined();
+    const pm = makePm({ permissionsDeny: ['Bash(rm *)'] });
+    expect(pm.findMatchingDenyRule(sh('git status'))).toBeUndefined();
   });
 
   it('matches session deny rules', () => {
-    const pm = new PermissionManager(makeConfig());
-    pm.initialize();
+    const pm = makePm();
     pm.addSessionDenyRule('Read(//secret/**)');
-
-    const result = pm.findMatchingDenyRule({
-      toolName: 'read_file',
-      filePath: '/secret/key.pem',
-    });
-    expect(result).toBe('Read(//secret/**)');
+    const ctx = { toolName: 'read_file', filePath: '/secret/key.pem' };
+    expect(pm.findMatchingDenyRule(ctx)).toBe('Read(//secret/**)');
   });
 
   it('returns undefined for non-denied tool', () => {
-    const pm = new PermissionManager(
-      makeConfig({ permissionsDeny: ['ShellTool'] }),
-    );
-    pm.initialize();
-
-    const result = pm.findMatchingDenyRule({ toolName: 'read_file' });
-    expect(result).toBeUndefined();
+    const pm = makePm({ permissionsDeny: ['ShellTool'] });
+    expect(pm.findMatchingDenyRule({ toolName: 'read_file' })).toBeUndefined();
   });
 
   it('matches bare tool deny rule', () => {
-    const pm = new PermissionManager(
-      makeConfig({ permissionsDeny: ['ShellTool'] }),
-    );
-    pm.initialize();
-
-    const result = pm.findMatchingDenyRule({
-      toolName: 'run_shell_command',
-      command: 'echo hello',
-    });
+    const pm = makePm({ permissionsDeny: ['ShellTool'] });
     // rule.raw preserves the original rule string as written in config
-    expect(result).toBe('ShellTool');
+    expect(pm.findMatchingDenyRule(sh('echo hello'))).toBe('ShellTool');
   });
 
-  it('matches a deny rule through a symlinked path', () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
-    try {
-      const protectedDir = path.join(root, 'protected');
-      const link = path.join(root, 'link');
-      fs.mkdirSync(protectedDir);
-      fs.symlinkSync(protectedDir, link, 'dir');
-      const pm = new PermissionManager(
-        makeConfig({
-          permissionsDeny: ['Edit(/protected/**)'],
-          projectRoot: root,
-          cwd: root,
-        }),
-      );
-      pm.initialize();
-
-      expect(
-        pm.findMatchingDenyRule({
-          toolName: 'edit',
-          filePath: path.join(link, 'file.txt'),
-        }),
-      ).toBe('Edit(/protected/**)');
-    } finally {
-      fs.rmSync(root, { recursive: true, force: true });
-    }
-  });
+  it('matches a deny rule through a symlinked path', () =>
+    withTempRoot((root) => {
+      const { link } = linkDir(root);
+      const pm = makePm({
+        permissionsDeny: ['Edit(/protected/**)'],
+        projectRoot: root,
+        cwd: root,
+      });
+      const ctx = { toolName: 'edit', filePath: path.join(link, 'file.txt') };
+      expect(pm.findMatchingDenyRule(ctx)).toBe('Edit(/protected/**)');
+    }));
 
   it('cites the deny rule for a compound command segment', () => {
-    const pm = new PermissionManager(
-      makeConfig({ permissionsDeny: ['Bash(npm view *)'] }),
-    );
-    pm.initialize();
-
+    const pm = makePm({ permissionsDeny: ['Bash(npm view *)'] });
     // evaluate() splits the compound command and denies on the `npm view`
     // segment, so findMatchingDenyRule must cite that same rule (issue #11405).
-    expect(
-      pm.findMatchingDenyRule({
-        toolName: 'run_shell_command',
-        command: 'cd /tmp && npm view foo',
-      }),
-    ).toBe('Bash(npm view *)');
+    expect(pm.findMatchingDenyRule(sh('cd /tmp && npm view foo'))).toBe(
+      'Bash(npm view *)',
+    );
   });
 
   it('cites the deny rule when a shell command is denied via a virtual file op', () => {
-    const pm = new PermissionManager(
-      makeConfig({ permissionsDeny: ['Read(//**/node_modules/**)'] }),
-    );
-    pm.initialize();
-
+    const pm = makePm({ permissionsDeny: ['Read(//**/node_modules/**)'] });
     // A `cat` of a node_modules file is denied through the shell virtual-op
     // pass (Read rule), not a Bash rule. findMatchingDenyRule must cite it.
-    expect(
-      pm.findMatchingDenyRule({
-        toolName: 'run_shell_command',
-        command: 'cat /app/node_modules/lodash/index.js',
-      }),
-    ).toBe('Read(//**/node_modules/**)');
+    const ctx = sh('cat /app/node_modules/lodash/index.js');
+    expect(pm.findMatchingDenyRule(ctx)).toBe('Read(//**/node_modules/**)');
   });
 });
 
@@ -4477,56 +3199,34 @@ describe('PermissionManager.findMatchingDenyRule', () => {
 
 describe('PermissionManager — strip/restore for AUTO mode', () => {
   it('strips Bash interpreter wildcards and stashes them', () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsAllow: ['Bash(python:*)', 'Bash(git status)'],
-      }),
-    );
-    pm.initialize();
+    const pm = makePm({
+      permissionsAllow: ['Bash(python:*)', 'Bash(git status)'],
+    });
 
     const stash = pm.stripDangerousRulesForAutoMode();
     expect(stash.persistent).toHaveLength(1);
     expect(stash.persistent[0].raw).toBe('Bash(python:*)');
 
     // The safe rule remains: git status still auto-allowed.
-    return expect(
-      pm.evaluate({ toolName: 'run_shell_command', command: 'git status' }),
-    ).resolves.toBe('allow');
+    return expect(pm.evaluate(sh('git status'))).resolves.toBe('allow');
   });
 
   it('strips bare tool-level Bash allow', async () => {
-    const pm = new PermissionManager(
-      makeConfig({ permissionsAllow: ['Bash'] }),
-    );
-    pm.initialize();
-
+    const pm = makePm({ permissionsAllow: ['Bash'] });
     // Before strip: any Bash command is auto-allowed.
-    expect(
-      await pm.evaluate({
-        toolName: 'run_shell_command',
-        command: 'rm -rf /',
-      }),
-    ).toBe('allow');
+    expect(await pm.evaluate(sh('rm -rf /'))).toBe('allow');
 
     pm.stripDangerousRulesForAutoMode();
 
     // After strip: Bash falls through to default (which AST analysis turns
     // into ask for non-readonly commands).
-    expect(
-      await pm.evaluate({
-        toolName: 'run_shell_command',
-        command: 'rm -rf /',
-      }),
-    ).not.toBe('allow');
+    expect(await pm.evaluate(sh('rm -rf /'))).not.toBe('allow');
   });
 
   it('strips Agent / Skill any-allow rules', () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsAllow: ['Agent(coder)', 'Skill(pdf)', 'ReadFileTool'],
-      }),
-    );
-    pm.initialize();
+    const pm = makePm({
+      permissionsAllow: ['Agent(coder)', 'Skill(pdf)', 'ReadFileTool'],
+    });
 
     const stash = pm.stripDangerousRulesForAutoMode();
     expect(stash.persistent).toHaveLength(2);
@@ -4538,10 +3238,7 @@ describe('PermissionManager — strip/restore for AUTO mode', () => {
   });
 
   it('is idempotent — second strip returns the same stash without re-removal', () => {
-    const pm = new PermissionManager(
-      makeConfig({ permissionsAllow: ['Bash(python:*)'] }),
-    );
-    pm.initialize();
+    const pm = makePm({ permissionsAllow: ['Bash(python:*)'] });
 
     const first = pm.stripDangerousRulesForAutoMode();
     const second = pm.stripDangerousRulesForAutoMode();
@@ -4550,10 +3247,7 @@ describe('PermissionManager — strip/restore for AUTO mode', () => {
   });
 
   it('restoreDangerousRules reattaches stripped rules to their original scope', async () => {
-    const pm = new PermissionManager(
-      makeConfig({ permissionsAllow: ['Bash(python:*)'] }),
-    );
-    pm.initialize();
+    const pm = makePm({ permissionsAllow: ['Bash(python:*)'] });
 
     pm.stripDangerousRulesForAutoMode();
     expect(pm.getAllowRawStrings()).toEqual([]);
@@ -4562,175 +3256,105 @@ describe('PermissionManager — strip/restore for AUTO mode', () => {
     expect(pm.getAllowRawStrings()).toEqual(['Bash(python:*)']);
 
     // And the rule works again: python anything is auto-allowed.
-    expect(
-      await pm.evaluate({
-        toolName: 'run_shell_command',
-        command: 'python foo.py',
-      }),
-    ).toBe('allow');
+    expect(await pm.evaluate(sh('python foo.py'))).toBe('allow');
   });
 
   it('never strips deny rules — user intent for deny is honored', () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsDeny: ['Bash', 'Agent'],
-        permissionsAllow: ['Bash(git log)'],
-      }),
-    );
-    pm.initialize();
+    const pm = makePm({
+      permissionsDeny: ['Bash', 'Agent'],
+      permissionsAllow: ['Bash(git log)'],
+    });
 
     pm.stripDangerousRulesForAutoMode();
     // Bash deny still applies — no allow rule can override it after strip.
-    return expect(
-      pm.evaluate({ toolName: 'run_shell_command', command: 'git log' }),
-    ).resolves.toBe('deny');
+    return expect(pm.evaluate(sh('git log'))).resolves.toBe('deny');
   });
 
   it('auto-strips on initialize when approvalMode is "auto"', () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsAllow: ['Bash(python:*)'],
-        approvalMode: 'auto',
-      }),
-    );
-    pm.initialize();
+    const pm = makePm({
+      permissionsAllow: ['Bash(python:*)'],
+      approvalMode: 'auto',
+    });
     expect(pm.getAllowRawStrings()).toEqual([]);
     expect(pm.getStrippedDangerousRules()?.persistent).toHaveLength(1);
   });
 
   it('does NOT auto-strip when approvalMode is the default', () => {
-    const pm = new PermissionManager(
-      makeConfig({ permissionsAllow: ['Bash(python:*)'] }),
-    );
-    pm.initialize();
+    const pm = makePm({ permissionsAllow: ['Bash(python:*)'] });
     expect(pm.getAllowRawStrings()).toEqual(['Bash(python:*)']);
     expect(pm.getStrippedDangerousRules()).toBeUndefined();
   });
 });
 
 // ─── Compound shell + cd + wrapper → virtual-op rule matching ───────────────
-//
 // Regression coverage for compound shell writes reaching protected paths
 // through `cd` and shell wrappers.
 
 describe('PermissionManager — compound shell write attribution', () => {
+  /** A manager rooted at `/repo` (cwd and project root) with `rules`. */
+  const repoPm = (rules: PmOpts) =>
+    makePm({ ...rules, cwd: '/repo', projectRoot: '/repo' });
+  const denySettings = {
+    permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
+  };
+  const opsIn = (command: string) =>
+    extractShellOperationsAcrossCommand(command, '/project');
+  const writeTo = (filePath: string) => [
+    { virtualTool: 'write_file', filePath },
+  ];
+
   it('deny rule matches a write after `cd` into a subdir', async () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
-        cwd: '/repo',
-        projectRoot: '/repo',
-      }),
-    );
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: 'run_shell_command',
-        command: "cd .qwen && echo '{}' > settings.json",
-        cwd: '/repo',
-      }),
-    ).toBe('deny');
+    const ctx = sh("cd .qwen && echo '{}' > settings.json", '/repo');
+    expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
   });
 
   it('deny rule matches a write through a `bash -lc` wrapper after `cd`', async () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
-        cwd: '/repo',
-        projectRoot: '/repo',
-      }),
-    );
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: 'run_shell_command',
-        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
-        cwd: '/repo',
-      }),
-    ).toBe('deny');
+    const ctx = sh("cd .qwen && bash -lc 'echo {} > settings.json'", '/repo');
+    expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
   });
 
   it('ask rule matches a write through nested shell wrappers', async () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsAsk: ['WriteFileTool(.mcp.json)'],
-        cwd: '/repo',
-        projectRoot: '/repo',
-      }),
-    );
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: 'run_shell_command',
-        command: 'bash -lc "sh -c \'echo hi > .mcp.json\'"',
-        cwd: '/repo',
-      }),
-    ).toBe('ask');
+    const pm = repoPm({ permissionsAsk: ['WriteFileTool(.mcp.json)'] });
+    const ctx = sh('bash -lc "sh -c \'echo hi > .mcp.json\'"', '/repo');
+    expect(await pm.evaluate(ctx)).toBe('ask');
   });
 
   it('allow rule on the same shell command does NOT downgrade a virtual-op deny', async () => {
     // The Bash allow rule covers the literal command, but the cross-command
-    // virtual-op pass surfaces the write target and the deny rule on
-    // .qwen/settings.json escalates the verdict. Allow + virtual-op deny
-    // → deny, matching the "deny > ask > allow" priority.
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsAllow: ['Bash(*)'],
-        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
-        cwd: '/repo',
-        projectRoot: '/repo',
-      }),
-    );
-    pm.initialize();
-    expect(
-      await pm.evaluate({
-        toolName: 'run_shell_command',
-        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
-        cwd: '/repo',
-      }),
-    ).toBe('deny');
+    // virtual-op pass surfaces the write target, whose deny rule escalates
+    // the verdict: allow + virtual-op deny → deny ("deny > ask > allow").
+    const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+    const ctx = sh("cd .qwen && bash -lc 'echo {} > settings.json'", '/repo');
+    expect(await pm.evaluate(ctx)).toBe('deny');
   });
 
-  // #11865: a redirect target made of characters that are not bash word
-  // separators — a single NBSP here — is a real filename to bash, so it must
-  // survive into the virtual op. `String.prototype.trim` used to delete it,
-  // and the write disappeared from a verdict that was a `deny`.
+  // #11865: a redirect target of non-separator characters (one NBSP here) is a
+  // real filename to bash and must survive into the virtual op; deleting it
+  // with `String.prototype.trim` dropped the write from a `deny` verdict.
   it('attributes a write whose whole target is an invisible character', () => {
-    expect(
-      extractShellOperationsAcrossCommand('echo x >\r& echo y', '/project'),
-    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\r' }]);
-    expect(
-      extractShellOperationsAcrossCommand('echo x >\u00a0& echo y', '/project'),
-    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\u00a0' }]);
+    expect(opsIn('echo x >\r& echo y')).toEqual(writeTo('/project/\r'));
+    expect(opsIn('echo x >\u00a0& echo y')).toEqual(writeTo('/project/\u00a0'));
   });
 
   it('does not invent a read op when an invisible target is followed by a word', () => {
     // `cat >\u00a0` takes no argument, so a deleted target left the bare `>`
     // in the positional args and `looksLikePath('>')` turned the real write
     // into a spurious `read_file '/project/>'`.
-    expect(
-      extractShellOperationsAcrossCommand('cat >\u00a0& echo hi', '/project'),
-    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\u00a0' }]);
+    expect(opsIn('cat >\u00a0& echo hi')).toEqual(writeTo('/project/\u00a0'));
   });
 
   // Same defect on the `\n` spelling: the CR of a CRLF pair is dropped with the
-  // line ending, but when the CR *is* the whole redirection target that deleted
-  // the write and left the bare operator in the positional args, where
-  // `looksLikePath('>')` invented a `read_file` of a file nobody reads — and
-  // `/project/>` is matchable, so a `Read(//project/**)` deny fired on it.
+  // line ending, but a CR that *is* the whole redirect target took the write
+  // with it and left the bare `>` for `looksLikePath('>')` to invent a
+  // `read_file` of the matchable `/project/>`, firing `Read(//project/**)`.
   it('attributes a CR redirect target across a newline instead of inventing a read', () => {
-    expect(
-      extractShellOperationsAcrossCommand('echo x >\r\necho y', '/project'),
-    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\r' }]);
-    expect(
-      extractShellOperationsAcrossCommand('cat >\r\necho hi', '/project'),
-    ).toEqual([{ virtualTool: 'write_file', filePath: '/project/\r' }]);
+    expect(opsIn('echo x >\r\necho y')).toEqual(writeTo('/project/\r'));
+    expect(opsIn('cat >\r\necho hi')).toEqual(writeTo('/project/\r'));
   });
 
-  // The verdict, not the intermediate op. Each target is a character bash keeps
-  // as part of the word, so the write really happens inside the denied tree;
-  // the `\r` rows were an `allow` until the path matcher stopped handing line
-  // terminators to picomatch (#11865).
+  // The verdict, not the op: bash keeps each target character in the word, so
+  // the write lands in the denied tree; the `\r` rows were `allow` until the
+  // path matcher stopped handing line terminators to picomatch (#11865).
   it.each([
     ['\\r (whole target)', 'echo x >\r& echo y'],
     ['\\r (visible prefix)', 'echo x >out\r& echo y'],
@@ -4740,177 +3364,68 @@ describe('PermissionManager — compound shell write attribution', () => {
   ])(
     'denies an invisible write inside a denied directory: %s',
     async (_label, command) => {
-      const pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Bash(echo *)'],
-          permissionsDeny: ['Edit(//project/**)', 'Write(//project/**)'],
-          cwd: '/project',
-          projectRoot: '/project',
-        }),
-      );
-      pm.initialize();
-      expect(
-        await pm.evaluate({
-          toolName: 'run_shell_command',
-          command,
-          cwd: '/project',
-        }),
-      ).toBe('deny');
+      const pm = makePm({
+        permissionsAllow: ['Bash(echo *)'],
+        permissionsDeny: ['Edit(//project/**)', 'Write(//project/**)'],
+      });
+      expect(await pm.evaluate(sh(command, '/project'))).toBe('deny');
     },
   );
 
   it('ordinary writes after `cd` into project subdirs stay unmatched by self-mod rules', () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
-        cwd: '/repo',
-        projectRoot: '/repo',
-      }),
-    );
-    pm.initialize();
-    expect(
-      pm.hasRelevantRules({
-        toolName: 'run_shell_command',
-        command: "cd src && bash -lc 'echo ok > generated.txt'",
-        cwd: '/repo',
-      }),
-    ).toBe(false);
+    const ctx = sh("cd src && bash -lc 'echo ok > generated.txt'", '/repo');
+    expect(repoPm(denySettings).hasRelevantRules(ctx)).toBe(false);
   });
 
-  it('does not treat canonical-only allow matches as relevant', () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-permission-'));
-    try {
-      const allowedDir = path.join(root, 'allowed');
-      const link = path.join(root, 'link');
-      fs.mkdirSync(allowedDir);
-      fs.writeFileSync(path.join(allowedDir, 'file.txt'), 'allowed');
-      fs.symlinkSync(allowedDir, link, 'dir');
-
-      const pm = new PermissionManager(
-        makeConfig({
-          permissionsAllow: ['Edit(/allowed/**)'],
-          cwd: root,
-          projectRoot: root,
-        }),
-      );
-      pm.initialize();
-
-      expect(
-        pm.hasRelevantRules({
-          toolName: 'edit',
-          filePath: path.join(link, 'file.txt'),
-        }),
-      ).toBe(false);
-      expect(
-        pm.hasRelevantRules({
-          toolName: 'run_shell_command',
-          command: `echo allowed > ${path.join(link, 'file.txt')}`,
-          cwd: root,
-        }),
-      ).toBe(false);
-    } finally {
-      fs.rmSync(root, { recursive: true, force: true });
-    }
-  });
+  it('does not treat canonical-only allow matches as relevant', () =>
+    withTempRoot((root) => {
+      const { link } = linkDir(root, { 'file.txt': 'allowed' }, 'allowed');
+      const file = path.join(link, 'file.txt');
+      const pm = makePm({
+        permissionsAllow: ['Edit(/allowed/**)'],
+        cwd: root,
+        projectRoot: root,
+      });
+      const edit = { toolName: 'edit', filePath: file };
+      expect(pm.hasRelevantRules(edit)).toBe(false);
+      const write = sh(`echo allowed > ${file}`, root);
+      expect(pm.hasRelevantRules(write)).toBe(false);
+    }));
 
   it('hasRelevantRules sees protected writes after sibling shell-wrapper segments', () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
-        cwd: '/repo',
-        projectRoot: '/repo',
-      }),
-    );
-    pm.initialize();
-    expect(
-      pm.hasRelevantRules({
-        toolName: 'run_shell_command',
-        command: "bash -lc 'echo ok' && echo hi > .qwen/settings.json",
-        cwd: '/repo',
-      }),
-    ).toBe(true);
+    const command = "bash -lc 'echo ok' && echo hi > .qwen/settings.json";
+    const ctx = sh(command, '/repo');
+    expect(repoPm(denySettings).hasRelevantRules(ctx)).toBe(true);
   });
 
   it('hasRelevantRules sees protected writes after `cd` before compound recursion', () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsDeny: ['Write(.qwen/settings.json)'],
-        cwd: '/repo',
-        projectRoot: '/repo',
-      }),
-    );
-    pm.initialize();
-    expect(
-      pm.hasRelevantRules({
-        toolName: 'run_shell_command',
-        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
-        cwd: '/repo',
-      }),
-    ).toBe(true);
+    const pm = repoPm({ permissionsDeny: ['Write(.qwen/settings.json)'] });
+    const ctx = sh("cd .qwen && bash -lc 'echo {} > settings.json'", '/repo');
+    expect(pm.hasRelevantRules(ctx)).toBe(true);
   });
 
   it('hasMatchingAskRule sees writes after `cd` into a subdir', () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsAsk: ['WriteFileTool(.qwen/settings.json)'],
-        cwd: '/repo',
-        projectRoot: '/repo',
-      }),
-    );
-    pm.initialize();
-    expect(
-      pm.hasMatchingAskRule({
-        toolName: 'run_shell_command',
-        command: "cd .qwen && bash -lc 'echo {} > settings.json'",
-        cwd: '/repo',
-      }),
-    ).toBe(true);
+    const pm = repoPm({
+      permissionsAsk: ['WriteFileTool(.qwen/settings.json)'],
+    });
+    const ctx = sh("cd .qwen && bash -lc 'echo {} > settings.json'", '/repo');
+    expect(pm.hasMatchingAskRule(ctx)).toBe(true);
   });
 
   it('escalates dynamic-cd writes when path-specific deny rules may apply', async () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsAllow: ['Bash(*)'],
-        permissionsDeny: ['WriteFileTool(.qwen/settings.json)'],
-        cwd: '/repo',
-        projectRoot: '/repo',
-      }),
-    );
-    pm.initialize();
-    expect(
-      pm.hasRelevantRules({
-        toolName: 'run_shell_command',
-        command: 'cd "$TARGET" && echo hi > ../settings.json',
-        cwd: '/repo',
-      }),
-    ).toBe(true);
-    expect(
-      await pm.evaluate({
-        toolName: 'run_shell_command',
-        command: 'cd "$TARGET" && echo hi > ../settings.json',
-        cwd: '/repo',
-      }),
-    ).toBe('ask');
+    const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+    const ctx = sh('cd "$TARGET" && echo hi > ../settings.json', '/repo');
+    expect(pm.hasRelevantRules(ctx)).toBe(true);
+    expect(await pm.evaluate(ctx)).toBe('ask');
   });
 
   it('preserves wildcard deny rules for dynamic-cd writes', async () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsAllow: ['Bash(*)'],
-        permissionsDeny: ['WriteFileTool(*)'],
-        cwd: '/repo',
-        projectRoot: '/repo',
-      }),
-    );
-    pm.initialize();
-
-    expect(
-      await pm.evaluate({
-        toolName: 'run_shell_command',
-        command: 'cd "$TARGET" && echo hi > settings.json',
-        cwd: '/repo',
-      }),
-    ).toBe('deny');
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)'],
+      permissionsDeny: ['WriteFileTool(*)'],
+    });
+    const ctx = sh('cd "$TARGET" && echo hi > settings.json', '/repo');
+    expect(await pm.evaluate(ctx)).toBe('deny');
   });
 });
 
@@ -4918,200 +3433,67 @@ describe('PermissionManager — compound shell write attribution', () => {
 
 describe('PermissionManager — toolParams end-to-end', () => {
   it('evaluate respects allow rule with param matcher', async () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsAllow: ['Agent(coder,model:opus)'],
-      }),
-    );
-    pm.initialize();
-
-    expect(
-      await pm.evaluate({
-        toolName: 'agent',
-        specifier: 'coder',
-        toolParams: { subagent_type: 'coder', model: 'opus' },
-      }),
-    ).toBe('allow');
+    const pm = makePm({ permissionsAllow: ['Agent(coder,model:opus)'] });
+    const ctx = agentCtx({ subagent_type: 'coder', model: 'opus' }, 'coder');
+    expect(await pm.evaluate(ctx)).toBe('allow');
   });
 
   it('evaluate denies when param matcher does not match', async () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsAllow: ['Agent(coder,model:opus)'],
-      }),
-    );
-    pm.initialize();
-
-    expect(
-      await pm.evaluate({
-        toolName: 'agent',
-        specifier: 'coder',
-        toolParams: { subagent_type: 'coder', model: 'sonnet' },
-      }),
-    ).not.toBe('allow');
+    const pm = makePm({ permissionsAllow: ['Agent(coder,model:opus)'] });
+    const ctx = agentCtx({ subagent_type: 'coder', model: 'sonnet' }, 'coder');
+    expect(await pm.evaluate(ctx)).not.toBe('allow');
   });
 
   it('findMatchingDenyRule matches deny rule with param matcher', () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsDeny: ['Agent(model:restricted)'],
-      }),
-    );
-    pm.initialize();
-
-    expect(
-      pm.findMatchingDenyRule({
-        toolName: 'agent',
-        toolParams: { model: 'restricted' },
-      }),
-    ).toBe('Agent(model:restricted)');
+    const pm = makePm({ permissionsDeny: ['Agent(model:restricted)'] });
+    const ctx = agentCtx({ model: 'restricted' });
+    expect(pm.findMatchingDenyRule(ctx)).toBe('Agent(model:restricted)');
   });
 
   it('findMatchingDenyRule returns undefined when param does not match', () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsDeny: ['Agent(model:restricted)'],
-      }),
-    );
-    pm.initialize();
-
-    expect(
-      pm.findMatchingDenyRule({
-        toolName: 'agent',
-        toolParams: { model: 'opus' },
-      }),
-    ).toBeUndefined();
+    const pm = makePm({ permissionsDeny: ['Agent(model:restricted)'] });
+    const ctx = agentCtx({ model: 'opus' });
+    expect(pm.findMatchingDenyRule(ctx)).toBeUndefined();
   });
 
   it('hasRelevantRules returns true when param matcher rule exists', () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsAsk: ['Agent(model:opus)'],
-      }),
-    );
-    pm.initialize();
-
-    expect(
-      pm.hasRelevantRules({
-        toolName: 'agent',
-        toolParams: { model: 'opus' },
-      }),
-    ).toBe(true);
+    const pm = makePm({ permissionsAsk: ['Agent(model:opus)'] });
+    expect(pm.hasRelevantRules(agentCtx({ model: 'opus' }))).toBe(true);
   });
 
   it('hasMatchingAskRule returns true when param matcher ask rule matches', () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsAsk: ['Agent(model:opus)'],
-      }),
-    );
-    pm.initialize();
-
-    expect(
-      pm.hasMatchingAskRule({
-        toolName: 'agent',
-        toolParams: { model: 'opus' },
-      }),
-    ).toBe(true);
+    const pm = makePm({ permissionsAsk: ['Agent(model:opus)'] });
+    expect(pm.hasMatchingAskRule(agentCtx({ model: 'opus' }))).toBe(true);
   });
 
   it('case-insensitive param matching: deny rule blocks different casing', async () => {
-    const pm = new PermissionManager(
-      makeConfig({
-        permissionsDeny: ['Agent(model:Sonnet)'],
-      }),
-    );
-    pm.initialize();
-
-    expect(
-      await pm.evaluate({
-        toolName: 'agent',
-        toolParams: { model: 'sonnet' },
-      }),
-    ).toBe('deny');
+    const pm = makePm({ permissionsDeny: ['Agent(model:Sonnet)'] });
+    expect(await pm.evaluate(agentCtx({ model: 'sonnet' }))).toBe('deny');
   });
 });
 
 // ─── evaluateParamMatchers type guard tests ──────────────────────────────────
 
 describe('matchesRule — param matcher type guards', () => {
-  it('rejects boolean param values', () => {
-    const rule = parseRule('Agent(model:*)');
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        { model: true },
-      ),
-    ).toBe(false);
-  });
-
-  it('rejects null param values', () => {
-    const rule = parseRule('Agent(model:*)');
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        { model: null },
-      ),
-    ).toBe(false);
-  });
-
-  it('rejects undefined param values', () => {
-    const rule = parseRule('Agent(model:*)');
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        { model: undefined },
-      ),
-    ).toBe(false);
-  });
-
-  it('rejects object param values', () => {
-    const rule = parseRule('Agent(model:*)');
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        { model: { nested: 'opus' } },
-      ),
-    ).toBe(false);
-  });
-
-  it('accepts number param values via coercion', () => {
-    const rule = parseRule('Agent(count:42)');
-    expect(
-      matchesRule(
-        rule,
-        'agent',
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        { count: 42 },
-      ),
-    ).toBe(true);
+  it.each([
+    ['rejects boolean param values', 'model:*', { model: true }, false],
+    ['rejects null param values', 'model:*', { model: null }, false],
+    ['rejects undefined param values', 'model:*', { model: undefined }, false],
+    [
+      'rejects object param values',
+      'model:*',
+      { model: { nested: 'opus' } },
+      false,
+    ],
+    [
+      'accepts number param values via coercion',
+      'count:42',
+      { count: 42 },
+      true,
+    ],
+  ])('%s', (_title, matcher, toolParams, expected) => {
+    expect(matchesAgent(parseRule(`Agent(${matcher})`), toolParams)).toBe(
+      expected,
+    );
   });
 });

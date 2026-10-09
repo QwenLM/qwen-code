@@ -22,6 +22,10 @@ import {
   type ManagedSessionCommitReceipt,
 } from './managed-session-authority.js';
 import {
+  publishManagedMessageBody,
+  readManagedMessageBody,
+} from './managed-message-chunks.js';
+import {
   LocalManagedSessionResourceStore,
   readManagedBranchCheckpoint,
 } from './managed-session-resources.js';
@@ -63,7 +67,7 @@ export class ManagedSessionMessageProjection {
       );
     }
     const body = Buffer.from(JSON.stringify(record), 'utf8');
-    const contentRef = await this.resources.publish('managed-message', body);
+    const contentRef = await publishManagedMessageBody(this.resources, body);
     const subject =
       actor.class === 'harness' && actor.activation !== undefined
         ? {
@@ -103,8 +107,15 @@ export class ManagedSessionMessageProjection {
    * order. A content body that cannot be resolved fails the projection rather
    * than silently dropping a record, which would present a short history as a
    * complete one.
+   *
+   * Deliberately narrower than the reader-facing list: this projection
+   * carries branch checkpoints and committed messages only. Turn results,
+   * compaction summaries and record-carrying domains are projected by
+   * `projectManagedSessionRecords` — the reader-facing list used both to
+   * rebuild a session for a reader and by the live recorder's chain view
+   * (`ChatRecordingService.readActiveTranscriptChain`).
    */
-  async project(): Promise<ChatRecord[]> {
+  async project(throughSequence?: number): Promise<ChatRecord[]> {
     const records: ChatRecord[] = [];
     const checkpoints = new Map<string, number>();
     let after = 0;
@@ -115,12 +126,14 @@ export class ManagedSessionMessageProjection {
       });
       if (page.length === 0) break;
       for (const event of page) {
+        if (throughSequence !== undefined && event.sequence > throughSequence)
+          return records;
         after = event.sequence;
         const branch = await readManagedBranchCheckpoint(
           event,
           this.resources,
           (id) => checkpoints.get(id),
-          this.authority.committedSequence,
+          throughSequence ?? this.authority.committedSequence,
         );
         if (event.kind === 'checkpoint.committed') {
           checkpoints.set(
@@ -145,7 +158,8 @@ async function readRecordBody(
   resources: ManagedSessionResourceStore,
   ref: ManagedSessionEvent['payload'][string],
 ): Promise<ChatRecord> {
-  const body = await resources.read(
+  const body = await readManagedMessageBody(
+    (bodyRef) => resources.read(bodyRef),
     ref as unknown as Parameters<ManagedSessionResourceStore['read']>[0],
   );
   return JSON.parse(body.toString('utf8')) as ChatRecord;
@@ -180,6 +194,42 @@ export async function readManagedSessionRecords(options: {
     sessionKey: options.sessionKey,
   });
   return projectManagedSessionRecords({ scan, resources });
+}
+
+/**
+ * The records a reader replays together with the session's title, from one
+ * read of the log. The title is the last one committed anywhere in the log,
+ * not only in the windows at each end that the session list scans. A title
+ * whose body cannot be read is reported as none, as the session list reports
+ * it: a damaged title costs the title, not the session.
+ */
+export async function readManagedSessionRecordsAndTitle(options: {
+  readonly transcriptPath: string;
+  readonly runtimeBaseDir: string;
+  readonly sessionKey: ManagedSessionKey;
+  /** Bounds the projection to a frozen snapshot's byte length. */
+  readonly maxBytes?: number;
+}): Promise<{
+  records: ChatRecord[];
+  titleInfo: { title?: string; source?: 'auto' | 'manual' };
+}> {
+  const scan = await readManagedSessionLog(
+    options.transcriptPath,
+    options.sessionKey,
+    options.maxBytes,
+  );
+  const resources = LocalManagedSessionResourceStore.create({
+    runtimeBaseDir: options.runtimeBaseDir,
+    sessionKey: options.sessionKey,
+  });
+  const records = await projectManagedSessionRecords({ scan, resources });
+  let titleInfo: { title?: string; source?: 'auto' | 'manual' } = {};
+  try {
+    titleInfo = await projectManagedSessionTitleInfo({ scan, resources });
+  } catch {
+    // Reported as no title.
+  }
+  return { records, titleInfo };
 }
 
 /** Projects an already-verified durable journal through its resource store. */
@@ -297,6 +347,11 @@ const RECORD_CARRYING_DOMAINS: ReadonlySet<unknown> = new Set([
  * A domain body is the authority's envelope wrapping the content, so the record
  * sits under its own key there, unlike the event channels whose body is the
  * record itself.
+ *
+ * This list is deliberately wider than the hot `project()`: a reader
+ * rebuilding the whole history needs turn results, compaction summaries and
+ * record-carrying domains materialized, while a live message projection
+ * presents them as events.
  */
 function readerFacingBody(event: ManagedSessionEvent):
   | {

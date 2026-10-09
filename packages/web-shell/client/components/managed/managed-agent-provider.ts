@@ -1,4 +1,8 @@
+import type { components } from './generated/managed-agent-api';
+import type { ManagedToolResultReader } from './managed-tool-result-types';
+
 export type ManagedAgentSessionPhase =
+  | 'created'
   | 'admitted'
   | 'runtime_starting'
   | 'agent_running'
@@ -20,13 +24,21 @@ export interface ManagedAgentSessionSummary {
   activeTurnId?: string;
   title: string;
   workspaceCwd?: string;
+  workspace?: { workspaceId: string; cwdRelative: string };
   createdAt: number;
   admittedAt: number;
   updatedAt: number;
   phase: ManagedAgentSessionPhase;
   runtimeReady: boolean;
   runtimeState: ManagedAgentRuntimeState;
-  capabilities: { canSend: boolean; canCancel: boolean };
+  capabilities: {
+    canSend: boolean;
+    canCancel: boolean;
+    actions?: boolean;
+    artifacts?: boolean;
+    /** The caller may submit later Turns to this Workspace-bound Session. */
+    workspaceTurns?: boolean;
+  };
   failure?: { code: string; message: string };
 }
 
@@ -42,10 +54,12 @@ export type ManagedAgentSessionEventType =
   | 'tool_requested'
   | 'tool_started'
   | 'tool_completed'
+  | 'tool_result_updated'
   | 'completed'
   | 'failed'
   | 'cancelling'
   | 'cancelled'
+  | 'action_updated'
   | 'stream_gap';
 
 export interface ManagedAgentSessionEvent {
@@ -55,6 +69,12 @@ export interface ManagedAgentSessionEvent {
   sessionId: string;
   turnId: string;
   data?: unknown;
+  /**
+   * Projected from a durable snapshot item rather than a raw event. The
+   * server can retract its items (reconciliation), after which these
+   * projections must not survive a resync.
+   */
+  assembledFromItem?: boolean;
 }
 
 export interface ManagedAgentSessionTranscript {
@@ -77,11 +97,58 @@ export interface ManagedAgentCommandOptions extends ManagedAgentRequestOptions {
   idempotencyKey: string;
 }
 
+/** A Hosted tool approval waiting for the Session owner's answer. */
+export interface ManagedAgentPendingAction {
+  actionId: string;
+  sessionId: string;
+  /** Public Turn ID; absent when the Turn could not be resolved. */
+  turnId?: string;
+  functionCallId: string;
+  toolName: string;
+  inputRevision: number;
+  policyRevision: string;
+  expiresAt: number;
+  options: Array<{ id: string; label: string }>;
+  inputPreview?: components['schemas']['WebShellActionInputPreview'];
+}
+
 export interface ManagedAgentProvider {
   readonly kind: 'daemon' | 'java';
   readonly storageKey: string;
   readonly canCancel: boolean;
   readonly acceptsWorkspaceCwd: boolean;
+  /** Present when the provider can serve Hosted permission Actions. */
+  readonly actions?: {
+    listPending(
+      sessionId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedAgentPendingAction[]>;
+    respond(
+      action: ManagedAgentPendingAction,
+      optionId: string,
+      options: ManagedAgentCommandOptions,
+    ): Promise<void>;
+  };
+  readonly toolResults?: ManagedToolResultReader;
+  readonly workspaceBinding?: {
+    readonly agentId: string;
+    list(
+      options: ManagedAgentRequestOptions & { cursor?: string; limit?: number },
+    ): Promise<{
+      data: ManagedAgentWorkspace[];
+      defaultWorkspace?: ManagedAgentWorkspace | null;
+      nextCursor?: string;
+      supported: boolean;
+    }>;
+    get(
+      workspaceId: string,
+      options: ManagedAgentRequestOptions,
+    ): Promise<ManagedAgentWorkspace>;
+    createEmpty(
+      request: { agentId: string; workspaceId: string; cwdRelative: string },
+      options: ManagedAgentCommandOptions,
+    ): Promise<{ sessionId: string }>;
+  };
   listSessions(
     options: ManagedAgentRequestOptions & {
       workspaceCwd?: string;
@@ -119,6 +186,22 @@ export interface ManagedAgentProvider {
   ): Promise<void>;
   subscribeEvents(
     sessionId: string,
-    options: ManagedAgentRequestOptions & { lastEventId?: number },
+    options: ManagedAgentRequestOptions & {
+      lastEventId?: number;
+      /**
+       * Called once the stream connection has been (re-)established. An
+       * established stream can stay silent indefinitely — heartbeats are
+       * not events — so this is the only liveness signal that does not
+       * depend on stream activity.
+       */
+      onEstablished?(): void;
+    },
   ): AsyncIterable<ManagedAgentSessionEvent>;
+}
+
+export interface ManagedAgentWorkspace {
+  workspaceId: string;
+  displayName: string;
+  state: string;
+  canCreateSession: boolean;
 }

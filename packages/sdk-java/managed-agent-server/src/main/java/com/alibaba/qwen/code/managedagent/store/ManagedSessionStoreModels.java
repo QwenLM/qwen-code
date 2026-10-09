@@ -17,11 +17,22 @@ public final class ManagedSessionStoreModels {
     public static final int MAX_RESOURCES_PER_TRANSACTION = 1024;
     public static final int MAX_TRANSACTION_BYTES = 8 * 1024 * 1024;
     public static final int MAX_TRANSACTION_EVENTS = 256;
+    /** The deepest record line the Session authority's reader accepts. */
+    public static final int MAX_JSON_DEPTH = 64;
+    /** The largest record line the authority's reader parses. */
+    public static final int MAX_EVENT_BYTES = 1024 * 1024;
+    /** The largest commit marker the authority's reader derives a digest of. */
+    public static final int MAX_COMMIT_MARKER_BYTES = 64 * 1024;
     public static final int MIN_WRITER_TOKEN_LENGTH = 32;
     public static final int MAX_WRITER_TOKEN_LENGTH = 512;
     public static final long MIN_LEASE_MILLIS = 1_000;
     public static final long MAX_LEASE_MILLIS = 300_000;
     public static final long MAX_SAFE_COUNTER = 9_007_199_254_740_990L;
+    /** Character widths of the head's activation columns (migration V36);
+     * a wider payload blanks the columns so authorization reads the journal.
+     * Character-based, matching the {@code .length()} checks on both writers. */
+    public static final int MAX_ACTIVATION_ID_CHARS = 512;
+    public static final int MAX_ACTIVATION_PHASE_CHARS = 32;
     public static final String ERROR_WRITER_CONFLICT =
             "managed_session_writer_conflict";
     public static final String ERROR_IDEMPOTENCY_CONFLICT =
@@ -30,6 +41,8 @@ public final class ManagedSessionStoreModels {
             "managed_session_resource_missing";
     public static final String ERROR_RESOURCE_NOT_FOUND =
             "managed_session_resource_not_found";
+    public static final String ERROR_WRITER_CREDENTIAL_INVALID =
+            "writer_credential_invalid";
     public static final String ERROR_OSS_DISABLED =
             "managed_session_oss_disabled";
     public static final String ERROR_INVALID_REQUEST =
@@ -45,6 +58,16 @@ public final class ManagedSessionStoreModels {
     private static final String DIGEST_PATTERN = "^[0-9a-f]{64}$";
 
     private ManagedSessionStoreModels() {
+    }
+
+    public record AuthorizeLifecycleRequest(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
+            String kind) {
+        public AuthorizeLifecycleRequest(String workspaceId, String writerId, long writerGeneration) {
+            this(workspaceId, writerId, writerGeneration, null);
+        }
     }
 
     public record AcquireWriterRequest(
@@ -101,6 +124,22 @@ public final class ManagedSessionStoreModels {
             @Min(0) long byteLength,
             @NotBlank @Pattern(regexp = DIGEST_PATTERN) String digest,
             @Size(max = 90_000) String bytesBase64) {
+    }
+
+    public record PublishToolResultRequest(
+            @NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 512) String writerId,
+            @Min(1) @Max(MAX_SAFE_COUNTER) long writerGeneration,
+            @NotBlank @Size(max = 512) String resourceId,
+            @NotBlank @Size(max = 512) String kind,
+            @Min(1) @Max(1) int schemaVersion,
+            @Min(1) @Max(1024 * 1024) long byteLength,
+            @NotBlank @Pattern(regexp = DIGEST_PATTERN) String digest,
+            @NotBlank @Size(max = 1_398_104) String bytesBase64) {
+    }
+
+    public record ToolResultResourceRef(String resourceId, String kind,
+            int schemaVersion, long byteLength, String digest) {
     }
 
     public record CommitTransactionRequest(

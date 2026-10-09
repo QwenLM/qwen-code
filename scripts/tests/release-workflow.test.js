@@ -94,7 +94,7 @@ const liveHostOssWorkflow = readFileSync(
 describe('CUA release workflow', () => {
   it('keeps the Node REPL package independently versioned', () => {
     expect(nodeReplPackage.name).toBe('@qwen-code/node-repl-mcp');
-    expect(nodeReplPackage.version).toBe('0.1.6');
+    expect(nodeReplPackage.version).toBe('0.1.7');
     expect(cuaReleaseWorkflow).toContain(
       "node_repl_version: '${{ steps.release.outputs.node_repl_version }}'",
     );
@@ -1157,6 +1157,24 @@ describe('release workflow', () => {
         rmSync(dir, { recursive: true, force: true });
       }
     }
+  });
+
+  it('stands down millisecond latency budgets on the shared ECS pool', () => {
+    // ci.yml's unit lane sets this on the same fleet predicate (#10870): a
+    // wall-clock budget written on a developer machine measures the
+    // neighbours on the shared pool, where one shard of the same suite
+    // measures 6.7 or 36 minutes depending on placement. The release lane
+    // runs the same suites on the same ecs-qwen hosts, so the budgets stand
+    // down here too — a pool-hosted shard otherwise reddens a release on
+    // contention while the commit itself is green. The relaxed
+    // poolMultiplier bound still applies where the duration is the property
+    // under test.
+    const testStep = releaseYaml.jobs.workspace_tests.steps.find(
+      (step) => step.name === 'Run Workspace Tests',
+    );
+    expect(testStep.env.QWEN_SKIP_LATENCY_BUDGETS).toBe(
+      "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}",
+    );
   });
 
   it('lets an operator retune the workspace shard timeout without a PR', () => {

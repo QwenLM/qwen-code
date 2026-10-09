@@ -22,7 +22,7 @@ W0c 上下文安装也有同样的缺口。Broker 的 managed-context/1 链路�
 
 范围内：#12748 中针对工具链路的 FG1–FG4 门禁，以及针对 W0c 上下文安装的 FG5 门禁，运行在真实服务、真实打包的 worker、真实 HTTP、真实数据库和真实进程死亡之上。
 
-范围外：Hosted Harness 的会话与 SSE 门禁、输出捕获与投递门禁（等 O1b–O3 之后）、managed agent server 在 W0c-3 中的存储所有权行与授权复核（由 `WorkspaceRuntimeTest` 单元测试覆盖）、Kubernetes 供给，以及 Stage G 故障转移。`scripts/run-managed-agent-server-e2e.ts` 的故障转移模式仍不进 CI。
+范围外：Hosted Harness 的会话与 SSE 门禁、输出捕获与投递门禁（等 O1b–O3 之后）、managed agent server 在 W0c-3 中的存储所有权行与授权复核（由 `WorkspaceRuntimeTest` 单元测试覆盖）、Kubernetes 供给，以及 Stage G 故障转移。`scripts/run-managed-agent-server-e2e.ts` 的三个故障转移模式（`--session-failover`、`--inflight-failover`、`--continuation-failover`）以及 `--big-output` 长回答与冷恢复模式都在 `hosted-harness-mysql` 任务中运行（#13258)；只有真实模型检查仍不进 CI（见[ Hosted Turn failover E2E](2026-09-30-hosted-turn-failover-e2e.zh-CN.md)）。
 
 ## 3. 设计
 
@@ -40,7 +40,7 @@ W0c 上下文安装也有同样的缺口。Broker 的 managed-context/1 链路�
    └─ JDBC ─► [TcpRelay，可按需切断] ─► H2 TCP server，文件型（测试 JVM）
 ```
 
-- `FaultGateBroker` 在独立 JVM 中运行生产的 `RuntimeBrokerService`，搭配 `JdbcRuntimeBindingRepository`、`JdbcRuntimeSessionRepository` 和 `JdbcToolExecutionRepository`。门禁把它作为子进程（`BrokerProcess`）启动，通过标准输入驱动 `warm`、`acquire`、`create`、`get`、`cancel`、`reconcile` 和 `release`。可以单独 SIGKILL Broker，此时它的 worker 继续运行，与 JVM 崩溃时一样；也可以用 SIGSTOP 和 SIGCONT 冻结、解冻它。门禁杀掉 Broker 时，挂在它上面的命令会在 JVM 退出后立即失败。
+- `FaultGateBroker` 在独立 JVM 中运行生产的 `RuntimeBrokerService`，搭配 `JdbcRuntimeBindingRepository`、`JdbcRuntimeSessionRepository` 和 `JdbcToolExecutionRepository`。门禁把它作为子进程（`BrokerProcess`）启动，通过标准输入驱动 `warm`、`acquire`、`create`（预留后启动）、`createImmediate`（立即派发的 `POST /executions` 路由）、`get`、`cancel`、`reconcile` 和 `release`。可以单独 SIGKILL Broker，此时它的 worker 继续运行，与 JVM 崩溃时一样；也可以用 SIGSTOP 和 SIGCONT 冻结、解冻它。门禁杀掉 Broker 时，挂在它上面的命令会在 JVM 退出后立即失败。
 - Broker 的 `HttpRuntimeTransport` 构建在一个以 `FaultProxy` 为代理的 `HttpClient` 上，所以发往 worker 的每个请求都经过它。代理转发每个请求，再对该操作施加下一个预定的故障：`DROP` 静默关闭，`RESET` 重置套接字，`DELAY` 延迟应答，`HOLD_REQUEST` 在放行前不转发，`HOLD_RESPONSE` 扣住 worker 的应答直到放行。代理在请求到达时记录它，门禁据此统计 Broker 发出的 transport 调用数。
 - worker 由生产的 `LocalProcessRuntimeProvisioner` 以 `node dist/cli.js managed-runtime-worker` 启动。工具调用是向工作区中标记文件追加内容的 `run_shell_command`，副作用次数以工具自己写入的内容计数。
 - 所有 Broker 共用一个文件型 H2 数据库，它位于测试 JVM 中的 TCP server 之后，因此重启的或第二个 Broker 看到的是相同记录，门禁也直接读取这些记录。前面的 `TcpRelay` 可以被切断：已打开的连接被重置，新连接被拒绝。
@@ -48,7 +48,7 @@ W0c 上下文安装也有同样的缺口。Broker 的 managed-context/1 链路�
 
 两个测试适配器补上了生产代码的缺口：
 
-- `FaultGateTransport`。v2 worker 契约没有 Session 动词，`HttpRuntimeTransport` 对 `acquire` 和 `release` 返回 501（`runtime_session_verb_unsupported`），所以只用生产 transport 时服务无法走到派发。适配器把 attest、execute、status 和 cancel 交给 `HttpRuntimeTransport`；除了下文的 `MANAGED` placement，它在本地应答这两个动词。工具契约设计把 Session 动词列为后续工作。
+- `FaultGateTransport`。`HttpRuntimeTransport` 已实现 Session 动词（acquire 在 Broker 本地应答；release 走 provider control 路由），适配器把两个动词都委托给生产 transport。在下文的 `MANAGED` placement 下，它的 acquire 还会通过 `HttpRuntimeTransport` 执行 W0c-3 式的上下文安装与激活。
 - `RecoverableProcessProvisioner`。`LocalProcessRuntimeProvisioner` 把 worker 归属保存在内存中，所以其他进程里的 Broker 永远观测不到这个 worker。适配器包装生产 provisioner（worker 仍由它启动、验证并持有），只增加一份记录：每个 worker 的 pid、启动时间和 endpoint。对本进程不持有的租约：记录中的进程存活且重新验证通过即为 `READY`，记录中的进程已消失即为 `NOT_FOUND`，没有记录则为 `UNKNOWN`。它代替了对账设计中列为后续工作的"可恢复本地进程供给"，让门禁能在真实 worker 上驱动服务的收养（#12627）和接管（#12477）路径。
 
 FG5 的门禁以 `MANAGED` placement 打开测试台：
@@ -81,7 +81,7 @@ FG5 针对 W0c 上下文安装再加上：
 | 门禁                         | 故障                                                                                                                                                      | 断言的结果                                                                                                                                                                                                                                                                                                                                 |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | FG1 对照                     | 无                                                                                                                                                        | warm 验证两次（provisioner，然后服务），acquire 再验证一次，调用结算为 `success`，标记只有一行，代理看到一次 execute，按 reference 的 `status` 返回已存储的结果。                                                                                                                                                                          |
-| FG2 execute 丢失             | worker 执行调用后，`DROP`、`RESET` 或 `DELAY` 超过 10 s 请求超时                                                                                          | 记录变为 `UNKNOWN`。相同 key 的重试返回该记录，不派发任何东西。直接发给 worker 的同一 reference 的 execute 并入原调用。`status` 返回已结算结果，`reconcileExecution` 据此解决记录。标记一行，execute 一次。                                                                                                                                |
+| FG2 execute 丢失             | worker 执行调用后，`DROP`、`RESET` 或 `DELAY` 超过 10 s 请求超时                                                                                          | 记录变为 `UNKNOWN`。相同 key 的重试返回该记录，不派发任何东西。直接发给 worker 的同一 reference 的 execute 并入原调用。`status` 返回已结算结果，`reconcileExecution` 据此解决记录。标记一行，execute 一次。预留后启动与立即派发两条路径都跑。                                                                                              |
 | FG2 status 丢失              | 对账查询先 `DROP`、再 `RESET`                                                                                                                             | 每次对账都以 `managed_runtime_unavailable` 可重试地失败，记录保持 `UNKNOWN` 且没有结果。下一次查询将其解决。                                                                                                                                                                                                                               |
 | FG2 cancel 丢失              | 在 `sleep 5` 命令期间 `DROP` cancel 应答                                                                                                                  | cancel 调用失败。worker 确实中止了命令，所以记录依据 execute 应答结算为 `cancelled`。命令尾部从未执行，`status` 返回相同结果。                                                                                                                                                                                                             |
 | FG2 attestation 丢失         | `DROP` provisioner 的验证，或服务的验证                                                                                                                   | warm 可重试地失败。绑定保持 `PROVISIONING` 且没有租约，未通过验证的 worker 被回收。下一次 warm 在同一绑定上达到 `READY`。                                                                                                                                                                                                                  |
@@ -122,7 +122,7 @@ FG4 存储门禁还钉住：数据库恢复后，没有任何东西重试失败�
 在仓库根目录构建好打包产物（`npm run build && npm run bundle`）后，在 `packages/sdk-java/runtime-broker` 中运行：
 
 ```bash
-mvn -Pfault-gates test   # 28 个门禁，约 2 分钟
+mvn -Pfault-gates test   # 全部门禁（目前 44 个），约 4 分钟
 mvn test                 # 默认测试集，不含门禁
 mvn checkstyle:check
 ```
@@ -159,9 +159,9 @@ mvn checkstyle:check
 
 - 信号无法可靠地让 Broker 停在 `claimDispatch` 与 execute 调用之间，即 #12477 修复的那个窗口；该窗口仍由它的单元测试覆盖。FG4 覆盖的是围绕它的进程级接管。
 - 门禁需要 POSIX 信号，在 CI 中运行于 Linux。
-- 收养期间 attestation 应答丢失未覆盖。Session 动词还没有 worker 路由；FG5 只覆盖托管 acquire 所做的安装与激活。
+- 收养期间 attestation 应答丢失未覆盖。Session 动词走 provider control 路由；FG5 只覆盖托管 acquire 所做的安装与激活。
 - FG5 检验的是 Broker 的 W0c-2 链路和 worker，而不是 managed agent server。`FaultGateTransport` 只模仿 W0c-3 的安装与激活调用；W0c-3 的存储所有权、授权复核和目录预检仍由 `WorkspaceRuntimeTest` 覆盖。
 - Broker 不为安装持久化任何东西，因此 FG5 没有存储故障门禁，围绕一次安装的双 Broker 接管也未覆盖。release（关闭这道门）的应答丢失同样未覆盖。
 - 重放得到的回执与原回执逐字节相同，所以回执无法区分重放和全新安装；FG5 通过把上下文目录移走来证明重放，因为全新安装在那里会被拒绝。安装与激活回执的校验由单元测试（`HttpRuntimeTransportTest`）覆盖；门禁从不篡改回执。
 - worker 关闭时仍停在激活门的调用继续推迟，与 worker 设计的记录一致。
-- 后续：在 MySQL 上运行崩溃与接管门禁；持久化本地收养与 #12670 落地后翻转两个钉子；`HttpRuntimeTransport` 实现 Session 动词后移除 `FaultGateTransport`。Broker 在上下文拒绝时关闭 Session，或把这种拒绝结算为 `not_started` 时，翻转上下文目录的钉子。
+- 后续：在 MySQL 上运行崩溃与接管门禁；持久化本地收养与 #12670 落地后翻转两个钉子。`FaultGateTransport` 现已把两个 Session 动词委托给 `HttpRuntimeTransport`（它仅剩的职责是 MANAGED placement 的安装与激活），此前"transport 实现 Session 动词后移除该适配器"的前提已经满足；适配器仅为该 placement 保留。Broker 在上下文拒绝时关闭 Session，或把这种拒绝结算为 `not_started` 时，翻转上下文目录的钉子。
