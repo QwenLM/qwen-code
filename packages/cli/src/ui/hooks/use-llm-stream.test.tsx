@@ -303,7 +303,11 @@ describe('useLlmStream', () => {
       vertexai: false,
       contextFileName: undefined,
       getToolRegistry: vi.fn(
-        () => ({ getToolSchemaList: vi.fn(() => []) }) as any,
+        () =>
+          ({
+            getToolSchemaList: vi.fn(() => []),
+            getAllToolNames: vi.fn(() => []),
+          }) as any,
       ),
       getProjectRoot: vi.fn(() => '/test/dir'),
       getFileCheckpointingEnabled: vi.fn(() => false),
@@ -499,6 +503,9 @@ describe('useLlmStream', () => {
   };
 
   it('sends a hidden Goal turn without user admission side effects', async () => {
+    vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+      getAllToolNames: () => ['tool_search', 'tool_call'],
+    } as unknown as ReturnType<Config['getToolRegistry']>);
     const permit = {
       goalId: 'goal-1',
       revision: 3,
@@ -545,7 +552,6 @@ describe('useLlmStream', () => {
         'Continue working on the active Goal.',
         'Use get_goal for the authoritative objective, the budget figures, and any verifier feedback.',
         'In Direct mode: If the get_goal or update_goal tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
-        'In Code Mode, discover missing Goal tools with tool_search and invoke them through exec using the returned JavaScript name.',
         "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
         'If completion depends on content delivered in this turn, deliver only that content in this turn, before update_goal.',
         'This is a synthetic continuation turn. It contains no new real user input and cannot satisfy an objective condition that requires the user to send, confirm, choose, approve, or provide something.',
@@ -614,6 +620,7 @@ describe('useLlmStream', () => {
     });
 
     const syntheticPrompt = streamMock.mock.calls[0]?.[0] as string;
+    expect(syntheticPrompt).not.toContain('tool_search');
     // The objective now reaches the model, but only inside the delimited data
     // block, JSON-escaped, and under both anti-spoofing guard lines.
     expect(syntheticPrompt).toContain(

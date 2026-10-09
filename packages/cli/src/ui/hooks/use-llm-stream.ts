@@ -3988,7 +3988,10 @@ export const useLlmStream = (
             submitType === SendMessageType.Goal
               ? queuedGoal
                 ? {
-                    queryToSend: renderGoalContinuationTurn(queuedGoal),
+                    queryToSend: renderGoalContinuationTurn(
+                      queuedGoal,
+                      config.getToolRegistry?.(),
+                    ),
                     shouldProceed: true,
                   }
                 : { queryToSend: null, shouldProceed: false }

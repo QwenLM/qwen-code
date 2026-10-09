@@ -14,6 +14,7 @@ import {
   replaceImagePayloadsInPlace,
   trailingReattachPartCount,
 } from './image-payload-references.js';
+import { appendAutoMemoryContext } from '../memory/request-context.js';
 import { modelText, userText } from '../test-utils/model-fixtures.js';
 
 const png = (data: string): Part => ({
@@ -417,5 +418,21 @@ describe('trailingReattachPartCount', () => {
   it('returns 0 when the last content carries no reattach marker', () => {
     expect(trailingReattachPartCount([userText('plain')])).toBe(0);
     expect(trailingReattachPartCount([])).toBe(0);
+  });
+
+  it('counts from the first mark when the catalog lands after a reattach region', () => {
+    // LlmChat appends the reattach region to the last user content and then
+    // hands the same history to appendAutoMemoryContext, so one tail holds two
+    // marked parts with unmarked parts between them. The count must run from
+    // the *first* mark: a findLastIndex reading would return 1 and place the
+    // cache breakpoint on a per-request block that is never read back, the
+    // regression #11627 was fixed for.
+    const contents = appendAutoMemoryContext(
+      [{ role: 'user', parts: [{ text: 'question' }, ...reattachFor('a')] }],
+      'CATALOG',
+    );
+
+    expect(contents.at(-1)!.parts).toHaveLength(5);
+    expect(trailingReattachPartCount(contents)).toBe(4);
   });
 });
