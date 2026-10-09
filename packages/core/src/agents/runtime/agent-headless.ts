@@ -71,7 +71,10 @@ const MAX_MODEL_VISIBLE_MESSAGE_LENGTH = MAX_MODEL_VISIBLE_ERROR_LENGTH - 100;
  * `\p{Cf}` covers the characters that reorder a row (U+202E) or hide text
  * (zero-width), which `stripAnsiAndControl` leaves alone and which would
  * otherwise survive into text that is rendered for a human and grepped by
- * later consumers. Same pass as `sanitizeForStderr` and `sanitizeDescription`.
+ * later consumers. Same clean step as `sanitizeForStderr`
+ * (`packages/cli/src/utils/errors.ts`); it is *not* the same pass as
+ * `sanitizeDescription`, which strips before it collapses whitespace and so
+ * welds the token boundaries this step exists to keep.
  */
 function collapseModelErrorText(text: string): string {
   return stripAnsiAndControl(text.replace(/\s+/g, ' '))
@@ -496,14 +499,17 @@ export class AgentHeadless implements SubagentExecutor {
         // Every Error goes through the cleaned copy, not only one long enough to
         // need the bound: `getErrorMessage` head-caps a composed
         // `<message> (cause: …)` at 1 000 RAW characters, so escape bytes in a
-        // shorter message still evict the folded cause.
+        // shorter message still evict the folded cause. A message that cleans
+        // to nothing falls back to the name rather than to the raw Error, which
+        // would spend that same cap on the very escape bytes the cleaning
+        // removed and leave the parent the truthy stub `...`.
         const cleanedMessage =
           error instanceof Error ? collapseModelErrorText(error.message) : '';
         const bounded =
-          error instanceof Error && cleanedMessage
+          error instanceof Error
             ? {
                 message: boundModelErrorText(
-                  cleanedMessage,
+                  cleanedMessage || error.name || 'Error',
                   MAX_MODEL_VISIBLE_MESSAGE_LENGTH,
                 ),
                 cause: error.cause,

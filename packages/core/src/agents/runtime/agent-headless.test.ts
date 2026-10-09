@@ -2093,6 +2093,25 @@ describe('subagent.ts', () => {
         expect(scope.getLastError()).toContain('socket hang up');
       });
 
+      it('keeps the folded cause when the message cleans to nothing (#13597)', async () => {
+        // A message made only of control characters cleans to '', and falling
+        // back to the raw Error there handed `getErrorMessage` a 2 000-character
+        // message for its 1 000-RAW-character head cap to spend on the escape
+        // bytes the cleaning removes — evicting the cause and leaving the parent
+        // the truthy stub '...', the unactionable-reason shape #13597 is about.
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(
+          Object.assign(new Error('\u0007'.repeat(2000)), {
+            cause: Object.assign(new Error('socket hang up'), {
+              code: 'ECONNRESET',
+            }),
+          }),
+        );
+        const scope = await createAgent(config);
+        await expect(scope.execute(new ContextState())).rejects.toBeDefined();
+        expect(scope.getLastError()).toContain('ECONNRESET');
+      });
+
       it('does not split a surrogate pair when bounding the message (#13597)', async () => {
         // The bound is a length, so an astral character can straddle it. This
         // text is persisted into chat history and the JSONL transcript, where
