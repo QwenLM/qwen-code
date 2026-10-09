@@ -786,6 +786,46 @@ it.each([
   },
 );
 
+it.each([
+  [
+    'replaces the tool input with a PreToolUse updatedInput',
+    { updatedInput: { changed: true }, tool_input: { legacy: true } },
+    { changed: true },
+  ],
+  [
+    'keeps the tool input for an invalid PreToolUse updatedInput',
+    { updatedInput: ['not', 'an', 'object'] },
+    { original: true },
+  ],
+])('%s like the local runner', async (_label, output, expected) => {
+  catalog = {
+    ...catalog,
+    hooks: ['first', 'second'].map((hookId) => ({
+      ...catalog.hooks[0],
+      hookId,
+      sequential: true,
+    })),
+  };
+  const seen: unknown[] = [];
+  execute = async (operation) => {
+    if (operation.hookId === 'second')
+      seen.push('tool_input' in operation.input && operation.input.tool_input);
+    return {
+      success: true,
+      outcome: 'success',
+      duration: 0,
+      output: { hookSpecificOutput: output },
+    };
+  };
+  await hooks.fire(
+    HookEventName.PreToolUse,
+    'replacement',
+    { tool_input: { original: true } },
+    signal(),
+  );
+  expect(seen).toEqual([expected]);
+});
+
 it('does not compose failed Hook output into later sequential inputs', async () => {
   catalog = {
     ...catalog,

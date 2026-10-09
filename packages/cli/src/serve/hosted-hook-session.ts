@@ -117,7 +117,10 @@ function sequentialInput(
   const output = result.output.hookSpecificOutput;
   return {
     ...effective,
-    ...(output?.['updatedInput'] && typeof output['updatedInput'] === 'object'
+    // PreToolUse replacements are validated by the shared helper above.
+    ...(event !== HookEventName.PreToolUse &&
+    output?.['updatedInput'] &&
+    typeof output['updatedInput'] === 'object'
       ? { tool_input: output['updatedInput'] }
       : {}),
     ...(typeof output?.['updatedPrompt'] === 'string'
