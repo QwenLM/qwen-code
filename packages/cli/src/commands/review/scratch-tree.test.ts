@@ -282,6 +282,103 @@ describe('runScratchTree', () => {
     expect(existsSync(pwned)).toBe(false);
   });
 
+  it.each([true, false])(
+    'screens a destination-only conditional filter before scratch checkout (repository-owned: %s)',
+    (controlled) => {
+      const canary = join(gitIsolation.home, 'destination-filter-ran');
+      const payload = join(
+        controlled ? repo : gitIsolation.home,
+        'destination-driver.cfg',
+      );
+      git(
+        repo,
+        'config',
+        '--file',
+        payload,
+        'filter.destination.smudge',
+        `touch ${shellQuotePath(canary)}; cat`,
+      );
+      if (controlled) git(repo, 'add', 'destination-driver.cfg');
+      const tree = scratchWorktreePath(worktree, 'verify--round-1--abc123');
+      const common = git(repo, 'rev-parse', '--absolute-git-dir');
+      git(
+        repo,
+        'config',
+        '--global',
+        `includeIf.gitdir:${common}/worktrees/${basename(tree)}.path`,
+        payload,
+      );
+      git(
+        repo,
+        'config',
+        'include.path',
+        join(gitIsolation.home, '.gitconfig'),
+      );
+      writeFileSync(
+        join(repo, '.git', 'info', 'attributes'),
+        '* filter=destination\n',
+      );
+
+      const report = run();
+      expect.soft(existsSync(canary)).toBe(!controlled);
+      expect.soft(report.available).toBe(!controlled);
+      if (controlled) {
+        expect(report.note).toContain('filter.destination.smudge');
+        expect(existsSync(join(tree, 'a.ts'))).toBe(false);
+        git(tree, 'checkout', '--force', '--detach', headSha);
+        expect(existsSync(canary)).toBe(true);
+      }
+    },
+  );
+
+  it("allows a repo-local include of the user's exact global filter source", () => {
+    const globalConfig = join(gitIsolation.home, '.gitconfig');
+    writeFileSync(
+      globalConfig,
+      '[filter "lfs"]\n\tclean = git-lfs clean -- %f\n',
+    );
+    git(worktree, 'config', 'include.path', globalConfig);
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+    expect(r.sharedTreeResidue).toEqual([]);
+    expect(r.sharedTreeUnmeasured).toContain('filter.lfs.clean');
+    expect(r.note).toContain('could not be measured');
+    expect(r.note).not.toContain('shared review worktree is NOT clean');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses checkout when effective-config enumeration is unavailable',
+    () => {
+      const realGit = execFileSync('which', ['git'], {
+        encoding: 'utf8',
+      }).trim();
+      const shimDir = join(repo, 'git-shim');
+      mkdirSync(shimDir);
+      const shim = join(shimDir, 'git');
+      writeFileSync(
+        shim,
+        '#!/bin/sh\n' +
+          'for arg do\n' +
+          '  [ "$arg" = "--show-scope" ] && exit 129\n' +
+          'done\n' +
+          `exec ${JSON.stringify(realGit)} "$@"\n`,
+      );
+      chmodSync(shim, 0o755);
+      const savedPath = process.env['PATH'];
+      try {
+        process.env['PATH'] = `${shimDir}:${savedPath ?? ''}`;
+        const result = run();
+        expect(result.available).toBe(false);
+        expect(result.note).toContain('git config exited 129');
+      } finally {
+        if (savedPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = savedPath;
+      }
+    },
+  );
+
   it("screens ANOTHER worktree's per-worktree config, not just this one's", () => {
     // The screen runs against the review worktree, but the checkout it
     // authorises runs in the SCRATCH tree — whose own
