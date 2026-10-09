@@ -4,7 +4,7 @@
 
 ## 问题与范围
 
-同一 Workspace 内切换 cwd 的持久化接口已经存在，但 WebShell Session 能力字段仍预留。浏览器需要明确的调用者支持与权限信号，才能提供操作入口。合并后的 W2 PR 中，BFF 部分仅实现 `capabilities.cwdChange`，在 OpenAPI v1.36 标记已实现并重新生成 WebShell 类型。[WebShell 设计](2026-10-09-managed-workspace-w2-webshell.zh-CN.md)说明同一 PR 交付的界面与恢复行为。能力变更不增加接口、表、operation 列表、公共能力或 WorkspaceContext 状态推导。
+同一 Workspace 内切换 cwd 的持久化接口已经存在，但 WebShell Session 能力字段仍预留。浏览器需要明确的调用者支持与权限信号，才能提供操作入口。合并后的 W2 PR 中，BFF 部分仅实现 `capabilities.cwdChange`，在 OpenAPI v1.37 标记已实现并重新生成 WebShell 类型。[WebShell 设计](2026-10-09-managed-workspace-w2-webshell.zh-CN.md)说明同一 PR 交付的界面与恢复行为。能力变更不增加接口、表、operation 列表、公共能力或 WorkspaceContext 状态推导。
 
 ## 权限与实现
 
