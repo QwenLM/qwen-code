@@ -7479,14 +7479,55 @@ describe('Server Config (config.ts)', () => {
 
     await config.refreshHierarchicalMemory();
 
-    // Context files stay in userMemory; the volatile auto-memory section is
-    // kept separate so prompt assembly can order stable → context → volatile.
+    // The system policy stays separate from the request-only catalog.
     expect(config.getUserMemory()).toContain('Project rules');
     expect(config.getUserMemory()).not.toContain('# auto memory');
     expect(config.getAutoMemoryPrompt()).toContain('# auto memory');
-    expect(config.getAutoMemoryPrompt()).toContain(
+    expect(config.getAutoMemoryPrompt()).not.toContain(
       '[Project Memory](project.md)',
     );
+    expect(config.getAutoMemoryContext()).toContain(
+      '[Project Memory](project.md)',
+    );
+  });
+
+  it('keeps policy stable through first save, update, no-op and deletion', async () => {
+    const config = makeConfig();
+    loadProjectRules();
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(null);
+    await config.refreshHierarchicalMemory();
+    const policy = config.getAutoMemoryPrompt();
+    const emptyCatalog = config.getAutoMemoryContext();
+    const scoped = Object.create(config) as Config;
+    scoped.getAutoMemoryPrompt = () => '';
+    expect(scoped.getAutoMemoryContext()).toBe('');
+
+    for (const index of ['- [First](first.md)', '- [Updated](updated.md)']) {
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(
+        mockAutoMemoryIndexRead(index),
+      );
+      await config.refreshHierarchicalMemory();
+      expect(config.getAutoMemoryPrompt()).toBe(policy);
+      expect(config.getAutoMemoryContext()).toContain(index);
+      expect(scoped.getAutoMemoryContext()).toBe('');
+    }
+    const populatedCatalog = config.getAutoMemoryContext();
+    await config.refreshHierarchicalMemory();
+    expect(config.getAutoMemoryContext()).toBe(populatedCatalog);
+
+    vi.mocked(readAutoMemoryIndexWithStats).mockRejectedValueOnce(
+      new Error('read failed'),
+    );
+    await expect(config.refreshHierarchicalMemory()).rejects.toThrow(
+      'read failed',
+    );
+    expect(config.getAutoMemoryPrompt()).toBe(policy);
+    expect(config.getAutoMemoryContext()).toBe(populatedCatalog);
+
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(null);
+    await config.refreshHierarchicalMemory();
+    expect(config.getAutoMemoryPrompt()).toBe(policy);
+    expect(config.getAutoMemoryContext()).toBe(emptyCatalog);
   });
 
   /**
@@ -7802,6 +7843,7 @@ describe('Server Config (config.ts)', () => {
       memoryRecallModeInitialized: true,
       memoryCorpusRevision: 'legacy-revision',
       autoMemoryPrompt: 'legacy prompt',
+      autoMemoryContext: 'legacy catalog',
     });
     vi.spyOn(config, 'isManagedMemoryAvailable').mockReturnValue(true);
     vi.spyOn(config, 'getManagedAutoMemoryEnabled').mockReturnValue(true);
@@ -7840,13 +7882,16 @@ describe('Server Config (config.ts)', () => {
       config.confirmMemoryRecallTransition(transition!),
     ).resolves.toBe(true);
 
+    expect(config.getAutoMemoryContext()).toBe('legacy catalog');
     config.commitMemoryRecallTransition(transition!);
+    expect(config.getAutoMemoryContext()).toBe('');
     expect(config.getMemoryRecallMode()).toBe('structured');
     expect(config.getAutoMemoryPrompt()).toBe(transition?.autoMemoryPrompt);
 
     config.rollbackMemoryRecallTransition(transition!);
     expect(config.getMemoryRecallMode()).toBe('legacy');
     expect(config.getAutoMemoryPrompt()).toBe('legacy prompt');
+    expect(config.getAutoMemoryContext()).toBe('legacy catalog');
 
     scan.mockResolvedValueOnce({ ready: true, revision: 'changed-revision' });
     await expect(
@@ -8004,6 +8049,49 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expectWarning(config, ALWAYS_ON_CONTEXT);
+  });
+
+  it('refreshHierarchicalMemory should count the request-only catalog in the context warning estimate', async () => {
+    // The warning is built from [userMemory, policy, catalog]. With
+    // the full protocol the policy alone already exceeds the small-window
+    // bound, so asserting only that the warning fires cannot tell which term
+    // it was built from — dropping the catalog keeps it green while the
+    // estimate under-reports by every MEMORY.md index line. Compare the quoted
+    // figure across two index sizes instead.
+    const warningTokenFigure = (config: Config) => {
+      const warning = config
+        .getWarnings()
+        .find((w) => w.includes(ALWAYS_ON_CONTEXT));
+      const match = /uses about ([\d,]+) tokens/.exec(warning ?? '');
+      expect(match).not.toBeNull();
+      return Number(match![1].replace(/,/g, ''));
+    };
+    const indexWithLines = (count: number) =>
+      '# Managed Auto-Memory Index\n\n' +
+      Array.from(
+        { length: count },
+        (_, i) => `- [Entry ${i}](entry-${i}.md) — remembered note`,
+      ).join('\n');
+    const refreshWithIndex = async (indexContent: string) => {
+      const config = makeConfig(smallWindow());
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValue(
+        memoryLoad({ memoryContent: 'short project rules', fileCount: 1 }),
+      );
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(
+        mockAutoMemoryIndexRead(indexContent),
+      );
+      await config.refreshHierarchicalMemory();
+      return config;
+    };
+
+    const smallIndex = warningTokenFigure(
+      await refreshWithIndex(indexWithLines(2)),
+    );
+    const largeIndex = warningTokenFigure(
+      await refreshWithIndex(indexWithLines(60)),
+    );
+
+    expect(largeIndex).toBeGreaterThan(smallIndex);
   });
 
   it('refreshHierarchicalMemory should warn when always-loaded context is large for the model window', async () => {
@@ -8770,6 +8858,7 @@ describe('Server Config (config.ts)', () => {
     const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
     Object.assign(config, {
       autoMemoryPrompt: 'structured prompt naming the old workspace',
+      autoMemoryContext: 'old workspace catalog',
       memoryRecallMode: 'structured',
     });
     vi.mocked(loadServerHierarchicalMemory).mockRejectedValueOnce(
@@ -8781,6 +8870,7 @@ describe('Server Config (config.ts)', () => {
     expect(result.memoryRefreshError).toEqual(new Error('memory failed'));
     expect(config.getMemoryRecallMode()).toBe('legacy');
     expect(config.getAutoMemoryPrompt()).toBe('');
+    expect(config.getAutoMemoryContext()).toBe('');
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();
@@ -8826,7 +8916,10 @@ describe('Server Config (config.ts)', () => {
       expect(readAutoMemoryIndexWithStats).not.toHaveBeenCalled();
     } else {
       expect(config.getAutoMemoryPrompt()).toContain('# auto memory');
-      expect(config.getAutoMemoryPrompt()).toContain(
+      expect(config.getAutoMemoryPrompt()).not.toContain(
+        'MEMORY.md is currently empty',
+      );
+      expect(config.getAutoMemoryContext()).toContain(
         'MEMORY.md is currently empty',
       );
     }

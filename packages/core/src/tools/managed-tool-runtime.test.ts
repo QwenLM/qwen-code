@@ -717,6 +717,156 @@ describe('ManagedToolRuntime', () => {
     expect(tool.invocations).toHaveLength(1025);
   });
 
+  it.each([
+    ['a replacement', { shouldProceed: true }, { value: 'rewritten' }],
+    ['an empty replacement', { shouldProceed: true }, {}],
+    ['an identical replacement', { shouldProceed: true }, input],
+    ['an ask replacement', { shouldProceed: false, blockType: 'ask' }, {}],
+  ])(
+    'refuses %s without running the tool',
+    async (_label, decision, updatedInput) => {
+      hooks.pre.mockResolvedValue({
+        ...decision,
+        additionalContext: 'ctx',
+        updatedInput,
+      });
+      tool.setup = (invocation) => {
+        invocation.getDefaultPermission.mockResolvedValue('ask');
+      };
+      const ref = await prepare();
+      await runtime.confirm(ref, ToolConfirmationOutcome.ProceedOnce);
+
+      const result = await runtime.preflight(ref);
+      expect(result).toEqual({
+        shouldProceed: false,
+        blockType: 'denied',
+        blockReason: expect.stringContaining('not supported'),
+        additionalContext: 'ctx',
+      });
+      expect(await runtime.preflight(ref)).toEqual(result);
+      await expect(
+        runtime.confirm(
+          ref,
+          ToolConfirmationOutcome.ProceedOnce,
+          undefined,
+          'preflight',
+        ),
+      ).rejects.toThrow('did not request');
+      expect(() => runtime.execute(ref)).toThrow('preflight');
+      expect(hooks.pre).toHaveBeenCalledTimes(1);
+      expect(tool.invocations[0].execute).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['denied', 'policy'],
+    ['stop', 'halt'],
+  ])(
+    'keeps a %s reason that comes with a replacement',
+    async (blockType, blockReason) => {
+      hooks.pre.mockResolvedValue({
+        shouldProceed: false,
+        blockType,
+        blockReason,
+        updatedInput: { value: 'rewritten' },
+      });
+      const ref = await prepare();
+      expect(await runtime.preflight(ref)).toEqual({
+        shouldProceed: false,
+        blockType,
+        blockReason,
+      });
+      expect(() => runtime.execute(ref)).toThrow('preflight');
+    },
+  );
+
+  it('refuses a real command hook replacement through the hook pipeline', async () => {
+    const { HookSystem } = await import('../hooks/hookSystem.js');
+    const { PermissionMode } = await import('../hooks/types.js');
+    const actual = await vi.importActual<
+      typeof import('../core/toolHookTriggers.js')
+    >('../core/toolHookTriggers.js');
+    hooks.pre.mockImplementation(actual.firePreToolUseHook);
+    const { mkdtemp, writeFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const outputFile = join(
+      await mkdtemp(join(tmpdir(), 'managed-hook-')),
+      'output.json',
+    );
+    await writeFile(
+      outputFile,
+      JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          updatedInput: { value: 'rewritten' },
+        },
+      }),
+    );
+    Object.assign(config, {
+      getAllowedHttpHookUrls: () => [],
+      getAllowPrivateNetworkHooks: () => false,
+      getSystemHooks: () => ({}),
+      getUserHooks: () => ({
+        PreToolUse: [
+          {
+            hooks: [
+              {
+                type: 'command',
+                command: `cat '${outputFile}'`,
+              },
+            ],
+          },
+        ],
+      }),
+      getProjectHooks: () => ({}),
+      getExtensions: () => [],
+      isTrustedFolder: () => true,
+      getTranscriptPath: () => '/tmp/transcript',
+      getWorkingDir: () => process.cwd(),
+      getSessionSourceType: () => undefined,
+      getSessionSourceId: () => undefined,
+      getUsageStatisticsEnabled: () => false,
+    });
+    const system = new HookSystem(config);
+    config.getHookSystem = () => system;
+    await system.initialize();
+    const owner = { runtimeId: system.runtimeId, sessionId, agentId: null };
+    const request = vi.fn(
+      async (
+        message: import('../confirmation-bus/types.js').HookExecutionRequest,
+      ) => ({
+        success: true,
+        output: await runWithHookExecutionOwner(message.owner, () =>
+          system.firePreToolUseEvent(
+            String(message.input['tool_name']),
+            message.input['tool_input'] as Record<string, unknown>,
+            String(message.input['tool_use_id']),
+            PermissionMode.Default,
+          ),
+        ),
+      }),
+    );
+    config.getMessageBus = () =>
+      ({ request, publish: vi.fn() }) as unknown as ReturnType<
+        Config['getMessageBus']
+      >;
+    const ref = await runWithHookExecutionOwner(owner, () => prepare());
+    const result = await runWithHookExecutionOwner(owner, () =>
+      runtime.preflight(ref),
+    );
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      shouldProceed: false,
+      blockType: 'denied',
+      blockReason: expect.stringContaining('not supported'),
+    });
+    expect(result).not.toHaveProperty('updatedInput');
+    expect(() => runtime.execute(ref)).toThrow('preflight');
+    expect(tool.invocations[0].execute).not.toHaveBeenCalled();
+  });
+
   it('runs the preflight hook once across the second confirmation bounce', async () => {
     hooks.pre.mockResolvedValue({ shouldProceed: false, blockType: 'ask' });
     const ref = await prepare();
