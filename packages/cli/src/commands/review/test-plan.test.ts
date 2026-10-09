@@ -186,6 +186,25 @@ describe('extractClaims', () => {
     expect(claims[0].text).toBe('471 tests passed');
   });
 
+  it.each([
+    ['2,239 passed', '2,239 passed'],
+    ['2,239 tests passed', '2,239 tests passed'],
+    ['expect 1,234 tests to pass', '1,234 tests to pass'],
+    ['Tests: 12,345 passed', 'Tests: 12,345 passed'],
+    ['1,234,567 passed', '1,234,567 passed'],
+  ])('preserves the full grouped count in %s', (text, claim) => {
+    expect(extractClaims(text).filter((c) => c.kind === 'count')).toEqual([
+      { kind: 'count', text: claim },
+    ]);
+  });
+
+  it.each(['PR 1,234', '12,34 passed', '1,234,56 passed', 'x123 passed'])(
+    'does not extract a count from %s',
+    (text) => {
+      expect(extractClaims(text).filter((c) => c.kind === 'count')).toEqual([]);
+    },
+  );
+
   it('does not extract a Test Files file-count line as a test-count claim', () => {
     // A pasted vitest summary nests 'Test Files  3 passed (3)' above
     // 'Tests  157 passed (157)'. The file-count line must not produce a
@@ -1008,6 +1027,23 @@ describe('runTestPlan', () => {
     it('reproduces a count a suite in this review reported', () => {
       const r = run('## Test Plan\n\n471 tests passed', [], withCounts(471));
       expect(verdictOf(r.claims, '471 tests passed')).toBe('reproduces');
+    });
+
+    it.each([
+      ['2,239 passed', 2239],
+      ['2,239 tests passed', 2239],
+      ['1,234 tests to pass', 1234],
+      ['Tests: 12,345 passed', 12345],
+      ['1,234,567 passed', 1234567],
+    ])('compares the full grouped count in %s', (text, count) => {
+      const r = run(`## Test Plan\n\n${text}`, [], withCounts(count));
+      expect(r.claims).toHaveLength(1);
+      expect(r.claims[0]).toMatchObject({
+        kind: 'count',
+        text,
+        verdict: 'reproduces',
+        observed: `${count} passed`,
+      });
     });
 
     it('reports a mismatch as `differs`, NOT as a contradiction', () => {
