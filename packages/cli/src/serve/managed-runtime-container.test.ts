@@ -80,14 +80,17 @@ async function bootFile(contents: string): Promise<string> {
 
 // The fixed container port 43190 collides with whatever else holds it on a
 // shared CI host (EADDRINUSE, #13775): keep asserting the requested
-// (43190, '0.0.0.0') bind while the real socket uses an ephemeral loopback
-// port, the pattern managed-runtime-attestation-worker.test.ts established.
+// (43190, '0.0.0.0') bind while the real socket binds an ephemeral port on
+// the requested host, the pattern managed-runtime-attestation-worker.test.ts
+// established. Only the port is overridden — forcing loopback here would
+// make the ready.url host assertion below self-referential.
 function mockEphemeralListen() {
   const nativeListen = Server.prototype.listen;
   return vi.spyOn(Server.prototype, 'listen').mockImplementation(function (
     this: Server,
+    ...args: unknown[]
   ) {
-    return Reflect.apply(nativeListen, this, [0, '127.0.0.1']);
+    return Reflect.apply(nativeListen, this, [0, ...args.slice(1)]);
   });
 }
 
