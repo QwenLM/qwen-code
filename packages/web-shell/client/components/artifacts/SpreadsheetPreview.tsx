@@ -55,11 +55,13 @@ export default function SpreadsheetPreview({
   const sheetTabsRef = useRef<HTMLDivElement>(null);
   const focusSheetTabRef = useRef(false);
   useEffect(() => {
+    const active = sheetTabsRef.current?.querySelector<HTMLButtonElement>(
+      '[data-state="active"]',
+    );
+    active?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     if (focusSheetTabRef.current) {
       focusSheetTabRef.current = false;
-      sheetTabsRef.current
-        ?.querySelector<HTMLButtonElement>('[data-state="active"]')
-        ?.focus();
+      active?.focus();
     }
   }, [sheetIndex]);
   useEffect(() => {
@@ -181,7 +183,7 @@ export default function SpreadsheetPreview({
             size="icon"
             className="h-6 w-6 shrink-0"
             aria-label={t('excel.previousWorksheets')}
-            disabled={sheetTabStart === 0}
+            disabled={!!error || sheetTabStart === 0}
             onClick={() => setSheetIndex(sheetTabStart - 1)}
           >
             <ChevronLeftIcon />
@@ -194,6 +196,7 @@ export default function SpreadsheetPreview({
             aria-label={t('excel.worksheet')}
             className="-mb-px min-w-0 flex-1 justify-start gap-1 overflow-x-auto p-0 group-data-horizontal/tabs:h-6"
             onKeyDownCapture={(event) => {
+              if (error) return;
               const next =
                 event.key === 'ArrowRight'
                   ? Math.min(sheetIndex + 1, workbook.sheetNames.length - 1)
@@ -220,6 +223,7 @@ export default function SpreadsheetPreview({
                   key={sheetTabStart + offset}
                   value={String(sheetTabStart + offset)}
                   title={name}
+                  disabled={!!error}
                   className="h-6 max-w-48 flex-none rounded-none rounded-t-lg border-border bg-muted/40 px-4 py-0 text-xs font-normal text-foreground after:hidden data-[state=active]:border-b-background data-[state=active]:bg-background data-[state=active]:text-[var(--agent-blue-400)] dark:data-[state=active]:text-[var(--agent-blue-400)]"
                 >
                   <span className="truncate">{name}</span>
@@ -235,7 +239,7 @@ export default function SpreadsheetPreview({
             size="icon"
             className="h-6 w-6 shrink-0"
             aria-label={t('excel.nextWorksheets')}
-            disabled={sheetTabEnd === workbook.sheetNames.length}
+            disabled={!!error || sheetTabEnd === workbook.sheetNames.length}
             onClick={() => setSheetIndex(sheetTabEnd)}
           >
             <ChevronRightIcon />
@@ -246,7 +250,10 @@ export default function SpreadsheetPreview({
             <a
               href={downloadUrl}
               download={workspacePath.split(/[/\\]/).pop()}
-              onClick={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                setDownloadError(undefined);
+              }}
             >
               <DownloadIcon />
               {t('common.download')}
@@ -450,7 +457,7 @@ function SpreadsheetTable({ sheet }: { sheet: ExcelPreviewSheet }) {
                       className="border-b border-r border-border px-2 py-1 align-top whitespace-pre-wrap break-words"
                     >
                       {cell?.uncalculated ? (
-                        <span className="text-muted-foreground">
+                        <span>
                           ={cell.formula} ({t('excel.notCalculated')})
                         </span>
                       ) : (

@@ -39,17 +39,23 @@ border hidden to join a narrow panel-colored gap above the grid. Allow horizonta
 overflow and keyboard arrow navigation, and reset scrolling when switching sheets.
 Mount at most 50 tabs at a time, with previous/next group buttons; retain every
 worksheet and its original index. Arrow keys cross groups and Home/End reach the
-first/last worksheet. Download failures have a separate status and do not discard
-a successful preview. The row-number gutter defaults to a 56 px minimum and grows
+first/last worksheet. Group navigation scrolls the active tab into view without
+moving keyboard focus. Disable worksheet controls after a preview failure until
+retry. Download failures have a separate status and do not discard
+a successful preview; a new download attempt clears the previous download error.
+The row-number gutter defaults to a 56 px minimum and grows
 with the row-number digits in the current font, using tabular numerals.
 
 ExcelJS reads workbook data. Use the small SSF formatter for Excel number formats
 instead of implementing a custom number-format parser. Preserve formula cached
 results (including zero/false), errors, rich text as plain text, and formulas
-without results as explicitly uncalculated. Do not execute formulas or hyperlinks.
+without results as explicitly uncalculated. Format typed hyperlink labels through
+the same value formatter and display them only as plain text. Do not execute formulas or hyperlinks.
 Use a white cell canvas so document colors remain readable in dark mode.
 Show basic explicit RGB colors, bold/italic text, alignment, and merges; complex
 styles/themes and embedded objects are outside this preview's fidelity guarantee.
+If an explicit foreground or fill cannot be represented, fall back both colors
+to black on white together. Uncalculated annotations inherit the cell text color.
 
 Limit preview input to 10 MiB and each selected sheet to 100,000 grid cells,
 including empty positions inside the content/merge extent. Ignore peripheral

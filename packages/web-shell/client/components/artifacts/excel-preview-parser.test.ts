@@ -162,9 +162,105 @@ describe('Excel preview projection', () => {
         formula: 'SUM(A1:A2)',
         uncalculated: true,
       });
-      expect(parsed.rows[2]![0]?.text).toBe('<script>alert(1)</script>');
+      expect(parsed.rows[2]![0]).toEqual({
+        text: '<script>alert(1)</script>',
+        style: {},
+      });
     },
   );
+
+  it('formats typed hyperlink values as plain strings after loading', async () => {
+    const book = new ExcelJS.Workbook();
+    const sheet = book.addWorksheet('Links');
+    sheet.addRow([
+      { richText: [{ text: 'Link ' }, { text: 'here' }] },
+      new Date('2026-10-08T00:00:00Z'),
+      1234.5,
+      true,
+      { formula: 'HYPERLINK("https://example.test",1234.5)', result: 1234.5 },
+    ]);
+    sheet.getCell('B1').numFmt = 'yyyy-mm-dd';
+    sheet.getCell('C1').numFmt = '#,##0.00';
+    sheet.getCell('E1').numFmt = '#,##0.00';
+    // OOXML hyperlink relationships preserve the underlying typed cell values.
+    const zip = await JSZip.loadAsync(await book.xlsx.writeBuffer());
+    const xmlPath = 'xl/worksheets/sheet1.xml';
+    const xml = await zip.file(xmlPath)!.async('string');
+    zip.file(
+      xmlPath,
+      xml.replace(
+        '</sheetData>',
+        '</sheetData><hyperlinks>' +
+          ['A1', 'B1', 'C1', 'D1']
+            .map((ref) => `<hyperlink ref="${ref}" r:id="rId1"/>`)
+            .join('') +
+          '</hyperlinks>',
+      ),
+    );
+    zip.file(
+      'xl/worksheets/_rels/sheet1.xml.rels',
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.test" TargetMode="External"/>' +
+        '</Relationships>',
+    );
+    const loaded = await loadExcelWorkbook(
+      await zip.generateAsync({ type: 'arraybuffer' }),
+    );
+    expect(loaded.worksheets[0]!.getCell('A1').hyperlink).toBe(
+      'https://example.test',
+    );
+    expect(
+      projectExcelSheet(loaded, 0).rows[0]!.map((cell) => cell?.text),
+    ).toEqual(['Link here', '2026-10-08', '1,234.50', 'TRUE', '1,234.50']);
+  });
+
+  it('falls back both colors when an explicit color or fill is unsupported', async () => {
+    const book = new ExcelJS.Workbook();
+    const sheet = book.addWorksheet('Colors');
+    sheet.addRow([
+      'Theme fill',
+      'Gradient',
+      'Pattern',
+      'Theme font',
+      'Indexed font',
+    ]);
+    for (const column of ['A', 'B', 'C'])
+      sheet.getCell(`${column}1`).font = { color: { argb: 'FFFFFFFF' } };
+    sheet.getCell('A1').fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { theme: 4 },
+    };
+    sheet.getCell('B1').fill = {
+      type: 'gradient',
+      gradient: 'angle',
+      degree: 0,
+      stops: [
+        { position: 0, color: { argb: 'FF000000' } },
+        { position: 1, color: { argb: 'FF1F4E79' } },
+      ],
+    };
+    sheet.getCell('C1').fill = {
+      type: 'pattern',
+      pattern: 'lightGrid',
+      fgColor: { argb: 'FF1F4E79' },
+    };
+    for (const column of ['D', 'E']) {
+      sheet.getCell(`${column}1`).font = {
+        color: column === 'D' ? { theme: 0 } : { indexed: 2 },
+      };
+      sheet.getCell(`${column}1`).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FF1F4E79' },
+      };
+    }
+    const projected = projectExcelSheet(await preview(book), 0);
+    for (const cell of projected.rows[0]!) {
+      expect(cell?.style.color).toBeUndefined();
+      expect(cell?.style.backgroundColor).toBeUndefined();
+    }
+  });
 
   it('keeps merged masters and basic styles without duplicating their values', async () => {
     const book = new ExcelJS.Workbook();

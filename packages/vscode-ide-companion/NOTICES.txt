@@ -14715,7 +14715,7 @@ IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 
 ============================================================
-brace-expansion@2.1.4
+brace-expansion@2.1.7
 (git://github.com/juliangruber/brace-expansion.git)
 
 MIT License

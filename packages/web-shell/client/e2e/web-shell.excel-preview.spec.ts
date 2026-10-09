@@ -415,7 +415,9 @@ test('keeps large worksheets virtual while scrolling through wrapped and merged 
     table.getByRole('cell', { name: 'Record 1', exact: true }),
   ).toBeVisible();
   await expect(
-    preview.getByRole('button', { name: /Next page|Previous page/ }),
+    preview.getByRole('button', {
+      name: /Next worksheets|Previous worksheets/,
+    }),
   ).toHaveCount(0);
   expect(await table.locator('tbody tr[data-index]').count()).toBeLessThan(70);
   expect(
@@ -475,7 +477,9 @@ test('keeps large worksheets virtual while scrolling through wrapped and merged 
   });
   await expect(lastRowNumber).toBeVisible();
   await preview.getByRole('table').evaluate((element) => {
-    element.style.fontFamily = '"Arial Black", monospace';
+    element.style.fontSize = '20px';
+    // Stress digit width without changing the virtualizer's measured row height.
+    element.style.lineHeight = '20px';
   });
   expect(
     await lastRowNumber.evaluate(

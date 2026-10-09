@@ -27,7 +27,8 @@ function displayValue(
   if (typeof value === 'object' && 'error' in value) return value.error;
   if (typeof value === 'object' && 'richText' in value)
     return value.richText.map((part) => part.text).join('');
-  if (typeof value === 'object' && 'hyperlink' in value) return value.text;
+  if (typeof value === 'object' && 'hyperlink' in value)
+    return displayValue(value.text, numberFormat, date1904);
   if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
   if (typeof value === 'number' || value instanceof Date) {
     const numeric =
@@ -54,6 +55,17 @@ function previewCell(cell: Cell, date1904: boolean): ExcelPreviewCell {
     cell.type === ExcelJS.ValueType.Formula ? cell.result : cell.value;
   const alignment = cell.alignment?.horizontal;
   const fill = cell.fill;
+  const color = rgb(cell.font?.color?.argb);
+  const backgroundColor =
+    fill?.type === 'pattern' && fill.pattern === 'solid'
+      ? rgb(fill.fgColor?.argb)
+      : undefined;
+  // Fall back together when an explicit color is unsupported, keeping text readable.
+  const unsupportedColors =
+    (cell.font?.color && !color) ||
+    (fill &&
+      !(fill.type === 'pattern' && fill.pattern === 'none') &&
+      !backgroundColor);
   return {
     text: displayValue(value, cell.numFmt, date1904),
     ...(formula
@@ -62,11 +74,8 @@ function previewCell(cell: Cell, date1904: boolean): ExcelPreviewCell {
     style: {
       fontWeight: cell.font?.bold ? 'bold' : undefined,
       fontStyle: cell.font?.italic ? 'italic' : undefined,
-      color: rgb(cell.font?.color?.argb),
-      backgroundColor:
-        fill?.type === 'pattern' && fill.pattern === 'solid'
-          ? rgb(fill.fgColor?.argb)
-          : undefined,
+      color: unsupportedColors ? undefined : color,
+      backgroundColor: unsupportedColors ? undefined : backgroundColor,
       textAlign:
         alignment === 'left' ||
         alignment === 'center' ||

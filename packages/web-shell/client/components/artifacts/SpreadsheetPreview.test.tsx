@@ -41,7 +41,6 @@ async function render(data: Blob, path = 'report.xlsx') {
         <SpreadsheetPreview data={data} workspacePath={path} />
       </I18nProvider>,
     );
-    await new Promise((resolve) => setTimeout(resolve, 0));
   });
 }
 
@@ -77,6 +76,7 @@ describe('SpreadsheetPreview', () => {
   });
 
   it('bounds mounted tabs while every worksheet remains keyboard reachable', async () => {
+    const scrollIntoView = vi.spyOn(Element.prototype, 'scrollIntoView');
     await render(blob());
     const worker = workers[0]!;
     act(() =>
@@ -93,11 +93,24 @@ describe('SpreadsheetPreview', () => {
     const next = container.querySelector<HTMLButtonElement>(
       '[aria-label="Next worksheets"]',
     )!;
+    const tabList = container.querySelector<HTMLElement>('[role="tablist"]')!;
+    tabList.scrollLeft = 3200;
     act(() => next.click());
     expect(worker.postMessage).toHaveBeenLastCalledWith({
       type: 'sheet',
       index: 50,
     });
+    const active = container.querySelector('[role="tab"][data-state="active"]');
+    expect(scrollIntoView.mock.contexts).toContain(active);
+    const previous = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Previous worksheets"]',
+    )!;
+    act(() => previous.click());
+    expect(worker.postMessage).toHaveBeenLastCalledWith({
+      type: 'sheet',
+      index: 49,
+    });
+    act(() => next.click());
     const key = (value: string) =>
       act(() => {
         container
@@ -129,6 +142,10 @@ describe('SpreadsheetPreview', () => {
       index: 0,
     });
     expect(document.activeElement?.textContent).toBe('Sheet 0');
+    expect(previous.disabled).toBe(true);
+    const requests = worker.postMessage.mock.calls.length;
+    act(() => previous.click());
+    expect(worker.postMessage).toHaveBeenCalledTimes(requests);
   });
 
   it('keeps a loaded preview usable when an overlapping download fails', async () => {
@@ -209,6 +226,11 @@ describe('SpreadsheetPreview', () => {
     expect(container.querySelector('[role="status"]')?.textContent).toContain(
       'Download failed',
     );
+    const download = container.querySelector<HTMLAnchorElement>('a[download]')!;
+    download.addEventListener('click', (event) => event.preventDefault());
+    await act(async () => download.click());
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(container.querySelector('table')?.textContent).toContain('Revenue');
     act(() =>
       container.querySelectorAll<HTMLButtonElement>('[role="tab"]')[1]!.focus(),
     );
@@ -407,7 +429,10 @@ describe('SpreadsheetPreview', () => {
           sheet: {
             ...sheet,
             name: 'Small',
-            rows: [[{ text: 'Selected sheet', style: {} }]],
+            rows: [
+              [{ text: 'Selected sheet', style: {} }],
+              [{ text: '', formula: '1+1', uncalculated: true, style: {} }],
+            ],
           },
         },
       }),
@@ -415,23 +440,15 @@ describe('SpreadsheetPreview', () => {
     expect(container.querySelector('table')?.textContent).toContain(
       'Selected sheet',
     );
+    const annotation = container.querySelector('td span')!;
+    expect(annotation.textContent).toContain('Not calculated');
+    expect(annotation.classList.contains('text-muted-foreground')).toBe(false);
     expect(worker.terminate).not.toHaveBeenCalled();
   });
 
   it('shows a timeout with a downloadable original and ignores late worker messages', async () => {
-    await render(blob());
     vi.useFakeTimers();
-    // The worker timer starts during render, so rerender with fake timers active.
-    await act(async () =>
-      root.render(
-        <I18nProvider language="en">
-          <SpreadsheetPreview data={blob()} workspacePath="slow.xlsx" />
-        </I18nProvider>,
-      ),
-    );
-    await act(async () => {
-      await Promise.resolve();
-    });
+    await render(blob(), 'slow.xlsx');
     act(() => vi.advanceTimersByTime(30000));
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(
       'took too long',
@@ -453,25 +470,17 @@ describe('SpreadsheetPreview', () => {
   });
 
   it('gives the selected sheet its own timeout and ignores a result after it expires', async () => {
-    await render(blob());
     vi.useFakeTimers();
-    await act(async () => {
-      root.render(
-        <I18nProvider language="en">
-          <SpreadsheetPreview data={blob()} workspacePath="slow-sheet.xlsx" />
-        </I18nProvider>,
-      );
-    });
-    await act(async () => {
-      await Promise.resolve();
-    });
+    await render(blob(), 'slow-sheet.xlsx');
     const worker = workers.at(-1)!;
     act(() => vi.advanceTimersByTime(29000));
     act(() =>
       worker.onmessage?.({
         data: {
           type: 'loaded',
-          workbook: { sheetNames: ['Slow'] },
+          workbook: {
+            sheetNames: Array.from({ length: 60 }, (_, i) => `Slow ${i}`),
+          },
         },
       }),
     );
@@ -483,6 +492,15 @@ describe('SpreadsheetPreview', () => {
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(
       'took too long',
     );
+    const requests = worker.postMessage.mock.calls.length;
+    for (const button of container.querySelectorAll<HTMLButtonElement>(
+      '[role="tab"], [aria-label="Next worksheets"], [aria-label="Previous worksheets"]',
+    )) {
+      expect(button.disabled).toBe(true);
+      act(() => button.click());
+    }
+    expect(worker.postMessage).toHaveBeenCalledTimes(requests);
+    expect(container.querySelector('a')?.download).toBe('slow-sheet.xlsx');
     act(() =>
       worker.onmessage?.({
         data: {
