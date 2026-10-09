@@ -29,6 +29,66 @@ import org.junit.jupiter.api.Test;
 
 class RuntimeBrokerHttpServerTest {
     @Test
+    void privateHistoryControlErrorsAreNotCachedOrDispatchedToAnOrdinaryRuntime() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            HttpResponse<String> response = fixture.post("/tool-sessions/runtime/control", Map.of(
+                    "protocolVersion", 1, "requestId", "history-bind", "harnessSessionId", "harness",
+                    "operation", Map.of("kind", "csi-file-history", "version", 1, "action", "bind")));
+            assertEquals(409, response.statusCode(), response.body());
+            assertTrue(response.body().contains("runtime_control_invalid"), response.body());
+            assertEquals("no-store", response.headers().firstValue("Cache-Control").orElseThrow());
+            assertEquals(0, fixture.transport.controls.get());
+            assertEquals(0, fixture.transport.executions.get());
+        }
+    }
+
+    @Test
+    void nativeReadUsesSeparateOriginalCredentialAndStrictBoundedEnvelope() throws Exception {
+        var suite = new com.fasterxml.jackson.databind.ObjectMapper().readTree(
+                ManagedRuntimeAttestationConformanceTest.contractDirectory()
+                        .resolve("managed-csi-native-readback-v1.fixtures.json").toFile());
+        Map<String, Object> request = JsonCodec.parseObject(suite.path("valid").get(0).path("request").toString().getBytes(StandardCharsets.UTF_8), "fixture request");
+        Map<String, Object> response = JsonCodec.parseObject(suite.path("valid").get(0).path("response").toString().getBytes(StandardCharsets.UTF_8), "fixture response");
+        AtomicInteger reads = new AtomicInteger();
+        try (Fixture fixture = new Fixture(false, (credential, body) -> {
+            reads.incrementAndGet();
+            if (!"original-runtime-token".equals(credential)) {
+                throw new RuntimeBrokerException(401, "csi_native_readback_unauthorized", "Original credential differs", false);
+            }
+            return response;
+        })) {
+            URI path = fixture.server.getBaseUri().resolve(CsiNativeReadbackProtocol.PATH);
+            for (String credential : List.of("secret", "original-runtime-token")) {
+                var result = fixture.client.send(HttpRequest.newBuilder(path)
+                        .header("Authorization", "Bearer " + credential).header("Cache-Control", "no-store")
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofByteArray(JsonCodec.encode(request))).build(),
+                        HttpResponse.BodyHandlers.ofString());
+                assertEquals(credential.equals("secret") ? 401 : 200, result.statusCode(), result.body());
+                assertEquals("no-store", result.headers().firstValue("Cache-Control").orElseThrow());
+            }
+            assertEquals(2, reads.get());
+            for (String invalid : List.of("{\"protocolVersion\":1,\"protocolVersion\":1}", "{} {}", " ".repeat(16385))) {
+                var result = fixture.client.send(HttpRequest.newBuilder(path)
+                        .header("Authorization", "Bearer original-runtime-token").header("Cache-Control", "no-store")
+                        .header("Content-Type", "application/json").POST(HttpRequest.BodyPublishers.ofString(invalid)).build(),
+                        HttpResponse.BodyHandlers.ofString());
+                assertEquals(invalid.length() > 16384 ? 413 : 400, result.statusCode(), result.body());
+            }
+            for (URI alias : List.of(URI.create(path + "?alias=1"), URI.create(path + "/"))) {
+                var result = fixture.client.send(HttpRequest.newBuilder(alias).POST(HttpRequest.BodyPublishers.ofString("{}")).build(),
+                        HttpResponse.BodyHandlers.ofString());
+                assertEquals(404, result.statusCode(), result.body());
+            }
+            assertEquals(2, reads.get());
+            var generic = fixture.client.send(HttpRequest.newBuilder(fixture.uri("/tool-sessions/ordinary/control"))
+                    .header("Authorization", "Bearer original-runtime-token").header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString("{}")).build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(401, generic.statusCode(), generic.body());
+        }
+    }
+    @Test
     void privateInlineResourceBoundsAreIndependentOfIdLength() throws Exception {
         try (Fixture fixture = new Fixture()) {
             fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
@@ -929,6 +989,10 @@ class RuntimeBrokerHttpServerTest {
         }
 
         private Fixture(boolean v3) throws Exception {
+            this(v3, null);
+        }
+
+        private Fixture(boolean v3, java.util.function.BiFunction<String, Map<String, Object>, Map<String, Object>> nativeReadback) throws Exception {
             RuntimeScope scope = new RuntimeScope("tenant", "workspace",
                     "generation", "/workspace", "capability", "workspace");
             RuntimePublicationVerifier verifier = v3 ? new RuntimePublicationVerifier() {
@@ -962,7 +1026,7 @@ class RuntimeBrokerHttpServerTest {
                     executions,
                     "broker", Duration.ofMinutes(1), Duration.ofMinutes(1), verifier);
             server = new RuntimeBrokerHttpServer(new InetSocketAddress("127.0.0.1", 0),
-                    "secret", service);
+                    "secret", service, false, nativeReadback);
             server.start();
         }
 

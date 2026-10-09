@@ -24,12 +24,28 @@ import {
 } from './managed-runtime-attestation-worker.js';
 import * as contextWorker from './managed-context-worker.js';
 import * as composer from './managed-csi-file-composer.js';
+import * as nativeReadback from './managed-csi-native-readback.js';
+import {
+  csiFileHistoryEnvelope,
+  CSI_FILE_HISTORY_PATH,
+} from './managed-csi-file-history-protocol.js';
 import { ManagedToolExecutor } from './managed-runtime-tool-executor.js';
 import type { ManagedCsiFileWorkerHandle } from './managed-csi-file-worker.js';
+import { csiHistoryPreparationFixture } from './__tests__/csi-history-preparation-fixture.js';
 import {
   computeManagedContextDigest,
   type ManagedContextBinding,
 } from './managed-workspace-binding.js';
+
+const nativeFixture = JSON.parse(
+  readFileSync(
+    new URL(
+      './contracts/managed-csi-native-readback-v1.fixtures.json',
+      import.meta.url,
+    ),
+    'utf8',
+  ),
+);
 
 const fixture = JSON.parse(
   readFileSync(
@@ -112,7 +128,7 @@ function send(
 
 describe('CSI2 production construction with labelled mock Linux mount', () => {
   it.each([boot, parseManagedCsiFileBoot(fixture.executionBoot5)])(
-    'serves only four exact routes for boot$version and installs the fixed context without any tools',
+    'serves the boot$version construction routes and installs the fixed context without constructing tools',
     async (candidate) => {
       mockMountFixture();
       const generic = vi
@@ -327,7 +343,7 @@ describe('CSI2 production construction with labelled mock Linux mount', () => {
     void first.then(() => {
       closed = true;
     });
-    await Promise.resolve();
+    await vi.waitFor(() => expect(mount.close).toHaveBeenCalledTimes(1));
     expect(closed).toBe(false);
     release();
     await first;
@@ -353,6 +369,315 @@ describe('CSI2 production construction with labelled mock Linux mount', () => {
       startManagedRuntimeAttestationWorker(boot, undefined, undefined, true),
     ).rejects.toThrow('Listener unavailable');
     expect(mount.close).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('boot5 history HTTP ownership with labelled readback/composer seams', () => {
+  const candidate = parseManagedCsiFileBoot(nativeFixture.boot);
+  const installed = nativeFixture.valid[0].request.installedContext;
+  const observation = {
+    state: {
+      ownerSessionId: candidate.identity.sessionId,
+      snapshots: [],
+      files: {},
+    },
+    backupDirectory: {
+      volumeDevice: '1',
+      volumeInode: '2',
+      directoryDevice: '1',
+      directoryInode: '3',
+    },
+    retainedBackups: [],
+  };
+  async function start() {
+    worker = await startManagedRuntimeAttestationWorker(
+      candidate,
+      undefined,
+      undefined,
+      true,
+    );
+    expect(
+      (
+        await send('context', {
+          ...fixture.installationRequest,
+          context: installed,
+        })
+      ).status,
+    ).toBe(200);
+  }
+  function history(action: 'bind' | 'snapshot') {
+    return send(
+      CSI_FILE_HISTORY_PATH,
+      csiFileHistoryEnvelope(candidate, installed, {
+        kind: 'csi-file-history',
+        version: 1,
+        action,
+      }),
+    );
+  }
+  function prepare(
+    ref: ReturnType<typeof csiHistoryPreparationFixture>['intentRef'],
+  ) {
+    return send(
+      CSI_FILE_HISTORY_PATH,
+      csiFileHistoryEnvelope(candidate, installed, {
+        kind: 'csi-file-history',
+        version: 1,
+        action: 'prepare',
+        preparationRef: ref,
+      }),
+    );
+  }
+  function retainedHistory(
+    sample: ReturnType<typeof csiHistoryPreparationFixture>,
+  ) {
+    const observe = vi.fn().mockResolvedValue({
+      history: sample.observation.state,
+      storage: {
+        backupDirectory: sample.observation.backupDirectory,
+        retainedBackups: sample.observation.retainedBackups,
+      },
+    });
+    const historyPrepare = vi.fn().mockResolvedValue(undefined);
+    const close = vi.fn().mockResolvedValue(undefined);
+    const compose = vi
+      .spyOn(composer, 'composeManagedCsiFiles')
+      .mockResolvedValue({
+        observe,
+        close,
+        history: { prepare: historyPrepare },
+      } as unknown as Awaited<
+        ReturnType<typeof composer.composeManagedCsiFiles>
+      >);
+    return { observe, historyPrepare, close, compose };
+  }
+
+  it('joins the original prepare promise and derives mutation paths from fresh native evidence', async () => {
+    mockMountFixture();
+    const sample = csiHistoryPreparationFixture();
+    const retained = retainedHistory(sample);
+    let resume!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const native = vi
+      .spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockResolvedValueOnce(
+        nativeFixture.valid[0].response as unknown as Awaited<
+          ReturnType<typeof nativeReadback.readCurrentCsiNative>
+        >,
+      )
+      .mockImplementation(async () => {
+        await paused;
+        return sample.response;
+      });
+    await start();
+    expect((await history('bind')).status).toBe(200);
+    const first = prepare(sample.intentRef);
+    await vi.waitFor(() => expect(native).toHaveBeenCalledTimes(2));
+    const retry = prepare(sample.intentRef);
+    resume();
+    expect((await first).status).toBe(200);
+    expect((await retry).status).toBe(200);
+    expect(retained.historyPrepare).toHaveBeenCalledExactlyOnceWith(
+      sample.preparation.promptId,
+      ['existing.txt', 'new.txt'],
+    );
+    expect(retained.compose).toHaveBeenCalledTimes(1);
+    expect(native).toHaveBeenLastCalledWith(
+      candidate,
+      installed,
+      'prepare',
+      sample.intentRef,
+    );
+    expect((await prepare(sample.intentRef)).status).toBe(200);
+    expect(native).toHaveBeenCalledTimes(2);
+    expect(
+      (await prepare({ ...sample.intentRef, digest: 'a'.repeat(64) })).status,
+    ).toBe(409);
+    expect(retained.historyPrepare).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains a failed prepare without recopying preimages on retries', async () => {
+    mockMountFixture();
+    const sample = csiHistoryPreparationFixture();
+    const retained = retainedHistory(sample);
+    retained.historyPrepare.mockRejectedValue(new Error('Owned backup failed'));
+    const native = vi
+      .spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockResolvedValueOnce(
+        nativeFixture.valid[0].response as unknown as Awaited<
+          ReturnType<typeof nativeReadback.readCurrentCsiNative>
+        >,
+      )
+      .mockResolvedValue(sample.response);
+    await start();
+    expect((await history('bind')).status).toBe(200);
+    expect((await prepare(sample.intentRef)).status).toBe(409);
+    expect((await prepare(sample.intentRef)).status).toBe(409);
+    expect(retained.historyPrepare).toHaveBeenCalledTimes(1);
+    expect(native).toHaveBeenCalledTimes(2);
+    expect((await history('snapshot')).status).toBe(200);
+    const drained = await (await send('drain', fixture.drainRequest)).json();
+    expect(drained.workState).toBe('BLOCKED');
+  });
+
+  it('refuses changed original observation before preimage I/O', async () => {
+    mockMountFixture();
+    const sample = csiHistoryPreparationFixture();
+    const retained = retainedHistory(sample);
+    vi.spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockResolvedValueOnce(
+        nativeFixture.valid[0].response as unknown as Awaited<
+          ReturnType<typeof nativeReadback.readCurrentCsiNative>
+        >,
+      )
+      .mockResolvedValue(sample.response);
+    await start();
+    expect((await history('bind')).status).toBe(200);
+    retained.observe.mockResolvedValue({
+      history: sample.observation.state,
+      storage: {
+        backupDirectory: {
+          ...sample.observation.backupDirectory,
+          directoryInode: '99',
+        },
+        retainedBackups: [],
+      },
+    });
+    expect((await prepare(sample.intentRef)).status).toBe(409);
+    expect(retained.historyPrepare).not.toHaveBeenCalled();
+  });
+
+  it('seals and joins pending preparation readback before closing the original composition', async () => {
+    mockMountFixture();
+    const sample = csiHistoryPreparationFixture();
+    const retained = retainedHistory(sample);
+    let resume!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const native = vi
+      .spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockResolvedValueOnce(
+        nativeFixture.valid[0].response as unknown as Awaited<
+          ReturnType<typeof nativeReadback.readCurrentCsiNative>
+        >,
+      )
+      .mockImplementation(async () => {
+        await paused;
+        return sample.response;
+      });
+    await start();
+    expect((await history('bind')).status).toBe(200);
+    const request = prepare(sample.intentRef).catch(() => undefined);
+    await vi.waitFor(() => expect(native).toHaveBeenCalledTimes(2));
+    const closing = worker!.close();
+    expect(retained.close).not.toHaveBeenCalled();
+    resume();
+    await closing;
+    await request;
+    worker = undefined;
+    expect(retained.historyPrepare).not.toHaveBeenCalled();
+    expect(retained.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('joins concurrent bind, waits before snapshot and observes the retained owner after seal', async () => {
+    const mount = mockMountFixture();
+    let resume!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const native = vi
+      .spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockImplementation(async () => {
+        await paused;
+        return nativeFixture.valid[0].response as unknown as Awaited<
+          ReturnType<typeof nativeReadback.readCurrentCsiNative>
+        >;
+      });
+    const observe = vi.fn().mockResolvedValue({
+      history: observation.state,
+      storage: {
+        backupDirectory: observation.backupDirectory,
+        retainedBackups: [],
+      },
+    });
+    let originalMount: ManagedCsiMount;
+    const close = vi.fn(() => originalMount.close());
+    const compose = vi
+      .spyOn(composer, 'composeManagedCsiFiles')
+      .mockImplementation(async (options) => {
+        originalMount = options.mount;
+        return { observe, close } as unknown as Awaited<
+          ReturnType<typeof composer.composeManagedCsiFiles>
+        >;
+      });
+    await start();
+    const first = history('bind');
+    await vi.waitFor(() => expect(native).toHaveBeenCalledTimes(1));
+    const retry = history('bind');
+    const snapshot = history('snapshot');
+    expect(compose).not.toHaveBeenCalled();
+    resume();
+    for (const response of await Promise.all([first, retry, snapshot])) {
+      expect(response.status).toBe(200);
+      expect((await response.json()).observation).toEqual(observation);
+    }
+    expect(native).toHaveBeenCalledTimes(1);
+    expect(compose).toHaveBeenCalledTimes(1);
+    expect(observe).toHaveBeenCalledTimes(2);
+    const drain = await (await send('drain', fixture.drainRequest)).json();
+    expect(drain.workState).toBe('BLOCKED');
+    expect(drain.blockers).toContain('retained-history-bound');
+    expect((await history('bind')).status).toBe(409);
+    expect((await history('snapshot')).status).toBe(200);
+    await worker!.close();
+    worker = undefined;
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(mount.close).toHaveBeenCalledTimes(1);
+  });
+  it('retains failed bind and refuses to construct another history on retry', async () => {
+    mockMountFixture();
+    const native = vi
+      .spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockRejectedValue(new Error('Original native owner unavailable'));
+    const compose = vi.spyOn(composer, 'composeManagedCsiFiles');
+    await start();
+    expect((await history('bind')).status).toBe(409);
+    expect((await history('bind')).status).toBe(409);
+    expect((await history('snapshot')).status).toBe(409);
+    expect(native).toHaveBeenCalledTimes(1);
+    expect(compose).not.toHaveBeenCalled();
+  });
+  it('close seals first and joins a pending native read before closing the original mount', async () => {
+    const mount = mockMountFixture();
+    let resume!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const native = vi
+      .spyOn(nativeReadback, 'readCurrentCsiNative')
+      .mockImplementation(async () => {
+        await paused;
+        return nativeFixture.valid[0].response as unknown as Awaited<
+          ReturnType<typeof nativeReadback.readCurrentCsiNative>
+        >;
+      });
+    const compose = vi.spyOn(composer, 'composeManagedCsiFiles');
+    await start();
+    const request = history('bind').catch(() => undefined);
+    await vi.waitFor(() => expect(native).toHaveBeenCalledTimes(1));
+    const closing = worker!.close();
+    const result = closing.catch(() => undefined);
+    await Promise.resolve();
+    expect(mount.close).not.toHaveBeenCalled();
+    resume();
+    await result;
+    await request;
+    worker = undefined;
+    expect(compose).not.toHaveBeenCalled();
+    expect(mount.close).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -1,8 +1,11 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
+import com.alibaba.qwen.code.runtimebroker.CsiFileHistoryProtocol;
+import com.alibaba.qwen.code.runtimebroker.CsiNativeReadbackProtocol;
+import com.alibaba.qwen.code.runtimebroker.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
@@ -18,9 +21,13 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Clock;
 import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -34,6 +41,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 /** Original private Session readback and context installation; no native execution grant. */
 public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, RuntimeTransport {
+    private static final ObjectMapper JSON = new ObjectMapper().enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transaction;
     private final ManagedAgentStore managed;
@@ -97,11 +105,11 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
 
     @Override
     public CompletionStage<Void> acquire(RuntimeLease lease, RuntimeSession session) {
-        Admission before = admission(lease, session);
+        Admission before = admission(lease, session, false);
         String operationId = UUID.nameUUIDFromBytes(sessionId.getBytes(StandardCharsets.UTF_8)).toString();
         return delegate.installContext(before.binding(), before.session(), operationId, before.context())
                 .thenAccept(ignored -> {
-                    Admission after = admission(lease, session);
+                    Admission after = admission(lease, session, false);
                     if (before.binding().getVersion() != after.binding().getVersion()
                             || before.session().getVersion() != after.session().getVersion()
                             || before.session().getState() != after.session().getState()
@@ -114,7 +122,7 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
                 });
     }
 
-    private Admission admission(RuntimeLease lease, RuntimeSession session) {
+    private Admission admission(RuntimeLease lease, RuntimeSession session, boolean continuation) {
         fresh();
         if (session == null || lease == null || !sessionId.equals(session.getHarnessSessionId())
                 || !sessionId.equals(session.getRuntimeSessionId()) || !"bootstrap".equals(session.getTurnKind())
@@ -130,28 +138,36 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
             if (guard == null) {
                 throw unavailable();
             }
-            guard.requireAdmission();
+            if (continuation) {
+                guard.requireContinuation();
+            } else {
+                guard.requireAdmission();
+            }
             JdbcCsiFilesRetirementGuard.requireSingleSession(original, guard);
-            var request = request();
+            var request = request(continuation);
             if (!guard.request().equals(request) || !request.getScope().equals(session.getScope())) {
                 throw unavailable();
             }
-            JdbcRuntimeBindingRepository.requireHarnessAdmission(original, request.getScope(), sessionId, null);
+            if (!continuation) {
+                JdbcRuntimeBindingRepository.requireHarnessAdmission(original, request.getScope(), sessionId, null);
+            }
             var binding = bindings.findByIdForUpdate(original, guard.bindingId());
             if (binding == null || binding.getGeneration() != guard.generation() || binding.getVersion() != guard.version()
                     || !binding.getRequest().equals(request) || !binding.hasSameLease(lease)
-                    || binding.getState() != RuntimeBindingRecord.State.READY || binding.isDrainRequested()) {
+                    || !continuation && (binding.getState() != RuntimeBindingRecord.State.READY || binding.isDrainRequested())) {
                 throw unavailable();
             }
             WorkspaceCsiRuntimeIdentity.verify(binding);
             storage.verifyRegistration(registration);
             var reserved = storage.lockPublication(bindings, binding);
-            if (reserved.retirement() != null || reserved.binding().getVersion() != binding.getVersion()) {
+            if (!continuation && reserved.retirement() != null || reserved.binding().getVersion() != binding.getVersion()) {
                 throw unavailable();
             }
             var saved = sessions.findByIdForUpdate(original, request.getScope(), sessionId);
             guard.requireSession(saved);
-            if (!saved.isAcquirable()) {
+            if (!continuation && !saved.isAcquirable()
+                    || continuation && saved.getState() != RuntimeSessionRecord.State.READY
+                            && saved.getState() != RuntimeSessionRecord.State.RELEASING) {
                 throw unavailable();
             }
             var context = managed.findSession(registration.tenantId(), sessionId).orElseThrow(
@@ -164,12 +180,95 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
     }
 
     private RuntimeProvisionRequest request() {
+        return request(false);
+    }
+
+    private RuntimeProvisionRequest request(boolean continuation) {
         var request = managed.requireCsiRequest(registration, sessionId);
-        if (!requestKey.equals(request.requestKey()) || !"ACTIVE".equals(managed.findSession(
+        var allowed = continuation ? java.util.Set.of("ACTIVE", "CLOSING", "DELETING") : java.util.Set.of("ACTIVE");
+        if (!requestKey.equals(request.requestKey()) || !allowed.contains(managed.findSession(
                 registration.tenantId(), sessionId).orElseThrow(WorkspaceCsiRuntimeAccess::unavailable).status())) {
             throw unavailable();
         }
         return request;
+    }
+
+    public Map<String, Object> readNative(String token, Map<String, Object> body) {
+        var requestBody = CsiNativeReadbackProtocol.request(body);
+        fresh();
+        return transaction.execute(status -> jdbc.execute((ConnectionCallback<Map<String, Object>>) connection -> {
+            var original = DataSourceUtils.getTargetConnection(connection);
+            requireBound(original);
+            JdbcRuntimeBindingRepository.lockPlacementDomain(original, registration.tenantId(), 10);
+            ToolPublicationRetentionStore.lockTenant(jdbc, registration.tenantId());
+            var guard = JdbcCsiFilesRetirementGuard.lockManagedSession(original, registration.tenantId(), sessionId);
+            if (guard == null) {
+                throw unavailable();
+            }
+            guard.requireAdmission();
+            var request = request();
+            var binding = bindings.findByIdForUpdate(original, guard.bindingId());
+            if (binding == null || !guard.request().equals(request) || !binding.getRequest().equals(request)
+                    || binding.getGeneration() != guard.generation() || binding.getVersion() != guard.version()
+                    || binding.getState() != RuntimeBindingRecord.State.READY || binding.isDrainRequested()
+                    || binding.getLease() == null || binding.getProvisionSeed() == null) {
+                throw unavailable();
+            }
+            byte[] credential = token == null ? new byte[0] : token.getBytes(StandardCharsets.UTF_8);
+            boolean seedMatches = MessageDigest.isEqual(binding.getProvisionSeed().getToken().getBytes(StandardCharsets.UTF_8), credential);
+            boolean leaseMatches = MessageDigest.isEqual(binding.getLease().getToken().getBytes(StandardCharsets.UTF_8), credential);
+            if (!seedMatches || !leaseMatches) {
+                throw new RuntimeBrokerException(401, "csi_native_readback_unauthorized", "Original Runtime authentication failed.", false);
+            }
+            var boot = WorkspaceCsiRuntimeIdentity.boot(binding);
+            var head = JdbcCsiActivationAdmission.lockNativeHead(original, guard);
+            Runnable retirementFence = () -> {
+                storage.verifyRegistration(registration);
+                var reserved = storage.lockPublication(bindings, binding);
+                if (reserved.retirement() != null || reserved.binding().getVersion() != binding.getVersion()) throw unavailable();
+            };
+            Map<String, Object> evidence;
+            String action = (String) requestBody.get("action");
+            if ("prepare".equals(action)) evidence = JdbcCsiActivationAdmission.readPreparation(original, guard, head,
+                    JSON.valueToTree(requestBody.get("subject")), retirementFence);
+            else {
+                retirementFence.run();
+                evidence = Map.of("kind", "ready");
+            }
+            JdbcCsiFilesRetirementGuard.requireSingleSession(original, guard);
+            var saved = sessions.findByIdForUpdate(original, request.getScope(), sessionId);
+            guard.requireSession(saved);
+            if (saved.getState() != RuntimeSessionRecord.State.READY) {
+                throw unavailable();
+            }
+            var context = managed.findSession(registration.tenantId(), sessionId).orElseThrow(
+                    WorkspaceCsiRuntimeAccess::unavailable).workspace();
+            var expected = CsiNativeReadbackProtocol.bindRequest(boot, request, context, (String) requestBody.get("requestId"));
+            for (String field : java.util.List.of("identity", "context", "installedContext")) {
+                if (!jsonSame(expected.get(field), requestBody.get(field))) {
+                    throw unavailable();
+                }
+            }
+            head.requireCurrentTime(original);
+            if (!"bind".equals(action) && !"prepare".equals(action)) {
+                throw new RuntimeBrokerException(501, "csi_native_execution_unavailable",
+                        "Original native execution grants are not connected.", false);
+            }
+            var response = new LinkedHashMap<>(expected);
+            response.remove("subject");
+            response.put("action", action);
+            response.put("head", Map.of("revision", head.revision(), "sequence", head.sequence(), "digest", head.digest()));
+            response.put("evidence", evidence);
+            return CsiNativeReadbackProtocol.response(response, requestBody);
+        }));
+    }
+
+    private static boolean jsonSame(Object left, Object right) {
+        try {
+            return JSON.writeValueAsString(left).equals(JSON.writeValueAsString(right));
+        } catch (JsonProcessingException invalid) {
+            throw unavailable();
+        }
     }
 
     private void requireSelected(String candidate) {
@@ -192,7 +291,34 @@ public final class WorkspaceCsiRuntimeAccess implements HarnessSessionResolver, 
 
     @Override
     public CompletionStage<Object> control(RuntimeLease lease, RuntimeSession session, Map<String, Object> operation) {
-        return CompletableFuture.failedFuture(unavailable());
+        try {
+            if (!CsiFileHistoryProtocol.isOperation(operation)) {
+                throw unavailable();
+            }
+            CsiFileHistoryProtocol.operation(operation);
+            boolean continuation = "snapshot".equals(operation.get("action"));
+            Admission before = admission(lease, session, continuation);
+            if (!continuation && before.session().getState() != RuntimeSessionRecord.State.READY) {
+                throw unavailable();
+            }
+            var binding = before.binding();
+            var originalBoot = WorkspaceCsiRuntimeIdentity.boot(binding);
+            return delegate.csiFileHistory(lease, binding.getRequest(), binding.getProvisionSeed(), originalBoot,
+                    before.context(), operation).thenApply(response -> {
+                        Admission after = admission(lease, session, continuation);
+                        if (!before.context().equals(after.context())
+                                || !binding.getProvisionSeed().equals(after.binding().getProvisionSeed())
+                                || !binding.getResourceHandle().equals(after.binding().getResourceHandle())
+                                || binding.getAttestationGeneration() != after.binding().getAttestationGeneration()
+                                || !continuation && (binding.getVersion() != after.binding().getVersion()
+                                        || before.session().getVersion() != after.session().getVersion())) {
+                            throw unavailable();
+                        }
+                        return (Object) response;
+                    });
+        } catch (RuntimeException failure) {
+            return CompletableFuture.failedFuture(failure);
+        }
     }
 
     @Override

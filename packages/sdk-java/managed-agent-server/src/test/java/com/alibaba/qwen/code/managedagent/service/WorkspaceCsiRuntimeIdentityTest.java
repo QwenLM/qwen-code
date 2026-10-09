@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent.service;
 
+import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;

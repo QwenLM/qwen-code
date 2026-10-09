@@ -1,13 +1,5 @@
-package com.alibaba.qwen.code.managedagent.service;
+package com.alibaba.qwen.code.runtimebroker;
 
-import com.alibaba.qwen.code.runtimebroker.ManagedCsiProtocol;
-import com.alibaba.qwen.code.runtimebroker.ManagedCsiFilesProtocol;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
-import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
-import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
-import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
-import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -23,10 +15,10 @@ import java.util.UUID;
 
 /** Reads the original API-observed CSI identity; never accepts a worker as its own authority. */
 public final class WorkspaceCsiRuntimeIdentity {
-    static final String KIND = "kubernetes-workspace";
-    static final int VERSION = 1;
-    static final int FILES_VERSION = 2;
-    static final int FILES_AUTHORITY_VERSION = 3;
+    public static final String KIND = "kubernetes-workspace";
+    public static final int VERSION = 1;
+    public static final int FILES_VERSION = 2;
+    public static final int FILES_AUTHORITY_VERSION = 3;
     private static final ObjectMapper JSON = new ObjectMapper().enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
     private static final Set<String> KEYS = Set.of("bindingId", "runtimeGeneration", "context", "storage",
             "placement", "protection", "artifacts", "bootDigest", "podSpecDigest", "mount", "identity");
@@ -56,12 +48,12 @@ public final class WorkspaceCsiRuntimeIdentity {
         return boot(binding.getRequest(), binding.getProvisionSeed(), binding.getResourceHandle());
     }
 
-    static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> storage) {
+    public static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> storage) {
         return ManagedCsiFilesProtocol.selects(request) ? ManagedCsiFilesProtocol.boot(request, seed, storage)
                 : ManagedCsiProtocol.boot(request, seed, storage);
     }
 
-    static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, RuntimeResourceHandle handle) {
+    public static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, RuntimeResourceHandle handle) {
         var value = handle.getValue();
         return handle.getVersion() == FILES_AUTHORITY_VERSION
                 ? ManagedCsiFilesProtocol.boot(request, seed, map(value.get("storage")), map(value.get("authority")))
@@ -73,7 +65,7 @@ public final class WorkspaceCsiRuntimeIdentity {
         return pod(map(binding.getResourceHandle().getValue().get("placement")));
     }
 
-    static void validate(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, RuntimeResourceHandle handle) {
+    public static void validate(RuntimeProvisionRequest request, RuntimeProvisionSeed seed, RuntimeResourceHandle handle) {
         try {
             boolean files = ManagedCsiFilesProtocol.selects(request);
             boolean authorityHandle = files && handle != null && handle.getVersion() == FILES_AUTHORITY_VERSION;
@@ -149,7 +141,7 @@ public final class WorkspaceCsiRuntimeIdentity {
         }
     }
 
-    static Map<String, Object> context(Map<String, Object> boot) {
+    public static Map<String, Object> context(Map<String, Object> boot) {
         var context = new LinkedHashMap<>(map(boot.get("context")));
         context.remove("type");
         context.remove("version");
@@ -158,16 +150,16 @@ public final class WorkspaceCsiRuntimeIdentity {
         return Map.copyOf(context);
     }
 
-    static Map<String, Object> pod(Map<String, Object> placement) {
+    public static Map<String, Object> pod(Map<String, Object> placement) {
         return Map.of("uid", placement.get("podUid"), "namespace", placement.get("namespace"), "nodeName", placement.get("nodeName"));
     }
 
-    static RuntimeLease lease(RuntimeProvisionSeed seed, Map<String, Object> placement) {
+    public static RuntimeLease lease(RuntimeProvisionSeed seed, Map<String, Object> placement) {
         return new RuntimeLease(seed.getProvisionalRuntimeId(), endpoint(text(placement, "podIp", 64)),
                 seed.getToken(), seed.getLeaseId(), seed.getEpoch());
     }
 
-    static URI endpoint(String ip) {
+    public static URI endpoint(String ip) {
         String[] parts = ip.split("\\.", -1);
         require(parts.length == 4);
         for (String part : parts) {
@@ -178,11 +170,11 @@ public final class WorkspaceCsiRuntimeIdentity {
         return URI.create("http://" + ip + ":43190/");
     }
 
-    static String name(RuntimeProvisionSeed seed) {
+    public static String name(RuntimeProvisionSeed seed) {
         return "qwen-csi-" + digest(seed.getProvisionRequestId()).substring(0, 48);
     }
 
-    static byte[] bytes(Object value) {
+    public static byte[] bytes(Object value) {
         try {
             return JSON.writeValueAsBytes(value);
         } catch (JsonProcessingException failure) {
@@ -190,7 +182,7 @@ public final class WorkspaceCsiRuntimeIdentity {
         }
     }
 
-    static String digest(Object value) {
+    public static String digest(Object value) {
         try {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes(value)));
         } catch (NoSuchAlgorithmException impossible) {
@@ -198,17 +190,17 @@ public final class WorkspaceCsiRuntimeIdentity {
         }
     }
 
-    static boolean same(Object first, Object second) {
+    public static boolean same(Object first, Object second) {
         return java.util.Arrays.equals(bytes(first), bytes(second));
     }
 
     @SuppressWarnings("unchecked")
-    static Map<String, Object> map(Object value) {
+    public static Map<String, Object> map(Object value) {
         require(value instanceof Map<?, ?>);
         return (Map<String, Object>) value;
     }
 
-    static String text(Map<String, Object> value, String key, int maximum) {
+    public static String text(Map<String, Object> value, String key, int maximum) {
         require(value.get(key) instanceof String);
         String text = (String) value.get(key);
         require(!text.isBlank() && text.length() <= maximum && text.codePoints().noneMatch(point ->
@@ -216,14 +208,14 @@ public final class WorkspaceCsiRuntimeIdentity {
         return text;
     }
 
-    static void dns(String name) {
+    public static void dns(String name) {
         require(name.length() <= 253);
         for (String part : name.split("\\.", -1)) {
             require(part.matches("[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"));
         }
     }
 
-    static void uuid(String value) {
+    public static void uuid(String value) {
         require(UUID.fromString(value).toString().equals(value));
     }
 
@@ -232,13 +224,13 @@ public final class WorkspaceCsiRuntimeIdentity {
         require(text.matches("[1-9][0-9]{0,18}") && Long.parseLong(text) > 0);
     }
 
-    static void require(boolean valid) {
+    public static void require(boolean valid) {
         if (!valid) {
             throw unavailable();
         }
     }
 
-    static RuntimeBrokerException unavailable() {
+    public static RuntimeBrokerException unavailable() {
         return new RuntimeBrokerException(409, "workspace_csi_identity_conflict", "Original workspace CSI identity is unavailable.", false);
     }
 }

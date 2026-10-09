@@ -81,15 +81,27 @@ public final class CsiNativeActivationProof {
     public record OriginalBatch(String promptId, PendingBatch batch) {
     }
 
+    public record FrozenBatch(JsonNode intentRef, JsonNode preparedRef, List<JsonNode> invocations, long intentSequence) {
+        public FrozenBatch {
+            invocations = List.copyOf(invocations);
+        }
+    }
+
+    public record FileHistory(JsonNode ref, JsonNode body, Map<String, FrozenBatch> batches) {
+        public FileHistory {
+            batches = Map.copyOf(batches);
+        }
+    }
+
     public record Prefix(Input input, Checkpoint checkpoint, String lastMessageId, Attempt attempt,
             boolean assistantCommitted, Stream stream, Set<String> usedIds, PendingBatch pendingBatch,
-            Map<String, OriginalBatch> batches) {
+            Map<String, OriginalBatch> batches, FileHistory fileHistory) {
         public Prefix {
             batches = Map.copyOf(batches);
         }
 
         public static Prefix empty() {
-            return new Prefix(null, null, null, null, false, null, Set.of(), null, Map.of());
+            return new Prefix(null, null, null, null, false, null, Set.of(), null, Map.of(), null);
         }
 
         public String checkpointResourceId() {
@@ -207,14 +219,14 @@ public final class CsiNativeActivationProof {
                 require(previous.input() == null && previous.pendingBatch() == null);
                 Input input = input(transaction, metadata, original, activation, previousSequence, resources);
                 yield new Prefix(input, previous.checkpoint(), previous.lastMessageId(), null, false,
-                        null, useId(previous, input.inputId()), null, previous.batches());
+                        null, useId(previous, input.inputId()), null, previous.batches(), previous.fileHistory());
             }
             case "commitCheckpoint" -> {
                 require(previous.checkpoint() == null);
                 yield new Prefix(previous.input(), validatedInitialCheckpoint(transaction, metadata, original,
                         writerId, genesis, activation, previousSequence, resources), previous.lastMessageId(),
                         previous.attempt(), previous.assistantCommitted(), previous.stream(), previous.usedIds(),
-                        previous.pendingBatch(), previous.batches());
+                        previous.pendingBatch(), previous.batches(), previous.fileHistory());
             }
             case "commitMessage" -> message(transaction, metadata, original, genesis, activation,
                     previousSequence, previous, resources);
@@ -224,8 +236,194 @@ public final class CsiNativeActivationProof {
             case "assistantRetract" -> retract(transaction, metadata, original, activation, previousSequence, previous);
             case "settleTurn" -> settle(transaction, metadata, original, activation,
                     previousSequence, previous, resources);
+            case "commitFileHistory" -> fileHistory(transaction, metadata, original, activation,
+                    previousSequence, previous, resources);
             default -> throw invalid();
         };
+    }
+
+    private static Prefix fileHistory(Transaction transaction, JsonNode metadata,
+            RuntimeProvisionRequest original, Activation activation, long previousSequence,
+            Prefix previous, Function<JsonNode, byte[]> resources) {
+        require(transaction.events().size() == 1 && metadata.path("latestCheckpointResourceId").isNull());
+        boolean initial = previous.fileHistory() == null;
+        long revision = initial ? 1 : number(previous.fileHistory().body().get("revision")) + 1;
+        require(revision <= MAX_SAFE);
+        String command = id(metadata, "commandId");
+        JsonNode event = transaction.events().getFirst();
+        closed(event, Set.of("v", "sequence", "eventId", "sessionKey", "kind", "occurredAt", "payload"));
+        key(event.path("sessionKey"), original);
+        require(number(event.get("v")) == 1 && number(event.get("sequence")) == previousSequence + 1
+                && ("file_history:" + revision).equals(id(event, "eventId")) && "domain.committed".equals(text(event, "kind"))
+                && time(event.get("occurredAt")) < activation.expiresAt());
+        JsonNode payload = event.path("payload");
+        closed(payload, Set.of("domain", "version", "operationId", "recordRef"));
+        require("file_history".equals(text(payload, "domain")) && number(payload.get("version")) == 1
+                && command.equals(id(payload, "operationId")));
+        JsonNode ref = payload.path("recordRef");
+        byte[] bytes = reference(ref, "managed-file_history", resources);
+        require(bytes.length <= 64 * 1024);
+        JsonNode body = readObject(bytes);
+        closed(body, Set.of("operationId", "revision", "previousRecordRef", "schemaVersion", "profile",
+                "runtimeSessionId", "state", "backupDirectory", "retainedBackups", "preparation", "record"));
+        require(command.equals(id(body, "operationId")) && number(body.get("revision")) == revision
+                && (initial ? body.path("previousRecordRef").isNull()
+                        : canonical(body.path("previousRecordRef")).equals(canonical(previous.fileHistory().ref())))
+                && number(body.get("schemaVersion")) == 2
+                && CsiFilesRetirementProfile.PROFILE.equals(text(body, "profile"))
+                && original.getIsolationKey().equals(id(body, "runtimeSessionId")));
+        ObjectNode observation = JSON.createObjectNode();
+        for (String field : List.of("state", "backupDirectory", "retainedBackups")) {
+            observation.set(field, body.get(field));
+        }
+        CsiFileHistoryProtocol.observation(observation, original.getIsolationKey());
+        JsonNode projection = body.path("record");
+        closed(projection, Set.of("uuid", "parentUuid", "sessionId", "timestamp", "type", "subtype", "cwd", "version", "systemPayload"));
+        envelope(projection, original, "file_history_snapshot", previous.lastMessageId());
+        require("hosted-harness/1".equals(text(projection, "version")));
+        closed(projection.path("systemPayload"), Set.of("snapshots"));
+        require(canonical(body.path("state").path("snapshots"))
+                .equals(canonical(projection.path("systemPayload").path("snapshots"))));
+        ObjectNode content = body.deepCopy();
+        content.remove(List.of("operationId", "revision", "previousRecordRef", "record"));
+        require(sha256(utf8(canonical(content))).equals(text(metadata, "contentDigest")));
+        Map<String, FrozenBatch> frozen = initial ? new HashMap<>() : new HashMap<>(previous.fileHistory().batches());
+        if (initial) {
+            require(previous.input() == null && previous.checkpoint() == null && previous.lastMessageId() == null
+                    && previous.pendingBatch() == null && previous.batches().isEmpty()
+                    && command.equals("csi-file-history:bind:" + original.getIsolationKey())
+                    && body.path("preparation").isNull() && body.path("state").path("snapshots").isEmpty()
+                    && body.path("state").path("files").isEmpty() && body.path("retainedBackups").isEmpty());
+        } else {
+            conversation(previous);
+            require(previous.pendingBatch() != null && !previous.assistantCommitted() && previous.stream() == null);
+            JsonNode preparation = body.path("preparation");
+            String stage = text(preparation, "stage");
+            closed(preparation, "prepared".equals(stage)
+                    ? Set.of("stage", "turnId", "promptId", "batchId", "invocations", "paths", "intentRef")
+                    : Set.of("stage", "turnId", "promptId", "batchId", "invocations", "paths"));
+            String batchId = previous.pendingBatch().messageId();
+            String prompt = previous.input().inputId();
+            require(prompt.equals(id(preparation, "turnId")) && prompt.equals(id(preparation, "promptId"))
+                    && batchId.equals(id(preparation, "batchId")));
+            if ("intent".equals(stage)) {
+                require(command.equals("csi-file-history:intent:" + batchId)
+                        && previous.fileHistory().body().path("preparation").isNull() && !frozen.containsKey(batchId));
+                sameObservation(previous.fileHistory().body(), body);
+                List<JsonNode> invocations = historyInvocations(original, previous.batches().get(batchId), preparation, resources);
+                frozen.put(batchId, new FrozenBatch(ref.deepCopy(), null, invocations, previousSequence + 1));
+            } else {
+                require("prepared".equals(stage) && command.equals("csi-file-history:prepared:" + batchId));
+                var saved = frozen.get(batchId);
+                require(saved != null && saved.preparedRef() == null
+                        && canonical(saved.intentRef()).equals(canonical(preparation.path("intentRef")))
+                        && canonical(saved.intentRef()).equals(canonical(previous.fileHistory().ref())));
+                JsonNode intent = readObject(reference(saved.intentRef(), "managed-file_history", resources));
+                require(canonical(intent).equals(canonical(previous.fileHistory().body())));
+                ObjectNode unchanged = preparation.deepCopy();
+                unchanged.remove("intentRef");
+                unchanged.put("stage", "intent");
+                require(canonical(unchanged).equals(canonical(intent.path("preparation"))));
+                historyInvocations(original, previous.batches().get(batchId), preparation, resources);
+                preparedObservation(intent, body, prompt, preparation.path("paths"));
+                frozen.put(batchId, new FrozenBatch(saved.intentRef(), ref.deepCopy(), saved.invocations(), saved.intentSequence()));
+            }
+        }
+        return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(), previous.attempt(),
+                previous.assistantCommitted(), previous.stream(), useId(previous, id(projection, "uuid")),
+                previous.pendingBatch(), previous.batches(), new FileHistory(ref.deepCopy(), body.deepCopy(), frozen));
+    }
+
+    public static JsonNode historyExecutionReference(RuntimeProvisionRequest original, JsonNode preparation, JsonNode invocation) {
+        ObjectNode result = JSON.createObjectNode().put("sessionId", original.getIsolationKey())
+                .put("promptId", id(preparation, "promptId")).put("batchId", id(preparation, "batchId"))
+                .put("dispatchMode", "deferred");
+        for (String field : List.of("callId", "functionCallId", "partIndex", "ordinal", "inputRef", "toolDefinitionRef"))
+            result.set(field, invocation.get(field));
+        result.set("argsDigest", invocation.get("requestDigest"));
+        return result;
+    }
+
+    private static List<JsonNode> historyInvocations(RuntimeProvisionRequest original, OriginalBatch batch,
+            JsonNode preparation, Function<JsonNode, byte[]> resources) {
+        require(batch != null && preparation.path("invocations").isArray() && !preparation.path("invocations").isEmpty()
+                && preparation.path("invocations").size() <= batch.batch().calls().size());
+        List<JsonNode> result = new ArrayList<>();
+        Set<String> executions = new HashSet<>();
+        Set<String> calls = new HashSet<>();
+        var paths = new java.util.TreeSet<String>();
+        long ordinal = -1;
+        for (JsonNode invocation : preparation.path("invocations")) {
+            closed(invocation, Set.of("executionCallId", "callId", "functionCallId", "toolName", "partIndex",
+                    "ordinal", "requestDigest", "inputRef", "toolDefinitionRef"));
+            require(executions.add(id(invocation, "executionCallId")) && calls.add(id(invocation, "callId"))
+                    && number(invocation.get("ordinal")) > ordinal);
+            ordinal = number(invocation.get("ordinal"));
+            require(ordinal < batch.batch().calls().size()
+                    && batch.batch().calls().get((int) ordinal).name().equals(text(invocation, "toolName")));
+            JsonNode ref = historyExecutionReference(original, preparation, invocation);
+            var input = CsiNativeToolReservation.qualifyContent(original, batch, ref, text(invocation, "requestDigest"),
+                    reference(invocation.path("inputRef"), "managed-tool-input", resources),
+                    reference(invocation.path("toolDefinitionRef"), "managed-tool-definition", resources));
+            if (!"read_file".equals(text(invocation, "toolName"))) paths.add(text(input, "file_path"));
+            result.add(invocation.deepCopy());
+        }
+        require(!paths.isEmpty() && preparation.path("paths").isArray()
+                && canonical(JSON.valueToTree(paths)).equals(canonical(preparation.path("paths"))));
+        return List.copyOf(result);
+    }
+
+    private static void sameObservation(JsonNode left, JsonNode right) {
+        for (String field : List.of("state", "backupDirectory", "retainedBackups"))
+            require(canonical(left.path(field)).equals(canonical(right.path(field))));
+    }
+
+    private static void preparedObservation(JsonNode intent, JsonNode prepared, String prompt, JsonNode paths) {
+        require(canonical(intent.path("backupDirectory")).equals(canonical(prepared.path("backupDirectory"))));
+        Map<String, JsonNode> pins = new HashMap<>();
+        prepared.path("retainedBackups").forEach(pin -> pins.put(text(pin, "name"), pin));
+        for (JsonNode pin : intent.path("retainedBackups"))
+            require(canonical(pin).equals(canonical(pins.get(text(pin, "name")))));
+        JsonNode before = intent.path("state");
+        JsonNode after = prepared.path("state");
+        var tracked = new HashSet<String>();
+        before.path("files").fieldNames().forEachRemaining(tracked::add);
+        paths.forEach(path -> tracked.add(path.textValue()));
+        var actual = new HashSet<String>();
+        after.path("files").fieldNames().forEachRemaining(actual::add);
+        require(tracked.equals(actual));
+        before.path("files").fields().forEachRemaining(entry ->
+                require(canonical(entry.getValue()).equals(canonical(after.path("files").get(entry.getKey())))));
+        JsonNode oldSnapshots = before.path("snapshots");
+        JsonNode snapshots = after.path("snapshots");
+        boolean extend = !oldSnapshots.isEmpty() && prompt.equals(oldSnapshots.get(oldSnapshots.size() - 1).path("promptId").textValue());
+        require(snapshots.size() == oldSnapshots.size() + (extend ? 0 : 1));
+        for (int index = 0; index < oldSnapshots.size() - (extend ? 1 : 0); index++)
+            require(canonical(oldSnapshots.get(index)).equals(canonical(snapshots.get(index))));
+        JsonNode last = snapshots.get(snapshots.size() - 1);
+        require(prompt.equals(id(last, "promptId")));
+        JsonNode backups = last.path("trackedFileBackups");
+        var backed = new HashSet<String>();
+        backups.fieldNames().forEachRemaining(backed::add);
+        require(backed.equals(tracked));
+        if (extend) {
+            JsonNode previous = oldSnapshots.get(oldSnapshots.size() - 1);
+            require(canonical(previous.path("timestamp")).equals(canonical(last.path("timestamp"))));
+            previous.path("trackedFileBackups").fields().forEachRemaining(entry ->
+                    require(canonical(entry.getValue()).equals(canonical(backups.get(entry.getKey())))));
+        }
+        for (String path : tracked) {
+            JsonNode backup = backups.path(path);
+            JsonNode fingerprint = after.path("files").get(path);
+            if (extend && before.path("files").has(path)) continue;
+            if (fingerprint.isNull()) require(backup.path("backupFileName").isNull());
+            else {
+                require(backup.path("backupFileName").isTextual());
+                JsonNode pin = pins.get(backup.path("backupFileName").textValue());
+                require(pin != null && ("sha256:" + text(pin, "digest")).equals(text(fingerprint, "digest"))
+                        && number(pin.get("mode")) == number(fingerprint.get("mode")));
+            }
+        }
     }
 
     private static Set<String> useId(Prefix previous, String value) {
@@ -271,7 +469,7 @@ public final class CsiNativeActivationProof {
         Stream stream = new Stream(messageId, prior == null ? previousSequence + 1 : prior.firstSequence(),
                 ordinal + 1, (prior == null ? "" : prior.text()) + fragment);
         return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(), previous.attempt(),
-                false, stream, prior == null ? useId(previous, messageId) : previous.usedIds(), null, previous.batches());
+                false, stream, prior == null ? useId(previous, messageId) : previous.usedIds(), null, previous.batches(), previous.fileHistory());
     }
 
     private static Prefix retract(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,
@@ -289,7 +487,7 @@ public final class CsiNativeActivationProof {
                 && sha256(utf8(stream.messageId() + ":" + stream.firstSequence()))
                         .equals(text(metadata, "contentDigest")));
         return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(), previous.attempt(),
-                false, null, previous.usedIds(), null, previous.batches());
+                false, null, previous.usedIds(), null, previous.batches(), previous.fileHistory());
     }
 
     static byte[] utf8(String text) {
@@ -402,7 +600,7 @@ public final class CsiNativeActivationProof {
         }
         return new Prefix(input, previous.checkpoint(), messageId, previous.attempt(), !user && calls.isEmpty(),
                 null, !user && previous.stream() != null ? previous.usedIds() : useId(previous, messageId),
-                batch, batches);
+                batch, batches, previous.fileHistory());
     }
 
     private static JsonNode messageBody(JsonNode ref, Function<JsonNode, byte[]> resources) {
@@ -494,7 +692,7 @@ public final class CsiNativeActivationProof {
         }
         return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(),
                 new Attempt(attemptId, routeRef.deepCopy(), checkpointRef.deepCopy(), route.deepCopy(), stage), false,
-                previous.stream(), ids, null, previous.batches());
+                previous.stream(), ids, null, previous.batches(), previous.fileHistory());
     }
 
     private static void usage(JsonNode usage, JsonNode route, String stage) {
@@ -588,7 +786,7 @@ public final class CsiNativeActivationProof {
                 && number(state.path("resume").get("initialTurn")) == 0
                 && canonical(expected).equals(canonical(state)));
         return new Prefix(null, new Checkpoint(stateRef.deepCopy(), state.deepCopy()), previous.lastMessageId(),
-                null, false, null, useId(previous, id(result, "uuid")), null, previous.batches());
+                null, false, null, useId(previous, id(result, "uuid")), null, previous.batches(), previous.fileHistory());
     }
 
     private static Input input(Transaction transaction, JsonNode metadata, RuntimeProvisionRequest original,

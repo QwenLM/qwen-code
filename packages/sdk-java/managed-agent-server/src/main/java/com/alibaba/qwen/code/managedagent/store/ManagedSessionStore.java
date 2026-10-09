@@ -5,6 +5,8 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiActivationAdmission;
 import com.alibaba.qwen.code.runtimebroker.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.BlockRecoveryRequest;
 import com.alibaba.qwen.code.managedagent.store.ManagedSessionStoreModels.CommitReceipt;
@@ -71,6 +73,7 @@ public class ManagedSessionStore {
     private ToolPublicationObjectStore publicationObjects;
     private ManagedToolResultStore toolResults;
     private WriterCredentialPolicy credentials = WriterCredentialPolicy.unbound();
+    private JdbcRuntimeBindingRepository csiBindings;
     private final ManagedExtensionRecordStore extensionRecords;
     private final ManagedActionStore actions;
     private final ToolPublicationRetentionStore outputRetention;
@@ -244,6 +247,12 @@ public class ManagedSessionStore {
     @Autowired
     public void setCredentials(WriterCredentialPolicy credentials) {
         this.credentials = credentials;
+    }
+
+    @Autowired(required = false)
+    public void setCsiBindings(RuntimeBindingRepository bindings) {
+        this.csiBindings = bindings instanceof JdbcRuntimeBindingRepository original
+                && original.usesDataSource(jdbc.getDataSource()) ? original : null;
     }
 
     // A bound credential is checked before any state lookup so a foreign
@@ -534,6 +543,12 @@ public class ManagedSessionStore {
         HeadRow head = requireHeadForUpdate(tenantId, sessionId);
         requireHeadScope(head, tenantId, request.workspaceId(), sessionId);
         requireCsiWriter(csiOriginal, head);
+        if (csiOriginal != null && ("commitFileHistory".equals(request.operation())
+                || !jdbc.query("SELECT journal_revision FROM qwen_managed_session_journal_tx"
+                        + " WHERE tenant_id = ? AND session_id = ? AND operation = 'commitFileHistory'"
+                        + " ORDER BY journal_revision LIMIT 1 FOR UPDATE", (row, index) -> row.getLong(1), tenantId, sessionId).isEmpty())) {
+            requireCsiHistoryOwner(csiOriginal);
+        }
         TransactionRow existing = findTransactionByCommand(tenantId,
                 sessionId, commandKeyHash(request.operation(),
                         request.commandId()));
@@ -556,6 +571,15 @@ public class ManagedSessionStore {
         long revision = increment(head.journalRevision(),
                 "journal revision");
         String scopeKey = sessionScopeKey(tenantId, sessionId);
+        if (csiOriginal != null && "commitFileHistory".equals(request.operation())) {
+            jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+                JdbcCsiActivationAdmission.preflightFileHistory(connection, csiOriginal, CSI_JSON.valueToTree(request),
+                        com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.records(validated.recordBytes()),
+                        head.journalRevision(), head.committedSequence(), head.lastCommitDigest(), head.writerId());
+                return null;
+            });
+            requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
+        }
         commitResources(scopeKey, tenantId, sessionId, request, revision,
                 now, validated.resources());
         if (authority != null && extensionRecords.hasNewLifecycleDispatch(tenantId, sessionId, validated.recordBytes(),
@@ -593,6 +617,7 @@ public class ManagedSessionStore {
                         head.lastCommitDigest(), head.writerId(), now.toInstant().toEpochMilli());
                 return null;
             });
+            requireWriter(head, request.writerId(), request.writerGeneration(), writerToken, databaseNow(), true);
         }
         var receiptEvents = applied.receipts();
         if (actions != null) {
@@ -1241,6 +1266,26 @@ public class ManagedSessionStore {
         if (original != null && head.writerGeneration() != 1) {
             throw conflict("csi_original_writer_unavailable", "The original CSI writer cannot be replaced.");
         }
+    }
+
+    private void requireCsiHistoryOwner(JdbcCsiFilesRetirementGuard.Original original) {
+        if (csiBindings == null) {
+            throw conflict("csi_native_identity_unavailable", "CSI history requires original encrypted Runtime identity");
+        }
+        jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
+            var target = org.springframework.jdbc.datasource.DataSourceUtils.getTargetConnection(connection);
+            var binding = csiBindings.findByIdForUpdate(target, original.bindingId());
+            if (binding == null || !binding.getRequest().equals(original.request())
+                    || binding.getGeneration() != original.generation() || binding.getVersion() != original.version()
+                    || binding.getResourceHandle() == null || binding.getResourceHandle().getVersion() != 3) {
+                throw conflict("csi_native_identity_unavailable", "Original execution bootstrap is unavailable");
+            }
+            var boot = WorkspaceCsiRuntimeIdentity.boot(binding);
+            if (!Integer.valueOf(5).equals(boot.get("version"))) {
+                throw conflict("csi_native_identity_unavailable", "Original execution bootstrap is unavailable");
+            }
+            return null;
+        });
     }
 
     private HeadRow requireHeadForUpdate(String tenantId, String sessionId) {

@@ -22,6 +22,15 @@ import {
   HostedToolRecoveryRequiredError,
   hostedWorkspaceDeclarations,
 } from './hosted-workspace-tool-turn.js';
+import {
+  commitHostedCsiHistory,
+  requestHostedCsiHistory,
+} from './hosted-csi-file-history.js';
+import type {
+  CsiHistoryInvocation,
+  CsiHistoryPreparation,
+} from './managed-csi-file-history-protocol.js';
+import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -199,6 +208,88 @@ export class HostedCsiToolTurn implements HostedToolTurn {
       this.verifyBatch(batch, batchId, reservations);
       if ((batch['members'] as unknown[]).length !== reservations.length)
         throw new Error('Original CSI batch is incomplete.');
+      const members = batch['members'] as Array<Record<string, unknown>>;
+      if (members.some((member) => member['state'] !== 'prepared'))
+        throw new Error('Original CSI batch is not prepared.');
+      const paths = new Set<string>();
+      const invocations: CsiHistoryInvocation[] = members
+        .map((member) => {
+          const reference = object(member['reference']);
+          const reservation = reservations.find(
+            (item) =>
+              object(item['reference'])['callId'] === reference['callId'],
+          )!;
+          const wrapper = object(
+            JSON.parse(
+              Buffer.from(
+                reservation['inputBytesBase64'] as string,
+                'base64',
+              ).toString('utf8'),
+            ),
+          );
+          const payload = object(JSON.parse(wrapper['payloadJson'] as string));
+          const toolName = payload['toolName'] as string;
+          if (toolName !== 'read_file')
+            paths.add(object(payload['input'])['file_path'] as string);
+          return {
+            executionCallId: member['executionCallId'] as string,
+            callId: reference['callId'] as string,
+            functionCallId: reference['functionCallId'] as string,
+            toolName,
+            partIndex: reference['partIndex'] as number,
+            ordinal: reference['ordinal'] as number,
+            requestDigest: reference['argsDigest'] as string,
+            inputRef: reference['inputRef'] as ManagedSessionDurableRef,
+            toolDefinitionRef: reference[
+              'toolDefinitionRef'
+            ] as ManagedSessionDurableRef,
+          };
+        })
+        .sort((a, b) => a.ordinal - b.ordinal);
+      if (paths.size > 0) {
+        signal.throwIfAborted();
+        const key = this.session.authority.sessionHeader.sessionKey;
+        const observation = await requestHostedCsiHistory(this.broker, key, {
+          kind: 'csi-file-history',
+          version: 1,
+          action: 'snapshot',
+        });
+        const preparation: CsiHistoryPreparation = {
+          stage: 'intent',
+          turnId: this.promptId,
+          promptId: this.promptId,
+          batchId,
+          invocations,
+          paths: [...paths].sort(),
+        };
+        signal.throwIfAborted();
+        const intent = await commitHostedCsiHistory(
+          this.session,
+          observation,
+          preparation,
+          batchId,
+          `csi-file-history:intent:${batchId}`,
+        );
+        signal.throwIfAborted();
+        const prepared = await requestHostedCsiHistory(this.broker, key, {
+          kind: 'csi-file-history',
+          version: 1,
+          action: 'prepare',
+          preparationRef: intent.recordRef,
+        });
+        signal.throwIfAborted();
+        await commitHostedCsiHistory(
+          this.session,
+          prepared,
+          {
+            ...preparation,
+            stage: 'prepared',
+            intentRef: intent.recordRef,
+          },
+          batchId,
+          `csi-file-history:prepared:${batchId}`,
+        );
+      }
       throw new Error('CSI native tool intent and dispatch remain closed.');
     } catch (cause) {
       throw new HostedToolRecoveryRequiredError(cause);

@@ -1725,6 +1725,29 @@ function nestedResourceRefs(
     const parsed = tryParseHarnessCheckpointV1(bytes);
     return parsed.ok ? collectRefs([parsed.checkpoint]) : [];
   }
+  if (ref.kind === 'managed-file_history') {
+    const record = parseManagedSessionRecordJson(
+      bytes.toString('utf8'),
+      MANAGED_SESSION_LIMITS.maxEventBytes,
+    );
+    if (
+      record === null ||
+      typeof record !== 'object' ||
+      Array.isArray(record) ||
+      record['schemaVersion'] !== 2 ||
+      record['profile'] !== 'csi-files-retirement/1'
+    )
+      return [];
+    const preparation = record['preparation'];
+    if (preparation === null) return [];
+    if (
+      !preparation ||
+      typeof preparation !== 'object' ||
+      Array.isArray(preparation)
+    )
+      throw corrupt('CSI history preparation is invalid.');
+    return collectRefs([preparation['invocations'], preparation['intentRef']]);
+  }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
     ref.kind === 'managed-action-options' ||

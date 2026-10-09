@@ -292,7 +292,7 @@ public final class JdbcRuntimeBindingRepository
         try {
             return JdbcRepositorySupport.transaction(dataSource, connection -> {
                 lockPlacementDomain(connection, original.getRequest().getScope().getTenantId());
-                var csiOriginal = JdbcCsiActivationAdmission.lockForExecution(connection, original);
+                var csiOriginal = JdbcCsiActivationAdmission.lockForExecution(connection, original, this);
                 JdbcCsiActivationAdmission.requireExecution(csiOriginal, candidate);
                 RuntimeBindingRecord binding = selectById(connection,
                         candidate.getBindingId(), true);
@@ -335,14 +335,16 @@ public final class JdbcRuntimeBindingRepository
         requireCsiRepositories(sessions, executions);
         JdbcToolExecutionRepository.requireCandidate(candidate);
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
-            var admission = JdbcCsiActivationAdmission.lockForReservation(connection, hint);
+            var admission = JdbcCsiActivationAdmission.lockForReservation(connection, hint, this);
             var original = admission.original();
             var resources = CsiNativeToolReservation.inventory(connection, original);
             JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
             RuntimeAdmission.requireReady(selectById(connection, original.bindingId(), true), original.generation());
             RuntimeAdmission.requireSession(JdbcRuntimeSessionRepository.selectSession(connection,
                     original.request().getScope(), original.request().getIsolationKey(), true), candidate);
-            return CsiNativeToolReservation.prepare(connection, original, admission.prefix(), resources, candidate, input, definition);
+            var result = CsiNativeToolReservation.prepare(connection, original, admission.prefix(), resources, candidate, input, definition);
+            admission.head().requireCurrentTime(connection);
+            return result;
         });
     }
 
@@ -350,7 +352,7 @@ public final class JdbcRuntimeBindingRepository
             RuntimeBindingRecord hint, String promptId, String batchId) {
         requireCsiRepositories(sessions, executions);
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
-            var admission = JdbcCsiActivationAdmission.lockForReservation(connection, hint);
+            var admission = JdbcCsiActivationAdmission.lockForReservation(connection, hint, this);
             var original = admission.original();
             var resources = CsiNativeToolReservation.inventory(connection, original);
             JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
@@ -361,7 +363,9 @@ public final class JdbcRuntimeBindingRepository
             if (runtime.getState() != RuntimeSessionRecord.State.READY) {
                 throw new RuntimeBrokerException(409, "runtime_admission_closed", "Original CSI Runtime Session is not ready", false);
             }
-            return CsiNativeToolReservation.read(connection, original, admission.prefix(), resources, promptId, batchId);
+            var result = CsiNativeToolReservation.read(connection, original, admission.prefix(), resources, promptId, batchId);
+            admission.head().requireCurrentTime(connection);
+            return result;
         });
     }
 
@@ -687,7 +691,7 @@ public final class JdbcRuntimeBindingRepository
         }
         RuntimeBindingRecord hint = findById(expected.getBindingId());
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
-            var original = JdbcCsiActivationAdmission.lockForExecution(connection, hint);
+            var original = JdbcCsiActivationAdmission.lockForExecution(connection, hint, this);
             JdbcCsiActivationAdmission.requireExecution(original, expected);
             if (original != null) {
                 throw new RuntimeBrokerException(501, "csi_file_dispatch_unavailable",

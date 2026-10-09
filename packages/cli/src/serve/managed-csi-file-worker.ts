@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import express, { type Request, type Response } from 'express';
@@ -37,6 +38,15 @@ import {
 } from './managed-csi-file-envelope.js';
 import { validateManagedCsiPodIdentity } from './managed-csi-envelope.js';
 import { ManagedCsiMount } from './managed-csi-mount.js';
+import { composeManagedCsiFiles } from './managed-csi-file-composer.js';
+import { readCurrentCsiNative } from './managed-csi-native-readback.js';
+import {
+  CSI_FILE_HISTORY_PATH,
+  readCsiFileHistoryEnvelope,
+  readCsiFileHistoryObservation,
+  readCsiPreparationEvidence,
+  type CsiFileHistoryObservation,
+} from './managed-csi-file-history-protocol.js';
 
 export interface ManagedCsiFileWorkerHandle {
   readonly ready: ManagedCsiFileReady;
@@ -65,6 +75,28 @@ export async function startManagedCsiFileWorker(
   const installations = new ManagedContextInstallations(boot.context);
   let closed = false;
   let retirementId: string | undefined;
+  let composition:
+    | Awaited<ReturnType<typeof composeManagedCsiFiles>>
+    | undefined;
+  let binding: Promise<CsiFileHistoryObservation> | undefined;
+  let bindIdentity: string | undefined;
+  let observationTail: Promise<unknown> = Promise.resolve();
+  const preparations = new Map<
+    string,
+    {
+      reference: unknown;
+      observation: Promise<CsiFileHistoryObservation>;
+    }
+  >();
+  const operations = new Set<Promise<unknown>>();
+  const track = <T>(operation: Promise<T>): Promise<T> => {
+    operations.add(operation);
+    void operation.then(
+      () => operations.delete(operation),
+      () => operations.delete(operation),
+    );
+    return operation;
+  };
   const canInstall = () =>
     !closed && retirementId === undefined && mount.isAvailable;
   const app = express();
@@ -197,9 +229,137 @@ export async function startManagedCsiFileWorker(
     handleManagedRuntimeJsonError,
   );
   app.post(
+    CSI_FILE_HISTORY_PATH,
+    ...middleware,
+    async (req: Request, res: Response) => {
+      try {
+        if (boot.version !== 5 || closed) throw new Error();
+        const installed = installations.installation(boot.identity.sessionId);
+        if (!installed) throw new Error();
+        const operation = readCsiFileHistoryEnvelope(req.body, boot, installed);
+        const fingerprint = JSON.stringify(installed);
+        let observation: CsiFileHistoryObservation;
+        if (operation.action === 'prepare') {
+          if (!canInstall() || !binding || fingerprint !== bindIdentity)
+            throw new Error();
+          const originalBinding = binding;
+          const ref = operation.preparationRef;
+          let prepared = preparations.get(ref.resourceId);
+          if (prepared && !isDeepStrictEqual(prepared.reference, ref))
+            throw new Error();
+          if (!prepared) {
+            const pending = track(
+              observationTail
+                .catch(() => undefined)
+                .then(async () => {
+                  await originalBinding;
+                  if (!canInstall() || !composition) throw new Error();
+                  const current = readCsiPreparationEvidence(
+                    await readCurrentCsiNative(boot, installed, 'prepare', ref),
+                  );
+                  if (!canInstall()) throw new Error();
+                  const before = await composition.observe();
+                  if (
+                    !isDeepStrictEqual(
+                      current.observation,
+                      readCsiFileHistoryObservation(
+                        { state: before.history, ...before.storage },
+                        boot.identity.sessionId,
+                      ),
+                    ) ||
+                    !canInstall()
+                  )
+                    throw new Error();
+                  await composition.history.prepare(
+                    current.preparation.promptId,
+                    current.preparation.paths,
+                  );
+                  const after = await composition.observe();
+                  return readCsiFileHistoryObservation(
+                    { state: after.history, ...after.storage },
+                    boot.identity.sessionId,
+                  );
+                }),
+            );
+            prepared = {
+              reference: structuredClone(ref),
+              observation: pending,
+            };
+            preparations.set(ref.resourceId, prepared);
+            observationTail = pending;
+          }
+          observation = await prepared.observation;
+        } else if (operation.action === 'bind') {
+          if (!canInstall()) throw new Error();
+          if (binding && fingerprint !== bindIdentity) throw new Error();
+          if (!binding) {
+            bindIdentity = fingerprint;
+            binding = track(
+              Promise.resolve().then(async () => {
+                await readCurrentCsiNative(boot, installed, 'bind', null);
+                if (!canInstall()) throw new Error();
+                composition = await composeManagedCsiFiles({
+                  mount,
+                  ownerSessionId: boot.identity.sessionId,
+                  runtimeSessionId: boot.identity.sessionId,
+                  profile: boot.identity.profile,
+                  capabilityDigest: boot.identity.capabilityDigest,
+                });
+                if (!canInstall()) throw new Error();
+                const observed = await composition.observe();
+                const result = readCsiFileHistoryObservation(
+                  { state: observed.history, ...observed.storage },
+                  boot.identity.sessionId,
+                );
+                if (
+                  result.state.snapshots.length ||
+                  Object.keys(result.state.files).length ||
+                  result.retainedBackups.length
+                )
+                  throw new Error();
+                return result;
+              }),
+            );
+          }
+          observation = await binding;
+        } else {
+          if (!binding || fingerprint !== bindIdentity) throw new Error();
+          const originalBinding = binding;
+          const pending = track(
+            observationTail
+              .catch(() => undefined)
+              .then(async () => {
+                await originalBinding;
+                if (closed || !composition) throw new Error();
+                const observed = await composition.observe();
+                return readCsiFileHistoryObservation(
+                  { state: observed.history, ...observed.storage },
+                  boot.identity.sessionId,
+                );
+              }),
+          );
+          observationTail = pending;
+          observation = await pending;
+        }
+        if (closed || (operation.action !== 'snapshot' && !canInstall()))
+          throw new Error();
+        const response = {
+          ...(req.body as Record<string, unknown>),
+          observation,
+        };
+        if (Buffer.byteLength(JSON.stringify(response)) > 64 * 1024)
+          throw new Error();
+        res.json(response);
+      } catch {
+        refuse(res, 'managed_csi_history_unavailable');
+      }
+    },
+    handleManagedRuntimeJsonError,
+  );
+  app.post(
     `${MANAGED_CSI_FILE_PREFIX}/drain`,
     ...middleware,
-    (req: Request, res: Response) => {
+    async (req: Request, res: Response) => {
       try {
         const request = readManagedCsiFileDrain(req.body, boot, pod);
         if (
@@ -210,6 +370,7 @@ export async function startManagedCsiFileWorker(
         )
           throw new Error();
         if (request.operation === 'seal') retirementId ??= request.retirementId;
+        await Promise.allSettled([...operations]);
         res.json({
           protocolVersion: 2,
           managedCsi: MANAGED_CSI_FILE_PROTOCOL,
@@ -222,7 +383,10 @@ export async function startManagedCsiFileWorker(
           workState: 'BLOCKED',
           pendingStarts: 0,
           pendingInvocations: 0,
-          blockers: ['file-admission-unavailable'],
+          blockers: [
+            'file-admission-unavailable',
+            ...(binding ? ['retained-history-bound'] : []),
+          ].sort(),
         });
       } catch {
         refuse(res, 'managed_csi_drain_conflict');
@@ -231,7 +395,12 @@ export async function startManagedCsiFileWorker(
     handleManagedRuntimeJsonError,
   );
   const server = createServer(
-    ownedManagedRuntimeRouteGate(app, MANAGED_CSI_FILE_ROUTES),
+    ownedManagedRuntimeRouteGate(app, [
+      ...MANAGED_CSI_FILE_ROUTES,
+      ...(boot.version === 5
+        ? [{ method: 'POST', path: CSI_FILE_HISTORY_PATH }]
+        : []),
+    ]),
   );
   server.maxHeadersCount = 32;
   server.headersTimeout = 5_000;
@@ -242,7 +411,6 @@ export async function startManagedCsiFileWorker(
     closed = true;
     closing ??= (async () => {
       const results = await Promise.allSettled([
-        mount.close(),
         new Promise<void>((resolve, reject) => {
           if (!server.listening) {
             resolve();
@@ -252,7 +420,11 @@ export async function startManagedCsiFileWorker(
           server.closeAllConnections();
         }),
       ]);
-      const errors = results.flatMap((result) =>
+      const joined = await Promise.allSettled([...operations]);
+      const retained = await Promise.allSettled([
+        composition ? composition.close() : mount.close(),
+      ]);
+      const errors = [...results, ...joined, ...retained].flatMap((result) =>
         result.status === 'rejected' ? [result.reason] : [],
       );
       if (errors.length)

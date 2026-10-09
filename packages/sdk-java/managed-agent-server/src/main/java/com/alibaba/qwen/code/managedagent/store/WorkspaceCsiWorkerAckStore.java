@@ -2,7 +2,7 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import static com.alibaba.qwen.code.managedagent.store.ToolPublicationContract.require;
 
-import com.alibaba.qwen.code.managedagent.service.WorkspaceCsiRuntimeIdentity;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceCsiRuntimeIdentity;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;

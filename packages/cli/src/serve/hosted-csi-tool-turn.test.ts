@@ -18,6 +18,8 @@ import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/mana
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
+import * as history from './hosted-csi-file-history.js';
+import type { CsiFileHistoryObservation } from './managed-csi-file-history-protocol.js';
 
 let root: string;
 let managed: ManagedSession;
@@ -323,4 +325,114 @@ it('refuses a changed complete-read identity while preserving the original assis
   ).rejects.toBeInstanceOf(HostedToolRecoveryRequiredError);
   expect(requests).toHaveLength(3);
   expect(commit).toHaveBeenCalledTimes(1);
+});
+
+it('commits actual initial, intent and prepared domain receipts before refusing dispatch', async () => {
+  // Original local authority; the assistant callback, broker rows and worker observation are explicit seams.
+  const initial: CsiFileHistoryObservation = {
+    state: { ownerSessionId: sessionId, snapshots: [], files: {} },
+    backupDirectory: {
+      volumeDevice: '1',
+      volumeInode: '2',
+      directoryDevice: '1',
+      directoryInode: '3',
+    },
+    retainedBackups: [],
+  };
+  const first = await history.commitInitialHostedCsiHistory(managed, initial);
+  expect(first.revision).toBe(1);
+  expect(first.receipt.replayed).toBe(false);
+  const control = vi
+    .spyOn(history, 'requestHostedCsiHistory')
+    .mockImplementation(async (_broker, _key, operation) => {
+      if (operation.action === 'snapshot') return initial;
+      expect(operation.action).toBe('prepare');
+      if (operation.action !== 'prepare')
+        throw new Error('Unexpected operation');
+      const original = JSON.parse(
+        (await managed.resources.read(operation.preparationRef)).toString(),
+      );
+      expect(original.revision).toBe(2);
+      expect(original.previousRecordRef).toEqual(first.recordRef);
+      expect(original.preparation.stage).toBe('intent');
+      expect(
+        original.preparation.invocations.map(
+          (item: { toolName: string }) => item.toolName,
+        ),
+      ).toEqual(['read_file', 'write_file', 'edit']);
+      expect(original.preparation.paths).toEqual([
+        'dir/file.txt',
+        'output.txt',
+      ]);
+      expect(original.record.parentUuid).toBe(batchId);
+      const timestamp = new Date().toISOString();
+      return {
+        ...initial,
+        state: {
+          ...initial.state,
+          files: { 'dir/file.txt': null, 'output.txt': null },
+          snapshots: [
+            {
+              promptId,
+              timestamp,
+              trackedFileBackups: {
+                'dir/file.txt': {
+                  backupFileName: null,
+                  version: 1,
+                  backupTime: timestamp,
+                },
+                'output.txt': {
+                  backupFileName: null,
+                  version: 1,
+                  backupTime: timestamp,
+                },
+              },
+            },
+          ],
+        },
+      };
+    });
+  const { calls, parts } = batch();
+  let refusal: unknown;
+  try {
+    await turn.execute(
+      calls,
+      parts,
+      'unit-model',
+      new AbortController().signal,
+    );
+  } catch (error) {
+    refusal = error;
+  }
+  expect(refusal).toBeInstanceOf(HostedToolRecoveryRequiredError);
+  expect((refusal as Error).cause).toMatchObject({
+    message: 'CSI native tool intent and dispatch remain closed.',
+  });
+  expect(control).toHaveBeenCalledTimes(2);
+  const latest = managed.authority.domainRecord('file_history')!;
+  expect(latest.revision).toBe(3);
+  const prepared = JSON.parse(
+    (await managed.resources.read(latest.recordRef)).toString(),
+  );
+  expect(prepared.preparation.stage).toBe('prepared');
+  expect(prepared.preparation.intentRef).toEqual(prepared.previousRecordRef);
+  expect(prepared.preparation.invocations).toHaveLength(3);
+  expect(prepared.record.parentUuid).toBe(batchId);
+  const replay = await history.commitHostedCsiHistory(
+    managed,
+    {
+      state: prepared.state,
+      backupDirectory: prepared.backupDirectory,
+      retainedBackups: prepared.retainedBackups,
+    },
+    prepared.preparation,
+    batchId,
+    `csi-file-history:prepared:${batchId}`,
+  );
+  expect(replay.revision).toBe(3);
+  expect(replay.recordRef).toEqual(latest.recordRef);
+  expect(replay.receipt.replayed).toBe(true);
+  expect(
+    paths.some((path) => path.includes('start') || path.includes('execute')),
+  ).toBe(false);
 });

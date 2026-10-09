@@ -108,6 +108,26 @@ export async function csiSessionSnapshot(
         stored.set(ref.resourceId, entry);
         if (ref.kind === 'managed-checkpoint')
           pending.push(JSON.parse(bytes.toString('utf8')));
+        if (ref.kind === 'managed-file_history') {
+          const body = JSON.parse(bytes.toString('utf8')) as Record<
+            string,
+            unknown
+          >;
+          if (
+            body['schemaVersion'] === 2 &&
+            body['profile'] === 'csi-files-retirement/1'
+          ) {
+            const preparation = body['preparation'] as Record<
+              string,
+              unknown
+            > | null;
+            if (preparation)
+              pending.push(
+                preparation['invocations'],
+                preparation['intentRef'],
+              );
+          }
+        }
       } else pending.push(...Object.values(row));
     }
   }

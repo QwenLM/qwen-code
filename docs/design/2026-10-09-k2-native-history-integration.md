@@ -2,27 +2,34 @@
 
 [English](2026-10-09-k2-native-history-integration.md) | [简体中文](2026-10-09-k2-native-history-integration.zh-CN.md)
 
-Status: implementation design, 2026-10-09. Investigated source baseline:
-`9582aac56085faa42d8c8fcde8f7157e9db64619`, Draft PR #13526.
+Status: implementation in progress, 2026-10-09. Preparation increment parent:
+`b0d9888b444dcb15497abd83ec15182b65c2fae8`, Draft PR #13526.
 The preceding increment implements derived original assistant-batch retention and
-complete related-row qualification before current-batch partitioning. The boot-5/handle-3 authority propagation dependency is implemented and under
-verification. Current native readback, schema-2 history/promotion, worker
-admission/execution and completion below remain proposed and unaccepted. This increment refines the preparation contract
-and adds explicit Broker dispatch and JDBC authorization refusals while original
-native intent/checkpoint grants are absent. It does not implement preparation.
+complete related-row qualification before current-batch partitioning. The
+boot-5/handle-3 authority propagation dependency has passed bounded software
+verification. The current candidate connects lease-authenticated bind/prepare
+readback, native schema-2 initial/intent/prepared acceptance, exact original
+resource promotion and association, retained worker preparation, and the private
+Hosted caller. Focused tests cover these components. On 2026-10-09 an independent bounded
+software run connected the actual producer through durable prepared, under the
+explicit seams in section 7.1; platform and full K2 acceptance remain open. Original native tool intents/checkpoints, execution grants,
+execution and completion remain closed. Explicit Broker dispatch and JDBC
+authorization refusals preserve that boundary.
 It refines the remaining connected composition in the [native file execution design](2026-10-07-k2-native-file-execution.md)
 and [original batch reservation design](2026-10-08-k2-native-batch-reservation.md).
 The full K2 objective, proposal #12380 and tracker #13395 remain open.
 
 ## 1. Current gap and required result
 
-The actual private Hosted caller commits the complete original assistant,
-durably reserves accepted Read/Write/Edit inputs and full definitions, and reads
-the complete current allocation. It then stops with recovery required. Native
-fresh acceptance and historical replay admit no file-history or tool-intent
-operation. `commitResources` runs before native acceptance and refuses original
-PUBLISHED allocation resources. The four-route boot-4/boot-5 worker has no production
-composer, history preparation, executor or result-consumption caller.
+The submitted baseline private Hosted caller stops after the complete original
+assistant and accepted Read/Write/Edit allocations. The current candidate adds
+initial history before input, complete intent and original resource promotion,
+worker preparation and durable prepared history. It then stops with recovery
+required. Native fresh acceptance and historical replay share the history
+validator; same-Connection preflight qualifies the entire transition before
+`commitResources`, and final acceptance verifies original associations. Boot 5
+adds a retained composer/history route; boot 4 stays construction-only. Tool
+intents, execution grants, executor and result-consumption callers remain absent.
 
 Connect one original chain: READY Session and installed context → retained empty
 history bind → native schema-2 intent with the entire accepted batch → worker
@@ -130,8 +137,9 @@ complete dispatch checkpoint, not worker-preparation admission. The nullable
 prepared rule and all repeated fields must agree with the response and original
 qualified authorization. Persist this exact joined authorization evidence when
 authorizing dispatch; an existing two-column dispatch-generation/binding-version
-marker alone is insufficient. This wire shape and persistence are planned,
-not currently provided by the construction-only worker or generic Tool-v3 grant.
+marker alone is insufficient. Shared Java/CLI codecs now implement this wire
+shape; immutable grant persistence, execute admission and the worker execution
+consumer remain unimplemented. Generic Tool-v3 grants do not provide this proof.
 
 Each resource entry has exactly `reference` and `bytesBase64`. References use
 existing closed resource metadata. A resource appears once, all listed resources
@@ -286,7 +294,8 @@ private history operation through this access and the Broker service.
 The private `serve` entry reads `K2_RUNTIME_BROKER_ORIGIN` from deployment
 configuration, validates the origin rules in section 2 and passes the retained
 tuple to provisioning. The independent lease-authenticated readback handler on
-the same owned server is still pending. Production HTTPS can front the
+the same owned server is connected for bind and prepare; execute returns 501.
+Production HTTPS can front the
 existing loopback listener; the global Hosted credential is not installed in
 the worker. Reconciliation reconstructs boot from the saved handle, never from
 the new process environment.
@@ -408,3 +417,40 @@ two clean self-audits and the repository's native review workflow precede a
 completed implementation report. Keep any native workflow restriction explicit;
 CI or individual helper tests are not maintainer approval. Keep the same Draft
 PR; no automatic Ready, merge, physical release or proposal closure.
+
+### 7.1 Observed preparation increment, 2026-10-09
+
+One independent run of the pinned candidate completes ordinary local Read and
+one actual private mixed assistant chain. Actual provisioning produces
+boot5/handle3; the Main-owned Broker, original controller/store, Hosted shared
+runner and same live worker commit initial history, intent and prepared, all
+with HTTP 200. The three accepted Read/Write/Edit allocations preserve ordinals
+0/2/3 after traversal Read ordinal 1 is refused. Their six original input and
+declaration resources become REFERENCED with exact intent/prepared associations.
+The finite commit closures contain 1/7/8 resources, without recursively copying
+the initial predecessor into prepared. The worker reads the original committed
+intent through its original lease and retained composition.
+
+The existing file's actual 29-byte preimage equals the retained backup; the
+working file stays unchanged and the new Write target stays absent. The original
+head reaches revision/sequence 12/12. All three allocations remain PREPARED with
+null authorization markers. Hosted text returns 503 after durable prepared;
+there is no dispatch, next input, settled turn or user-facing execution success.
+The 34 offline original-data predicates are separate from the two behavior
+groups. All 53 SQL tables are conserved after the producer; owned processes,
+ports, H2 and retained handles are cleaned up. Sources/products are pinned and
+unchanged across the run; post-run actual-loaded-origin auditing does not claim
+complete transitive prelaunch dependency coverage.
+
+This run uses H2, synthetic Kubernetes objects, mocked pre-provision attestation,
+a MockMvc transaction/HTTP adapter around the actual controller/store,
+deterministic model SSE, Darwin mount/platform/fd shims over owned real handles,
+and a transparent worker URI proxy. It is bounded software preparation evidence,
+not real MySQL isolation/lock competition, physical Linux CSI, target-cluster or
+full K2 qualification. Previous failed runs are preserved separately: a missing
+no-store response header and an incorrect mixed-assistant history guard were
+reproduced, repaired and covered by regressions before this successful run.
+Immutable grants, execution, result consumption, cold recovery, writer cut and
+physical retirement remain the next deliveries. Native review remains pending
+because the required foreground workflow tool is unavailable; Draft and
+maintainer review remain mandatory.

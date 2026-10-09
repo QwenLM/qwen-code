@@ -30,9 +30,17 @@ public final class JdbcToolExecutionRepository
             "settled_at", "abandoned_at", "loss_evidence_id",
             "authorized_dispatch_generation", "authorized_binding_version");
     private final DataSource dataSource;
+    private final JdbcRuntimeBindingRepository csiBindings;
 
     public JdbcToolExecutionRepository(DataSource dataSource) {
+        this(dataSource, null);
+    }
+
+    public JdbcToolExecutionRepository(DataSource dataSource, JdbcRuntimeBindingRepository csiBindings) {
         this.dataSource = JdbcRepositorySupport.requireDataSource(dataSource);
+        if (csiBindings != null && !csiBindings.usesDataSource(this.dataSource))
+            throw new IllegalArgumentException("CSI continuation requires the same DataSource");
+        this.csiBindings = csiBindings;
     }
 
     static void abandonByBinding(Connection connection, RuntimeBindingRecord binding)
@@ -461,9 +469,9 @@ public final class JdbcToolExecutionRepository
         });
     }
 
-    private static CsiContinuation lockCsiContinuation(Connection connection, ToolExecutionRecord hint)
+    private CsiContinuation lockCsiContinuation(Connection connection, ToolExecutionRecord hint)
             throws SQLException {
-        var original = JdbcCsiActivationAdmission.lockForContinuation(connection, hint.getBindingId());
+        var original = JdbcCsiActivationAdmission.lockForContinuation(connection, hint.getBindingId(), csiBindings);
         if (original == null) {
             return null;
         }

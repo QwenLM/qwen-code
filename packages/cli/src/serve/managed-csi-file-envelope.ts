@@ -72,6 +72,7 @@ export function parseManagedCsiFileJson(
   bytes: Uint8Array,
   limit: number,
 ): unknown {
+  if (bytes.byteLength > limit) throw new Error('Invalid CSI file JSON.');
   const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
   parseManagedSessionRecordJson(text, limit);
   return JSON.parse(

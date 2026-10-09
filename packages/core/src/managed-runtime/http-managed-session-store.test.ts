@@ -130,6 +130,87 @@ describe('HTTP Managed Session store', () => {
     );
   });
 
+  it('associates only finite private history invocation refs and the original prepared intent', async () => {
+    const server = new FakeManagedSessionStore();
+    const open = await createSessionOpener(server);
+    const session = await open('harness-a', TOKEN_A);
+    try {
+      const commit = async (
+        commandId: string,
+        content: Record<string, unknown>,
+      ) =>
+        session.authority.commitDomainRecord(
+          {
+            operation: 'commitFileHistory',
+            commandId,
+            sessionKey: SESSION_KEY,
+            contentDigest: createHash('sha256')
+              .update(JSON.stringify(content))
+              .digest('hex'),
+          },
+          { domain: 'file_history', content },
+          { class: 'trusted_entry' },
+        );
+      const initial = await commit('history-bind', {
+        schemaVersion: 2,
+        profile: 'csi-files-retirement/1',
+        preparation: null,
+      });
+      const inputRef = await session.resources.publish(
+        'managed-tool-input',
+        Buffer.from('{}'),
+      );
+      const toolDefinitionRef = await session.resources.publish(
+        'managed-tool-definition',
+        Buffer.from('{}'),
+      );
+      const invocations = [{ inputRef, toolDefinitionRef }];
+      const intent = await commit('history-intent', {
+        schemaVersion: 2,
+        profile: 'csi-files-retirement/1',
+        preparation: { stage: 'intent', invocations },
+      });
+      const ids = () =>
+        (server.commits.at(-1)!['resources'] as ManagedSessionDurableRef[])
+          .map((ref) => ref.resourceId)
+          .sort();
+      expect(ids()).toEqual(
+        [
+          intent.recordRef.resourceId,
+          inputRef.resourceId,
+          toolDefinitionRef.resourceId,
+        ].sort(),
+      );
+      expect(ids()).not.toContain(initial.recordRef.resourceId);
+      const prepared = await commit('history-prepared', {
+        schemaVersion: 2,
+        profile: 'csi-files-retirement/1',
+        preparation: {
+          stage: 'prepared',
+          invocations,
+          intentRef: intent.recordRef,
+        },
+      });
+      expect(ids()).toEqual(
+        [
+          prepared.recordRef.resourceId,
+          intent.recordRef.resourceId,
+          inputRef.resourceId,
+          toolDefinitionRef.resourceId,
+        ].sort(),
+      );
+      expect(ids()).not.toContain(initial.recordRef.resourceId);
+      const legacy = await commit('history-legacy', {
+        schemaVersion: 1,
+        state: {},
+      });
+      expect(ids()).toContain(legacy.recordRef.resourceId);
+      expect(ids()).not.toContain(prepared.recordRef.resourceId);
+    } finally {
+      await session.close();
+    }
+  });
+
   async function bootStoresAndSession(
     server: FakeManagedSessionStore,
   ): Promise<{

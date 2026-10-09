@@ -2,13 +2,16 @@
 
 [English](2026-10-09-k2-native-history-integration.md) | [简体中文](2026-10-09-k2-native-history-integration.zh-CN.md)
 
-状态：实现设计，2026-10-09。已调查的源码基线：
-`9582aac56085faa42d8c8fcde8f7157e9db64619`，Draft PR #13526。
+状态：实现进行中，2026-10-09。Preparation 增量的父提交：
+`b0d9888b444dcb15497abd83ec15182b65c2fae8`，Draft PR #13526。
 前一增量已实现派生的原始 assistant 批次保留，以及先校验全部相关行再分组当前批次。
-boot-5/handle-3 authority 传播依赖已实现，正在验证。下述当前原生读回、schema-2
-历史/资源提升、worker 准入/执行与完成仍是提案，尚未验收。
-本增量细化 preparation 合同，并在缺少原生 intent/checkpoint grant 时，加入明确的
-Broker dispatch 和 JDBC authorization 拒绝；尚未实现 preparation。
+boot-5/handle-3 authority 传播依赖已通过有界软件验证。当前候选实现连接了
+lease 认证的 bind/prepare 读回、原生 schema-2 initial/intent/prepared 接受、
+原始资源的精确提升与关联、retained worker preparation 以及私有 Hosted 调用者。
+聚焦测试覆盖了这些组件。2026-10-09 的独立有界软件运行已将实际 producer
+贯通至持久 prepared，使用第 7.1 节明确列出的 seam；平台与完整 K2 验收仍开放。原始 native tool intent/checkpoint、
+execution grant、执行与完成保持关闭。明确的 Broker dispatch 和 JDBC authorization
+拒绝保留了该边界。
 本设计细化
 [原生文件执行设计](2026-10-07-k2-native-file-execution.zh-CN.md)与
 [原始批次预留设计](2026-10-08-k2-native-batch-reservation.zh-CN.md)
@@ -16,11 +19,13 @@ Broker dispatch 和 JDBC authorization 拒绝；尚未实现 preparation。
 
 ## 1. 当前缺口与要求的结果
 
-实际私有 Hosted 调用者提交完整原始 assistant，持久预留已接受的 Read/Write/Edit
-输入与完整定义，并读取完整当前分配，随后以需要恢复的状态停止。原生新提交与历史
-回放均未准入文件历史或 tool intent。`commitResources` 在原生接受前执行，拒绝原始
-PUBLISHED 分配资源。只有四条路由的 boot-4/boot-5 worker 尚无生产 composer、历史准备、
-执行器或结果消费调用者。
+已提交基线的私有 Hosted 调用者在完整原始 assistant 和已接受 Read/Write/Edit
+分配之后停止。当前候选在 input 前增加 initial history，并连接完整 intent 与原始
+资源提升、worker preparation、持久 prepared 历史，然后以需要恢复的状态停止。
+原生新提交与历史回放共享 history validator；same-Connection preflight 在
+`commitResources` 前校验完整转换，最终接受校验原始关联。boot 5 增加 retained
+composer/history 路由；boot 4 仍只用于构造。tool intent、execution grant、执行器
+及结果消费调用者仍未连接。
 
 连接一条原始链路：READY Session 与已安装上下文 → 保留的空历史绑定 → 包含全部
 已接受成员的原生 schema-2 intent → worker 读取当前原始证据并准备保留备份 →
@@ -108,8 +113,9 @@ revision 和 sequence 使用安全正整数。execution reference 是原始十�
 reference。intent/checkpoint ref 是原生 tool intent 和完整 dispatch checkpoint，
 不是 worker preparation 准入。prepared 可空规则与所有重复字段必须匹配响应和
 原始合格 authorization。dispatch 授权时持久保存这份确切的联合证据；现有仅含
-两个 dispatch-generation/binding-version 列的 marker 不足。该 wire shape 与
-持久化仍待实现，构造用 worker 和通用 Tool-v3 grant 目前都不提供它。
+两个 dispatch-generation/binding-version 列的 marker 不足。共享 Java/CLI codec 已实现此 wire shape；
+不可变 grant 持久化、execute 准入和 worker 执行消费者仍未实现。通用 Tool-v3
+grant 不提供该证明。
 
 每个 resource entry 严格包含 `reference`、`bytesBase64`；reference 使用既有闭合
 资源元数据。每个资源仅出现一次，所有返回资源均为该 action 必需，所有必需资源
@@ -230,7 +236,7 @@ access, ...)`；修改普通 Workspace transport 不能连接此路径。保持�
 拒绝，仅在此 access 与 Broker service 准入闭合的私有 history operation。
 
 私有 `serve` 入口从部署配置读取 `K2_RUNTIME_BROKER_ORIGIN`，按第 2 节规则校验，
-将保留元组传给 provisioning。同一自有 server 上的独立 lease 认证读回 handler 尚待实现。
+将保留元组传给 provisioning。同一自有 server 上的独立 lease 认证读回 handler 已连接 bind/prepare；execute 返回 501。
 生产 HTTPS 可代理现有 loopback listener；不向 worker 安装全局 Hosted 凭据。
 reconciliation 从已保存 handle 重建 boot，不读取新进程环境来替换它。
 
@@ -325,3 +331,32 @@ POSIX fixture。
 自审及仓库原生 review workflow。如有原生 workflow 限制必须明示；CI 或独立 helper
 测试不能替代 maintainer approval。保持同一个 Draft PR，不自动 Ready、merge、
 物理 release 或关闭 proposal。
+
+### 7.1 已观察的 preparation 增量，2026-10-09
+
+固定候选产物的一次独立运行完成普通本地 Read 和一条实际私有混合 assistant
+链路。实际 provisioning 生成 boot5/handle3；Main 自有 Broker、原始
+controller/store、Hosted shared runner 与同一 live worker 提交 initial history、
+intent 和 prepared，均返回 HTTP 200。Traversal Read ordinal 1 拒绝后，三个
+已接受 Read/Write/Edit 分配保留 ordinal 0/2/3。六个原始 input/declaration
+resource 提升为 REFERENCED，具有确切 intent/prepared 关联。有限 commit closure
+分别包含 1/7/8 个 resource，不在 prepared 中递归复制 initial 前驱。worker 使用
+原始 lease 和 retained composition 读取原始已提交 intent。
+
+既有文件的实际 29 字节 preimage 与 retained backup 相等；工作文件不变，新 Write
+目标仍不存在。原始 head 达到 revision/sequence 12/12。三个分配仍为 PREPARED，
+authorization marker 为空。Hosted text 在持久 prepared 后返回 503；没有 dispatch、
+下一次 input、settled turn 或面向用户的执行成功。34 个原数据离线谓词与两个行为
+组分开计数。producer 后的 53 张 SQL 表保持不变；自有 process、port、H2 和
+retained handle 已清理。源码与产物在运行前固定，运行后无漂移；实际 loaded-origin
+后审计不声称完整传递依赖的启动前覆盖。
+
+本轮使用 H2、模拟 Kubernetes 对象、mocked pre-provision attestation、包裹实际
+controller/store 的 MockMvc transaction/HTTP adapter、确定性模型 SSE、在自有
+真实 handle 上实现的 Darwin mount/platform/fd shim，以及透明 worker URI proxy。
+这是有界软件 preparation 证据，不是真实 MySQL isolation/锁竞争、物理 Linux CSI、
+目标集群或完整 K2 验收。之前的失败运行单独保留：缺少 no-store 响应 header 和
+错误的混合 assistant history guard 都已复现、修复并加入回归后，才完成本轮成功
+运行。不可变 grant、执行、结果消费、冷恢复、writer cut 和物理退休仍是下一批交付。
+原生 review 所需 foreground workflow 工具不可用，因此该审查仍待完成；继续保持
+Draft 和 maintainer review。

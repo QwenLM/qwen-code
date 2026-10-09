@@ -206,8 +206,12 @@ public final class ManagedCsiFilesProtocol {
     }
 
     public static Map<String, Object> parse(byte[] bytes) {
+        return parse(bytes, 32 * 1024);
+    }
+
+    static Map<String, Object> parse(byte[] bytes, int limit) {
         try {
-            require(bytes != null && bytes.length <= 32 * 1024);
+            require(bytes != null && bytes.length <= limit);
             String text = StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString();
             try (var parser = JSON.createParser(text)) {
                 for (JsonToken token = parser.nextToken(); token != null; token = parser.nextToken()) {

@@ -22,6 +22,7 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Function;
+import java.util.function.BiFunction;
 
 /**
  * Private HTTP face of the merged Runtime Broker for a Hosted Harness.
@@ -51,6 +52,12 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
     public RuntimeBrokerHttpServer(InetSocketAddress address, String token,
             RuntimeBrokerService service, boolean allowNonLoopback)
             throws IOException {
+        this(address, token, service, allowNonLoopback, null);
+    }
+
+    public RuntimeBrokerHttpServer(InetSocketAddress address, String token,
+            RuntimeBrokerService service, boolean allowNonLoopback,
+            BiFunction<String, Map<String, Object>, Map<String, Object>> nativeReadback) throws IOException {
         if (address == null || service == null) {
             throw new IllegalArgumentException(
                     "address and service are required");
@@ -75,10 +82,52 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
         });
         server.setExecutor(executor);
         server.createContext(ROUTE_PREFIX, this::handle);
+        if (nativeReadback != null) {
+            server.createContext(CsiNativeReadbackProtocol.PATH, exchange -> handleNative(exchange, nativeReadback));
+        }
     }
 
     public void start() {
         server.start();
+    }
+
+    private static void handleNative(HttpExchange exchange,
+            BiFunction<String, Map<String, Object>, Map<String, Object>> readback) {
+        exchange.getResponseHeaders().set("Cache-Control", "no-store");
+        try {
+            if (!"POST".equals(exchange.getRequestMethod()) || exchange.getRequestURI().getRawQuery() != null
+                    || !CsiNativeReadbackProtocol.PATH.equals(exchange.getRequestURI().getRawPath())) {
+                throw notFound();
+            }
+            List<String> authorization = exchange.getRequestHeaders().get("Authorization");
+            if (authorization == null || authorization.size() != 1
+                    || authorization.getFirst().length() > 519
+                    || !authorization.getFirst().matches("Bearer [A-Za-z0-9._~+/-]{1,512}=*")) {
+                throw new RuntimeBrokerException(401, "csi_native_readback_unauthorized", "Original Runtime authentication failed.", false);
+            }
+            String contentType = exchange.getRequestHeaders().getFirst("Content-Type");
+            if (contentType == null || !"application/json".equals(contentType.split(";", 2)[0].trim())
+                    || !"no-store".equals(exchange.getRequestHeaders().getFirst("Cache-Control"))) {
+                throw new IllegalArgumentException("Invalid native readback headers");
+            }
+            String length = exchange.getRequestHeaders().getFirst("Content-Length");
+            if (length != null && (!length.matches("0|[1-9][0-9]{0,9}")
+                    || Long.parseLong(length) > CsiNativeReadbackProtocol.REQUEST_LIMIT)) {
+                throw tooLarge();
+            }
+            byte[] bytes;
+            try (var input = exchange.getRequestBody()) {
+                bytes = input.readNBytes(CsiNativeReadbackProtocol.REQUEST_LIMIT + 1);
+            }
+            if (bytes.length > CsiNativeReadbackProtocol.REQUEST_LIMIT) {
+                throw tooLarge();
+            }
+            var request = CsiNativeReadbackProtocol.request(bytes);
+            var response = readback.apply(authorization.getFirst().substring(7), request);
+            sendJson(exchange, 200, CsiNativeReadbackProtocol.response(response, request));
+        } catch (Throwable error) {
+            sendError(exchange, error);
+        }
     }
 
     public URI getBaseUri() {
@@ -240,6 +289,9 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                     "harnessSessionId", "control request");
             Map<String, Object> operation = requiredObject(body, "operation",
                     "control request");
+            if (CsiFileHistoryProtocol.isOperation(operation)) {
+                exchange.getResponseHeaders().set("Cache-Control", "no-store");
+            }
             complete(exchange, service.control(harnessSessionId,
                     runtimeSessionId, operation, lifecycleAuthority(exchange)), result -> envelope(
                             harnessSessionId, runtimeSessionId, "result",

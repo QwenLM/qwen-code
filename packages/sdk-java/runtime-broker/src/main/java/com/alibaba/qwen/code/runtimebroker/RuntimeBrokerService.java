@@ -496,6 +496,13 @@ public final class RuntimeBrokerService implements AutoCloseable {
         requireOpen();
         Map<String, Object> immutable = immutableMap(operation,
                 "operation");
+        if (CsiFileHistoryProtocol.isOperation(immutable)) {
+            CsiFileHistoryProtocol.operation(immutable);
+            if (authority != null) {
+                throw conflict("runtime_lifecycle_operation_invalid", "CSI history cannot use lifecycle authority");
+            }
+            return csiFileHistory(harnessSessionId, runtimeSessionId, immutable);
+        }
         if (!ManagedMcpProtocol.isOperation(immutable) && !ManagedHookProtocol.isOperation(immutable)) {
             ProviderRuntimeProtocol.control(immutable, harnessSessionId, runtimeSessionId);
         }
@@ -546,6 +553,55 @@ public final class RuntimeBrokerService implements AutoCloseable {
                     return result.whenComplete((ignored, error) ->
                             context.endControl());
                 });
+    }
+
+    private CompletionStage<Object> csiFileHistory(String harnessSessionId,
+            String runtimeSessionId, Map<String, Object> operation) {
+        boolean snapshot = "snapshot".equals(operation.get("action"));
+        return requireSession(harnessSessionId, runtimeSessionId).thenCompose(context -> {
+            if (!JdbcCsiFilesRetirementGuard.isProfile(context.session().getScope())) {
+                throw conflict("runtime_control_invalid", "CSI history requires the original private Runtime");
+            }
+            context.lock();
+            try {
+                RuntimeSessionRecord record = sessionRepository.findById(context.session().getScope(), runtimeSessionId);
+                RuntimeBindingRecord parent = bindingRepository.findById(context.binding().getBindingId());
+                if (record == null || parent == null
+                        || !record.getSession().getHarnessSessionId().equals(harnessSessionId)
+                        || !record.getSession().getRuntimeSessionId().equals(runtimeSessionId)
+                        || !record.getSession().getTurnKind().equals(context.session().getTurnKind())
+                        || !record.getSession().getScope().equals(context.session().getScope())
+                        || !record.getBindingId().equals(parent.getBindingId())
+                        || record.getRuntimeGeneration() != context.binding().getGeneration()
+                        || parent.getGeneration() != context.binding().getGeneration()
+                        || !parent.hasSameLease(context.lease())
+                        || parent.getState() != RuntimeBindingRecord.State.READY
+                                && parent.getState() != RuntimeBindingRecord.State.DRAINING
+                        || record.getState() != RuntimeSessionRecord.State.READY
+                                && (!snapshot || record.getState() != RuntimeSessionRecord.State.RELEASING)) {
+                    throw conflict("csi_original_runtime_unavailable", "Original CSI history owner is unavailable");
+                }
+                if (!snapshot) {
+                    requireReadySessionRecord(context);
+                    bindingRepository.requireHarnessAdmission(context.session().getScope(), harnessSessionId, null);
+                }
+                context.beginControl();
+            } finally {
+                context.unlock();
+            }
+            CompletionStage<Object> result;
+            try {
+                if (!provisioner.isUsable(context.lease())) {
+                    throw conflict("csi_original_runtime_unavailable", "Original CSI worker is unavailable");
+                }
+                result = mapFailure(safeStage(() -> transport.control(context.lease(), context.session(), operation)),
+                        "csi_file_history_unavailable", "Original CSI history observation failed");
+            } catch (RuntimeException | Error failure) {
+                context.endControl();
+                throw failure;
+            }
+            return result.whenComplete((ignored, error) -> context.endControl());
+        });
     }
 
     public CompletionStage<ToolExecutionRecord> createExecution(

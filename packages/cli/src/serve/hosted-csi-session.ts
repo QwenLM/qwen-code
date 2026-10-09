@@ -31,6 +31,10 @@ import {
   type HostedTurnSession,
 } from './hosted-harness-turn.js';
 import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
+import {
+  bindHostedCsiHistory,
+  commitInitialHostedCsiHistory,
+} from './hosted-csi-file-history.js';
 
 const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
@@ -255,7 +259,6 @@ async function initialize(
       replaceActivation: deny,
       close: deny,
     };
-    owner.session = { managed, cwd: owner.admission.cwd, blocked: false };
     owner.timer = setInterval(() => {
       if (owner.stopped || owner.blocked || owner.renewing) return;
       const pending = authority
@@ -263,7 +266,7 @@ async function initialize(
         .then(() => undefined)
         .catch(async () => {
           owner.blocked = true;
-          owner.session!.blocked = true;
+          if (owner.session) owner.session.blocked = true;
           owner.active?.abort.abort();
           clearInterval(owner.timer);
           await stores.stopLocal();
@@ -276,8 +279,14 @@ async function initialize(
         .catch(() => undefined);
     }, LEASE_MS / 3);
     owner.timer.unref();
+    const observation = await bindHostedCsiHistory(broker, owner.key);
+    active(owner);
+    await commitInitialHostedCsiHistory(managed, observation);
+    active(owner);
+    owner.session = { managed, cwd: owner.admission.cwd, blocked: false };
   } catch (cause) {
     owner.blocked = true;
+    clearInterval(owner.timer);
     await owner.stores?.stopLocal();
     throw cause;
   }

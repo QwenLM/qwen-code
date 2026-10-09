@@ -164,6 +164,28 @@ public final class HttpRuntimeTransport implements RuntimeTransport {
     }
 
     @Override
+    public CompletionStage<Map<String, Object>> csiFileHistory(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> boot,
+            ContextBinding binding, Map<String, Object> operation) {
+        if (lease == null || seed == null || !seed.matches(lease)
+                || !ManagedCsiFilesProtocol.selects(request) || client.followRedirects() != HttpClient.Redirect.NEVER) {
+            throw new IllegalArgumentException("Original CSI file history must bind the lease.");
+        }
+        var originalBoot = BrokerValues.immutableMap(boot);
+        ManagedCsiFilesProtocol.validateBoot(originalBoot);
+        var storage = ProviderRuntimeProtocol.object(originalBoot.get("storage"));
+        var expectedBoot = ManagedCsiFilesProtocol.boot(request, seed, storage,
+                originalBoot.containsKey("authority") ? ProviderRuntimeProtocol.object(originalBoot.get("authority")) : null);
+        if (!BrokerValues.sameJsonMap(originalBoot, expectedBoot)) {
+            throw new IllegalArgumentException("Original CSI file boot differs.");
+        }
+        var expected = CsiFileHistoryProtocol.request(originalBoot, request, binding, operation);
+        return post(lease, CsiFileHistoryProtocol.PATH,
+                encodeToolRequest(expected, CsiNativeReadbackProtocol.REQUEST_LIMIT), 64 * 1024,
+                seed.getGatewayIncarnation()).thenApply(bytes -> CsiFileHistoryProtocol.response(bytes, expected));
+    }
+
+    @Override
     public CompletionStage<Map<String, Object>> acknowledgeCsi(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> boot, Map<String, Object> expectedPod, Map<String, Object> request,
             Map<String, Object> expectedCaptureIdentity) {

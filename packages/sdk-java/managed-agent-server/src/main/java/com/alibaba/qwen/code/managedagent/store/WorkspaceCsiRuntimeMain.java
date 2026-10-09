@@ -107,10 +107,10 @@ public final class WorkspaceCsiRuntimeMain {
                 bindings, request.registration(), api, guard, request.image(), request.command(),
                 Duration.ofSeconds(30), request.artifacts(), authorityOrigin);
         try (var service = new RuntimeBrokerService(access, provider, access, bindings, sessions,
-                new JdbcToolExecutionRepository(source), UUID.randomUUID().toString(),
+                new JdbcToolExecutionRepository(source, bindings), UUID.randomUUID().toString(),
                 Duration.ofSeconds(30), Duration.ofSeconds(30));
                 var server = new RuntimeBrokerHttpServer(new InetSocketAddress(InetAddress.getLoopbackAddress(), port),
-                        token, service)) {
+                        token, service, false, access::readNative)) {
             requireAuthorityOrigin(authorityOrigin, server.getBaseUri());
             var stopped = new CountDownLatch(1);
             var shutdown = new Thread(() -> {

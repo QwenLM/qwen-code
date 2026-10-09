@@ -46,6 +46,13 @@ public interface RuntimeTransport {
                 "workspace_csi_attestation_unavailable", "Original file boot attestation is unavailable.", false));
     }
 
+    default CompletionStage<Map<String, Object>> csiFileHistory(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, Map<String, Object> boot,
+            ContextBinding binding, Map<String, Object> operation) {
+        return CompletableFuture.failedFuture(new RuntimeBrokerException(501,
+                "csi_file_history_unavailable", "Original CSI file history is unavailable.", false));
+    }
+
     /** Explicit comparison inputs are component expectations, not trusted CSI placement provenance. */
     default CompletionStage<Map<String, Object>> acknowledgeCsi(RuntimeLease lease, RuntimeSession session,
             Map<String, Object> boot, Map<String, Object> expectedPod, Map<String, Object> request,
