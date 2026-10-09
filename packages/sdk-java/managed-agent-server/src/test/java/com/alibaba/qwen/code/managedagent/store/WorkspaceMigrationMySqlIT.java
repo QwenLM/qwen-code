@@ -62,7 +62,7 @@ class WorkspaceMigrationMySqlIT {
                 + " WHERE installed_rank <= ? ORDER BY installed_rank", lastRank)).isEqualTo(applied);
         assertThat(jdbc.queryForList("SELECT version FROM flyway_schema_history"
                 + " WHERE installed_rank > ? AND success = TRUE ORDER BY installed_rank",
-                String.class, lastRank)).containsExactly("48", "49", "50", "51", "52");
+                String.class, lastRank)).containsExactly("48", "49", "50", "51", "52", "53");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_workspace_migration", Integer.class)).isZero();
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_runtime_storage_fence", Integer.class)).isZero();
     }
@@ -116,8 +116,8 @@ class WorkspaceMigrationMySqlIT {
                     + " storage_id, display_name, config_ref, policy_ref, state)"
                     + " VALUES (?, 'workspace', 1, 'storage', 'Workspace', ?, ?, 'ACTIVE')", tenant,
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                    + " VALUES (?, 'workspace', ?, TRUE, TRUE)", tenant, "actor".getBytes(StandardCharsets.UTF_8));
+            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                    + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
         }
         var transaction = new TransactionTemplate(new DataSourceTransactionManager(data));
         transaction.setIsolationLevel(Connection.TRANSACTION_REPEATABLE_READ);
