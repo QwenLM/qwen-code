@@ -2216,6 +2216,12 @@ try {
 } catch (error) {
   failure = error;
   console.error(error);
+  if (runtimeDelayMs !== 0 && existsSync(delayedNode)) {
+    console.error(
+      `\n--- Delayed worker shim (${delayedNode}) ---\n${readFileSync(delayedNode, 'utf8')}`,
+    );
+  }
+
   if (dumpPort !== undefined) {
     try {
       console.error(
