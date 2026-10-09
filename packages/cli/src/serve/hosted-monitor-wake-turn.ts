@@ -13,6 +13,7 @@ import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import { HostedMcpRecoveryRequiredError } from './hosted-mcp-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
+import { LlmRequestPreparationError } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 
 /**
  * The Session's one wake-recovery classification, shared by its wiring
@@ -24,7 +25,8 @@ export function monitorWakeNeedsRecovery(cause: unknown): boolean {
   return (
     cause instanceof HostedToolRecoveryRequiredError ||
     cause instanceof HostedMcpRecoveryRequiredError ||
-    cause instanceof HostedHookRecoveryRequiredError
+    cause instanceof HostedHookRecoveryRequiredError ||
+    cause instanceof LlmRequestPreparationError
   );
 }
 
@@ -60,8 +62,8 @@ export function createMonitorWakeRunTurn(params: {
   ) => Promise<unknown>;
   readonly busy: () => boolean;
   /**
-   * The recovery-required classification. It is injected because the three
-   * RecoveryRequiredError classes must be matched by type — their
+   * The recovery-required classification. It is injected because these
+   * error classes must be matched by type — their
    * constructors never assign `name`, so every instance reads `name ===
    * 'Error'` and a name comparison silently reclassifies a recovery
    * exception as an ordinary failure, settling its unconsumed input.

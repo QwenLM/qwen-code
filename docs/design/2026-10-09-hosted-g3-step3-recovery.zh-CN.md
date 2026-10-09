@@ -6,6 +6,8 @@
 
 当前实现为不含 Hooks/MCP 的原生文件 profile 生产审批计划（打包门禁覆盖 `hosted-workspace-files/1`），为不含 Hooks 的主模型请求保存精确快照，并实现冷恢复流的有界撤回及原生 Turn 清理债务。主模型冷重发仅在不含 Hooks/MCP 时准入。Shell profile 保留现有执行和清理 owner。运行中的前缀 continuation 继续可用，但尚未完成的前缀 continuation 不保存冷重发快照，恢复时明确拒绝。主模型 attempt 已完成且最终回答已提交时，仍可只补终态而不重发推理。超限快照保留明确不支持的边界。协议生产者和读取者在本次工作区一同实现；下文门禁定义所需的验收证据。
 
+精确请求快照由原生 Turn driver 在首次准入、审批恢复和模型 redrive 路径生产。旧 Runtime-only continuation 路由保留现有 G1 恢复行为，不生产这些快照。渠道中断结算在允许新工作前处理已有的原 G3 清理债务；请求准备失败时，普通 prompt 和 wake 输入均保持未结算，留待恢复。
+
 ## 1. 问题与已有行为
 
 G3 第 1–2 步让仍存活的 Java 控制面能够接纳替代 Hosted Harness。第三步需要在

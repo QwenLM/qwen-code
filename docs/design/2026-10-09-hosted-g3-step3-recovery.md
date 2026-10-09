@@ -6,6 +6,8 @@ Status: implemented in the current working tree, 2026-10-09; five scoped Linux p
 
 The implementation produces native-file approval plans for native-file profiles without Hooks or MCP (packaged gates cover `hosted-workspace-files/1`), exact main-model request snapshots without Hooks, bounded cold-stream retractions, and native Turn cleanup obligations. Cold model reissue is admitted only without Hooks or MCP. Shell profiles retain their existing execution/cleanup owner. Live prefix continuations remain supported, but an unfinished prefix continuation has no cold-reissue snapshot and declines recovery. A committed final answer with a completed main attempt can still receive terminal-only compensation without reissuing inference. Oversize snapshots deliberately remain unsupported. The production protocol and readers are updated together in this tree; the gates below state the required acceptance evidence.
 
+Exact request snapshots are produced by the native Turn driver for initial admission, approval resume and model redrive. The legacy Runtime-only continuation route retains its existing G1 recovery behavior and does not produce these snapshots. Interrupted channel settlement uses any original G3 cleanup debt before allowing new work; request-preparation failures keep both ordinary prompt and wake inputs unsettled for recovery.
+
 ## 1. Problem and existing behavior
 
 G3 Steps 1–2 let a live Java control plane adopt a replacement Hosted Harness.
