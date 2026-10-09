@@ -105,10 +105,10 @@ function stripDelimitingNewlines(value: string): string {
  * covers a value wholesale, and a prose-opened fence whose closing delimiter
  * sits inside a value would otherwise never close, marking the rest of the turn
  * fenced and dropping every call after it. A masked delimiter may therefore
- * close a fence only when prose has no delimiter line left to do it: otherwise
- * the fence ends inside the value, the documentation after it is dispatched,
- * and the prose's own delimiter re-opens a fence that swallows a real call.
- * See #13492.
+ * close a fence only when prose has no delimiter line left that can do it:
+ * otherwise the fence ends inside the value, the documentation after it is
+ * dispatched, and the prose's own delimiter re-opens a fence that swallows a
+ * real call. See #13492.
  */
 const FENCE_DELIMITER_LINE = /^ {0,3}((`{3,})|~{3,})/;
 
