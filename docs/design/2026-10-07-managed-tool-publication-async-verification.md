@@ -102,6 +102,10 @@ Integrity quarantine and all
 success/failure writes require the current live epoch. A stale worker cannot
 overwrite a successor's outcome. Read leases, retirement, unresolved PUTs,
 candidate/quarantined object protection, and GC quota accounting remain intact.
+Permanent FAILED operations do not block collection of an accepted complete,
+referenced publication. Pending operations (including expired ones), unresolved
+PUTs, candidate or quarantined objects, and all other retention protections still
+block collection; collection does not revive a failed operation.
 
 ## Rollout and observability
 

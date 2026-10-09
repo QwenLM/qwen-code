@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.daemon.StreamHarnessEvents;
 import com.alibaba.qwen.code.daemon.SubmitHarnessTurn;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.store.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.store.StoreModels;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.store.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.store.WriterCredentialPolicy;
@@ -479,6 +480,31 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     @Override
+    public void runChildOperation(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        try {
+            client().runChildOperation(attachment(tenantId, sessionId, true),
+                    body);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
+    public Map<String, Object> runChannelOperation(String tenantId,
+            String sessionId, Map<String, Object> body) {
+        try {
+            requireReadyForNewWork(tenantId, sessionId, false);
+            return client().runChannelOperation(
+                    channelAttachment(tenantId, sessionId), body);
+        } catch (HostedHarnessGenerationException error) {
+            adoptGeneration(error);
+            throw error;
+        }
+    }
+
+    @Override
     public String closeSession(String tenantId, String sessionId) {
         try {
             return doCloseSession(tenantId, sessionId);
@@ -505,6 +531,36 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
         attachments.clear();
         pendingRecovery.clear();
+    }
+
+    /**
+     * A channel route's Session is created without input, so the Harness
+     * holds no journal for it until its first channel operation: create it
+     * then. A Session the Harness already holds answers the create with 409,
+     * which create() turns into a load.
+     */
+    private HarnessSessionRef channelAttachment(String tenantId,
+            String sessionId) {
+        AttachmentKey key = new AttachmentKey(tenantId, sessionId);
+        HarnessSessionRef attachment = attachments.get(key);
+        if (attachment == null) {
+            SessionRecord session = sessions.requireSession(tenantId,
+                    sessionId);
+            try {
+                createOrLoad(tenantId, sessionId,
+                        session.harnessBootId() != null, false);
+            } catch (DaemonHttpException error) {
+                // The Harness still holds the Session this control plane
+                // attached before it restarted: re-take it passively, the
+                // way the other cold attachments re-acquire a live one.
+                if (error.getStatusCode() != 409) {
+                    throw error;
+                }
+                createOrLoad(tenantId, sessionId, true, true);
+            }
+            attachment = attachments.get(key);
+        }
+        return attachment;
     }
 
     private HarnessSessionRef attachment(String tenantId, String sessionId, boolean newWork) {
@@ -561,6 +617,13 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     session);
             if (store != null) {
                 builder.managedSessionStore(store);
+            }
+            StoreModels.SessionLineage lineage = sessions.findChildLineage(
+                    session.tenantId(), session.sessionId());
+            if (lineage != null) {
+                builder.lineage(lineage.parentSessionId(),
+                        lineage.rootSessionId(), lineage.parentChildRunId(),
+                        lineage.depth());
             }
             return client().createSession(builder.build());
         } catch (DaemonHttpException error) {

@@ -313,7 +313,7 @@ public final class ToolPublicationRetentionStore {
                 + " AND state <> 'RETURNED'", scope, publication) != 0) {
             blocker = "put_unresolved";
         } else if (count("SELECT COUNT(*) FROM qwen_tool_publication_operation WHERE scope_key = ?"
-                + " AND publication_id = ? AND state <> 'SUCCEEDED'", scope, publication) != 0) {
+                + " AND publication_id = ? AND state NOT IN ('SUCCEEDED', 'FAILED')", scope, publication) != 0) {
             blocker = "operation_unresolved";
         } else if (count("SELECT COUNT(*) FROM qwen_tool_publication_object WHERE scope_key = ?"
                 + " AND publication_id = ? AND state <> 'VERIFIED'", scope, publication) != 0) {

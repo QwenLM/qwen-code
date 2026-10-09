@@ -80,6 +80,9 @@ runtime 与 CSI。开启异步接收要求已开启 journal-head authorization�
 完整性隔离和所有成功/失败写入都要求当前有效 epoch；旧 worker
 不能覆盖接管者结果。保留 read lease、retirement、未知 PUT、候选/隔离对象保护和
 GC 配额核算。
+永久 FAILED 操作不阻止已完成接收且被引用的 publication 回收。PENDING 操作（包括
+已超期操作）、未解决 PUT、候选或隔离对象以及其他保留保护仍会阻止回收；回收不会
+复活失败操作。
 
 ## 发布与可观测性
 

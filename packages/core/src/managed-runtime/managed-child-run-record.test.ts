@@ -16,7 +16,11 @@ import {
   parseChildRun,
   parseChildShellRun,
 } from './managed-child-run-record.js';
-import { MANAGED_SESSION_ENABLED_DOMAINS } from './managed-session-records.js';
+import {
+  MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS,
+  MANAGED_SESSION_ENABLED_DOMAINS,
+  assertManagedSessionChildRunKindEnabled,
+} from './managed-session-records.js';
 
 interface Fixture {
   id: string;
@@ -88,9 +92,9 @@ function templateOf(fixture: {
 }
 
 describe('managed-child-run-record/1 shared contract', () => {
-  it('projects per-kind tasks and stays disabled for submission', () => {
-    // The body lands before its producers: enabling the domain is the
-    // enablement slice's own explicit step.
+  it('projects per-kind tasks behind a per-kind enablement gate', () => {
+    // H4b admits the child_agent kind; the domain itself still stays off
+    // the plain enabled list, so H3's shell keeps its own disabled gate.
     const body = MANAGED_EXTENSION_RECORD_BODIES.child_run!;
     expect(
       body.taskKindOf(parseChildRun(fixtures.templates['child_run'])),
@@ -101,6 +105,13 @@ describe('managed-child-run-record/1 shared contract', () => {
     expect(MANAGED_TASK_KINDS).toContain('background_shell');
     expect(MANAGED_TASK_KINDS).toContain('child_agent');
     expect(MANAGED_SESSION_ENABLED_DOMAINS).not.toContain('child_run');
+    expect(MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS).toEqual(['child_agent']);
+    expect(() =>
+      assertManagedSessionChildRunKindEnabled('child_agent'),
+    ).not.toThrow();
+    expect(() => assertManagedSessionChildRunKindEnabled('shell')).toThrow(
+      'domain child_run kind shell is registered but not enabled for submission.',
+    );
   });
 
   it('pins the closed keys and the closed stop-reason vocabulary', () => {
