@@ -604,6 +604,17 @@ export class ManagedEmailAdapter {
     await this.submit(uid, event);
   }
 
+  private isRegistrationRefusal(error: unknown): boolean {
+    const status = (error as { status?: unknown }).status;
+    const code = (error as { code?: unknown }).code;
+    return (
+      status === 404 ||
+      (status === 409 &&
+        (code === 'channel_generation_unregistered' ||
+          code === 'channel_disconnected'))
+    );
+  }
+
   private async submit(uid: number, event: ManagedInboundEvent): Promise<void> {
     const state = this.state!;
     try {
@@ -618,19 +629,21 @@ export class ManagedEmailAdapter {
     } catch (error) {
       const status = (error as { status?: unknown }).status;
       const code = (error as { code?: unknown }).code;
-      if (
-        status === 404 ||
-        (status === 409 &&
-          (code === 'channel_generation_unregistered' ||
-            code === 'channel_disconnected'))
-      ) {
+      if (this.isRegistrationRefusal(error)) {
         // The server lost our registration (a restart, a wipe) or an
         // unfenced disconnect flipped the instance under this adapter: a
         // fresh register is the only heal of `connected`, so that is a
         // poll-level claim — re-register before the next drive, never a
-        // per-message drop.
+        // per-message drop. It is a refusal, not an unanswered answer:
+        // say so, and keep the event so the re-drive never rebuilds it.
         this.registeredGeneration = 0;
-      } else if (
+        this.log(
+          `Managed email admission of ${event.platformEventId} was refused as not registered (${String(status)} ${String(code)}); the next poll re-registers and re-drives it.`,
+        );
+        this.pendingEvents.set(uid, event);
+        return;
+      }
+      if (
         typeof status === 'number' &&
         (status === 400 || status === 403 || status === 409)
       ) {
@@ -679,6 +692,9 @@ export class ManagedEmailAdapter {
         }
       }
       await this.submit(entry.uid, event);
+      // A registration refusal reset the generation: no further submit
+      // converges this tick — the next poll re-registers, then re-drives.
+      if (this.registeredGeneration === 0) return;
       if (state.pending.some((pending) => pending.uid === entry.uid)) {
         await delay(SUBMIT_RETRY_MS, undefined, {
           signal: this.abort.signal,
@@ -847,15 +863,10 @@ export class ManagedEmailAdapter {
       // either way (R3-3's outbound half).
       const status = (error as { status?: unknown }).status;
       const code = (error as { code?: unknown }).code;
-      if (
-        status === 404 ||
-        (status === 409 &&
-          (code === 'channel_generation_unregistered' ||
-            code === 'channel_disconnected'))
-      ) {
+      if (this.isRegistrationRefusal(error)) {
         this.registeredGeneration = 0;
         this.log(
-          'Managed email outbox claim was refused as not registered; the next poll re-registers first.',
+          `Managed email outbox claim was refused (${String(status)} ${String(code)}); the next poll re-registers first.`,
         );
         return;
       }
