@@ -2438,8 +2438,8 @@ export class MemoryManager {
 
   /**
    * Build the managed auto-memory section of the system prompt. This is the
-   * volatile prompt layer — it is rewritten in-session on every memory save,
-   * so callers must keep it after the stable/context layers. When
+   * policy plus indexes by default. Session callers exclude indexes and send
+   * them as request-only catalog data. When
    * `userSection` is provided, the prompt teaches the model to route saves
    * between the project dir and the user (cross-project) dir using the
    * per-type scope guidance.

@@ -177,7 +177,6 @@ import {
   sessionIdContext,
   resolveAgentPersona,
   buildRemoteSessionAgentSystemPrompt,
-  findAgentSessionBinding,
   resolveModelId,
   buildModelIdContext,
   registerSession,
@@ -15814,8 +15813,8 @@ class QwenAgent implements Agent {
       this.bindSessionSourceService(config);
     }
     // A hidden agent session the session-agents orchestrator planned. Looked
-    // up before `initialize()` because it decides whether the thread tools
-    // are registered (see Config.markSessionAgentSession). A plain read of
+    // up before `initialize()` so the session is marked before its tools are
+    // built (see Config.markSessionAgentSession). A plain read of
     // daemon-written state; the claim itself is still only `sourceType`.
     let sessionAgentBinding: SessionAgentNativeBinding | undefined;
     try {
@@ -15880,22 +15879,12 @@ class QwenAgent implements Agent {
         // Server binding. `sourceType` and `sourceId` both arrive from the
         // client, so on their own they are a claim, not a credential — without
         // this check any caller with daemon access could ask for an agent's
-        // persona and its thread tools. What makes the claim true is that this
-        // workspace's store holds a live run for that agent naming this very
-        // session. Deliberately not gated on the opt-in: with collaboration on
-        // is exactly when the check has to hold.
-        // Either collaboration surface may own the session while both exist:
-        // a live thread run (legacy dispatcher) or a live session-agents run
-        // whose binding planned this session id (looked up above).
-        // TODO(multi-agent): drop the thread lookup with the thread subsystem.
-        const binding =
-          sessionAgentBinding ??
-          (await findAgentSessionBinding(
-            cwd,
-            wiredSessionId,
-            sessionSource.sourceId,
-          ));
-        if (!binding) {
+        // persona. What makes the claim true is a session-agents binding,
+        // persisted by the orchestrator, that planned this very session id
+        // for a live run of that agent (looked up above). Deliberately not
+        // gated on the opt-in: with collaboration on is exactly when the
+        // check has to hold.
+        if (!sessionAgentBinding) {
           throw RequestError.invalidParams(
             undefined,
             'No dispatched run claims this session for that agent',
@@ -15916,7 +15905,6 @@ class QwenAgent implements Agent {
           const persona = await resolveAgentPersona(
             config,
             sessionSource.sourceId,
-            sessionAgentBinding ? { surface: 'session' } : {},
           );
           if (persona.status !== 'resolved') {
             throw RequestError.invalidParams(undefined, persona.error);

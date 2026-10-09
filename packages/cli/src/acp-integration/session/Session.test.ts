@@ -608,6 +608,7 @@ describe('Session', () => {
     get: ReturnType<typeof vi.fn>;
   };
   let mockToolRegistry: {
+    getAllToolNames: ReturnType<typeof vi.fn>;
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
     isDeferredAndHidden: ReturnType<typeof vi.fn>;
@@ -973,6 +974,7 @@ describe('Session', () => {
     };
 
     mockToolRegistry = {
+      getAllToolNames: vi.fn().mockReturnValue([]),
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
       isDeferredAndHidden: vi.fn().mockReturnValue(false),
