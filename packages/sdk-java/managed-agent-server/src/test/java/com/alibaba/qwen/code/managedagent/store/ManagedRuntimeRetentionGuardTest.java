@@ -1,14 +1,28 @@
 package com.alibaba.qwen.code.managedagent.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.alibaba.qwen.code.runtimebroker.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeRetention;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
+import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
+import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
+import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
+import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Map;
 import java.util.UUID;
+import javax.sql.DataSource;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -16,17 +30,88 @@ import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 class ManagedRuntimeRetentionGuardTest {
-    private JdbcDataSource source;
+    private DataSource source;
     private JdbcTemplate jdbc;
     private final ManagedRuntimeRetentionGuard guard = new ManagedRuntimeRetentionGuard();
 
     @BeforeEach
     void setup() {
-        source = new JdbcDataSource();
-        source.setURL("jdbc:h2:mem:runtime-retention-" + UUID.randomUUID()
-                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        source = dataSource();
         Flyway.configure().dataSource(source).load().migrate();
         jdbc = new JdbcTemplate(source);
+    }
+
+    DataSource dataSource() {
+        var dataSource = new JdbcDataSource();
+        dataSource.setURL("jdbc:h2:mem:runtime-retention-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        return dataSource;
+    }
+
+    @Test
+    void unsettledChildRetainsDrainedBindingUntilCanonicalRunSettles() throws Exception {
+        child();
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("key", new byte[32]));
+        var created = bindings.findOrCreate(request("child"));
+        var claim = bindings.claimOperation(created.getBindingId(), "fixture", Duration.ofSeconds(2));
+        var seed = claim.getProvisionSeed();
+        var ready = bindings.compareAndSet(claim, claim.withAttestation(new RuntimeLease(seed.getProvisionalRuntimeId(),
+                URI.create("http://127.0.0.1:9"), seed.getToken(), seed.getLeaseId(), seed.getEpoch()),
+                new RuntimeResourceHandle("local-process", 1, Map.of("worker", "fixture")), Instant.now(), Instant.now()));
+        var draining = bindings.compareAndSet(ready, ready.withDrainRequested(true, Instant.now()));
+        var receipt = new RuntimeDrainReceipt(draining.getBindingId(), draining.getGeneration(),
+                seed.getProvisionRequestId(), draining.getResourceHandle(), Instant.now());
+        var retired = bindings.compareAndSet(draining, draining.withDrainReceipt(receipt)
+                .withState(RuntimeBindingRecord.State.RELEASED, draining.getLease(), Instant.parse("2000-01-01T00:00:00Z")));
+        assertThat(retired).isNotNull();
+        await().atMost(Duration.ofSeconds(5)).until(() -> !retired.getOperationLeaseUntil().isAfter(Instant.now()));
+        jdbc.update("INSERT INTO qwen_managed_child_result_relay (tenant_id, parent_session_id, child_run_id,"
+                + " creation_key, child_session_id, state, created_at, updated_at)"
+                + " VALUES ('tenant', 'parent', 'run', 'creation', 'child', 'orphaned', 1, 1)");
+        var retention = new JdbcRuntimeRetention(source, bindings, guard);
+        assertThat(retention.sweep(Duration.ofDays(30), 1, null).bindingsDeleted()).isZero();
+        assertThat(bindings.findById(retired.getBindingId()).getDrainReceipt()).isEqualTo(receipt);
+        projection();
+        assertThat(retention.sweep(Duration.ofDays(30), 1, null).bindingsDeleted()).isZero();
+        assertThat(bindings.findById(retired.getBindingId()).getGeneration()).isEqualTo(retired.getGeneration());
+        jdbc.update("UPDATE qwen_managed_session_extension_record SET task_state = 'cancelled', settled_at = 2");
+        assertThat(retention.sweep(Duration.ofDays(30), 1, null).bindingsDeleted()).isEqualTo(1);
+        assertThat(bindings.findById(retired.getBindingId())).isNull();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_child_result_relay", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session", Integer.class)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM qwen_managed_session_extension_record", Integer.class)).isEqualTo(1);
+    }
+
+    @Test
+    void aDifferentRawIdentityCannotEndChildProtection() throws Exception {
+        child();
+        projection();
+        jdbc.update("UPDATE qwen_managed_session_extension_record SET task_state = 'cancelled', settled_at = 2");
+        var binding = mock(RuntimeBindingRecord.class);
+        when(binding.getRequest()).thenReturn(request("child"));
+        try (var connection = source.getConnection()) {
+            assertThat(guard.bindingReferenced(connection, binding)).isFalse();
+            for (String column : java.util.List.of("tenant_id", "session_id", "domain", "record_id")) {
+                jdbc.update("UPDATE qwen_managed_session_extension_record SET " + column + " = UPPER(" + column + ")");
+                assertThat(guard.bindingReferenced(connection, binding)).as(column).isTrue();
+                jdbc.update("UPDATE qwen_managed_session_extension_record SET " + column + " = LOWER(" + column + ")");
+            }
+        }
+    }
+
+    @Test
+    void childLineageIsReadOnTheSweepConnection() throws Exception {
+        var binding = mock(RuntimeBindingRecord.class);
+        when(binding.getRequest()).thenReturn(request("child"));
+        try (var connection = source.getConnection()) {
+            connection.setAutoCommit(false);
+            try (var insert = connection.prepareStatement(childSql())) {
+                insert.executeUpdate();
+            }
+            assertThat(guard.bindingReferenced(connection, binding)).isTrue();
+            connection.rollback();
+            assertThat(guard.bindingReferenced(connection, binding)).isFalse();
+        }
     }
 
     @Test
@@ -105,6 +190,31 @@ class ManagedRuntimeRetentionGuardTest {
         var binding = mock(RuntimeBindingRecord.class);
         when(binding.getBindingId()).thenReturn(id);
         when(binding.getGeneration()).thenReturn(generation);
+        when(binding.getRequest()).thenReturn(request(null));
         return binding;
+    }
+
+    private static RuntimeProvisionRequest request(String isolationKey) {
+        return new RuntimeProvisionRequest(new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                "sha256:" + "a".repeat(64), isolationKey == null ? "workspace" : "session"),
+                isolationKey, "local-process", "storage");
+    }
+
+    private static String childSql() {
+        return "INSERT INTO managed_agent_session (tenant_id, session_id, agent_id, status, created_at, updated_at,"
+                + " parent_session_id, parent_child_run_id, root_session_id, child_depth)"
+                + " VALUES ('tenant', 'child', 'qwen-code', 'CLOSED', 1, 1, 'parent', 'run', 'parent', 1)";
+    }
+
+    private void child() { jdbc.update(childSql()); }
+
+    private void projection() {
+        jdbc.update("INSERT INTO qwen_managed_session_extension_record (session_scope_key, record_key, tenant_id,"
+                + " workspace_id, session_id, domain, record_id, operation_hash, revision, record_resource_id,"
+                + " task_kind, task_state, runtime_state, delivery_target, delivery_state, created_at)"
+                + " VALUES (?, ?, 'tenant', 'workspace', 'parent', 'child_run', 'run', ?, 1, 'resource',"
+                + " 'child_agent', 'pending', 'unbound', 'session', 'planned', 1)",
+                ManagedSessionStore.sessionScopeKey("tenant", "parent"),
+                ManagedExtensionProjection.recordKey("parent", "child_run", "run"), "a".repeat(64));
     }
 }

@@ -18,6 +18,8 @@ Broker 的终态 binding、session 和 execution 无限累积。新 placement �
 
 Operator recovery、Workspace holder 和 CSI retirement 保护整个 binding，包括已完成 recovery。Publication 和 CSI worker ACK 保护对应 execution，并通过它保留 session 和 binding；无引用的兄弟记录可以删除。COLLECTED publication 仍保留原证据。Publication 与 ACK 使用原始 UTF-8 的 SHA-256，Broker execution hash 则带长度前缀；从有界候选 ID 计算引用键，禁止直接关联不同算法的哈希。
 
+子 Session 的 lineage 在父 child_run 的 canonical projection 缺失或 settled_at 为空时保护 binding。即使子会话已停止、没有 tool execution 或 Workspace holder，cascade 与 relay 的修复仍可能需要原 binding 身份。在 sweep 同连接上按主键读取 lineage 和父 projection，并精确校验原始身份。Lineage 在子会话 warm 前提交，终态 run 不可重新打开；已提交的 settled_at 结束此项保护。Session lineage、父记录和永久 relay ledger 均保留。
+
 ## 组件与并发
 
 JdbcRuntimeRetention 提供不依赖框架的 JDBC sweep，嵌入方提供同连接引用检查器。返回续扫游标以及扫描、跳过和各表删除计数。两层 keyset 游标跟踪 binding 和子表阶段；已检查的受保护行也推进游标。Binding 游标比较使用带六位小数的 UTC 字面值，避免 Connector/J 因 MariaDB 兼容握手截断时间参数而停滞。完整扫描后回绕，重启可安全重扫。
@@ -37,6 +39,8 @@ Managed-server 使用独立单线程 scheduler，只有 Broker 和 retention 同
 ## 验证与验收
 
 覆盖年龄边界、数据库时钟、生命周期状态、物理证据、有效租约、非终态子记录、generation 连续性和过期查询。覆盖全部外部引用、已完成 recovery、COLLECTED publication 和不同哈希算法。验证大家族与受保护行的有界推进，包括亚秒时间戳、同时间戳的 ID 排序和单行批次，并覆盖并发清理、回滚及引用创建竞争。对照内存实现的 placement 决策，并断言历史记录零解密。检查 schema/Flyway 一致性、旧库升级、调度隔离和配置开关。事务锁与 collation 必须在 MySQL/MariaDB 上验证，不能只依赖 H2。
+
+复现子会话已停止但父记录仍欠 dispatch/attach journal 修复的场景：清理须保留原 binding，使修复能够完成。验证 projection 缺失时保守保留、原始身份不匹配不能结束保护、guard 能读取 sweep 事务自己的写入，以及 canonical 终态 projection 允许清理而不回收 lineage 或 relay 分类。
 
 集中 H2 和 MySQL 8.4.11 验证已通过，包括有界清理、回滚、精确 placement 比较、publication 行锁，以及过期 Broker 历史查询不会触发 provisioning 或 dispatch。查询计划检查确认 MySQL 可以使用候选、tenant/状态和引用索引。本地尚未验证 MariaDB；查询计划检查不代表延迟基准测试。
 

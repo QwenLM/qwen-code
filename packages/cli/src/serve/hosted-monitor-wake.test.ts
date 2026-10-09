@@ -405,8 +405,11 @@ describe('createMonitorWakeRunTurn', () => {
         session: access,
         sessionId,
         cwd: '/workspace',
+        // The completed settle the wake's result contract classifies —
+        // 'settled' now answers only a completed turn's settle shape.
         executeHostedTurn: async (promptId) => {
           ran = promptId;
+          return { systemPayload: { state: 'completed' } };
         },
         busy: () => access.active !== undefined,
         needsRecovery,
@@ -508,6 +511,50 @@ describe('settlePendingMonitorInputs', () => {
   };
   const BINDING = { runtimeBindingId: 'binding-1', generation: '1' };
   const temporaryDirectories = new Set<string>();
+
+  async function openRootedSession() {
+    const root = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-hosted-wake-settle-'),
+    );
+    temporaryDirectories.add(root);
+    const runtimeBaseDir = path.join(root, 'runtime');
+    const transcriptPath = path.join(root, 'chats', `${sessionId}.jsonl`);
+    await fs.mkdir(runtimeBaseDir, { recursive: true });
+    await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
+    const lease = await SessionWriterLease.acquire({
+      runtimeBaseDir,
+      sessionId,
+      transcriptPath,
+    });
+    const resourceStore = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir,
+      sessionKey,
+    });
+    const session = await openManagedSession({
+      runtimeBaseDir,
+      sessionId,
+      transcriptPath,
+      sessionKey,
+      cwd: '/workspace',
+      version: 'test',
+      workerId: 'worker-test',
+      activationLeaseDurationMs: 60_000,
+      lease,
+      resourceStore,
+      create: {
+        definitionRef: await resourceStore.publish(
+          'managed-definition',
+          Buffer.from('{}', 'utf8'),
+        ),
+        rootSnapshotRef: await resourceStore.publish(
+          'managed-root',
+          Buffer.from('{}', 'utf8'),
+        ),
+        createdBy: 'test',
+      },
+    });
+    return { session, lease };
+  }
 
   afterEach(async () => {
     for (const directory of temporaryDirectories) {
@@ -873,6 +920,67 @@ describe('settlePendingMonitorInputs', () => {
           authority.eventsInSequenceRange(1, authority.committedSequence),
         ).map((input) => input.turnId),
       ).toEqual(['monitor-1:notify:1']);
+    } finally {
+      await lease.release().catch(() => undefined);
+    }
+  });
+
+  it('settles a child_agent notification on the same arm', async () => {
+    // R1-34: the child_agent branch of the close settle — the durable
+    // input settles cancelled under its own turn id, not lumped away.
+    const { session, lease } = await openRootedSession();
+    try {
+      const authority = session.authority;
+      const store = session.resources;
+      await authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: 'run-1:accept:notify',
+          sessionKey,
+          contentDigest: 'b'.repeat(64),
+        },
+        {
+          inputId: 'run-1:accept:notify',
+          turnId: 'run-1:accept:notify',
+          source: 'child_agent',
+          contentRef: await store.publish(
+            'managed-input',
+            Buffer.from('{"text":"<task-notification />"}', 'utf8'),
+          ),
+          deadline: null,
+          admissionRef: await store.publish(
+            'managed-admission',
+            Buffer.from('{}', 'utf8'),
+          ),
+          wakeReason: 'input',
+        },
+      );
+      expect(
+        pendingSessionInputs(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+        ).map((input) => input.turnId),
+      ).toEqual(['run-1:accept:notify']);
+      const settled = await settlePendingMonitorInputs({
+        authority,
+        sink: session.sink,
+        sessionId,
+        cwd: '/workspace',
+      });
+      expect(settled).toBe(1);
+      const settledEvents = authority
+        .readEvents()
+        .filter((event) => event.kind === 'turn.settled');
+      expect(settledEvents).toHaveLength(1);
+      expect(settledEvents[0].payload).toMatchObject({
+        turnId: 'run-1:accept:notify',
+        outcome: 'cancelled',
+        stopReason: 'session_closing',
+      });
+      expect(
+        pendingSessionInputs(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+        ),
+      ).toHaveLength(0);
     } finally {
       await lease.release().catch(() => undefined);
     }

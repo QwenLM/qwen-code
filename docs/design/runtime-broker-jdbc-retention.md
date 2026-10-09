@@ -18,6 +18,8 @@ Any nonterminal child retains the whole binding. SETTLED and ABANDONED execution
 
 Operator recovery, Workspace holders and CSI retirement retain the whole binding, including completed recovery records. Publication and CSI worker ACK records retain their execution and, through it, the session and binding; unrelated siblings may be removed. COLLECTED publication records still retain their original evidence. Publication and ACK hashes use SHA-256 over raw UTF-8, unlike the Broker's length-prefixed execution hash; compute reference keys from bounded candidate IDs rather than joining unlike hashes.
 
+A child Session's lineage retains its binding while the canonical parent child_run projection is missing or has no settled_at. Cascade and relay repair can need the original binding identity after the child has stopped, even without a tool execution or Workspace holder. Read lineage and the parent projection by primary key on the sweep connection, with exact raw identity checks. Lineage commits before child warm, and a terminal run cannot reopen; its committed settled_at ends this protection. Keep Session lineage, parent records and the permanent relay ledger intact.
+
 ## Components and concurrency
 
 JdbcRuntimeRetention is a framework-neutral JDBC sweep with a same-connection reference guard supplied by the embedding. It returns continuation and scanned, skipped and per-table deletion counts. Its two-level keyset cursor tracks the binding and child phase; checked protected rows advance the cursor. Binding cursor comparisons use UTC literals with six fractional digits so Connector/J's MariaDB compatibility handshake cannot truncate timestamp parameters and stall traversal. A complete sweep wraps to the beginning, and a restart may safely repeat work.
@@ -37,6 +39,8 @@ Deploy migrations and code with retention disabled. Enable only after every inst
 ## Validation and acceptance
 
 Cover age boundaries, database time, lifecycle states, physical evidence, live leases, nonterminal children, generation continuity and expired lookup behavior. Cover every external reference, completed recovery, COLLECTED publication and the distinct hash algorithms. Prove bounded progress with large families and protected rows, including subsecond timestamps, equal-time ID ordering and single-row batches, concurrent sweepers, rollback and reference creation races. Compare placement decisions to the in-memory implementation and assert zero historical decrypts. Check schema/Flyway agreement, old-schema upgrades, scheduling isolation and configuration gates. Exercise locking and collation on MySQL/MariaDB, not H2 alone.
+
+Reproduce a stopped child whose parent still owes dispatch/attach journal repair: cleanup must preserve its original binding until that repair can complete. Verify missing projections fail closed, raw identity mismatches do not end protection, the guard sees the sweep transaction's own writes, and a canonical terminal projection allows cleanup without collecting lineage or relay classifications.
 
 Focused H2 and MySQL 8.4.11 verification passed, including bounded sweeps, rollback, exact placement comparisons, publication row locking and expired Broker history queries without provisioning or dispatch. Query-plan checks confirmed the candidate, tenant/state and reference indexes are usable on MySQL. MariaDB has not been verified locally; query-plan checks are not latency benchmarks.
 
