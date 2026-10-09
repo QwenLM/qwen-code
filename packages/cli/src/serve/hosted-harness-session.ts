@@ -562,10 +562,38 @@ export async function fillParkedRoundAgentGaps(input: {
       type: 'tool_result',
       cwd: input.cwd,
       version: 'hosted-harness/1',
+      model: 'recovered',
       daemonPromptId: input.promptId,
       message: { role: 'user', parts },
     });
   };
+  // The fit predicate measures exactly this record shape (a uuid is always
+  // 36 chars; the assistant parent is always 36; the timestamp is one ISO
+  // string) — never an estimate, or the inline bound would slip.
+  const templateRecord = (parts: Part[]): Buffer =>
+    Buffer.from(
+      JSON.stringify({
+        uuid: '0'.repeat(36),
+        parentUuid: '0'.repeat(36),
+        sessionId: input.sessionId,
+        timestamp: '1970-01-01T00:00:00.000Z',
+        type: 'tool_result',
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        model: 'recovered',
+        daemonPromptId: input.promptId,
+        message: { role: 'user', parts },
+      }),
+      'utf8',
+    );
+  // The same fit discipline as the live arm: a caller's lambda wins when
+  // present; otherwise the exact template above decides. Both predicates,
+  // never estimates.
+  const fits = (parts: Part[]): boolean =>
+    input.messageFitsInline !== undefined
+      ? input.messageFitsInline('tool_result', parts, 'recovered')
+      : templateRecord(parts).byteLength <=
+        HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes;
   let filled = 0;
   for (const part of assistant.message?.parts ?? []) {
     const callId = part.functionCall?.id;
@@ -636,10 +664,7 @@ export async function fillParkedRoundAgentGaps(input: {
           // acceptance record, and the fit predicate, not an estimate,
           // measures the fold.
           let fitted: Part[] | undefined;
-          if (
-            input.messageFitsInline === undefined ||
-            input.messageFitsInline('tool_result', whole, 'recovered')
-          ) {
+          if (fits(whole)) {
             fitted = whole;
           } else {
             const marker =
@@ -652,8 +677,7 @@ export async function fillParkedRoundAgentGaps(input: {
               const folded = convertToFunctionResponse(name, callId, [
                 { text: text.slice(0, head) + marker },
               ]);
-              if (input.messageFitsInline('tool_result', folded, 'recovered'))
-                fitted = folded;
+              if (fits(folded)) fitted = folded;
             }
           }
           if (fitted === undefined)
@@ -5323,10 +5347,6 @@ export function registerHostedHarnessSessionRoutes(
               cwd: session.cwd,
               children: session.childAgents,
               signal: abort.signal,
-              messageFitsInline: (type, parts, model) =>
-                Buffer.byteLength(
-                  JSON.stringify(messageRecord(type, parts, model)),
-                ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
               consume: (childRunId) => session.childConsumption.add(childRunId),
             });
             if (outstanding.length > 0 || filled > 0) {
@@ -5548,19 +5568,6 @@ export function registerHostedHarnessSessionRoutes(
             cwd: session.cwd,
             children: session.childAgents,
             signal: session.active?.abort.signal,
-            messageFitsInline: (type, parts, model) =>
-              Buffer.byteLength(
-                JSON.stringify(
-                  record(session, sessionId, type, null, {
-                    daemonPromptId: promptId,
-                    model,
-                    message: {
-                      role: type === 'assistant' ? 'model' : 'user',
-                      parts,
-                    },
-                  }),
-                ),
-              ) <= HTTP_MANAGED_SESSION_STORE_CONTRACT.maxInlineResourceBytes,
             consume: (childRunId) => session.childConsumption.add(childRunId),
           });
         }
