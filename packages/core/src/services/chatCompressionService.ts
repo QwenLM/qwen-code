@@ -681,9 +681,11 @@ export class ChatCompressionService {
         ) + Math.ceil(systemInstruction.length / CHARS_PER_TOKEN));
     // Window the output budget clamps against: the window of the model that
     // actually receives the side-query. Defaults to the main model's window
-    // (already capped at any server-reported ceiling, #13432); switched below
-    // to a distinct compaction model's window when the guard keeps that model
-    // (issue #7960).
+    // (already capped at any server-reported ceiling, #13432); narrowed below
+    // by a distinct compaction model's window when the guard keeps that model
+    // (issue #7960). A distinct model's window can only narrow this — the
+    // observed ceiling stays in force, since the server rejects whatever it
+    // rejects regardless of which model we label the request with (#13432).
     let budgetWindow = reactiveContextCeiling;
     // Only check the window when the effective model differs from the main
     // model — warning about the main model being "too small" is confusing
@@ -722,7 +724,14 @@ export class ChatCompressionService {
             .warn(`[chat-compression] ${compactionWarning}`);
           effectiveCompactionModel = config.getModel();
         } else if (window && window > 0) {
-          budgetWindow = window;
+          // Combine, never overwrite: the measured window of the receiving
+          // model can legitimately exceed the server-reported ceiling (#13432),
+          // and the server enforces that ceiling no matter which model we label
+          // the request with — so keep the lower of the two. Absent an observed
+          // ceiling the measured window governs, which is what #7960 requires.
+          budgetWindow = opts.observedServerCeiling
+            ? Math.min(window, opts.observedServerCeiling)
+            : window;
         }
       }
     }

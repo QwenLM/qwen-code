@@ -1289,6 +1289,8 @@ describe('ChatCompressionService.compress cache sharing', () => {
     authType?: AuthType;
     baseUrl?: string;
     compactionModel?: string;
+    /** Registry rows `getAllConfiguredModels()` reports for window lookup. */
+    configuredModels?: Array<{ id: string; contextWindowSize: number }>;
     enableCacheControl?: boolean;
     contextWindowSize?: number | null;
     lastPromptTokenCount?: number;
@@ -1343,7 +1345,9 @@ describe('ChatCompressionService.compress cache sharing', () => {
       }),
       getModel: () => 'test-model',
       getCompactionModel: vi.fn().mockReturnValue(options?.compactionModel),
-      getAllConfiguredModels: vi.fn().mockReturnValue([]),
+      getAllConfiguredModels: vi
+        .fn()
+        .mockReturnValue(options?.configuredModels ?? []),
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
       getTargetDir: () => '/tmp/test-workspace',
@@ -1745,6 +1749,8 @@ describe('ChatCompressionService.compress cache sharing', () => {
   const INFERRED_WINDOW = 1_000_000;
   const OBSERVED_CEILING = 262_144;
   const SERVER_REPORTED_ACTUAL = 279_935;
+  /** A distinct compaction model whose window exceeds the observed ceiling. */
+  const COMPACTION_WINDOW = 400_000;
 
   it('keeps reactive overflow recovery off the shared request when the server reports a lower ceiling (#13432)', async () => {
     // Every other canShareCache conjunct holds in this fixture: main model,
@@ -1807,6 +1813,67 @@ describe('ChatCompressionService.compress cache sharing', () => {
     // binds, otherwise the assertion below could pass vacuously.
     expect(coldInputEstimate).toBeGreaterThan(
       OBSERVED_CEILING - COMPACT_MAX_OUTPUT_TOKENS,
+    );
+    expect(
+      coldInputEstimate + (request.config?.maxOutputTokens ?? 0),
+    ).toBeLessThanOrEqual(OBSERVED_CEILING);
+  });
+
+  it('keeps the observed ceiling in force when a distinct compaction model reports a larger window (#13432)', async () => {
+    // The distinct-compaction-model branch measures the window of the model
+    // that actually receives the side-query, which can legitimately be LARGER
+    // than the ceiling the server just reported (a llama.cpp `-c 262144`
+    // fronting a model id that resolves to a 400K catalog row). The observed
+    // ceiling still bounds the real request, so combining must be a min:
+    // overwriting `budgetWindow` with the larger window reserves the full
+    // 20_000 and overflows the ceiling the server enforces. Replacing the
+    // `Math.min` at that site with a bare `budgetWindow = window` turns the
+    // assertion below red.
+    const chunk = 'x'.repeat(4_000);
+    const history = Array.from({ length: 245 }, (_, i) =>
+      i % 2
+        ? modelText(`chunk-${i} ${chunk}`)
+        : userText(`chunk-${i} ${chunk}`),
+    );
+    const { coldSpy } = await expectCold(
+      {
+        history,
+        // The compaction model differs from the main model, which by itself
+        // keeps this run on the cold path (see "keeps $name on the cold path"
+        // above), and its window is large enough that the too-small-window
+        // guard keeps it rather than coalescing back to the main model.
+        compactionModel: 'compact-model',
+        configuredModels: [
+          { id: 'compact-model', contextWindowSize: COMPACTION_WINDOW },
+        ],
+        contextWindowSize: INFERRED_WINDOW,
+      },
+      {
+        originalTokenCount: SERVER_REPORTED_ACTUAL,
+        precomputedEffectiveTokens: SERVER_REPORTED_ACTUAL,
+        observedServerCeiling: OBSERVED_CEILING,
+      },
+    );
+    const request = coldSpy.mock.calls[0]![1] as {
+      contents: Content[];
+      systemInstruction?: string;
+      config?: { maxOutputTokens?: number };
+    };
+    const coldInputEstimate =
+      estimateContentTokens(request.contents) +
+      Math.ceil((request.systemInstruction ?? '').length / 4);
+    // Fixture guards: the estimate must sit inside the clamping regime AND the
+    // distinct model's window must exceed the ceiling — otherwise the buggy
+    // overwrite and the correct min would produce the same budget and the
+    // assertion below would pass vacuously.
+    expect(coldInputEstimate).toBeGreaterThan(
+      OBSERVED_CEILING - COMPACT_MAX_OUTPUT_TOKENS,
+    );
+    expect(COMPACTION_WINDOW).toBeGreaterThan(OBSERVED_CEILING);
+    // The budget is sized against the CEILING, not the larger window: a full
+    // 20_000 reserve only fits the 400K window, never the 262_144 ceiling.
+    expect(request.config?.maxOutputTokens).toBeLessThan(
+      COMPACT_MAX_OUTPUT_TOKENS,
     );
     expect(
       coldInputEstimate + (request.config?.maxOutputTokens ?? 0),
