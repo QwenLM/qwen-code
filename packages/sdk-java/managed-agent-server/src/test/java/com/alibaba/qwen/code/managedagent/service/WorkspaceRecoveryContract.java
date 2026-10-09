@@ -223,6 +223,22 @@ public final class WorkspaceRecoveryContract {
         assertThat(fixture.bindings.findById(lost.getBindingId()).getState()).isEqualTo(RuntimeBindingRecord.State.LOST);
         assertThat(fixture.sessions.countActiveByBinding(lost.getBindingId(), lost.getGeneration())).isEqualTo(1);
 
+        // A child Workspace maintenance hold (#13753 I1) is not the lost
+        // binding's: a retried release passes it by and leaves it held.
+        String maintenance = java.util.HexFormat.of().formatHex(new byte[16]);
+        jdbc.update("INSERT INTO qwen_managed_child_workspace (tenant_id, parent_session_id, child_run_id,"
+                + " child_workspace_id, workspace_id, workspace_generation, storage_id, parent_cwd_relative,"
+                + " state, claim_generation, created_at, updated_at) VALUES (?, ?, 'run', ?, 'workspace', 1,"
+                + " ?, '.', 'preparing', 1, 0, 0)", fixture.tenant, fixture.session.sessionId(), maintenance,
+                fixture.session.workspace().getStorageId());
+        authority.holdForMaintenance(fixture.session.workspace(), maintenance, 1);
+        authority.releaseLost(nextClaim);
+        assertThat(authority.holdsMaintenance(fixture.session.workspace(), maintenance, 1)).isTrue();
+        assertThatThrownBy(() -> authority.claim(fixture.session.workspace(), rival.session()))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("workspace_busy"));
+        authority.releaseMaintenance(fixture.session.workspace(), maintenance, 1);
+
         // The first clear is committed. Retry after a new holder arrives must not erase it.
         authority.claim(fixture.session.workspace(), rival.session());
         authority.releaseLost(nextClaim);

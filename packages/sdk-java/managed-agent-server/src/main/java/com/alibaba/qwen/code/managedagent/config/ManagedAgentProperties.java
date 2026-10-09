@@ -127,6 +127,17 @@ public class ManagedAgentProperties {
                         "Automation scan-delay, lease, late-tolerance and lookback must be positive durations.");
             }
         }
+        // The child Workspace capability (#13753 I1) runs Git in this
+        // control plane against an administrator mount, so it needs the
+        // local-process Broker that mounts the storage here.
+        if (runtimeBroker.isChildWorkspacesEnabled()
+                && (!runtimeBroker.isEnabled()
+                        || !"local-process".equals(runtimeBroker.getProvisioner())
+                        || !"session".equals(runtimeBroker.getIsolationClass())
+                        || runtimeBroker.getWorkspaceMounts().isEmpty())) {
+            throw new IllegalStateException("Child Workspaces require a Session-isolated"
+                    + " local-process Broker with Workspace mounts");
+        }
     }
 
     public static class Harness {
@@ -641,6 +652,9 @@ public class ManagedAgentProperties {
         private String staticLeaseId = "standalone-lease";
         private long staticEpoch = 1;
         private Map<String, String> environment = new LinkedHashMap<>();
+        private boolean childWorkspacesEnabled;
+        private String childWorkspaceGit = "git";
+        private Duration childWorkspaceGitTimeout = Duration.ofMinutes(2);
 
         public boolean isEnabled() {
             return enabled;
@@ -767,6 +781,30 @@ public class ManagedAgentProperties {
 
         public boolean isVerifiedWorkspaceRecoveryEnabled() {
             return verifiedWorkspaceRecoveryEnabled;
+        }
+
+        public boolean isChildWorkspacesEnabled() {
+            return childWorkspacesEnabled;
+        }
+
+        public void setChildWorkspacesEnabled(boolean childWorkspacesEnabled) {
+            this.childWorkspacesEnabled = childWorkspacesEnabled;
+        }
+
+        public String getChildWorkspaceGit() {
+            return childWorkspaceGit;
+        }
+
+        public void setChildWorkspaceGit(String childWorkspaceGit) {
+            this.childWorkspaceGit = childWorkspaceGit;
+        }
+
+        public Duration getChildWorkspaceGitTimeout() {
+            return childWorkspaceGitTimeout;
+        }
+
+        public void setChildWorkspaceGitTimeout(Duration childWorkspaceGitTimeout) {
+            this.childWorkspaceGitTimeout = childWorkspaceGitTimeout;
         }
 
         public void setVerifiedWorkspaceRecoveryEnabled(boolean verifiedWorkspaceRecoveryEnabled) {

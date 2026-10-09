@@ -850,6 +850,29 @@ class WorkspaceRuntimeTest {
             RuntimeBindingRepository bindings) {
     }
 
+    @Test
+    void childWorkspaceMaintenanceAndToolTurnsExcludeEachOther() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        RuntimeSessionRecord turn = holder(session, UUID.randomUUID().toString());
+        String maintenance = "0".repeat(32);
+        jdbc.update("INSERT INTO qwen_managed_child_workspace (tenant_id, parent_session_id, child_run_id,"
+                + " child_workspace_id, workspace_id, workspace_generation, storage_id, parent_cwd_relative,"
+                + " state, claim_generation, created_at, updated_at) VALUES (?, ?, 'run', ?, 'workspace', 1,"
+                + " 'storage', '.', 'preparing', 3, 0, 0)", session.tenantId(), session.sessionId(), maintenance);
+
+        authority.holdForMaintenance(session.workspace(), maintenance, 3);
+        assertBusy(() -> authority.claim(session.workspace(), turn));
+        assertBusy(() -> authority.assertHeld(session.workspace(), turn));
+        authority.releaseMaintenance(session.workspace(), maintenance, 3);
+
+        authority.claim(session.workspace(), turn);
+        assertBusy(() -> authority.holdForMaintenance(session.workspace(), maintenance, 3));
+        authority.release(session.workspace(), turn);
+        authority.holdForMaintenance(session.workspace(), maintenance, 3);
+        assertThat(authority.holdsMaintenance(session.workspace(), maintenance, 3)).isTrue();
+        authority.releaseMaintenance(session.workspace(), maintenance, 3);
+    }
+
     private JdbcRuntimeBindingRepository bindings() {
         return new JdbcRuntimeBindingRepository(dataSource, new AesGcmSecretProtector("test-key", new byte[32]));
     }

@@ -52,6 +52,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     private final RuntimeBrokerHttpServer server;
     private final RuntimeRecoveryCoordinator recovery;
     private final WorkspaceRuntimeResolver workspaces;
+    private final ChildWorkspaceProvider childWorkspaces;
     private final Set<String> retired = ConcurrentHashMap.newKeySet();
 
     public EmbeddedRuntimeBroker(AgentStateStore store,
@@ -103,6 +104,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         this.workspaces = workspaceExecutionStore == null ? null
                 : new WorkspaceRuntimeResolver(store, workspaceExecutionStore, properties);
         WorkspaceRuntimeResolver workspaces = this.workspaces;
+        this.childWorkspaces = broker.isChildWorkspacesEnabled()
+                ? childWorkspaces(workspaces, broker) : null;
         RuntimeTransport transport = workspaces == null ? http
                 : new WorkspaceRuntimeTransport(http, workspaces, workspaceExecutionStore,
                         bindingRepository, sessionRepository);
@@ -246,6 +249,32 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
     @Override
     public CompletionStage<Void> closeWorkspace(String tenantId, String sessionId) {
         return service.drainHarnessSession(tenantId, sessionId);
+    }
+
+    @Override
+    public ChildWorkspaceProvider childWorkspaces() {
+        return childWorkspaces;
+    }
+
+    private static ChildWorkspaceProvider childWorkspaces(WorkspaceRuntimeResolver workspaces,
+            ManagedAgentProperties.RuntimeBroker broker) {
+        if (workspaces == null) {
+            throw new IllegalStateException("Child Workspaces require Workspace mounts");
+        }
+        ChildWorktreeGit git = new ChildWorktreeGit(broker.getChildWorkspaceGit(),
+                broker.getChildWorkspaceGitTimeout());
+        LOG.info("Child Workspaces enabled with {}", git.requireSupportedVersion());
+        return new ChildWorkspaceProvider() {
+            @Override
+            public java.nio.file.Path storageRoot(ContextBinding binding) {
+                return workspaces.storageRoot(binding);
+            }
+
+            @Override
+            public ChildWorktreeGit git() {
+                return git;
+            }
+        };
     }
 
     @Override

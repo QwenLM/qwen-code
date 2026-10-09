@@ -278,4 +278,27 @@ class ManagedAgentPropertiesTest {
         off.getAutomation().setMaxSlotsPerTick(0);
         assertThatCode(off::validateWorkspaceFiles).doesNotThrowAnyException();
     }
+
+    @Test
+    void childWorkspacesAreOffByDefaultAndNeedTheMountingBroker() {
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().isChildWorkspacesEnabled()).isFalse();
+        assertThat(new ManagedAgentProperties().getRuntimeBroker().getChildWorkspaceGitTimeout())
+                .isEqualTo(java.time.Duration.ofMinutes(2));
+        List<Consumer<ManagedAgentProperties>> invalid = List.of(
+                p -> p.getRuntimeBroker().setEnabled(false),
+                p -> p.getRuntimeBroker().setProvisioner("kubernetes"),
+                p -> p.getRuntimeBroker().setIsolationClass("workspace"),
+                p -> p.getRuntimeBroker().setWorkspaceMounts(List.of()));
+        for (Consumer<ManagedAgentProperties> change : invalid) {
+            ManagedAgentProperties properties = new ManagedAgentProperties();
+            properties.getRuntimeBroker().setEnabled(true);
+            properties.getRuntimeBroker().setChildWorkspacesEnabled(true);
+            properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                    new ManagedAgentProperties.RuntimeBroker.WorkspaceMount("tenant", "storage", "/workspace")));
+            assertThatCode(properties::validateWorkspaceFiles).doesNotThrowAnyException();
+            change.accept(properties);
+            assertThatThrownBy(properties::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Child Workspaces require");
+        }
+    }
 }
