@@ -73,7 +73,7 @@ class RuntimeBrokerFlywaySchemaTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"11", "13", "50", "51", "52", "53", "54", "55", "56"})
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"11", "13", "50", "51", "52", "53", "54", "55", "56", "57", "58"})
     void migrationsPreserveRowsWrittenByOldBinaries(String version) throws SQLException {
         DataSource source = migrate(dataSource(), MigrationVersion.fromVersion(version));
         RuntimeProvisionRequest request = JdbcRepositoryContract.writeLegacyRows(source, "upgrade");

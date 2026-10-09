@@ -76,7 +76,7 @@ Workspace role、V54 child lineage 和 V55 channel instance binding。全部已�
 migration 字节保持不变；只把本 Draft 的 request、first-activation 和
 native-authorization SQL 从 V55/V56/V57 改为 V56/V57/V58，SQL 字节与顺序不变。
 已经应用更早未发布编号的数据库不是自动升级对象，不修复其历史，不回填原始
-authority。当前升级检查包含 main V53/V54/V55、仅 request 的 V56 和
+authority。此前升级检查包含 main V53/V54/V55、仅 request 的 V56 和
 activation V57，保留旧行、checksum 和 native grant 的 NULL。
 
 后续与 main `e6e2c9efd` 合并包含已发布的 V55 channel instance migration。
@@ -84,6 +84,8 @@ activation V57，保留旧行、checksum 和 native grant 的 NULL。
 只把三个未发布 CSI migration 顺延为 V56/V57/V58，SQL 字节与顺序不变。
 构建前清理旧 target resource，验证完整 source/packaged inventory 及截至
 V58 的升级序列。更早未发布编号的数据库仍需独立明确迁移方案，本次不回填。
+
+最终交付还合入 main `5b1c701400c949a6e943909db6fcbcb2273dc721`，包含已发布的 operation actor-key migration V56，并在 bound Session 上同时校验 caller role 与原 creator execution facts。源码 inventory 检查在修复前复现 V56 冲突。已发布 V1–V56 字节全部保持，只将三个仍未发布的 CSI 文件顺延为 request V57、activation V58、native authorization V59，SQL 字节/顺序不变。升级测试覆盖已发布 V56、仅 request 的 V57、仅 activation 的 V58；完整序列止于 V59。私有创建保留 creator/owner key 与 request pin，child/close/delete 门禁保持关闭。合并后须在新推送提交运行检查，不能把原进程断点验收转移到新 head；更早未发布编号仍需独立明确迁移方案。
 
 Root Session 创建同时用 main 的同一原始 actor 字节写 creator 与 owner key，
 私有构造时另写 CSI request pin。当前 CSI fixture 使用 main 的

@@ -92,7 +92,7 @@ binding. Keep all published migrations byte-identical. Rename only this Draft's
 request, first-activation and native-authorization SQL from V55/V56/V57 to
 V56/V57/V58, with unchanged SQL bytes and order. Databases that applied earlier
 unpublished numbers are not an automatic upgrade target; do not repair their
-history or backfill original authority. Current upgrade checks include main
+history or backfill original authority. The earlier upgrade checks included main
 V53/V54/V55, request-only V56 and activation V57, preserving old rows,
 checksums and null native grants.
 
@@ -103,6 +103,8 @@ to V56/V57/V58 without changing their SQL bytes or order. Clean stale target
 resources before building and verify the complete source/packaged inventory and
 upgrade sequence through V58. Earlier unpublished databases still require a
 separate explicit migration strategy and are not backfilled by this change.
+
+The final delivery also merges main `5b1c701400c949a6e943909db6fcbcb2273dc721`, which publishes operation actor-key migration V56 and enforces the caller role plus the original creator execution facts on bound Sessions. A source-inventory check reproduces the V56 collision before repair. Preserve published V1–V56 byte-for-byte and renumber only the three still-unpublished CSI files to request V57, activation V58 and native authorization V59, with unchanged SQL bytes/order. Upgrade tests cover published V56, request-only V57 and activation-only V58; the complete migration sequence ends at V59. The private creation path retains creator/owner keys and its request pin, and its child/close/delete gates remain closed. This merge requires new shipping-head checks and does not transfer the earlier process-cut acceptance to the new head. Earlier unpublished numbering still requires a separate explicit migration strategy.
 
 Root Session creation writes both creator and owner actor keys using main's
 same original actor bytes, plus the CSI request pin when privately constructed.

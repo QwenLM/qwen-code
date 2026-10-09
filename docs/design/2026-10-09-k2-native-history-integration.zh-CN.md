@@ -921,3 +921,7 @@ Root 独立核对342项封存 artifact、当前 source/product/dependency/class 
 另一轮全新专属 MySQL 在同一干净 `af5a0e544d4690b7073fc40a6d77d7b1a8734095` 上，于真实 model2 单个 `output_committed` 标记事务返回200后、结果消费前切断。原工具成员为 results-ready，三条结果已 settled、尚未 consumed，完整最后 assistant Parts 尚未耐久提交。仅终止登记原 Main/Hosted、等待自然过期后，真实 native acquire 返回409 `csi_original_activation_unavailable`，与 Hosted wrapper503 区分。该准确拒绝事务前后全部57表精确相同。没有 model3、新 final assistant、结果消费、settlement 或重复工具效果。
 
 编译、producer、完整 auditor 均 exit0：一个实际拒绝组、28项 producer 检查、33项 auditor 谓词。Root 核对256项封存 artifact、原 SQL/journal 保留、当前及删除 input bridge、38次 PID/group 缺席探测、11关闭端口和专属 MySQL/临时目录清理后解除窗口。Producer 启动时合格原身份的只读 attestation 三请求与拒绝事务的全表不变分别核验。报告组装对 row/key 的错误假设保留，只读修正后未重跑 producer。只验证旧形态的拒绝边界；第6.8.5节完整输出原子提交、零 model3 恢复设计尚未实现或验收，不赋予完整 K2 或物理/Linux/云门禁资格。
+
+### 7.13 与已发布 operation actor migration 合并后的最终交付
+
+最终交付还合入 main `5b1c701400c949a6e943909db6fcbcb2273dc721`，包含已发布的 operation actor-key migration V56，并在 bound Session 上同时校验 caller role 与原 creator execution facts。源码 inventory 检查在修复前复现 V56 冲突。已发布 V1–V56 字节全部保持，只将三个仍未发布的 CSI 文件顺延为 request V57、activation V58、native authorization V59，SQL 字节/顺序不变。升级测试覆盖已发布 V56、仅 request 的 V57、仅 activation 的 V58；完整序列止于 V59。私有创建保留 creator/owner key 与 request pin，child/close/delete 门禁保持关闭。合并后须在新推送提交运行检查，不能把原进程断点验收转移到新 head；更早未发布编号仍需独立明确迁移方案。
