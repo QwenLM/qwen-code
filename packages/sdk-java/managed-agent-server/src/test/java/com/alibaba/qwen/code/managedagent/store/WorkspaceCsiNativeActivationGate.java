@@ -354,7 +354,7 @@ class WorkspaceCsiNativeActivationGate {
             rows.put(table, jdbc.queryForList("SELECT * FROM \"" + table + "\"").stream()
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
-        assertThat(rows).hasSize(53);
+        assertThat(rows).hasSize(54).containsKey("qwen_managed_child_result_relay");
         return rows;
     }
 
