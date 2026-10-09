@@ -674,7 +674,7 @@ public class ManagedExtensionRecordStore {
                     requireReference(resources.apply(ref.get("resourceId").textValue()), ref);
                 }
             }
-            require(!"child_agent".equals(record.get("kind").textValue())
+            require("shell".equals(record.get("kind").textValue())
                     || record.get("depth").longValue() != 1
                     || record.get("rootSessionId").textValue()
                             .equals(sessionId),
@@ -787,10 +787,10 @@ public class ManagedExtensionRecordStore {
                     (result, row) -> result.getString("record_resource_id"),
                     scopeKey, childRunKey).stream().findFirst().orElse(null);
             require(childRunResource != null,
-                    "Child acceptance must name a child agent run of this Session.");
+                    "Child acceptance must name a child Session run of this Session.");
             JsonNode child = readBody(resources.apply(childRunResource));
-            require("child_agent".equals(child.get("kind").textValue()),
-                    "Child acceptance must name a child agent run of this Session.");
+            require(!"shell".equals(child.get("kind").textValue()),
+                    "Child acceptance must name a child Session run of this Session.");
             require("settled".equals(child.get("run").get("state").textValue())
                     && "completed".equals(child.get("stopReason").textValue()),
                     "Child acceptance must name a run that ended with its"
@@ -819,7 +819,7 @@ public class ManagedExtensionRecordStore {
                     "Child acceptance must bind the result and receipt its"
                             + " child run committed.");
         }
-        if (domain.equals("child_run") && "child_agent".equals(
+        if (domain.equals("child_run") && !"shell".equals(
                 record.get("kind").textValue())) {
             // H4b decision 7 (the reverse of the acceptance's check): the
             // acceptance record is authoritative — the run's delivery may

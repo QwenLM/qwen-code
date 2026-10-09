@@ -549,7 +549,7 @@ public selectors retain their existing gates.
 
 Both production schema paths must create the original execution authorization
 column: the standalone Broker schema and Agent Server's Flyway migration.
-The first candidate exposed a missing Agent migration before dispatch; V57 adds
+The first candidate exposed a missing Agent migration before dispatch; V58 adds
 the nullable column without granting or changing any existing execution.
 
 Persist one immutable native authorization JSON on the original ToolExecution
@@ -1018,11 +1018,11 @@ continuation fences only, not native execution or cold takeover.
 
 ### 7.4 Current main migration and child admission boundary
 
-Integration with main `5ddd43815` preserves published Workspace roles V53 and
-child lineage V54. Draft-only CSI request, activation and native grant migrations
-are V55/V56/V57 with unchanged SQL bytes; the first native candidate's V55 grant
-migration is now V57. Earlier unpublished-number databases are not automatically
-upgraded or backfilled. Root private creation keeps original creator/owner actor
+Integration with main preserves published Workspace roles V53, child lineage
+V54 and channel instance binding V55. Draft-only CSI request, activation and
+native grant migrations are V56/V57/V58 with unchanged SQL bytes; the first
+native candidate's V55 grant migration is now V58. Earlier unpublished-number
+databases are not automatically upgraded or backfilled. Root private creation keeps original creator/owner actor
 bytes and request pin; public child admission refuses CSI parents before Service
 work and inside the locked Store transaction. Ordinary child consumption still
 occurs after durable completed-turn settlement through the shared runner.

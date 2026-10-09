@@ -86,15 +86,15 @@ acceptance matrix remain tracked in issue 13395.
 
 ## Integration with actor roles and child Sessions, 2026-10-09
 
-The native-execution increment `f252ada3e` is integrated with main
-`5ddd43815`, which has published V53 Workspace roles and V54 child lineage.
-Keep all published migrations byte-identical. Rename only this Draft's request,
-first-activation and native-authorization SQL from V53/V54/V55 to V55/V56/V57,
-with unchanged SQL bytes and order. Databases that applied earlier unpublished
-numbers are not an automatic upgrade target; do not repair their history or
-backfill original authority. Current upgrade checks include main V53/V54,
-request-only V55 and activation V56, preserving old rows, checksums and null
-native grants.
+The native-execution increment `f252ada3e` is integrated with main, which has
+published V53 Workspace roles, V54 child lineage and V55 channel instance
+binding. Keep all published migrations byte-identical. Rename only this Draft's
+request, first-activation and native-authorization SQL from V55/V56/V57 to
+V56/V57/V58, with unchanged SQL bytes and order. Databases that applied earlier
+unpublished numbers are not an automatic upgrade target; do not repair their
+history or backfill original authority. Current upgrade checks include main
+V53/V54/V55, request-only V56 and activation V57, preserving old rows,
+checksums and null native grants.
 
 The later merge with main `e6e2c9efd` includes published V55 channel instances.
 A compiled Flyway schema test reproduces the duplicate V55 before repair. Keep

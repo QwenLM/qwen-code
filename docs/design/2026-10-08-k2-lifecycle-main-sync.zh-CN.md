@@ -71,13 +71,13 @@ writer 收口、聚合 DRAINED/RELEASED、物理 writers、CSI NodeUnpublish、�
 
 ## 与 actor role 和 child Session 集成，2026-10-09
 
-原生执行增量 `f252ada3e` 与 main `5ddd43815` 集成。main 已发布 V53
-Workspace role 和 V54 child lineage。全部已发布 migration 字节保持不变；
-只把本 Draft 的 request、first-activation 和 native-authorization SQL 从
-V53/V54/V55 改为 V55/V56/V57，SQL 字节与顺序不变。已经应用更早未发布编号
-的数据库不是自动升级对象，不修复其历史，不回填原始 authority。当前升级检查
-包含 main V53/V54、仅 request 的 V55 和 activation V56，保留旧行、checksum
-和 native grant 的 NULL。
+原生执行增量 `f252ada3e` 与 main 集成。main 已发布 V53
+Workspace role、V54 child lineage 和 V55 channel instance binding。全部已发布
+migration 字节保持不变；只把本 Draft 的 request、first-activation 和
+native-authorization SQL 从 V55/V56/V57 改为 V56/V57/V58，SQL 字节与顺序不变。
+已经应用更早未发布编号的数据库不是自动升级对象，不修复其历史，不回填原始
+authority。当前升级检查包含 main V53/V54/V55、仅 request 的 V56 和
+activation V57，保留旧行、checksum 和 native grant 的 NULL。
 
 后续与 main `e6e2c9efd` 合并包含已发布的 V55 channel instance migration。
 已编译 Flyway schema test 在修复前复现 V55 重复。保留该已发布 migration，

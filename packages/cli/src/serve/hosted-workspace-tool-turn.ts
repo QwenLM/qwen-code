@@ -2655,14 +2655,16 @@ export class HostedWorkspaceToolTurn {
     }
     // Quotas gate NEW children only: a re-driven batch names the same
     // run id, and `children.admit` answers that replay identically —
-    // counting the replayed child against `count_limit` would refuse
-    // the launch it is already running.
+    // counting the replayed child against `count_limit` or the launch
+    // budget would refuse the launch it is already running. Both counts
+    // read committed records only, so a refusal re-derives on replay.
     if (children.record(childRunId) === undefined) {
       const admission = childLaunchAdmission({
         workspaceMode: 'shared',
         sameDefinition: true,
         closing: authority.currentActivation?.phase !== 'active',
         activeInScope: children.activeChildRunsOf(key.sessionId).length,
+        launchedInScope: children.launchedChildRunsOf(key.sessionId).length,
         envelopeBytes,
       });
       if (!admission.admitted) {
