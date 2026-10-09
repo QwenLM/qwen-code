@@ -1608,8 +1608,13 @@ export function convertOpenAIChunkToLlm(
       ) {
         requestContext.taggedThinkingParser ??= new TaggedThinkingParser();
         requestContext.pendingThinkingTagCandidate = undefined;
+        // The takeover stops calling the trailing-tag filter for the rest of
+        // the turn, so a whitespace hold it still has is handed over rather
+        // than stranded between two prose runs.
+        const drainedWhitespace =
+          requestContext.trailingThinkingTagFilter?.drainWhitespace() ?? '';
         contentParts = requestContext.taggedThinkingParser.parse(
-          taggedThinkingCandidate,
+          drainedWhitespace + taggedThinkingCandidate,
           Boolean(choice.finish_reason),
         );
       } else if (normalizedContent || choice.finish_reason) {

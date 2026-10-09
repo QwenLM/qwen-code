@@ -371,6 +371,10 @@ function hasNonThoughtCandidateParts(
  *
  * The tail the filter can hold is whitespace plus a tag fragment and never
  * prose, so withholding it in these states loses no model output.
+ *
+ * A strip performed here is reported through the returned `sanitizedTagName`:
+ * the in-loop path is the only other reader of the filter's own verdict, so
+ * this route owes the same telemetry event.
  */
 function flushTrailingThinkingTag(
   abortSignal: AbortSignal | undefined,
@@ -384,7 +388,10 @@ function flushTrailingThinkingTag(
    * releases the tail verbatim instead.
    */
   completed: boolean,
-): GenerateContentResponse | undefined {
+): {
+  response?: GenerateContentResponse;
+  sanitizedTagName?: 'think' | 'thinking';
+} {
   if (
     abortSignal?.aborted === true ||
     context.hasThinkingTagInReasoning ||
@@ -392,14 +399,15 @@ function flushTrailingThinkingTag(
     context.pendingUntrustedResponseParts !== undefined ||
     context.taggedThinkingParser !== undefined
   ) {
-    return undefined;
+    return {};
   }
-  const trailingText = context.trailingThinkingTagFilter?.parse(
-    '',
-    true,
-    completed,
-  );
-  if (!trailingText) return undefined;
+  const filter = context.trailingThinkingTagFilter;
+  const trailingText = filter?.parse('', true, completed);
+  const sanitizedTagName = filter?.sanitizedTagName;
+  if (filter) {
+    filter.sanitizedTagName = undefined;
+  }
+  if (!trailingText) return { sanitizedTagName };
   const response = new GenerateContentResponse();
   response.candidates = [
     {
@@ -407,7 +415,7 @@ function flushTrailingThinkingTag(
       index: 0,
     },
   ];
-  return response;
+  return { response, sanitizedTagName };
 }
 
 /**
@@ -743,7 +751,7 @@ export class ContentGenerationPipeline {
       | NonNullable<RequestContext['protocolTagSanitized']>
       | undefined;
     const logPendingProtocolTagSanitized = (
-      response: GenerateContentResponse,
+      response: GenerateContentResponse | undefined,
       sanitization:
         | NonNullable<RequestContext['protocolTagSanitized']>
         | undefined,
@@ -752,7 +760,7 @@ export class ContentGenerationPipeline {
       const event = new ProtocolTagSanitizedEvent({
         model: context.model,
         promptId: userPromptId,
-        responseId: response.responseId,
+        responseId: response?.responseId,
         tagName: sanitization.tagName,
         toolCallCount: sanitization.toolCallCount,
       });
@@ -764,6 +772,24 @@ export class ContentGenerationPipeline {
         toolCallCount: event.tool_call_count,
       });
       logProtocolTagSanitized(this.config.cliConfig, event);
+    };
+
+    /**
+     * Reports an end-of-stream flush and returns the response it released, if
+     * any. The flush strips through the filter directly, so its verdict has to
+     * be logged here -- `responseId` is absent when the strip consumed the
+     * whole tail, and the event's own field is optional.
+     */
+    const logFlushedTrailingTag = (
+      flushed: ReturnType<typeof flushTrailingThinkingTag>,
+    ): GenerateContentResponse | undefined => {
+      if (flushed.sanitizedTagName) {
+        logPendingProtocolTagSanitized(flushed.response, {
+          tagName: flushed.sanitizedTagName,
+          toolCallCount: 0,
+        });
+      }
+      return flushed.response;
     };
 
     try {
@@ -922,14 +948,17 @@ export class ContentGenerationPipeline {
       // PROTOCOL_TAG_LEAK never has its withheld tail handed over as ordinary
       // prose first; above the Stage 2d parked-finish yield, so released text
       // cannot land after the `finishReason` chunk.
-      const flushedTail = flushTrailingThinkingTag(
-        request.config?.abortSignal,
-        context,
-        finishSeen,
-        // A clean end with no finish chunk is the absent-reason case the
-        // converter's own mapper reports as STOP, so this tail belongs to a
-        // finished turn and a complete orphan closer still has to be stripped.
-        true,
+      const flushedTail = logFlushedTrailingTag(
+        flushTrailingThinkingTag(
+          request.config?.abortSignal,
+          context,
+          finishSeen,
+          // A clean end with no finish chunk is the absent-reason case the
+          // converter's own mapper reports as STOP, so this tail belongs to a
+          // finished turn and a complete orphan closer still has to be
+          // stripped.
+          true,
+        ),
       );
       if (flushedTail) {
         contentYielded ||= hasNonThoughtCandidateParts(flushedTail);
@@ -962,13 +991,15 @@ export class ContentGenerationPipeline {
         throw error;
       }
 
-      const flushedTail = flushTrailingThinkingTag(
-        request.config?.abortSignal,
-        context,
-        finishSeen,
-        // An error mid-stream is a truncation, not an absent reason: the tail
-        // is released verbatim so a genuinely cut answer is not edited.
-        false,
+      const flushedTail = logFlushedTrailingTag(
+        flushTrailingThinkingTag(
+          request.config?.abortSignal,
+          context,
+          finishSeen,
+          // An error mid-stream is a truncation, not an absent reason: the
+          // tail is released verbatim so a genuinely cut answer is not edited.
+          false,
+        ),
       );
       if (flushedTail) {
         contentYielded ||= hasNonThoughtCandidateParts(flushedTail);

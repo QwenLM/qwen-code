@@ -62,8 +62,11 @@ export class TrailingThinkingTagFilter {
 
     const closing = CLOSING_TAG_LINE.exec(this.pending);
     let candidateStart = closing?.index ?? this.pending.lastIndexOf('\n');
-    if (!closing && candidateStart < 0 && this.pending.endsWith('\r')) {
-      candidateStart = this.pending.length - 1;
+    if (!closing && this.pending.endsWith('\r')) {
+      // The hold cannot depend on `candidateStart` still being -1: once the
+      // answer has an earlier line break it comes from `lastIndexOf('\n')`,
+      // and the `\r` is then released into the delivered prose.
+      candidateStart = Math.max(candidateStart, this.pending.length - 1);
     } else if (!closing && this.pending[candidateStart - 1] === '\r') {
       candidateStart--;
     }
@@ -116,6 +119,21 @@ export class TrailingThinkingTagFilter {
     this.hasVisibleText ||= /\S/.test(result);
     this.noteReleased(result);
     return result;
+  }
+
+  /**
+   * Hands back a hold that is entirely whitespace. A tagged-thinking takeover
+   * stops calling this filter for the rest of the turn, so whitespace it still
+   * holds would otherwise be stranded -- and whitespace is model output. A
+   * held tag fragment is deliberately left alone: draining it would leak the
+   * fragment as prose.
+   */
+  drainWhitespace(): string {
+    if (!/^\s+$/.test(this.pending)) return '';
+    const held = this.pending;
+    this.pending = '';
+    this.noteReleased(held);
+    return held;
   }
 
   /**

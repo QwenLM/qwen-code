@@ -2779,6 +2779,31 @@ describe('ContentGenerationPipeline', () => {
         ),
     );
 
+    it('hands a stranded whitespace tail to the tagged-thinking takeover', async () =>
+      withRealChunkConverter(
+        async () => {
+          // The filter withholds the newline ahead of the opened think block,
+          // and the takeover never calls it again, so that hold has to be
+          // handed back here or the model's line break is lost and two prose
+          // runs are glued together.
+          const { items, error } = await settle(
+            await streamFrom(
+              streamOf(
+                chunkOf({ reasoning_content: 'Let me think.' }),
+                chunkOf({ content: 'I will help.\n' }),
+                chunkOf({ content: '<think>hmm</thinking>Answer.' }),
+              ),
+            ),
+          );
+          expect(error).toBeUndefined();
+          expect(visibleText(items)).toBe('I will help.\nAnswer.');
+        },
+        {
+          contentOnlyThinkingTagLeaks: true,
+          taggedThinkingTagsAfterReasoning: true,
+        },
+      ));
+
     it('does not release a lone closing tag over discarded parked prose', async () =>
       withRealChunkConverter(async () => {
         const streamError = new Error('connection reset');
@@ -2889,6 +2914,28 @@ describe('ContentGenerationPipeline', () => {
         );
         expect(error).toBeUndefined();
         expect(visibleText(items)).toBe('Answer.');
+        // The strip happened on this route, so it owes the same telemetry the
+        // in-loop strip path emits.
+        expect(logProtocolTagSanitized).toHaveBeenCalledTimes(1);
+        expect(logProtocolTagSanitized).toHaveBeenCalledWith(
+          mockCliConfig,
+          expect.objectContaining({ tag_name: 'thinking', tool_call_count: 0 }),
+        );
+      }));
+
+    it('releases a complete orphan closer verbatim when the stream errors', async () =>
+      withRealChunkConverter(async () => {
+        // A transport failure is a truncation, not an absent reason: the
+        // complete closer already received stays in the delivered answer.
+        const streamError = new Error('socket hang up');
+        const { items, error } = await settle(
+          await streamFrom(
+            streamOf(chunkOf({ content: 'Answer.\n</thinking>' }), streamError),
+          ),
+        );
+        expect(error).toBe(streamError);
+        expect(visibleText(items)).toBe('Answer.\n</thinking>');
+        expect(logProtocolTagSanitized).not.toHaveBeenCalled();
       }));
 
     it('leaves the chunk-converter stub unimplemented for later tests', () => {

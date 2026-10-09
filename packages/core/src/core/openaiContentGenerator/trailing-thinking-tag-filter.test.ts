@@ -95,6 +95,9 @@ describe('TrailingThinkingTagFilter', () => {
 
   it('accepts a CRLF split across chunks without leaking the carriage return', () => {
     expect(run(['Answer.\r', '\n', '</thinking>'])).toBe('Answer.');
+    // An earlier line break must not disable the hold: `candidateStart` then
+    // comes from the line start rather than the `\r`.
+    expect(run(['Answer.\nMore.\r', '\n</thinking>'])).toBe('Answer.\nMore.');
   });
 
   it('preserves an indented code block but strips a lazy continuation', () => {
@@ -150,6 +153,7 @@ describe('TrailingThinkingTagFilter', () => {
       '<!-- </thinking> -->\nTail.\n</thinking>',
       'First the closer:\n</thinking>\nthen again:\n</thinking>',
       'Answer.\n</thinking>',
+      'Answer.\nMore.\r\n</thinking>',
     ];
     for (const input of inputs) {
       const oneShot = run([input]);
