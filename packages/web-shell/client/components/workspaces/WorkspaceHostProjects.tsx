@@ -4,8 +4,9 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
-import { Folder, Server, Trash2Icon } from 'lucide-react';
+import { Folder, Server } from 'lucide-react';
 import { useDaemonTargetOptional } from '../../config/daemon-target';
+import { WorkspaceMenu } from '../sidebar/WorkspaceMenu';
 import { useWorkspaceRemoval } from './useWorkspaceRemoval';
 import { WorkspaceRemovalDialog } from './WorkspaceRemovalDialog';
 import {
@@ -296,20 +297,11 @@ function LiveHostWorkspace({
       headerActions={
         onRemoveWorkspace && workspace.removable
           ? () => (
-              <button
-                type="button"
-                className={sectionStyles.workspaceHeaderAction}
-                title={t('sidebar.removeWorkspace')}
-                data-testid="fanout-remove-workspace"
-                onClick={() => onRemoveWorkspace(workspace)}
-              >
-                <Trash2Icon
-                  className={sectionStyles.folderIcon}
-                  size={14}
-                  strokeWidth={1.4}
-                  aria-hidden="true"
-                />
-              </button>
+              <WorkspaceMenu
+                workspace={workspace}
+                actions={{ remove: () => onRemoveWorkspace(workspace) }}
+                triggerClassName={sectionStyles.workspaceHeaderAction}
+              />
             )
           : undefined
       }
