@@ -94,4 +94,62 @@ class RuntimeBrokerServiceBindingReadTest {
         assertSame(readyHigh, service.findLatestBindingByHarnessSession("tenant",
                 "session"));
     }
+
+    /** The evidence read: any state's newest id across the whole
+     * traversal — a retired binding still proves its dispatch. */
+    @Test
+    void answersTheNewestBindingAcrossPagesInAnyState() {
+        AtomicReference<List<RuntimeBindingRecord>> rows =
+                new AtomicReference<>(List.of());
+        InvocationHandler handler = (proxy, method, args) -> {
+            if ("findByHarnessSession".equals(method.getName())) {
+                List<RuntimeBindingRecord> all = rows.get();
+                String after = (String) args[2];
+                int limit = (Integer) args[3];
+                int start = 0;
+                while (start < all.size() && after != null && !after.isEmpty()
+                        && all.get(start).getBindingId().compareTo(after) <= 0) {
+                    start++;
+                }
+                return all.subList(start,
+                        Math.min(all.size(), start + limit));
+            }
+            throw new UnsupportedOperationException(method.getName());
+        };
+        RuntimeBindingRepository bindings = (RuntimeBindingRepository)
+                Proxy.newProxyInstance(
+                        RuntimeBindingRepository.class.getClassLoader(),
+                        new Class<?>[] {RuntimeBindingRepository.class},
+                        handler);
+        RuntimeBrokerService service = new RuntimeBrokerService(
+                stub(HarnessSessionResolver.class),
+                stub(RuntimeProvisioner.class), stub(RuntimeTransport.class),
+                bindings, stub(RuntimeSessionRepository.class),
+                stub(ToolExecutionRepository.class), "owner",
+                Duration.ofSeconds(30), Duration.ofSeconds(30));
+        RuntimeBindingRecord releasedHigh = row("zzzz0",
+                RuntimeBindingRecord.State.RELEASED);
+        List<RuntimeBindingRecord> spanning = new ArrayList<>();
+        spanning.add(row("0000a", RuntimeBindingRecord.State.READY));
+        for (int index = 0; index < 120; index++) {
+            spanning.add(row(String.format("%04x-mid", index + 1),
+                    RuntimeBindingRecord.State.LOST));
+        }
+        spanning.add(releasedHigh);
+        rows.set(spanning);
+        assertSame(releasedHigh,
+                service.findLatestBindingByHarnessSessionAnyState("tenant",
+                        "session"));
+        // An all-retired history is a full answer, never an absence.
+        RuntimeBindingRecord lost = row("0000a",
+                RuntimeBindingRecord.State.LOST);
+        rows.set(List.of(lost));
+        assertSame(lost,
+                service.findLatestBindingByHarnessSessionAnyState("tenant",
+                        "session"));
+        // Only an empty history means nothing ever stood there.
+        rows.set(List.of());
+        assertNull(service.findLatestBindingByHarnessSessionAnyState(
+                "tenant", "session"));
+    }
 }

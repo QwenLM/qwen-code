@@ -454,21 +454,28 @@ public class SessionLifecycleCoordinator {
             boolean recordReady = body.childSessionId() != null;
             boolean provablyUnstarted = false;
             if (childSessionId != null && !recordReady) {
-                // The close_scope settlement parses only with the child
-                // Session recorded through valid transitions: dispatch and
-                // attach replay the child's proven identity — the body's
-                // own committed dispatch facts when present, or the
-                // physical Runtime binding the child warms with. The SDK's
+                // The started call binds evidence, never a lease's
+                // memory: a creation key is an attempt id, not a start,
+                // and a READY binding's absence says nothing — a retired
+                // (RELEASED/LOST) binding still proves the dispatch it
+                // once was, and the child Session's own durable Turn is
+                // proof all by itself. A start is proven by the body's
+                // committed dispatch facts, by a binding row in ANY
+                // state, or by that Turn; with none of the three the
+                // never-started pairing is the honest one. The SDK's
                 // refusal and transport-ambiguous throws are plain
                 // RuntimeExceptions (DaemonHttpException,
-                // MutationOutcomeUnknownException): a journal-side failure
-                // owes its revision, but must never skip the child's own
-                // physical close behind it.
-                if (body.runtimeBindingId() == null && creationKey == null
-                        && findBinding(tenantId, childSessionId) == null) {
-                    // Nothing to replay: no dispatch facts committed, no
-                    // physical binding the child could have warmed from —
-                    // the only honest read of the create→attach window is
+                // MutationOutcomeUnknownException): a journal-side
+                // failure owes its revision, but must never skip the
+                // child's own physical close behind it.
+                RuntimeBindingRecord binding = findBinding(tenantId,
+                        childSessionId);
+                if (body.runtimeBindingId() == null
+                        && body.dispatchId() == null && binding == null
+                        && childScopes.latestTurn(tenantId, childSessionId)
+                                == null) {
+                    // Nothing to replay and nothing that ever ran: the
+                    // only honest read of the create→attach window is
                     // that the creation never attached. The run settles
                     // `started: false` on its evidence, not on a leaded
                     // row re-armed forever on behalf of proof it lacks.
@@ -476,7 +483,7 @@ public class SessionLifecycleCoordinator {
                 } else {
                     try {
                         repairChildRecord(operation, scope.childRunId(),
-                                body, childSessionId, creationKey);
+                                body, childSessionId, creationKey, binding);
                         recordReady = true;
                     } catch (RuntimeException unfixed) {
                         journalDebt = true;
@@ -573,6 +580,12 @@ public class SessionLifecycleCoordinator {
                 continue;
             }
             closeScope.put("started", childSessionId != null && recordReady);
+            if (childSessionId != null && !recordReady) {
+                // A minted, never-started child dies named: the settling
+                // revision carries its Session so the lineage's own close
+                // story is never lost with the body's gap.
+                closeScope.put("childSessionId", childSessionId);
+            }
             try {
                 runLifecycleChildOperation(operation, closeScope);
             } catch (RuntimeException error) {
@@ -597,18 +610,19 @@ public class SessionLifecycleCoordinator {
 
     /**
      * Rebuilds a run's dispatch/attach chain through the child's proven
-     * evidence — its own committed dispatch facts, or the physical Runtime
-     * binding the child warms with — so the settling revision commits over
-     * valid record transitions. Every operation is idempotent: a patched
-     * attempt replays its receipt instead of widening evidence.
+     * evidence — its own committed dispatch facts, or the physical
+     * binding row it once drove (any state: a retired binding's identity
+     * is what the dispatch committed, warmth is never required here) —
+     * so the settling revision commits over valid record transitions.
+     * Every operation is idempotent: a patched attempt replays its
+     * receipt instead of widening evidence.
      */
     private void repairChildRecord(OperationRecord parent, String childRunId,
-            ScopeEvidence body, String childSessionId, String creationKey) {
+            ScopeEvidence body, String childSessionId, String creationKey,
+            RuntimeBindingRecord binding) {
         String runtimeBindingId = body.runtimeBindingId();
         String generation = body.runtimeGeneration();
         if (runtimeBindingId == null || generation == null) {
-            RuntimeBindingRecord binding = findBinding(parent.tenantId(),
-                    childSessionId);
             if (binding == null) {
                 throw new IllegalStateException(
                         "child Runtime binding is not visible");
@@ -656,14 +670,17 @@ public class SessionLifecycleCoordinator {
                 childBody);
     }
 
-    /** The physical Runtime binding proving a child's dispatch identity,
-     * or null when no Runtime Broker is wired (legacy deployment shapes). */
+    /** The newest binding row proving a child's dispatch identity, in
+     * ANY state — or null when no Runtime Broker is wired (legacy
+     * deployment shapes) or no row ever stood. A retired row still
+     * proves the dispatch it once was; warmth is a separate question
+     * the relay answers READY-only. */
     private RuntimeBindingRecord findBinding(String tenantId,
             String sessionId) {
         RuntimeBrokerService broker = brokerProviders == null ? null
                 : brokerProviders.getIfAvailable();
         return broker == null ? null
-                : broker.findLatestBindingByHarnessSession(tenantId,
+                : broker.findLatestBindingByHarnessSessionAnyState(tenantId,
                         sessionId);
     }
 }

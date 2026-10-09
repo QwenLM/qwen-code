@@ -281,6 +281,9 @@ class SessionLifecycleCoordinatorTest {
             Mockito.when(broker.findLatestBindingByHarnessSession(
                     Mockito.anyString(), Mockito.anyString()))
                     .thenReturn(binding);
+            Mockito.when(broker.findLatestBindingByHarnessSessionAnyState(
+                    Mockito.anyString(), Mockito.anyString()))
+                    .thenReturn(binding);
         }
         ObjectProvider<RuntimeBrokerService> provider =
                 Mockito.mock(ObjectProvider.class);
@@ -487,6 +490,10 @@ class SessionLifecycleCoordinatorTest {
                         .toList();
                 assertThat(terminals).hasSize(1);
                 assertThat(terminals.get(0)).containsEntry("started", false);
+                // A minted, never-started child dies named: the verdict
+                // carries the Session its lineage minted.
+                assertThat(terminals.get(0)).containsEntry("childSessionId",
+                        world.child);
                 assertThat(harness.closed).contains(world.child);
             } finally {
                 coordinator.stopRenewals();
@@ -538,6 +545,104 @@ class SessionLifecycleCoordinatorTest {
                         .containsEntry("generation", "7");
                 assertThat(harness.closed).contains(world.child,
                         world.session);
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    // The retired-binding window R22 measured: the ledger knows the
+    // child (creation key and all), the READY read is empty because the
+    // binding has retired, and the child itself has closed. The started
+    // call must bind the retired row's own dispatch identity — never
+    // wedge the parent behind a repair that reports warmth missing.
+    @Test
+    void aRetiredBindingStillSettlesTheLedgerKnownChild() {
+        World world = closingWorld("retired-");
+        liveScope(world, "{\"inputRef\":{\"resourceId\":\"res-input\"}}");
+        ChildResultRelayStore.RelayRow claimed = world.relayStore.claim(
+                "tenant", world.session, "run-1", "key-run-1", "owner",
+                30_000, 100);
+        assertThat(claimed).isNotNull();
+        world.relayStore.advance(claimed, "owner", "watching", world.child,
+                0, null, 30_000, 100);
+        world.jdbc.update("UPDATE managed_agent_session SET status ="
+                        + " 'CLOSED' WHERE tenant_id = 'tenant'"
+                        + " AND session_id = ?",
+                world.child);
+        RuntimeBrokerService broker = Mockito.mock(
+                RuntimeBrokerService.class);
+        RuntimeBindingRecord retired = bindingOf("binding-1", 7L);
+        Mockito.when(broker.findLatestBindingByHarnessSessionAnyState(
+                Mockito.anyString(), Mockito.anyString()))
+                .thenReturn(retired);
+        ObjectProvider<RuntimeBrokerService> provider =
+                Mockito.mock(ObjectProvider.class);
+        Mockito.when(provider.getIfAvailable()).thenAnswer(
+                ignored -> broker);
+        var harness = new CascadingHarness(true, false);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(world.store,
+                    new ManagedSessionStore(world.jdbc), harness,
+                    warmer(true, false), world.relayStore, new ObjectMapper(),
+                    admissions(world.store, warmer(true, false)),
+                    provider, executor, Clock.systemUTC(),
+                    world.properties);
+            try {
+                redispatchUntil(coordinator, world, "COMPLETED");
+                Map<String, Object> closeScope = harness.operations.stream()
+                        .filter(op -> "close_scope".equals(op.get("kind")))
+                        .findFirst().orElseThrow();
+                assertThat(closeScope).containsEntry("started", true);
+                assertThat(harness.operations.stream()
+                        .filter(op -> "dispatch_started".equals(
+                                op.get("kind"))).findFirst().orElseThrow())
+                        .containsEntry("dispatchId", "key-run-1")
+                        .containsEntry("runtimeBindingId", "binding-1")
+                        .containsEntry("generation", "7");
+                // The child had already closed: no duplicate admission.
+                assertThat(harness.closed).doesNotContain(world.child);
+            } finally {
+                coordinator.stopRenewals();
+            }
+        }
+    }
+
+    // R22's false-verdict repro in isolation: lineage alone names the
+    // child, the binding has retired, and the child's own durable Turn
+    // completed. The settling revision must read started: true — the
+    // never-started pairing over proven execution would certify a lie.
+    @Test
+    void aCompletedTurnNeverSettlesTheNeverStartedPairing() {
+        World world = closingWorld("turnproof-");
+        liveScope(world, "{\"inputRef\":{\"resourceId\":\"res-input\"}}");
+        world.jdbc.update("INSERT INTO managed_agent_turn (tenant_id,"
+                        + " session_id, turn_id, prompt_id, input_json,"
+                        + " payload_digest, status, submission_attempted,"
+                        + " created_at, updated_at, completed_at, version)"
+                        + " VALUES ('tenant', ?, 'turn-1', 'prompt-1', '[]',"
+                        + " 'd', 'COMPLETED', TRUE, 1, 2, 2, 1)",
+                world.child);
+        var harness = new CascadingHarness(true, false);
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var coordinator = new SessionLifecycleCoordinator(world.store,
+                    new ManagedSessionStore(world.jdbc), harness,
+                    warmer(true, false), world.relayStore, new ObjectMapper(),
+                    admissions(world.store, warmer(true, false)),
+                    brokerProvider(bindingOf("binding-1", 7L)), executor,
+                    Clock.systemUTC(), world.properties);
+            try {
+                redispatchUntil(coordinator, world, "COMPLETED");
+                assertThat(world.store.requireSession("tenant", world.child)
+                        .status()).isEqualTo("CLOSED");
+                Map<String, Object> closeScope = harness.operations.stream()
+                        .filter(op -> "close_scope".equals(op.get("kind")))
+                        .findFirst().orElseThrow();
+                assertThat(closeScope).containsEntry("started", true);
+                assertThat(harness.operations.stream().filter(
+                        op -> "close_scope".equals(op.get("kind")))
+                        .filter(op -> Boolean.FALSE.equals(
+                                op.get("started")))).isEmpty();
             } finally {
                 coordinator.stopRenewals();
             }

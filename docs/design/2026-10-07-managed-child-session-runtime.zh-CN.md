@@ -119,6 +119,13 @@ H4b 交付该流水线的 child-agent 部分:
 3. **`"tool"` 臂的挂起等待者是否需要除已提交记录外的自有持久行**——现有证据(settled run + acceptance 恒足以应答)表明不需要;真实栈发现可以再加,不构成契约变更。
 4. **relay 表生命周期**:orphaned/已闭台账行的保留与删除,随 Session 归档/删除工作(#13135/#13194 跟进)处理;本切片只铸造与更新行。
 
+## 修订(2026-10-09,R22 评审轮)
+
+1. **never-started 判决指名已铸造的 Session(契约修订)。** 执行线落在 `not_started_proven` 的 `creation_failed` / `stop_requested` 结算可携带 `childSessionId` 且无 Runtime binding——铸造正是 create→attach 窗口里唯一存留的事实,不指名的铸造会让 child 变成孤儿:再无任何一方能发现它。两种语言的记录校验器各放宽三条子句(session 需要已准入的 dispatch、session 需要承载它的 binding、`creation_failed` 需要 null session),每条都以 `not_started_proven` 为界——它是唯一没有 dispatch 可承载的终态。`fail` / `close_scope` 线路操作接受可选 `childSessionId`;构造器对同一 id 重放安全重述,对改名以 `child_operation_record` 拒绝;共享 fixtures 钉住新增合法形态。
+2. **终态判决与铸造共享同一提交接缝。** 任何 `not_started_proven` 终态 revision 的吸入先对该 run 自己的 extension 行加 `FOR UPDATE` 锁——正是创建栅栏 `insertChildSessionCommand` 所读的同一行——随后在锁下读 `managed_agent_session.parent_child_run_id`:该 revision 的 `childSessionId` 必须等于 lineage 铸出的 Session(无 lineage 时必须为 null),否则提交被拒,写入方带新证据重试。评估到空 lineage 的 give-up 判决在铸造先落地时被拒,推迟后的重试重读 lineage 并指名 child——R21 创建对判决竞态的逆序,在提交时点而非靠预防性运气关闭。
+3. **give-up 的启动证据读记录体,不读 `runtime_state` 投影。** 投影列存的是 Runtime 状态(`unbound`、`provisioning`、`ready`),与 execution 枚举的比较永不命中,链条于是无限重发被拒的 started 配对(R22 的 give-up 楔死)。`executionState` 现经 inline resource 读已提交记录体;记录体不可读时欠有界重试而非猜断;记录自带的 `not_started_proven` 直接配对未启动判决。
+4. **级联的 started 判定绑定任意态证据。** 启动由以下三者之一证明:记录体已提交的 dispatch 事实、任意态的 binding 行(`findLatestBindingByHarnessSessionAnyState`——已退役的 RELEASED/LOST 行仍证明它曾经的 dispatch 并给出修复所需的身份;用于回暖的修复读取保持仅 READY),或 child Session 自己的持久 Turn。creation key 只是尝试 id,永远不是启动。三者皆无时,以 `started: false` 结算未启动配对——lineage 铸过 Session 时指名;三者有一时,修复用该证据重建 dispatch+attach,结算以 `started: true` 提交。
+
 ## 后续工作
 
 | 切片   | 范围                                                                                                                  |
