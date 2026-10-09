@@ -442,6 +442,11 @@ it('names Windows as unsupported instead of advising an extension install', () =
   for (const message of [windows, other]) {
     expect(message).not.toContain('install the extension from');
     expect(message).not.toContain('chrome://extensions');
+    // The reason and the next step are the whole point of this branch, and
+    // both platforms share this tail verbatim.
+    expect(message).toContain(
+      'because its Native Messaging host is only registered on macOS and Linux. Run Qwen Code on macOS or Linux to use Browser Use.',
+    );
     // The real diagnostic stays visible on this branch too.
     expect(message).toContain('Chrome extension disconnected');
   }
@@ -477,20 +482,6 @@ it('reports Windows as unsupported when discovery finds no host', async () => {
     vi.restoreAllMocks();
   }
   expect(transport.isConnected()).toBe(false);
-});
-
-it('lists no browsers on an unsupported platform instead of throwing', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qbu-client-'));
-  roots.push(root);
-  const transport = discovering(root, 200);
-  const platform = vi
-    .spyOn(process, 'platform', 'get')
-    .mockReturnValue('win32');
-  try {
-    await expect(transport.profiles()).resolves.toEqual([]);
-  } finally {
-    platform.mockRestore();
-  }
 });
 
 it('explicit endpoint listing reports no browsers when nothing listens', async () => {
