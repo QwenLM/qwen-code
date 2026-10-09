@@ -152,9 +152,11 @@ class Session {
    * carries several turns under a single id: the key the rewind mapping from
    * #9466 anchors on (it fails closed to a positional walk when ids repeat),
    * and the `prompt_id` on persisted `ui_telemetry` records, which is what
-   * the next resume reads back to seed from. File-history snapshots are not
-   * at stake on this path — checkpointing defaults off outside interactive
-   * sessions, so headless turns write none.
+   * the next resume reads back to seed from. Headless turns write no
+   * file-history snapshots themselves, but one retained from an earlier
+   * interactive turn outlives the conversation-only rewind that discarded its
+   * turn, so this seed still reads `file_history_snapshot` ordinals — or the
+   * replacement turn re-wears that identity (#11408).
    *
    * ACP seeds through this same helper (`primeTurnFromHistory`). Interactive
    * mode seeds too, but by its own inline count of resumed user turns
