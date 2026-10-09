@@ -47,6 +47,35 @@ public interface AgentStateStore {
             String agentId, String requestedRevision, String title,
             List<Map<String, Object>> input, String payloadDigest);
 
+    /**
+     * H4b: creates a child Session under its parent's exact binding,
+     * stamping the lineage in the same transaction. The idempotency key
+     * derives from the parent's committed launch, so a replay returns the
+     * original admission and never mints a second Session. The caller is
+     * the control plane (the relay), so this path deliberately skips the
+     * public actor/workspace checks — the parent's row carries them.
+     */
+    default StoreModels.Admission insertChildSessionCommand(String tenantId,
+            String parentSessionId, String idempotencyKey,
+            String requestDigest, String title, List<Map<String, Object>> input,
+            String payloadDigest, StoreModels.SessionLineage lineage) {
+        throw new UnsupportedOperationException("Child Session creation is unavailable");
+    }
+
+    /** The replay of {@link #insertChildSessionCommand}: same key and
+     * digest answers the original admission; either mismatch conflicts. */
+    default StoreModels.Admission replayChildSessionCommand(String tenantId,
+            String parentSessionId, String idempotencyKey,
+            String requestDigest) {
+        throw new UnsupportedOperationException("Child Session creation is unavailable");
+    }
+
+    /** A child Session's persisted lineage, or null for a root Session. */
+    default StoreModels.SessionLineage findChildLineage(String tenantId,
+            String sessionId) {
+        return null;
+    }
+
     Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest, String agentId,
             String requestedRevision, String title,
@@ -103,6 +132,14 @@ public interface AgentStateStore {
     OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId,
             OperationKind kind, String actorId, String actorDigest, String key,
             String digest, boolean closeSupported);
+
+    default OperationAdmission beginWorkspaceLifecycle(String tenantId, String sessionId, OperationKind kind,
+            String actorId, String actorDigest, String key, String digest, boolean supported, int protocolVersion) {
+        if (protocolVersion != 0) {
+            throw new UnsupportedOperationException("Workspace lifecycle protocol is unavailable");
+        }
+        return beginWorkspaceLifecycle(tenantId, sessionId, kind, actorId, actorDigest, key, digest, supported);
+    }
 
     boolean hasCompletedWorkspaceClose(String tenantId, String sessionId);
 
@@ -274,12 +311,16 @@ public interface AgentStateStore {
     void markSubmissionAttempted(String tenantId, String sessionId,
             String turnId, String owner);
 
+    boolean withdrawSubmissionAttempted(String tenantId, String sessionId,
+            String turnId, String owner);
+
     void recordAdmission(String tenantId, String sessionId, String turnId,
             String owner, String eventEpoch, long lastEventId);
 
     void recordRecoveryAdmission(String tenantId, String sessionId,
-            String turnId, String owner, String expectedEventEpoch,
-            String eventEpoch, long lastEventId);
+            String turnId, String owner, String expectedTurnEventEpoch,
+            String expectedSessionEventEpoch, String eventEpoch,
+            long lastEventId);
 
     /**
      * Clears non-terminal text from a continuation epoch that did not reach

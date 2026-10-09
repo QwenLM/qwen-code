@@ -21,6 +21,13 @@ export interface ServeProtocolVersions {
 export interface ServeCapabilityDescriptor {
   since: ServeProtocolVersion;
   /**
+   * Marks this tag as part of the hosted persona's curated wire set
+   * (`hostedPersonaServeFeatures`). Declared only here, in the registry:
+   * the persona adds a tag by setting this field, never by editing a list
+   * at the route.
+   */
+  hostedPersona?: boolean;
+  /**
    * Sub-mode names supported by this capability, when the feature has
    * more than one operating mode and clients benefit from feature-
    * detecting the active set. Optional — baseline tags (always-on,
@@ -35,7 +42,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   daemon_update: { since: 'v1' },
   capabilities: { since: 'v1' },
   session_create: { since: 'v1' },
-  hosted_harness_private_v1: { since: 'v1' },
+  hosted_harness_private_v1: { since: 'v1', hostedPersona: true },
+  // The Hosted Harness can open journals containing message.delta records;
+  // a control plane refuses older Harness builds at negotiation instead of
+  // failing every Session open (G3).
+  managed_session_journal_delta_v1: { since: 'v1', hostedPersona: true },
   session_startup_config: { since: 'v1' },
   session_id_override: { since: 'v1' },
   session_scope_override: { since: 'v1' },
@@ -696,6 +707,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   (toggles: AdvertiseFeatureToggles) => boolean
 > = new Map<ServeFeature, (toggles: AdvertiseFeatureToggles) => boolean>([
   ['hosted_harness_private_v1', (toggles) => toggles.hostedHarness === true],
+  [
+    'managed_session_journal_delta_v1',
+    (toggles) => toggles.hostedHarness === true,
+  ],
   ['require_auth', (toggles) => toggles.requireAuth === true],
   [
     'agent_collaboration_v1',
@@ -906,6 +921,22 @@ function isFeatureAvailableInProtocol(
 
 export function getRegisteredServeFeatures(): ServeFeature[] {
   return [...SERVE_FEATURES];
+}
+
+/** The hosted persona's curated tag set: exactly the registry entries
+ * carrying `hostedPersona`, filtered to the current protocol. Membership
+ * is a curation fact declared once — in the registry — so adding a tag to
+ * the persona is a registry edit, and a second or third list cannot
+ * exist to drift. */
+export function hostedPersonaServeFeatures(): ServeFeature[] {
+  return SERVE_FEATURES.filter((feature) => {
+    if (!isFeatureAvailableInProtocol(feature, SERVE_PROTOCOL_VERSION))
+      return false;
+    const entry = SERVE_CAPABILITY_REGISTRY[feature] as
+      | { hostedPersona?: boolean }
+      | undefined;
+    return entry?.hostedPersona === true;
+  });
 }
 
 export function getAdvertisedServeFeatures(
