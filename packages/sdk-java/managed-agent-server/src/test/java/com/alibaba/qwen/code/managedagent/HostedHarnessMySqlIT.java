@@ -61,6 +61,10 @@ class HostedHarnessMySqlIT {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
     private static final Pattern LISTENING = Pattern.compile(
             "listening on http://127\\.0\\.0\\.1:(\\d+)");
+    // The CI job's MySQL service container can stall journal writes for tens
+    // of seconds when its InnoDB redo log fills under fork load (MY-014084);
+    // a 30s settlement poll expires mid-stall (#13780).
+    private static final int SETTLEMENT_POLL_SECONDS = 90;
     private final ObjectMapper json = new ObjectMapper();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
     private final AtomicReference<Throwable> modelFailure = new AtomicReference<>();
@@ -206,7 +210,7 @@ class HostedHarnessMySqlIT {
     }
 
     @Test
-    @Timeout(120)
+    @Timeout(360)
     void lifecycleOperationsCloseThePackagedHarnessSession() throws Exception {
         Path cli = Path.of(required("qwen.cli.entry")).toAbsolutePath();
         assertThat(cli).as("Build and bundle the packaged CLI first").isRegularFile();
@@ -242,8 +246,8 @@ class HostedHarnessMySqlIT {
                      "input":[{"type":"input_text","text":"LIFECYCLE_FIRST"}]}
                     """, 202).path("id").asText();
             await(() -> api("GET", "/v1/agents/sessions/" + id + "/events", null, null, 200)
-                    .path("data").toString().contains("\"turn.completed\""), 30,
-                    "Turn completion");
+                    .path("data").toString().contains("\"turn.completed\""),
+                    SETTLEMENT_POLL_SECONDS, "Turn completion");
             assertThat(writerState(id)).isEqualTo("ACTIVE");
 
             JsonNode close = api("POST", "/v1/agents/sessions/" + id + "/close", "close",
@@ -277,7 +281,7 @@ class HostedHarnessMySqlIT {
             operation.set(api("GET", "/v1/agents/sessions/" + session + "/operations/"
                     + operationId, null, null, 200));
             return "completed".equals(operation.get().path("status").asText());
-        }, 30, "Operation " + operationId);
+        }, SETTLEMENT_POLL_SECONDS, "Operation " + operationId);
         return operation.get();
     }
 
@@ -388,7 +392,7 @@ class HostedHarnessMySqlIT {
         environment.put("QWEN_CODE_SYSTEM_DEFAULTS_PATH", temporary.resolve("system-defaults.json").toString());
         environment.put("QWEN_CODE_TRUSTED_FOLDERS_PATH", temporary.resolve("trusted-folders.json").toString());
         child = builder.start();
-        watchdog.schedule(this::killChild, 100, TimeUnit.SECONDS);
+        watchdog.schedule(this::killChild, 300, TimeUnit.SECONDS);
         outputReader = Thread.ofPlatform().daemon().start(() -> {
             try (var reader = child.inputReader(StandardCharsets.UTF_8)) {
                 char[] buffer = new char[2048];
