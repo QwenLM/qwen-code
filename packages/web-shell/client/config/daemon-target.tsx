@@ -159,10 +159,14 @@ export function DaemonTargetProvider({
           `Refusing to focus an origin the current document cannot reach: ${target.origin}`,
         );
       }
+      // Clicking the already-focused host must not touch anything: applying
+      // the URL rewrite would still delete workspace/context params of the
+      // CURRENT session and visibly refresh the shell for nothing.
+      if (origin === activeOrigin && !target.workspaceId) return;
       applyFocusToUrl({ ...target, origin });
       setActiveOrigin(origin);
     },
-    [coveredOrigins],
+    [activeOrigin, coveredOrigins],
   );
   const focusHostWithHandoff = useCallback(
     (target: FocusHostTarget, handoff: HostHandoff) => {

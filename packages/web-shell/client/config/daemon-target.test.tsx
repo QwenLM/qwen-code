@@ -95,6 +95,23 @@ describe('DaemonTargetProvider (#13727)', () => {
     expect(url.searchParams.get('context')).toBeNull();
   });
 
+  it('is a no-op when clicking the already-focused host', () => {
+    const ref = mountController();
+    window.history.replaceState(
+      null,
+      '',
+      '/session/s-7?daemon=' +
+        encodeURIComponent('https://focus.example') +
+        '&workspace=ws-7&fanout=https%3A%2F%2Falpha.example',
+    );
+    const before = window.location.href;
+    act(() => {
+      ref.current?.focusHost({ origin: 'https://focus.example' });
+    });
+    expect(window.location.href).toBe(before);
+    expect(ref.current?.activeOrigin).toBe('https://focus.example');
+  });
+
   it('drops the daemon param when focusing the page origin', () => {
     const ref = mountController();
     act(() => {
