@@ -845,7 +845,7 @@ describe('Gemini Client (client.ts)', () => {
       warmAll: vi.fn().mockResolvedValue(undefined),
       ensureTool: vi.fn().mockResolvedValue(null),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
-      getAllToolNames: vi.fn().mockReturnValue([ToolNames.AGENT]),
+      getAllToolNames: vi.fn(),
       getDeferredToolSummary: vi.fn().mockReturnValue([]),
       clearRevealedDeferredTools: vi.fn(),
       clearReviewedDeclarations: vi.fn(),
@@ -857,6 +857,15 @@ describe('Gemini Client (client.ts)', () => {
       getTool: vi.fn().mockReturnValue(null),
       getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
     };
+    // Keep getAllToolNames consistent with the per-test getTool stub: a real
+    // ToolRegistry that returns a tool from getTool always lists that name,
+    // and isDeferredToolBridgeAvailable now reads this factory-aware view.
+    mockToolRegistry.getAllToolNames.mockImplementation(() =>
+      [ToolNames.AGENT, ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL].filter(
+        (name) =>
+          name === ToolNames.AGENT || mockToolRegistry.getTool(name) != null,
+      ),
+    );
     const fileService = new FileDiscoveryService('/test/dir');
     const contentGeneratorConfig: ContentGeneratorConfig = {
       model: 'test-model',
@@ -877,6 +886,7 @@ describe('Gemini Client (client.ts)', () => {
       getUserAgent: vi.fn().mockReturnValue('test-agent'),
       getUserMemory: vi.fn().mockReturnValue(''),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
+      getAutoMemoryContext: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
@@ -8442,6 +8452,30 @@ Other open files:
       );
     });
 
+    it('runs no managed auto-memory extraction in a session agent session', async () => {
+      const agentConfig = mockConfig as unknown as {
+        isSessionAgentSession?: () => boolean;
+      };
+      agentConfig.isSessionAgentSession = () => true;
+      try {
+        mockMemoryManager.scheduleExtract.mockClear();
+        mockMemoryManager.scheduleDream.mockClear();
+        mockTurnRunFn.mockReturnValue(textTurn('Done'));
+        installChat({
+          getHistory: vi
+            .fn()
+            .mockReturnValue([userText('Review this.'), modelText('Done')]),
+        });
+
+        await run([{ text: 'Review this.' }], 'prompt-id-agent-extract');
+
+        expect(mockMemoryManager.scheduleExtract).not.toHaveBeenCalled();
+        expect(mockMemoryManager.scheduleDream).not.toHaveBeenCalled();
+      } finally {
+        delete agentConfig.isSessionAgentSession;
+      }
+    });
+
     it('should run managed auto-memory extraction after a completed user query', async () => {
       mockMemoryManager.scheduleExtract.mockResolvedValue({
         touchedTopics: ['user'],
@@ -12447,6 +12481,40 @@ Other open files:
       expect(lastSystemInstruction()).toBe(
         'Custom side-query prompt\n\n---\n\n# auto memory\nMEMORY_INDEX_MARKER',
       );
+    });
+
+    it('appends the auto-memory catalog to the request tail without mutating the caller contents', async () => {
+      // The catalog is request-only: it must be appended after modality
+      // slimming, and generateContent must leave the array the caller owns
+      // untouched so stored history never reproduces it.
+      vi.mocked(mockConfig.getAutoMemoryContext).mockReturnValue(
+        'CATALOG_MARKER',
+      );
+      const contents: Content[] = [
+        content('user', { text: 'first turn' }),
+        content('model', { text: 'first reply' }),
+      ];
+      const ownedByCaller = structuredClone(contents);
+
+      await client.generateContent(
+        contents,
+        {},
+        new AbortController().signal,
+        'test-model',
+      );
+
+      const request = vi
+        .mocked(mockContentGenerator.generateContent)
+        .mock.calls.at(-1)?.[0];
+      const sent = (request?.contents ?? []) as Content[];
+      const catalogParts = sent
+        .flatMap((entry) => entry.parts ?? [])
+        .filter((part) => part.text === 'CATALOG_MARKER');
+      expect(catalogParts).toHaveLength(1);
+      expect(sent.at(-1)?.parts?.at(-1)).toEqual(
+        expect.objectContaining({ text: 'CATALOG_MARKER' }),
+      );
+      expect(contents).toEqual(ownedByCaller);
     });
 
     it('includes context and auto-memory but omits appendPrompt/gitStatus in the per-call systemInstruction branch', async () => {

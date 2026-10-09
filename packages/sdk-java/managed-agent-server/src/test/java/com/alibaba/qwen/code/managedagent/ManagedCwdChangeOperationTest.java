@@ -17,8 +17,12 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionMutationKind;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -41,6 +45,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.flywaydb.core.Flyway;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
@@ -104,11 +110,82 @@ class ManagedCwdChangeOperationTest {
         assertThat(settle(fixture,
                 sessionId, claimed.operationId(), "owner",
                 claimed.claimGeneration()).completed()).isTrue();
+        fixture.insertRuntimeOwner(TENANT, sessionId,
+                RuntimeSessionRecord.State.READY);
         OperationAdmission replay = begin(fixture, sessionId, "key-1",
                 "digest-1", "services/b", 1);
         assertThat(replay.replayed()).isTrue();
         assertThat(replay.operation().state()).isEqualTo("COMPLETED");
         assertThat(replay.operation().resultContextRevision()).isEqualTo(2);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = RuntimeSessionRecord.State.class,
+            names = {"ACQUIRING", "READY", "RELEASING", "FAILED"})
+    void retainedRuntimeContextRefusesAdmissionWithoutAnActiveTurn(
+            RuntimeSessionRecord.State state) {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        fixture.insertRuntimeOwner(TENANT, sessionId, state);
+        assertThatThrownBy(() -> fixture.tx(() -> begin(fixture, sessionId,
+                "key", "digest", "services/b", 1)))
+                .isInstanceOfSatisfying(ApiException.class,
+                        error -> assertRefusal(error, HttpStatus.CONFLICT,
+                                "session_context_busy"));
+        assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM"
+                + " managed_agent_operation WHERE tenant_id = ? AND"
+                + " session_id = ?", Integer.class, TENANT, sessionId)).isZero();
+        assertThat(fixture.store.requireSession(TENANT, sessionId)
+                .workspace().getContextRevision()).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = RuntimeSessionRecord.State.class,
+            names = {"ACQUIRING", "READY", "RELEASING", "FAILED"})
+    void runtimeContextAcquiredAfterAdmissionRefusesCommit(
+            RuntimeSessionRecord.State state) {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        OperationRecord operation = fixture.tx(() -> begin(fixture,
+                sessionId, "key", "digest", "services/b", 1)).operation();
+        OperationRecord claimed = claim(fixture, sessionId,
+                operation.operationId(), "owner");
+        fixture.insertRuntimeOwner(TENANT, sessionId, state);
+        CwdChangeOutcome outcome = settle(fixture, sessionId,
+                operation.operationId(), "owner", claimed.claimGeneration());
+        assertThat(outcome.completed()).isFalse();
+        assertThat(outcome.failureCode()).isEqualTo("session_context_busy");
+        assertFailed(fixture, sessionId, operation.operationId(),
+                "session_context_busy");
+        ContextBinding binding = fixture.store.requireSession(TENANT,
+                sessionId).workspace();
+        assertThat(binding.getCwdRelative()).isEqualTo("services/api");
+        assertThat(binding.getContextRevision()).isEqualTo(1);
+        assertThat(fixture.events(sessionId).stream().map(fixture::event)
+                .filter(event -> "session.context.changed"
+                        .equals(event.path("type").asText())).count()).isZero();
+    }
+
+    @Test
+    void confirmedReleaseAndOtherHarnessOwnersPermitTheDirectoryChange() {
+        Fixture fixture = fixture(true);
+        String sessionId = fixture.createBoundSession(TENANT, WS);
+        fixture.insertRuntimeOwner(TENANT, sessionId,
+                RuntimeSessionRecord.State.RELEASED);
+        fixture.insertRuntimeOwner("another-tenant", sessionId,
+                RuntimeSessionRecord.State.READY);
+        fixture.insertRuntimeOwner(TENANT, "another-harness",
+                RuntimeSessionRecord.State.READY);
+        OperationRecord operation = fixture.tx(() -> begin(fixture,
+                sessionId, "key", "digest", "services/b", 1)).operation();
+        OperationRecord claimed = claim(fixture, sessionId,
+                operation.operationId(), "owner");
+        assertThat(settle(fixture, sessionId, operation.operationId(),
+                "owner", claimed.claimGeneration()).completed()).isTrue();
+        ContextBinding binding = fixture.store.requireSession(TENANT,
+                sessionId).workspace();
+        assertThat(binding.getCwdRelative()).isEqualTo("services/b");
+        assertThat(binding.getContextRevision()).isEqualTo(2);
     }
 
     @Test
@@ -232,14 +309,14 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
-        fixture.grant(TENANT, WS, "colleague", true, true);
+        fixture.grant(TENANT, WS, "colleague", "OPERATOR");
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
                 "a", 1, "colleague", "digest-colleague"))
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.FORBIDDEN,
                                 "session_operation_forbidden"));
         fixture.jdbc.update("UPDATE managed_workspace_access SET"
-                        + " can_create = FALSE WHERE tenant_id = ? AND"
+                        + " role = 'READER' WHERE tenant_id = ? AND"
                         + " workspace_id = ?", TENANT, WS);
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
                 "a", 1))
@@ -258,8 +335,8 @@ class ManagedCwdChangeOperationTest {
         OperationAdmission admitted = begin(fixture, sessionId, "key",
                 "digest", "services/b", 1);
         assertThat(admitted.replayed()).isFalse();
-        fixture.jdbc.update("UPDATE managed_workspace_access SET"
-                + " can_read = FALSE WHERE tenant_id = ? AND"
+        fixture.jdbc.update("DELETE FROM managed_workspace_access"
+                + " WHERE tenant_id = ? AND"
                 + " workspace_id = ? AND actor_id = ?", TENANT, WS,
                 ACTOR.getBytes(java.nio.charset.StandardCharsets.UTF_8));
         assertThatThrownBy(() -> begin(fixture, sessionId, "key", "digest",
@@ -497,7 +574,7 @@ class ManagedCwdChangeOperationTest {
         OperationRecord revokedClaim = claim(fixture, revokedId, revokedOp,
                 "owner");
         fixture.jdbc.update("UPDATE managed_workspace_access SET"
-                        + " can_create = FALSE WHERE tenant_id = ? AND"
+                        + " role = 'READER' WHERE tenant_id = ? AND"
                         + " workspace_id = ?", TENANT, WS);
         assertThat(settle(fixture,
                 revokedId, revokedOp, "owner",
@@ -597,7 +674,7 @@ class ManagedCwdChangeOperationTest {
                 .isInstanceOfSatisfying(ApiException.class,
                         error -> assertRefusal(error, HttpStatus.NOT_FOUND,
                                 "session_not_found"));
-        fixture.grant(TENANT, WS, "colleague", true, true);
+        fixture.grant(TENANT, WS, "colleague", "OPERATOR");
         assertThatThrownBy(() -> begin(fixture, archivedId, "key",
                 "digest", "a", 1, "colleague", "digest-colleague"))
                 .isInstanceOfSatisfying(ApiException.class,
@@ -1382,7 +1459,7 @@ class ManagedCwdChangeOperationTest {
                                 + " DUPLICATE KEY UPDATE workspace_id ="
                                 + " workspace_id", tenant, workspaceId,
                                 STORAGE, workspaceId);
-                        grant(tenant, workspaceId, ACTOR, true, true);
+                        grant(tenant, workspaceId, ACTOR, "OPERATOR");
                         return store.insertWorkspaceSessionCommand(tenant,
                                 ACTOR, "create-" + UUID.randomUUID(),
                                 "create-digest", "qwen-code", null, null,
@@ -1393,13 +1470,13 @@ class ManagedCwdChangeOperationTest {
         }
 
         void grant(String tenant, String workspaceId, String actor,
-                boolean read, boolean create) {
+                String role) {
             jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                            + " workspace_id, actor_id, can_read,"
-                            + " can_create) VALUES (?, ?, ?, ?, ?)"
+                            + " workspace_id, actor_id, role)"
+                            + " VALUES (?, ?, ?, ?)"
                             + " ON DUPLICATE KEY UPDATE actor_id = actor_id",
                     tenant, workspaceId, actor.getBytes(java.nio.charset
-                            .StandardCharsets.UTF_8), read, create);
+                            .StandardCharsets.UTF_8), role);
         }
 
         void insertAction(String sessionId, String actionId,
@@ -1419,6 +1496,22 @@ class ManagedCwdChangeOperationTest {
                             + " updated_at) VALUES (?, ?, ?, ?, '[]',"
                             + " 'digest', ?, 0, 0)", TENANT, sessionId,
                     turnId, UUID.randomUUID().toString(), status);
+        }
+
+        void insertRuntimeOwner(String tenant, String sessionId,
+                RuntimeSessionRecord.State state) {
+            RuntimeScope scope = new RuntimeScope(tenant, WS, "1",
+                    "/workspace", "workspace-files", "session");
+            RuntimeSession session = new RuntimeSession(sessionId,
+                    UUID.randomUUID().toString(), "bootstrap", scope);
+            var repository = new JdbcRuntimeSessionRepository(jdbc.getDataSource());
+            RuntimeSessionRecord created = repository.findOrCreate(
+                    new RuntimeSessionRecord(session, "binding", 1,
+                            RuntimeSessionRecord.State.ACQUIRING, 0, clock.instant()));
+            if (state != RuntimeSessionRecord.State.ACQUIRING) {
+                assertThat(repository.compareAndSet(created,
+                        created.withState(state, clock.instant()))).isNotNull();
+            }
         }
 
         List<Map<String, Object>> events(String sessionId) {

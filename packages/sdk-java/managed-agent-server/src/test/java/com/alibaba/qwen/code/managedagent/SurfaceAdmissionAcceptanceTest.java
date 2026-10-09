@@ -169,8 +169,8 @@ class SurfaceAdmissionAcceptanceTest {
                 + " 'ACTIVE')", ARTIFACT_TENANT, ARTIFACT_WORKSPACE);
         for (String actor : List.of(READER, OWNER)) {
             jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                    + " workspace_id, actor_id, can_read, can_create)"
-                    + " VALUES (?, ?, ?, TRUE, FALSE)", ARTIFACT_TENANT,
+                    + " workspace_id, actor_id, role)"
+                    + " VALUES (?, ?, ?, 'READER')", ARTIFACT_TENANT,
                     ARTIFACT_WORKSPACE, actor.getBytes(StandardCharsets.UTF_8));
         }
         var artifacts = fixture.results()
@@ -696,7 +696,8 @@ class SurfaceAdmissionAcceptanceTest {
      */
     private void expectInternal(SurfaceRegistry entry) throws Exception {
         int status = switch (entry.capabilities().iterator().next()) {
-            case STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
+            case STORE_EXECUTION_AUTHORIZE, STORE_LIFECYCLE_AUTHORIZE,
+                    STORE_WRITER_ACQUIRE, STORE_WRITER_RENEW, STORE_WRITER_SEAL,
                     STORE_RECOVERY_BLOCK, STORE_TRANSACTION_COMMIT,
                     STORE_RESTORE, STORE_TOOL_RESULT_PUBLISH,
                     STORE_TRANSACTION_LIST, STORE_RESOURCE_GET, PUB_FINISHED,
@@ -711,6 +712,12 @@ class SurfaceAdmissionAcceptanceTest {
                 .as("%s answered %d for a wrong credential", entry.routeKey(),
                         result.getResponse().getStatus())
                 .isEqualTo(status);
+        if (entry == SurfaceRegistry.INTERNAL_EXECUTION_AUTHORIZE
+                || entry == SurfaceRegistry.INTERNAL_LIFECYCLE_AUTHORIZE) {
+            assertThat(JSON.readTree(result.getResponse().getContentAsString())
+                    .path("error").path("code").asText())
+                    .isEqualTo("writer_credential_invalid");
+        }
     }
 
     /**
@@ -950,7 +957,8 @@ class SurfaceAdmissionAcceptanceTest {
             case STORE_WRITER_RENEW -> "{\"workspaceId\":\"ws\","
                     + "\"writerId\":\"writer-probe\",\"writerGeneration\":1,"
                     + "\"leaseMillis\":60000}";
-            case STORE_WRITER_SEAL -> "{\"workspaceId\":\"ws\","
+            case STORE_EXECUTION_AUTHORIZE, STORE_LIFECYCLE_AUTHORIZE,
+                    STORE_WRITER_SEAL -> "{\"workspaceId\":\"ws\","
                     + "\"writerId\":\"writer-probe\",\"writerGeneration\":1}";
             case STORE_RECOVERY_BLOCK -> "{\"workspaceId\":\"ws\","
                     + "\"writerId\":\"writer-probe\",\"writerGeneration\":1,"
@@ -1024,9 +1032,10 @@ class SurfaceAdmissionAcceptanceTest {
 
     private void grant(String tenant, String actor, boolean canCreate) {
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                + " workspace_id, actor_id, can_read, can_create) VALUES"
-                + " (?, 'ws', ?, TRUE, ?)", tenant,
-                actor.getBytes(StandardCharsets.UTF_8), canCreate);
+                + " workspace_id, actor_id, role) VALUES"
+                + " (?, 'ws', ?, ?)", tenant,
+                actor.getBytes(StandardCharsets.UTF_8),
+                canCreate ? "OPERATOR" : "READER");
     }
 
     private String insertAction(String tenant, String session)

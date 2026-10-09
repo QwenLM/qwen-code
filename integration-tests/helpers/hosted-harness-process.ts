@@ -111,6 +111,7 @@ export class HostedHarnessProcess {
             HOME: this.root,
             USERPROFILE: this.root,
             QWEN_HOME: config,
+            QWEN_CODE_MODELS_DEV_REFRESH: 'off',
             QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(
               this.root,
               'system-settings.json',

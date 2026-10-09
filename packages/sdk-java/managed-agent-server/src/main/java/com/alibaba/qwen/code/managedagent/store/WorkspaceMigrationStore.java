@@ -253,7 +253,7 @@ public final class WorkspaceMigrationStore {
                 guard.promoteMigration(source, target, (String) saved.get("target_registration_id"), id);
                 clearFence();
             }
-            check(jdbc.update("UPDATE managed_workspace_migration SET state = ?, result_json = ?,"
+            check(jdbc.update("UPDATE managed_workspace_migration SET state = ?, result_json = ?, last_error_code = NULL,"
                     + " updated_at = CURRENT_TIMESTAMP(6) WHERE operation_id = ? AND verify_operation_id = ?",
                     promote ? "COMPLETED" : "PREPARED", result.toString(), id, attempt) == 1, "migration_not_writable");
         });
@@ -387,8 +387,8 @@ public final class WorkspaceMigrationStore {
     }
 
     private void lockAuthority() {
-        ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
         WorkspaceMigrationAdmission.lockTenant(jdbc, tenant);
+        ToolPublicationRetentionStore.lockTenant(jdbc, tenant);
     }
 
     private void requireOwner() {
