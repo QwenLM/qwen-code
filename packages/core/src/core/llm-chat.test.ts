@@ -11917,6 +11917,90 @@ describe('LlmChat', async () => {
       ).toBeLessThan(850_000);
     });
 
+    const fixedInputSetters = [
+      [
+        'system instruction',
+        (changed: boolean) =>
+          chat.setSystemInstruction(changed ? 'x'.repeat(20_000) : 'base'),
+      ],
+      [
+        'session-start context',
+        (changed: boolean) =>
+          chat.setSessionStartContext(changed ? 'x'.repeat(20_000) : 'base'),
+      ],
+      [
+        'tool declarations',
+        (changed: boolean) =>
+          chat.setTools([
+            {
+              functionDeclarations: [
+                {
+                  description: changed ? 'x'.repeat(20_000) : 'base',
+                  name: 'inspect',
+                },
+              ],
+            },
+          ]),
+      ],
+    ] as const;
+
+    it.each(fixedInputSetters)(
+      'falls back after changed %s without clearing token counters',
+      async (_name, rebind) => {
+        rebind(false);
+        await reportUsage(NEAR_AUTO);
+        const counters = [
+          chat.getLastPromptTokenCount(),
+          chat.getLastOutputTokenCount(),
+          chat.getLastCachedContentTokenCount(),
+        ];
+        rebind(true);
+        expect([
+          chat.getLastPromptTokenCount(),
+          chat.getLastOutputTokenCount(),
+          chat.getLastCachedContentTokenCount(),
+        ]).toEqual(counters);
+        await sendDrain([result()], 'second');
+        expect(resultChars(1)).toBe(20_000);
+      },
+    );
+
+    it.each(fixedInputSetters)(
+      'retains pressure headroom after equivalent %s',
+      async (_name, rebind) => {
+        rebind(false);
+        chat.setTools([
+          { functionDeclarations: [{ name: 'inspect', description: 'base' }] },
+        ]);
+        await reportUsage(NEAR_AUTO);
+        rebind(false);
+        await sendDrain([result()], 'second');
+        expect(resultChars(1)).toBeLessThan(12_000);
+      },
+    );
+
+    it('does not reanchor an old response after tools change in flight', async () => {
+      const pendingResponse = async function* () {
+        chat.setTools([
+          {
+            functionDeclarations: [
+              { name: 'new_tool', description: 'x'.repeat(20_000) },
+            ],
+          },
+        ]);
+        yield* textStream('ok', {
+          promptTokenCount: NEAR_AUTO,
+          totalTokenCount: NEAR_AUTO + 10,
+        });
+      };
+      mockStreamsOnce(pendingResponse(), textStream('done'));
+      await sendDrain('start', 'first');
+      expect(chat.getLastPromptTokenCount()).toBe(NEAR_AUTO);
+      expect(chat.getLastOutputTokenCount()).toBe(10);
+      await sendDrain([result()], 'second');
+      expect(resultChars(1)).toBe(20_000);
+    });
+
     it('leaves results alone when the session is far from auto-compaction', async () => {
       await reportUsage(500_000);
       await sendDrain([result()], 'second');

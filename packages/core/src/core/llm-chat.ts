@@ -17,6 +17,7 @@ import type {
   Tool,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
+import { isDeepStrictEqual } from 'node:util';
 import { createUserContent, FinishReason } from './genai-compat.js';
 import {
   finalizeToolResponses,
@@ -2220,6 +2221,7 @@ export class LlmChat {
     tokens: number;
     history: Content[];
   };
+  private toolBudgetFixedInputVersion = 0;
 
   /**
    * Per-chat output-token count from the previous model response. The
@@ -2959,6 +2961,10 @@ export class LlmChat {
   }
 
   setSystemInstruction(sysInstr: string) {
+    if (this.generationConfig.systemInstruction !== sysInstr) {
+      this.toolBudgetUsageAnchor = undefined;
+      this.toolBudgetFixedInputVersion++;
+    }
     this.generationConfig.systemInstruction = sysInstr;
   }
 
@@ -2977,7 +2983,7 @@ export class LlmChat {
       baseInstruction = stripTrailingSessionStartContextBlock(baseInstruction);
     }
     const contextBlock = buildSessionStartContextBlock(trimmed);
-    this.generationConfig.systemInstruction = `${baseInstruction}${contextBlock}`;
+    this.setSystemInstruction(`${baseInstruction}${contextBlock}`);
   }
 
   applySessionStartContext(
@@ -3220,8 +3226,7 @@ export class LlmChat {
           // results are still resident has to be told — the same invalidation
           // `tryCompress` does for the same reason. A forked chat shares the
           // parent's cache and skill tracking while holding only a copy of a
-          // history slice, so it must not clear either; every other clear in
-          // this file carries the same guard (see `isForkedChat`).
+          // history slice, so this send-boundary cut must not clear either.
           if (!this.isForkedChat) {
             const cutResults = guarded.flatMap((entry, index) => {
               const before = entries[index].responseParts[0].functionResponse;
@@ -5372,10 +5377,12 @@ export class LlmChat {
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
+    let fixedInputVersion = this.toolBudgetFixedInputVersion;
     const apiCall = () => {
       // A continuation attempt's replay gate is already shut by the
       // accumulated prefix, so the pipeline must release a parked tool-call
       // finish rather than withhold it for a replay that cannot happen.
+      fixedInputVersion = this.toolBudgetFixedInputVersion;
       const request: PromptCacheSharingParameters = {
         model,
         contents: requestContents,
@@ -5460,6 +5467,7 @@ export class LlmChat {
       model,
       rejectDegradedPlaceholderResponse(streamResponse),
       routeKey,
+      fixedInputVersion,
       goalContext,
       transportContinuationPrefix,
       acceptQuietToolResultCompletion,
@@ -6099,6 +6107,10 @@ export class LlmChat {
   }
 
   setTools(tools: Tool[]): void {
+    if (!isDeepStrictEqual(this.generationConfig.tools, tools)) {
+      this.toolBudgetUsageAnchor = undefined;
+      this.toolBudgetFixedInputVersion++;
+    }
     this.generationConfig.tools = tools;
   }
 
@@ -6155,6 +6167,7 @@ export class LlmChat {
     model: string,
     streamResponse: AsyncGenerator<GenerateContentResponse>,
     routeKey: string,
+    fixedInputVersion: number,
     goalContext?: GoalTurnPermit,
     transportContinuationPrefix?: Part[],
     acceptQuietToolResultCompletion = false,
@@ -7027,6 +7040,7 @@ export class LlmChat {
       parts: acceptedTurnParts,
     });
     this.toolBudgetUsageAnchor =
+      fixedInputVersion === this.toolBudgetFixedInputVersion &&
       usageMetadata &&
       typeof usageMetadata.promptTokenCount === 'number' &&
       Number.isFinite(usageMetadata.promptTokenCount) &&
