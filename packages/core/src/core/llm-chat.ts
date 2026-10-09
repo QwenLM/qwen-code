@@ -72,6 +72,7 @@ import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
+import { appendAutoMemoryContext } from '../memory/request-context.js';
 import { completedToolCallBoundary } from './turn-interruption.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { StructuredError } from './turn.js';
@@ -158,6 +159,7 @@ import {
 import { InvalidStreamError } from './invalid-stream-error.js';
 import type { GoalTurnPermit } from '../goals/goal-protocol.js';
 import { markApiHistoryPrompt } from '../services/session-api-history.js';
+import { isAgentEnvelopeContent } from '../agents/session-agents/envelope.js';
 
 export { InvalidStreamError };
 
@@ -2883,7 +2885,10 @@ export class LlmChat {
         requestHistory.push({ role: 'user', parts: reattachParts });
       }
     }
-    return requestHistory;
+    return appendAutoMemoryContext(
+      requestHistory,
+      this.config.getAutoMemoryContext?.() ?? '',
+    );
   }
 
   private getRequestHistoryForRoute(
@@ -6105,6 +6110,16 @@ export class LlmChat {
       // text, which then leaks into the next turn via appendCuratedContent.
       const lastEntry = this.history[this.history.length - 1];
       if (lastEntry && isSystemReminderContent(lastEntry)) {
+        break;
+      }
+      // Same rule for a user entry that is only session multi-agent context
+      // (an `agent_message` / `agent_mention` envelope, rebuilt on resume from
+      // its own record): it is durable conversation, not an orphaned prompt.
+      // Every part must match, so a failed prompt that carried a spliced
+      // envelope ahead of the user's text still pops as a whole.
+      // TODO(multi-agent): that whole-entry pop drops the spliced envelope
+      // from live history for the rest of the process (resume restores it).
+      if (lastEntry && isAgentEnvelopeContent(lastEntry)) {
         break;
       }
       strippedEntries.unshift(this.history.pop()!);

@@ -429,6 +429,14 @@ export function selectCandidates(
       const agent = agents.find((candidate) => candidate.id === run.agentId);
       // A retired or disabled agent keeps its history and its name but takes
       // no new work; the roster entry survives so its old posts still read.
+      // TODO(multi-agent): thread runs for remote agents (only reachable via
+      // A2A) cannot run until the follow-up PR moves A2A to sessions; Host v1
+      // was replaced by v2, so no pickup route leases them to a Host. New ones
+      // are refused at intake (`a2aSendMessage` answers `unsupported`, see
+      // A2A_REMOTE_AGENT_UNSUPPORTED). One queued before that refusal stays
+      // queued here and is not failed: settleOrphanedHostRuns rebooks
+      // follow-ups for remote agents as queued runs, and the caller can still
+      // read and cancel the task.
       if (!agent || !isAgentAddressable(agent) || !isAgentLocal(agent)) {
         continue;
       }

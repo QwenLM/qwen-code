@@ -12,6 +12,16 @@ public interface HarnessConnector extends AutoCloseable {
         return false;
     }
 
+    default boolean supportsLifecycle() { return false; }
+
+    default JsonNode settleLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+        throw new UnsupportedOperationException("Hosted lifecycle is unavailable");
+    }
+
+    default void detachLifecycle(com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord operation) {
+        throw new UnsupportedOperationException("Hosted lifecycle is unavailable");
+    }
+
     Attachment createOrLoad(String tenantId, String sessionId,
             boolean loadExisting);
 
@@ -72,6 +82,17 @@ public interface HarnessConnector extends AutoCloseable {
     }
 
     void cancel(String tenantId, String sessionId);
+
+    /**
+     * H4b: one child operation onto the Session's journal, from the
+     * control plane's relay (dispatch/attach/result/accept/cancel/
+     * close-scope). The Hosted side settles it before answering.
+     */
+    default void runChildOperation(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        throw new UnsupportedOperationException(
+                "Child operations are unavailable");
+    }
 
     void rename(String tenantId, String sessionId, String title);
 

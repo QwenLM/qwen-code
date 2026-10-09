@@ -39,6 +39,7 @@ import {
   MANAGED_SESSION_LIMITS,
   MANAGED_SESSION_MINIMUM_READER,
   ManagedSessionRecordError,
+  assertManagedSessionChildRunKindEnabled,
   assertManagedSessionDigest,
   assertManagedSessionDomainEnabled,
   assertManagedSessionEventActor,
@@ -72,10 +73,15 @@ import {
 } from './managed-hook-record.js';
 import { parseChildRun } from './managed-child-run-record.js';
 import {
+  parseChannelDelivery,
+  parseChannelRoute,
+} from './managed-channel-record.js';
+import {
   parseChildAcceptance,
   type ChildAcceptance,
 } from './managed-child-acceptance-record.js';
 import {
+  ManagedSessionCommitRejectedError,
   managedSessionActivationStateFrom,
   managedSessionCommandKey,
   type ManagedSessionActivationState,
@@ -1451,8 +1457,18 @@ export class LocalManagedSessionAuthority {
           }
         });
       }
-      this.assertDomainAdmittable(request.domain);
+      if (request.domain !== 'child_run') {
+        this.assertDomainAdmittable(request.domain);
+      }
       const parsed = body.parse(request.record);
+      if (request.domain === 'child_run') {
+        // The one domain carries two capabilities with independent gates
+        // (H3's shell, H4's child agent), so its admission is per kind,
+        // decided from the parsed body.
+        assertManagedSessionChildRunKindEnabled(
+          parseChildRun(parsed.record).kind,
+        );
+      }
       await this.verifyExtensionResources(request.domain, parsed.record);
       this.assertExtensionRevision(
         request.domain,
@@ -1856,6 +1872,38 @@ export class LocalManagedSessionAuthority {
         );
       }
     }
+    if (domain === 'child_run') {
+      // The reverse check of the acceptance's cross-record one (H4b
+      // decision 7): the acceptance record is authoritative, so the run's
+      // delivery may reach accepted/consumed only after the acceptance
+      // chain exists, and may never retract to unknown/rejected once it
+      // does. Before any acceptance, accepting → unknown stays legal as
+      // the relay's retry vocabulary.
+      const child = parseChildRun(parsed.record);
+      if (child.kind === 'child_agent') {
+        const delivery = child.run.delivery!.state;
+        const acceptance = this.extensionRecord(
+          'child_acceptance',
+          child.childRunId,
+        );
+        if (
+          (delivery === 'accepted' || delivery === 'consumed') &&
+          acceptance === undefined
+        ) {
+          reject(
+            'Child run delivery reaches accepted or consumed only with its acceptance record.',
+          );
+        }
+        if (
+          (delivery === 'unknown' || delivery === 'rejected') &&
+          acceptance !== undefined
+        ) {
+          reject(
+            'Child run delivery cannot go unknown or rejected after its acceptance record.',
+          );
+        }
+      }
+    }
     if (previous === undefined) {
       if (!body.isStart(parsed.record)) {
         reject(
@@ -2093,6 +2141,17 @@ export class LocalManagedSessionAuthority {
         monitor.outputRef,
         monitor.lastObservationRef,
       ];
+    } else if (domain === 'channel_route') {
+      refs = [parseChannelRoute(record).policyRef];
+    } else if (domain === 'channel_delivery') {
+      const delivery = parseChannelDelivery(record);
+      refs = [
+        delivery.contentRef,
+        ...delivery.segments.flatMap((segment) => [
+          segment.contentRef,
+          segment.receipt?.proofRef ?? null,
+        ]),
+      ];
     }
     // Every read settles before a failure is reported, so none outlives
     // the commit or the open it belongs to.
@@ -2245,11 +2304,15 @@ export class LocalManagedSessionAuthority {
         );
       }
       // Only an enabled domain commits records, whatever the path: the
-      // generic appends would otherwise take any name in the index.
+      // generic appends would otherwise take any name in the index. The
+      // child_run gate is per capability kind; this commit already passed
+      // it in commitExtensionRecord, which is the only path a child_run
+      // event may take (the check right above).
       if (event.kind === 'domain.committed') {
-        this.assertDomainAdmittable(
-          event.payload['domain'] as ManagedSessionDomain,
-        );
+        const domain = event.payload['domain'] as ManagedSessionDomain;
+        if (domain !== 'child_run') {
+          this.assertDomainAdmittable(domain);
+        }
       }
       if (
         event.eventId !== extension?.eventId &&
@@ -2342,6 +2405,7 @@ export class LocalManagedSessionAuthority {
       await this.journal.appendTransaction(records);
       this.lastRecordUuid = final.uuid;
     } catch (cause) {
+      if (cause instanceof ManagedSessionCommitRejectedError) throw cause;
       // Records may already be on disk, so the sequences this transaction
       // claimed are spent whether or not the marker landed.
       this.writeFailure =

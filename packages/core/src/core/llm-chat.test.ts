@@ -63,6 +63,7 @@ import {
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
 import { SYSTEM_REMINDER_OPEN } from './environmentContext.js';
+import { formatAgentMessageModelText } from '../agents/session-agents/envelope.js';
 import { SessionStartSource } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import {
@@ -2400,6 +2401,36 @@ describe('LlmChat', async () => {
       );
       expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledTimes(
         1,
+      );
+    });
+
+    it('sends the latest memory catalog without persisting it to history', async () => {
+      // The catalog part carries the volatile-boundary marker so the provider
+      // cache passes anchor their per-turn breakpoint before it.
+      const catalogPart = (text: string) => ({
+        text,
+        partMetadata: { 'qwen-code:reattach-boundary': true },
+      });
+      let catalog = 'first catalog';
+      mockConfig.getAutoMemoryContext = () => catalog;
+      mockStream(textStream('response'));
+      await sendDrain('first question', 'memory-tail-1');
+      expect(
+        (requestAt(0).contents as Content[]).at(-1)?.parts?.at(-1),
+      ).toEqual(catalogPart('first catalog'));
+      expect(JSON.stringify(chat.getHistory())).not.toContain('first catalog');
+      const firstHistory = chat.getHistory();
+      catalog = 'updated catalog';
+      mockStream(textStream('done'));
+      await sendDrain('second question', 'memory-tail-2');
+      const second = requestAt(1).contents as Content[];
+      expect(second.slice(0, firstHistory.length)).toEqual(firstHistory);
+      expect(second.at(-1)?.parts?.at(-1)).toEqual(
+        catalogPart('updated catalog'),
+      );
+      expect(JSON.stringify(second)).not.toContain('first catalog');
+      expect(JSON.stringify(chat.getHistory())).not.toContain(
+        'updated catalog',
       );
     });
 
@@ -10618,6 +10649,14 @@ describe('LlmChat', async () => {
 
     const reminder = (body: string) =>
       userText(`${SYSTEM_REMINDER_OPEN}\n${body}\n</system-reminder>`);
+    const AGENT_PAYLOAD = {
+      displayText: 'done',
+      author: { agentId: 'agent-1', name: 'claude-B' },
+      runId: 'run-1',
+      status: 'completed' as const,
+    };
+    const agentEnvelope = () =>
+      userText(formatAgentMessageModelText(AGENT_PAYLOAD));
 
     it.each<[string, Content[], Content[]]>([
       [
@@ -10646,6 +10685,25 @@ describe('LlmChat', async () => {
             {
               text: `${SYSTEM_REMINDER_OPEN}\nPlan mode is active.\n</system-reminder>`,
             },
+            { text: 'the actual user prompt' },
+          ),
+        ],
+        earlier(),
+      ],
+      // A resumed agent_message record is its own user entry; a later
+      // failed prompt must not take it along.
+      [
+        'preserves a trailing session agent envelope entry',
+        [...earlier(), agentEnvelope(), userText('failed prompt')],
+        [...earlier(), agentEnvelope()],
+      ],
+      [
+        'pops a failed prompt that carried a spliced agent envelope',
+        [
+          ...earlier(),
+          content(
+            'user',
+            { text: formatAgentMessageModelText(AGENT_PAYLOAD) },
             { text: 'the actual user prompt' },
           ),
         ],
