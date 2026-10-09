@@ -66,7 +66,11 @@ public final class CsiNativeActivationProof {
     public record Checkpoint(JsonNode ref, JsonNode state) {
     }
 
-    public record Attempt(String attemptId, JsonNode routeRef, JsonNode checkpointRef, JsonNode route, String stage) {
+    public record Attempt(String attemptId, JsonNode routeRef, JsonNode checkpointRef, JsonNode route, String stage,
+            JsonNode finalMessageRef) {
+        public Attempt(String attemptId, JsonNode routeRef, JsonNode checkpointRef, JsonNode route, String stage) {
+            this(attemptId, routeRef, checkpointRef, route, stage, null);
+        }
     }
 
     public record Stream(String messageId, long firstSequence, String text) {
@@ -472,7 +476,7 @@ public final class CsiNativeActivationProof {
                 }
             }
             if (consume) {
-                require(changed && !previous.assistantCommitted()
+                require(changed && (!previous.assistantCommitted() || previous.attempt().finalMessageRef() != null)
                         && canonical(previous.attempt().checkpointRef()).equals(canonical(previous.checkpoint().ref())));
                 ((ObjectNode) expected.path("identity")).put("activationId", activation.activationId());
                 command = "harness:results_consumed:" + activation.activationId() + ":" + previousSequence;
@@ -1004,14 +1008,19 @@ public final class CsiNativeActivationProof {
         JsonNode event = transaction.events().getFirst();
         JsonNode payload = harnessEvent(event, "message.committed", original, activation, previousSequence + 1);
         closed(payload, Set.of("messageId", "role", "contentRef", "parentMessageId"));
+        require(("recorder:" + id(payload, "messageId")).equals(id(metadata, "commandId")));
+        return messageRecord(event, payload, original, previous, resources, false);
+    }
+
+    private static Prefix messageRecord(JsonNode event, JsonNode payload, RuntimeProvisionRequest original,
+            Prefix previous, Function<JsonNode, byte[]> resources, boolean finalOutput) {
         String messageId = id(payload, "messageId");
         uuid(messageId);
-        require(("message:" + messageId).equals(id(event, "eventId"))
-                && ("recorder:" + messageId).equals(id(metadata, "commandId")));
+        require(("message:" + messageId).equals(id(event, "eventId")));
         JsonNode record = messageBody(payload.path("contentRef"), resources);
         String role = text(payload, "role");
         boolean user = "user".equals(role);
-        require(user || "assistant".equals(role));
+        require((user || "assistant".equals(role)) && (!finalOutput || !user));
         Set<String> fields = new HashSet<>(Set.of("uuid", "parentUuid", "sessionId", "timestamp", "type", "cwd",
                 "version", "daemonPromptId", "message"));
         if (!user) {
@@ -1041,7 +1050,9 @@ public final class CsiNativeActivationProof {
             Set<String> functions = new HashSet<>();
             for (int index = 0; index < body.path("parts").size(); index++) {
                 JsonNode part = body.path("parts").get(index);
-                if (part.has("functionCall")) {
+                if (finalOutput) {
+                    finalPart(part);
+                } else if (part.has("functionCall")) {
                     closed(part, Set.of("functionCall"));
                     JsonNode call = part.path("functionCall");
                     closed(call, Set.of("id", "name", "args"));
@@ -1076,9 +1087,44 @@ public final class CsiNativeActivationProof {
             batches = new HashMap<>(batches);
             require(batches.put(messageId, new OriginalBatch(input.inputId(), batch)) == null);
         }
-        return new Prefix(input, previous.checkpoint(), messageId, previous.attempt(), !user && calls.isEmpty(),
+        Attempt attempt = previous.attempt();
+        if (finalOutput) {
+            attempt = new Attempt(attempt.attemptId(), attempt.routeRef(), attempt.checkpointRef(), attempt.route(),
+                    attempt.stage(), payload.path("contentRef").deepCopy());
+        }
+        return new Prefix(input, previous.checkpoint(), messageId, attempt, !user && calls.isEmpty(),
                 null, !user && previous.stream() != null ? previous.usedIds() : useId(previous, messageId),
                 batch, batches, previous.fileHistory(), previous.intents(), previous.receipts(), previous.nextDeltaOrdinal());
+    }
+
+    private static void finalPart(JsonNode part) {
+        boolean textPart = part.has("text");
+        Set<String> fields = new HashSet<>(Set.of(textPart ? "text" : "inlineData"));
+        if (part.has("thought")) {
+            fields.add("thought");
+            require(part.path("thought").isBoolean());
+        }
+        if (part.has("thoughtSignature")) {
+            fields.add("thoughtSignature");
+            require(part.path("thoughtSignature").isTextual());
+        }
+        closed(part, fields);
+        if (textPart) {
+            require(part.path("text").isTextual());
+        } else {
+            JsonNode data = part.path("inlineData");
+            closed(data, Set.of("mimeType", "data"));
+            require(text(data, "mimeType").matches("[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+"));
+            JsonNode encodedValue = data.path("data");
+            require(encodedValue.isTextual() && !encodedValue.textValue().isEmpty());
+            String encoded = encodedValue.textValue();
+            try {
+                require(java.util.Base64.getEncoder().encodeToString(java.util.Base64.getDecoder().decode(encoded))
+                        .equals(encoded));
+            } catch (IllegalArgumentException error) {
+                throw invalid();
+            }
+        }
     }
 
     private static JsonNode messageBody(JsonNode ref, Function<JsonNode, byte[]> resources) {
@@ -1129,7 +1175,9 @@ public final class CsiNativeActivationProof {
             Activation activation, long previousSequence, Prefix previous, Function<JsonNode, byte[]> resources) {
         conversation(previous);
         require(previous.input().userMessageId() != null && !previous.assistantCommitted() && previous.pendingBatch() == null
-                && transaction.events().size() == 1 && metadata.path("latestCheckpointResourceId").isNull());
+                && (transaction.events().size() == 1 || transaction.events().size() == 2)
+                && metadata.path("latestCheckpointResourceId").isNull());
+        boolean finalOutput = transaction.events().size() == 2;
         JsonNode event = transaction.events().getFirst();
         JsonNode payload = harnessEvent(event, "model.attempt", original, activation, previousSequence + 1);
         closed(payload, Set.of("attemptId", "routeRef", "inputCheckpointRef", "state", "usageRef"));
@@ -1144,7 +1192,7 @@ public final class CsiNativeActivationProof {
         JsonNode route = readObject(reference(routeRef, "managed-hosted-model-route", resources));
         closed(route, Set.of("version", "turnId", "model", "budget"));
         require(number(route.get("version")) == 1 && previous.input().inputId().equals(id(route, "turnId"))
-                && text(routeRef, "digest").equals(text(metadata, "contentDigest")));
+                && (finalOutput || text(routeRef, "digest").equals(text(metadata, "contentDigest"))));
         text(route, "model");
         JsonNode budget = route.path("budget");
         closed(budget, Set.of("sessionId", "promptId", "budget", "outputTokensAtTurnStart"));
@@ -1155,6 +1203,21 @@ public final class CsiNativeActivationProof {
         require(canonical(checkpointRef).equals(canonical(previous.checkpoint().ref())));
         require(canonical(readObject(reference(checkpointRef, "managed-checkpoint", resources)))
                 .equals(canonical(previous.checkpoint().state())));
+        if (finalOutput) {
+            require("output_committed".equals(stage)
+                    && "results_ready".equals(previous.checkpoint().state().path("continuation").path("phase").textValue())
+                    && previous.checkpoint().state().path("tools").path("items").isArray()
+                    && !previous.checkpoint().state().path("tools").path("items").isEmpty());
+            boolean pending = false;
+            for (JsonNode item : previous.checkpoint().state().path("tools").path("items")) {
+                var receipt = previous.receipts().get(id(item, "executionCallId"));
+                require("settled".equals(text(item, "state")) && item.path("consumed").isBoolean()
+                        && receipt != null && receipt.messageSequence() > 0
+                        && canonical(item.path("outcomeRef")).equals(canonical(receipt.ref())));
+                pending |= !item.path("consumed").booleanValue();
+            }
+            require(pending);
+        }
         Set<String> ids = previous.usedIds();
         if ("started".equals(stage)) {
             require(previous.attempt() == null && payload.path("usageRef").isNull()
@@ -1171,9 +1234,48 @@ public final class CsiNativeActivationProof {
                     && ("output_committed".equals(stage) || "abandoned".equals(stage)));
             usage(readObject(reference(payload.path("usageRef"), "managed-hosted-model-usage", resources)), route, stage);
         }
-        return new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(),
+        Prefix completed = new Prefix(previous.input(), previous.checkpoint(), previous.lastMessageId(),
                 new Attempt(attemptId, routeRef.deepCopy(), checkpointRef.deepCopy(), route.deepCopy(), stage), false,
                 previous.stream(), ids, null, previous.batches(), previous.fileHistory(), previous.intents(), previous.receipts(), previous.nextDeltaOrdinal());
+        if (!finalOutput) {
+            return completed;
+        }
+        JsonNode message = transaction.events().get(1);
+        JsonNode messagePayload = harnessEvent(message, "message.committed", original, activation, previousSequence + 2);
+        closed(messagePayload, Set.of("messageId", "role", "contentRef", "parentMessageId", "modelAttemptId"));
+        require(attemptId.equals(id(messagePayload, "modelAttemptId")));
+        var digestInput = JSON.createArrayNode().add("managed-final-output/1").add(attemptId);
+        for (JsonNode ref : List.of(routeRef, checkpointRef, payload.path("usageRef"), messagePayload.path("contentRef"))) {
+            digestInput.add(JSON.createArrayNode().add(ref.path("resourceId")).add(ref.path("kind"))
+                    .add(ref.path("schemaVersion")).add(ref.path("byteLength")).add(ref.path("digest")));
+        }
+        require(sha256(utf8(digestInput.toString())).equals(text(metadata, "contentDigest")));
+        return messageRecord(message, messagePayload, original, completed, resources, true);
+    }
+
+    static Set<String> completeOutputTail(Prefix prefix, long sequence) {
+        require(prefix.input() != null && prefix.input().noDeadline() && prefix.pendingBatch() == null
+                && prefix.batches().size() == 1 && prefix.checkpoint() != null && prefix.attempt() != null
+                && "output_committed".equals(prefix.attempt().stage()) && prefix.attempt().finalMessageRef() != null
+                && prefix.assistantCommitted() && prefix.stream() == null && prefix.fileHistory() != null
+                && prefix.fileHistory().body().path("preparation").isNull()
+                && "results_ready".equals(prefix.checkpoint().state().path("continuation").path("phase").textValue())
+                && canonical(prefix.attempt().checkpointRef()).equals(canonical(prefix.checkpoint().ref())));
+        Set<String> executions = new HashSet<>();
+        JsonNode items = prefix.checkpoint().state().path("tools").path("items");
+        require(items.isArray() && !items.isEmpty());
+        String batchId = prefix.batches().keySet().iterator().next();
+        for (JsonNode item : items) {
+            String execution = id(item, "executionCallId");
+            ToolReceipt receipt = prefix.receipts().get(execution);
+            require(executions.add(execution) && "settled".equals(text(item, "state"))
+                    && item.path("consumed").isBoolean() && !item.path("consumed").booleanValue()
+                    && batchId.equals(id(item, "modelMessageId")) && receipt != null
+                    && receipt.messageSequence() > 0 && receipt.messageSequence() <= sequence
+                    && canonical(item.path("outcomeRef")).equals(canonical(receipt.ref())));
+        }
+        require(executions.equals(prefix.intents().keySet()) && executions.equals(prefix.receipts().keySet()));
+        return Set.copyOf(executions);
     }
 
     private static void usage(JsonNode usage, JsonNode route, String stage) {

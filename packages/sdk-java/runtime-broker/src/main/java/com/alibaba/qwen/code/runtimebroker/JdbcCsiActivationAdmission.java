@@ -350,9 +350,13 @@ public final class JdbcCsiActivationAdmission {
         original.requireAdmission();
         var prefix = history.prefix();
         require(history.activation() != null);
-        requireRecoveryTail(connection, original,
-                new NativeHead(history.revision(), history.sequence(), history.digest(), prefix,
-                        0, history.activation().expiresAt(), history.activation()));
+        var head = new NativeHead(history.revision(), history.sequence(), history.digest(), prefix,
+                0, history.activation().expiresAt(), history.activation());
+        if (prefix.attempt() != null && prefix.attempt().finalMessageRef() != null) {
+            JdbcCsiExecutionAdmission.verifyColdFinalOutput(connection, original, head);
+        } else {
+            requireRecoveryTail(connection, original, head);
+        }
     }
 
     static void requireRecoveryTail(Connection connection, JdbcCsiFilesRetirementGuard.Original original,

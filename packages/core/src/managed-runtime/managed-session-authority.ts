@@ -819,6 +819,21 @@ export class LocalManagedSessionAuthority {
     );
   }
 
+  appendExecutionEvents(
+    command: ManagedSessionCommand,
+    events: (firstSequence: number) => readonly unknown[],
+    actor: ManagedSessionActor,
+  ): Promise<ManagedSessionCommitReceipt> {
+    return this.runSerial(() => {
+      const values = events(this.committed + 1);
+      return this.commit(
+        command,
+        values,
+        values.map(() => actor),
+      );
+    });
+  }
+
   /** The latest committed action for this request, if any. */
   action(requestId: string): ManagedSessionAction | undefined {
     return this.actions.get(requestId);

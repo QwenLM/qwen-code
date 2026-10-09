@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
@@ -12,7 +13,10 @@ import {
   createManagedHarnessHandle,
   type ManagedHarnessHandle,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-factory.js';
-import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
+import {
+  ManagedHookActivationController,
+  type ManagedMainModelAttempt,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import { HTTP_MANAGED_SESSION_STORE_CONTRACT } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
@@ -77,6 +81,12 @@ interface HostedTurnOptions {
     workspaceContext: HostedWorkspaceContextSlot,
   ) => HostedToolTurn;
   resumeFromToolResults?: Part[];
+  completeFinalOutput?: (
+    attempt: ManagedMainModelAttempt,
+    usage: unknown[],
+    record: ChatRecord,
+  ) => Promise<void>;
+  recoveredFinalOutput?: ChatRecord;
   onTurnResult?: (result: ChatRecord) => void;
   onResumeReady?: () => void;
   onCompleted?: () => Promise<void>;
@@ -134,6 +144,8 @@ export async function runHostedHarnessTurn({
   historyMode,
   createToolTurn,
   resumeFromToolResults,
+  completeFinalOutput,
+  recoveredFinalOutput,
   onTurnResult,
   onResumeReady,
   onCompleted,
@@ -240,26 +252,58 @@ export async function runHostedHarnessTurn({
         }
         let state: 'completed' | 'cancelled' | 'error' = 'completed';
         let stopReason = 'end_turn';
+        let finalOutputCommitted = false;
         try {
-          const result = await runHostedHarnessTextTurn({
-            sessionId,
-            cwd,
-            history,
-            prompt: text,
-            promptId,
-            signal: abort.signal,
-            modelScope,
-            workspaceContext,
-            ...(session.hooks ? { hooks: session.hooks } : {}),
-            ...(toolTurn ? { toolTurn } : {}),
-            ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
-            ...(deltas ? { textDeltas: deltas } : {}),
-          });
-          await commit(
-            'assistant',
-            result.parts ?? [{ text: result.text }],
-            result.model,
-          );
+          if (recoveredFinalOutput) {
+            if (
+              !resumeFromToolResults ||
+              !toolTurn ||
+              session.hooks ||
+              !isDeepStrictEqual(projected.at(-1), recoveredFinalOutput)
+            )
+              throw new HostedToolRecoveryRequiredError(
+                'Final output recovery is unavailable.',
+              );
+            await toolTurn.consumeResults();
+          } else {
+            const result = await runHostedHarnessTextTurn({
+              sessionId,
+              cwd,
+              history,
+              prompt: text,
+              promptId,
+              signal: abort.signal,
+              modelScope,
+              workspaceContext,
+              ...(session.hooks ? { hooks: session.hooks } : {}),
+              ...(toolTurn ? { toolTurn } : {}),
+              ...(resumeFromToolResults ? { resumeFromToolResults } : {}),
+              ...(deltas ? { textDeltas: deltas } : {}),
+              ...(completeFinalOutput
+                ? {
+                    completeFinalOutput: async (
+                      attempt: ManagedMainModelAttempt,
+                      usage: unknown[],
+                      parts: Part[],
+                      model: string,
+                    ) => {
+                      const record = messageRecord('assistant', parts, model);
+                      const streamed = deltas?.takeMessageId();
+                      if (streamed !== undefined) record.uuid = streamed;
+                      await completeFinalOutput(attempt, usage, record);
+                      parentUuid = record.uuid;
+                      finalOutputCommitted = true;
+                    },
+                  }
+                : {}),
+            });
+            if (!finalOutputCommitted)
+              await commit(
+                'assistant',
+                result.parts ?? [{ text: result.text }],
+                result.model,
+              );
+          }
         } catch (cause) {
           if (
             cause instanceof HostedToolRecoveryRequiredError ||

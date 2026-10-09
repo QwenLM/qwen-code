@@ -669,17 +669,17 @@ receipt 尚不存在时，原随机 message ID 或 timestamp 也尚未耐久建�
 
 #### 6.8.5 结果消费前的完整模型输出
 
-状态：提议，正向 C8 实现与验收尚待完成。第 7.12 节记录当前仅有标记形态的实际拒绝基线。当前 `model.attempt(output_committed)` 保存 attempt 标记、route/checkpoint ref 与 usage，完整 assistant Parts 却在消费结果后才取得。可见 delta 不能证明完整输出，也不能证明没有新 tool call。对这种仅有标记的旧形状继续拒绝 C8，不能追认为完整输出已耐久保存。
+状态：候选实现已接通原子完整输出和冷恢复；新鲜正向进程断点验收尚待完成。第 7.12 节保留原提交仅有标记形态的实际拒绝基线。旧 `model.attempt(output_committed)` 保存 attempt 标记、route/checkpoint ref 与 usage，完整 assistant Parts 却在消费结果后才取得。可见 delta 不能证明完整输出，也不能证明没有新 tool call。对这种仅有标记的旧形状继续拒绝 C8，不能追认为完整输出已耐久保存。
 
 针对无 tool call 的私有 CSI final output，将现有 `model.attempt(output_committed)`、`message.committed` 连同原完整 ChatRecord 与 usage resources 放在同一 native journal 事务提交。保留实际 stream message ID 或首个耐久建立的 ID、timestamp、model、parent 和全部 Parts，包括 thought。消息绑定原 model attempt 与 input checkpoint。两个 event sequence 必须在 authority 的串行 commit 内分配；caller 预先计算会与 activation renewal 竞争。复用现有 message/resource 格式，不另加 output ledger 或 event。Hook、普通 Hosted 和新 tool call 路径保持既有行为。
 
 native qualification 必须明确识别这一种双 event final-output 事务，并独立核验两个既有 body、attempt/route/checkpoint、原 scoped resources、完整 assistant Parts 与零 function call。只有该合格 final output 才允许 assistant 已提交时消费结果。原 results-ready 成员、receipt/outcome、SQL result/grant 与已闭合 schema2 history 保持精确；采用 successor activation 仅改变 checkpoint 许可的 activation 身份。
 
-提议的 completion 接口为 `ManagedMainModelAttempt` 增加可选 final `ChatRecord`。共享 turn wrapper 暴露内部 `completeFinalOutput(attempt, usage, record)` 回调；只有私有 CSI caller 填充，并将成功状态、原 usage 与完整 record 传给原 attempt。wrapper 用原 parent 和 stream 身份构建一次 record。模型层仅在无 Hook、处理原 pending tool results、已取得完整且零 function call 的 Parts 时调用它。在原子调用前标记此 completion 路径已处理：响应丢失必须抛 recovery-required，不能再补 legacy marker 或 abandoned event。成功后推进 wrapper parent，跳过稍后的重复 assistant commit。普通 Hosted、Hook、child-completion callback 与新 tool call 路径保持既有行为。
+completion 接口为 `ManagedMainModelAttempt` 增加可选 final `ChatRecord`。共享 turn wrapper 暴露内部 `completeFinalOutput(attempt, usage, record)` 回调；只有私有 CSI caller 填充，并将成功状态、原 usage 与完整 record 传给原 attempt。wrapper 用原 parent 和 stream 身份构建一次 record。模型层仅在无 Hook、处理原 pending tool results、已取得完整且零 function call 的 Parts 时调用它。在原子调用前标记此 completion 路径已处理：响应丢失必须抛 recovery-required，不能再补 legacy marker 或 abandoned event。成功后推进 wrapper parent，跳过稍后的重复 assistant commit。普通 Hosted、Hook、child-completion callback 与新 tool call 路径保持既有行为。
 
 保留 operation `hostedModelAttempt` 与原 attempt 的 `output_committed` command ID。final-output content digest 绑定带版本的固定数组，其中包含原 attempt ID 与 route/checkpoint/usage/message reference tuple；tuple 含 resource ID、kind、schema version、byte length、digest。必须同时绑定输出和 usage，防止 local replay 吞掉变化内容。复用原 message-body chunking；完整 message、usage、manifest 与 chunks 必须共同满足现有 transaction budget。native parser 直接识别精确双 event 事务，复用纯 route/usage 校验，不伪造 single-event metadata。final message payload 携带现有可选 `modelAttemptId`；仅此 parser 为后续消费或冷准入派生 final message 身份/reference。
 
-final-output grammar 保留 closed text 与 inline-data Parts，可带 boolean `thought` 和 string `thoughtSignature`；校验 inline-data MIME type 和 canonical Base64，拒绝 function call 与不支持的形状。所有已接受字段均须保留，不能静默删去 thought、signature 或 media。这些提议的 final-output 规则不扩宽现有普通 tool-call message grammar。
+final-output grammar 保留 closed text 与 inline-data Parts，可带 boolean `thought` 和 string `thoughtSignature`；校验 inline-data MIME type 和 canonical Base64，拒绝 function call 与不支持的形状。media payload 大小遵循既有完整 message 与 transaction 预算，不套用 identifier string 的长度限制。所有已接受字段均须保留，不能静默删去 thought、signature 或 media。这些 final-output 规则不扩宽现有普通 tool-call message grammar。
 
 独立 C8 cold-tail 分类要求该原完整 final output、原成功 model2 attempt/input checkpoint、完整 SETTLED 且未 consumed 成员、原闭合 history，以及现有 scoped expiry/claim/install 证明。checkpoint items、原 SQL execution、intent 和带原结果消息/outcome reference 的完整 receipt，成员集合必须精确一致。C4 readback 的原 receipt-absent 分类继续分离，不能接受 C8 tail。私有 C8 分支校验完整已有 receipt/message 链，不 repair 写入、不新增 read-batch，再通过共享 ownership wrapper 直接消费并结算原 turn。提交既有 turn-result/idle 链；私有 text 响应仍为现有 turn-result record，原 assistant 保留在 journal/history/feed。它绕过 model runner，不新增第三次模型请求、attempt、assistant 身份、execution 或文件效果。TS event 相邻不是同一 SQL 事务的独立证明；该证明来自 native journal qualification 与成功 claim/install。此增量仍拒绝已经 consumed 或 turn-settled 的后续窗口。
 
@@ -920,7 +920,7 @@ Root 独立核对342项封存 artifact、当前 source/product/dependency/class 
 
 另一轮全新专属 MySQL 在同一干净 `af5a0e544d4690b7073fc40a6d77d7b1a8734095` 上，于真实 model2 单个 `output_committed` 标记事务返回200后、结果消费前切断。原工具成员为 results-ready，三条结果已 settled、尚未 consumed，完整最后 assistant Parts 尚未耐久提交。仅终止登记原 Main/Hosted、等待自然过期后，真实 native acquire 返回409 `csi_original_activation_unavailable`，与 Hosted wrapper503 区分。该准确拒绝事务前后全部57表精确相同。没有 model3、新 final assistant、结果消费、settlement 或重复工具效果。
 
-编译、producer、完整 auditor 均 exit0：一个实际拒绝组、28项 producer 检查、33项 auditor 谓词。Root 核对256项封存 artifact、原 SQL/journal 保留、当前及删除 input bridge、38次 PID/group 缺席探测、11关闭端口和专属 MySQL/临时目录清理后解除窗口。Producer 启动时合格原身份的只读 attestation 三请求与拒绝事务的全表不变分别核验。报告组装对 row/key 的错误假设保留，只读修正后未重跑 producer。只验证旧形态的拒绝边界；第6.8.5节完整输出原子提交、零 model3 恢复设计尚未实现或验收，不赋予完整 K2 或物理/Linux/云门禁资格。
+编译、producer、完整 auditor 均 exit0：一个实际拒绝组、28项 producer 检查、33项 auditor 谓词。Root 核对256项封存 artifact、原 SQL/journal 保留、当前及删除 input bridge、38次 PID/group 缺席探测、11关闭端口和专属 MySQL/临时目录清理后解除窗口。Producer 启动时合格原身份的只读 attestation 三请求与拒绝事务的全表不变分别核验。报告组装对 row/key 的错误假设保留，只读修正后未重跑 producer。只验证旧形态的拒绝边界；第6.8.5节候选已实现完整输出原子提交、零 model3 恢复，但新鲜正向进程断点验收仍待完成，不赋予完整 K2 或物理/Linux/云门禁资格。
 
 ### 7.13 与已发布 operation actor migration 合并后的最终交付
 

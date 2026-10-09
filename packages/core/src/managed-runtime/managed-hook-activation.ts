@@ -5,6 +5,7 @@
  */
 
 import type { HookExecutionResult } from '../hooks/types.js';
+import type { ChatRecord } from '../services/chatRecordingService.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   extractTurnBudgetDirectiveText,
@@ -19,6 +20,7 @@ import {
 import type { ManagedSession } from './managed-session-assembly.js';
 import { ManagedSessionConflictError } from './managed-session-authority.js';
 import type { ManagedSessionDurableRef } from './managed-session-records.js';
+import { publishManagedMessageBody } from './managed-message-chunks.js';
 
 export interface ManagedHookModelOperation {
   readonly operationId: string;
@@ -52,6 +54,7 @@ export type ManagedHookModelScope = Pick<
 export type ManagedMainModelAttempt = ((
   success: boolean,
   usage: unknown,
+  finalChatRecord?: ChatRecord,
 ) => Promise<void>) & { readonly attemptId: string };
 
 const sessionBudgets = new WeakMap<
@@ -152,7 +155,13 @@ class LocalManagedHookModelScope {
     attemptId: string,
     kind: 'hook' | 'hosted',
     route: object,
-  ): Promise<(success: boolean, usage: unknown) => Promise<void>> {
+  ): Promise<
+    (
+      success: boolean,
+      usage: unknown,
+      finalChatRecord?: ChatRecord,
+    ) => Promise<void>
+  > {
     const authority = this.session.authority;
     const activation = this.session.activation;
     const budget = sessionBudgets.get(authority)?.snapshot ?? null;
@@ -191,22 +200,131 @@ class LocalManagedHookModelScope {
       );
     };
     await commit('started', null);
-    return async (success, usage) => {
-      const usageRef = await this.session.resources.publish(
-        `managed-${kind}-model-usage`,
-        Buffer.from(
-          JSON.stringify({
-            version: 1,
-            ...route,
-            attempts: usage,
-            budget,
-            models: uiTelemetryService.getMetricsForSession(
-              authority.sessionHeader.sessionKey.sessionId,
-            ).models,
-          }),
-        ),
+    let finalOutput:
+      | {
+          recordBytes: Buffer;
+          usageBytes: Buffer;
+          usageRef: ManagedSessionDurableRef;
+          contentRef: ManagedSessionDurableRef;
+        }
+      | undefined;
+    return async (success, usage, finalChatRecord) => {
+      if (finalChatRecord && (!success || kind !== 'hosted'))
+        throw new ManagedSessionConflictError(
+          'Only successful main output can carry a final message.',
+        );
+      const usageBytes = Buffer.from(
+        JSON.stringify({
+          version: 1,
+          ...route,
+          attempts: usage,
+          budget,
+          models: uiTelemetryService.getMetricsForSession(
+            authority.sessionHeader.sessionKey.sessionId,
+          ).models,
+        }),
       );
-      await commit(success ? 'output_committed' : 'abandoned', usageRef);
+      if (!finalChatRecord) {
+        const usageRef = await this.session.resources.publish(
+          `managed-${kind}-model-usage`,
+          usageBytes,
+        );
+        await commit(success ? 'output_committed' : 'abandoned', usageRef);
+        return;
+      }
+      this.assertOwner();
+      const recordBytes = Buffer.from(JSON.stringify(finalChatRecord));
+      if (
+        finalOutput &&
+        (!finalOutput.recordBytes.equals(recordBytes) ||
+          !finalOutput.usageBytes.equals(usageBytes))
+      )
+        throw new ManagedSessionConflictError(
+          'Final model output replay differs.',
+        );
+      finalOutput ??= {
+        recordBytes,
+        usageBytes,
+        usageRef: await this.session.resources.publish(
+          'managed-hosted-model-usage',
+          usageBytes,
+        ),
+        contentRef: await publishManagedMessageBody(
+          this.session.resources,
+          recordBytes,
+        ),
+      };
+      const { usageRef, contentRef } = finalOutput;
+      const contentDigest = createHash('sha256')
+        .update(
+          JSON.stringify([
+            'managed-final-output/1',
+            attemptId,
+            ...[routeRef, inputCheckpointRef, usageRef, contentRef].map(
+              (ref) =>
+                ref === null
+                  ? null
+                  : [
+                      ref.resourceId,
+                      ref.kind,
+                      ref.schemaVersion,
+                      ref.byteLength,
+                      ref.digest,
+                    ],
+            ),
+          ]),
+        )
+        .digest('hex');
+      await authority.appendExecutionEvents(
+        {
+          operation: 'hostedModelAttempt',
+          commandId: `${attemptId}:output_committed`,
+          sessionKey: authority.sessionHeader.sessionKey,
+          contentDigest,
+        },
+        (sequence) => {
+          const subject = {
+            type: 'activation',
+            scopeId: activation.activationId,
+            ...activation,
+          };
+          return [
+            {
+              v: 1,
+              sequence,
+              eventId: `${attemptId}:output_committed`,
+              sessionKey: authority.sessionHeader.sessionKey,
+              kind: 'model.attempt',
+              occurredAt: Date.now(),
+              subject,
+              payload: {
+                attemptId,
+                routeRef,
+                inputCheckpointRef,
+                state: 'output_committed',
+                usageRef,
+              },
+            },
+            {
+              v: 1,
+              sequence: sequence + 1,
+              eventId: `message:${finalChatRecord.uuid}`,
+              sessionKey: authority.sessionHeader.sessionKey,
+              kind: 'message.committed',
+              occurredAt: Date.parse(finalChatRecord.timestamp),
+              subject,
+              payload: {
+                messageId: finalChatRecord.uuid,
+                role: finalChatRecord.type,
+                contentRef,
+                parentMessageId: finalChatRecord.parentUuid,
+                modelAttemptId: attemptId,
+              },
+            },
+          ];
+        },
+        { class: 'harness', activation },
+      );
     };
   }
 

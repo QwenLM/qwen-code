@@ -483,7 +483,14 @@ export function registerHostedCsiSessionRoutes(
             text,
             abort,
             historyMode: 'settled',
-            ...(resumed ? { resumeFromToolResults: resumed } : {}),
+            completeFinalOutput: (attempt, usage, record) =>
+              attempt(true, usage, record),
+            ...(resumed
+              ? {
+                  resumeFromToolResults: resumed.parts,
+                  recoveredFinalOutput: resumed.finalOutput,
+                }
+              : {}),
             createToolTurn: (harness, commit, messageFitsInline) =>
               new HostedCsiToolTurn(
                 managed,

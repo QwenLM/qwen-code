@@ -50,7 +50,7 @@ export async function recoverHostedCsiReceipts(
   promptId: string,
   text: string,
   owner?: CsiRecoveryOwner,
-): Promise<Part[]> {
+): Promise<{ parts: Part[]; finalOutput?: ChatRecord }> {
   const authority = session.authority;
   const events = authority.eventsInSequenceRange(
     1,
@@ -263,8 +263,61 @@ export async function recoverHostedCsiReceipts(
     });
     parentUuid = record.uuid;
   }
-  if (projected.length !== batchIndex + 1 + existingCount)
-    throw new Error('Original CSI tool message chain differs.');
+  const tail = projected.slice(batchIndex + 1 + existingCount);
+  let finalOutput: ChatRecord | undefined;
+  if (tail.length !== 0) {
+    const candidate = tail[0];
+    const attempt = events
+      .filter((event) => event.kind === 'model.attempt')
+      .at(-1);
+    const message = events
+      .filter((event) => event.kind === 'message.committed')
+      .at(-1);
+    const routeRef =
+      attempt &&
+      assertManagedSessionDurableRef(
+        attempt.payload['routeRef'],
+        'final CSI route',
+      );
+    const route =
+      routeRef &&
+      object(
+        parseManagedCsiFileJson(
+          await session.resources.read(routeRef),
+          64 * 1024,
+        ),
+      );
+    if (
+      tail.length !== 1 ||
+      missing ||
+      existingCount !== items.length ||
+      items.some((item) => item.state !== 'settled') ||
+      authorization.checkpoint.continuation.phase !== 'results_ready' ||
+      !attempt ||
+      attempt.payload['state'] !== 'output_committed' ||
+      !message ||
+      message.sequence !== attempt.sequence + 1 ||
+      message.payload['modelAttemptId'] !== attempt.payload['attemptId'] ||
+      message.payload['messageId'] !== candidate.uuid ||
+      !isDeepStrictEqual(message.subject, attempt.subject) ||
+      !isDeepStrictEqual(
+        attempt.payload['inputCheckpointRef'],
+        authority.latestCheckpoint?.stateRef,
+      ) ||
+      routeRef?.kind !== 'managed-hosted-model-route' ||
+      route?.['version'] !== 1 ||
+      route['turnId'] !== promptId ||
+      route['model'] !== candidate.model ||
+      candidate.type !== 'assistant' ||
+      candidate.daemonPromptId !== promptId ||
+      candidate.parentUuid !== parentUuid ||
+      candidate.message?.role !== 'model' ||
+      !candidate.message.parts?.length ||
+      candidate.message.parts.some((part) => part.functionCall)
+    )
+      throw new Error('Original CSI final output differs.');
+    finalOutput = candidate;
+  }
   const latest = authority.domainRecord('file_history');
   if (!latest) throw new Error('Original CSI file history is unavailable.');
   const saved = object(
@@ -273,6 +326,8 @@ export async function recoverHostedCsiReceipts(
       64 * 1024,
     ),
   );
+  if (finalOutput && saved['preparation'] !== null)
+    throw new Error('Original CSI final output history is not closed.');
   // No durable repair happens before the complete original batch passes preflight.
   const harness = createManagedHarnessHandle(session);
   const responses: Part[] = [];
@@ -308,5 +363,5 @@ export async function recoverHostedCsiReceipts(
     );
   }
   await requireClosedHostedCsiHistory(session);
-  return responses;
+  return { parts: responses, ...(finalOutput ? { finalOutput } : {}) };
 }

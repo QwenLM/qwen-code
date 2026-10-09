@@ -73,7 +73,7 @@ public final class JdbcCsiExecutionAdmission {
         head.requireCurrentTime(connection);
     }
 
-    static void verifyColdReceipts(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+    static List<ToolExecutionRecord> verifyColdReceipts(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             JdbcCsiActivationAdmission.NativeHead head) throws SQLException {
         var members = receiptMembers(connection, original, head, head.prefix(), true);
         require(!members.isEmpty());
@@ -86,6 +86,16 @@ public final class JdbcCsiExecutionAdmission {
                     .get((int) number(ref.get("ordinal")));
             CsiNativeActivationProof.convertedResult(JSON.valueToTree(member.getResult()), call);
         }
+        return members;
+    }
+
+    static void verifyColdFinalOutput(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            JdbcCsiActivationAdmission.NativeHead head) throws SQLException {
+        var expected = CsiNativeActivationProof.completeOutputTail(head.prefix(), head.sequence());
+        var members = verifyColdReceipts(connection, original, head);
+        require(members.size() == expected.size()
+                && members.stream().map(ToolExecutionRecord::getExecutionCallId)
+                        .collect(java.util.stream.Collectors.toSet()).equals(expected));
     }
 
     private static List<ToolExecutionRecord> receiptMembers(Connection connection,

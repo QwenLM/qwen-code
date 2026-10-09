@@ -20,6 +20,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
 import { runHostedHarnessTextTurn } from './hosted-harness-model.js';
 import { createHostedChatRecord } from './hosted-harness-turn.js';
+import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 
 const state = vi.hoisted(() => ({
   config: undefined as unknown as {
@@ -1256,6 +1257,73 @@ describe('Hosted Harness resume and retraction', () => {
     expect(toolTurn.consumeResults).toHaveBeenCalledOnce();
     expect(toolTurn.execute).not.toHaveBeenCalled();
   });
+
+  it.each([false, true])(
+    'persists complete final Parts before consuming CSI results (answer loss=%s)',
+    async (answerLoss) => {
+      const model = config([
+        { type: LlmEventType.Content, value: 'answer' },
+        {
+          type: LlmEventType.Finished,
+          value: { usageMetadata: { candidatesTokenCount: 30 } },
+        },
+      ]);
+      const parts: Part[] = [
+        { text: 'thought', thought: true, thoughtSignature: 'signature' },
+        { text: 'answer' },
+      ];
+      model.getHistory.mockReturnValue([{ role: 'model', parts }]);
+      const complete = Object.assign(
+        vi.fn(async () => undefined),
+        { attemptId: 'original-attempt' },
+      );
+      const toolTurn = {
+        execute: vi.fn(),
+        consumeResults: vi.fn(),
+        declarations: async () => [],
+      };
+      const atomic = vi.fn(async () => {
+        expect(toolTurn.consumeResults).not.toHaveBeenCalled();
+        if (answerLoss) throw new Error('commit response lost');
+      });
+      const run = runHostedHarnessTextTurn({
+        ...input,
+        toolTurn,
+        resumeFromToolResults: [
+          {
+            functionResponse: {
+              id: 'original-call',
+              name: 'read_file',
+              response: { original: true },
+            },
+          },
+        ],
+        modelScope: {
+          bindBudget: vi.fn(),
+          evaluate: vi.fn(),
+          beginMainAttempt: vi.fn().mockResolvedValue(complete),
+        },
+        completeFinalOutput: atomic,
+      });
+      if (answerLoss) {
+        await expect(run).rejects.toBeInstanceOf(
+          HostedToolRecoveryRequiredError,
+        );
+        expect(toolTurn.consumeResults).not.toHaveBeenCalled();
+      } else {
+        await expect(run).resolves.toMatchObject({ parts });
+        expect(toolTurn.consumeResults).toHaveBeenCalledOnce();
+      }
+      expect(atomic).toHaveBeenCalledExactlyOnceWith(
+        complete,
+        [{ candidatesTokenCount: 30 }],
+        parts,
+        'test-model',
+      );
+      expect(complete).not.toHaveBeenCalled();
+      expect(toolTurn.execute).not.toHaveBeenCalled();
+    },
+  );
 
   it('retracts a published model attempt before the replay resumes', async () => {
     const model = config([

@@ -31,6 +31,10 @@ import {
   type ManagedContextBinding,
 } from './managed-workspace-binding.js';
 import { ManagedSessionRecordSink } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-record-sink.js';
+import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
+import { TurnBudget } from '@qwen-code/qwen-code-core/core/turn-budget.js';
+import { runHostedHarnessTurn } from './hosted-harness-turn.js';
+import * as hostedModel from './hosted-harness-model.js';
 
 let root: string;
 let managed: ManagedSession;
@@ -682,7 +686,7 @@ it('repairs a durable receipt before the model gate without new execution or mes
     promptId,
     text,
   );
-  expect(responses.map((part) => part.functionResponse?.id)).toEqual([
+  expect(responses.parts.map((part) => part.functionResponse?.id)).toEqual([
     reads[0].callId,
     reads[2].callId,
   ]);
@@ -918,6 +922,122 @@ async function missingReceiptFixture() {
   return { successor, owner, text, before };
 }
 
+it('recovers complete final output without repair, another model request or a duplicate assistant with labelled SQL/worker seams', async () => {
+  const { successor, owner, text } = await missingReceiptFixture();
+  const broker = { baseUrl: 'http://127.0.0.1:8080', token: 'unit-broker' };
+  await recoverHostedCsiReceipts(successor, broker, promptId, text, owner);
+  const prior = await successor.sink.project();
+  const original: ChatRecord = {
+    ...successor.authority.recordEnvelope,
+    sessionId,
+    uuid: randomUUID(),
+    parentUuid: prior.at(-1)!.uuid,
+    timestamp: new Date().toISOString(),
+    type: 'assistant',
+    daemonPromptId: promptId,
+    model: 'unit-model',
+    message: {
+      role: 'model',
+      parts: [
+        {
+          text: 'original thought',
+          thought: true,
+          thoughtSignature: 'signature',
+        },
+        { text: 'original complete answer' },
+        { inlineData: { mimeType: 'image/png', data: 'AQID' } },
+      ],
+    },
+  };
+  await new ManagedHookActivationController(successor).runTurn(
+    promptId,
+    async (scope) => {
+      await scope.bindBudget(new TurnBudget(), text);
+      const complete = await scope.beginMainAttempt('unit-model');
+      await complete(true, [{ candidatesTokenCount: 30 }], original);
+    },
+  );
+  const activation = await successor.authority.installActivation({
+    activationId: randomUUID(),
+    workerId: randomUUID(),
+    leaseDurationMs: 60000,
+  });
+  const resumed = {
+    ...successor,
+    activation,
+    sink: new ManagedSessionRecordSink(
+      successor.authority,
+      successor.resources,
+      () => ({ class: 'harness', activation }),
+    ),
+  };
+  const sequence = resumed.authority.committedSequence;
+  const before = await resumed.sink.project();
+  const pathsBefore = paths.slice();
+  const recovered = await recoverHostedCsiReceipts(
+    resumed,
+    broker,
+    promptId,
+    text,
+  );
+  expect(recovered.finalOutput).toEqual(original);
+  expect(resumed.authority.committedSequence).toBe(sequence);
+  expect(await resumed.sink.project()).toEqual(before);
+  expect(paths).toEqual(pathsBefore);
+  const model = vi.spyOn(hostedModel, 'runHostedHarnessTextTurn');
+  const result = await runHostedHarnessTurn({
+    session: { managed: resumed, cwd: root, blocked: false },
+    sessionId,
+    cwd: root,
+    promptId,
+    text,
+    abort: new AbortController(),
+    historyMode: 'settled',
+    resumeFromToolResults: recovered.parts,
+    recoveredFinalOutput: recovered.finalOutput,
+    createToolTurn: (harness, record, fits) =>
+      new HostedCsiToolTurn(
+        resumed,
+        broker,
+        { bindingId, generation: '1' },
+        promptId,
+        record,
+        harness,
+        fits,
+      ),
+  });
+  expect(model).not.toHaveBeenCalled();
+  expect(result.subtype).toBe('turn_result');
+  expect(result.systemPayload).toMatchObject({ state: 'completed' });
+  expect(paths).toEqual(pathsBefore);
+  const after = await resumed.sink.project();
+  expect(after.filter((record) => record.type !== 'system')).toEqual(before);
+  expect(after.filter((record) => record.uuid === original.uuid)).toEqual([
+    original,
+  ]);
+  const checkpoint = parseHarnessCheckpointV1(
+    (await resumed.authority.readCheckpointState())!,
+  );
+  expect(checkpoint.continuation.phase).toBe('before_model');
+  const events = resumed.authority.eventsInSequenceRange(
+    sequence + 1,
+    resumed.authority.committedSequence,
+  );
+  expect(events.filter((event) => event.kind === 'turn.settled')).toHaveLength(
+    1,
+  );
+  expect(
+    events.some((event) =>
+      [
+        'model.attempt',
+        'message.committed',
+        'tool.intent',
+        'tool.receipt',
+      ].includes(event.kind),
+    ),
+  ).toBe(false);
+});
+
 it('repairs the absent receipt from the original settled batch and reuses its first durable identity after interruption', async () => {
   const { successor, owner, text, before } = await missingReceiptFixture();
   const write = successor.sink.write.bind(successor.sink);
@@ -958,7 +1078,7 @@ it('repairs the absent receipt from the original settled batch and reuses its fi
     promptId,
     text,
   );
-  expect(response.map((part) => part.functionResponse?.id)).toEqual([
+  expect(response.parts.map((part) => part.functionResponse?.id)).toEqual([
     'provider-read',
     'read-second',
     'read-third',
