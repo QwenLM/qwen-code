@@ -901,6 +901,29 @@ class ChildResultRelayTest {
         assertThat(harness.operations)
                 .extracting(operation -> operation.get("kind"))
                 .containsExactly("fail");
+        // The minted child dies named: the verdict carries the Session
+        // the creation committed, so its close is never unaccountable.
+        assertThat(harness.operations.get(0))
+                .containsEntry("stopReason", "creation_failed")
+                .containsEntry("started", false)
+                .containsEntry("childSessionId", CHILD);
+    }
+
+    // A record that already carries its own never-started proof still
+    // earns only the unstarted pairing when the give-up runs — never
+    // the started failure a fall-through would invent over it.
+    @Test
+    void aProvenNeverStartedGiveUpKeepsTheUnstartedPairing() {
+        row.set(new RelayRow(TENANT, PARENT, RUN, "creation-key", CHILD,
+                "binding", "owner", now + 30_000, 63, 0, null, now, now));
+        when(store.executionState(TENANT, PARENT, RUN)).thenReturn(
+                "not_started_proven");
+        relay.scan();
+        assertThat(row.get().state()).isEqualTo("unknown");
+        verify(childCloses).admitChildClose(TENANT, PARENT, CHILD, RUN);
+        assertThat(harness.operations)
+                .extracting(operation -> operation.get("kind"))
+                .containsExactly("fail");
         assertThat(harness.operations.get(0))
                 .containsEntry("stopReason", "creation_failed")
                 .containsEntry("started", false);

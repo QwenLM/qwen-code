@@ -455,6 +455,74 @@ class ChildResultRelayStoreTest {
                 "done", null, now + 2_000);
     }
 
+    // The execution proof is the record's own body: the runtime_state
+    // column is the Runtime projection (`unbound`, `provisioning`,
+    // `ready`) and never carries the execution enum — a column read
+    // classifies every row started and wedges the give-up chain behind
+    // verdicts the wire keeps refusing.
+    @Test
+    void readsTheExecutionLineFromTheRecordBody() {
+        String session = UUID.randomUUID().toString();
+        // `delivered` keeps the fixtures off the fleet-wide discovery
+        // page; only the execution read is under test here.
+        insertRecordRow("scope-e", session, "run-exec-intent",
+                "child_agent", "delivered", "pending");
+        jdbc.update("UPDATE qwen_managed_session_extension_record SET"
+                        + " runtime_state = 'unbound'"
+                        + " WHERE tenant_id = ?"
+                        + " AND record_id = 'run-exec-intent'",
+                TENANT);
+        insertRecordBody("resource-run-exec-intent", session, "intent");
+        assertThat(relayStore.executionState(TENANT, session,
+                "run-exec-intent")).isEqualTo("intent");
+        insertRecordRow("scope-e", session, "run-exec-dispatch",
+                "child_agent", "delivered", "pending");
+        jdbc.update("UPDATE qwen_managed_session_extension_record SET"
+                        + " runtime_state = 'provisioning'"
+                        + " WHERE tenant_id = ?"
+                        + " AND record_id = 'run-exec-dispatch'",
+                TENANT);
+        insertRecordBody("resource-run-exec-dispatch", session,
+                "dispatch_started");
+        assertThat(relayStore.executionState(TENANT, session,
+                "run-exec-dispatch")).isEqualTo("dispatch_started");
+        // A terminal record projects a null runtime_state; the body
+        // still answers its execution line.
+        insertRecordRow("scope-e", session, "run-exec-settled",
+                "child_agent", "delivered", "completed");
+        insertRecordBody("resource-run-exec-settled", session, "settled");
+        assertThat(relayStore.executionState(TENANT, session,
+                "run-exec-settled")).isEqualTo("settled");
+        // No committed record row at all is the never-started answer.
+        assertThat(relayStore.executionState(TENANT, session,
+                "run-missing")).isNull();
+        // A row whose body cannot prove the line owes the caller a
+        // bounded retry, never a guessed verdict.
+        insertRecordRow("scope-e", session, "run-exec-corrupt",
+                "child_agent", "delivered", "pending");
+        assertThatThrownBy(() -> relayStore.executionState(TENANT,
+                session, "run-exec-corrupt"))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    private void insertRecordBody(String resourceId, String sessionId,
+            String execution) {
+        String body = "{\"kind\":\"child_agent\",\"run\":{\"state\":"
+                + "\"admitted\",\"execution\":\"" + execution + "\"}}";
+        jdbc.update("INSERT INTO qwen_managed_session_resource"
+                        + " (session_scope_key, tenant_id, workspace_id,"
+                        + " session_id, resource_id, kind, schema_version,"
+                        + " byte_length, sha256, storage_kind,"
+                        + " inline_bytes, publish_command_id, state,"
+                        + " created_at)"
+                        + " VALUES ('scope', ?, 'workspace', ?, ?,"
+                        + " 'managed-child_run', 1, ?, '" + "a".repeat(64)
+                        + "', 'MYSQL_INLINE', ?, 'command', 'REFERENCED',"
+                        + " CURRENT_TIMESTAMP)",
+                TENANT, sessionId, resourceId, body.length(),
+                body.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
     @Test
     void readsInlineResourcesOnly() {
         jdbc.update("INSERT INTO qwen_managed_session_resource"

@@ -584,6 +584,12 @@ public class ChildResultRelay {
             fail.put("childRunId", row.childRunId());
             fail.put("stopReason", started ? "child_failed" : "creation_failed");
             fail.put("started", started);
+            if (child != null) {
+                // A minted child dies named: the terminal verdict carries
+                // the Session the creation committed, so the close owed
+                // it is never invented out of the ledger's absence later.
+                fail.put("childSessionId", child);
+            }
             harness.runChildOperation(row.tenantId(), row.parentSessionId(),
                     fail);
             resolvedChild = child;
@@ -629,6 +635,11 @@ public class ChildResultRelay {
         if (execution == null) {
             // Nothing written about the run at all: absence of commit
             // evidence itself is the proof of never-started.
+            return false;
+        }
+        if ("not_started_proven".equals(execution)) {
+            // The record already carries its own never-started proof:
+            // the only truthful pairing left is the unstarted one.
             return false;
         }
         if ("intent".equals(execution)) {

@@ -307,6 +307,39 @@ public class ManagedExtensionRecordStore {
         return new ApplyResult(receipts, lastActivation);
     }
 
+    /** A never-started verdict and the creation mint share one seam:
+     * this lock is the same row the creation fence reads FOR UPDATE, so
+     * the mint's lineage write and the verdict's name serialize against
+     * each other. The verdict must name exactly the Session the lineage
+     * proves minted — unnamed orphans the mint, mismatched forges one —
+     * and null exactly when no lineage exists. Package-visible for its
+     * H2 decision-table pin; the row lock it rides only binds inside
+     * the commit transaction that calls it. */
+    void reconcileNeverStartedVerdict(String tenantId, String sessionId,
+            String domain, String recordId, JsonNode record) {
+        jdbc.query("SELECT record_key FROM"
+                        + " qwen_managed_session_extension_record"
+                        + " WHERE session_scope_key = ?"
+                        + " AND record_key = ? FOR UPDATE",
+                (result, rowNum) -> result.getString(1),
+                ManagedSessionStore.sessionScopeKey(tenantId, sessionId),
+                ManagedExtensionProjection.recordKey(sessionId, domain,
+                        recordId));
+        List<String> lineage = jdbc.query(
+                "SELECT session_id FROM managed_agent_session"
+                        + " WHERE tenant_id = ? AND parent_session_id = ?"
+                        + " AND parent_child_run_id = ?",
+                (result, rowNum) -> result.getString(1), tenantId,
+                sessionId, recordId);
+        JsonNode named = record.get("childSessionId");
+        String namedId = named == null || named.isNull() ? null
+                : named.textValue();
+        require(lineage.isEmpty() ? namedId == null
+                : lineage.size() == 1 && lineage.getFirst().equals(namedId),
+                "Child run " + recordId + "'s never-started verdict does"
+                        + " not name the Session its creation minted.");
+    }
+
     boolean hasNewLifecycleDispatch(String tenantId, String sessionId, byte[] bytes,
             Function<String, StoredResource> resources) {
         boolean dispatch = false;
@@ -613,6 +646,14 @@ public class ManagedExtensionRecordStore {
                             .equals(sessionId),
                     "Child run rootSessionId must be this Session for a"
                             + " first-level child.");
+            JsonNode stopReasonNode = record.get("stopReason");
+            JsonNode executionNode = record.get("run").get("execution");
+            if (stopReasonNode != null && !stopReasonNode.isNull()
+                    && executionNode != null && "not_started_proven"
+                            .equals(executionNode.textValue())) {
+                reconcileNeverStartedVerdict(tenantId, sessionId, domain,
+                        body.recordId().apply(record), record);
+            }
         }
         if (domain.equals("child_acceptance")) {
             for (String field : List.of("contentRef", "terminalReceiptRef")) {

@@ -3,6 +3,8 @@ package com.alibaba.qwen.code.managedagent.store;
 import java.util.List;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 /**
  * H4b: the JDBC side of the child result relay — its V53 ledger plus the
@@ -84,6 +86,8 @@ public class ChildResultRelayStore {
                     + " ELSE 0 END, r.created_at, r.session_id, r.record_id"
                     + " LIMIT ?";
 
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private final JdbcTemplate jdbc;
 
     public ChildResultRelayStore(JdbcTemplate jdbc) {
@@ -124,18 +128,39 @@ public class ChildResultRelayStore {
     }
 
     /** The record's execution line as committed — the give-up's proof
-     * of start: the wire's own transition legality already says whether
-     * a dispatch ever attached (`intent → dispatch_started →
-     * running_attached` only), so the verdict reads the record. */
+     * of start. The `runtime_state` column is the Runtime projection
+     * (`unbound`, `provisioning`, `ready`), never the execution enum, so
+     * the proof reads the record's own body: the wire's transition
+     * legality already says whether a dispatch ever attached (`intent →
+     * dispatch_started → running_attached` only). A null answer means no
+     * committed record row at all; a row whose body cannot prove its
+     * line owes the caller a bounded retry, never a guessed verdict. */
     public String executionState(String tenantId, String parentSessionId,
             String childRunId) {
         List<String> rows = jdbc.query(
-                "SELECT runtime_state FROM qwen_managed_session_extension_record"
+                "SELECT record_resource_id FROM"
+                        + " qwen_managed_session_extension_record"
                         + " WHERE tenant_id = ? AND session_id = ?"
                         + " AND domain = 'child_run' AND record_id = ?",
-                (result, row) -> result.getString("runtime_state"),
+                (result, row) -> result.getString("record_resource_id"),
                 tenantId, parentSessionId, childRunId);
-        return rows.isEmpty() ? null : rows.getFirst();
+        if (rows.isEmpty()) {
+            return null;
+        }
+        String text = readResource(tenantId, rows.getFirst());
+        JsonNode execution;
+        try {
+            execution = text == null ? null
+                    : MAPPER.readTree(text).path("run").path("execution");
+        } catch (Exception error) {
+            throw new IllegalStateException("Child run " + childRunId
+                    + "'s committed record is unreadable", error);
+        }
+        if (execution == null || !execution.isTextual()) {
+            throw new IllegalStateException("Child run " + childRunId
+                    + "'s committed record holds no execution line");
+        }
+        return execution.textValue();
     }
 
     /** One inline resource's bytes, or null when it is not inline-held. */
