@@ -73,8 +73,8 @@ class WorkspaceCsiSessionGuardTest {
                 + " storage_id, display_name, config_ref, policy_ref, state) VALUES"
                 + " ('tenant', 'workspace', 3, 'storage', 'CSI', ?, ?, 'ACTIVE')",
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                + " VALUES ('tenant', 'workspace', ?, TRUE, TRUE)", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("reviewed-agent/1");
         sessionId = WorkspaceCsiSessionMain.create(jdbc, manager, json, properties,

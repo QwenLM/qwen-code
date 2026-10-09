@@ -79,6 +79,7 @@ interface HostedTurnOptions {
   resumeFromToolResults?: Part[];
   onTurnResult?: (result: ChatRecord) => void;
   onResumeReady?: () => void;
+  onCompleted?: () => Promise<void>;
 }
 
 /**
@@ -135,6 +136,7 @@ export async function runHostedHarnessTurn({
   resumeFromToolResults,
   onTurnResult,
   onResumeReady,
+  onCompleted,
 }: HostedTurnOptions): Promise<ChatRecord> {
   const authority = session.managed.authority;
   const harness = createManagedHarnessHandle(session.managed);
@@ -294,6 +296,7 @@ export async function runHostedHarnessTurn({
         );
         onTurnResult?.(turnResult);
         await session.managed.sink.write(turnResult);
+        if (state === 'completed') await onCompleted?.();
       }),
   );
   // Session availability must not gate on publisher cleanup: the drain is

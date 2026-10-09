@@ -845,3 +845,16 @@ blocks it without changing the original execution; removing native reference
 fields cannot qualify a downgrade. Native continuation retains full original
 membership and immutable-grant validation. These historical fixtures qualify
 continuation fences only, not native execution or cold takeover.
+
+### 7.4 Current main migration and child admission boundary
+
+Integration with main `5ddd43815` preserves published Workspace roles V53 and
+child lineage V54. Draft-only CSI request, activation and native grant migrations
+are V55/V56/V57 with unchanged SQL bytes; the first native candidate's V55 grant
+migration is now V57. Earlier unpublished-number databases are not automatically
+upgraded or backfilled. Root private creation keeps original creator/owner actor
+bytes and request pin; public child admission refuses CSI parents before Service
+work and inside the locked Store transaction. Ordinary child consumption still
+occurs after durable completed-turn settlement through the shared runner.
+See the paired lifecycle-main integration design for migration and validation
+requirements. None of these integration checks opens cold or physical gates.

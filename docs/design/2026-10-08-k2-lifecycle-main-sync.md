@@ -79,7 +79,46 @@ cloud runs do not establish complete K2 acceptance.
 
 ## Remaining work
 
-Private text attachment is implemented. Native file intent/definition admission,
-atomic batch reservation/recovery, file grant execution, aggregate
-DRAINED/RELEASED, physical writers, CSI NodeUnpublish, safe volume reuse, public
-wiring and a fresh full acceptance matrix remain tracked in issue 13395.
+Private text attachment and bounded finite native file execution are implemented.
+Genuine cold takeover, all-writer closure, aggregate DRAINED/RELEASED, physical
+writers, CSI NodeUnpublish, safe volume reuse, public wiring and a fresh full
+acceptance matrix remain tracked in issue 13395.
+
+## Integration with actor roles and child Sessions, 2026-10-09
+
+The native-execution increment `f252ada3e` is integrated with main
+`5ddd43815`, which has published V53 Workspace roles and V54 child lineage.
+Keep all published migrations byte-identical. Rename only this Draft's request,
+first-activation and native-authorization SQL from V53/V54/V55 to V55/V56/V57,
+with unchanged SQL bytes and order. Databases that applied earlier unpublished
+numbers are not an automatic upgrade target; do not repair their history or
+backfill original authority. Current upgrade checks include main V53/V54,
+request-only V55 and activation V56, preserving old rows, checksums and null
+native grants.
+
+Root Session creation writes both creator and owner actor keys using main's
+same original actor bytes, plus the CSI request pin when privately constructed.
+Current CSI fixtures use main's OPERATOR/READER role semantics; historical
+migration fixtures keep their old schema columns. New public child admission
+must refuse a private CSI parent in the Service before child/harness work and
+again under the Store's original parent lock before replay or insertion. Copying
+its profile without its original request, Pod and reservation cannot construct
+a valid child. Ordinary child admission and its existing tests remain intact.
+
+Keep the shared Hosted turn runner. Pass main's child funnel and queued
+consumption into the ordinary tool turn; after the turn-result write succeeds,
+flush consumed child IDs only for a completed turn. Remove each queued ID only
+after its durable consumption succeeds. A refused flush logs and preserves the
+owed remainder without changing the already settled turn outcome. The private
+CSI caller supplies no child callback. Preserve ordinary child redrive and wake
+consumption, selected runtime ownership and all existing CSI refusals.
+
+Validate the exact integrated commit with build/typecheck/bundle, affected
+Hosted/child/HTTP Store tests, Broker and Agent tests, fresh/upgrade Flyway,
+style and quality checks. Independently reproduce duplicate migrations and
+private-parent child admission before their fixes, then verify refusal and
+original SQL conservation. Rebuild both Agent packages with the actual Broker
+bytes before a fresh owned MySQL mixed/export run. Previous f252 producer
+results and five earlier negative groups retain their own source/product
+versions; they are not relabeled as new integrated-commit behavior. Native
+review remains unavailable and Draft/maintainer review stays required.

@@ -647,3 +647,14 @@ resource inventory 不得有原生 input、declaration、outcome 或 file-histor
 阻断此分支，原始执行不变；删去 native reference 字段不能取得降级资格。原生续接
 保留完整原始成员和不可变 grant 校验。这些历史 fixture 只验证续接边界，不证明
 原生执行或 cold takeover。
+
+### 7.4 当前 main migration 与 child admission 边界
+
+与 main `5ddd43815` 集成保留已发布的 Workspace role V53 和 child lineage
+V54。仅 Draft CSI request、activation 和 native grant migration 使用
+V55/V56/V57，SQL 字节不变；首个原生候选的 V55 grant migration 现为 V57。
+更早未发布编号数据库不自动升级或回填。Root 私有创建保留原 creator/owner actor
+字节与 request pin；公开 child admission 在 Service 操作前和 Store 锁定事务内
+拒绝 CSI parent。普通 child consumption 仍通过共享 runner，发生在 completed
+turn 持久落定之后。Migration 与验证要求见完整双语 lifecycle-main 集成设计。
+这些集成检查不开放冷恢复或物理门禁。

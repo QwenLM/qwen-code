@@ -73,7 +73,7 @@ class RuntimeBrokerFlywaySchemaTest {
     }
 
     @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"11", "13", "50", "51", "52", "53"})
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"11", "13", "50", "51", "52", "53", "54", "55", "56"})
     void migrationsPreserveRowsWrittenByOldBinaries(String version) throws SQLException {
         DataSource source = migrate(dataSource(), MigrationVersion.fromVersion(version));
         RuntimeProvisionRequest request = JdbcRepositoryContract.writeLegacyRows(source, "upgrade");
@@ -106,6 +106,8 @@ class RuntimeBrokerFlywaySchemaTest {
             assertThat(execution.getExecutionCallId()).isEqualTo("upgrade-" + state);
             assertThat(execution.getVersion()).isEqualTo(5);
             assertThat(execution.getAbandonedAt()).isNull();
+            assertThat(jdbc.queryForObject("SELECT native_authorization_json FROM qwen_tool_execution"
+                    + " WHERE execution_call_id = ?", String.class, execution.getExecutionCallId())).isNull();
             if (execution.isSettled()) {
                 assertThat(execution.getResult()).containsEntry("executionStatus", "success");
             }

@@ -2,10 +2,21 @@ package com.alibaba.qwen.code.managedagent.store;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import com.alibaba.qwen.code.managedagent.api.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.api.ApiException;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.service.HarnessCoordinator;
+import com.alibaba.qwen.code.managedagent.service.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.service.RequestDigests;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.fasterxml.jackson.core.StreamReadFeature;
@@ -56,8 +67,8 @@ class WorkspaceCsiSessionMainTest {
                 + " storage_id, display_name, config_ref, policy_ref, state) VALUES"
                 + " ('tenant', 'workspace', 3, 'storage', 'CSI', ?, ?, 'ACTIVE')",
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                + " VALUES ('tenant', 'workspace', ?, TRUE, TRUE)", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
     }
 
     @Test
@@ -74,6 +85,7 @@ class WorkspaceCsiSessionMainTest {
         assertThat(row.get("context_config_ref")).isEqualTo(ManagedWorkspaceRegistry.descriptorRef(
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF));
         assertThat(row.get("creator_actor_key")).isEqualTo(ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+        assertThat(row.get("owner_actor_key")).isEqualTo(row.get("creator_actor_key"));
         var sessions = store();
         var original = new TransactionTemplate(manager).execute(status -> sessions.requireCsiRequest(registration,
                 first.sessionId()));
@@ -92,6 +104,64 @@ class WorkspaceCsiSessionMainTest {
         assertThat(count("managed_workspace_create_command")).isEqualTo(1);
         assertThat(count("managed_agent_consumer_progress")).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT event_type FROM managed_agent_event", String.class)).isEqualTo("session.created");
+    }
+
+    @Test
+    void privateCsiParentCannotCreateAnUnpinnedChildSession() {
+        var original = create(request("parent"));
+        var before = jdbc.queryForList("SELECT * FROM managed_agent_session");
+        var commands = jdbc.queryForList("SELECT * FROM managed_workspace_create_command");
+        var events = jdbc.queryForList("SELECT * FROM managed_agent_event");
+        assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> store()
+                .insertChildSessionCommand("tenant", original.sessionId(), "child", "digest", "child",
+                        List.of(), null, new StoreModels.SessionLineage(original.sessionId(),
+                                original.sessionId(), "child-run", 1))))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> assertThat(((ApiException) error).getCode())
+                        .isEqualTo("child_parent_unavailable"));
+        assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> store()
+                .replayChildSessionCommand("tenant", original.sessionId(), "child", "digest")))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> assertThat(((ApiException) error).getCode())
+                        .isEqualTo("child_parent_unavailable"));
+        assertThat(jdbc.queryForList("SELECT * FROM managed_agent_session"))
+                .usingRecursiveComparison().isEqualTo(before);
+        assertThat(jdbc.queryForList("SELECT * FROM managed_workspace_create_command"))
+                .usingRecursiveComparison().isEqualTo(commands);
+        assertThat(jdbc.queryForList("SELECT * FROM managed_agent_event"))
+                .usingRecursiveComparison().isEqualTo(events);
+        assertEmpty("managed_agent_turn");
+    }
+
+    @Test
+    void privateCsiParentIsRefusedBeforePublicChildAdmissionOrHarnessLookup() {
+        var original = create(request("parent"));
+        var childStore = mock(AgentStateStore.class);
+        var harness = mock(HarnessConnector.class);
+        when(childStore.requireSession("tenant", original.sessionId()))
+                .thenReturn(store().requireSession("tenant", original.sessionId()));
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(childStore.insertChildSessionCommand(anyString(),
+                anyString(), anyString(),
+                anyString(), anyString(),
+                anyList(), anyString(),
+                any()))
+                .thenReturn(new StoreModels.Admission("child", null, false, false));
+        var service = new ManagedAgentService(childStore,
+                new RequestDigests(),
+                mock(HarnessCoordinator.class),
+                harness, new ManagedWorkspaceRegistry(jdbc));
+        assertThatThrownBy(() -> service.createChildSession("tenant", original.sessionId(), "child-run",
+                "audit", "inspect"))
+                .isInstanceOf(ApiException.class)
+                .satisfies(error -> assertThat(((ApiException) error).getCode())
+                        .isEqualTo("child_parent_unavailable"));
+        verify(harness, never()).isWorkspaceFilesAvailable();
+        verify(childStore, never())
+                .insertChildSessionCommand(anyString(), anyString(),
+                        anyString(), anyString(),
+                        anyString(), anyList(),
+                        anyString(), any());
     }
 
     @Test
@@ -123,8 +193,8 @@ class WorkspaceCsiSessionMainTest {
                 "UPDATE managed_workspace_registry SET config_ref = 'legacy'",
                 "UPDATE managed_workspace_registry SET policy_ref = 'other'",
                 "UPDATE managed_workspace_registry SET state = 'DRAINING'",
-                "UPDATE managed_workspace_access SET can_create = FALSE",
-                "UPDATE managed_workspace_access SET can_read = FALSE",
+                "UPDATE managed_workspace_access SET role = 'READER'",
+                "UPDATE managed_workspace_access SET actor_id = X'6f74686572'",
                 "UPDATE managed_workspace_csi_registration SET registration_revision = 8"};
         for (String change : changes) {
             jdbc.update(change);
@@ -140,7 +210,8 @@ class WorkspaceCsiSessionMainTest {
                     "managed_agent_consumer_progress", "managed_session_create_scope");
             jdbc.update("UPDATE managed_workspace_registry SET storage_id = 'storage', config_ref = ?, policy_ref = ?,"
                     + " state = 'ACTIVE'", CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
-            jdbc.update("UPDATE managed_workspace_access SET can_read = TRUE, can_create = TRUE");
+            jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR', actor_id = ?",
+                    ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
             jdbc.update("UPDATE managed_workspace_csi_registration SET registration_revision = 7");
         }
         var wrongRevision = new WorkspaceCsiSessionMain.Request(registration, "actor", "rejected", "unsupported", null,

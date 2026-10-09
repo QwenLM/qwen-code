@@ -99,6 +99,75 @@ public final class RuntimeBrokerService implements AutoCloseable {
     private final ConcurrentMap<String, CooledObservation>
             unknownLookupCooldowns = new ConcurrentHashMap<>();
 
+    /**
+     * H4b: the live physical Runtime binding of a Harness Session — how
+     * the child result relay and the close cascade confirm the child
+     * Session's Runtime identity and generation. {@code warm()} creates
+     * the binding when the Hosted tool turn is constructed, so it exists
+     * even for a child that finishes without ever acquiring a tool
+     * Session. Only READY rows answer: a drained, lost, recovering or
+     * released binding no longer holds the live Runtime it would pin.
+     * "Latest" is the greatest READY binding id across the whole
+     * traversal — the page a row lands on says nothing, and
+     * {@code generation} is not consulted for the choice.
+     */
+    public RuntimeBindingRecord findLatestBindingByHarnessSession(
+            String tenantId, String harnessSessionId) {
+        String after = null;
+        RuntimeBindingRecord best = null;
+        for (;;) {
+            List<RuntimeBindingRecord> page = bindingRepository
+                    .findByHarnessSession(tenantId, harnessSessionId, after,
+                            100);
+            if (page.isEmpty()) {
+                return best;
+            }
+            for (RuntimeBindingRecord candidate : page) {
+                if (candidate.getState() == RuntimeBindingRecord.State.READY
+                        && (best == null || candidate.getBindingId()
+                                .compareTo(best.getBindingId()) > 0)) {
+                    best = candidate;
+                }
+            }
+            if (page.size() < 100) {
+                return best;
+            }
+            after = page.get(page.size() - 1).getBindingId();
+        }
+    }
+
+    /**
+     * The newest binding row of a Harness Session in ANY state — evidence
+     * reads only: the close cascade's started proof and its repair's
+     * dispatch identity. A RELEASED or LOST row still proves the child
+     * once dispatched (and names the identity that dispatch committed),
+     * while it can never warm a retry, so the repair-for-warmth read
+     * above stays READY-only.
+     */
+    public RuntimeBindingRecord findLatestBindingByHarnessSessionAnyState(
+            String tenantId, String harnessSessionId) {
+        String after = null;
+        RuntimeBindingRecord best = null;
+        for (;;) {
+            List<RuntimeBindingRecord> page = bindingRepository
+                    .findByHarnessSession(tenantId, harnessSessionId, after,
+                            100);
+            if (page.isEmpty()) {
+                return best;
+            }
+            for (RuntimeBindingRecord candidate : page) {
+                if (best == null || candidate.getBindingId()
+                        .compareTo(best.getBindingId()) > 0) {
+                    best = candidate;
+                }
+            }
+            if (page.size() < 100) {
+                return best;
+            }
+            after = page.get(page.size() - 1).getBindingId();
+        }
+    }
+
     public RuntimeBrokerService(HarnessSessionResolver sessionResolver,
             RuntimeProvisioner provisioner, RuntimeTransport transport,
             RuntimeBindingRepository bindingRepository,

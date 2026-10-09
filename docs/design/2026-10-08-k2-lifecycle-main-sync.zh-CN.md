@@ -65,7 +65,39 @@ HTTP journal、tool-turn、环境隔离测试。独立地运行实际 Java 私�
 
 ## 未完成工作
 
-私有文本 attachment 已实现。Native 文件 intent/definition admission、原子
-batch reservation/recovery、文件 grant 执行、聚合 DRAINED/RELEASED、物理
-writers、CSI NodeUnpublish、安全卷复用、公开接线及新的完整验收矩阵仍由
-issue 13395 跟踪。
+私有文本 attachment 和有界有限原生文件执行已实现。真正 cold takeover、全部
+writer 收口、聚合 DRAINED/RELEASED、物理 writers、CSI NodeUnpublish、安全
+卷复用、公开接线及新的完整验收矩阵仍由 issue 13395 跟踪。
+
+## 与 actor role 和 child Session 集成，2026-10-09
+
+原生执行增量 `f252ada3e` 与 main `5ddd43815` 集成。main 已发布 V53
+Workspace role 和 V54 child lineage。全部已发布 migration 字节保持不变；
+只把本 Draft 的 request、first-activation 和 native-authorization SQL 从
+V53/V54/V55 改为 V55/V56/V57，SQL 字节与顺序不变。已经应用更早未发布编号
+的数据库不是自动升级对象，不修复其历史，不回填原始 authority。当前升级检查
+包含 main V53/V54、仅 request 的 V55 和 activation V56，保留旧行、checksum
+和 native grant 的 NULL。
+
+Root Session 创建同时用 main 的同一原始 actor 字节写 creator 与 owner key，
+私有构造时另写 CSI request pin。当前 CSI fixture 使用 main 的
+OPERATOR/READER role 语义；历史 migration fixture 保留旧 schema 字段。
+新的公开 child admission 必须在 Service 的 child/harness 操作前拒绝私有
+CSI parent，并在 Store 锁住原 parent 后、重放或插入前再次拒绝。只复制 profile
+而没有原始 request、Pod 和 reservation 不能构造合法 child。普通 child admission
+及其既有测试保持完整。
+
+保留共享 Hosted turn runner，把 main 的 child funnel 与 queued consumption
+传入普通 tool turn；turn-result 写入成功后，只对 completed turn 刷新 consumed
+child ID。每个 queued ID 只在其 durable consumption 成功后删除。拒绝刷新时
+仅记日志并保留剩余 owed ID，不改变已落定 turn 的结果。私有 CSI 调用者不提供
+child callback。保留普通 child redrive、wake consumption、所选 runtime
+ownership 和全部既有 CSI 拒绝边界。
+
+对精确集成提交验证 build/typecheck/bundle、相关 Hosted/child/HTTP Store
+测试、Broker 与 Agent 测试、fresh/upgrade Flyway、格式和质量检查。独立地先复现
+migration 重号与 private-parent child admission，再验证修复后的拒绝和原 SQL
+守恒。在新的自有 MySQL mixed/export 运行前，让两个 Agent package 内嵌实际
+Broker 字节。此前 f252 producer 结果与五组更早负向运行保留各自源码/产物
+版本，不重新标成集成提交行为。原生 review 仍不可用，保持 Draft/maintainer
+审查要求。

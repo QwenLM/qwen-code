@@ -24,8 +24,8 @@ public final class WorkspaceCsiRuntimeConstructionFixture {
                 + " storage_id, display_name, config_ref, policy_ref, state) VALUES"
                 + " ('tenant', 'workspace', 1, 'storage', 'CSI', ?, ?, 'ACTIVE')",
                 CsiFilesRetirementProfile.CONFIG_REF, CsiFilesRetirementProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                + " VALUES ('tenant', 'workspace', ?, TRUE, TRUE)", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", ManagedWorkspaceRegistry.actorKey("tenant", "actor"));
         var properties = new ManagedAgentProperties();
         properties.setAgentRevision("construction-fixture/1");
         var created = WorkspaceCsiSessionMain.create(jdbc, manager, json, properties,
