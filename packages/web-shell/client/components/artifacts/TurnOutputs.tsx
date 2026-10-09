@@ -705,7 +705,7 @@ function canDownloadArtifact(
 ): artifact is DaemonSessionArtifact & { workspacePath: string } {
   return (
     artifact.storage === 'workspace' &&
-    artifact.status === 'available' &&
+    (artifact.status === 'available' || artifact.status === 'changed') &&
     Boolean(artifact.workspacePath)
   );
 }
