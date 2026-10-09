@@ -2263,6 +2263,127 @@ describe('ShellExecutionService child_process fallback', () => {
     expect(capture.write).toHaveBeenCalledWith('stdout', stdout);
   });
 
+  it('strips an orphan CSI suffix left by a cut ANSI sequence at the tail boundary', async () => {
+    // Force maxBufferedOutputBytes = 4096. Head = 2048, Tail = 2048.
+    // Payload = 4098 bytes. Tail starts at byte 2050 ("31m").
+    const payload = Buffer.concat([
+      Buffer.alloc(2048, 'A'),
+      Buffer.from([0x1b, 0x5b, 0x33, 0x31, 0x6d]), // \x1b[31m
+      Buffer.alloc(2045, 'A'),
+    ]);
+    mockChildProcess.stdout.pause = vi.fn();
+    mockChildProcess.stdout.resume = vi.fn();
+    const handlePromise = ShellExecutionService.execute(
+      'echo',
+      process.cwd(),
+      () => {},
+      new AbortController().signal,
+      false,
+      { maxBufferedOutputBytes: 4096, showColor: false },
+      {
+        rawCapture: {
+          write: async () => {},
+          finish: async () => {},
+          setStarted: () => {},
+          setProcessResult: () => {},
+        },
+      },
+    );
+    await new Promise(process.nextTick);
+    mockChildProcess.stdout?.emit('data', payload);
+    mockChildProcess.emit('exit', 0, null);
+    mockChildProcess.emit('close', 0, null);
+    const result = await (await handlePromise).result;
+    expect(result.output).not.toMatch(/^[0-9;]*m/);
+    expect(result.output).toContain(
+      '[Middle output omitted from this preview; complete bytes are retained in the managed capture.]',
+    );
+    expect(result.output).toContain('A'.repeat(2045));
+  });
+
+  it('drops orhpan UTF-8 continuation bytes when the remainder is all ASCII', async () => {
+    // Force maxBufferedOutputBytes = 4096. Head = 2048, Tail = 2048.
+    // Payload = 4097 bytes. Tail starts at byte 2049 (0x94 0x99).
+    const payload = Buffer.concat([
+      Buffer.alloc(2048, 'A'),
+      Buffer.from([0xe9, 0x94, 0x99]),
+      Buffer.alloc(2046, 'A'),
+    ]);
+    mockChildProcess.stdout.pause = vi.fn();
+    mockChildProcess.stdout.resume = vi.fn();
+    const handlePromise = ShellExecutionService.execute(
+      'echo',
+      process.cwd(),
+      () => {},
+      new AbortController().signal,
+      false,
+      { maxBufferedOutputBytes: 4096, showColor: false },
+      {
+        rawCapture: {
+          write: async () => {},
+          finish: async () => {},
+          setStarted: () => {},
+          setProcessResult: () => {},
+        },
+      },
+    );
+    await new Promise(process.nextTick);
+    mockChildProcess.stdout?.emit('data', payload);
+    mockChildProcess.emit('exit', 0, null);
+    mockChildProcess.emit('close', 0, null);
+    const result = await (await handlePromise).result;
+    expect(result.output).not.toContain('\uFFFD');
+    expect(result.output).toContain('A'.repeat(2046));
+  });
+
+  it('preserve non-UTF_8 leading bytes when the ring starts on them', async () => {
+    // Force maxBufferedOutputBytes = 4096. Head = 2048, Tail = 2048.
+    // Payload = 4097 bytes. Tail starts at byte 2049 (0xA1).
+    const payload = Buffer.concat([
+      Buffer.alloc(2048, 'A'),
+      Buffer.from([0xb0, 0xa1]),
+      Buffer.alloc(2047, 'A'),
+    ]);
+    mockChildProcess.stdout.pause = vi.fn();
+    mockChildProcess.stdout.resume = vi.fn();
+
+    // Mock the encoding to be latin1 so it doesn't try to decode as UTF-8
+    const systemEncoding = await import('../utils/systemEncoding.js');
+    const spy = vi
+      .spyOn(systemEncoding, 'getCachedEncodingForBuffer')
+      .mockReturnValue('latin1');
+
+    const handlePromise = ShellExecutionService.execute(
+      'echo',
+      process.cwd(),
+      () => {},
+      new AbortController().signal,
+      false,
+      { maxBufferedOutputBytes: 4096, showColor: false },
+      {
+        rawCapture: {
+          write: async () => {},
+          finish: async () => {},
+          setStarted: () => {},
+          setProcessResult: () => {},
+        },
+      },
+    );
+    await new Promise(process.nextTick);
+    mockChildProcess.stdout?.emit('data', payload);
+    mockChildProcess.emit('exit', 0, null);
+    mockChildProcess.emit('close', 0, null);
+    const result = await (await handlePromise).result;
+
+    // In latin1, 0xA1 is '¡'. It should NOT be dropped or replaced with U+FFFD.
+    expect(result.output).toContain('¡');
+    expect(result.output).not.toContain('\uFFFD');
+    expect(result.output).toContain('A'.repeat(2047));
+
+    // Restore ONLY this spy so we don't break other tests
+    spy.mockRestore();
+  });
+
   describe('child environment sanitization (#6601)', () => {
     it('strips Qwen-internal daemon secrets from the child_process env while keeping user vars and third-party credentials', async () => {
       setSecretEnv();

@@ -309,18 +309,37 @@ function decodeBufferedOutput(finalBuffer: Buffer): string {
   return new TextDecoder(fallbackEncoding).decode(finalBuffer);
 }
 
+const ORPHAN_CSI_SUFFIX = /^[0-9;]*m/;
+
+function stripOrphanCsiSuffix(text: string): string {
+  if (!text) return text;
+  const match = text.match(ORPHAN_CSI_SUFFIX);
+  return match ? text.slice(match[0].length) : text;
+}
+
 function decodePreviewTail(buffer: Buffer): string {
   let start = 0;
   while (start < buffer.length && start < 3 && (buffer[start] & 0xc0) === 0x80)
     start++;
+
+  if (start === 0) {
+    return decodeBufferedOutput(buffer);
+  }
+
   const aligned = buffer.subarray(start);
-  // A ring can start inside a UTF-8 character; keep legacy bytes unless the
-  // remainder contains a valid multibyte UTF-8 sequence.
-  return decodeBufferedOutput(
-    start > 0 && isUtf8(aligned) && aligned.some((byte) => byte >= 0xc2)
-      ? aligned
-      : buffer,
-  );
+  // A ring can start inside a UTF-8 character. Drop the orphan continuation
+  // bytes ONLY if we are in a UTF-8 context and the aligned remainder is a
+  // valid UTF-8 sequence (decodable without U+FFFD). For non-UTF-8 encodings
+  // (e.g. GBK) keep the legacy full-buffer decode to preserve legitimate
+  // leading bytes.
+  const encoding = getCachedEncodingForBuffer(buffer);
+  const isUtf8path = encoding === 'utf8' || encoding === 'utf-8' || !encoding;
+
+  if (isUtf8path && isUtf8(aligned)) {
+    return decodeBufferedOutput(aligned);
+  }
+
+  return decodeBufferedOutput(buffer);
 }
 
 function appendOutputCaptureLimitNotice(
@@ -1304,10 +1323,14 @@ export class ShellExecutionService {
           const stderrPreview = stderrTail?.read() ?? Buffer.alloc(0);
           const tailPreview = retainedTail();
           const tailText = rawCapture
-            ? stripAnsi(decodePreviewTail(tailPreview)).trim()
+            ? stripOrphanCsiSuffix(
+                stripAnsi(decodePreviewTail(tailPreview)),
+              ).trim()
             : '';
           const stderrText = stderrPreview.length
-            ? stripAnsi(decodePreviewTail(stderrPreview)).trim()
+            ? stripOrphanCsiSuffix(
+                stripAnsi(decodePreviewTail(stderrPreview)),
+              ).trim()
             : '';
           const boundedOutput =
             rawCapture &&
