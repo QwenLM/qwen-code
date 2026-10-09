@@ -859,9 +859,9 @@ export async function evaluateAutoMode(
   // Regex-based hard blocks that run BEFORE the LLM classifier, so API
   // failures or classifier misjudgment cannot allow destructive git/IaC
   // commands through on the denying call. The `blocked:destructive-command`
-  // case below keeps the denial hard until denial tracking reaches the
-  // consecutive-block or session-total cap, where it falls back to manual
-  // approval like the classifier arm. Only applies to shell-like tools.
+  // arm of `applyAutoModeDecision` keeps the denial hard until denial tracking
+  // reaches the consecutive-block or session-total cap, where it falls back to
+  // manual approval like the classifier arm. Only applies to shell-like tools.
   if (SHELL_LIKE_TOOL_NAMES.has(input.ctx.toolName) && input.ctx.command) {
     const command =
       input.ctx.toolName === ToolNames.MONITOR
