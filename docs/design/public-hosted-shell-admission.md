@@ -37,6 +37,12 @@ Profile and approval mode are written in the existing creation transaction.
 They are server decisions, not inputs to the client request digest. Creation
 replay returns the original Session across a deployment flag change.
 
+The V53 actor-role storage merged from main fbde5cf0 initializes the Session's
+creator and owner from the same authenticated actor key in that transaction,
+for Shell and files creation. Shell profile selection preserves both identity
+columns and the upstream role-based grants; this slice adds no handover or
+role-management operation.
+
 With Shell disabled, existing Shell Sessions reject fresh Turns with
 `409 workspace_unavailable`. Authorization still runs first. Both the service
 replay probe and the locked Store command probe precede the new Shell gate;
@@ -104,7 +110,9 @@ Session lifecycle and retains its authorization, attachment and recovery guards.
 Configuration tests cover default-off, missing prerequisites and all approval
 modes. SQL-backed admission tests cover both surfaces, empty/initial creation,
 frozen metadata and profile, flag changes, replay, fresh rejection, ACLs and
-zero lifecycle operations. Connector tests exercise create/load/cached/recovery
+zero lifecycle operations. Empty and initial Shell creation in both approval
+modes, plus flag-off files creation, must persist the exact actor key in both
+creator and owner columns. Connector tests exercise create/load/cached/recovery
 validation with zero Harness calls for invalid modes and file YOLO controls.
 WebShell adapter tests prove disabled sending retains active cancellation.
 Both wire surfaces pin explicit false for flag-off Shell and omission for files

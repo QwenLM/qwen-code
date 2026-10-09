@@ -31,6 +31,10 @@ Session 行为不变。不添加调用者 profile 选择、metadata 覆盖、数
 profile 与审批模式写入已有创建事务。它们是服务端决策，不纳入客户端请求摘要。
 部署开关变化后，创建重放仍返回原 Session。
 
+从 main fbde5cf0 合入的 V53 actor-role 存储在同一事务中，将 Session 的 creator
+与 owner 初始化为同一已认证 actor key，Shell 和 files 创建均如此。选择 Shell
+profile 时保留两个身份列和上游基于 role 的授权；本切片不增加交接或角色管理操作。
+
 关闭 Shell 后，既有 Shell Session 的新 Turn 返回 `409 workspace_unavailable`。
 先执行授权，再进行 Service 重放探测；持有 Session 行锁的 Store 也先探测旧命令，
 再执行 Shell 新准入门禁。原幂等键可以重放，不接受新工作，Store 为最终准入权威。
@@ -85,7 +89,8 @@ files/2 的 L3 支持。Turn 取消与 Session 生命周期分开，保留其授
 
 配置测试覆盖默认关闭、缺失前提及所有审批模式。SQL 准入测试覆盖两个表面、空/带
 输入创建、metadata/profile 冻结、开关变化、重放、新请求拒绝、ACL 及零生命周期
-operation。Connector 覆盖 create/load/缓存/recovery 的校验，无效模式的 Harness
+operation。两种审批模式下的空/带输入 Shell 创建，以及关开关后的 files 创建，
+均须在 creator 和 owner 两列持久化精确 actor key。Connector 覆盖 create/load/缓存/recovery 的校验，无效模式的 Harness
 调用为零，并保留 files YOLO 对照。WebShell adapter 证明禁用发送仍可取消活动回合。
 两种 wire 响应断言关 Shell 时显式 false，files 和非绑定时省略字段。生命周期负例
 先取得 files 成功关闭回执并提供支持关闭的 Runtime，再将持久化 profile 改为 Shell，

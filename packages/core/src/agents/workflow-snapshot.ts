@@ -41,6 +41,11 @@ import {
   isWorkflowSizeWarning,
   type WorkflowSizeWarning,
 } from './runtime/workflow-size.js';
+import {
+  buildWorkflowResultPreview,
+  isWorkflowResultPreview,
+  type WorkflowResultPreview,
+} from './workflow-result-preview.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_SNAPSHOT');
 
@@ -124,6 +129,12 @@ export interface WorkflowSnapshot {
   startTime: number;
   endTime?: number;
   result?: unknown;
+  /**
+   * How a completed run's result read when it settled. `result` is plain
+   * JSON and loses Error, Map, Set, and cyclic values; this does not. Absent
+   * on runs that did not complete and on older snapshots.
+   */
+  resultPreview?: WorkflowResultPreview;
   error?: string;
 }
 
@@ -167,6 +178,9 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
     startTime: task.startTime,
     endTime: task.endTime,
     result: safeResult(task.result),
+    ...(task.status === 'completed'
+      ? { resultPreview: buildWorkflowResultPreview(task.result) }
+      : {}),
     error: task.error,
   };
 }
@@ -618,6 +632,8 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
     isStringArray(value['recentLogs']) &&
     isFiniteNumber(value['startTime']) &&
     (value['endTime'] === undefined || isFiniteNumber(value['endTime'])) &&
+    (value['resultPreview'] === undefined ||
+      isWorkflowResultPreview(value['resultPreview'])) &&
     isOptionalString(value['error'])
   );
 }

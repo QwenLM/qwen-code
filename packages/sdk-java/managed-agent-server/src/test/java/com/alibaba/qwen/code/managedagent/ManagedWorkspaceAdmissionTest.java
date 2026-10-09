@@ -148,7 +148,11 @@ class ManagedWorkspaceAdmissionTest {
         var initial = transaction.execute(status -> enabled.insertWorkspaceSessionCommand(tenant,
                 "actor-a", "initial-shell", digest, "qwen-code", null, null,
                 List.of(Map.of("type", "text", "text", "initial")), digest, selection));
+        byte[] actorKey = "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8);
         for (String id : List.of(session, initial.sessionId())) {
+            assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?"
+                    + " AND creator_actor_key = ? AND owner_actor_key = ?", Integer.class,
+                    tenant, id, actorKey, actorKey)).isEqualTo(1);
             assertThat(enabled.requireSession(tenant, id).toolProfile()).isEqualTo("hosted-workspace-shell/1");
             assertThat(enabled.requireSession(tenant, id).approvalMode()).isEqualTo(mode);
         }
@@ -208,6 +212,9 @@ class ManagedWorkspaceAdmissionTest {
                 Integer.class, tenant, session)).isEqualTo(2);
         String files = transaction.execute(status -> disabled.insertWorkspaceSessionCommand(tenant,
                 "actor-a", "create-files", digest, "qwen-code", null, null, List.of(), null, selection)).sessionId();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ? AND session_id = ?"
+                + " AND creator_actor_key = ? AND owner_actor_key = ?", Integer.class,
+                tenant, files, actorKey, actorKey)).isEqualTo(1);
         assertThat(disabled.requireSession(tenant, files).toolProfile()).isEqualTo("hosted-workspace-files/1");
         assertThat(stopped.getPublicSession(tenant, "actor-a", files).capabilities().foregroundShell()).isNull();
         var fileTurn = transaction.execute(status -> stopped.submitTurn(tenant, "actor-a", "files-turn", files, input));
@@ -401,7 +408,7 @@ class ManagedWorkspaceAdmissionTest {
                         .principal(actor(tenant, "actor-a")))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.default_workspace").value((Object) null));
-        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE"
+        jdbc.update("DELETE FROM managed_workspace_access"
                         + " WHERE tenant_id = ? AND workspace_id = ?",
                 tenant, "b-visible");
         mvc.perform(get("/v1/agents/workspaces/b-visible")
@@ -571,7 +578,7 @@ class ManagedWorkspaceAdmissionTest {
                         + " managed_agent_command WHERE tenant_id = ?"
                         + " AND session_id = ?", Integer.class, tenant,
                 sessionId)).isZero();
-        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE"
+        jdbc.update("DELETE FROM managed_workspace_access"
                         + " WHERE tenant_id = ? AND workspace_id = ?"
                         + " AND actor_id = ?", tenant, "ws-a",
                 "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -1289,11 +1296,13 @@ class ManagedWorkspaceAdmissionTest {
         assertCreateError(tenant, selection, "workspace_not_found");
         grant(tenant, "ws-a", "actor-a", false);
         assertCreateError(tenant, selection, "workspace_forbidden");
-        jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE"
+        jdbc.update("DELETE FROM managed_workspace_access"
                 + " WHERE tenant_id = ?", tenant);
         assertCreateError(tenant, selection, "workspace_not_found");
-        jdbc.update("UPDATE managed_workspace_access SET can_read = TRUE, can_create = TRUE"
-                + " WHERE tenant_id = ?", tenant);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
+                + " workspace_id, actor_id, role) VALUES (?, 'ws-a', ?,"
+                + " 'OPERATOR')", tenant,
+                "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         jdbc.update("UPDATE managed_workspace_registry SET state = 'REMOVED'"
                 + " WHERE tenant_id = ?", tenant);
         assertCreateError(tenant, selection, "workspace_unavailable");
@@ -1314,7 +1323,7 @@ class ManagedWorkspaceAdmissionTest {
         assertThat(optedOut.getWebShellSession(tenant, "actor-a", sessionId)
                 .capabilities().workspaceTurns()).isFalse();
 
-        jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE"
+        jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
                 + " WHERE tenant_id = ?", tenant);
         jdbc.update("UPDATE managed_workspace_registry SET state = 'DRAINING'"
                 + " WHERE tenant_id = ?", tenant);
@@ -1619,11 +1628,11 @@ class ManagedWorkspaceAdmissionTest {
     private void grant(String tenant, String workspaceId, String actorId,
             boolean canCreate) {
         jdbc.update("INSERT INTO managed_workspace_access (tenant_id,"
-                        + " workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, ?, ?, TRUE, ?)",
+                        + " workspace_id, actor_id, role)"
+                        + " VALUES (?, ?, ?, ?)",
                 tenant, workspaceId,
                 actorId.getBytes(java.nio.charset.StandardCharsets.UTF_8),
-                canCreate);
+                canCreate ? "OPERATOR" : "READER");
     }
 
     private static AuthenticatedTenantActor actor(String tenant,

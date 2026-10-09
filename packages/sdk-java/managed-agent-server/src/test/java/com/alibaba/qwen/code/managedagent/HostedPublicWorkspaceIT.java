@@ -745,16 +745,17 @@ class HostedPublicWorkspaceIT {
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename, "rename-" + workspace,
                     "actor", 200).path("metadata").path("title").asText()).isEqualTo("Renamed " + workspace);
 
-            // A creator whose can_create grant is revoked, with the Workspace draining, keeps
-            // read access but loses admission of new work: submit and rename answer
-            // workspace_unavailable, and no PENDING command row is left behind. Cancelling
-            // only aborts work already running, so a Turn started before the revocation is
-            // still cancelled and stops without running another tool.
+            // A creator whose grant drops to READER, with the Workspace draining,
+            // keeps read access but loses admission of new work: submit and rename
+            // answer workspace_unavailable, and no PENDING command row is left
+            // behind. Cancelling only aborts work already running, so a Turn
+            // started before the revocation is still cancelled and stops without
+            // running another tool.
             int beforeRevokedCancel = modelRequests.size();
             String revokedTurn = request("POST", "/v1/agents/sessions/" + session + "/events", hold,
                     "hold-revoked-" + workspace, "actor", 202).path("turn_id").asText();
             await().atMost(Duration.ofSeconds(35)).until(() -> modelRequests.size() > beforeRevokedCancel);
-            jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE"
+            jdbc.update("UPDATE managed_workspace_access SET role = 'READER'"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
             jdbc.update("UPDATE managed_workspace_registry SET state = 'DRAINING'"
@@ -779,16 +780,16 @@ class HostedPublicWorkspaceIT {
                     Long.class, session)).isEqualTo(executions * 2);
             assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_command"
                     + " WHERE tenant_id = ? AND command_status = 'PENDING'", Integer.class, tenant)).isZero();
-            jdbc.update("UPDATE managed_workspace_access SET can_create = TRUE"
+            jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR'"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
             jdbc.update("UPDATE managed_workspace_registry SET state = 'ACTIVE'"
                     + " WHERE tenant_id = ? AND workspace_id = ?", tenant, workspace);
 
-            // With the running Turn settled, revoking the creator's read grant hides the
+            // With the running Turn settled, revoking the creator's grant hides the
             // bound Session from every later-Turn path: submit, cancel and rename all fall
             // through to the legacy gate and answer session_not_found.
-            jdbc.update("UPDATE managed_workspace_access SET can_read = FALSE"
+            jdbc.update("DELETE FROM managed_workspace_access"
                     + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
             assertThat(request("POST", "/v1/agents/sessions/" + session + "/events", later,
@@ -800,8 +801,8 @@ class HostedPublicWorkspaceIT {
             assertThat(request("PATCH", "/v1/agents/sessions/" + session, rename,
                     "revoked-rename-" + workspace, "actor", 404).path("error").path("code").asText())
                     .isEqualTo("session_not_found");
-            jdbc.update("UPDATE managed_workspace_access SET can_read = TRUE"
-                    + " WHERE tenant_id = ? AND workspace_id = ? AND actor_id = ?",
+            jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                    + " VALUES (?, ?, ?, 'OPERATOR')",
                     tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
 
             String registeredStorage = jdbc.queryForObject("SELECT storage_id FROM managed_workspace_registry"
@@ -849,9 +850,9 @@ class HostedPublicWorkspaceIT {
                 .timeout(Duration.ofSeconds(10)).header("X-Qwen-Tenant-Id", "other-tenant")
                 .header("X-G0-Fixture-Actor", "actor").build(), HttpResponse.BodyHandlers.ofString());
         assertThat(crossTenant.statusCode()).isEqualTo(403);
-        jdbc.update("UPDATE managed_workspace_access SET can_create = FALSE WHERE tenant_id = ?", tenant);
+        jdbc.update("UPDATE managed_workspace_access SET role = 'READER' WHERE tenant_id = ?", tenant);
         request("POST", "/v1/agents/sessions", denied, "read-only", "actor", 403);
-        jdbc.update("UPDATE managed_workspace_access SET can_create = TRUE WHERE tenant_id = ?", tenant);
+        jdbc.update("UPDATE managed_workspace_access SET role = 'OPERATOR' WHERE tenant_id = ?", tenant);
         jdbc.update("UPDATE managed_workspace_registry SET config_ref = 'unsupported' WHERE tenant_id = ?", tenant);
         assertUnavailable(request("POST", "/v1/agents/sessions", denied, "unsupported", "actor", 409));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM managed_agent_session WHERE tenant_id = ?",
@@ -926,13 +927,13 @@ class HostedPublicWorkspaceIT {
         jdbc.update("INSERT INTO managed_workspace_registry (tenant_id, workspace_id, workspace_generation,"
                         + " storage_id, display_name, config_ref, policy_ref, state) VALUES (?, ?, 1, ?, 'G0', ?, ?, 'ACTIVE')",
                 tenant, workspace, storage, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, ?, ?, TRUE, TRUE)", tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                        + " VALUES (?, ?, ?, 'OPERATOR')", tenant, workspace, "actor".getBytes(StandardCharsets.UTF_8));
         // The reader grant exists in both runs so the later-Turn block can also run under
         // approval-mode=default without colliding with the access table's primary key.
-        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, can_read, can_create)"
-                        + " VALUES (?, ?, ?, TRUE, ?)", tenant, workspace, "reader".getBytes(StandardCharsets.UTF_8),
-                !approvals);
+        jdbc.update("INSERT INTO managed_workspace_access (tenant_id, workspace_id, actor_id, role)"
+                        + " VALUES (?, ?, ?, ?)", tenant, workspace, "reader".getBytes(StandardCharsets.UTF_8),
+                !approvals ? "OPERATOR" : "READER");
     }
 
     private void answerActions(String session, boolean web) throws Exception {
