@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.OperationTarget;
+import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.store.StoreModels.SessionRecord;
@@ -281,6 +282,16 @@ public interface AgentStateStore {
             List<String> sessionIds);
 
     ReplayWindow findReplayWindow(String tenantId, String sessionId);
+
+    /** The Sessions whose Snapshot covers more than their replay floor. */
+    List<ReplayFloorTarget> findReplayFloorTargets(int limit);
+
+    /**
+     * Raises the Session's replay floor, never above the Snapshot's covered
+     * sequence, so a client told to resync can resume from the Snapshot.
+     */
+    ReplayWindow advanceReplayFloor(String tenantId, String sessionId,
+            long floorSequence);
 
     List<MaterializationTarget> findMaterializationTargets(int limit);
 

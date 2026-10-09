@@ -277,6 +277,7 @@ import {
   getFileChangesByTurn,
   getScheduledTasksByTurn,
 } from './components/artifacts/turnOutputSelectors';
+import { artifactDisplayName } from './components/artifacts/artifactUtils';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
 import { usePrefersReducedMotion } from './hooks/usePrefersReducedMotion';
 import {
@@ -5633,7 +5634,7 @@ export function App({
         id: `artifact:${artifactId}`,
         kind: 'artifact',
         artifactId,
-        title: artifact?.title ?? 'Artifact',
+        title: artifact ? artifactDisplayName(artifact) : 'Artifact',
         ...(connection.workspaceCwd
           ? { workspaceCwd: connection.workspaceCwd }
           : {}),
