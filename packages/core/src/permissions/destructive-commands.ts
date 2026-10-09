@@ -11,7 +11,9 @@
  * provides deterministic regex-based blocking that cannot be bypassed by
  * classifier failures on the denying call itself: the block is hard until
  * denial tracking reaches the consecutive-block or session-total cap, at which
- * point `applyAutoModeDecision` falls back to manual approval instead.
+ * point `applyAutoModeDecision` escalates to a confirmation only a human can
+ * give — it marks the escalation `requiresHumanDecision`, so a
+ * `PermissionRequest` hook returning `allow` cannot waive it.
  *
  * Only applies in AUTO mode — YOLO mode is an explicit opt-out of all guards.
  */
@@ -185,7 +187,7 @@ export function clearSessionCommits(): void {
  * guard. Runs before the L5.3 classifier — failures here are hard blocks
  * regardless of classifier availability, until denial tracking reaches the
  * consecutive-block or session-total cap; at a cap `applyAutoModeDecision`
- * falls back to manual approval instead.
+ * escalates to a human-only confirmation instead (`requiresHumanDecision`).
  *
  * @param command - The raw shell command string
  * @param userPrompt - The user's most recent prompt text

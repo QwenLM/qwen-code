@@ -5495,6 +5495,51 @@ describe('CoreToolScheduler', () => {
     expect(setAutoModeDenialState).toHaveBeenCalledWith(denialState());
     expect(execute).toHaveBeenCalledOnce();
   });
+
+  it('does not let a PermissionRequest hook allow waive a destructive-command escalation', async () => {
+    // Counterpart to the test above. The escalation shares its reason code with
+    // the classifier arm, so without `requiresHumanDecision` this hook allow
+    // would schedule a command the deterministic guard classified as
+    // work-destroying, with no human in the loop.
+    const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+    const execute = vi.fn().mockResolvedValue(textResult('executed'));
+    const harness = autoScheduler(
+      askingTool({
+        kind: Kind.Execute,
+        getConfirmationDetails: vi
+          .fn()
+          .mockResolvedValue(
+            execDetails('Run command', 'git reset --hard', 'git', onConfirmSpy),
+          ),
+        execute,
+      }),
+      {
+        messageBus: permissionRequestHookBus({ behavior: 'allow' }),
+        disableHooks: false,
+        // One below maxTotalDenials, so this denial reaches the session cap and
+        // the destructive arm escalates instead of hard-blocking.
+        autoModeDenialState: denialState({ totalBlock: 19 }),
+        setAutoModeDenialState: vi.fn(),
+      },
+    );
+
+    await harness.scheduler.schedule(
+      shellRequest('destructive-hook-waiver', 'git reset --hard'),
+      new AbortController().signal,
+    );
+
+    // The hook fired and answered `allow`, but the call must still be waiting
+    // on a human rather than scheduled. `reportedCalls` flattens every snapshot
+    // ever emitted, and this test schedules exactly one call, so the last
+    // snapshot is that call's current state.
+    await vi.waitFor(() =>
+      expect(reportedCalls(harness.onToolCallsUpdate).at(-1)?.status).toBe(
+        'awaiting_approval',
+      ),
+    );
+    expect(onConfirmSpy).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
   /** Read-kind MockTools by name; each runs a mock or resolves a result. */
   function readToolMap(
     executes: Record<string, Mock | ToolResult>,

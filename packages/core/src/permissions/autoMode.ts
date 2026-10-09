@@ -548,6 +548,14 @@ export type AutoModeOutcome =
       kind: 'fallback';
       reason: FallbackToAskReason;
       message?: string;
+      /**
+       * Set when a deterministic security floor escalated rather than the
+       * classifier. The confirmation must be given by a human, so a
+       * `PermissionRequest` hook `allow` must not waive it — `hideAlwaysAllow`
+       * is not enough, since that suppresses persisted allow rules rather than
+       * programmatic approval.
+       */
+      requiresHumanDecision?: boolean;
     };
 
 /** Stable identity for an AUTO-mode action within its filesystem context. */
@@ -614,6 +622,11 @@ export function applyAutoModeDecision(
             fallback.reason,
             sanitizedReason,
           ),
+          // This arm is the deterministic floor the guard exists for, so the
+          // escalation it produces is the one a hook must not be able to
+          // waive: the reason code alone (`consecutive_block`/`total_denial`)
+          // is shared with the classifier arm and cannot distinguish them.
+          requiresHumanDecision: true,
         };
       }
       config.setAutoModeDenialState(blockedState);
@@ -860,8 +873,10 @@ export async function evaluateAutoMode(
   // failures or classifier misjudgment cannot allow destructive git/IaC
   // commands through on the denying call. The `blocked:destructive-command`
   // arm of `applyAutoModeDecision` keeps the denial hard until denial tracking
-  // reaches the consecutive-block or session-total cap, where it falls back to
-  // manual approval like the classifier arm. Only applies to shell-like tools.
+  // reaches the consecutive-block or session-total cap, where it escalates to a
+  // confirmation only a human can give: unlike the classifier arm, it sets
+  // `requiresHumanDecision`, so a `PermissionRequest` hook returning `allow`
+  // cannot waive it. Only applies to shell-like tools.
   if (SHELL_LIKE_TOOL_NAMES.has(input.ctx.toolName) && input.ctx.command) {
     const command =
       input.ctx.toolName === ToolNames.MONITOR

@@ -3923,6 +3923,12 @@ export class CoreToolScheduler {
           // fallback state — otherwise every trivially safe tool would
           // force manual approval until the user toggles modes.
           let autoModeFallback: AutoModeFallbackConfirmation | undefined;
+          // Set when the fallback came from the deterministic destructive
+          // guard rather than the classifier. Tracked separately from
+          // `autoModeFallback` because that record is only built when the
+          // outcome carries a message, and because its `reason` is shared with
+          // the classifier escalation.
+          let autoModeFallbackRequiresHuman = false;
           if (
             !requiresUserInteraction &&
             !preToolUseAsk &&
@@ -4036,6 +4042,8 @@ export class CoreToolScheduler {
                 // pending dialog tells the user what's being asked;
                 // operators see recovery fallbacks in the debug log. A
                 // pmForcedAsk fallback isn't an audit-worthy event.
+                autoModeFallbackRequiresHuman =
+                  outcome.requiresHumanDecision === true;
                 if (
                   outcome.message &&
                   (isDenialFallbackReason(outcome.reason) ||
@@ -4297,12 +4305,14 @@ export class CoreToolScheduler {
               }
 
               // A deny always applies. An allow never replaces a confirmation
-              // the user must give (an interactive tool or a PreToolUse
-              // 'ask'); under an 'ask' it only has a replacement checked,
-              // which the user then confirms.
+              // the user must give (an interactive tool, a PreToolUse 'ask', or
+              // an escalation from the deterministic destructive guard); under
+              // an 'ask' it only has a replacement checked, which the user then
+              // confirms.
               const allowApplies =
                 hookResult.shouldAllow === true &&
                 !requiresUserInteraction &&
+                !autoModeFallbackRequiresHuman &&
                 (!preToolUseAsk ||
                   (hookResult.updatedInput !== undefined &&
                     planShellDecision.classification === 'not-applicable'));

@@ -1551,6 +1551,36 @@ describe('applyAutoModeDecision — blocked:destructive-command escalation', () 
     expect(setAutoModeDenialState).toHaveBeenCalledWith(counters(1, 0, 20, 0));
   });
 
+  it('marks the escalation as one a PermissionRequest hook cannot waive', () => {
+    // Both caps share their reason code with the classifier arm, and
+    // `hideAlwaysAllow` only suppresses persisted allow rules — so without an
+    // explicit marker a `PermissionRequest` hook returning `allow` could
+    // schedule a command this deterministic guard classified as
+    // work-destroying, with no human involved.
+    for (const state of [counters(2, 0, 2, 0), counters(0, 0, 19, 0)]) {
+      const { result } = apply(destructive(), state, fingerprint);
+      expect(result.kind).toBe('fallback');
+      if (result.kind === 'fallback') {
+        expect(result.requiresHumanDecision).toBe(true);
+      }
+    }
+  });
+
+  it('leaves the classifier cap fallback hook-waivable', () => {
+    // Contrast for the marker above: only the deterministic guard's escalation
+    // is human-only. The classifier arm reaches the same two reason codes, and
+    // a hook `allow` is still permitted to waive it — see coreToolScheduler's
+    // 'resets denial counters when PermissionRequest hook approves a
+    // denialTracking fallback prompt'.
+    for (const state of [counters(2, 0, 2, 0), counters(0, 0, 19, 0)]) {
+      const { result } = apply(verdict(), state, fingerprint);
+      expect(result.kind).toBe('fallback');
+      if (result.kind === 'fallback') {
+        expect(result.requiresHumanDecision).toBeUndefined();
+      }
+    }
+  });
+
   it('consumes the pending retry once it escalates', () => {
     // Mirrors the classifier path: the one-shot retry is consumed in the same
     // call that falls back, so it cannot fire twice.
