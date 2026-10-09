@@ -54,7 +54,66 @@ const mocks = vi.hoisted(() => ({
   runWorkspaceRecoveryWorker: vi.fn(),
   runSessionSendMcp: vi.fn(),
   runManagedRuntimeAttestationWorker: vi.fn(),
+  validateModsHandler: vi.fn(),
 }));
+
+vi.mock('./commands/extensions/validate-mods.js', () => ({
+  validateModsCommand: {
+    command: 'validate-mods <path>',
+    builder: (parser: Argv) => parser.option('json', { type: 'boolean' }),
+    handler: mocks.validateModsHandler,
+  },
+}));
+
+describe('Mod validation bootstrap', () => {
+  it('routes explicit local validation before model/settings startup', async () => {
+    vi.clearAllMocks();
+    expect(
+      resolveBootstrapRoute([
+        'extensions',
+        'validate-mods',
+        '/tmp/plugin',
+        '--json',
+      ]),
+    ).toBe('validate-mods');
+    await runCliEntry(['extensions', 'validate-mods', '/tmp/plugin', '--json']);
+    expect(mocks.validateModsHandler).toHaveBeenCalledOnce();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['extensions', 'validate-mods'],
+    ['extensions', 'validate-mods', '/tmp/plugin', '--bad'],
+    ['extensions', 'validate-mods', '/tmp/plugin', 'extra'],
+    ['--debug', 'extensions', 'validate-mods'],
+    ['extensions', '--debug', 'validate-mods'],
+  ])('stops usage failures before validation: %s', async (...args) => {
+    vi.clearAllMocks();
+    await runCliEntry(args);
+    expect(process.exitCode).toBe(2);
+    expect(mocks.validateModsHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+    process.exitCode = 0;
+  });
+  it('keeps global option values out of Mod command detection', () => {
+    expect(
+      resolveBootstrapRoute([
+        '--model',
+        'extensions',
+        'validate-mods',
+        '/tmp/plugin',
+      ]),
+    ).toBe('default');
+    expect(
+      resolveBootstrapRoute([
+        '--proxy',
+        'http://localhost',
+        'extensions',
+        'validate-mods',
+        '/tmp/plugin',
+      ]),
+    ).toBe('validate-mods');
+  });
+});
 
 vi.mock('./commands/agents/session-send-mcp-server.js', () => ({
   runSessionSendMcp: mocks.runSessionSendMcp,

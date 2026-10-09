@@ -2372,6 +2372,16 @@ describe('extension tests', () => {
   });
 
   describe('refreshCatalogSnapshot', () => {
+    it('does not discover Mod declarations during catalog loads', async () => {
+      const dir = addExt({ name: 'catalog-mod' });
+      writeTree(dir, { 'hooks/hooks.json': { modules: ['./missing.mjs'] } });
+      const manager = createExtensionManager();
+      const catalog = await manager.refreshCatalogSnapshot();
+      expect(catalog.extensions[0].mod).toBeUndefined();
+      expect(manager.getLoadedExtensions()).toEqual([]);
+      await manager.refreshCache();
+      expect(manager.getLoadedExtensions()[0].mod?.discovery).toBe('invalid');
+    });
     it('loads manifest identity fields without subresources', async () => {
       addExt({
         name: 'qwen-ext',
@@ -3913,6 +3923,89 @@ describe('extension tests', () => {
       ).toBe(command);
     }
     const dirOf = (name: string) => path.join(userExtensionsDir, name);
+
+    it('does not create classic hooks for a module-only file', async () => {
+      const extensions = await loadHooks(
+        'mod-only',
+        {},
+        {
+          'hooks/hooks.json': { modules: ['./register.mjs'] },
+          'hooks/register.mjs': 'export function register(on) {}',
+        },
+      );
+      expect(extensions[0].mod?.discovery).toBe('declared');
+      expect(extensions[0].hooks).toBeUndefined();
+    });
+
+    it('discovers default modules alongside inline classic hooks without hydrating options', async () => {
+      const rawDefault = '${HOME}/${workspacePath}';
+      const extensions = await loadHooks(
+        'mod-inline',
+        {
+          hooks: pre('inline', 'echo inline'),
+          userConfig: {
+            value: {
+              type: 'string',
+              title: 'Value',
+              description: 'Value',
+              default: rawDefault,
+            },
+          },
+        },
+        {
+          'hooks/hooks.json': {
+            modules: ['./register.mjs'],
+            description: 'module metadata',
+          },
+          'hooks/register.mjs':
+            'export function register(on) { throw new Error("must not execute") }',
+        },
+      );
+      expectHook(extensions, 'PreToolUse', 'echo inline');
+      expect(extensions[0].mod).toMatchObject({
+        discovery: 'declared',
+        runtime: 'unavailable',
+      });
+      expect(extensions[0].config.userConfig).toMatchObject({
+        value: { default: rawDefault },
+      });
+      expect(Object.keys(extensions[0].hooks!)).toEqual(['PreToolUse']);
+    });
+
+    it.each([false, true])(
+      'filters Mod metadata from %s wrapped hooks without reading module source',
+      async (wrapped) => {
+        const events = pre('classic', 'echo classic');
+        const extensions = await loadHooks(
+          'mod-mixed',
+          {},
+          {
+            'hooks/hooks.json': {
+              modules: ['./missing.mjs'],
+              description: 'metadata',
+              ...(wrapped ? { hooks: events } : events),
+            },
+          },
+        );
+        expectHook(extensions, 'PreToolUse', 'echo classic');
+        expect(Object.keys(extensions[0].hooks!)).toEqual(['PreToolUse']);
+        expect(extensions[0].mod?.discovery).toBe('invalid');
+      },
+    );
+
+    it('keeps valid classic hooks when Mod configuration is invalid', async () => {
+      const extensions = await loadHooks(
+        'bad-mod',
+        {
+          hooks: pre('classic', 'echo classic'),
+          userConfig: { broken: { default: 'secret' } },
+        },
+        { 'hooks/hooks.json': { modules: [] } },
+      );
+      expectHook(extensions, 'PreToolUse', 'echo classic');
+      expect(extensions[0].mod?.discovery).toBe('invalid');
+      expect(JSON.stringify(extensions[0].mod)).not.toContain('secret');
+    });
 
     it('should load hooks from qwen-extension.json', async () => {
       const extensions = await loadHooks('hooks-extension', {

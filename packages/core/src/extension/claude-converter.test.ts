@@ -31,6 +31,8 @@ import type { SubagentError } from '../subagents/types.js';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { loadExtensionWorkflows } from '../agents/runtime/workflow-extension.js';
+import { discoverMod } from '../mods/mod-discovery.js';
+import { validateMods } from '../mods/mod-validation.js';
 
 // The git-subdir source clones a repo; stub the network clone so the security
 // guards around the cloned subdirectory can be exercised against a real fs.
@@ -52,6 +54,65 @@ function writeTree(root: string, files: Record<string, string>): void {
     fs.writeFileSync(file, body, 'utf-8');
   }
 }
+
+describe('Mod declaration conversion', () => {
+  it('preserves raw declarations and installed relative modules after source removal', async () => {
+    const source = fs.mkdtempSync(path.join(os.tmpdir(), 'mod-source-'));
+    const installed = fs.mkdtempSync(path.join(os.tmpdir(), 'mod-installed-'));
+    tempDirs.push(source, installed);
+    const userConfig = {
+      secret: {
+        type: 'string',
+        title: 'Secret',
+        description: 'Secret value',
+        sensitive: true,
+        default: '${HOME}/${workspacePath}',
+      },
+    };
+    writeTree(source, {
+      '.claude-plugin/plugin.json': JSON.stringify({
+        name: 'mod-conversion',
+        version: '1.0.0',
+        hooks: './hooks/hooks.json',
+        userConfig,
+        types: './types/self.d.ts',
+        dependencies: ['other-plugin'],
+      }),
+      'hooks/hooks.json': JSON.stringify({ modules: ['./register.mjs'] }),
+      'hooks/register.mjs':
+        "import './helper.mjs'; export function register(on) {}",
+      'hooks/helper.mjs': 'export const value = 1;',
+      'types/self.d.ts': 'export interface Options { secret: string }',
+    });
+    const result = await convertClaudePluginStandalone(source);
+    tempDirs.push(result.convertedDir);
+    fs.cpSync(result.convertedDir, installed, { recursive: true });
+    fs.rmSync(source, { recursive: true, force: true });
+    fs.rmSync(result.convertedDir, { recursive: true, force: true });
+    const config = JSON.parse(
+      fs.readFileSync(path.join(installed, 'qwen-extension.json'), 'utf8'),
+    );
+    expect(config).toMatchObject({
+      userConfig,
+      types: './types/self.d.ts',
+      dependencies: ['other-plugin'],
+      hooks: './hooks/hooks.json',
+    });
+    const declaration = await discoverMod(installed);
+    expect(declaration.discovery).toBe('declared');
+    expect(declaration.entry).toBe('hooks/register.mjs');
+    expect(
+      fs.readFileSync(path.join(installed, declaration.entry!), 'utf8'),
+    ).toContain('./helper.mjs');
+    const validation = await validateMods(installed);
+    expect(validation.static.status).toBe('valid');
+    expect(validation.files).toEqual([
+      'hooks/helper.mjs',
+      'hooks/register.mjs',
+      'types/self.d.ts',
+    ]);
+  });
+});
 
 // Every temp dir a test creates (fixtures, converted output, host "secrets")
 // is registered here and removed after that test.
@@ -665,11 +726,14 @@ describe('convertClaudePluginPackage', () => {
     );
 
     expect(result.config.hooks).toBeDefined();
-    expect(result.config.hooks!['PostToolUse']).toHaveLength(1);
+    const hooks = result.config.hooks;
+    if (!hooks || typeof hooks === 'string') {
+      throw new Error('Expected converted inline classic hooks.');
+    }
+    expect(hooks['PostToolUse']).toHaveLength(1);
     // The plugin-root variable is substituted.
     expect(
-      (result.config.hooks!['PostToolUse']![0].hooks![0] as { command: string })
-        .command,
+      (hooks['PostToolUse']![0].hooks![0] as { command: string }).command,
     ).toBe(`${pluginSourceDir}/scripts/post-install.sh`);
   });
 

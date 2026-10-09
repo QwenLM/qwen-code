@@ -40,6 +40,7 @@ initCpuProfiler();
 type BootstrapRoute =
   | 'serve'
   | 'mcp'
+  | 'validate-mods'
   | 'managed-runtime-worker'
   | 'session-send-mcp'
   | 'help'
@@ -384,6 +385,9 @@ export function resolveBootstrapRoute(
   }
 
   const firstArg = argv[0];
+  if (modValidationCommandIndex(argv) !== undefined) {
+    return 'validate-mods';
+  }
   if (firstArg === 'serve') {
     return 'serve';
   }
@@ -403,6 +407,27 @@ export function resolveBootstrapRoute(
   }
 
   return 'default';
+}
+
+function modValidationCommandIndex(
+  argv: readonly string[],
+): number | undefined {
+  let extensionIndex: number | undefined;
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index]!;
+    if (arg === '--') return undefined;
+    if (arg.startsWith('-')) {
+      index = skipOptionValues(argv, index);
+      continue;
+    }
+    if (extensionIndex === undefined) {
+      if (arg !== 'extensions') return undefined;
+      extensionIndex = index;
+    } else {
+      return arg === 'validate-mods' ? extensionIndex : undefined;
+    }
+  }
+  return undefined;
 }
 
 async function printTopLevelHelp(): Promise<void> {
@@ -471,6 +496,48 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
   }
 
   await parseYargsCommand(parser, argv);
+}
+
+async function runValidateModsFastPath(argv: readonly string[]): Promise<void> {
+  const usageFailure = new Error('Invalid Mod validation arguments.');
+  const [
+    { default: yargsInstance },
+    { validateModsCommand },
+    { stripAnsiAndControl },
+  ] = await Promise.all([
+    import('yargs'),
+    import('./commands/extensions/validate-mods.js'),
+    import('@qwen-code/qwen-code-core/utils/textUtils.js'),
+  ]);
+  const parser = yargsInstance([])
+    .scriptName('qwen extensions')
+    .command(validateModsCommand)
+    .version(false)
+    .help()
+    .strict()
+    .demandCommand(1)
+    .exitProcess(false)
+    .fail((message, error) => {
+      writeStderrLine(
+        stripAnsiAndControl(
+          message || error?.message || 'Invalid validation arguments.',
+        ),
+      );
+      process.exitCode = 2;
+      throw usageFailure;
+    });
+  for (const [option, config] of TOP_LEVEL_HELP_OPTIONS) {
+    parser.option(option, config);
+  }
+  const index = modValidationCommandIndex(argv)!;
+  try {
+    await parser.parseAsync([
+      ...argv.slice(0, index),
+      ...argv.slice(index + 1),
+    ]);
+  } catch (error) {
+    if (error !== usageFailure) throw error;
+  }
 }
 
 async function parseYargsHelp(
@@ -580,6 +647,9 @@ export async function runCliEntry(
     }
   } else if (route === 'mcp') {
     await runMcpFastPath(argv);
+    return;
+  } else if (route === 'validate-mods') {
+    await runValidateModsFastPath(argv);
     return;
   } else if (route === 'managed-runtime-worker') {
     const containerBoot =

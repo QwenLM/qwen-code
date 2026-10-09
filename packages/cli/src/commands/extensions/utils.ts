@@ -114,6 +114,18 @@ export function extensionToOutputString(
   }
   output += `\n ${t('Enabled (User):')} ${userEnabled}`;
   output += `\n ${t('Enabled (Workspace):')} ${workspaceEnabled}`;
+  if (extension.mod) {
+    output +=
+      extension.mod.discovery === 'invalid'
+        ? `\n Mod: invalid declaration (runtime ${extension.mod.runtime})`
+        : `\n Mod: declared; runtime ${extension.mod.runtime}`;
+    const errors = extension.mod.diagnostics.filter(
+      (diagnostic) => diagnostic.severity === 'error',
+    );
+    if (errors.length > 0) {
+      output += `\n Mod diagnostics: ${[...new Set(errors.map((diagnostic) => diagnostic.code))].join(', ')}`;
+    }
+  }
   if (extension.contextFiles.length > 0) {
     output += `\n ${t('Context files:')}`;
     extension.contextFiles.forEach((contextFile) => {

@@ -876,6 +876,9 @@ importers:
       '@anthropic-ai/sdk':
         specifier: ^0.36.1
         version: 0.36.3(encoding@0.1.13)
+      '@babel/parser':
+        specifier: 7.29.8
+        version: 7.29.8
       '@google/genai':
         specifier: 2.6.0
         version: 2.6.0(@modelcontextprotocol/sdk@1.30.0(supports-color@7.2.0)(zod@3.25.76))(supports-color@7.2.0)

@@ -54,6 +54,16 @@ describe('extensions command', () => {
     );
   });
 
+  it('registers local Mod validation with a required path', () => {
+    const parser = yargs([])
+      .command(extensionsCommand)
+      .fail(false)
+      .locale('en');
+    expect(() => parser.parse('extensions validate-mods')).toThrow(
+      'Not enough non-option arguments',
+    );
+  });
+
   it('should register list subcommand', () => {
     const parser = yargs([])
       .command(extensionsCommand)

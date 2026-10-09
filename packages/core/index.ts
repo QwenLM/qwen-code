@@ -5,3 +5,5 @@
  */
 
 export * from './src/index.js';
+export { validateMods } from './src/mods/mod-validation.js';
+export type { ModValidationReport } from './src/mods/mod-types.js';

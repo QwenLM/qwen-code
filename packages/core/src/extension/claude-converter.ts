@@ -61,6 +61,9 @@ export interface ClaudePluginConfig {
   workflows?: string | string[];
   outputStyles?: string | string[];
   lspServers?: string | Record<string, unknown>;
+  userConfig?: unknown;
+  types?: unknown;
+  dependencies?: unknown;
 }
 
 /**
@@ -444,6 +447,13 @@ export function convertClaudeToQwenConfig(
     mcpServers,
     lspServers: claudeConfig.lspServers,
     hooks, // Assign the properly typed hooks variable
+    ...(claudeConfig.userConfig !== undefined
+      ? { userConfig: claudeConfig.userConfig }
+      : {}),
+    ...(claudeConfig.types !== undefined ? { types: claudeConfig.types } : {}),
+    ...(claudeConfig.dependencies !== undefined
+      ? { dependencies: claudeConfig.dependencies }
+      : {}),
   };
 }
 
@@ -681,6 +691,7 @@ export async function buildQwenExtensionFromPlugin(
             tmpDir,
           );
 
+    let modHooksPath: string | undefined;
     // Handle hooks from a file path if needed.
     if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
       const hooksPath = resolvePluginRelativeFile(
@@ -704,7 +715,15 @@ export async function buildQwenExtensionFromPlugin(
             };
           }
 
-          mergedConfig.hooks = substituteHookVariables(hooksData, pluginSource);
+          // Keep module declarations at their file-relative base in the copy.
+          if (Object.hasOwn(parsedHooks, 'modules')) {
+            modHooksPath = mergedConfig.hooks;
+          } else {
+            mergedConfig.hooks = substituteHookVariables(
+              hooksData,
+              pluginSource,
+            );
+          }
         } catch (error) {
           debugLogger.warn(
             `Failed to parse hooks file ${hooksPath}: ${error instanceof Error ? error.message : String(error)}`,
@@ -717,6 +736,10 @@ export async function buildQwenExtensionFromPlugin(
     await convertAgentFiles(agentsDestDir);
 
     const qwenConfig = convertClaudeToQwenConfig(mergedConfig);
+    if (modHooksPath !== undefined) {
+      // A Mod declaration must survive conversion, including unsupported locations.
+      qwenConfig.hooks = modHooksPath;
+    }
     if (workflowPaths !== undefined) {
       qwenConfig.workflows = workflowPaths;
     }

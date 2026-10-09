@@ -13,6 +13,8 @@ import { validateSkillName, type SkillConfig } from '../skills/types.js';
 import type { SubagentConfig, SubagentError } from '../subagents/types.js';
 import type { ClaudeMarketplaceConfig } from './claude-converter.js';
 import type { HookEventName, HookDefinition } from '../hooks/types.js';
+import { discoverMod, splitModHooks } from '../mods/mod-discovery.js';
+import type { ModDiagnostic, ModDiscoveryStatus } from '../mods/mod-types.js';
 import { Storage } from '../config/storage.js';
 import {
   logExtensionEnable,
@@ -193,6 +195,11 @@ export interface Extension {
   // instead of falling through to a builtin of the same name.
   agentExecutorRefusals?: Map<string, SubagentError>;
   hooks?: { [K in HookEventName]?: HookDefinition[] };
+  mod?: {
+    discovery: ModDiscoveryStatus;
+    runtime: 'unavailable';
+    diagnostics: ModDiagnostic[];
+  };
   channels?: Record<string, ExtensionChannelConfig>;
 }
 
@@ -216,7 +223,10 @@ export interface ExtensionConfig {
   /** Workflow directories or `.js` files; defaults to `workflows/`. */
   workflows?: string | string[];
   settings?: ExtensionSetting[];
-  hooks?: { [K in HookEventName]?: HookDefinition[] };
+  hooks?: string | { [K in HookEventName]?: HookDefinition[] };
+  userConfig?: unknown;
+  types?: unknown;
+  dependencies?: unknown;
   channels?: Record<string, ExtensionChannelConfig>;
 }
 
@@ -1851,7 +1861,13 @@ export class ExtensionManager {
     });
     let config = loadedManifest.config;
     if (loadedManifest.format === 'qwen') {
-      config = resolveEnvVarsInObject(config);
+      const { userConfig, types, dependencies, ...hostConfig } = config;
+      config = {
+        ...resolveEnvVarsInObject(hostConfig),
+        ...(userConfig !== undefined ? { userConfig } : {}),
+        ...(types !== undefined ? { types } : {}),
+        ...(dependencies !== undefined ? { dependencies } : {}),
+      };
     }
     const extensionId = getExtensionId(config, installMetadata);
     if (loadedManifest.format === 'agent-plugins-v1') {
@@ -1944,6 +1960,23 @@ export class ExtensionManager {
       const config = extension.config;
       const effectiveExtensionPath = extension.path;
 
+      if (loadedManifest.format === 'qwen') {
+        const mod = await discoverMod(
+          effectiveExtensionPath,
+          { ...config },
+          {
+            strict: false,
+          },
+        );
+        if (mod.discovery !== 'absent') {
+          extension.mod = {
+            discovery: mod.discovery,
+            runtime: 'unavailable',
+            diagnostics: mod.diagnostics,
+          };
+        }
+      }
+
       const onSkillsDiscoveryError = () => {
         head.extension.skillsDiscoveryHasErrors = true;
       };
@@ -1989,7 +2022,7 @@ export class ExtensionManager {
       ) {
         // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
         extension.hooks = this.substituteHookVariables(
-          config.hooks,
+          splitModHooks(config.hooks),
           effectiveExtensionPath,
         );
       }
@@ -2019,23 +2052,20 @@ export class ExtensionManager {
             const hooksContent = fs.readFileSync(hooksFilePath, 'utf-8');
             const parsedHooks = JSON.parse(hooksContent);
 
-            let hooksData;
-            if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
-              hooksData = parsedHooks.hooks as {
-                [K in HookEventName]?: HookDefinition[];
-              };
-            } else {
-              // Assume the entire file content is the hooks object
-              hooksData = parsedHooks as {
-                [K in HookEventName]?: HookDefinition[];
-              };
-            }
+            const hooksData = splitModHooks(parsedHooks);
 
             // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
-            extension.hooks = this.substituteHookVariables(
-              hooksData,
-              effectiveExtensionPath,
-            );
+            if (
+              Object.hasOwn(parsedHooks, 'modules') &&
+              Object.keys(hooksData).length === 0
+            ) {
+              extension.hooks = undefined;
+            } else {
+              extension.hooks = this.substituteHookVariables(
+                hooksData,
+                effectiveExtensionPath,
+              );
+            }
           } catch (error) {
             debugLogger.warn(
               `Failed to parse hooks file ${hooksJsonPath}: ${error instanceof Error ? error.message : String(error)}`,
@@ -2109,13 +2139,19 @@ export class ExtensionManager {
       const configContent = fs.readFileSync(configFilePath, 'utf-8');
       const parsedConfig = JSON.parse(configContent);
       const skillStates = parseSkillStates(parsedConfig?.skillStates);
-      const rawConfig = recursivelyHydrateStrings(parsedConfig, {
-        extensionPath: extensionDir,
-        CLAUDE_PLUGIN_ROOT: extensionDir,
-        workspacePath: workspaceDir,
-        '/': path.sep,
-        pathSeparator: path.sep,
-      }) as unknown as RawExtensionConfig;
+      const { userConfig, types, dependencies, ...hostConfig } = parsedConfig;
+      const rawConfig = {
+        ...(recursivelyHydrateStrings(hostConfig, {
+          extensionPath: extensionDir,
+          CLAUDE_PLUGIN_ROOT: extensionDir,
+          workspacePath: workspaceDir,
+          '/': path.sep,
+          pathSeparator: path.sep,
+        }) as Record<string, unknown>),
+        ...(userConfig !== undefined ? { userConfig } : {}),
+        ...(types !== undefined ? { types } : {}),
+        ...(dependencies !== undefined ? { dependencies } : {}),
+      } as unknown as RawExtensionConfig;
 
       const config = resolveExtensionConfigLocale(rawConfig, this.locale);
       if (skillStates !== undefined) config.skillStates = skillStates;

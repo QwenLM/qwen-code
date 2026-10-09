@@ -175,6 +175,48 @@ describe('extensionToOutputString', () => {
     ...overrides,
   });
 
+  it('shows declaration error codes without source or option values', () => {
+    const extension = createMockExtension({
+      mod: {
+        discovery: 'invalid',
+        runtime: 'unavailable',
+        diagnostics: [
+          {
+            code: 'MOD_PATH_MISSING',
+            severity: 'error',
+            message: 'private internal detail',
+          },
+        ],
+      },
+    });
+    const output = extensionToOutputString(
+      extension,
+      mockExtensionManager,
+      '/workspace',
+    );
+    expect(output).toContain('Mod diagnostics: MOD_PATH_MISSING');
+    expect(output).not.toContain('private internal detail');
+  });
+
+  it.each(['declared', 'invalid'] as const)(
+    'shows %s Mod status without claiming runtime support',
+    (discovery) => {
+      const extension = createMockExtension({
+        mod: { discovery, runtime: 'unavailable', diagnostics: [] },
+      });
+      const output = extensionToOutputString(
+        extension,
+        mockExtensionManager,
+        '/workspace',
+      );
+      expect(output).toContain(
+        discovery === 'invalid'
+          ? 'Mod: invalid declaration (runtime unavailable)'
+          : 'Mod: declared; runtime unavailable',
+      );
+    },
+  );
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockIsEnabled.mockReturnValue(true);
