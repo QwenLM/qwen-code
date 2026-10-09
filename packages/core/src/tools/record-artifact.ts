@@ -84,7 +84,12 @@ class RecordArtifactInvocation extends BaseToolInvocation<
   }
 
   override getDescription(): string {
-    return `Recording artifact ${this.params.title}`;
+    const workspacePath = this.params.workspacePath;
+    const filename =
+      typeof workspacePath === 'string'
+        ? workspacePath.split('/').at(-1)
+        : undefined;
+    return `Recording artifact ${filename || this.params.title}`;
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
@@ -115,9 +120,13 @@ class RecordArtifactInvocation extends BaseToolInvocation<
       const title = isRecordableDerivedChild(filename, locator.workspacePath)
         ? filename
         : callerTitle;
+      const callerDescription = trimOptional(this.params.description);
       const description =
-        trimOptional(this.params.description) ||
-        (callerTitle !== title ? callerTitle : undefined);
+        callerDescription || (callerTitle !== title ? callerTitle : undefined);
+      const metadata =
+        description && !callerDescription
+          ? { ...this.params.metadata, derivedFromTitle: true }
+          : this.params.metadata;
       const artifact: ToolArtifact = {
         title,
         kind: this.params.kind,
@@ -126,7 +135,7 @@ class RecordArtifactInvocation extends BaseToolInvocation<
         workspacePath: locator.workspacePath,
         mimeType: trimOptional(this.params.mimeType),
         sizeBytes: this.params.sizeBytes ?? locator.sizeBytes,
-        metadata: this.params.metadata,
+        metadata,
       };
       return {
         llmContent: formatWorkspaceSuccess(artifact.title, locator),

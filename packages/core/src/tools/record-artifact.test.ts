@@ -173,6 +173,7 @@ describe('RecordArtifactTool', () => {
         storage: 'workspace',
         workspacePath: 'reports/summary.html',
         sizeBytes: '<html>ok</html>'.length,
+        metadata: { derivedFromTitle: true },
       },
     ]);
     expectText(result, [
@@ -200,6 +201,23 @@ describe('RecordArtifactTool', () => {
       title: 'summary.html',
       description: 'Daily export',
     });
+    expect(result.artifacts?.[0]?.metadata).toBeUndefined();
+  });
+
+  it('describes a workspace recording by its filename', async () => {
+    const ws = await workspace();
+
+    expect(
+      ws.tool
+        .build({
+          title: 'Workspace report',
+          workspacePath: 'reports/summary.html',
+        })
+        .getDescription(),
+    ).toBe('Recording artifact summary.html');
+    expect(
+      ws.tool.build({ title: 'Table details', url: RES }).getDescription(),
+    ).toBe('Recording artifact Table details');
   });
 
   it('does not copy a filename that already matches the caller title into the description', async () => {
@@ -271,6 +289,7 @@ describe('RecordArtifactTool', () => {
     await ws.write('reports\\summary.csv', 'a,b\n');
 
     expectFirst(await ws.record('Literal backslash', 'reports\\summary.csv'), {
+      title: 'reports\\summary.csv',
       workspacePath: 'reports\\summary.csv',
     });
   });

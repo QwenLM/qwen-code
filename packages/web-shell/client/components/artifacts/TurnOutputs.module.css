@@ -38,6 +38,9 @@
 
 .title {
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--foreground);
   font-size: 14px;
   font-weight: 400;

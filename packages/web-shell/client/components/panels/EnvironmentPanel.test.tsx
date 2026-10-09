@@ -1029,6 +1029,11 @@ describe('EnvironmentPanel', () => {
     const row = Array.from(view.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('report.md'),
     );
+    expect(row?.getAttribute('title')).toBe('report.md');
+    const linkRow = Array.from(view.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Table details'),
+    );
+    expect(linkRow?.getAttribute('title')).toBe('Table details');
     act(() => row?.click());
     expect(onOpenArtifact).toHaveBeenCalledWith('artifact-1');
   });

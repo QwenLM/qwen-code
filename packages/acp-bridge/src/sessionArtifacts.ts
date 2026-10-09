@@ -427,6 +427,7 @@ export class SessionArtifactStore {
           if (!existing) {
             const stored: StoredArtifact = {
               ...artifact,
+              metadata: stripDerivedFromTitleMarker(artifact.metadata),
               insertSeq: ++this.insertSeq,
             };
             this.artifacts.set(stored.id, stored);
@@ -2177,7 +2178,7 @@ function mergeBatchArtifact(
     ...existing,
     title: refreshDisplay ? next.title : existing.title,
     description: refreshDisplay
-      ? (next.description ?? existing.description)
+      ? descriptionOnWorkspaceRefresh(existing.description, next)
       : existing.description,
     toolName: refreshDisplay ? next.toolName : existing.toolName,
     source: refreshDisplay ? next.source : existing.source,
@@ -2185,9 +2186,9 @@ function mergeBatchArtifact(
     toolCallId: refreshDisplay ? next.toolCallId : existing.toolCallId,
     status: next.status,
     sizeBytes: mergeSizeBytes(existing, next),
-    metadata: refreshDisplay
-      ? stripExpandedFromDirectoryMarker(metadata)
-      : metadata,
+    metadata: stripDerivedFromTitleMarker(
+      refreshDisplay ? stripExpandedFromDirectoryMarker(metadata) : metadata,
+    ),
     clientRetained: existing.clientRetained || next.clientRetained,
     trustedPublisher: existing.trustedPublisher || next.trustedPublisher,
     retentionExplicit: existing.retentionExplicit || next.retentionExplicit,
@@ -2285,12 +2286,17 @@ function mergeArtifact(
     // record_artifact (or the same producer) may refresh the display
     // name; write_file/hook auto-records must not clobber it.
     next.title = incoming.title;
-    next.description = incoming.description ?? existing.description;
+    next.description = descriptionOnWorkspaceRefresh(
+      existing.description,
+      incoming,
+    );
     next.toolCallId = incoming.toolCallId;
     next.toolName = incoming.toolName;
     next.source = incoming.source;
     next.hookEventName = incoming.hookEventName;
-    next.metadata = stripExpandedFromDirectoryMarker(next.metadata);
+    next.metadata = stripDerivedFromTitleMarker(
+      stripExpandedFromDirectoryMarker(next.metadata),
+    );
   }
 
   const changed = !publicArtifactsEqual(
@@ -2323,6 +2329,26 @@ function stripExpandedFromDirectoryMarker(
     return metadata;
   }
   const { expandedFromDirectory: _dropped, ...rest } = metadata;
+  return Object.keys(rest).length > 0 ? rest : undefined;
+}
+
+function descriptionOnWorkspaceRefresh(
+  existingDescription: string | undefined,
+  incoming: Pick<NormalizedArtifact, 'description' | 'metadata'>,
+): string | undefined {
+  if (incoming.metadata?.['derivedFromTitle'] === true) {
+    return existingDescription ?? incoming.description;
+  }
+  return incoming.description ?? existingDescription;
+}
+
+function stripDerivedFromTitleMarker(
+  metadata: Record<string, string | number | boolean | null> | undefined,
+): Record<string, string | number | boolean | null> | undefined {
+  if (metadata?.['derivedFromTitle'] !== true) {
+    return metadata;
+  }
+  const { derivedFromTitle: _dropped, ...rest } = metadata;
   return Object.keys(rest).length > 0 ? rest : undefined;
 }
 

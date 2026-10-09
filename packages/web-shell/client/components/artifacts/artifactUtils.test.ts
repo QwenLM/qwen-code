@@ -31,7 +31,7 @@ describe('artifactUtils', () => {
         title: 'Pretty name',
         workspacePath: 'reports\\summary.html',
       }),
-    ).toBe('summary.html');
+    ).toBe('reports\\summary.html');
     expect(
       artifactDisplayName({
         title: 'Table details',
