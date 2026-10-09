@@ -24,9 +24,8 @@ import type {
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { stripAnsiAndControl } from '../utils/textUtils.js';
 import {
-  escapeShellArg,
   getShellConfiguration,
-  type ShellType,
+  resolveCommandPath,
   type ShellConfiguration,
 } from '../utils/shell-utils.js';
 import { HttpHookRunner } from './httpHookRunner.js';
@@ -42,6 +41,49 @@ import {
 } from './hook-command-cgroup.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
+
+// PowerShell probe: pwsh preferred, powershell (5.1) fallback. Hits are
+// cached per-process; a miss is re-probed on the next call.
+let cachedPowerShell: string | undefined;
+export function __resetPowerShellCacheForTests(): void {
+  cachedPowerShell = undefined;
+}
+
+// The finder searches the probe cwd before PATH, so probe from a directory
+// non-admin actors cannot write: the system directory on Windows, the temp
+// directory elsewhere (never the session's own cwd).
+function neutralProbeCwd(): string {
+  return process.platform === 'win32'
+    ? `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32`
+    : tmpdir();
+}
+
+export function resolvePowerShellExecutable(): string {
+  if (cachedPowerShell !== undefined) {
+    return cachedPowerShell;
+  }
+  let probeError: Error | undefined;
+  for (const name of ['pwsh', 'powershell']) {
+    // Spawn the absolute hit, never a bare name.
+    const { path, error } = resolveCommandPath(name, {
+      cwd: neutralProbeCwd(),
+    });
+    if (error) probeError ??= error;
+    const resolved = path?.split(/\r?\n/)[0]?.trim();
+    if (resolved) {
+      cachedPowerShell = resolved;
+      debugLogger.debug(`PowerShell probe: ${name} resolved to ${resolved}`);
+      return resolved;
+    }
+    debugLogger.debug(
+      `PowerShell probe: ${name} ${error ? 'lookup failed' : 'not found'}`,
+    );
+  }
+  throw new Error(
+    'Could not resolve a PowerShell executable (looked for pwsh, powershell)' +
+      (probeError ? `: ${probeError.message}` : ''),
+  );
+}
 
 /**
  * Maximum length for stdout/stderr output (1MB)
@@ -837,18 +879,18 @@ export class HookRunner {
   ): ShellConfiguration {
     const globalConfig = getShellConfiguration();
 
+    // Shared by the explicit-shell and cmd-fallback branches so both stay in
+    // sync; the closure defers the PATH probe until powershell is needed.
+    const powershellConfig = (): ShellConfiguration => ({
+      shell: 'powershell',
+      executable: resolvePowerShellExecutable(),
+      argsPrefix: ['-NoProfile', '-Command'],
+    });
+
     // If hook specifies a shell, use it
     if (hookConfig.shell) {
-      const shellType: ShellType =
-        hookConfig.shell === 'powershell' ? 'powershell' : 'bash';
-
-      // Return configuration for the specified shell type
-      if (shellType === 'powershell') {
-        return {
-          shell: 'powershell',
-          executable: 'powershell',
-          argsPrefix: ['-Command'],
-        };
+      if (hookConfig.shell === 'powershell') {
+        return powershellConfig();
       }
 
       // For bash, use global config's executable path or fallback
@@ -860,7 +902,11 @@ export class HookRunner {
       };
     }
 
-    // Use global configuration
+    // On Windows cmd.exe /d /s /c keeps quotes in shell-prefix commands, so a
+    // quoted path fails; powershell strips them natively.
+    if (globalConfig.shell === 'cmd') {
+      return powershellConfig();
+    }
     return globalConfig;
   }
 
@@ -1205,11 +1251,22 @@ export class HookRunner {
 
       // Use hook-specific shell configuration if specified
       const shellConfig = this.getShellConfigForHook(hookConfig);
-      const command = this.expandCommand(
-        hookConfig.command,
-        input,
-        shellConfig.shell,
-      );
+      // StrictMode + ErrorActionPreference=Stop: undefined $VAR and a
+      // non-terminating error terminate the script instead of masking the
+      // failure with exit 0. LASTEXITCODE is pre-set to $null so the author's
+      // own `-ne 0` check stays fail-closed (StrictMode throws on undefined).
+      const strictPrefix =
+        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; ";
+      // Win32 5.1 defaults the console to the OEM code page; force UTF-8 so the
+      // JSON we read back survives non-ASCII.
+      const utf8Prefix =
+        process.platform === 'win32'
+          ? '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;'
+          : '';
+      const command =
+        shellConfig.shell === 'powershell'
+          ? `${utf8Prefix}${strictPrefix}${hookConfig.command}`
+          : hookConfig.command;
 
       const env: NodeJS.ProcessEnv = {
         // Hook commands are child processes launched on the agent's behalf,
@@ -1693,35 +1750,6 @@ export class HookRunner {
         });
       });
     });
-  }
-
-  /**
-   * Resolve project directory variables in a command string before launch.
-   *
-   * `QWEN_PROJECT_DIR`, `CLAUDE_PROJECT_DIR` and `GEMINI_PROJECT_DIR` are
-   * always exported in the hook's environment. Bash expands exported
-   * variables itself, so a bash command is passed through unchanged: a text
-   * substitution would put shell quotes inside a double-quoted
-   * `"$CLAUDE_PROJECT_DIR/..."` and break the path. cmd.exe never expands
-   * `$VAR`, and PowerShell reads a bare `$VAR` as an undefined variable, so
-   * for those shells each variable is replaced with the quoted project
-   * directory. `$env:QWEN_PROJECT_DIR` in PowerShell does not match and is
-   * left for the shell to read.
-   */
-  private expandCommand(
-    command: string,
-    input: HookInput,
-    shellType: ShellType,
-  ): string {
-    if (shellType === 'bash') {
-      return command;
-    }
-    debugLogger.debug(`Expanding hook command: ${command} (cwd: ${input.cwd})`);
-    const escapedCwd = escapeShellArg(input.cwd, shellType);
-    return command
-      .replace(/\$GEMINI_PROJECT_DIR\b/g, () => escapedCwd)
-      .replace(/\$CLAUDE_PROJECT_DIR\b/g, () => escapedCwd)
-      .replace(/\$QWEN_PROJECT_DIR\b/g, () => escapedCwd);
   }
 
   /**

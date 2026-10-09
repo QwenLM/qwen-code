@@ -4,12 +4,25 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type MockInstance,
+} from 'vitest';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runInNewContext } from 'node:vm';
-import { HookRunner } from './hookRunner.js';
+import {
+  HookRunner,
+  __resetPowerShellCacheForTests,
+  resolvePowerShellExecutable,
+} from './hookRunner.js';
+import * as shellUtils from '../utils/shell-utils.js';
 import {
   HookEventName,
   HookType,
@@ -49,30 +62,24 @@ vi.mock('../utils/debugLogger.js', async (importOriginal) => ({
   createDebugLogger: () => mockDebugLogger,
 }));
 
-// Lets a test pin the platform shell (e.g. cmd.exe) that a hook without its
-// own `shell` resolves to; unset, the real platform configuration is used.
-const shellConfigOverride = vi.hoisted(() => ({
-  current: undefined as
-    | import('../utils/shell-utils.js').ShellConfiguration
-    | undefined,
-}));
-
-vi.mock('../utils/shell-utils.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('../utils/shell-utils.js')>();
-  return {
-    ...actual,
-    getShellConfiguration: () =>
-      shellConfigOverride.current ?? actual.getShellConfiguration(),
-  };
-});
-
 describe('HookRunner', () => {
   let hookRunner: HookRunner;
 
   beforeEach(() => {
     hookRunner = new HookRunner();
     vi.clearAllMocks();
+    // Default probe result: only `powershell` installed. Probe-priority
+    // tests override this spy; cache reset makes the mock take effect.
+    vi.spyOn(shellUtils, 'resolveCommandPath').mockImplementation(((
+      name: string,
+    ) => {
+      if (name === 'powershell')
+        return {
+          path: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+        };
+      return { path: null };
+    }) as never);
+    __resetPowerShellCacheForTests();
   });
 
   afterEach(() => {
@@ -111,6 +118,16 @@ describe('HookRunner', () => {
       unref: vi.fn(),
     };
   };
+
+  // Forces the cmd->powershell fallback; needed for asserts on the
+  // post-`-Command` arg position (bash hosts have no third spawn arg).
+  // Caller must wrap in `try { ... } finally { spy.mockRestore(); }`.
+  const mockCmdShellConfig = () =>
+    vi.spyOn(shellUtils, 'getShellConfiguration').mockReturnValue({
+      executable: 'cmd.exe',
+      argsPrefix: ['/d', '/s', '/c'],
+      shell: 'cmd',
+    });
 
   const createControllableMockProcess = (pid = 4321) => {
     type Listener = (...args: unknown[]) => void;
@@ -687,132 +704,6 @@ describe('HookRunner', () => {
       const result = await runHook('echo exact', 0, 'x'.repeat(1024 * 1024));
 
       expect(result.stdout?.length).toBe(1024 * 1024);
-    });
-  });
-
-  describe('expandCommand', () => {
-    const runAndGetSpawn = async (
-      hookConfig: HookConfig,
-      cwd: string,
-    ): Promise<{
-      executable: string;
-      command: string;
-      env: NodeJS.ProcessEnv;
-    }> => {
-      scriptSpawn(0, 'result');
-
-      await hookRunner.executeHook(
-        hookConfig,
-        HookEventName.PreToolUse,
-        createMockInput({ cwd }),
-      );
-
-      const [executable, args, options] = mockSpawn.mock.calls[0];
-      return {
-        executable,
-        command: args[args.length - 1], // Last arg is the command
-        env: options.env,
-      };
-    };
-    const powershell = (command: string) =>
-      cmd(command, { shell: 'powershell' });
-
-    it.each([
-      'echo $CLAUDE_PROJECT_DIR',
-      '"$QWEN_PROJECT_DIR/x.sh"',
-      "'$GEMINI_PROJECT_DIR'",
-    ])(
-      'passes bash command %s through verbatim for bash to read the environment',
-      async (hookCommand) => {
-        const cwd = '/home/u/my proj';
-        const { command, env } = await runAndGetSpawn(
-          cmd(hookCommand, { shell: 'bash' }),
-          cwd,
-        );
-
-        expect(command).toBe(hookCommand);
-        expect(env['QWEN_PROJECT_DIR']).toBe(cwd);
-        expect(env['CLAUDE_PROJECT_DIR']).toBe(cwd);
-        expect(env['GEMINI_PROJECT_DIR']).toBe(cwd);
-      },
-    );
-
-    it.each(['QWEN_PROJECT_DIR', 'CLAUDE_PROJECT_DIR', 'GEMINI_PROJECT_DIR'])(
-      'replaces a bare $%s with the quoted project directory for PowerShell',
-      async (variable) => {
-        const { command } = await runAndGetSpawn(
-          powershell(`& $${variable}/hook.ps1`),
-          'C:\\Users\\u\\my proj',
-        );
-
-        expect(command).toBe("& 'C:\\Users\\u\\my proj'/hook.ps1");
-      },
-    );
-
-    it('doubles an apostrophe in the project directory for PowerShell', async () => {
-      const { command } = await runAndGetSpawn(
-        powershell('Write-Output $QWEN_PROJECT_DIR'),
-        "C:\\Users\\o'brien\\proj",
-      );
-
-      expect(command).toBe("Write-Output 'C:\\Users\\o''brien\\proj'");
-    });
-
-    it('leaves $env:QWEN_PROJECT_DIR for PowerShell to read', async () => {
-      const { command } = await runAndGetSpawn(
-        powershell('Write-Output $env:QWEN_PROJECT_DIR'),
-        'C:\\Users\\u\\proj',
-      );
-
-      expect(command).toBe('Write-Output $env:QWEN_PROJECT_DIR');
-    });
-
-    it.each([
-      'QWEN_PROJECT_DIRS',
-      'CLAUDE_PROJECT_DIRS',
-      'GEMINI_PROJECT_DIRS',
-    ])(
-      'does not rewrite a longer variable name $%s for PowerShell',
-      async (variable) => {
-        const { command } = await runAndGetSpawn(
-          powershell(`Write-Output $${variable}`),
-          'C:\\Users\\u\\proj',
-        );
-
-        expect(command).toBe(`Write-Output $${variable}`);
-      },
-    );
-
-    it('replaces all three variables with the quoted project directory for cmd', async () => {
-      shellConfigOverride.current = {
-        executable: 'cmd.exe',
-        argsPrefix: ['/d', '/s', '/c'],
-        shell: 'cmd',
-      };
-      try {
-        const { executable, command } = await runAndGetSpawn(
-          cmd(
-            '$QWEN_PROJECT_DIR\\hooks\\check.cmd && echo $CLAUDE_PROJECT_DIR $GEMINI_PROJECT_DIR',
-          ),
-          'C:\\Users\\u\\my proj',
-        );
-
-        expect(executable).toBe('cmd.exe');
-        expect(command).toBe(
-          '"C:\\Users\\u\\my proj"\\hooks\\check.cmd && echo "C:\\Users\\u\\my proj" "C:\\Users\\u\\my proj"',
-        );
-      } finally {
-        shellConfigOverride.current = undefined;
-      }
-    });
-
-    it('should not modify command without placeholders', async () => {
-      const { command } = await runAndGetSpawn(
-        cmd('echo hello'),
-        '/test/project',
-      );
-
-      expect(command).toBe('echo hello');
     });
   });
 
@@ -1912,6 +1803,7 @@ describe('HookRunner', () => {
     });
 
     it('should use powershell when hookConfig.shell is powershell', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       await runHook(
         cmd('Write-Output test', { shell: 'powershell' }),
         0,
@@ -1920,9 +1812,384 @@ describe('HookRunner', () => {
 
       expect(mockSpawn).toHaveBeenCalled();
       const spawnArgs = mockSpawn.mock.calls[0];
-      expect(spawnArgs[0]).toBe('powershell');
-      expect(spawnArgs[1]).toContain('-Command');
+      expect(spawnArgs[0]).toBe(
+        'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      );
+      expect(spawnArgs[1]).toEqual([
+        '-NoProfile',
+        '-Command',
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output test",
+      ]);
       expect(spawnArgs[2].shell).toBe(false);
+    });
+
+    it('omits the encoding statement for a powershell hook off Windows', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('linux');
+      mockSpawn.mockImplementation(() => createMockProcess(0));
+      await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'Write-Output test',
+          source: HooksConfigSource.Project,
+          shell: 'powershell',
+        },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      const command = mockSpawn.mock.calls[0][1][2];
+      expect(command).not.toContain('[Console]::OutputEncoding');
+      expect(command).toContain(
+        "Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output test",
+      );
+    });
+
+    it('uses powershell when the global shell is cmd', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const spy = mockCmdShellConfig();
+      try {
+        mockSpawn.mockImplementation(() => createMockProcess(0));
+        await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command: 'echo test',
+            source: HooksConfigSource.Project,
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        const spawnArgs = mockSpawn.mock.calls[0];
+        expect(spawnArgs[0]).toBe(
+          'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+        );
+        expect(spawnArgs[1]).toEqual([
+          '-NoProfile',
+          '-Command',
+          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; echo test",
+        ]);
+        // cmd.exe keeps the inner quotes that PowerShell drops.
+        await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command: 'bash "C:/Program Files/app/script.sh" arg',
+            source: HooksConfigSource.Project,
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        expect(mockSpawn.mock.calls[1][0]).toBe(
+          'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+        );
+        expect(mockSpawn.mock.calls[1][1]).toEqual([
+          '-NoProfile',
+          '-Command',
+          `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; bash "C:/Program Files/app/script.sh" arg`,
+        ]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('passes the env-var form through for an explicit powershell shell', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      mockSpawn.mockImplementation(() => createMockProcess(0));
+      await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: '$env:CLAUDE_PROJECT_DIR/scripts/validate.cmd',
+          source: HooksConfigSource.Project,
+          shell: 'powershell',
+        },
+        HookEventName.PreToolUse,
+        createMockInput({ cwd: '/test/project' }),
+      );
+      const spawnArgs = mockSpawn.mock.calls[0];
+      expect(spawnArgs[0]).toBe(
+        'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      );
+      expect(spawnArgs[1][2]).toBe(
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; $env:CLAUDE_PROJECT_DIR/scripts/validate.cmd",
+      );
+    });
+
+    it('uses the same powershell config for explicit shell and cmd fallback', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      const spy = mockCmdShellConfig();
+      try {
+        mockSpawn.mockImplementation(() => createMockProcess(0));
+        await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command: 'Write-Output explicit',
+            source: HooksConfigSource.Project,
+            shell: 'powershell',
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        const explicitArgs = mockSpawn.mock.calls[0][1];
+        await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command: 'Write-Output fallback',
+            source: HooksConfigSource.Project,
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        const fallbackArgs = mockSpawn.mock.calls[1][1];
+        expect(mockSpawn.mock.calls[1][0]).toBe(mockSpawn.mock.calls[0][0]);
+        expect(fallbackArgs.slice(0, 2)).toEqual(explicitArgs.slice(0, 2));
+        expect(explicitArgs[2]).toBe(
+          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output explicit",
+        );
+        expect(fallbackArgs[2]).toBe(
+          "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Set-StrictMode -Version 1; $ErrorActionPreference = 'Stop'; $global:LASTEXITCODE = $null; Write-Output fallback",
+        );
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it.each([
+      ['a continuation backtick at the end', 'Write-Output tail `'],
+      [
+        'a literal backtick inside a trailing comment',
+        'Write-Output gate `gate.sh` # same as `gate.sh`',
+      ],
+      ['a backtick followed by spaces at the end', 'Write-Output tail `  '],
+      ['two backticks at the end', 'Write-Output literal ``'],
+    ])(
+      'runs a PowerShell command whose body ends with backticks: %s',
+      async (_label, command) => {
+        vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+        mockSpawn.mockImplementation(() => createMockProcess(0));
+        await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command,
+            source: HooksConfigSource.Project,
+            shell: 'powershell',
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        expect(mockSpawn.mock.calls[0][1][2]).toContain(command);
+      },
+    );
+
+    it.each([
+      ['call-operator prefix on quoted .cmd', '& "C:\\hook.cmd"'],
+      ['command with quoted arguments', 'Get-Process "name"'],
+      ['write-output with quoted argument', 'Write-Output "hello"'],
+      ['cmd-style invocation with quoted tail', 'cmd /c "echo hello"'],
+      ['bare-quoted no-extension command', '"foo"'],
+      [
+        'multi-line array of paths with bare-quoted .cmd',
+        '"C:\\path1.cmd"\n"C:\\path2.cmd"\n"C:\\path3.cmd"',
+      ],
+      [
+        'statement after a bare-quoted .cmd on the next line',
+        '"C:\\hooks\\check.cmd"\nWrite-Output done',
+      ],
+      ['bare-quoted .sh path', '"C:\\hooks\\gate.sh"'],
+      [
+        'backtick-continued quoted path as argument',
+        'Get-Process "C:\\long `\n` path\\app.cmd"',
+      ],
+      [
+        'bare-quoted path whose name merely contains .exe / .cmd',
+        '"C:\\build\\app.exe.log" | Get-Content',
+      ],
+      [
+        'bare-quoted path whose name merely contains .cmd',
+        '"C:\\Scripts\\deploy.cmd.old" | Remove-Item',
+      ],
+      [
+        'bare-quoted .cmd piped as pipeline input',
+        '"C:\\Scripts\\deploy.cmd" | Remove-Item',
+      ],
+      [
+        'bare-quoted .ps1 piped as pipeline input',
+        '"C:\\hooks\\gate.ps1" | Get-Content',
+      ],
+    ])(
+      'does not throw for a PowerShell command that is %s',
+      async (_label, command) => {
+        mockSpawn.mockImplementation(() => createMockProcess(0));
+        const result = await hookRunner.executeHook(
+          {
+            type: HookType.Command,
+            command,
+            source: HooksConfigSource.Project,
+            shell: 'powershell',
+          },
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+        expect(result.success).toBe(true);
+        expect(mockSpawn).toHaveBeenCalled();
+        expect(mockSpawn.mock.calls[0][1][2]).toContain(command);
+      },
+    );
+
+    it('does NOT wrap bash commands with Set-StrictMode', async () => {
+      // bash keeps unset-$VAR behaviour; `set -u` would break existing hooks.
+      mockSpawn.mockImplementation(() => createMockProcess(0));
+      await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: 'echo $CLAUDE_PROJECT_DIR',
+          source: HooksConfigSource.Project,
+          shell: 'bash',
+        },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      const spawnArgs = mockSpawn.mock.calls[0];
+      expect(spawnArgs[1][spawnArgs[1].length - 1]).toBe(
+        'echo $CLAUDE_PROJECT_DIR',
+      );
+      expect(spawnArgs[2].env).toMatchObject({
+        CLAUDE_PROJECT_DIR: '/test',
+        GEMINI_PROJECT_DIR: '/test',
+        QWEN_PROJECT_DIR: '/test',
+      });
+      await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: "echo '$CLAUDE_PROJECT_DIR'",
+          source: HooksConfigSource.Project,
+          shell: 'bash',
+        },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      const quotedArgs = mockSpawn.mock.calls[1][1];
+      expect(quotedArgs[quotedArgs.length - 1]).toBe(
+        "echo '$CLAUDE_PROJECT_DIR'",
+      );
+    });
+
+    it('surfaces VariableIsUndefined as systemMessage when $VAR is undefined', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      mockSpawn.mockImplementation(() =>
+        createMockProcess(
+          1,
+          '',
+          "\u001b[31;1mThe variable '$CLAUDE_PROJECT_DIR' cannot be retrieved because it has not been set.\u001b[0m\n" +
+            'At line:1 char:1\n' +
+            '+ $CLAUDE_PROJECT_DIR\n' +
+            '+ ~~~~~~~~~~~~~~~~~~~\n' +
+            '    + CategoryInfo          : InvalidOperation: (CLAUDE_PROJECT_DIR:String) [], RuntimeException\n' +
+            '    + FullyQualifiedErrorId : VariableIsUndefined\n',
+        ),
+      );
+      const result = await hookRunner.executeHook(
+        {
+          type: HookType.Command,
+          command: '$CLAUDE_PROJECT_DIR',
+          source: HooksConfigSource.Project,
+          shell: 'powershell',
+        },
+        HookEventName.PreToolUse,
+        createMockInput(),
+      );
+      const spawnArgs = mockSpawn.mock.calls[0];
+      expect(spawnArgs[1][2]).toMatch(
+        /^\[Console\]::OutputEncoding=\[System\.Text\.Encoding\]::UTF8;Set-StrictMode -Version 1;\s*\$ErrorActionPreference\s*=\s*'Stop';\s*\$global:LASTEXITCODE = \$null;\s*\$CLAUDE_PROJECT_DIR$/,
+      );
+      expect(result.success).toBe(false);
+      expect(result.exitCode).toBe(1);
+      const output = result.output as {
+        systemMessage?: string;
+        reason?: string;
+      };
+      expect(output.systemMessage).toBeDefined();
+      expect(output.systemMessage).toContain('CLAUDE_PROJECT_DIR');
+      expect(output.systemMessage).toMatch(
+        /cannot be retrieved|VariableIsUndefined/,
+      );
+    });
+  });
+
+  describe('resolvePowerShellExecutable', () => {
+    let execSpy: MockInstance<typeof shellUtils.resolveCommandPath>;
+    beforeEach(() => {
+      execSpy = vi.spyOn(shellUtils, 'resolveCommandPath');
+    });
+
+    it('resolves to "pwsh" when pwsh is on PATH', () => {
+      execSpy.mockImplementation(((name: string) => {
+        if (name === 'pwsh') return { path: '/usr/bin/pwsh' };
+        return { path: null };
+      }) as never);
+      expect(resolvePowerShellExecutable()).toBe('/usr/bin/pwsh');
+    });
+
+    it('falls back to "powershell" when pwsh is missing', () => {
+      execSpy.mockImplementation(((name: string) => {
+        if (name === 'powershell') return { path: '/usr/bin/powershell' };
+        return { path: null };
+      }) as never);
+      expect(resolvePowerShellExecutable()).toBe('/usr/bin/powershell');
+    });
+
+    it('throws a precise error when neither executable is on PATH', () => {
+      execSpy.mockImplementation((() => ({ path: null })) as never);
+      expect(() => resolvePowerShellExecutable()).toThrow(
+        'Could not resolve a PowerShell executable (looked for pwsh, powershell)',
+      );
+    });
+
+    it('probes only once across multiple calls (caches the resolved executable)', () => {
+      execSpy.mockImplementation((() => ({ path: '/usr/bin/pwsh' })) as never);
+      resolvePowerShellExecutable();
+      resolvePowerShellExecutable();
+      resolvePowerShellExecutable();
+      expect(execSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('re-probes after a failed lookup instead of latching the failure', () => {
+      execSpy.mockImplementation((() => ({ path: null })) as never);
+      expect(() => resolvePowerShellExecutable()).toThrow(
+        'Could not resolve a PowerShell executable (looked for pwsh, powershell)',
+      );
+      execSpy.mockImplementation(((name: string) =>
+        name === 'pwsh' ? { path: '/usr/bin/pwsh' } : { path: null }) as never);
+      expect(resolvePowerShellExecutable()).toBe('/usr/bin/pwsh');
+      expect(execSpy).toHaveBeenCalledTimes(3);
+    });
+
+    it('resolves to the first match when the lookup lists several', () => {
+      execSpy.mockImplementation((() => ({
+        path: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe\r\nD:\\shims\\pwsh.exe',
+      })) as never);
+      expect(resolvePowerShellExecutable()).toBe(
+        'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+      );
+    });
+
+    it('names the lookup error when the probe failed rather than missed', () => {
+      execSpy.mockImplementation((() => ({
+        path: null,
+        error: new Error('spawn where.exe EACCES'),
+      })) as never);
+      expect(() => resolvePowerShellExecutable()).toThrow(
+        /Could not resolve a PowerShell executable.*EACCES/,
+      );
+    });
+
+    it('probes from a neutral cwd so a workspace copy cannot answer', () => {
+      execSpy.mockImplementation((() => ({ path: null })) as never);
+      expect(() => resolvePowerShellExecutable()).toThrow();
+      // `where` searches the current directory before PATH: probing from the
+      // process cwd would return a workspace-planted pwsh.exe, and the temp
+      // directory is writable, so Windows probes from the system directory.
+      const neutral =
+        process.platform === 'win32'
+          ? `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32`
+          : tmpdir();
+      expect(execSpy).toHaveBeenCalledWith('pwsh', { cwd: neutral });
     });
   });
 
